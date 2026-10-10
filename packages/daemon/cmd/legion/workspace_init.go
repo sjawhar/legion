@@ -8,14 +8,11 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	legionclaim "github.com/sjawhar/legion/daemon/internal/claim"
@@ -27,40 +24,34 @@ import (
 const workspaceProvisionUsage = "legion workspace-init provision --issue <KEY> --repo <owner>/<repo> [--root /legion] --credential-helper <git helper> --feed <dir>"
 
 const (
-	// workspaceLostExitCode is the status that tells the runtime the tree volume itself was lost —
-	// neither the shared clone nor the recorded OMP session is on it — rather than that one launch
-	// failed.
+	// workspaceLostExitCode reports an expected issue volume with neither its clone nor any
+	// retained session. A single missing role transcript is the role launcher's refusal.
 	workspaceLostExitCode = 3
-	// lockWaitEnv bounds how long this init container waits for another pod's provisioning of the
-	// same repository. The daemon sets it on every pod from its own registration deadline, so the
-	// wait never gives up on a pod the daemon would still tolerate.
-	lockWaitEnv = "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS"
 	// provisionTokenFileEnv points `workspace-init fetch` at the mounted provisioning token.
 	provisionTokenFileEnv = "LEGION_PROVISION_TOKEN_FILE"
-	// defaultLockWaitSeconds is for an invocation no daemon sized: three slow-command budgets, a
-	// live holder's clone and fetch at full budget plus its local commands
-	// (DEFAULT_WORKSPACE_INIT_LOCK_WAIT_SECONDS, workspace-init.ts).
-	defaultLockWaitSeconds = 3 * int64(workspace.CommandTimeout/time.Second)
+	// expectVolumeEnv is the daemon's word that this issue's volume must already hold the clone
+	// or a retained session: the issue has run before, so a volume with neither was lost.
+	expectVolumeEnv = "LEGION_EXPECT_ISSUE_VOLUME"
 )
-
-var lockWaitPattern = regexp.MustCompile(`^[1-9][0-9]*$`)
 
 // volumeLostError is the one failure the runtime tells apart, by workspaceLostExitCode.
 type volumeLostError string
 
 func (e volumeLostError) Error() string { return string(e) }
 
-// workspaceInitCommands is `legion workspace-init`, the Kubernetes runtime's two init containers,
-// which prepare an issue's jj workspace on the tree's persistent volume before the main
-// container's worker-shim starts, and the one list of them `legion workspace-init --help` names.
-// `fetch` is the first: the one process of the pod that holds the provisioning token, in a
-// container that mounts nothing a tree agent can write. `provision` is the second: all the tree
-// volume's work, in a container the provisioning Secret is not mounted in. Each one's log lines go
-// to stdout and its refusals and failures to stderr — together the init log the runtime quotes —
-// with exit 1, or 3 for a lost volume.
+// workspaceInitCommands is `legion workspace-init`, the Kubernetes runtime's init containers, which
+// prepare a pod's persistent volume before the main container's worker-shim starts, and the one
+// list of them `legion workspace-init --help` names. An issue pod runs two, which prepare the
+// issue's clone and jj workspace on the issue's own volume: `fetch` is the first, the one process of
+// the pod that holds the provisioning token, in a container that mounts nothing an agent of the
+// issue can write; `provision` is the second, all the volume's work, in a container the provisioning
+// Secret is not mounted in. The controller's pod (`controller: daemon`) runs `controller` alone, on
+// the volume its own Sandbox owns. Each one's log lines go to stdout and its refusals and failures
+// to stderr — together the init log the runtime quotes — with exit 1, or 3 for a lost volume.
 var workspaceInitCommands = map[string]command{
-	"fetch":     runWorkspaceFetch,
-	"provision": runWorkspaceProvision,
+	"fetch":      runWorkspaceFetch,
+	"provision":  runWorkspaceProvision,
+	"controller": runWorkspaceController,
 }
 
 func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -81,13 +72,56 @@ func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io
 	flags := newFlags("workspace-init provision", "usage: "+workspaceProvisionUsage, stderr)
 	issue := flags.String("issue", "", "Dispatch issue key, e.g. LEGION-1 (required)")
 	repo := flags.String("repo", "", "repository as <owner>/<name> (required)")
-	root := flags.String("root", "/legion", "tree volume root directory")
-	credentialHelper := flags.String("credential-helper", "", "git credential helper written into the shared clone's config (required)")
+	root := flags.String("root", "/legion", "issue volume root directory")
+	credentialHelper := flags.String("credential-helper", "", "git credential helper written into the clone's config (required)")
 	feed := flags.String("feed", "", "the pod's feed directory, which workspace-init fetch filled (required)")
 	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
 		return code
 	}
 	return workspaceInitExit(flags, workspaceInit(ctx, *issue, *repo, *root, *credentialHelper, *feed, stdout), stderr)
+}
+
+const workspaceControllerUsage = "legion workspace-init controller [--root /legion]"
+
+func runWorkspaceController(_ context.Context, args []string, stdout, stderr io.Writer) int {
+	flags := newFlags("workspace-init controller", "usage: "+workspaceControllerUsage, stderr)
+	root := flags.String("root", "/legion", "the controller's volume root directory")
+	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
+		return code
+	}
+	return workspaceInitExit(flags, workspaceController(*root), stderr)
+}
+
+// workspaceController prepares the controller's volume: the sessions directory Oh My Pi's
+// sessions are mounted from, and nothing else — the controller works no repository and holds no
+// GitHub credential, so it gets no workspace and no gh shim. On a resume it holds the controller to
+// the session it recorded, as workspace-init holds a tree agent: a session gone from the volume
+// means the volume was lost (the controller's volume holds nothing else to tell a lost volume from
+// a lost file), which the runtime reads from workspaceLostExitCode, so the daemon relaunches a
+// fresh controller rather than resuming one no attempt can find.
+func workspaceController(root string) error {
+	if !filepath.IsAbs(root) {
+		return fmt.Errorf("--root must be an absolute path (got %q)", root)
+	}
+	if _, set := os.LookupEnv(provisionTokenFileEnv); set {
+		return errors.New(provisionTokenFileEnv + " is set: the controller's pod holds no provisioning token")
+	}
+	sessions := filepath.Join(root, "sessions")
+	if err := os.MkdirAll(sessions, 0o700); err != nil {
+		return fmt.Errorf("create %s: %w", sessions, err)
+	}
+	session, set := os.LookupEnv("LEGION_RESUME_SESSION_FILE")
+	if !set {
+		return nil
+	}
+	present, err := pathPresent(session)
+	if err != nil {
+		return fmt.Errorf("stat the recorded OMP session file %s: %w", session, err)
+	}
+	if !present {
+		return volumeLostError(fmt.Sprintf("The controller's volume holds no recorded OMP session file (%s): the volume was lost", session))
+	}
+	return nil
 }
 
 // parseWorkspaceInitFlags parses one subcommand's flags, refusing a positional argument; a false
@@ -118,10 +152,10 @@ func workspaceInitExit(flags *flag.FlagSet, err error, stderr io.Writer) int {
 }
 
 // workspaceInit validates everything before it touches the volume, --repo first, and refuses to
-// run where the provisioning token is pointed at: this is the process that runs git and jj against what every
-// agent of the tree can write. Then it installs the gh shim, creates the directories the main
-// container mounts, holds a resume to the same agent, and provisions from the feed under the
-// repository lock, which it holds until it returns.
+// run where the provisioning token is pointed at: this is the process that runs git and jj against
+// what every agent of the issue can write. Then it installs the gh shim, creates the directories the
+// main container mounts, holds a resume to the same agent, and provisions from the feed. No lock
+// guards the clone: it is the issue's own, on the issue's own volume, and no other pod mounts it.
 func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, feed string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {
@@ -142,10 +176,6 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	if _, set := os.LookupEnv(provisionTokenFileEnv); set {
 		return errors.New(provisionTokenFileEnv + " is set: provisioning runs without the provisioning token, which `workspace-init fetch` alone holds")
 	}
-	lockWait, err := workspaceInitLockWait()
-	if err != nil {
-		return err
-	}
 	tools, err := provisioningTools("git", "jj")
 	if err != nil {
 		return err
@@ -156,6 +186,27 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	}
 	cloneDir := located.Clone
 
+	if value, set := os.LookupEnv(expectVolumeEnv); set {
+		expected, err := strconv.ParseBool(value)
+		if err != nil {
+			return fmt.Errorf("%s must be a boolean: %w", expectVolumeEnv, err)
+		}
+		if expected {
+			cloned, err := pathPresent(cloneDir)
+			if err != nil {
+				return fmt.Errorf("stat the clone %s: %w", cloneDir, err)
+			}
+			if !cloned {
+				sessions, err := hasRetainedSession(filepath.Join(root, "sessions"))
+				if err != nil {
+					return err
+				}
+				if !sessions {
+					return volumeLostError(fmt.Sprintf("The volume of %s holds neither the clone (%s) nor retained sessions: the issue's volume was lost", issue, cloneDir))
+				}
+			}
+		}
+	}
 	if err := workerbin.InstallGh(root); err != nil {
 		return err
 	}
@@ -164,31 +215,7 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 			return fmt.Errorf("create %s: %w", filepath.Join(root, dir), err)
 		}
 	}
-	// A recorded session gone from the volume is a launch failure, never a silent fresh agent —
-	// which is what OMP does with a missing --resume path. Checked before the repository lock: a
-	// doomed pod must not hold the shared clone's lock while it fails.
-	if session, set := os.LookupEnv("LEGION_RESUME_SESSION_FILE"); set {
-		present, err := pathPresent(session)
-		if err != nil {
-			return fmt.Errorf("stat the recorded OMP session file %s: %w", session, err)
-		}
-		if !present {
-			cloned, err := pathPresent(cloneDir)
-			if err != nil {
-				return fmt.Errorf("stat the shared clone %s: %w", cloneDir, err)
-			}
-			if !cloned {
-				return volumeLostError(fmt.Sprintf("Tree volume for %s holds neither the clone (%s) nor the recorded OMP session file (%s): the volume was lost", issue, cloneDir, session))
-			}
-			return fmt.Errorf("Refusing to start %s fresh: recorded OMP session file is missing from the tree volume: %s", issue, session)
-		}
-	}
 
-	release, err := lockRepository(ctx, cloneDir+".lock", repository, lockWait, stdout)
-	if err != nil {
-		return err
-	}
-	defer release()
 	run := workspace.NewRunner(workspace.CommandTimeout, tools)
 	provisioned, err := workspace.Provision(ctx, run, workspace.Request{
 		StateDir: root, Repo: repository, Issue: issue, CredentialHelper: credentialHelper, Source: workspace.FromFeed(feed),
@@ -199,23 +226,30 @@ func workspaceInit(ctx context.Context, issue, repo, root, credentialHelper, fee
 	}
 	fmt.Fprintf(stdout, "workspace-init: %s on %s\n", provisioned.Dir, provisioned.Bookmark)
 	if fromRef, set := os.LookupEnv("LEGION_WORKSPACE_RECOVERED_FROM"); set {
-		return writeRecoveryMarker(ctx, run, provisioned.Dir, fromRef)
+		return writeRecoveryMarker(ctx, run, provisioned, issue, fromRef)
 	}
 	return nil
 }
 
-// workspaceInitLockWait is LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS: a positive whole number of
-// seconds, 900 when unset.
-func workspaceInitLockWait() (int64, error) {
-	value, set := os.LookupEnv(lockWaitEnv)
-	if !set {
-		return defaultLockWaitSeconds, nil
+func hasRetainedSession(dir string) (bool, error) {
+	found := false
+	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
+		if errors.Is(err, fs.ErrNotExist) && path == dir {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".jsonl") {
+			found = true
+			return fs.SkipAll
+		}
+		return nil
+	})
+	if err != nil {
+		return false, fmt.Errorf("read retained sessions in %s: %w", dir, err)
 	}
-	seconds, err := strconv.ParseInt(value, 10, 64)
-	if !lockWaitPattern.MatchString(value) || err != nil || seconds > int64(math.MaxInt64/time.Second) {
-		return 0, fmt.Errorf("%s must be a positive whole number of seconds (got %q)", lockWaitEnv, value)
-	}
-	return seconds, nil
+	return found, nil
 }
 
 // provisioningTools resolves the named tools a provisioning step runs from PATH — in an init
@@ -233,73 +267,15 @@ func provisioningTools(names ...string) (map[string]string, error) {
 	return tools, nil
 }
 
-// lockPollInterval is how often a waiting init container tries the repository lock again.
-const lockPollInterval = 250 * time.Millisecond
-
-// lockRepository serializes provisioning across a tree volume's init containers: every issue's
-// pod provisions against one shared clone, and two pods admitted together would otherwise run the
-// clone, the fetch, and the git config writes against it at once (git's config lock refuses the
-// second writer). The lock is flock(2) on <clone>.lock, the only state two pods share, held on this
-// process's own descriptor until release — or until the process dies, since the kernel drops the
-// lock with its last descriptor and no child inherits it (Go opens every file close-on-exec). No
-// lease, no mtime, no takeover: a live holder holds, however long it takes; a dead one holds
-// nothing. Every attempt is non-blocking (flock(2) promises waiters no order, so polling gives up
-// nothing); the first refused one logs one line, so a pod stuck behind another's provisioning says
-// so in its init log, and the attempts continue every lockPollInterval, bounded by waitSeconds and
-// by ctx (withWorkspaceInitLock and holdFlock, workspace-init.ts).
-func lockRepository(ctx context.Context, lockPath string, repo ghrepo.Repository, waitSeconds int64, log io.Writer) (release func(), err error) {
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o700); err != nil {
-		return nil, fmt.Errorf("create %s: %w", filepath.Dir(lockPath), err)
-	}
-	// Read-write: where flock(2) is emulated with POSIX locks (NFS), an exclusive lock needs a
-	// descriptor open for writing.
-	file, err := os.OpenFile(lockPath, os.O_RDWR|os.O_CREATE, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open workspace-init lock %s: %w", lockPath, err)
-	}
-	release = func() { _ = file.Close() }
-	deadline := time.Now().Add(time.Duration(waitSeconds) * time.Second)
-	for attempt := 0; ; attempt++ {
-		err := flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			return release, nil
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) {
-			release()
-			return nil, fmt.Errorf("flock workspace-init lock %s: %w", lockPath, err)
-		}
-		if attempt == 0 {
-			fmt.Fprintf(log, "workspace-init: waiting for %s (another pod is provisioning %s)\n", lockPath, repo)
-		}
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			release()
-			return nil, fmt.Errorf("Timed out after %d s waiting for workspace-init lock %s", waitSeconds, lockPath)
-		}
-		select {
-		case <-ctx.Done():
-			release()
-			return nil, fmt.Errorf("stopped waiting for workspace-init lock %s: %w", lockPath, context.Cause(ctx))
-		case <-time.After(min(lockPollInterval, remaining)):
-		}
-	}
-}
-
-func flock(fd, how int) error {
-	for {
-		if err := syscall.Flock(fd, how); !errors.Is(err, syscall.EINTR) {
-			return err
-		}
-	}
-}
-
 // writeRecoveryMarker is the command side of workspace recovery: a relaunch after a lost volume
 // names the ref it recovers from, and the recreated workspace records it with the commit it was
-// recreated at in .legion/workspace-recovered.json (cmdWorkspaceInit's
-// LEGION_WORKSPACE_RECOVERED_FROM branch, workspace-init.ts). recoveredAt is an ISO instant in
-// milliseconds, UTC, as JavaScript's toISOString writes it.
-func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, fromRef string) error {
-	result, err := workspace.RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id", "--color=never"}, nil, dir)
+// recreated at in .legion/<issue>/workspace-recovered.json (cmdWorkspaceInit's
+// LEGION_WORKSPACE_RECOVERED_FROM branch, workspace-init.ts), under issue's own directory like
+// every other handoff (dispatch://LEGION-565), so two trees recovering at once never touch the
+// same path either. recoveredAt is an ISO instant in milliseconds, UTC, as JavaScript's
+// toISOString writes it.
+func writeRecoveryMarker(ctx context.Context, run workspace.Runner, ws workspace.Workspace, issue, fromRef string) error {
+	result, err := workspace.RunCheckedIn(ctx, run, ws, []string{"jj", "log", "-r", "@", "--no-graph", "-T", "commit_id", "--color=never"})
 	if err != nil {
 		return err
 	}
@@ -312,11 +288,11 @@ func writeRecoveryMarker(ctx context.Context, run workspace.Runner, dir, fromRef
 	if err != nil {
 		return err
 	}
-	markerDir := filepath.Join(dir, ".legion")
-	if err := os.MkdirAll(markerDir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", markerDir, err)
+	marker := filepath.Join(ws.Dir, handoffFile(issue, "workspace-recovered.json"))
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", filepath.Dir(marker), err)
 	}
-	if err := os.WriteFile(filepath.Join(markerDir, "workspace-recovered.json"), body, 0o644); err != nil {
+	if err := os.WriteFile(marker, body, 0o644); err != nil {
 		return fmt.Errorf("write the recovery marker: %w", err)
 	}
 	return nil

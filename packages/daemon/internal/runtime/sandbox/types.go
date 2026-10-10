@@ -51,20 +51,39 @@ type ProvisionTokens interface {
 	Token(ctx context.Context, owner string) (string, error)
 }
 
+// Store is the durable state the runtime reads: the daemon's store (store.Store), or a test's
+// fake.
+type Store interface {
+	// IssueHasSessions is whether any stored claim of issue, retired ones included, recorded a
+	// session: the issue's volume must then already hold the issue's clone and that session.
+	IssueHasSessions(ctx context.Context, project, issue string) (bool, error)
+	// TreeLive is whether tree's lifecycle is open, or its cleanup reserved and unconfirmed: the
+	// tree's issue Sandboxes are then its cleanup's alone, never the orphan sweep's.
+	TreeLive(ctx context.Context, project, tree string) (bool, error)
+}
+
 // Options is what a Runtime is built from. Every field without a stated default is required.
 type Options struct {
 	// Namespace is where every Sandbox, pod, and Secret of the runtime lives; Project is the
 	// value of the legion.dev/project label on every one of them, and the informers select on it.
 	Namespace, Project string
+	// Store is the durable state the runtime reads.
+	Store Store
 	// Image is the worker image, pinned by digest: New refuses one without "@sha256:".
 	Image string
-	// StorageClass is the tree volume's class. Required: production has no default class.
+	// StorageClass is the issue volumes' class. Required: production has no default class.
 	StorageClass string
-	// TreeVolume is the tree volume's size, positive; the daemon's configuration supplies its
-	// default (runtime.kubernetes.tree_volume, 20Gi).
-	TreeVolume resource.Quantity
-	Scheduling Scheduling
-	// Resources are each role's container requests and limits; a role absent here gets none.
+	// IssueVolume is each issue volume's size, positive; the daemon's configuration supplies its
+	// default (runtime.kubernetes.issue_volume, 20Gi).
+	IssueVolume resource.Quantity
+	Scheduling  Scheduling
+	// Resources are each role's container requirements, the controller's included: the daemon
+	// hands one for every role (config.DefaultResources fills what its file leaves out), its cpu and
+	// memory the request and the limit alike, so every container of every pod the runtime builds —
+	// the init containers take the launching role's, the image probe's the controller's — is
+	// Guaranteed. New refuses a map that lacks a role of claim.Roles or the controller, or whose
+	// entry is not such a reservation: cpu and memory each requested as a positive quantity equal
+	// to its limit, and no other resource named.
 	Resources map[claim.Role]corev1.ResourceRequirements
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.
 	StreamURL string
@@ -103,16 +122,22 @@ type Options struct {
 	// seed of this same user (bootprobe.NATSUser), so a providers Secret holding a blank, invalid,
 	// or other seed refuses boot instead of every agent's connection.
 	NATSUser string
+	// SessionDSNKey is the providers Secret's key that holds the postgres:// URL of the database
+	// every role's Oh My Pi keeps its session in (runtime.kubernetes.session_store postgres); ""
+	// keeps each session a file in the issue's volume's sessions directory. With one, every pod and the
+	// image probe mount that key at ProvidersDir/OMP_SESSION_SQL_DSN, and every generation is
+	// started with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming that file
+	// (mainEnvironment), which the shim, seeing the pointer, never exports; a resume is held to the
+	// session table rather than the volume (the role launcher's check, internal/launcher), and no
+	// launch expects the issue's volume to hold a session.
+	SessionDSNKey string
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
-	// (`--no-extensions --extension <plugin>`, `--resume`, `--mode rpc`,
+	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
 	// BootTimeout bounds each wait of a relaunch, and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).
 	BootTimeout time.Duration
-	// BootIntervals is the registration deadline in boot intervals; workspace-init's lock
-	// wait is sized from it (worker_boot_registration_deadline_intervals).
-	BootIntervals int
 	// TerminationGrace is the pods' terminationGracePeriodSeconds, and how long Suspend and Release
 	// wait for a process to end itself after its shutdown frame (worker_stop_timeout_seconds).
 	TerminationGrace time.Duration

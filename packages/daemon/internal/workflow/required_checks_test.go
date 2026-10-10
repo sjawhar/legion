@@ -39,12 +39,17 @@ func applyRefusingNothing(t *testing.T, pool *pgxpool.Pool, engine *Engine, fact
 // implementerTask is the task the implementer was last started with, "" when it was not started.
 func implementerTask(t *testing.T, pool *pgxpool.Pool) string {
 	t.Helper()
-	var task string
-	if err := pool.QueryRow(context.Background(), `select coalesce(max(payload->>'task'), '') from outbox
-		where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = 'implementer'`).Scan(&task); err != nil {
-		t.Fatalf("read the implementer's start: %v", err)
+	return startTask(t, pool, claim.RoleImplementer)
+}
+
+// implementerRounds is the implementer's count of the issue's returns to implementing.
+func implementerRounds(t *testing.T, pool *pgxpool.Pool) int {
+	t.Helper()
+	var rounds int
+	if err := pool.QueryRow(context.Background(), "select rounds from phases where issue = 'LEGION-208' and role = 'implementer'").Scan(&rounds); err != nil {
+		t.Fatalf("read the implementer's rounds: %v", err)
 	}
-	return task
+	return rounds
 }
 
 // Only a check the base branch requires makes CI red at a head: a red beside a passing required
@@ -346,8 +351,8 @@ func TestAnApprovedRoundWaitsOnARequiredWorkflowsRunAtItsHead(t *testing.T) {
 // A reopened pull request is the same pull request, and its base branch requires what it did
 // before the close: the reopen keeps the required checks and the required workflows' runs as the
 // daemon last read them, so the first settlement of the reopened head is judged by both. Judged
-// by the checks alone, a required workflow that failed there would read green until the daemon's
-// next read, and a red head in testing would go on to review.
+// by the checks alone, a required review workflow that failed there would read green until the
+// daemon's next read, and the reviewer the tester's pass starts would not be told of it.
 func TestAReopenedPullRequestKeepsWhatItsBaseBranchRequires(t *testing.T) {
 	const workflow = ".github/workflows/claude-pr-review.yml"
 	pool := migratedPool(t)
@@ -357,15 +362,230 @@ func TestAReopenedPullRequestKeepsWhatItsBaseBranchRequires(t *testing.T) {
 		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", HeadUpdatedAt: time.Date(2026, 9, 24, 0, 0, 0, 0, time.UTC), Failing: []string{},
 		Required: []string{requiredGate}, Workflows: []record.RequiredWorkflow{{Path: workflow, Result: "failure"}}, WorkflowsHead: "head"})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-	applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil),
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	engine.cfg.ReviewWorkflows = []string{workflow}
+	applyRefusingNothing(t, pool, engine,
 		intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head",
 			UpdatedAt: time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC), Reopened: true},
 		intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head",
-			CheckRuns: []record.AttemptRun{{Name: requiredGate, ID: 1}}, Generation: 1, Snapshot: "settled", Failing: []string{}})
-	if got := issuePhase(t, pool); got != phase.Implementing {
-		t.Fatalf("after the reopened head settled the issue is in %s, want implementing: its required workflow failed there", got)
+			CheckRuns: []record.AttemptRun{{Name: requiredGate, ID: 1}}, Generation: 1, Snapshot: "settled", Failing: []string{}},
+		intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Summary: "tested", Verdict: "pass", Commit: "tested"})
+	if task := startTask(t, pool, claim.RoleReviewer); !strings.Contains(task, "CI is red at head: "+workflow+"; only declared review workflows are red") {
+		t.Fatalf("reviewer task %q, want it to name the failed review workflow", task)
 	}
-	if task := implementerTask(t, pool); !strings.Contains(task, "CI is red at head: "+workflow) {
-		t.Fatalf("implementer task %q, want it to name the failed required workflow", task)
+}
+
+// startTask is the task role was last started with, "" when it was not started.
+func startTask(t *testing.T, pool *pgxpool.Pool, role claim.Role) string {
+	t.Helper()
+	var task string
+	if err := pool.QueryRow(context.Background(), `select coalesce(max(payload->>'task'), '') from outbox
+		where kind = 'supervise' and payload->>'op' = 'start' and payload->>'role' = $1`, string(role)).Scan(&task); err != nil {
+		t.Fatalf("read the %s's start: %v", role, err)
+	}
+	return task
+}
+
+// A red that only the project's declared review workflows make - a review bot that fails on its
+// findings, with every required check green - is the reviewer's round's to decide, in testing and
+// in reviewing: nothing goes back to implementing, where a finding the implementer cannot make go
+// away would spend every fix attempt. In testing the tester finishes, and the reviewer its pass
+// starts is told the red and what the round owes it; in reviewing the round stays open with its
+// reviewer. A red required workflow the project does not declare - a test workflow - sends the
+// work back as a red required check does, alone or beside a declared one, and so does every red
+// required workflow when the project declares none.
+func TestARedOnlyDeclaredReviewWorkflowsMakeGoesToTheReviewersRound(t *testing.T) {
+	const review, tests = ".github/workflows/claude-pr-review.yml", ".github/workflows/tests.yml"
+	runs := func(reviewResult, testsResult string) []record.RequiredWorkflow {
+		return []record.RequiredWorkflow{{Path: review, Result: reviewResult, Run: 37, Attempt: 1}, {Path: tests, Result: testsResult, Run: 38, Attempt: 1}}
+	}
+	declared := []string{review}
+	for _, tc := range []struct {
+		name      string
+		from      phase.Phase
+		status    string
+		failing   []string
+		workflows []record.RequiredWorkflow
+		declared  []string
+		// red is what the implementer's task and the checks-red notice say; "" sends nothing back.
+		red string
+	}{
+		{"the review workflow, in testing", phase.Testing, "testing", []string{}, runs("failure", classify.Success), declared, ""},
+		{"the review workflow, in reviewing", phase.Reviewing, "needs_review", []string{}, runs("failure", classify.Success), declared, ""},
+		{"an undeclared workflow, in testing", phase.Testing, "testing", []string{}, runs(classify.Success, "failure"), declared, "CI is red at head: " + tests},
+		{"an undeclared workflow, in reviewing", phase.Reviewing, "needs_review", []string{}, runs(classify.Success, "failure"), declared, "CI is red at head: " + tests},
+		{"the review workflow beside an undeclared one, in testing", phase.Testing, "testing", []string{}, runs("failure", "failure"), declared, "CI is red at head: " + review + ", " + tests},
+		{"the review workflow beside an undeclared one, in reviewing", phase.Reviewing, "needs_review", []string{}, runs("failure", "failure"), declared, "CI is red at head: " + review + ", " + tests},
+		{"the review workflow with none declared, in testing", phase.Testing, "testing", []string{}, runs("failure", classify.Success), nil, "CI is red at head: " + review},
+		{"a red required check beside it, in testing", phase.Testing, "testing", []string{requiredGate}, runs("failure", classify.Success), declared,
+			"CI is red at head: " + requiredGate + ", " + review},
+		{"a red required check beside green workflows, in reviewing", phase.Reviewing, "needs_review", []string{requiredGate}, runs(classify.Success, classify.Success), declared,
+			"CI is red at head: " + requiredGate},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			engine.cfg.ReviewWorkflows = tc.declared
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: tc.failing,
+				CheckRuns: []record.AttemptRun{{Name: requiredGate, ID: 1}}, Generation: 1, Snapshot: "settled", Required: []string{requiredGate}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"})
+			applyRefusingNothing(t, pool, engine, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{requiredGate},
+				Workflows: tc.workflows, WorkflowsHead: "head"})
+			if tc.red != "" {
+				if got := issuePhase(t, pool); got != phase.Implementing {
+					t.Fatalf("the issue is in %s, want implementing", got)
+				}
+				if task := implementerTask(t, pool); !strings.Contains(task, tc.red) {
+					t.Fatalf("implementer task %q, want it to say %q", task, tc.red)
+				}
+				return
+			}
+			if got := issuePhase(t, pool); got != tc.from {
+				t.Fatalf("the issue is in %s, want it left in %s for the reviewer's round", got, tc.from)
+			}
+			if got := noticeKinds(t, pool, "LEGION-208"); len(got) != 0 {
+				t.Fatalf("the architect was told %v, want nothing while the round is open", got)
+			}
+			assertOutboxCount(t, pool, "supervise", 0)
+			if tc.from != phase.Testing {
+				return
+			}
+			applyRefusingNothing(t, pool, engine, intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester,
+				Claim: "test-claim", Summary: "tested", Verdict: "pass", Commit: "tested"})
+			if got := issuePhase(t, pool); got != phase.Reviewing {
+				t.Fatalf("after the tester's pass the issue is in %s, want reviewing", got)
+			}
+			want := "Reason: CI is red at head: " + review + "; only declared review workflows are red, so their findings are the review round's to decide"
+			if task := startTask(t, pool, claim.RoleReviewer); !strings.Contains(task, want) || !strings.Contains(task, "legion threads resolve") {
+				t.Fatalf("reviewer task %q, want it to say %q and name legion threads resolve", task, want)
+			}
+		})
+	}
+}
+
+// An approved round under a red only declared review workflows make is stuck on their findings:
+// the architect is told once, naming the workflow and what the reviewer does about it (adjudicate,
+// legion threads resolve, re-run the failed run). The re-run keeps the round open while a read
+// finds it running, and one that passes on the head ends the round with no push. One that stays red
+// is a new attempt of the run, and is told again whether or not a read found it running, as news of
+// a re-run that did not clear it, never sent back to the implementer; a read that finds that same
+// attempt again tells nothing more.
+func TestAnApprovedRoundUnderARedOnlyDeclaredReviewWorkflowsMakeSettlesOnTheRerun(t *testing.T) {
+	const workflow = ".github/workflows/claude-pr-review.yml"
+	for _, tc := range []struct {
+		name    string
+		running bool
+		rerun   string
+		want    phase.Phase
+		told    int
+	}{
+		{"a re-run that passes", true, classify.Success, phase.Retro, 1},
+		{"a re-run that stays red, read while it ran", true, "failure", phase.Reviewing, 2},
+		{"a re-run that stays red, never read while it ran", false, "failure", phase.Reviewing, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			engine.cfg.ReviewWorkflows = []string{workflow}
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{},
+				CheckRuns: []record.AttemptRun{{Name: requiredGate, ID: 1}}, Generation: 1, Snapshot: "settled", Required: []string{requiredGate}})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "head", Summary: "approved",
+				Decision: &record.ReviewDecision{State: "approved", Body: "looks right", Head: "head"}})
+			read := func(result string, attempt int) intake.RequiredChecks {
+				return intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{requiredGate},
+					Workflows: []record.RequiredWorkflow{{Path: workflow, Result: result, Run: 37, Attempt: attempt}}, WorkflowsHead: "head"}
+			}
+			applyRefusingNothing(t, pool, engine, read("failure", 1))
+			stuck := reviewStuckNotices(t, pool)
+			if len(stuck) != 1 || !strings.Contains(stuck[0].Reason, "CI is red at head: "+workflow+"; only declared review workflows are red") ||
+				!strings.Contains(stuck[0].Reason, "legion threads resolve") || !strings.Contains(stuck[0].Reason, "rerun-failed-jobs") {
+				t.Fatalf("review-stuck notices %+v, want one naming the workflow and the reviewer's adjudication and re-run", stuck)
+			}
+			if tc.running {
+				applyRefusingNothing(t, pool, engine, read(classify.Pending, 2))
+			}
+			applyRefusingNothing(t, pool, engine, read(tc.rerun, 2), read(tc.rerun, 2))
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the re-run the issue is in %s, want %s", got, tc.want)
+			}
+			if got := reviewStuckNotices(t, pool); len(got) != tc.told {
+				t.Fatalf("review-stuck notices %+v, want %d", got, tc.told)
+			}
+			if got := noticeKinds(t, pool, "LEGION-208"); containsNotice(got, "checks-red") {
+				t.Fatalf("notices %v, want no checks-red", got)
+			}
+			if task := implementerTask(t, pool); tc.want == phase.Reviewing && task != "" {
+				t.Fatalf("implementer started with %q, want it left suspended", task)
+			}
+		})
+	}
+}
+
+// An approval of other code than the head's, under a red only declared review workflows make, is
+// stuck on that approval first: re-running the workflow would not end the round, since a green head
+// still needs an approval of its own code, so the architect is told the approval does not cover the
+// head, not to have the run re-run. The daemon's first read of the required set brings the red.
+func TestAnApprovalOfOtherCodeUnderAReviewWorkflowsRedIsStuckOnTheApproval(t *testing.T) {
+	const workflow = ".github/workflows/claude-pr-review.yml"
+	pool := migratedPool(t)
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	engine.cfg.ReviewWorkflows = []string{workflow}
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{},
+		CheckRuns: []record.AttemptRun{{Name: requiredGate, ID: 1}}, Generation: 1, Snapshot: "settled"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "earlier", Summary: "approved",
+		Decision: &record.ReviewDecision{State: "approved", Body: "looks right", Head: "earlier"}})
+	applyRefusingNothing(t, pool, engine, intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{requiredGate},
+		Workflows: []record.RequiredWorkflow{{Path: workflow, Result: "failure", Run: 37, Attempt: 1}}, WorkflowsHead: "head"})
+	stuck := reviewStuckNotices(t, pool)
+	if len(stuck) != 1 || !strings.Contains(stuck[0].Reason, "the reviewer approved earlier on pull request #42, which does not approve head head") ||
+		strings.Contains(stuck[0].Reason, "only declared review workflows are red") {
+		t.Fatalf("review-stuck notices %+v, want one saying the approval of earlier does not approve head, and nothing of a re-run", stuck)
+	}
+	if got := issuePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("the issue is in %s, want reviewing", got)
+	}
+}
+
+// A round stuck on a declared review workflow's red is told again only when what is red changes.
+// An undeclared workflow cancelled at the code head the reviewer's handoff push replaced is no red
+// for the handoff head (classify.HeadChecks), so re-running it changes nothing the round is stuck
+// on, and tells nothing.
+func TestARerunOfADiscountedWorkflowTellsAStuckRoundNothing(t *testing.T) {
+	const review, tests = ".github/workflows/claude-pr-review.yml", ".github/workflows/tests.yml"
+	pool := migratedPool(t)
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	engine.cfg.ReviewWorkflows = []string{review}
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+		Phase: phase.Reviewing, Generation: 1, Status: "needs_review", Rank: "U"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "approval", CheckedHead: "head", Failing: []string{},
+		CheckRuns: []record.AttemptRun{{Name: requiredGate, ID: 1}}, Generation: 1, Snapshot: "settled", Required: []string{requiredGate},
+		Pushes: []record.ClassifiedPush{{SHA: "approval", Before: "head", HandoffOnly: true}}})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "approval", Summary: "approved",
+		Decision: &record.ReviewDecision{State: "approved", Body: "looks right", Head: "approval"}})
+	read := func(testsResult string, testsAttempt int) intake.RequiredChecks {
+		return intake.RequiredChecks{Repo: "sjawhar/legion", Number: 42, Names: []string{requiredGate}, WorkflowsHead: "head",
+			Workflows: []record.RequiredWorkflow{{Path: review, Result: "failure", Run: 1, Attempt: 1}, {Path: tests, Result: testsResult, Run: 2, Attempt: testsAttempt}}}
+	}
+	applyRefusingNothing(t, pool, engine, read("cancelled", 1))
+	if stuck := reviewStuckNotices(t, pool); len(stuck) != 1 || !strings.Contains(stuck[0].Reason, "CI is red at approval: "+review+"; only declared review workflows are red") {
+		t.Fatalf("review-stuck notices %+v, want one naming the review workflow alone", stuck)
+	}
+	applyRefusingNothing(t, pool, engine, read(classify.Pending, 2))
+	if stuck := reviewStuckNotices(t, pool); len(stuck) != 1 {
+		t.Fatalf("after the discounted workflow's re-run, review-stuck notices %+v, want still one", stuck)
 	}
 }

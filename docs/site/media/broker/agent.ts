@@ -55,9 +55,9 @@ export async function waitForOutput(
   throw new Error(`no ${what} in the agent's output:\n${running.output()}`);
 }
 
-/** `agent-secrets launcher login` on the agent machine: resolves once it prints its code. */
+/** `agent-secrets machine login` on the agent machine: resolves once it prints its code. */
 export async function startMachineLogin(agentExec: string): Promise<Running & { code: string }> {
-  const running = run(agentExec, ["agent-secrets", "launcher", "login"]);
+  const running = run(agentExec, ["agent-secrets", "machine", "login"]);
   const match = await waitForOutput(running, printed.loginCode, "machine login code");
   return { ...running, code: match[1] };
 }

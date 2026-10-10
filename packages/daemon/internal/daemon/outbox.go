@@ -16,13 +16,19 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
+	"github.com/sjawhar/legion/daemon/internal/wait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -39,10 +45,14 @@ const (
 	// second rather than ten times.
 	outboxFailedTickWait = time.Second
 	messageReadSkew      = 5 * time.Second
-	// pendingWaitWarnAttempts is when a row waiting on its claim's pending delivery is logged as a
-	// warning: past the backoff's climb to its cap, a wait of about two minutes, the turn it waits
-	// on is not ending on its own, and an operator should look.
-	pendingWaitWarnAttempts = 7
+	// waitWarnAttempts is when a waiting row is logged as a warning: past the backoff's climb to
+	// its cap, a wait of about two minutes, what it waits on is not ending on its own, and an
+	// operator should look.
+	waitWarnAttempts = 7
+	// issueBranchTimeout bounds one issue_branch row's GitHub calls, its token's mint with them:
+	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
+	// effect behind it.
+	issueBranchTimeout = 30 * time.Second
 )
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
@@ -53,6 +63,7 @@ type outbox struct {
 	dispatch   dispatch.Client
 	notices    notify.Publisher
 	supervisor *supervisor
+	trees      outboxTrees
 	tokens     appauth.Tokens
 	handlers   []intake.Handler
 	project    string
@@ -65,15 +76,28 @@ type outbox struct {
 	now             func() time.Time
 	provision       func(context.Context, workspace.Request) (workspace.Workspace, error)
 	remove          func(context.Context, workspace.Workspace) error
+	// githubAPI is the GitHub REST root an issue_branch row creates its issue's branch under: the
+	// workflow's (workflowRuntime.githubAPI), which empty, in production, is https://api.github.com.
+	githubAPI string
 }
 
-func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, tools map[string]string, log *slog.Logger) *outbox {
+// outboxTrees is the store's tree barrier (store.Store) as the outbox runs it: an issue close's
+// suspension, a stop's wait for a stored claim's machine, and a workflow tree close's cleanup.
+type outboxTrees interface {
+	IssueSuspension(ctx context.Context, project string, closing store.IssueClose, outOfWorkflow func(status string) bool) (bool, error)
+	StoredClaimMayRun(ctx context.Context, token claim.Token, row int64) (bool, error)
+	ReserveWorkflowTreeCleanup(ctx context.Context, project, tree string, rootGeneration uint64) (treelifecycle.Lifecycle, bool, error)
+	CleanupReservedTree(ctx context.Context, project, tree string, epoch uint64, releaser store.TreeReleaser) error
+}
+
+func newOutbox(pool *pgxpool.Pool, records record.Store, client dispatch.Client, publisher notify.Publisher, supervisor *supervisor, trees outboxTrees, tokens appauth.Tokens, handlers []intake.Handler, project, dispatchProject, stateDir string, configured config.Project, githubAPI string, tools map[string]string, log *slog.Logger) *outbox {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &outbox{
-		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, tokens: tokens,
-		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, log: log, now: time.Now,
+		pool: pool, records: records, dispatch: client, notices: publisher, supervisor: supervisor, trees: trees, tokens: tokens,
+		handlers: handlers, project: project, dispatchProject: dispatchProject, stateDir: stateDir, repo: configured.Repo, githubAPI: githubAPI,
+		log: log, now: time.Now,
 		// WarmCodegraphIndexInBackground runs here, never in provisionWorkspace: every outbox
 		// test injects its own `provision`, so only this production closure starts codegraph.
 		provision: func(ctx context.Context, request workspace.Request) (workspace.Workspace, error) {
@@ -134,26 +158,19 @@ func (r *outbox) RunOnce(ctx context.Context) error {
 	}
 	for _, row := range rows {
 		if err := r.execute(ctx, row); err != nil {
-			if errors.Is(err, errNoticeWaits) {
-				// A held notice is a wait for its architect, logged once for the row rather than on
-				// every attempt of its backoff.
-				if row.Attempts == 0 {
-					r.log.Info("outbox notice waits for its architect", "row", row.ID, "issue", row.Issue, "error", err)
-				}
-			} else if errors.Is(err, supervise.ErrSuspendHeld) {
-				// A suspension held for its agent's turn (supervise's holdSuspension) is a wait: the
-				// row is asked again on its backoff and finishes once the claim is suspended.
-				if row.Attempts == 0 {
-					r.log.Info("outbox suspend is held for its agent's turn to end", "row", row.ID, "issue", row.Issue, "error", err)
-				}
-			} else if errors.Is(err, supervise.ErrDeliveryPending) {
-				// A task meeting the claim's own pending delivery is a wait, not a failure: the row
-				// runs again on the same backoff once that delivery's turn is over.
+			if errors.Is(err, wait.ErrWaiting) {
+				// A wait is not a failure (wait.ErrWaiting): a held notice, a suspension or start held
+				// for a turn, a task behind the claim's pending delivery, a tree's cleanup reservation,
+				// or a close waiting for its stops. The row runs again on its backoff, logged when it
+				// first waits and as a warning once it has waited long.
 				level := slog.LevelDebug
-				if row.Attempts >= pendingWaitWarnAttempts {
+				switch {
+				case row.Attempts == 0:
+					level = slog.LevelInfo
+				case row.Attempts >= waitWarnAttempts:
 					level = slog.LevelWarn
 				}
-				r.log.Log(ctx, level, "outbox row waits for the claim's pending delivery", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
+				r.log.Log(ctx, level, "outbox row waits", "row", row.ID, "kind", row.Kind, "issue", row.Issue,
 					"attempts", row.Attempts, "error", err)
 			} else {
 				r.log.Error("outbox row failed", "row", row.ID, "kind", row.Kind, "error", err)
@@ -240,10 +257,25 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.seedGate(ctx, row, value)
 	case record.LingerClose:
 		return r.linger(ctx, row, value)
+	case record.IssueSuspend:
+		if r.supervisor == nil {
+			return errors.New("issue suspension executor has no claim supervisor")
+		}
+		suspender, ok := r.supervisor.deps.Runtime.(runtime.IssueSuspender)
+		if !ok {
+			return nil
+		}
+		closing := store.IssueClose{Issue: row.Issue, Tree: value.Tree, IssueGeneration: value.Generation,
+			TreeGeneration: value.TreeGeneration, Row: row.ID, Release: value.Release}
+		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, value.Release, func(ctx context.Context) (bool, error) {
+			return r.trees.IssueSuspension(ctx, r.project, closing, record.OutOfWorkflow)
+		})
 	case record.WorkspaceRemove:
 		return r.removeWorkspace(ctx, row, value)
 	case record.MergeQueuePublish:
 		return r.mergeQueue(ctx, row, value)
+	case record.IssueBranch:
+		return r.issueBranch(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -298,7 +330,7 @@ func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload reco
 
 // notice publishes a notice row to the architect that owns its issue, on that architect's own role
 // topic, and to nothing else. Every notice kind is for an architect, and no claim subscribes to an
-// issue topic (packages/pi-envoy/src/legion/claim-session.ts), so no issue topic carries one. The
+// issue topic (packages/pi-legion/src/claim-session.ts), so no issue topic carries one. The
 // owner, the earlier notices it waits behind, and whether its tree lingers are read from one
 // snapshot of the tree (notice_routing.go). A notice waits
 // (errNoticeWaits) behind an earlier notice of its tree that is held for the same architect, so
@@ -342,23 +374,22 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		if err != nil {
 			return fmt.Errorf("the architect of %s: %w", tree.root.Key, err)
 		}
-		if catchUpSuperseded(*payload.CatchUp, r.supervisedClaim(root), &tree.root) {
+		if catchUpSuperseded(*payload.CatchUp, r.supervisedClaim(root).Claim, &tree.root) {
 			r.log.Info("outbox catch-up finished without publishing: a newer catch-up supersedes it", "row", row.ID, "issue", row.Issue,
 				"generation", payload.CatchUp.Generation, "launch", payload.CatchUp.Launch)
 			return nil
 		}
 	}
-	runs := func(token claim.Token) bool { return claimRuns(r.claimState(token)) }
-	architect, err := owningArchitect(tree.project, tree.issues, issue, payload.Kind, runs)
+	architect, err := owningArchitect(tree.project, tree.issues, issue, payload.Kind, r.holdsItsRole)
 	if err != nil {
 		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
 	}
-	if state := r.claimState(architect); stoppedWithTree(tree.root.Lingers(), state) {
+	if held := r.supervisedClaim(architect); stoppedWithTree(tree.root.Lingers(), held) {
 		r.log.Info("outbox notice finished undelivered: its architect stopped with its finished tree",
-			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", state)
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", held.State, "stopping", held.Stopping)
 		return nil
 	}
-	if earlier := earlierNoticeFor(tree, architect, runs); earlier != 0 {
+	if earlier := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
 	notice, key := payload.Published(row.ID)
@@ -381,8 +412,8 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 // project's merge queue role, keyed by the row so a retried row is one delivery. A role with no
 // live holder refuses every attempt until someone claims it, so waiting would retry forever; the
 // Dispatch message the same READY posted already carries the packet, and the issue's status shows
-// a withdrawal, so the issue is told the role had no holder, as the shared merger prompt has the
-// merger say (internal/prompts/roles/merger.md step 4), and the row is done.
+// a withdrawal, so the issue is told the role had no holder, as the merger's prompt says the
+// daemon does (internal/prompts/go/merger.md), and the row is done.
 func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload record.MergeQueuePublish) error {
 	if r.notices == nil {
 		return errors.New("merge queue executor has no Envoy publisher")
@@ -392,7 +423,7 @@ func (r *outbox) mergeQueue(ctx context.Context, row record.OutboxRow, payload r
 		return r.message(ctx, row, record.MessagePost{Body: fmt.Sprintf("merge queue role %s had no live holder at %s", payload.Role, r.now().UTC().Format(time.RFC3339))})
 	}
 	if err != nil {
-		return fmt.Errorf("publish READY for %s to merge queue role %s: %w", row.Issue, payload.Role, err)
+		return fmt.Errorf("publish %s's READY packet or its withdrawal to merge queue role %s: %w", row.Issue, payload.Role, err)
 	}
 	return nil
 }
@@ -417,6 +448,12 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	issue, err := r.issue(ctx, row.Issue)
 	if err != nil {
 		return err
+	}
+	// A close row naming a tree other than its issue's never reserves it; the checks below decide it.
+	if payload.Op == "tree_close" && payload.Tree == issue.Tree {
+		if handled, err := r.reservedTreeClose(ctx, row, payload); handled || err != nil {
+			return err
+		}
 	}
 	if payload.Generation != issue.Generation {
 		r.log.Info("outbox supervise row serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
@@ -451,6 +488,16 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"tree", issue.Tree, "role", payload.Role)
 			return nil
 		}
+		// A start that takes the phase over from a role still at work in it (CI settled red before
+		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
+		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
+		// workspace together. A retry of a start that has already run against its claim (the claim's
+		// newest start, which StartedBy persists) is past that wait.
+		if payload.Quiesce != "" && (!found || machine.Claim().LastStartRow < row.ID) {
+			if err := r.quiesce(ctx, row, issue.Key, payload.Quiesce); err != nil {
+				return err
+			}
+		}
 		if !found {
 			if err := r.provisionWorkspace(ctx, issue); err != nil {
 				return err
@@ -460,6 +507,15 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 			}, "")
 			if err != nil {
 				return fmt.Errorf("create claim %s: %w", token, err)
+			}
+		}
+		// A child of a closed tree re-admitted as a root of its own keeps its roles' claims, which
+		// still name the tree it left; each is re-pointed before it starts here, so it binds this
+		// tree's lifecycle and launches in this tree's resources. The issue the supervisor keeps
+		// beside the machine (volumeLost) never moves with it: a claim's issue is fixed for its life.
+		if machine.Claim().Tree != issue.Tree {
+			if err := machine.Retree(ctx, issue.Tree); err != nil {
+				return err
 			}
 		}
 		// The claim remembers the newest start run against it, so a stop written before this one
@@ -535,23 +591,39 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		return nil
 	case "suspend":
 		if !found {
-			return nil
+			return r.stopWithoutMachine(ctx, row, token)
 		}
 		switch machine.Claim().State {
 		case supervise.StateFailed, supervise.StateRetired:
 			// The claim runs nothing, so there is nothing to suspend.
 			return nil
 		}
-		// Whether the suspend still acts is workflow.StopActs's rule, which promotion reads too. The
-		// phase is read before the suspend acts, not in one transaction with it: a transition
-		// committing in between costs one suspend, which that transition's own start then resumes.
-		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, issue.Phase, last, nil) {
-			r.log.Info("outbox suspend no longer acts: its role's phase is back, or a newer start superseded it; finished without acting",
-				"row", row.ID, "issue", issue.Key, "role", payload.Role, "leaves", payload.Leaves, "phase", issue.Phase, "start-row", last)
+		// Whether the suspend still acts is workflow.StopActs's rule, which promotion reads too.
+		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, last, nil) {
+			r.log.Info("outbox suspend superseded by a newer start; finished without acting",
+				"row", row.ID, "issue", issue.Key, "role", payload.Role, "phase", issue.Phase, "start-row", last)
 			return nil
 		}
 		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason}); err != nil {
 			return fmt.Errorf("suspend claim %s: %w", token, err)
+		}
+		return nil
+	case "issue_close":
+		// A child's close as done: the claim is closed as a tree close closes it, its session dropped
+		// with it, since the issue's volume the session lived on goes with the close's release
+		// (record.IssueSuspend's Release, which waits for every claim of the issue to retire). It is
+		// fenced as a suspend is, not as a tree close: no linger is involved, and a newer start
+		// means a person set the child todo again, whose run the close must not end.
+		if !found {
+			return r.stopWithoutMachine(ctx, row, token)
+		}
+		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, last, nil) {
+			r.log.Info("outbox issue close superseded by a newer start; finished without acting",
+				"row", row.ID, "issue", issue.Key, "role", payload.Role, "start-row", last)
+			return nil
+		}
+		if err := machine.Handle(ctx, supervise.RequestIssueClose{Claim: token}); err != nil {
+			return fmt.Errorf("close the issue of claim %s: %w", token, err)
 		}
 		return nil
 	case "tree_close":
@@ -566,11 +638,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		if err != nil {
 			return err
 		}
-		if !workflow.StopActs(row.ID, payload, issue.Phase, machine.Claim().LastStartRow, root) {
+		if !workflow.StopActs(row.ID, payload, machine.Claim().LastStartRow, root) {
 			r.log.Info("outbox tree close of a linger that has ended; finished without acting", "row", row.ID, "issue", issue.Key,
 				"tree", issue.Tree, "role", payload.Role, "linger", payload.Linger)
 			return nil
 		}
+		// A close that reserved, or found reserved, its tree's cleanup ran through reservedTreeClose
+		// already; one reaching here closes its claim alone.
 		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
 			return fmt.Errorf("close the tree of claim %s: %w", token, err)
 		}
@@ -578,6 +652,36 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
+}
+
+// reservedTreeClose runs a workflow tree close through its tree's durable cleanup reservation, and
+// does so before any stale-close fence. A close reserves only while the root still lingers at the
+// close's generation. Once it has, a re-admission that ends that linger cannot open the tree's next
+// epoch until the cleanup confirms, so every close row of the tree, however stale its own or its
+// root's generation has become, still retires its claim and drives the cleanup; were the fences to
+// finish those rows without acting, the reservation would never confirm and the re-admitted tree
+// would wait forever. The cleanup (store.CleanupReservedTree) waits until every stored claim of the
+// tree has retired, then has the runtime release what it holds for the tree and confirms the
+// reservation. It reports false, acting on nothing, when the tree holds no unconfirmed
+// reservation and this close could not take one; the ordinary fences then decide.
+func (r *outbox) reservedTreeClose(ctx context.Context, row record.OutboxRow, payload record.SuperviseRequest) (bool, error) {
+	lifecycle, reserved, err := r.trees.ReserveWorkflowTreeCleanup(ctx, r.project, payload.Tree, payload.Linger)
+	if err != nil {
+		return true, fmt.Errorf("reserve cleanup of workflow tree %s: %w", payload.Tree, err)
+	}
+	if !reserved {
+		return false, nil
+	}
+	token, err := claim.NewToken(r.project, row.Issue, payload.Role)
+	if err != nil {
+		return true, fmt.Errorf("derive claim for outbox row %d: %w", row.ID, err)
+	}
+	if machine, found := r.supervisor.Machine(token); found {
+		if err := machine.Handle(ctx, supervise.RequestTreeClose{Claim: token}); err != nil {
+			return true, fmt.Errorf("close the tree of claim %s: %w", token, err)
+		}
+	}
+	return true, r.trees.CleanupReservedTree(ctx, r.project, payload.Tree, lifecycle.Epoch, r.supervisor.deps.Runtime)
 }
 
 // root is issue's tree root as recorded, nil when it is not, read in a transaction of its own
@@ -592,6 +696,43 @@ func (r *outbox) root(ctx context.Context, issue record.Issue) (*record.Issue, e
 		return nil, fmt.Errorf("read the tree root of %s: %w", issue.Key, err)
 	}
 	return root, nil
+}
+
+// stopWithoutMachine is a stop row — a suspend or an issue close — that finds no machine for its
+// claim. Creation persists a claim before publishing its machine in memory, and the stop must not
+// be consumed in that interval: while the stored claim may still hold a process, the row waits for
+// the machine the later publish brings; a claim that runs nothing, or none at all, leaves it
+// nothing to stop.
+func (r *outbox) stopWithoutMachine(ctx context.Context, row record.OutboxRow, token claim.Token) error {
+	pending, err := r.trees.StoredClaimMayRun(ctx, token, row.ID)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return wait.Errorf("stop claim %s: waiting for its stored claim's supervising machine", token)
+	}
+	return nil
+}
+
+// quiesce asks the claim of role on issue, whose phase the start row takes over, to be out of its
+// turn (supervise.Machine.Quiesce): nil once it is, supervise.ErrQuiesceHeld while it is not, which
+// the runner retries on its backoff. A role with no claim runs nothing.
+func (r *outbox) quiesce(ctx context.Context, row record.OutboxRow, issue string, role claim.Role) error {
+	token, err := claim.NewToken(r.project, issue, role)
+	if err != nil {
+		return fmt.Errorf("derive the claim outbox row %d takes over from: %w", row.ID, err)
+	}
+	outgoing, found := r.supervisor.Machine(token)
+	if !found {
+		return nil
+	}
+	if err := outgoing.Quiesce(ctx, row.ID); err != nil {
+		return err
+	}
+	if row.Attempts > 0 {
+		r.log.Info("outbox start goes on: the claim it takes the phase from is out of its turn", "row", row.ID, "issue", issue, "role", role)
+	}
+	return nil
 }
 
 // podsProvision is whether the runtime provisions each claim's workspace in the claim's own pod
@@ -656,6 +797,52 @@ func (r *outbox) linger(ctx context.Context, row record.OutboxRow, payload recor
 	return nil
 }
 
+// issueBranch creates the issue's branch, legion/<KEY>, on GitHub at main, so no role's push is the
+// one that creates it: GitHub can refuse such a push on a large repository (its check for changed
+// workflow files, which it runs for an App without the workflows permission, times out on a new
+// ref), where it takes one that moves the branch. A branch GitHub already has is left where it is. A
+// start of the issue waits for this row (record.Store.ClaimDue), so a create GitHub refuses holds
+// back the issue's roles, each attempt logged with GitHub's answer, until one passes. A row of a
+// generation the issue has left, or of a tree that lingers, finishes without acting: the starts it
+// held back act on neither.
+func (r *outbox) issueBranch(ctx context.Context, row record.OutboxRow, payload record.IssueBranch) error {
+	issue, err := r.issue(ctx, row.Issue)
+	if err != nil {
+		return err
+	}
+	if payload.Generation != issue.Generation {
+		r.log.Info("outbox issue branch serves an earlier generation; finished without acting", "row", row.ID, "issue", issue.Key,
+			"generation", payload.Generation, "current", issue.Generation)
+		return nil
+	}
+	root, err := r.root(ctx, issue)
+	if err != nil {
+		return err
+	}
+	if root != nil && root.Lingers() {
+		r.log.Info("outbox issue branch of a member of a lingering tree; finished without acting", "row", row.ID, "issue", issue.Key, "tree", issue.Tree)
+		return nil
+	}
+	if err := r.createBranch(ctx, issue.Key); err != nil {
+		return fmt.Errorf("create the branch of %s, which its roles' starts wait for: %w", issue.Key, err)
+	}
+	return nil
+}
+
+// createBranch creates issue's branch on GitHub at main unless GitHub already has it, as the
+// implement App: the App of the roles that write an issue branch (appauth.AppRoleFor), and the one
+// workspace provisioning clones with.
+func (r *outbox) createBranch(ctx context.Context, issue string) error {
+	ctx, cancel := context.WithTimeout(ctx, issueBranchTimeout)
+	defer cancel()
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	if err != nil {
+		return fmt.Errorf("mint implement App token: %w", err)
+	}
+	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, r.repo)}
+	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue))
+}
+
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {
 	if r.supervisor == nil {
 		return errors.New("workspace removal has no claim supervisor")
@@ -691,7 +878,7 @@ func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payl
 			return fmt.Errorf("derive claim for outbox row %d: %w", row.ID, err)
 		}
 		if machine, found := r.supervisor.Machine(token); found && machine.Claim().State != supervise.StateRetired {
-			return fmt.Errorf("workspace removal of %s waits for the tree's close to retire claim %s (%s)", row.Issue, token, machine.Claim().State)
+			return wait.Errorf("workspace removal of %s waits for the tree's close to retire claim %s (%s)", row.Issue, token, machine.Claim().State)
 		}
 	}
 	working, err := workspace.Location(r.stateDir, r.repo, row.Issue)

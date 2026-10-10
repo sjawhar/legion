@@ -6,7 +6,7 @@ import { type ReactNode, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { api } from "../../api/client";
-import type { SearchResponse, SearchResult } from "../../api/types";
+import type { SearchResponse, SearchResult, SearchResultsPage } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { appKeymap } from "../shell/keymap";
 import { SearchButton } from "./SearchButton";
@@ -40,6 +40,18 @@ const results: SearchResult[] = [
     snippet: "Discuss the <mark>astrolabe</mark> diagram.",
   },
 ];
+
+/** The server's answer when these hits are every match: one page holding the whole list. */
+function searchAnswer(hits: SearchResult[]): SearchResponse & SearchResultsPage {
+  return {
+    limit: 20,
+    offset: 0,
+    reachable: hits.length,
+    results: hits,
+    took_ms: 1,
+    total: hits.length,
+  };
+}
 
 function CurrentRoute(): ReactNode {
   const location = useLocation();
@@ -78,11 +90,14 @@ async function searchFor(query: string): Promise<HTMLInputElement> {
 }
 
 test("renders grouped results with marked snippets and dims a done issue", async () => {
-  const search = spyOn(api, "search").mockResolvedValue({ results, took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer(results));
   const view = renderPalette();
 
   try {
     await searchFor("astrolabe");
+    await waitFor(() =>
+      expect(screen.getAllByText("astrolabe", { selector: "mark" }).length).toBeGreaterThan(0)
+    );
 
     // The owner rows name their groups and are `aria-hidden`, so a reader hears each owner
     // once; they are found by their label attribute rather than by role.
@@ -91,6 +106,26 @@ test("renders grouped results with marked snippets and dims a done issue", async
     expect(screen.getAllByRole("option")).toHaveLength(3);
     expect(screen.getAllByText("astrolabe", { selector: "mark" })).not.toHaveLength(0);
     expect(doneGroup?.getAttribute("data-status")).toBe("done");
+    expect(screen.queryByText(/^Showing the best/)).toBeNull();
+  } finally {
+    search.mockRestore();
+    view.unmount();
+    view.queryClient.clear();
+  }
+});
+
+test("says how many matches a query has when the page holds fewer", async () => {
+  const search = spyOn(api, "search").mockResolvedValue({
+    ...searchAnswer(results),
+    reachable: 300,
+    total: 1328,
+  });
+  const view = renderPalette();
+
+  try {
+    await searchFor("astrolabe");
+    expect(screen.getAllByRole("option")).toHaveLength(3);
+    expect(screen.getByText("Showing the best 3 of 1328 matches")).toBeDefined();
   } finally {
     search.mockRestore();
     view.unmount();
@@ -99,8 +134,8 @@ test("renders grouped results with marked snippets and dims a done issue", async
 });
 
 test("renders document-owned results under the document and opens their discussion", async () => {
-  const search = spyOn(api, "search").mockResolvedValue({
-    results: [
+  const search = spyOn(api, "search").mockResolvedValue(
+    searchAnswer([
       {
         artifact: { name: "Navigation design", slug: "navigation-design" },
         href: "/projects/CORE/documents/navigation-design?comment=comment-2",
@@ -116,9 +151,8 @@ test("renders document-owned results under the document and opens their discussi
         rank: 1,
         snippet: "Discuss the <mark>astrolabe</mark> diagram.",
       },
-    ],
-    took_ms: 1,
-  });
+    ])
+  );
   const view = renderPalette();
 
   try {
@@ -139,7 +173,7 @@ test("renders document-owned results under the document and opens their discussi
 });
 
 test("does not query below two characters", () => {
-  const search = spyOn(api, "search").mockResolvedValue({ results: [], took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer([]));
   const view = renderPalette();
 
   try {
@@ -155,7 +189,7 @@ test("does not query below two characters", () => {
 });
 
 test("names the limit instead of querying over it, and queries at it", async () => {
-  const search = spyOn(api, "search").mockResolvedValue({ results: [], took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer([]));
   const view = renderPalette();
 
   try {
@@ -183,7 +217,7 @@ test("names the limit instead of querying over it, and queries at it", async () 
 });
 
 test("arrow keys move aria-activedescendant and Enter navigates to the active href", async () => {
-  const search = spyOn(api, "search").mockResolvedValue({ results, took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer(results));
   const view = renderPalette();
 
   try {
@@ -220,7 +254,7 @@ function issueHit(key: string): SearchResult {
 
 test("a refetch that re-ranks the hits leaves the highlight on the hit the reader sees", async () => {
   const [first, second] = [issueHit("LEGION-3"), issueHit("LEGION-4")];
-  const search = spyOn(api, "search").mockResolvedValue({ results: [first, second], took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer([first, second]));
   const view = renderPalette();
 
   try {
@@ -229,7 +263,7 @@ test("a refetch that re-ranks the hits leaves the highlight on the hit the reade
     expect(shown).toBe(screen.getAllByRole("option")[0]?.id ?? "");
 
     // A focus refetch, or the event stream's reconnect, answers the same query re-ranked.
-    search.mockResolvedValue({ results: [second, first], took_ms: 1 });
+    search.mockResolvedValue(searchAnswer([second, first]));
     await view.queryClient.refetchQueries();
     await waitFor(() => expect(screen.getAllByRole("option")[0]?.id).not.toBe(shown));
     expect(input.getAttribute("aria-activedescendant")).toBe(shown);
@@ -242,7 +276,7 @@ test("a refetch that re-ranks the hits leaves the highlight on the hit the reade
 
 test("a highlighted hit that drops out hands the highlight to the head, which keeps it", async () => {
   const [first, second] = [issueHit("LEGION-3"), issueHit("LEGION-4")];
-  const search = spyOn(api, "search").mockResolvedValue({ results: [first, second], took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer([first, second]));
   const view = renderPalette();
 
   try {
@@ -251,13 +285,13 @@ test("a highlighted hit that drops out hands the highlight to the head, which ke
     const [head, arrowed] = screen.getAllByRole("option").map((option) => option.id);
     expect(input.getAttribute("aria-activedescendant")).toBe(arrowed ?? "");
 
-    search.mockResolvedValue({ results: [first], took_ms: 1 });
+    search.mockResolvedValue(searchAnswer([first]));
     await view.queryClient.refetchQueries();
     await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(1));
     expect(input.getAttribute("aria-activedescendant")).toBe(head ?? "");
 
     // The row coming back does not take the highlight back from the one the reader now sees.
-    search.mockResolvedValue({ results: [first, second], took_ms: 1 });
+    search.mockResolvedValue(searchAnswer([first, second]));
     await view.queryClient.refetchQueries();
     await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(2));
     expect(input.getAttribute("aria-activedescendant")).toBe(head ?? "");
@@ -270,7 +304,7 @@ test("a highlighted hit that drops out hands the highlight to the head, which ke
 
 test("a background refresh that fails keeps the hits the query has, and the highlight on its hit", async () => {
   const [first, second] = [issueHit("LEGION-3"), issueHit("LEGION-4")];
-  const search = spyOn(api, "search").mockResolvedValue({ results: [first, second], took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer([first, second]));
   const view = renderPalette();
 
   try {
@@ -333,7 +367,7 @@ test("a query found inside an action's label lists the action below the hits, an
   const ran: string[] = [];
   const unregister = registerClose(ran);
   const hit = issueHit("LEGION-3");
-  const search = spyOn(api, "search").mockResolvedValue({ results: [hit], took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer([hit]));
   const view = renderPaletteHost();
 
   try {
@@ -372,7 +406,7 @@ test("while the search is in flight no action found inside its label is highligh
     expect(ran).toEqual([]);
 
     // The hits arriving take the head; the action row was never adopted while they were out.
-    await act(async () => answer.resolve({ results: [hit], took_ms: 1 }));
+    await act(async () => answer.resolve(searchAnswer([hit])));
     await waitFor(() => expect(input.getAttribute("aria-activedescendant")).toBe(optionId(hit)));
     expect(optionIds()).toEqual([optionId(hit), CLOSE_ROW]);
   } finally {
@@ -386,7 +420,7 @@ test("while the search is in flight no action found inside its label is highligh
 test("a search that finds nothing still leaves an action found inside its label unhighlighted", async () => {
   const ran: string[] = [];
   const unregister = registerClose(ran);
-  const search = spyOn(api, "search").mockResolvedValue({ results: [], took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer([]));
   const view = renderPaletteHost();
 
   try {
@@ -429,7 +463,7 @@ test("an arrow pressed before the search answers reaches no action found inside 
     expect(ran).toEqual([]);
 
     // The hits arrive above it and take the head; Enter opens the first one.
-    await act(async () => answer.resolve({ results: [hit], took_ms: 1 }));
+    await act(async () => answer.resolve(searchAnswer([hit])));
     await waitFor(() => expect(optionIds()).toEqual([optionId(hit), CLOSE_ROW]));
     expect(input.getAttribute("aria-activedescendant")).toBe(optionId(hit));
     fireEvent.keyDown(input, { key: "Enter" });
@@ -446,7 +480,7 @@ test("an arrow pressed before the search answers reaches no action found inside 
 test("once the search has answered with no hit, Down takes the first action found inside its label", async () => {
   const ran: string[] = [];
   const unregister = registerClose(ran);
-  const search = spyOn(api, "search").mockResolvedValue({ results: [], took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer([]));
   const view = renderPaletteHost();
 
   try {
@@ -494,7 +528,7 @@ test("while the search is out the arrows walk only the actions the query starts,
     fireEvent.keyDown(input, { key: "ArrowUp" });
     expect(input.getAttribute("aria-activedescendant")).toBe(triage);
 
-    await act(async () => answer.resolve({ results: [hit], took_ms: 1 }));
+    await act(async () => answer.resolve(searchAnswer([hit])));
     await waitFor(() => expect(optionIds()).toEqual([report, triage, optionId(hit), CLOSE_ROW]));
     expect(input.getAttribute("aria-activedescendant")).toBe(triage);
     fireEvent.keyDown(input, { key: "Enter" });
@@ -515,7 +549,7 @@ test("a refetch behind a stale cached answer is still out, so Down and Enter rea
   const search = spyOn(api, "search").mockReturnValue(answer.promise);
   const view = renderPaletteHost();
   // The reader searched `issue` earlier and found nothing; that answer is stale now.
-  view.queryClient.setQueryData(["search", "issue"], { results: [], took_ms: 1 });
+  view.queryClient.setQueryData(["search", "issue"], searchAnswer([]));
 
   try {
     const input = screen.getByRole<HTMLInputElement>("combobox", { name: "Search" });
@@ -527,7 +561,7 @@ test("a refetch behind a stale cached answer is still out, so Down and Enter rea
     fireEvent.keyDown(input, { key: "Enter" });
     expect(ran).toEqual([]);
 
-    await act(async () => answer.resolve({ results: [hit], took_ms: 1 }));
+    await act(async () => answer.resolve(searchAnswer([hit])));
     await waitFor(() => expect(optionIds()).toEqual([optionId(hit), CLOSE_ROW]));
     expect(input.getAttribute("aria-activedescendant")).toBe(optionId(hit));
     fireEvent.keyDown(input, { key: "Enter" });
@@ -570,7 +604,7 @@ test("a background refetch keeps the actions the query starts and the hits walka
     { id: "report", keys: [], label: "Issue the report", run: () => ran.push("report") },
   ]);
   const hit = issueHit("LEGION-3");
-  const search = spyOn(api, "search").mockResolvedValue({ results: [hit], took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer([hit]));
   const view = renderPaletteHost();
   const report = "search-option-action-global-report";
   const refetchHeld = async (calls: number) => {
@@ -598,7 +632,7 @@ test("a background refetch keeps the actions the query starts and the hits walka
     expect(input.getAttribute("aria-activedescendant")).toBe(report);
     fireEvent.keyDown(input, { key: "ArrowUp" });
     expect(input.getAttribute("aria-activedescendant")).toBe(optionId(hit));
-    await act(async () => first.resolve({ results: [hit], took_ms: 1 }));
+    await act(async () => first.resolve(searchAnswer([hit])));
     await waitFor(() => expect(view.queryClient.isFetching()).toBe(0));
     fireEvent.keyDown(input, { key: "ArrowDown" });
     expect(input.getAttribute("aria-activedescendant")).toBe(CLOSE_ROW);
@@ -608,7 +642,7 @@ test("a background refetch keeps the actions the query starts and the hits walka
     const second = await refetchHeld(3);
     fireEvent.keyDown(input, { key: "ArrowDown" });
     expect(input.getAttribute("aria-activedescendant")).toBe(report);
-    await act(async () => second.resolve({ results: [hit], took_ms: 1 }));
+    await act(async () => second.resolve(searchAnswer([hit])));
     expect(ran).toEqual([]);
   } finally {
     search.mockRestore();
@@ -622,7 +656,7 @@ test("a query that starts an action's label lists it above the hits, and Enter r
   const ran: string[] = [];
   const unregister = registerClose(ran);
   const hit = issueHit("LEGION-3");
-  const search = spyOn(api, "search").mockResolvedValue({ results: [hit], took_ms: 1 });
+  const search = spyOn(api, "search").mockResolvedValue(searchAnswer([hit]));
   const view = renderPaletteHost();
 
   try {

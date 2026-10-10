@@ -106,13 +106,13 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/credential-requests/{record}/deny", uiAuth((*server).denyRecord)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", uiAuth((*server).lookupMachineLogin)},
-		// List the machine logins the named person approved, their own machines' and any
-		// service's, such as the Legion daemon's, that are not revoked and are unexpired or expired
-		// with a session still running.
+		// List the machine logins the named person may revoke, every service's, such as the Legion
+		// daemon's, whoever approved it, and the person's own machines', that are not revoked and
+		// are unexpired or expired with a session still running, each naming who approved it.
 		{http.MethodGet, "/v1/launcher-credentials", uiAuth((*server).listLauncherCredentials)},
-		// End a machine login, expired or not, as the person who approved it: its launcher proofs
-		// stop authenticating and every session it enrolled, pods included, ends with its grants and
-		// pending requests.
+		// End a machine login, expired or not: a service's as anyone signed in, a person's machine's
+		// as the person who approved it. Its launcher proofs stop authenticating and every session
+		// it enrolled, pods included, ends with its grants and pending requests.
 		{http.MethodPost, "/v1/launcher-credentials/{id}/revoke-by-approver", uiAuth((*server).revokeLauncherCredential)},
 		// List the live grants of the named person's sessions, automatic or approved, and those the
 		// person approved.
@@ -122,6 +122,27 @@ func routes() []apiRoute {
 		// the grant had already ended: its other grants that got them automatically end too, and it
 		// asks before it gets them again.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", uiAuth((*server).revokeByApprover)},
+		// List the logins of the calling credential's operator's own machines, as Dispatch's
+		// machine-logins page lists them, without the service logins that page also lists.
+		{http.MethodGet, "/v1/operator/machines", launcherAuth((*server).listOperatorMachines)},
+		// End one of the operator's own machines' logins: no proof signed with it authenticates again
+		// and every session it enrolled ends. A service's login is not found here, like an unknown
+		// id. Revoking the calling machine's own login ends this machine's access.
+		{http.MethodPost, "/v1/operator/machines/{id}/revoke", launcherAuth((*server).revokeOperatorMachine)},
+		// List the live grants of the operator's sessions and those the operator approved, exactly as
+		// Dispatch's Live grants page lists them.
+		{http.MethodGet, "/v1/operator/grants", launcherAuth((*server).listOperatorGrants)},
+		// End a grant as the operator: the revocation Dispatch's page offers, which also withholds an
+		// automatic grant's secrets from its session.
+		{http.MethodPost, "/v1/operator/grants/{id}/revoke", launcherAuth((*server).revokeOperatorGrant)},
+		// The namespace prefix, AWS account and region, and the agent-secrets key the broker serves:
+		// what the CLI needs so it and the broker never disagree about which secret a name means.
+		{http.MethodGet, "/v1/settings", public((*server).readSettings)},
+		// Reread one secret from Secrets Manager now, as whoever just wrote it may ask: the change is
+		// served, or gone, within seconds instead of at the next five-minute reload. Open to any caller,
+		// and rate-limited both per source address and over every caller at once, since each reread holds
+		// the policy's writer lock while it reads; a reread only moves the broker toward AWS's own truth.
+		{http.MethodPost, "/v1/secrets/{name}/reread", public((*server).rereadSecret)},
 		// Report whether the broker can reach its database.
 		{http.MethodGet, "/healthz", public((*server).healthz)},
 	}

@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "baseUrl": ".",
+    "paths": {
+      "@legion/contracts": ["../contracts/src/index.ts"],
+      "@legion/envoy-client/defaults": ["../envoy-client/src/defaults.ts"],
+      "@legion/envoy-client/dispatch-config": ["../envoy-client/src/dispatch-config.ts"],
+      "@legion/envoy-client/dispatch-execute": ["../envoy-client/src/dispatch-execute.ts"],
+      "@legion/envoy-client/dispatch-http": ["../envoy-client/src/dispatch-http.ts"],
+      "@legion/envoy-client/errors": ["../envoy-client/src/errors.ts"],
+      "@legion/envoy-client/secret-file": ["../envoy-client/src/secret-file.ts"],
+      "@legion/pi-shared/*": ["../pi-shared/src/*"],
+      "@legion/pi-shared/test/*": ["../pi-shared/test/*"]
+    },
+    "strict": true,
+    "noEmit": true,
+    "types": ["bun"],
+    "skipLibCheck": true
+  },
+  "include": [
+    "extensions/legion.ts",
+    "extensions/legion.test.ts",
+    "extensions/legion-phase-stall-omp.test.ts",
+    "extensions/legion-role-tools-omp.test.ts",
+    "../pi-shared/src/omp-host.d.ts",
+    "scripts/grant-rig/*.ts",
+    "scripts/skill-scenarios/*.ts",
+    "scripts/*.ts",
+    "src/**/*.ts"
+  ]
+}

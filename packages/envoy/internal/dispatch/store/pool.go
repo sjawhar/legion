@@ -90,6 +90,21 @@ func holdsConnection(ctx context.Context) bool {
 	return ok && state.connection.Load()
 }
 
+// ForConcurrentRead returns a context for one of a caller's reads that run side by side: ctx's
+// deadline, cancellation and values, with a hold mark of its own, so that read takes one
+// connection and the pool still refuses it a second. Reads sharing one mark would refuse each
+// other, since one read's open cursor marks the context they share. A caller already holding a
+// connection (its transaction, a cursor, an acquired connection) is refused with
+// ErrNestedAcquire, because each of its reads would be a second connection taken while it holds
+// one.
+func ForConcurrentRead(ctx context.Context) (context.Context, error) {
+	if holdsConnection(ctx) {
+		logRefusal()
+		return nil, ErrNestedAcquire
+	}
+	return context.WithValue(ctx, holdingKey{}, &holding{}), nil
+}
+
 // loggedSites remembers the call sites that have already logged a refusal, so a caller that
 // trips the guard in a loop reports its stack once instead of flooding the log. The error
 // itself is returned to every caller, every time.
@@ -261,6 +276,31 @@ func (p *Pool) Config() *pgxpool.Config { return p.pool.Config() }
 
 // Stat reports the pool's current connection counts.
 func (p *Pool) Stat() *pgxpool.Stat { return p.pool.Stat() }
+
+// ConnectionUse is how many connections of the shared and document-rooms pools are in use, and
+// how many those two pools have taken back since they opened, whether returned or discarded. The
+// health probe's pool is left out: it is how a caller asks whether the database answers.
+type ConnectionUse struct {
+	InUse    int32
+	Returned int64
+}
+
+// Use reports the shared and document-rooms pools' ConnectionUse.
+func (p *Pool) Use() ConnectionUse {
+	p.mu.Lock()
+	rooms := p.rooms
+	p.mu.Unlock()
+	var use ConnectionUse
+	for _, pool := range []*pgxpool.Pool{p.pool, rooms} {
+		if pool == nil {
+			continue
+		}
+		stat := pool.Stat()
+		use.InUse += stat.AcquiredConns()
+		use.Returned += stat.AcquireCount() - int64(stat.AcquiredConns())
+	}
+	return use
+}
 
 func (p *Pool) guard(ctx context.Context) error {
 	if !holdsConnection(ctx) {

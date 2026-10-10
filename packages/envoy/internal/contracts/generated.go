@@ -155,18 +155,30 @@ const ReceiptTimeoutCause = "The listener didn't answer within the send window; 
 const MaxBroadcastRecipients = 100
 
 // SearchQueryMax is the longest GET /api/v1/search query, in UTF-16 units. Generated from
-// SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the dispatch_search tool's
-// cannot drift apart.
+// SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the `dispatch search`
+// command's cannot drift apart.
 const SearchQueryMax = 1000
 
 // SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = "search with a short phrase of a few words, not a passage"
 
+// SearchKindDepth is how many of its best matches each kind of content lists before
+// GET /api/v1/search merges the kinds; a kind's later matches count in the total and no offset
+// returns them. Generated from SEARCH_KIND_DEPTH in packages/contracts so the server's cut and the
+// `dispatch search` command's account of it cannot drift apart.
+const SearchKindDepth = 100
+
+// SearchDegradedEmbedderUnavailable is GET /api/v1/search's SearchResponse.degraded value when
+// meaning search could not run for this request and search fell back to keyword-only ranking.
+// Generated from SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE in packages/contracts so the string
+// Dispatch writes and the string search-answer.ts compares against cannot drift apart.
+const SearchDegradedEmbedderUnavailable = "embedder_unavailable"
+
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
 // MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds
-// and the dispatch_issues tool's cannot drift apart.
+// and the `dispatch issues` command's cannot drift apart.
 const MaxIssuePageLimit = 250
 const DefaultIssuePageLimit = 50
 

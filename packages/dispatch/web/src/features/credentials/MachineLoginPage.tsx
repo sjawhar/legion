@@ -51,14 +51,15 @@ function MachineLoginDecision({
 }
 
 /**
- * The machine-login page: `agent-secrets launcher login` prints an 8-character code on the
- * machine, and the operator types it here. Ruling 13 of the shared broker contract: only this
- * code-lookup route selects a
+ * The machine-login page: `agent-secrets machine login` prints an 8-character code on the
+ * machine, and the operator types it here; a service's login, such as the Legion daemon's, prints
+ * its code in its log, and any signed-in person types it. Ruling 13 of the shared broker contract:
+ * only this code-lookup route selects a
  * `launcher_credential` record, and deciding it sends the same code again, so this is the one
  * place a machine record gets Approve/Deny buttons. A looked-up login already decided shows its
  * decision, and so does one decided here, in their place, as the record page does, so a second
- * click never reaches the broker's already-decided refusal. Below it, the viewer's machine logins
- * that can still reach a secret, each revocable.
+ * click never reaches the broker's already-decided refusal. Below it, the machine logins the
+ * viewer may revoke that can still reach a secret: their own machines' and every service's.
  */
 export function MachineLoginPage(): ReactNode {
   const [code, setCode] = useState("");

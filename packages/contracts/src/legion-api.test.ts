@@ -26,6 +26,8 @@ import {
   LegionRootCloseRequest,
   LegionSignOffRequest,
   LegionStateResponse,
+  LegionThreadsResolveRequest,
+  LegionThreadsResolveResponse,
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "./legion-api";
@@ -38,6 +40,9 @@ const schemas: Record<string, z.ZodType> = {
   "state.json": LegionStateResponse,
   "state-stage3.json": LegionStateResponse,
   "state-operator-claim.json": LegionStateResponse,
+  // Written by internal/projection's own golden test: what the state route projects while the
+  // daemon's own controller (`controller: daemon`) holds its claim on no issue.
+  "state-controller-claim.json": LegionStateResponse,
   "register.json": LegionRegisterResponse,
   "register-controller.json": LegionControllerRegisterResponse,
   "controller-secret.json": LegionControllerSecretResponse,
@@ -48,6 +53,8 @@ const schemas: Record<string, z.ZodType> = {
   "github-token.json": LegionGitHubTokenResponse,
   "git-credential.json": LegionGitCredentialResponse,
   "provisioning-credential.json": LegionGitHubTokenResponse,
+  "threads-resolve.json": LegionThreadsResolveResponse,
+  "threads-resolve-refused.json": LegionThreadsResolveResponse,
   "handoff-complete.json": LegionEmptyResponse,
   "issue-status.json": LegionEmptyResponse,
   "gate-register.json": LegionEmptyResponse,
@@ -78,6 +85,28 @@ test("every Go-written fixture parses through the strict schema", () => {
     const parsed = schema?.safeParse(fixture(name));
     expect(parsed?.error?.issues ?? [], `${name} failed the schema`).toEqual([]);
   }
+});
+
+test("a thread's outcome is resolved or left open, never both or neither", () => {
+  const url = "https://github.com/acme/widgets/pull/42#discussion_r1";
+  for (const outcome of [
+    { url },
+    { url, newestBy: "legion-reviewer" },
+    {
+      url,
+      resolved: "the Legion reviewer's acceptance of a bot's thread",
+      leftOpen: "not an acceptance",
+    },
+  ]) {
+    expect(
+      LegionThreadsResolveResponse.safeParse({ threads: [outcome], withheld: 0 }).success
+    ).toBe(false);
+  }
+});
+
+test("a resolve answer always carries its withheld count", () => {
+  expect(LegionThreadsResolveResponse.safeParse({ threads: [], withheld: 0 }).success).toBe(true);
+  expect(LegionThreadsResolveResponse.safeParse({ threads: [] }).success).toBe(false);
 });
 
 test("state accepts optional fields emitted by later workflow slices", () => {
@@ -139,6 +168,11 @@ test("every workflow request has a strict schema", () => {
       { sessionId: "ses_controller", secret: "s" },
     ],
     ["grant credential", LegionGrantCredentialRequest, { grantId: "grant-208" }],
+    [
+      "threads resolve",
+      LegionThreadsResolveRequest,
+      { grantId: "grant-208", repo: "acme/widgets", number: 42 },
+    ],
     [
       "handoff complete",
       LegionHandoffCompleteRequest,
@@ -252,6 +286,54 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
   delete state.issues["LEGION-208"]?.status;
 
   expect(LegionStateResponse.safeParse(state).success).toBeFalse();
+});
+
+// The state's capability report (contract 16): the golden carries a decided row with the operator's
+// reason and an open row with the legion.yaml line that records a decision, beside the present
+// (codegraph among them: the image carries the tooling and a pod's launch loads it with extension
+// discovery on), live and withheld rows, and the report is never absent from a state. `installed`
+// and `unchecked` stay in the schema's enum with no row carrying them here: `installed` was
+// codegraph's until LEGION-629, and `unchecked` is a row before any probe reported.
+test("the state golden carries the deployment's capability report", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+
+  const rows = Object.fromEntries(state.capabilities.map((row) => [row.name, row]));
+  expect(rows.secrets).toEqual({
+    name: "secrets",
+    status: "decided",
+    detail: "runtime.kubernetes.agent_secrets is not configured",
+    decision:
+      "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret",
+  });
+  expect(rows["resource-limits"]).toEqual({
+    name: "resource-limits",
+    status: "open",
+    detail:
+      "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester",
+    configLine: 'capabilities.decided.resource-limits: "<reason>"',
+  });
+  expect(rows.codegraph).toEqual({
+    name: "codegraph",
+    status: "present",
+    detail: "checked by the daemon's probe of the worker image, which passed",
+  });
+  const statuses = state.capabilities.map((row) => row.status);
+  for (const status of ["present", "live", "withheld", "decided", "open"] as const) {
+    expect(statuses).toContain(status);
+  }
+
+  const emptied = fixture("state-stage3.json") as { capabilities: unknown[] };
+  expect(emptied.capabilities).toEqual([]);
+});
+
+test("a capability row's status is one the report renders, and the report cannot be dropped", () => {
+  const unknownStatus = fixture("state.json") as { capabilities: { status: string }[] };
+  unknownStatus.capabilities = [{ ...unknownStatus.capabilities[0], status: "missing" }];
+  expect(LegionStateResponse.safeParse(unknownStatus).success).toBeFalse();
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.capabilities;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
 // An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is

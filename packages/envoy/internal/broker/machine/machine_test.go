@@ -2,6 +2,7 @@ package machine
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"regexp"
 	"testing"
@@ -214,7 +215,7 @@ func TestApplyDecisionTakesTheCodeThenOnlyTheApproversLogin(t *testing.T) {
 		Scan(&login, &actor); err != nil {
 		t.Fatalf("read approved event: %v", err)
 	}
-	if login != testApprover || actor != "human:"+testApprover {
+	if login != testApprover || actor != record.HumanActor(testApprover) {
 		t.Fatalf("approved event login=%q actor=%q, want the canonical login %q", login, actor, testApprover)
 	}
 }
@@ -238,14 +239,14 @@ func TestLoginRefusesAReplayedRequestObject(t *testing.T) {
 	}
 }
 
-// TestLoginRefusesAnyoneAsItsOperator pins that a machine login names the one person who decides
-// it and whose machine it becomes: login_hint record.AnyoneApprover, the approver of a shared
-// secret's request, would let any signed-in person approve someone else's machine as their own,
-// so it is refused in any casing and opens no record.
+// TestLoginRefusesAnyoneAsItsOperator pins that a person's machine login names the one person who
+// decides it and whose machine it becomes: login_hint record.AnyoneApprover, the approver of a
+// shared secret's request, would let any signed-in person approve someone else's machine as their
+// own, so it is refused in any casing and opens no record, and so is one that names no one.
 func TestLoginRefusesAnyoneAsItsOperator(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
-	for _, hint := range []string{record.AnyoneApprover, " Anyone "} {
+	for _, hint := range []string{record.AnyoneApprover, " Anyone ", "", "  "} {
 		if _, _, err := svc.Login(ctx, signMachineLogin(t, hint, "example-host-devbox", "")); !errors.Is(err, record.ErrRequestInvalid) {
 			t.Fatalf("Login(login_hint %q) = %v, want record.ErrRequestInvalid", hint, err)
 		}
@@ -288,14 +289,15 @@ func TestAMachineLoginNamingAnyoneIsDecidedByNoOne(t *testing.T) {
 }
 
 // TestServiceCredentialEnrollsOnlyPods pins that a login whose launcher_credential detail names a
-// service mints a credential with a nil operator (never the approving human's own login), and
-// that this new-flow-minted credential still respects enroll's own authorized() trust boundary:
-// a service credential enrols pods only.
+// service, with no login_hint, opens a record anyone signed in decides, and mints a credential with
+// a nil operator (never the approving human's own login) when a person it names nowhere approves
+// it; and that this new-flow-minted credential still respects enroll's own authorized() trust
+// boundary: a service credential enrols pods only.
 func TestServiceCredentialEnrollsOnlyPods(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
 
-	compact := signMachineLogin(t, testApprover, "cluster", "legion-daemon")
+	compact := signMachineLogin(t, "", "cluster", "legion-daemon")
 	_, code, err := svc.Login(ctx, compact)
 	if err != nil {
 		t.Fatalf("Login: %v", err)
@@ -304,11 +306,11 @@ func TestServiceCredentialEnrollsOnlyPods(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LookupByCode: %v", err)
 	}
-	if view.Service != "legion-daemon" {
-		t.Fatalf("view.Service = %q, want legion-daemon", view.Service)
+	if view.Service != "legion-daemon" || view.Approver != record.AnyoneApprover {
+		t.Fatalf("view = %+v, want service legion-daemon, approver %s", view, record.AnyoneApprover)
 	}
 
-	state, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, true, testApprover, code)
+	state, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, true, "bob@example.com", code)
 	if err != nil {
 		t.Fatalf("ApplyDecision: %v", err)
 	}
@@ -331,6 +333,136 @@ func TestServiceCredentialEnrollsOnlyPods(t *testing.T) {
 	cred := enroll.Credential{ID: uuid.MustParse(credentialID), Service: &service, Host: "cluster"}
 	if _, err := svc.Enroll.Create(ctx, cred, enroll.Enrollment{Kind: "box", RuntimeID: "box-1", Operator: new(testApprover), Thumbprint: "tp-1"}); !errors.Is(err, enroll.ErrOperatorMismatch) {
 		t.Fatalf("Create(service cred, kind box) = %v, want ErrOperatorMismatch", err)
+	}
+}
+
+// TestAServiceLoginIsDecidedByAnyoneWhateverItsLoginHintNames pins that the approver rule reads the
+// service from the signed request alone: a service's login that still names a person in its
+// login_hint (the Legion daemon's release before this rule did) opens a record anyone decides;
+// another person's login approves it, the approved event records that login, and the credential
+// it mints authenticates through AuthenticateLauncher's chain re-check. The sentinel and an empty
+// login decide it no more than they decide any record.
+func TestAServiceLoginIsDecidedByAnyoneWhateverItsLoginHintNames(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	machineKey, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := record.Sign(machineKey, testAudience, []record.AuthorizationDetail{
+		{Type: "launcher_credential", Identifier: "cluster", Service: "legion-daemon"},
+	}, "", testApprover, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, code, err := svc.Login(ctx, compact)
+	if err != nil {
+		t.Fatalf("Login(a service's login naming %s): %v", testApprover, err)
+	}
+	view, err := svc.LookupByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("LookupByCode: %v", err)
+	}
+	if view.Approver != record.AnyoneApprover {
+		t.Fatalf("view.Approver = %q, want %s: a service's login names no approver, whatever its login_hint says", view.Approver, record.AnyoneApprover)
+	}
+	for _, login := range []string{record.AnyoneApprover, " ANYONE ", "", "  "} {
+		if _, _, err := svc.ApplyDecision(ctx, view.RecordID, true, login, code); !errors.Is(err, record.ErrNotApprover) {
+			t.Fatalf("ApplyDecision(%q) = %v, want record.ErrNotApprover", login, err)
+		}
+	}
+	state, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, true, " Bob@Example.com ", code)
+	if err != nil || state != "issued" {
+		t.Fatalf("ApplyDecision(bob, whom the login names nowhere) = %q, %v; want issued", state, err)
+	}
+	var login string
+	if err := svc.Store.Pool.QueryRow(ctx, `select login from credential_request_events where record_id=$1 and event='approved'`, view.RecordID).Scan(&login); err != nil || login != "bob@example.com" {
+		t.Fatalf("approved event login = %q, %v; want bob@example.com", login, err)
+	}
+	assertLauncherAuthenticates(t, svc, machineKey, credentialID)
+}
+
+// TestAServiceLoginIsDeniedByAnyoneWhateverItsLoginHintNames pins the deny half of the same rule:
+// a service's login naming testApprover in its login_hint is denied by bob, whom it names nowhere;
+// the denied event records bob, and the login mints no credential.
+func TestAServiceLoginIsDeniedByAnyoneWhateverItsLoginHintNames(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	_, code, err := svc.Login(ctx, signMachineLogin(t, testApprover, "cluster", "legion-daemon"))
+	if err != nil {
+		t.Fatalf("Login(a service's login naming %s): %v", testApprover, err)
+	}
+	view, err := svc.LookupByCode(ctx, code)
+	if err != nil {
+		t.Fatalf("LookupByCode: %v", err)
+	}
+	state, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, false, "bob@example.com", code)
+	if err != nil || state != "denied" || credentialID != "" {
+		t.Fatalf("ApplyDecision(deny, bob, whom the login names nowhere) = %q, %q, %v; want denied with no credential", state, credentialID, err)
+	}
+	var login string
+	if err := svc.Store.Pool.QueryRow(ctx, `select login from credential_request_events where record_id=$1 and event='denied'`, view.RecordID).Scan(&login); err != nil || login != "bob@example.com" {
+		t.Fatalf("denied event login = %q, %v; want bob@example.com", login, err)
+	}
+	var minted int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials where record_id=$1`, view.RecordID).Scan(&minted); err != nil || minted != 0 {
+		t.Fatalf("launcher_credentials minted from the denied login = %d, %v; want none", minted, err)
+	}
+}
+
+// TestAServiceLoginPendingWithANamedApproverIsDecidedByAnyone pins the rule for a service's login a
+// broker from before it opened with a person as the approver, still pending at the deploy: the
+// stored approver is part of the hashed body and is never rewritten, and the rule reads the service
+// from the signed request instead, so another person approves it and its credential authenticates.
+func TestAServiceLoginPendingWithANamedApproverIsDecidedByAnyone(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	machineKey, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	compact, err := record.Sign(machineKey, testAudience, []record.AuthorizationDetail{
+		{Type: "launcher_credential", Identifier: "cluster", Service: "legion-daemon"},
+	}, "", testApprover, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const code = "ABCD-EFGH"
+	body := record.Body{
+		Request:         compact,
+		Approver:        testApprover,
+		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-"},
+		LifetimeSeconds: int(svc.CredentialLifetime.Seconds()),
+		RulesVersion:    svc.Policy.Get().Version,
+		ExpiresAt:       time.Now().Add(svc.PendingTTL).UTC().Truncate(time.Second),
+		Code:            code,
+	}
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, code, expires_at) values ($1,$2,'launcher_credential',$3,$4,$5)`,
+		body.ID(), body.Canonical(), body.Approver, code, body.ExpiresAt); err != nil {
+		t.Fatalf("insert the record an older broker opened: %v", err)
+	}
+	state, credentialID, err := svc.ApplyDecision(ctx, body.ID(), true, "bob@example.com", code)
+	if err != nil || state != "issued" {
+		t.Fatalf("ApplyDecision(bob) = %q, %v; want issued", state, err)
+	}
+	assertLauncherAuthenticates(t, svc, machineKey, credentialID)
+}
+
+// assertLauncherAuthenticates fails t unless a launcher proof signed by machineKey for credentialID
+// authenticates, through AuthenticateLauncher's re-check of the credential's whole issuance chain.
+func assertLauncherAuthenticates(t *testing.T, svc *Service, machineKey *ecdsa.PrivateKey, credentialID string) {
+	t.Helper()
+	verifier := &proof.Verifier{
+		Skew:           time.Minute,
+		LookupLauncher: svc.Enroll.AuthenticateLauncher,
+		Replay:         func(context.Context, string, time.Time) (bool, error) { return true, nil },
+	}
+	launcherProof, err := proof.SignLauncher(machineKey, credentialID, "POST", testURL, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verifier.Verify(context.Background(), launcherProof, "POST", testURL, time.Now()); err != nil {
+		t.Fatalf("launcher proof for credential %s: %v, want it to authenticate", credentialID, err)
 	}
 }
 

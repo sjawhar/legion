@@ -7,7 +7,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -44,6 +43,46 @@ func resolveWorkspace(value string) (string, error) {
 	return os.Getwd()
 }
 
+// resolveIssue reads LEGION_ISSUE, the tree's issue key, and refuses one that is not a Dispatch
+// issue key (legionclaim.IsIssueKey) before anything is built from it. The key names the tree's own
+// handoff directory (handoffFile) and branch, and a worker sets its own environment: a value such
+// as ../x would otherwise place a handoff, or the paths legion push lets skip CI, outside it.
+func resolveIssue() (string, error) {
+	issue := os.Getenv("LEGION_ISSUE")
+	if issue == "" {
+		return "", errors.New("LEGION_ISSUE is not set")
+	}
+	if !legionclaim.IsIssueKey(issue) {
+		return "", fmt.Errorf("LEGION_ISSUE %q is not a Dispatch issue key like LEGION-1", issue)
+	}
+	return issue, nil
+}
+
+// handoffFile is name in issue's own handoff directory, .legion/<issue>/<name>, relative to the
+// workspace: the one place that layout is spelled, for every handoff, the workspace recovery marker
+// and the paths legion push lets skip CI. Each tree writes only under its own directory, so two
+// trees running at once never touch the same path (dispatch://LEGION-565), and retro's last commit
+// removes it from the head a human merges, so none reaches main (dispatch://LEGION-605). issue is a
+// key resolveIssue, or workspace-init's --issue check, accepted.
+func handoffFile(issue, name string) string {
+	return filepath.Join(".legion", issue, name)
+}
+
+// legacyHandoffFile is name at the flat .legion/<name> every handoff used before
+// dispatch://LEGION-565, relative to the workspace. It is read only as a fallback for a tree still
+// mid-flight when this binary replaced an older one, and only when stampedBy the tree's issue.
+func legacyHandoffFile(name string) string {
+	return filepath.Join(".legion", name)
+}
+
+// stampedBy is whether value's "issue" field, which legion handoff write stamps itself and refuses
+// from a caller, is issue. An unstamped handoff, from before handoffs carried their issue, or one
+// stamped for another tree, whose merged handoff sits at the flat path, is not.
+func stampedBy(value any, issue string) bool {
+	fields, ok := value.(map[string]any)
+	return ok && fields["issue"] == issue
+}
+
 func validHandoffPhase(value string) bool {
 	_, ok := handoffPhases[value]
 	return ok
@@ -78,17 +117,22 @@ func runHandoffWrite(_ context.Context, args []string, stdout, stderr io.Writer)
 		return 1
 	}
 	var carried []string
-	for _, reserved := range []string{"schemaVersion", "phase", "completed"} {
+	for _, reserved := range []string{"schemaVersion", "phase", "completed", "issue"} {
 		if _, present := payload[reserved]; present {
 			carried = append(carried, reserved)
 		}
 	}
 	if len(carried) > 0 {
-		fmt.Fprintf(stderr, "legion handoff write: data carries %s, which this command writes itself (schemaVersion, phase and completed); send only the phase's own fields\n", strings.Join(carried, ", "))
+		fmt.Fprintf(stderr, "legion handoff write: data carries %s, which this command writes itself (schemaVersion, phase, completed and issue); send only the phase's own fields\n", strings.Join(carried, ", "))
 		return 1
 	}
 	if problems := handoffWriteProblems(*phase, payload); len(problems) > 0 {
 		fmt.Fprintf(stderr, "legion handoff write: Invalid %s handoff: %s\n", *phase, strings.Join(problems, "; "))
+		return 1
+	}
+	issue, err := resolveIssue()
+	if err != nil {
+		fmt.Fprintf(stderr, "legion handoff write: %v\n", err)
 		return 1
 	}
 	workspace, err := resolveWorkspace(*workspaceFlag)
@@ -96,8 +140,8 @@ func runHandoffWrite(_ context.Context, args []string, stdout, stderr io.Writer)
 		fmt.Fprintf(stderr, "legion handoff write: %v\n", err)
 		return 1
 	}
-	payload["schemaVersion"], payload["phase"], payload["completed"] = 1, *phase, time.Now().UTC().Format(time.RFC3339Nano)
-	path := filepath.Join(workspace, ".legion", *phase+".json")
+	payload["schemaVersion"], payload["phase"], payload["completed"], payload["issue"] = 1, *phase, time.Now().UTC().Format(time.RFC3339Nano), issue
+	path := filepath.Join(workspace, handoffFile(issue, *phase+".json"))
 	if err := atomicJSON(path, payload); err != nil {
 		fmt.Fprintf(stderr, "legion handoff write: %v\n", err)
 		return 1
@@ -121,8 +165,13 @@ func runHandoffRead(_ context.Context, args []string, stdout, stderr io.Writer) 
 		fmt.Fprintf(stderr, "legion handoff read: %v\n", err)
 		return 1
 	}
+	issue, err := resolveIssue()
+	if err != nil {
+		fmt.Fprintf(stderr, "legion handoff read: %v\n", err)
+		return 1
+	}
 	if *phase != "" {
-		value, err := readHandoff(filepath.Join(workspace, ".legion", *phase+".json"))
+		value, err := readOwnHandoff(workspace, issue, *phase)
 		if err != nil {
 			fmt.Fprintf(stderr, "legion handoff read: %v\n", err)
 			return 1
@@ -131,14 +180,127 @@ func runHandoffRead(_ context.Context, args []string, stdout, stderr io.Writer) 
 		return 0
 	}
 	all := map[string]any{}
-	for phase := range handoffPhases {
-		path := filepath.Join(workspace, ".legion", phase+".json")
-		if value, err := readHandoff(path); err == nil {
-			all[phase] = value
+	for word := range handoffPhases {
+		if value, err := readOwnHandoff(workspace, issue, word); err == nil {
+			all[word] = value
 		}
 	}
 	writeIndentedJSON(stdout, all)
 	return 0
+}
+
+// readOwnHandoff reads issue's handoff of phaseWord at handoffFile. While that file is absent from
+// the workspace, it reads the one a commit on this branch removed (removedHandoff): retro's last
+// commit removes .legion/<issue>/ from the head a human merges, and the branch's history before it
+// stays the recovery source of truth while the issue is open. Without either, it falls back to the
+// flat legacyHandoffFile only when legacyHandoffOwnedByThisTree. Without any, the per-issue read's
+// error is returned, naming the path the handoff belongs at.
+func readOwnHandoff(workspace, issue, phaseWord string) (any, error) {
+	file := handoffFile(issue, phaseWord+".json")
+	value, err := readHandoff(filepath.Join(workspace, file))
+	if err == nil {
+		return value, nil
+	}
+	if removed, ok := removedHandoff(workspace, file); ok {
+		return removed, nil
+	}
+	legacy, legacyErr := readHandoff(filepath.Join(workspace, legacyHandoffFile(phaseWord+".json")))
+	if legacyErr == nil && legacyHandoffOwnedByThisTree(legacy, issue, workspace, phaseWord+".json") {
+		return legacy, nil
+	}
+	return nil, err
+}
+
+// removedHandoff is the handoff at relPath that a commit on this tree's own branch removed: the
+// newest non-merge commit that touched relPath (ownNonMergeWrite), when relPath is absent at that
+// commit, read at its parent. A newest touching commit that still holds relPath removed nothing,
+// and a branch that never wrote relPath has no such commit; either answers false, as does any jj
+// error or LEGION_JJ_PATH unset or relative.
+func removedHandoff(workspace, relPath string) (any, bool) {
+	jj := os.Getenv("LEGION_JJ_PATH")
+	if !filepath.IsAbs(jj) {
+		return nil, false
+	}
+	fileset := rootFileset(relPath)
+	removal, err := ownNonMergeWrite(jj, workspace, relPath)
+	if err != nil || removal == "" {
+		return nil, false
+	}
+	if _, err := jjOutput(jj, workspace, relPath, "file", "show", "-r", removal, fileset); err == nil {
+		return nil, false
+	}
+	content, err := jjOutput(jj, workspace, relPath, "file", "show", "-r", removal+"-", fileset)
+	if err != nil {
+		return nil, false
+	}
+	var value any
+	if json.Unmarshal([]byte(content), &value) != nil {
+		return nil, false
+	}
+	return value, true
+}
+
+// legacyHandoffOwnedByThisTree is whether the flat legacy handoff value, read from name under
+// workspace's .legion/, belongs to this tree: stampedBy issue (every write since
+// dispatch://LEGION-565's first round), or, for a handoff a role wrote before that round ever
+// stamped one, unstamped and unchanged since the newest non-merge commit on this tree's own branch
+// (outside ::trunk()) that wrote it. A value stamped for a different issue is never this tree's. An
+// unstamped value the branch never itself wrote - inherited unchanged from main, or carried in by a
+// forward merge whose conflict resolved to main's side - is never this tree's either: in the first
+// case this branch has no non-merge commit touching the path at all; in the second its own commit
+// does, but the merge replaced what that commit wrote, so the content at @ no longer matches it.
+func legacyHandoffOwnedByThisTree(value any, issue, workspace, name string) bool {
+	if stampedBy(value, issue) {
+		return true
+	}
+	fields, ok := value.(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, stamped := fields["issue"]; stamped {
+		return false
+	}
+	jj := os.Getenv("LEGION_JJ_PATH")
+	if jj == "" || !filepath.IsAbs(jj) {
+		return false
+	}
+	return unchangedSinceOwnNonMergeWrite(jj, workspace, legacyHandoffFile(name))
+}
+
+// unchangedSinceOwnNonMergeWrite is whether relPath's content at @ is byte-identical to its content
+// at the newest non-merge commit in this tree's own history that touched it (ownNonMergeWrite). No
+// such commit - this branch never itself wrote relPath, only inherited it from main - answers false.
+// A commit that did, whose content a later forward merge's conflict resolution then replaced with
+// main's side, also answers false: content, not merely a touched path, decides. Any jj error, or
+// LEGION_JJ_PATH unset or relative, fails closed to false.
+func unchangedSinceOwnNonMergeWrite(jj, workspace, relPath string) bool {
+	fileset := rootFileset(relPath)
+	written, err := ownNonMergeWrite(jj, workspace, relPath)
+	if err != nil || written == "" {
+		return false
+	}
+	atHead, err := jjOutput(jj, workspace, relPath, "file", "show", "-r", "@", fileset)
+	if err != nil {
+		return false
+	}
+	atWritten, err := jjOutput(jj, workspace, relPath, "file", "show", "-r", written, fileset)
+	if err != nil {
+		return false
+	}
+	return atHead == atWritten
+}
+
+// ownNonMergeWrite is the newest non-merge commit in this tree's own history, (::@ ~ ::trunk()) (the
+// one-call pattern handoffCommit uses to find a commit outside the base), that touched relPath; ""
+// when none did.
+func ownNonMergeWrite(jj, workspace, relPath string) (string, error) {
+	return jjOutput(jj, workspace, relPath, "log", "-r", "latest((::@ ~ ::trunk()) & ~merges() & files("+rootFileset(relPath)+"))", "--no-graph", "-T", "commit_id")
+}
+
+// rootFileset is relPath, relative to the workspace, as a root-anchored jj fileset, so a jj run from
+// any directory names the same path.
+func rootFileset(relPath string) string {
+	return fmt.Sprintf("root:%q", filepath.ToSlash(relPath))
 }
 
 func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -197,28 +359,12 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
 	}
-	body, err := json.Marshal(map[string]any{"grantId": grant, "summary": *summary, "verdict": *verdict, "ready": *ready, "commit": commit})
+	response, err := postDaemon(ctx, "/legion/v1/handoff/complete", map[string]any{"grantId": grant, "summary": *summary, "verdict": *verdict, "ready": *ready, "commit": commit})
 	if err != nil {
 		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
 		return 1
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, daemonURL()+"/legion/v1/handoff/complete", strings.NewReader(string(body)))
-	if err != nil {
-		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
-		return 1
-	}
-	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		fmt.Fprintf(stderr, "legion handoff complete: %v\n", err)
-		return 1
-	}
-	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		answer, _ := io.ReadAll(response.Body)
-		fmt.Fprintf(stderr, "legion handoff complete: daemon returned %d: %s\n", response.StatusCode, strings.TrimSpace(string(answer)))
-		return 1
-	}
+	response.Body.Close()
 	fmt.Fprintln(stdout, "[handoff] Reported phase completion")
 	return 0
 }
@@ -226,14 +372,21 @@ func runHandoffComplete(ctx context.Context, args []string, stdout, stderr io.Wr
 // handoffCommit is the commit a completion of phase current reports, resolved with the jj the
 // daemon resolved at boot, which it names on every pane as LEGION_JJ_PATH. The phase decides, not
 // the role. A phase phase.HandoffFile names ends with its role's handoff, and the completion reports
-// the commit that carries it: the last commit on the issue branch that changed .legion/<phase>.json,
-// which in the end game is the committed .legion/ deletion. That handoff must be committed — none of
-// it only in the working copy — and committed on this branch, never inherited from the base: a pane
-// whose handoff is still uncommitted would otherwise report a commit that carries another issue's
-// file. The daemon refuses a carrying commit the role already reported in its previous phase. Every
-// other completion reports the commit the workspace stands on: retro, the production check (which
-// runs after the squash merge deleted the branch), the merger's READY, and a role reporting a phase
-// it does not run, which the daemon refuses naming whose phase it is. Paths reach jj as
+// the commit that carries it: the last commit on the issue branch that changed
+// .legion/<issue>/<phase>.json (handoffFile). While that file is absent from the workspace, a flat
+// legacyHandoffFile standing in for it when legacyHandoffOwnedByThisTree - stamped by the tree's
+// issue, or unstamped and unchanged since this tree's own non-merge write: a role that wrote its
+// handoff flat before dispatch://LEGION-565 still completes after the rollout, and a forward merge
+// that replaced it with main's own stale content does not. That handoff must be in the workspace,
+// committed — none of it only in the working copy — and committed on this branch, never inherited
+// from the base: a pane whose handoff is still uncommitted would otherwise report a commit that
+// carries another issue's file. A handoff a commit removed is no handoff of this round's: retro's
+// last commit removes .legion/<issue>/ before READY (dispatch://LEGION-605), and a round a
+// withdrawn READY sends back writes its own again, so a completion never reports that commit as its
+// handoff. The daemon refuses a carrying commit the role already reported in its previous phase.
+// Every other completion reports the commit the workspace stands on: retro, the production check
+// (which runs after the squash merge deleted the branch), the merger's READY, and a role reporting a
+// phase it does not run, which the daemon refuses naming whose phase it is. Paths reach jj as
 // root-anchored filesets, so --workspace works from any directory.
 func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase) (string, error) {
 	jj := os.Getenv("LEGION_JJ_PATH")
@@ -244,8 +397,18 @@ func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase)
 	if !fileBacked || workflow.RoleFor(current) != role {
 		return standingCommit(jj, workspace)
 	}
-	file := filepath.Join(".legion", word+".json")
-	fileset := fmt.Sprintf("root:%q", filepath.ToSlash(file))
+	issue, err := resolveIssue()
+	if err != nil {
+		return "", err
+	}
+	file := handoffFile(issue, word+".json")
+	if _, err := os.Stat(filepath.Join(workspace, file)); errors.Is(err, os.ErrNotExist) {
+		legacy := legacyHandoffFile(word + ".json")
+		if value, err := readHandoff(filepath.Join(workspace, legacy)); err == nil && legacyHandoffOwnedByThisTree(value, issue, workspace, word+".json") {
+			file = legacy
+		}
+	}
+	fileset := rootFileset(file)
 	uncommitted, err := jjOutput(jj, workspace, file, "diff", "-r", "@", "--name-only", fileset)
 	if err != nil {
 		return "", err
@@ -253,25 +416,20 @@ func handoffCommit(workspace string, role legionclaim.Role, current phase.Phase)
 	if uncommitted != "" {
 		return "", fmt.Errorf("%s has changes in the working copy that are not committed: commit this phase's handoff (jj commit) before completing", file)
 	}
+	if _, err := os.Stat(filepath.Join(workspace, file)); err != nil {
+		return "", fmt.Errorf("%s is missing from the workspace: write this phase's handoff with the legion tool's handoff_write with phase %s", file, word)
+	}
 	carrying, err := jjOutput(jj, workspace, file, "log", "-r", "latest((::@- ~ ::trunk()) & files("+fileset+"))", "--no-graph", "-T", "commit_id")
 	if err != nil {
 		return "", err
 	}
-	_, missing := os.Stat(filepath.Join(workspace, file))
-	if carrying != "" {
-		// A committed deletion is not a handoff this role wrote: the implementer's end-game
-		// .legion/ deletion carries every role's file away.
-		if missing == nil {
-			if err := ownHandoff(jj, workspace, file, carrying); err != nil {
-				return "", err
-			}
-		}
-		return carrying, nil
+	if carrying == "" {
+		return "", fmt.Errorf("%s is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff", file)
 	}
-	if missing != nil {
-		return "", fmt.Errorf("%s is missing from the workspace: write this phase's handoff with the legion tool's handoff_write with phase %s", file, word)
+	if err := ownHandoff(jj, workspace, file, carrying); err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("%s is not committed on this issue's branch (only the base branch carries it): write and commit this phase's handoff", file)
+	return carrying, nil
 }
 
 // ownHandoff refuses a handoff commit another App authored: every role of an issue shares the
@@ -300,20 +458,23 @@ func standingCommit(jj, workspace string) (string, error) {
 }
 
 // paneIssue is what a completion reads of the pane's issue from the daemon's state document: its
-// phase, and the pull request the daemon records for it, if any.
+// key (LEGION_ISSUE, which resolveIssue accepted), its phase, and the pull request the daemon
+// records for it, if any.
 type paneIssue struct {
+	Key         string      `json:"-"`
 	Phase       phase.Phase `json:"phase"`
 	PullRequest *struct {
 		Number int `json:"number"`
 	} `json:"pullRequest"`
 }
 
-// issueRecord reads the pane's issue (LEGION_ISSUE) from the daemon's state document, decoding that
-// one issue's phase and pull request and nothing else of the document.
+// issueRecord reads the pane's issue (LEGION_ISSUE, refused unless resolveIssue accepts it) from the
+// daemon's state document, decoding that one issue's phase and pull request and nothing else of the
+// document.
 func issueRecord(ctx context.Context) (paneIssue, error) {
-	issue := os.Getenv("LEGION_ISSUE")
-	if issue == "" {
-		return paneIssue{}, errors.New("LEGION_ISSUE is not set")
+	issue, err := resolveIssue()
+	if err != nil {
+		return paneIssue{}, err
 	}
 	body, err := get(ctx, daemonURL()+"/legion/v1/state")
 	if err != nil {
@@ -329,7 +490,7 @@ func issueRecord(ctx context.Context) (paneIssue, error) {
 	if !ok {
 		return paneIssue{}, fmt.Errorf("the daemon's state records no issue %s", issue)
 	}
-	var current paneIssue
+	current := paneIssue{Key: issue}
 	if err := json.Unmarshal(recorded, &current); err != nil {
 		return paneIssue{}, fmt.Errorf("decode the daemon's record of %s: %w", issue, err)
 	}

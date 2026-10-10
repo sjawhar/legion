@@ -60,6 +60,38 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 	return intake.Result{}, e.decideChecks(ctx, tx, pr, prior, byRequired)
 }
 
+// mergeability records what GitHub's last read found for whether the pull request's head can be
+// merged into its base (intake.PullRequestMergeability, pullRequestMergeability's own GitHub
+// answer). In awaiting_merge it withdraws a conflicting head the way decideChecks's AwaitingMerge
+// case withdraws a red one (classify.ConflictWithdrawsReady, the same TriggerChecksRed
+// transition), since GitHub computes no merge ref for a conflicting head and no CI result will
+// ever arrive for it. It decides on every read, not only a changed one: a conflict recorded
+// before the issue reaches awaiting_merge - in testing, reviewing, retro or merging, where
+// nothing moves yet, since the merger's READY check posts a conflicting head whose required
+// checks all succeeded - must still withdraw the READY once the issue gets there. Outside
+// awaiting_merge the read is recorded and nothing moves: no round is open to decide a conflict
+// the way RedSendsBack decides a red, and the tester or implementer already at work will see it
+// on its own pass or push. Leaving awaiting_merge is what stops a repeated CONFLICTING read from
+// withdrawing twice.
+func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRequestMergeability) (intake.Result, error) {
+	pr, err := e.pullRequest(ctx, tx, fact.Repo, fact.Number)
+	if err != nil || pr == nil {
+		return intake.Result{}, err
+	}
+	if pr.Mergeability != fact.Mergeable {
+		pr.Mergeability = fact.Mergeable
+		if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
+			return intake.Result{}, err
+		}
+	}
+	issue, err := e.store.Issue(ctx, tx, pr.Issue)
+	if err != nil || issue == nil || issue.Phase != phase.AwaitingMerge || !classify.ConflictWithdrawsReady(*pr) {
+		return intake.Result{}, err
+	}
+	reason := fmt.Sprintf("the head conflicts with %s: GitHub runs no checks on it; merge %s forward", fact.Base, fact.Base)
+	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
+}
+
 // decideChecks records pr, its checks verdict changed from prior's by a CI settlement or a new
 // read of what the base branch requires (the fact by names), and decides, with the issue's phase
 // in hand, what it moves. An exhausted fix-attempt count is posted and told to the architect. In
@@ -67,10 +99,14 @@ func (e *Engine) requiredChecks(ctx context.Context, tx pgx.Tx, fact intake.Requ
 // an approval waits for, a red at a code head sends the work back, and a round the verdict leaves
 // stuck another way than before is told. In awaiting_merge, the head's own red withdraws the READY
 // (classify.RedWithdrawsReady), and the transition tells the merge queue role so (withdrawReady).
-// In testing, a red at a code head (classify.RedSendsBack) sends the work back. The implementer's
-// task and the architect's checks-red notice name the red required checks and workflows, and the
-// implementer's next push is a counted fix attempt, as any new head on a red verdict is
-// (classify.AdvancePullRequestHead).
+// In testing, a red at a code head (classify.RedSendsBack) sends the work back. A red only the
+// project's declared review workflows make (Config.ReviewWorkflows) sends nothing back from testing
+// or reviewing (classify.RedOnlyByReviewWorkflows): the tester finishes, and the reviewer's round
+// adjudicates the workflows' findings, its start task naming the red (the tester's pass) and its
+// stuck round telling the architect (stuckApprovedWorkflowRed). Any other red required workflow
+// sends the work back as a red required check does. The implementer's task and the architect's
+// checks-red notice name the red required checks and workflows, and the implementer's next push is
+// a counted fix attempt, as any new head on a red verdict is (classify.AdvancePullRequestHead).
 func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, prior record.PullRequest, by string) error {
 	var blocked bool
 	*pr, blocked = classify.BlockFixAttempt(*pr, e.cfg.MaxFixAttempts)
@@ -105,14 +141,24 @@ func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullReq
 		if err != nil {
 			return err
 		}
-		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, reviewRound(*issue, reviewer, &prior), by)
+		_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, e.reviewRound(*issue, reviewer, &prior), by)
 		return err
 	case phase.AwaitingMerge:
 		if !classify.RedWithdrawsReady(*pr) {
 			return nil
 		}
+		// A required workflow's result is as old as the pass's last read of the runs, up to two
+		// minutes: a run re-run green since, which READY found green on GitHub, still reads red until
+		// the next read. So a settlement, which reads no run, withdraws only a red a required check
+		// makes. A red only the workflows make is left to the pass's next read, which the cleared
+		// head the runs were read at makes a change (record.RequiredReadUnchanged), so it withdraws
+		// the READY if the run is still red, and leaves it if the run passed.
+		if by != byRequired && classify.RedOnlyByWorkflows(*pr) {
+			pr.WorkflowsHead = ""
+			return e.store.PutPullRequest(ctx, tx, *pr)
+		}
 	default:
-		if !classify.RedSendsBack(*pr) {
+		if !classify.RedSendsBack(*pr, e.cfg.ReviewWorkflows) {
 			return nil
 		}
 	}
@@ -132,6 +178,15 @@ func redAt(pr record.PullRequest) string {
 	return "CI is red at " + pr.HeadSHA + ": " + strings.Join(red, ", ")
 }
 
+// reviewWorkflowsToAdjudicate is what a red only declared review workflows make
+// (classify.RedOnlyByReviewWorkflows) asks of the review round, after the red itself (redAt): the
+// reviewer answers each open thread the workflows' runs opened, has the daemon resolve the ones it
+// accepted (`legion threads resolve`), and re-runs each failed run, since such a workflow starts
+// only on a push; its approval ends the round once the head reads green.
+const reviewWorkflowsToAdjudicate = "; only declared review workflows are red, so their findings are the review round's to decide: " +
+	"the reviewer answers each of their open threads (Accepted: with its reason, or a REQUEST_CHANGES naming the defect), " +
+	"runs legion threads resolve, and re-runs each failed run (rerun-failed-jobs), and its approval of the head ends the round once the head reads green"
+
 // answerSkew bounds how far GitHub's clock, which stamps a review's submission, and the daemon's,
 // which stamps the reviewer's completion (record.PhaseRow.CompletedAt), may disagree. No ordering
 // between the two avoids comparing those clocks: the delivery order is the race itself, and the
@@ -145,6 +200,17 @@ func redAt(pr record.PullRequest) string {
 // of the completion reads as delivered late, and tells only when the round's stuck cause or head
 // changes (stuckAs).
 const answerSkew = 10 * time.Second
+
+// decidesRound says whether review may decide a review round: the review App submitted it, or its
+// author has write access or higher to the repository, which intake read from GitHub before the
+// fact reached this transaction (intake.PullRequestReview.AuthorCanWrite). On a public repository
+// any account can review a pull request, so anyone else's review decides nothing. GitHub's 404, or
+// a 403 that is not its rate limit, reads as no write access; any other failed read is retried
+// before the review reaches here. The review App is recognised by its login, since GitHub gives an
+// App's bot account no collaborator permission of its own, so the daemon never asks about it.
+func (e *Engine) decidesRound(review intake.PullRequestReview) bool {
+	return e.byReviewApp(review.Author) || review.AuthorCanWrite
+}
 
 // reviewersAnswer says whether fact is the reviewer's answer to a round it completed undecided: a
 // review the review App submitted, with a body - GitHub records a reply on a review thread as a
@@ -170,14 +236,22 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	}
 	// The reviewer's answer tells whenever it leaves the round stuck; any other review, only when it
 	// changes how the round is stuck.
-	before, by := reviewRound(*issue, reviewer, pr), byOtherReview
+	before, by := e.reviewRound(*issue, reviewer, pr), byOtherReview
 	if e.reviewersAnswer(fact, reviewer) {
 		before, by = round{}, byAnswer
 	}
-	// Only changes_requested and approved decide anything; a comment orders nothing either, so a
-	// comment written after a decision but delivered before it cannot make the decision look old.
+	// Only changes_requested and approved decide anything, and only from the review App or an
+	// account with write access to the repository (decidesRound). Any other review orders nothing
+	// either, so a comment written after a decision but delivered before it, or an outsider's
+	// review, cannot make the decision look old.
 	state := strings.ToLower(fact.State)
-	if state != "changes_requested" && state != "approved" {
+	decides := fact.Decides()
+	if decides && !e.decidesRound(fact) {
+		e.logOnCommit(ctx, "workflow: a review decides nothing: its author is neither the review App nor an account with write access to the repository",
+			"issue", issue.Key, "pull_request", pr.Number, "author", fact.Author, "state", state)
+		decides = false
+	}
+	if !decides {
 		_, err := e.settleRound(ctx, tx, *issue, reviewer, pr, before, by)
 		return intake.Result{}, err
 	}
@@ -245,7 +319,7 @@ const (
 	roundRejected
 	// roundSentBack is CI red at a head a push that may change code made (classify.RedSendsBack): the
 	// work goes back to implementing whatever the round holds, since only a red at the reviewer's own
-	// handoff head is the round's to decide.
+	// handoff head, or one only declared review workflows make, is the round's to decide.
 	roundSentBack
 	// roundStuck is a round its reviewer completed that nothing on its way will end (stuckCause).
 	roundStuck
@@ -256,10 +330,16 @@ type stuckCause int
 
 const (
 	// stuckUndecided: no review decided it. A COMMENT decides nothing, and neither does a review in
-	// any state but approved or changes_requested.
+	// any state but approved or changes_requested, nor one decidesRound does not count.
 	stuckUndecided stuckCause = iota + 1
 	// stuckApprovedRed: its approval stands on CI red at the reviewer's own head.
 	stuckApprovedRed
+	// stuckApprovedWorkflowRed: its approval of the head stands on CI red only declared review
+	// workflows make (classify.RedOnlyByReviewWorkflows), which the reviewer answers by adjudicating
+	// their findings and re-running them (reviewWorkflowsToAdjudicate). A completion, or a read that
+	// finds a later attempt of a red run still red, is told again (round.runs), so the architect sees
+	// a re-run that stayed red and takes it to a human.
+	stuckApprovedWorkflowRed
 	// stuckApprovedOtherCode: its approval is of a head whose code the current head may not carry.
 	stuckApprovedOtherCode
 	// stuckApprovedPending: its approval waits on a required check the reviewer's own head settled
@@ -268,19 +348,22 @@ const (
 )
 
 // round is reviewRound's account of a review round. A stuck round names its cause, the head it is
-// stuck at, and what the architect and a restarted reviewer are told of it.
+// stuck at, and what the architect and a restarted reviewer are told of it; one stuck on red review
+// workflows also names the run and attempt of each red one (redRuns).
 type round struct {
 	outcome roundOutcome
 	cause   stuckCause
 	head    string
+	runs    string
 	reason  string
 }
 
-// stuckAs says whether r is stuck in the same way as other: the same cause at the same head. A
-// fact that is not the reviewer's own tells only when the round is stuck in a new way, so a second
-// red settlement at the same head, failing other checks, tells nothing.
+// stuckAs says whether r is stuck in the same way as other: the same cause at the same head, on the
+// same runs. A fact that is not the reviewer's own tells only when the round is stuck in a new way,
+// so a second red settlement at the same head, failing other checks, tells nothing, while a re-run
+// of a red review workflow that ends red again is a new attempt, and tells.
 func (r round) stuckAs(other round) bool {
-	return r.outcome == roundStuck && other.outcome == roundStuck && r.cause == other.cause && r.head == other.head
+	return r.outcome == roundStuck && other.outcome == roundStuck && r.cause == other.cause && r.head == other.head && r.runs == other.runs
 }
 
 // reviewRound is what issue's review round comes to, row being its reviewer's and pr its pull
@@ -289,16 +372,20 @@ func (r round) stuckAs(other round) bool {
 // the decision it posted on GitHub, recorded on the round. Either may arrive second, and an
 // approval also waits for the head's checks to settle green. A red at a code head sends the work
 // back first. A round whose reviewer never completes is not ended by the decision alone: the
-// reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-envoy's
+// reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-legion's
 // phase-stall check), and past that the issue stays in reviewing, as a tester's that never completes
 // stays in testing. A completed round that nothing on its way would end is stuck, its reason naming
-// the head, since the decision it needs is of the head. An approved round whose head's own
-// settlement left a required check pending or without a result, or whose head has no run of a
-// required workflow, is stuck too: the check may never report (a run nobody reruns, a check only a
-// commit status reports), nor the workflow run, and a later settlement or run that passes it still
-// ends the round. A required workflow still running, or not read at the head yet, keeps the round
-// open until the daemon's next read of it.
-func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) round {
+// the head, since the decision it needs is of the head. An approved round under a red only declared
+// review workflows make is stuck on their findings, which the reviewer adjudicates and re-runs
+// (stuckApprovedWorkflowRed), once its approval is of the head's code; the run that passes on the
+// head ends it. An approval of other code is stuck on that first (stuckApprovedOtherCode), since a
+// green head would not end the round either. An approved round whose head's own settlement left a
+// required check pending or without a result, or whose head has no run of a required workflow, is
+// stuck too: the check may never report (a run nobody reruns, a check only a commit status
+// reports), nor the workflow run, and a later settlement or run that passes it still ends the
+// round. A required workflow still running, or not read at the head yet, keeps the round open until
+// the daemon's next read of it.
+func (e *Engine) reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest) round {
 	if issue.Phase != phase.Reviewing {
 		return round{}
 	}
@@ -320,31 +407,50 @@ func reviewRound(issue record.Issue, row record.PhaseRow, pr *record.PullRequest
 	if verdict == "" && pr.CheckedHead == pr.HeadSHA {
 		pending = pendingAt(*pr)
 	}
+	reviewRed := classify.RedOnlyByReviewWorkflows(*pr, e.cfg.ReviewWorkflows)
 	switch {
 	case completed && decided == "approved" && verdict == "green" && classify.ApprovalStands(*pr, row.Decision.Head):
 		return round{outcome: roundApproved}
-	case classify.RedSendsBack(*pr):
+	case classify.RedSendsBack(*pr, e.cfg.ReviewWorkflows):
 		return round{outcome: roundSentBack}
 	case !completed:
 		return round{}
 	case decided == "":
 		return round{outcome: roundStuck, cause: stuckUndecided, head: pr.HeadSHA,
-			reason: fmt.Sprintf("the reviewer completed its round on pull request #%d with no review that decides it: only an APPROVE of head %s or a REQUEST_CHANGES ends the round, and a COMMENT decides nothing",
+			reason: fmt.Sprintf("the reviewer completed its round on pull request #%d with no review that decides it: only an APPROVE of head %s or a REQUEST_CHANGES, from the review App or an account with write access to the repository, ends the round, and a COMMENT decides nothing",
 				pr.Number, pr.HeadSHA)}
-	case verdict == "red":
+	case verdict == "red" && !reviewRed:
 		return round{outcome: roundStuck, cause: stuckApprovedRed, head: pr.HeadSHA,
 			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, but %s; a red at the reviewer's own head is its round's to decide, with a REQUEST_CHANGES naming the failing checks",
 				row.Decision.Head, pr.Number, redAt(*pr))}
-	case (verdict == "green" || len(pending) > 0) && !classify.ApprovalStands(*pr, row.Decision.Head) && !classify.CodeOnItsWay(*pr):
+	case (verdict == "green" || reviewRed || len(pending) > 0) && !classify.ApprovalStands(*pr, row.Decision.Head) && !classify.CodeOnItsWay(*pr):
 		return round{outcome: roundStuck, cause: stuckApprovedOtherCode, head: pr.HeadSHA,
 			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, which does not approve head %s: a push since may have changed code, so only an APPROVE of %s or a REQUEST_CHANGES ends the round",
 				row.Decision.Head, pr.Number, pr.HeadSHA, pr.HeadSHA)}
+	case reviewRed && classify.ApprovalStands(*pr, row.Decision.Head):
+		return round{outcome: roundStuck, cause: stuckApprovedWorkflowRed, head: pr.HeadSHA, runs: redRuns(*pr),
+			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, but %s%s",
+				row.Decision.Head, pr.Number, redAt(*pr), reviewWorkflowsToAdjudicate)}
 	case len(pending) > 0 && classify.ApprovalStands(*pr, row.Decision.Head):
 		return round{outcome: roundStuck, cause: stuckApprovedPending, head: pr.HeadSHA,
 			reason: fmt.Sprintf("the reviewer approved %s on pull request #%d, but CI at %s settled with no passing result for %s; the approval stands, and the round ends when a later settlement or run on the head passes them",
 				row.Decision.Head, pr.Number, pr.HeadSHA, strings.Join(pending, ", "))}
 	}
 	return round{}
+}
+
+// redRuns names the run and attempt of each required workflow red at the pull request's head, as
+// classify judges it (classify.WorkflowStanding, the judgment HeadVerdict counts): a re-run keeps
+// its run's id and raises its attempt, so a re-run that ends red again is a round stuck anew
+// (stuckAs), while a run classify does not count as red changes nothing.
+func redRuns(pr record.PullRequest) string {
+	var runs []string
+	for _, workflow := range pr.Workflows {
+		if classify.WorkflowStanding(pr, workflow).Red() {
+			runs = append(runs, fmt.Sprintf("%s#%d.%d", workflow.Path, workflow.Run, workflow.Attempt))
+		}
+	}
+	return strings.Join(runs, ", ")
 }
 
 // pendingAt names each required check and workflow the head's own CI left without a verdict
@@ -368,7 +474,7 @@ func pendingAt(pr record.PullRequest) []string {
 
 // settleRound acts on what issue's review round comes to (reviewRound, with row its reviewer's and
 // pr its pull request as the fact left them), and says whether it moved the issue. An ended round
-// moves on, its request for changes counting a round; a red code head sends the work back to
+// moves on, its request for changes back to implementing; a red code head sends the work back to
 // implementing; a stuck round is told to the architect, in a notice whose summary is by, the fact
 // that wrote it - unless the round was already stuck the same way (stuckAs) before that fact,
 // which is before. The reviewer's completion and answer pass an empty before, so each that leaves
@@ -376,13 +482,10 @@ func pendingAt(pr record.PullRequest) []string {
 // notice's topic, for the decision. Linger holds a member of a closed tree where it stood
 // (record.TreeLingers).
 func (e *Engine) settleRound(ctx context.Context, tx pgx.Tx, issue record.Issue, row record.PhaseRow, pr *record.PullRequest, before round, by string) (bool, error) {
-	r := reviewRound(issue, row, pr)
+	r := e.reviewRound(issue, row, pr)
 	switch r.outcome {
 	case roundRejected:
 		if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
-			return false, err
-		}
-		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
 			return false, err
 		}
 		return true, e.transition(ctx, tx, issue, TriggerReviewRejected, "", row, pr, row.Decision.Body)

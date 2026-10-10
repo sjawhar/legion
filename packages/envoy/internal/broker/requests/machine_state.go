@@ -18,14 +18,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"sort"
+	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -43,14 +48,39 @@ var (
 	// signature, one approval by the record's approver) failed — a row written by anyone but the
 	// broker releases nothing.
 	ErrGrantChainInvalid = errors.New("this grant's approval chain no longer verifies")
-	// ErrSecretNotInStore: the secret a grant reads its value from is no longer in Secrets Manager.
-	ErrSecretNotInStore = errors.New("secret is not in the secrets store")
-	ErrMixedApprovers   = errors.New("the requested secrets need different approvers; request them separately")
+	ErrSecretNotInStore  = errors.New("secret is not in the secrets store")
+	ErrMixedApprovers    = errors.New("the requested secrets need different approvers; request them separately")
+	// ErrSessionIDInvalid: the request's own session_id override (requests.session_id — an
+	// unsigned claim any enrolled process may send, never verified against a signature) is too
+	// long or carries a whitespace or control character, refused before it is ever stored or
+	// forwarded to Envoy's wake (LEGION-587).
+	ErrSessionIDInvalid = errors.New("session id must be at most 128 characters with no whitespace or control character")
 )
+
+// maxSessionIDLength bounds the request body's session_id override; see ErrSessionIDInvalid.
+const maxSessionIDLength = 128
+
+// validSessionID reports whether sessionID is acceptable to store: empty (unset) or at most
+// maxSessionIDLength runes with no whitespace or control character.
+func validSessionID(sessionID string) bool {
+	if utf8.RuneCountInString(sessionID) > maxSessionIDLength {
+		return false
+	}
+	for _, r := range sessionID {
+		if unicode.IsSpace(r) || unicode.IsControl(r) {
+			return false
+		}
+	}
+	return true
+}
 
 // jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
 // proof.Verifier's own retention margin.
 const jtiRetentionMargin = time.Minute
+
+// DefaultMissRereads bounds the policy rereads one enrollment's unknown-name requests trigger:
+// a session inventing names costs at most Burst DescribeSecret calls, refilled one per Every.
+var DefaultMissRereads = ratelimit.Limit{Every: 10 * time.Second, Burst: 10}
 
 // SecretDecision is how the policy decided one name of a request.
 type SecretDecision struct {
@@ -61,11 +91,16 @@ type SecretDecision struct {
 	Source   string `json:"-"`
 }
 
+// Request is one agent_secret request as Create and Get answer it. Approver is the approver its
+// credential-request record names (a person's canonical login, or record.AnyoneApprover), read
+// from the record rather than the current policy, since the record is what the approver's list
+// shows; it is nil when the request has no record, because the policy decided it at once.
 type Request struct {
 	ID        string           `json:"request_id"`
 	State     string           `json:"state"`
 	GrantID   *string          `json:"grant_id"`
 	RecordID  *string          `json:"record_id"`
+	Approver  *string          `json:"approver"`
 	Secrets   []SecretDecision `json:"secrets"`
 	DecidedAt *time.Time       `json:"decided_at"`
 	DecidedBy *string          `json:"decided_by"`
@@ -97,6 +132,28 @@ type Machine struct {
 	// record.ChainVerifier machinery enroll.Service.AuthenticateLauncher uses for launcher
 	// credentials, built by NewChainVerifier against agent_secret records instead.
 	Chain *record.ChainVerifier
+	// MissRereads bounds, per enrollment, the single-name policy rereads Create makes for names the
+	// live policy does not serve (rereadMissing); nil means DefaultMissRereads.
+	MissRereads *ratelimit.Limit
+	// ServiceAccounts are the registered services' accounts (BROKER_SERVICES): for each service
+	// name, the subject a pod's projected token must have proved for its launcher's service to be
+	// its own (requester).
+	ServiceAccounts map[string]string
+	// missRereads is MissRereads' per-enrollment buckets, built on first use (missRereadLimiter).
+	missRereads     *ratelimit.Keyed
+	missRereadsOnce sync.Once
+}
+
+// missRereadLimiter is the per-enrollment buckets MissRereads names, built on the first miss.
+func (m *Machine) missRereadLimiter() *ratelimit.Keyed {
+	m.missRereadsOnce.Do(func() {
+		limit := DefaultMissRereads
+		if m.MissRereads != nil {
+			limit = *m.MissRereads
+		}
+		m.missRereads = ratelimit.NewKeyed(limit)
+	})
+	return m.missRereads
 }
 
 // NewChainVerifier builds the record.ChainVerifier VerifyChain uses, scoped to agent_secret
@@ -107,15 +164,22 @@ func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *rec
 
 type enrollmentRow struct {
 	ID, Kind, Thumbprint string
-	Operator             *string
-	RuntimeID, Slot      string
+	// Operator is the person the session acts for, nil for a pod; Service is the service of the
+	// launcher credential that enrolled it, nil for a person's machine; Subject is a pod's verified
+	// service account, nil for a box or host.
+	Operator, Service, Subject *string
+	RuntimeID, Slot            string
 }
 
 // requester is the enrollment as the policy sees it, read through q: the person it acts for (none
-// for a pod) and the names that person withheld from it (RevokeByApprover's withhold). A caller that
-// decides for the session reads it after locking the session's row, which RevokeByApprover holds
-// while it withholds, so a withhold either committed before the read or waits for the caller.
-func (e enrollmentRow) requester(ctx context.Context, q querier) (policy.Requester, error) {
+// for a pod), its service, and the names that person withheld from it (RevokeByApprover's
+// withhold). Its service is its launcher credential's only when it is a pod, that service is one
+// of services, and the pod's verified service account is the one services binds it to: a machine
+// login's service name is the machine's own claim, which anyone signed in to Dispatch may approve, so the
+// account is what proves the service. Any other session has none. A caller that decides for the
+// session reads it after locking the session's row, which RevokeByApprover holds while it
+// withholds, so a withhold either committed before the read or waits for the caller.
+func (e enrollmentRow) requester(ctx context.Context, q querier, services map[string]string) (policy.Requester, error) {
 	rows, err := q.Query(ctx, `select name from withheld_secrets where enrollment_id=$1`, e.ID)
 	if err != nil {
 		return policy.Requester{}, err
@@ -124,13 +188,18 @@ func (e enrollmentRow) requester(ctx context.Context, q querier) (policy.Request
 	if err != nil {
 		return policy.Requester{}, err
 	}
-	return policy.Requester{Operator: deref(e.Operator), Withheld: withheld}, nil
+	var service string
+	if subject, ok := services[deref(e.Service)]; ok && e.Kind == "pod" && e.Subject != nil && *e.Subject == subject {
+		service = *e.Service
+	}
+	return policy.Requester{Operator: deref(e.Operator), Service: service, Withheld: withheld}, nil
 }
 
 // Create verifies the request object (record.VerifyRequestObject, jti replay through the Replay
 // seam), requires iss to be this enrollment's own key and no login_hint (session requests never
-// name their own approver — that's the policy's job), and hands back a live grant for exactly these
-// names when one may be reused (reuseLiveGrant). Otherwise it decides and writes the request in one
+// name their own approver — that's the policy's job), rereads each name the live policy does not
+// serve (rereadMissing), and hands back a live grant for exactly these names when one may be
+// reused (reuseLiveGrant). Otherwise it decides and writes the request in one
 // transaction: it takes the advisory lock that serializes identical requests from one enrollment
 // (lockIdenticalPending), then locks the enrollment live (lockLiveEnrollment), so no request or
 // grant lands on an enrollment that ended after Create first read it (such an enrollment is
@@ -140,6 +209,9 @@ func (e enrollmentRow) requester(ctx context.Context, q querier) (policy.Request
 // or denied request, with a granted one's grant, or a pending request and its credential-request
 // record, which a pending identical request already waiting coalesces onto instead.
 func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sessionID string) (Request, error) {
+	if !validSessionID(sessionID) {
+		return Request{}, ErrSessionIDInvalid
+	}
 	enr, err := m.enrollment(ctx, enrollmentID)
 	if err != nil {
 		return Request{}, err
@@ -169,7 +241,10 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		names[i] = d.Identifier
 	}
 
-	set := m.Policy.Get()
+	set, err := m.rereadMissing(ctx, enrollmentID, names, m.Policy.Get())
+	if err != nil {
+		return Request{}, err
+	}
 	if existing, ok, err := m.reuseLiveGrant(ctx, enr, names, set); err != nil {
 		return Request{}, err
 	} else if ok {
@@ -187,7 +262,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err := lockLiveEnrollment(ctx, tx, enrollmentID); err != nil {
 		return Request{}, err
 	}
-	requester, err := enr.requester(ctx, tx)
+	requester, err := enr.requester(ctx, tx, m.ServiceAccounts)
 	if err != nil {
 		return Request{}, err
 	}
@@ -232,6 +307,39 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		return Request{}, err
 	}
 	return req, tx.Commit(ctx)
+}
+
+// rereadMissing rereads each requested name the live set does not serve (the spec's miss path: a
+// secret created seconds ago is not in the listing yet), bounded per enrollment by MissRereads,
+// and answers the set to evaluate against. A name no secret can carry (policy.Current.CheckName:
+// a free-text identifier, or one past Secrets Manager's name limit) stays unknown before it costs
+// a token or a line. A failed reread logs LoadFailedMessage and the name stays unknown — the
+// caller sees UNKNOWN_SECRET exactly as before the miss path existed. A reread that fails once ctx
+// has ended (the caller went away, or its deadline passed) is the request's failure, not Secrets
+// Manager's: it logs nothing and answers ctx's error, so the alarm on LoadFailedMessage never
+// counts a client that left. It runs before Create's transaction, so no Secrets Manager call
+// holds a row lock.
+func (m *Machine) rereadMissing(ctx context.Context, enrollmentID string, names []string, set *policy.Set) (*policy.Set, error) {
+	for _, name := range names {
+		if _, ok := set.Secrets[name]; ok {
+			continue
+		}
+		if m.Policy.CheckName(name) != nil {
+			continue
+		}
+		if !m.missRereadLimiter().Allow(enrollmentID) {
+			return set, nil
+		}
+		if _, err := m.Policy.RefreshOne(ctx, name); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			slog.Error(policy.LoadFailedMessage, "name", name, "error", err)
+			continue
+		}
+		set = m.Policy.Get()
+	}
+	return set, nil
 }
 
 // evaluation is one pass of the policy over a request's names. approver is set when a name needs
@@ -335,7 +443,7 @@ func (m *Machine) createPending(ctx context.Context, tx pgx.Tx, enr enrollmentRo
 	if err := m.insertRequest(ctx, tx, r); err != nil {
 		return Request{}, err
 	}
-	return Request{ID: r.id, State: "pending", Secrets: r.decisions, RecordID: &recordID}, nil
+	return Request{ID: r.id, State: "pending", Secrets: r.decisions, RecordID: &recordID, Approver: &body.Approver}, nil
 }
 
 // lockIdenticalPending takes the advisory lock Create serializes identical requests from one
@@ -436,8 +544,9 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
-	if err := tx.QueryRow(ctx, `select revoked_at is null and lease_expires_at > now(), operator from enrollments where id=$1 for share`, enrollmentID).
-		Scan(&live, &enr.Operator); err != nil {
+	if err := tx.QueryRow(ctx, `select e.revoked_at is null and e.lease_expires_at > now(), e.kind, e.operator, e.subject, c.service from enrollments e
+		left join launcher_credentials c on c.id = e.launcher_credential_id where e.id=$1 for share of e`, enrollmentID).
+		Scan(&live, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service); err != nil {
 		return Decision{}, err
 	}
 	var requestID, state string
@@ -451,12 +560,12 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return Decision{}, err
 	}
-	login, err = parsed.ApproverLogin(record.KindAgentSecret, login)
+	login, err = parsed.ApproverLogin(record.KindAgentSecret, "", login)
 	if err != nil {
 		return Decision{}, err
 	}
 	if approve {
-		requester, err := enr.requester(ctx, tx)
+		requester, err := enr.requester(ctx, tx, m.ServiceAccounts)
 		if err != nil {
 			return Decision{}, err
 		}
@@ -478,7 +587,7 @@ func (m *Machine) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return Decision{}, fmt.Errorf("%w: request object no longer verifies: %s", ErrGrantChainInvalid, err)
 	}
 
-	event, by := "denied", "human:"+login
+	event, by := "denied", record.HumanActor(login)
 	next, detail := "denied", ""
 	if approve {
 		event = "approved"
@@ -545,7 +654,7 @@ func (m *Machine) currentPolicyAdmits(ctx context.Context, tx pgx.Tx, requestID 
 		if d.Outcome == policy.Deny && slices.Contains(requester.Withheld, g.name) {
 			return fmt.Errorf("%w: %s is withheld from this session and the current policy denies it, so no one may approve it now", record.ErrNotApprover, g.name)
 		}
-		if d.Outcome == policy.Approval && !record.MayDecide(record.KindAgentSecret, d.Approver, login) {
+		if d.Outcome == policy.Approval && !record.MayDecide(record.KindAgentSecret, d.Approver, "", login) {
 			return fmt.Errorf("%w: the current policy has %s approve %s", record.ErrNotApprover, d.Approver, g.name)
 		}
 	}
@@ -622,22 +731,24 @@ func (m *Machine) RevokeGrant(ctx context.Context, grantID, enrollmentID string)
 	return tx.Commit(ctx)
 }
 
-// RevokeByApprover ends a grant on a human's Dispatch login. The login must be the grant's
-// approver or its enrollment's operator (mayRevoke). When the operator revokes, every name the
-// grant's request got automatically is withheld from the grant's session from then on, and every
-// other live grant of the session that got one of those names automatically ends with it
-// (withhold), so the session asks before it gets the name again (Create). The withhold belongs to
-// the session rather than the grant, so the operator's revoke of a grant already revoked (by its
-// session, or by an earlier withhold, after the operator's Live grants list was loaded) withholds
-// the same names, recorded as a grant.withheld audit row rather than a second grant.revoked.
-// Another person's revoke (an approver's of the grant) ends the grant alone and withholds nothing:
-// the session is not theirs. It locks the session's row in the statement that reads the grant,
-// before it writes the grant: the order every writer that locks both takes them in, and the one
-// lock Create and ApplyDecision read the withheld names under, so a request deciding on the session
-// as this runs either is written first, and then ended here if it got a withheld name, or decides
-// with the name withheld. A revoke that ends nothing and withholds nothing new succeeds and changes
-// nothing.
-func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) error {
+// RevokeByApprover ends a grant on a person's login. The login must be the grant's approver or its
+// enrollment's operator (mayRevoke). actor is what every row it writes records as having done it,
+// which the caller proved: "human:<login>" for a revoke Dispatch relays from its signed-in person,
+// "launcher:<credential id>" for one the operator's own machine login makes. When the operator
+// revokes, every name the grant's request got automatically is withheld from the grant's session
+// from then on, and every other live grant of the session that got one of those names
+// automatically ends with it (withhold), so the session asks before it gets the name again
+// (Create). The withhold belongs to the session rather than the grant, so the operator's revoke of
+// a grant already revoked (by its session, or by an earlier withhold, after the operator's Live
+// grants list was loaded) withholds the same names, recorded as a grant.withheld audit row rather
+// than a second grant.revoked. Another person's revoke (an approver's of the grant) ends the grant
+// alone and withholds nothing: the session is not theirs. It locks the session's row in the
+// statement that reads the grant, before it writes the grant: the order every writer that locks
+// both takes them in, and the one lock Create and ApplyDecision read the withheld names under, so a
+// request deciding on the session as this runs either is written first, and then ended here if it
+// got a withheld name, or decides with the name withheld. A revoke that ends nothing and withholds
+// nothing new succeeds and changes nothing.
+func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login, actor string) error {
 	tx, err := m.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -653,7 +764,6 @@ func (m *Machine) RevokeByApprover(ctx context.Context, grantID, login string) e
 	if !allowed {
 		return ErrNotApprover
 	}
-	actor := "human:" + record.CanonicalLogin(login)
 	tag, err := tx.Exec(ctx, `update grants set revoked_at=now(), revoked_by=$2 where id=$1 and revoked_at is null`, grantID, actor)
 	if err != nil {
 		return err
@@ -735,9 +845,10 @@ func mayRevoke(login string, approver, operator *string) (allowed, asOperator bo
 // enrollment reads a live enrollment (not revoked, lease not lapsed); pgx.ErrNoRows otherwise.
 func (m *Machine) enrollment(ctx context.Context, id string) (enrollmentRow, error) {
 	var e enrollmentRow
-	err := m.Store.Pool.QueryRow(ctx, `select id, kind, operator, thumbprint, runtime_id, slot from enrollments
-		where id=$1 and revoked_at is null and lease_expires_at > now()`, id).
-		Scan(&e.ID, &e.Kind, &e.Operator, &e.Thumbprint, &e.RuntimeID, &e.Slot)
+	err := m.Store.Pool.QueryRow(ctx, `select e.id, e.kind, e.operator, c.service, e.subject, e.thumbprint, e.runtime_id, e.slot from enrollments e
+		left join launcher_credentials c on c.id = e.launcher_credential_id
+		where e.id=$1 and e.revoked_at is null and e.lease_expires_at > now()`, id).
+		Scan(&e.ID, &e.Kind, &e.Operator, &e.Service, &e.Subject, &e.Thumbprint, &e.RuntimeID, &e.Slot)
 	return e, err
 }
 
@@ -785,8 +896,9 @@ func matchingRequest(ctx context.Context, q querier, query, enrollmentID string,
 // name-set match (never a subset or superset — the same matching rule coalescing uses for pending
 // requests) against a still-live grant (not revoked, not expired) under this enrollment is
 // returned as-is, with no new request row and no new record, as long as the policy it was
-// decided under is still current or the current policy still allows it to the session
-// (stillAllowed, the check Values makes) and its whole approval chain still verifies (VerifyChain,
+// decided under is still current and no granted name is a service's (anyServiceOwned: the
+// policy's version does not cover BROKER_SERVICES' accounts), or the current policy still allows
+// it to the session (stillAllowed, the check Values makes), and its whole approval chain still verifies (VerifyChain,
 // the same check Values makes). A caller that already holds a live grant for these exact names
 // never re-asks a human who already approved it, a policy tightened since then is never bypassed
 // by reuse, and neither is a chain that no longer verifies. No live grant holds a withheld name
@@ -804,12 +916,12 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 	if err := m.Store.Pool.QueryRow(ctx, `select rules_version, coalesce(decided_by, '') from requests where id=$1`, id).Scan(&rulesVersion, &decidedBy); err != nil {
 		return Request{}, false, err
 	}
-	if rulesVersion != set.Version {
-		requester, err := enr.requester(ctx, m.Store.Pool)
-		if err != nil {
-			return Request{}, false, err
-		}
-		granted, err := requestedSecrets(ctx, m.Store.Pool, id)
+	granted, err := requestedSecrets(ctx, m.Store.Pool, id)
+	if err != nil {
+		return Request{}, false, err
+	}
+	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
 		if err != nil {
 			return Request{}, false, err
 		}
@@ -833,6 +945,13 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 		}
 	}
 	return r, true, nil
+}
+
+// anyServiceOwned reports whether set serves any of granted as a service's secret, whose grant is
+// re-checked on every use: who is a service's own session rests on BROKER_SERVICES' accounts,
+// which the policy's version does not cover (policy.Set.ServiceOwned).
+func anyServiceOwned(set *policy.Set, granted []requestedSecret) bool {
+	return slices.ContainsFunc(granted, func(g requestedSecret) bool { return set.ServiceOwned(g.name) })
 }
 
 func insertGrant(ctx context.Context, tx pgx.Tx, requestID, enrollmentID, approver string, lifetime time.Duration) (string, error) {

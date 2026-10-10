@@ -435,6 +435,55 @@ func TestTheOutboxIsEachProjectsOwn(t *testing.T) {
 	})
 }
 
+// A start of an issue's role waits while an older issue_branch row of the issue is unfinished, so no
+// role starts before its branch exists on GitHub. Nothing else waits on it: a suspend of the same
+// issue, a start queued before the row, and another issue's start are each due.
+func TestAStartWaitsForItsIssuesBranch(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	enqueue := func(tx pgx.Tx, issue string, payload OutboxPayload) {
+		row, err := NewOutboxRow(issue, payload, now)
+		must(t, err)
+		must(t, records.Enqueue(ctx, tx, row))
+	}
+	start := SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 1}
+	inTx(t, st, func(tx pgx.Tx) {
+		enqueue(tx, "LEGION-208", start)
+		enqueue(tx, "LEGION-208", IssueBranch{Generation: 1})
+		enqueue(tx, "LEGION-208", start)
+		enqueue(tx, "LEGION-208", SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RolePlanner, Generation: 1})
+		enqueue(tx, "LEGION-209", SuperviseRequest{Op: "start", Tree: "LEGION-209", Role: claim.RoleArchitect, Generation: 1})
+	})
+	// claimed is every row due at at, in claim order, each finished once claimed.
+	claimed := func(at time.Time) []string {
+		var keys []string
+		inTx(t, st, func(tx pgx.Tx) {
+			rows, err := records.ClaimDue(ctx, tx, "LEGION", at, 10, time.Minute)
+			must(t, err)
+			for _, row := range rows {
+				payload, err := DecodeOutboxPayload(row)
+				must(t, err)
+				key := string(row.Kind) + ":" + row.Issue
+				if request, ok := payload.(SuperviseRequest); ok {
+					key += ":" + string(request.Op)
+				}
+				keys = append(keys, key)
+				must(t, records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken))
+			}
+		})
+		return keys
+	}
+
+	if got, want := claimed(now), []string{"supervise:LEGION-208:start", "issue_branch:LEGION-208", "supervise:LEGION-208:suspend", "supervise:LEGION-209:start"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("claimed with the branch unfinished = %v, want %v", got, want)
+	}
+	if got, want := claimed(now.Add(2*time.Minute)), []string{"supervise:LEGION-208:start"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("claimed once the branch finished = %v, want the start that waited for it alone", got)
+	}
+}
+
 // A status write the outbox failed and pushed back is still unwritten, so it stays listed through its
 // backoff; a finished one is deleted and gone, and a row of another kind is never listed. The list
 // runs oldest first, the order ClaimDue writes an issue's statuses in, so a newer write queued
@@ -569,7 +618,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},
@@ -717,6 +766,67 @@ func TestCheckedHeadMigrationKeepsARecordedVerdictStandingForItsHead(t *testing.
 		must(t, err)
 		if unsettled == nil || unsettled.CheckedHead != "" {
 			t.Fatalf("never-settled pull request after 0028 = %+v, want no checked head", unsettled)
+		}
+	})
+}
+
+// Migration 0035 ends phase-end suspension. A transition's suspend queued before it named the phase
+// it ended ("leaves"); the field is gone, and the outbox decodes rows strictly, so each such row is
+// deleted rather than left to fail on every attempt or, read without the field, stop a role its
+// issue still needs. Every other supervise row stays queued and decodes: a close's suspend, a start
+// and a tree close.
+func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) {
+	ctx := context.Background()
+	st := emptyStore(t)
+	all, err := migrations.All()
+	must(t, err)
+	for _, migration := range all {
+		if migration.Version >= 35 {
+			break
+		}
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, func() error {
+				if _, err := tx.Exec(ctx, migration.SQL); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, "insert into schema_version (version) values ($1)", migration.Version)
+				return err
+			}())
+		})
+	}
+	queued := map[string]string{
+		"phase-end suspend": `{"op": "suspend", "tree": "LEGION-208", "role": "planner", "generation": 1, "leaves": "planning", "reason": "LEGION-208 left planning"}`,
+		"close suspend":     `{"op": "suspend", "tree": "LEGION-208", "role": "implementer", "generation": 1, "reason": "the tree of LEGION-208 lingers"}`,
+		"start":             `{"op": "start", "tree": "LEGION-208", "role": "implementer", "generation": 1, "phase": "implementing", "task": "Continue Workflow."}`,
+		"tree close":        `{"op": "tree_close", "tree": "LEGION-208", "role": "tester", "generation": 1, "linger": 1}`,
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for name, payload := range queued {
+			_, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ('supervise', 'LEGION-208', $1, 1, now(), $2)`, payload, name)
+			must(t, err)
+		}
+	})
+
+	_, err = st.Migrate(ctx)
+	must(t, err)
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := NewStore().ClaimDue(ctx, tx, "LEGION", time.Now().Add(time.Hour), 10, time.Minute)
+		must(t, err)
+		kept := map[string]SuperviseRequest{}
+		for _, row := range rows {
+			payload, err := DecodeOutboxPayload(row)
+			if err != nil {
+				t.Fatalf("the %s row after 0035 does not decode: %v", row.LastError, err)
+			}
+			kept[row.LastError] = payload.(SuperviseRequest)
+		}
+		want := map[string]SuperviseRequest{
+			"close suspend": {Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 1, Reason: "the tree of LEGION-208 lingers"},
+			"start":         {Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 1, Phase: phase.Implementing, Task: "Continue Workflow."},
+			"tree close":    {Op: "tree_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 1, Linger: 1},
+		}
+		if !reflect.DeepEqual(kept, want) {
+			t.Fatalf("supervise rows after 0035 = %+v, want %+v: the phase-end suspend deleted and every other row kept", kept, want)
 		}
 	})
 }

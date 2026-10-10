@@ -19,10 +19,12 @@ import (
 )
 
 // Values releases the values of a live grant to its own enrollment. Every call re-checks the
-// enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and —
-// when the policy has changed since the grant's request was decided — that the current policy
-// still allows the session, with the names its operator withheld from it, every granted name under
-// the login that decided it (stillAllowed). Each value is read from the secret the request froze.
+// enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
+// the policy has changed since the grant's request was decided, or any granted name is a service's
+// (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts) — that the
+// current policy still allows the session, with the names its operator withheld from it, every
+// granted name under the login that decided it (stillAllowed). Each value is read from the secret
+// the request froze.
 // It holds no pooled connection across a Secrets Manager read: the grant's names are read into
 // memory before the first value is fetched.
 func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, time.Time, error) {
@@ -31,9 +33,10 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
 	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and g.expires_at > now() and e.revoked_at is null and e.lease_expires_at > now(),
-		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.operator
-		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id where g.id=$1`, grantID).
-		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &enr.Operator)
+		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.kind, e.operator, e.subject, c.service
+		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
+		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).
+		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, time.Time{}, ErrGrantNotLive
 	}
@@ -53,8 +56,8 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	if err != nil {
 		return nil, time.Time{}, err
 	}
-	if set := m.Policy.Get(); policyVersion != set.Version {
-		requester, err := enr.requester(ctx, m.Store.Pool)
+	if set := m.Policy.Get(); policyVersion != set.Version || anyServiceOwned(set, granted) {
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
 		if err != nil {
 			return nil, time.Time{}, err
 		}
@@ -135,18 +138,22 @@ func stillAllowed(set *policy.Set, name, frozenDecision, decidedBy string, reque
 		return nil
 	case frozenDecision == policy.Automatic && !slices.Contains(requester.Withheld, name):
 		return fmt.Errorf("%w: the current policy requires approval for %s", ErrGrantNotLive, name)
-	case !record.MayDecide(record.KindAgentSecret, d.Approver, decidedBy):
+	case !record.MayDecide(record.KindAgentSecret, d.Approver, "", decidedBy):
 		return fmt.Errorf("%w: %s now needs its owner's approval, which this grant does not have", ErrGrantNotLive, name)
 	}
 	return nil
 }
 
+// Get reads one request by id. Its Approver is the approver column of its credential-request
+// record, the column PendingForApprover lists the record by, so the request names exactly the
+// person whose list shows it; a request with no record has none.
 func (m *Machine) Get(ctx context.Context, id string) (Request, error) {
 	var r Request
 	var enrollmentID string
-	err := m.Store.Pool.QueryRow(ctx, `select r.id, r.state, r.enrollment_id, r.decided_at, r.decided_by, r.decision_detail, r.record_id,
+	err := m.Store.Pool.QueryRow(ctx, `select r.id, r.state, r.enrollment_id, r.decided_at, r.decided_by, r.decision_detail, r.record_id, cr.approver,
 		(select g.id::text from grants g where g.request_id=r.id and g.revoked_at is null limit 1)
-		from requests r where r.id=$1`, id).Scan(&r.ID, &r.State, &enrollmentID, &r.DecidedAt, &r.DecidedBy, &r.Detail, &r.RecordID, &r.GrantID)
+		from requests r left join credential_requests cr on cr.id = r.record_id where r.id=$1`, id).
+		Scan(&r.ID, &r.State, &enrollmentID, &r.DecidedAt, &r.DecidedBy, &r.Detail, &r.RecordID, &r.Approver, &r.GrantID)
 	if err != nil {
 		return Request{}, err
 	}
@@ -233,41 +240,93 @@ func (m *Machine) RecordKind(ctx context.Context, recordID string) (string, erro
 	return kind, err
 }
 
+// Session is the two possibly-differing session ids a credential-request record can name, read
+// independently (LEGION-587): Enrollment is the id the requesting session's own enrollment stated
+// when it enrolled (enrollments.session_id — agentbox's --session-id, or the Legion daemon's
+// worker claim session), Request is the id the request itself stated as an unsigned override in
+// its body at Create time (requests.session_id). Either is empty when that id was never set; a
+// machine login (kind launcher_credential, which has no request row and no requesting enrollment)
+// always answers both empty. An id outlives its enrollment's revocation: enrollments.session_id is
+// never cleared, only revoked_at is set, so the join below still finds it.
+type Session struct {
+	Request    string
+	Enrollment string
+}
+
 // PendingSummary is one still-undecided credential-request record for GET /v1/pending: its id,
 // kind, the plain identifiers its request object names (secret names for agent_secret, the single
-// host for launcher_credential), and when it was requested.
+// host for launcher_credential), when it was requested, and the session it names.
 type PendingSummary struct {
 	RecordID    string
 	Kind        string
 	Identifiers []string
 	RequestedAt time.Time
+	Session     Session
 }
+
+// pendingForApproverQuery is PendingForApprover's whole SQL text, pulled out so
+// TestPendingForApproverAvoidsSequentialScans (same package) can PREPARE and EXPLAIN the exact
+// statement the pool runs rather than a copy that could drift from it.
+//
+// The launcher_credential branch's NOT EXISTS spells its terminal-event predicate literally
+// (event in ('approved','denied','expired','cancelled')) rather than binding
+// record.TerminalEventNames() as a parameter, for the same reason machine.ExpirePending's ON
+// CONFLICT target already does for the same index (credential_request_decision,
+// store/migrations/0005_credential_requests.up.sql): Postgres can only recognize a partial index
+// from a predicate it can prove implies the index's at plan time, which a bound parameter never
+// does once the plan goes generic. The literal makes the index provably reachable in every plan
+// shape; whether an unforced planner actually prefers it over hashing the far smaller matching set
+// in one pass is then an ordinary cost comparison, which is why
+// TestPendingForApproverAvoidsSequentialScans also sets enable_seqscan = off — that is what
+// guarantees the index path, not the literal alone. A later change to the terminal event list must
+// change this literal too, which TestPendingForApproverTerminalEventsLiteralMatchesTheList pins
+// against record.TerminalEventNames().
+//
+// The two left joins read each row's session (LEGION-587): req on requests.record_id, the same
+// column requests_record (0008_lookup_indexes.up.sql) already indexes for ReadRecord, and enr on
+// credential_requests' own enrollment_id, its primary-key lookup into enrollments.
+// TestPendingForApproverAvoidsSequentialScans checks only credential_requests and
+// credential_request_events for a sequential scan; it pins nothing about how Postgres joins in
+// req and enr (a hash join over requests and enrollments, measured locally at 5,000 enrollments —
+// free to change with the planner's own cost estimates, and not this test's concern).
+const pendingForApproverQuery = `select cr.id, cr.kind, cr.body, cr.created_at, coalesce(req.session_id, ''), coalesce(enr.session_id, '')
+	from credential_requests cr
+	left join requests req on req.record_id = cr.id
+	left join enrollments enr on enr.id = cr.enrollment_id
+	where (
+		cr.approver in ($1, $2) and cr.kind='agent_secret' and cr.id in (select r.record_id from requests r where r.state='pending')
+		or cr.approver in ($1, $2) and cr.kind='launcher_credential' and not exists (
+			select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event in ('approved','denied','expired','cancelled'))
+	) order by cr.created_at desc`
 
 // PendingForApprover lists every still-pending credential-request record — of either kind — that
 // approver may decide, newest first: GET /v1/pending's exact contract. That is every record naming
-// approver, and every agent_secret record whose approver is record.AnyoneApprover. The rule for
+// approver, and every record whose approver is record.AnyoneApprover: a request for a shared
+// human-tier secret, and a service's machine login. A service's login a broker from before that
+// rule opened names a person instead and is listed for that person alone, though anyone who types
+// its code may decide it (record.MayDecide). The rule for
 // pending, which ReadRecord applies too: an agent_secret record is pending while its request is.
 // Every writer moves the request out of 'pending' together with the record's terminal event
 // (store.EndPendingRequests, ApplyDecision), but a request an ended enrollment cancelled before
 // endEnrollment wrote that event carries none, so the request row is the truth. A machine login
 // has no request row and is pending while it carries no terminal decision event, matching
-// credential_request_decision's own partial index.
+// credential_request_decision's own partial index — see pendingForApproverQuery's own comment for
+// why that match requires a literal predicate, not record.TerminalEventNames() bound as a
+// parameter. The approver scan itself is credential_requests_approver
+// (store/migrations/0011_credential_requests_approver.up.sql): with 300,000 historical rows and
+// no index, this was one sequential scan of the whole table on every 15 s poll tick of every open
+// Dispatch tab (336 ms; LEGION-575's review).
 func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]PendingSummary, error) {
-	rows, err := m.Store.Pool.Query(ctx, `select cr.id, cr.kind, cr.body, cr.created_at from credential_requests cr
-		where (
-			cr.approver in ($1, $2) and cr.kind='agent_secret' and cr.id in (select r.record_id from requests r where r.state='pending')
-			or cr.approver=$1 and cr.kind='launcher_credential' and not exists (
-				select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event = any($3))
-		) order by cr.created_at desc`, record.CanonicalLogin(approver), record.AnyoneApprover, record.TerminalEventNames())
+	rows, err := m.Store.Pool.Query(ctx, pendingForApproverQuery, record.CanonicalLogin(approver), record.AnyoneApprover)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []PendingSummary
 	for rows.Next() {
-		var id, kind, canonical string
+		var id, kind, canonical, requestSession, enrollmentSession string
 		var createdAt time.Time
-		if err := rows.Scan(&id, &kind, &canonical, &createdAt); err != nil {
+		if err := rows.Scan(&id, &kind, &canonical, &createdAt, &requestSession, &enrollmentSession); err != nil {
 			return nil, err
 		}
 		body, err := record.ParseBody(canonical)
@@ -282,7 +341,10 @@ func (m *Machine) PendingForApprover(ctx context.Context, approver string) ([]Pe
 		for i, d := range obj.Details {
 			identifiers[i] = d.Identifier
 		}
-		out = append(out, PendingSummary{RecordID: id, Kind: kind, Identifiers: identifiers, RequestedAt: createdAt})
+		out = append(out, PendingSummary{
+			RecordID: id, Kind: kind, Identifiers: identifiers, RequestedAt: createdAt,
+			Session: Session{Request: requestSession, Enrollment: enrollmentSession},
+		})
 	}
 	return out, rows.Err()
 }
@@ -314,16 +376,22 @@ type RecordDetail struct {
 	ExpiresAt       time.Time
 	RequestedAt     time.Time
 	Decided         *RecordDecision
+	Session         Session
 }
 
 // ReadRecord reads a credential-request record's full detail by id, for GET
 // /v1/credential-requests/{id} and, reused verbatim, POST /v1/machine-logins/lookup.
 // pgx.ErrNoRows means no such record.
 func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail, error) {
-	var canonical, approver, kind string
+	var canonical, approver, kind, requestSession, enrollmentSession string
 	var createdAt, expiresAt time.Time
-	if err := m.Store.Pool.QueryRow(ctx, `select body, approver, kind, created_at, expires_at from credential_requests where id=$1`, recordID).
-		Scan(&canonical, &approver, &kind, &createdAt, &expiresAt); err != nil {
+	if err := m.Store.Pool.QueryRow(ctx, `select cr.body, cr.approver, cr.kind, cr.created_at, cr.expires_at,
+			coalesce(req.session_id, ''), coalesce(enr.session_id, '')
+		from credential_requests cr
+		left join requests req on req.record_id = cr.id
+		left join enrollments enr on enr.id = cr.enrollment_id
+		where cr.id=$1`, recordID).
+		Scan(&canonical, &approver, &kind, &createdAt, &expiresAt, &requestSession, &enrollmentSession); err != nil {
 		return RecordDetail{}, err
 	}
 	body, err := record.ParseBody(canonical)
@@ -352,6 +420,7 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 		RecordID: recordID, Kind: kind, State: "pending", Approver: approver, Enrollment: enr,
 		Identifiers: identifiers, Service: service, Reason: obj.Reason, LifetimeSeconds: body.LifetimeSeconds,
 		RulesVersion: body.RulesVersion, ExpiresAt: expiresAt, RequestedAt: createdAt,
+		Session: Session{Request: requestSession, Enrollment: enrollmentSession},
 	}
 	// Whether the record is still pending follows PendingForApprover's rule: an agent_secret record
 	// by its request's state, a machine login by its terminal event. A decided record's terminal

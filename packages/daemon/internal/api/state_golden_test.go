@@ -10,9 +10,11 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/reviewthreads"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -66,8 +68,11 @@ func populatedState() State {
 							Locator: &runtime.Locator{
 								Runtime:     runtime.RuntimeSandbox,
 								Claim:       "legion-legion-legion-208-planner",
-								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
-								Sandbox:     &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-legion-208-planner"},
+								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/2",
+								Sandbox: &runtime.SandboxLocator{
+									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+									Container: "planner", Generation: 2,
+								},
 							},
 						},
 						HandoffCommit: "9f2c1d7a4b6e8c3f5a90d2e14b7c6f8a3d5e0b21",
@@ -80,8 +85,11 @@ func populatedState() State {
 							Locator: &runtime.Locator{
 								Runtime:     runtime.RuntimeSandbox,
 								Claim:       "legion-legion-legion-208-implementer",
-								Incarnation: "c41a8d3e-5b62-4f18-9d07-1e3a6c94b2f5",
-								Sandbox:     &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-legion-208-implementer"},
+								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
+								Sandbox: &runtime.SandboxLocator{
+									Namespace: "legion", Name: "legion-legion-legion-208", PodUID: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+									Container: "implementer", Generation: 5,
+								},
 							},
 						},
 						HandoffCommit: "",
@@ -121,6 +129,15 @@ func populatedState() State {
 			RegisteredAt: time.Date(2026, 9, 22, 9, 16, 40, 0, time.UTC),
 		},
 		AgentSecretsLogin: &AgentSecretsLoginView{State: "pending", Code: "WXYZ-1234"},
+		// A kubernetes deployment whose image passed the probe, with the broker gap decided and
+		// one role unreserved, so the fixture carries a decided row and an open row beside the
+		// present, live and withheld ones, rendered by the report itself: a wording change there
+		// rewrites the fixture rather than leaving the pinned words stale.
+		Capabilities: CapabilityStatesOf(capabilities.Deployment{
+			Runtime: "kubernetes", Probed: true, ModelFallback: "on",
+			Decided:               map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
+			RolesWithoutResources: []claim.Role{claim.RoleTester},
+		}.Report()),
 	}
 }
 
@@ -241,7 +258,7 @@ func TestRegisterResponseGolden(t *testing.T) {
 func TestControllerRegisterResponseGolden(t *testing.T) {
 	golden(t, "register-controller.json", ControllerRegisterResponse{
 		ClaimToken: "legion-legion-controller",
-		Role:       ControllerRole,
+		Role:       claim.RoleController,
 		Generation: 2,
 		Secret:     "Q29udHJvbGxlZEJ5TGVnaW9u",
 	})
@@ -336,6 +353,14 @@ func TestTask310RouteGoldens(t *testing.T) {
 	})
 	golden(t, "provisioning-credential.json", GitHubTokenResponse{
 		Token: "installation-token", AppLogin: "legion-implementer[bot]",
+	})
+	golden(t, "threads-resolve.json", ThreadsResolveResponse{Threads: []reviewthreads.Outcome{
+		{URL: "https://github.com/acme/widgets/pull/42#discussion_r1", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"},
+		{URL: "https://github.com/acme/widgets/pull/42#discussion_r2", LeftOpen: "not its opener's or the Legion reviewer's acceptance", NewestBy: "legion-implementer"},
+	}, Withheld: 1})
+	golden(t, "threads-resolve-refused.json", ThreadsResolveResponse{
+		Threads: []reviewthreads.Outcome{{URL: "https://github.com/acme/widgets/pull/42#discussion_r1", Resolved: reviewthreads.ReviewersAcceptanceOfABot, NewestBy: "legion-reviewer"}},
+		Refused: &ThreadRefusal{URL: "https://github.com/acme/widgets/pull/42#discussion_r3", Error: "GitHub: Resource not accessible by integration"},
 	})
 	golden(t, "handoff-complete.json", HandoffCompleteResponse{})
 	golden(t, "issue-status.json", IssueStatusResponse{})

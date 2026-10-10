@@ -37,7 +37,8 @@ type authorizationDetail struct {
 
 // requestClaims is a credential-request object's JSON payload, mirrored from envoy's
 // record.requestClaims. Reason is always empty for a machine login (envoy's own sign.go leaves
-// it empty too) and so never appears on the wire.
+// it empty too) and so never appears on the wire, and the daemon's login names no approver, so it
+// carries no login_hint.
 type requestClaims struct {
 	Issuer               string                `json:"iss"`
 	Audience             string                `json:"aud"`
@@ -46,7 +47,6 @@ type requestClaims struct {
 	Expires              int64                 `json:"exp"`
 	AuthorizationDetails []authorizationDetail `json:"authorization_details"`
 	Reason               string                `json:"reason,omitempty"`
-	LoginHint            string                `json:"login_hint,omitempty"`
 }
 
 // proofClaims is a launcher proof's JSON payload, mirrored from envoy's proof.claims. The daemon
@@ -70,10 +70,11 @@ func thumbprint(pub *ecdsa.PublicKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum), nil
 }
 
-// signRequestObject signs a machine-login credential-request object naming host (and, for a
-// service credential, service) as the launcher_credential the daemon asks to hold, approved by
-// loginHint. Byte-compatible with envoy's record.Sign.
-func signRequestObject(key *ecdsa.PrivateKey, audience, host, service, loginHint string, now time.Time) (string, error) {
+// signRequestObject signs a machine-login credential-request object naming host as the
+// launcher_credential the daemon asks to hold, for the service launcherService: the daemon only
+// ever logs in as a service, and it names no approver, since anyone signed in to Dispatch decides a
+// service's login. Byte-compatible with envoy's record.Sign.
+func signRequestObject(key *ecdsa.PrivateKey, audience, host string, now time.Time) (string, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, &jose.SignerOptions{
 		EmbedJWK:     true,
 		ExtraHeaders: map[jose.HeaderKey]any{jose.HeaderType: requestTyp},
@@ -93,9 +94,8 @@ func signRequestObject(key *ecdsa.PrivateKey, audience, host, service, loginHint
 		IssuedAt: iat,
 		Expires:  iat + requestLifetimeSeconds,
 		AuthorizationDetails: []authorizationDetail{
-			{Type: "launcher_credential", Identifier: host, Service: service},
+			{Type: "launcher_credential", Identifier: host, Service: launcherService},
 		},
-		LoginHint: loginHint,
 	})
 	if err != nil {
 		return "", err

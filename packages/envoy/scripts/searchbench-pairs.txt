@@ -1,0 +1,8 @@
+# Known related-issue pairs from this repository's own Dispatch project (LEGION-*, exempt from
+# the private-names rule - packages/envoy/AGENTS.md): each line is `query_title<TAB>target_key`,
+# where query_title is one issue's own title (searched verbatim, as a human filing a
+# near-duplicate would type it) and target_key is the other issue of the pair - the one the
+# search should surface. This file ships only Legion's own content; a run against a corpus copy
+# that includes other private projects' issues should pass its own query file instead
+# (DATABASE_URL and --queries are both caller-supplied, never literals here).
+main is red since #1021 landed over #1025: the daemon imports appRoleForLegionRole from a file that no longer exports it	LEGION-133

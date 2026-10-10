@@ -4,19 +4,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // Ledger is what the document operations joined to one database transaction produce until it
 // ends: the events they generate, their writes to live documents (see liveWrite) and the versions
 // they write. Join is the only way to join a transaction, so an operation that has one always has
-// its ledger. Commit ends the transaction the way every caller must: it commits, credits the
-// writes' authors to their rooms, releases the authors a version the transaction wrote named,
-// and publishes the writes to their rooms, in that order. Discard, which callers defer right
-// after Join, drops whatever a transaction that did not commit left behind.
+// its ledger. Commit ends the transaction the way every caller must: it records the writes'
+// authors and takes out the authors its versions listed in the transaction itself, commits, marks
+// the in-flight credits its versions listed consumed, records the writes' latest edit source in
+// their rooms, and publishes the writes to their rooms, in that order. Discard, which callers
+// defer right after Join, drops whatever a transaction that did not commit left behind.
 //
 // Settlement's operations run in a transaction of its own, which no caller joined, so its ledger
 // carries no `tx` and marks itself `settling` instead. Those are the only two ledgers there are:
@@ -34,6 +39,10 @@ type Ledger struct {
 	live     map[string]*liveWrite
 	order    []string
 	versions []ledgerVersion
+	// seeds holds, per document this transaction seeded (SeedText), the actor that wrote its
+	// first text and the tree it wrote, which credit records and registers as that actor's ask
+	// blocks once the transaction has committed.
+	seeds map[string]ledgerSeed
 	// rebuilds are the documents this transaction rebuilds (RebuildDocument), whose rooms refuse
 	// loads until it ends, committed or not.
 	rebuilds []string
@@ -42,6 +51,17 @@ type Ledger struct {
 type ledgerVersion struct {
 	artifactID string
 	version    model.Version
+	// capture is whom the version listed (authorCapture): the pending authors its commit deletes
+	// and the in-flight credits it marks consumed.
+	capture authorCapture
+}
+
+// ledgerSeed is a document SeedText wrote in this transaction: the actor who wrote its first
+// text, and the tree so credit can register that actor against every ask block the seed
+// introduced (registerAskAuthors) once the transaction has committed.
+type ledgerSeed struct {
+	actor model.Actor
+	tree  *pmdoc.Node
 }
 
 type ledgerContextKey struct{}
@@ -115,31 +135,76 @@ func (l *Ledger) publishEvents() {
 // commit is Commit up to the publish. Another transaction can run between the two, and tests
 // call them apart to hold that window open.
 func (l *Ledger) commit(ctx context.Context) error {
-	err := l.tx.Commit(ctx)
-	// The transaction has ended whichever way the commit went, so a rebuild's room reads the
-	// history the commit left from here.
-	l.endRebuilds()
+	if err := l.recordSettlementCredit(ctx); err != nil {
+		_ = l.tx.Rollback(context.Background())
+		l.endRebuilds()
+		l.fail(err)
+		return err
+	}
+	captures := make([]roomCapture, 0, len(l.versions))
+	for _, written := range l.versions {
+		captures = append(captures, roomCapture{room: written.artifactID, capture: written.capture})
+	}
+	err := l.service.commitConsuming(ctx, l.tx, captures, func(error) {
+		// The transaction has ended whichever way the commit went, so a rebuild's room reads the
+		// history the commit left from here.
+		l.endRebuilds()
+	})
+	l.versions = nil
 	if err != nil {
 		l.fail(err)
 		return err
 	}
-	l.credit()
-	for _, written := range l.versions {
-		l.service.commitVersion(written.artifactID, written.version)
-	}
-	l.versions = nil
+	l.creditRooms()
 	return nil
 }
 
+// roomCapture is a version's capture with the document it versions.
+type roomCapture struct {
+	room    string
+	capture authorCapture
+}
+
+// commitConsuming commits tx, which wrote the versions captures lists, and marks the in-flight
+// credits each listed consumed once it has committed. Each capture's state is locked (state.mu)
+// from before the commit until then: an append queued behind the document's advisory lock, which
+// tx holds until it commits, takes that lock the instant the commit drops it, and must find its
+// credit consumed when it reads it (UpdateCredit.take), or it writes an author a version listed
+// to the pending authors. The states are locked in their documents' sorted order, so two
+// transactions versioning the same two documents cannot deadlock. ended runs once the commit
+// returns, with its error and the states still locked; a capture with no state locks nothing.
+func (s *Service) commitConsuming(ctx context.Context, tx pgx.Tx, captures []roomCapture, ended func(error)) error {
+	sorted := slices.Clone(captures)
+	slices.SortStableFunc(sorted, func(a, b roomCapture) int { return strings.Compare(a.room, b.room) })
+	locked := make([]roomCapture, 0, len(sorted))
+	for _, written := range sorted {
+		state := written.capture.state
+		if state != nil && !slices.ContainsFunc(locked, func(held roomCapture) bool { return held.capture.state == state }) {
+			state.mu.Lock()
+			locked = append(locked, written)
+		}
+	}
+	err := tx.Commit(ctx)
+	if err == nil {
+		for _, written := range captures {
+			written.capture.consumeLocked()
+		}
+	}
+	if ended != nil {
+		ended(err)
+	}
+	for _, held := range locked {
+		s.unlockState(held.room, held.capture.state)
+	}
+	return err
+}
+
 // Discard drops what a transaction that did not commit left behind: its live writes, which no
-// room ever saw, the author captures of the versions it wrote, and the rooms its rebuilds held.
-// After Commit it does nothing.
+// room ever saw, and the rooms its rebuilds held. A version it wrote marked nothing it read, so
+// its authors stay where they were. After Commit it does nothing.
 func (l *Ledger) Discard() {
 	for _, artifactID := range l.order {
 		l.service.finishLiveWrite(l.live[artifactID])
-	}
-	for _, written := range l.versions {
-		l.service.discardPendingVersion(written.artifactID, written.version)
 	}
 	l.versions = nil
 	l.endRebuilds()
@@ -156,8 +221,36 @@ func (l *Ledger) endRebuilds() {
 	l.rebuilds = nil
 }
 
-func (l *Ledger) recordVersion(artifactID string, version model.Version) {
-	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version})
+// recordVersion records a version this transaction wrote, with whom it listed (capture), which
+// its commit takes out of the pending authors (recordSettlementCredit, commitConsuming). The
+// version holds every change the transaction's write to the document has made so far, so the
+// authors it lists leave the write's credits: a change the write makes after it credits its author
+// again (creditLiveWrite), and that author is pending once the transaction commits.
+func (l *Ledger) recordVersion(artifactID string, version model.Version, capture authorCapture) {
+	l.versions = append(l.versions, ledgerVersion{artifactID: artifactID, version: version, capture: capture})
+	if write := l.liveWriteFor(artifactID); write != nil {
+		for _, author := range version.Authors {
+			delete(write.credits, actorKey(author))
+			delete(write.creditedBy, actorKey(author))
+		}
+	}
+}
+
+// WroteVersion records version, of artifactID, which the caller wrote itself in this transaction,
+// outside the document service, over the transaction's own write to the document - an upload,
+// whose version lists its uploader alone. Once this transaction commits, it has cleared every
+// author whose change the write's last read of the room held, whether its replacement removed
+// that edit or kept it (uploadCapture): each pending author row whose writing update that room
+// held, and each in-flight credit observed by then. The write held the document's advisory lock
+// from before that read (ReplaceText), so nothing landed between them. A row another process's
+// room stored, and a credit observed after the read, stay pending for the next version. An upload
+// that changed nothing has no write to hold and nothing to clear.
+func (l *Ledger) WroteVersion(artifactID string, version model.Version) {
+	write := l.liveWriteFor(artifactID)
+	if write == nil || len(write.updates) == 0 {
+		return
+	}
+	l.recordVersion(artifactID, version, uploadCapture(write))
 }
 
 func (l *Ledger) liveWriteFor(artifactID string) *liveWrite {
@@ -189,23 +282,103 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 	l.order = append(l.order, write.artifactID)
 }
 
-// credit credits each content change of a committed transaction to its room, for the room's
-// next version. It runs before the transaction's own versions are released, which clears the
-// authors those versions already name.
-func (l *Ledger) credit() {
-	for _, artifactID := range l.order {
-		write := l.live[artifactID]
-		if len(write.credits) == 0 {
+// recordSettlementCredit records, in the transaction that wrote the documents, who owes what once
+// it commits. It first deletes the pending authors each version this transaction wrote takes out
+// (deleteCapturedPendingAuthors), then records, in one statement per write, each write's authors no
+// version of the transaction lists (recordVersion), each at the append that recorded that author's
+// latest change (liveWrite.creditedBy), and each write's and seed's latest edit source on the
+// document's pending-settlement row. Deleting first means the write's own authors are recorded
+// after the delete that would otherwise take them out. Both commit or roll back with the content,
+// before the request context can be canceled after commit.
+func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
+	for _, written := range l.versions {
+		if err := deleteCapturedPendingAuthors(ctx, l.tx, written.artifactID, written.capture); err != nil {
+			return err
+		}
+	}
+	released := l.releasedAuthors()
+	for artifactID, seed := range l.seeds {
+		if _, listed := released[artifactID][actorKey(seed.actor)]; listed {
 			continue
 		}
-		state := l.service.room(artifactID)
-		state.mu.Lock()
-		for key, actor := range write.credits {
-			state.pending[key] = actor
+		if err := recordLatestEditSource(ctx, l.tx, artifactID, &seed.actor); err != nil {
+			return err
 		}
-		state.lastActor = write.actor
-		state.mu.Unlock()
 	}
+	for _, artifactID := range l.order {
+		write := l.live[artifactID]
+		if write.actor == nil {
+			continue
+		}
+		pending := pendingAuthorsOf(write.credits, func(key string) persistence.Version { return write.creditedBy[key] })
+		if err := upsertPendingAuthors(ctx, l.tx, artifactID, pending); err != nil {
+			return err
+		}
+		if err := recordLatestEditSource(ctx, l.tx, artifactID, write.actor); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// releasedAuthors is, per artifact, the keys of the authors this transaction's own versions
+// listed, which a seed of the same transaction does not record as the latest edit source again.
+func (l *Ledger) releasedAuthors() map[string]map[string]struct{} {
+	released := make(map[string]map[string]struct{}, len(l.versions))
+	for _, written := range l.versions {
+		keys := released[written.artifactID]
+		if keys == nil {
+			keys = make(map[string]struct{}, len(written.version.Authors))
+			released[written.artifactID] = keys
+		}
+		for _, actor := range written.version.Authors {
+			keys[actorKey(actor)] = struct{}{}
+		}
+	}
+	return released
+}
+
+// creditRooms records, once the transaction has committed and before its live writes publish,
+// each seed's and write's latest edit source in its room, which the settlement it arms names on
+// its events, and registers the ask blocks each introduced to its author. The authors themselves
+// are already recorded in the database (recordSettlementCredit).
+func (l *Ledger) creditRooms() {
+	for artifactID, seed := range l.seeds {
+		state := l.service.lockState(artifactID)
+		state.creditSeq.Add(1)
+		state.lastActor = new(seed.actor)
+		state.unsettled = true
+		state.registerAskAuthors(askBlockIDs(seed.tree), seed.actor)
+		l.service.unlockState(artifactID, state)
+	}
+	for _, artifactID := range l.order {
+		write := l.live[artifactID]
+		if write.actor == nil {
+			continue
+		}
+		state := l.service.lockState(artifactID)
+		state.creditSeq.Add(1)
+		state.lastActor = write.actor
+		state.unsettled = true
+		if write.actor != nil {
+			// The carried-forward author of a renamed id is registered before the ids this
+			// write's own before/after diff adds, so a rename's more specific registration is
+			// never overwritten by the less specific one applyLive's diff would otherwise give
+			// it (registerAskAuthors, registerCarriedAskAuthors).
+			state.registerCarriedAskAuthors(write.carriedAskAuthors)
+			state.registerAskAuthors(write.addedAskBlockIDs, *write.actor)
+		}
+		l.service.unlockState(artifactID, state)
+	}
+}
+
+// seeded records that this transaction seeded artifactID's first text as actor (SeedText), with
+// the tree it wrote, whose ask blocks credit registers to actor once the transaction commits.
+func (l *Ledger) seeded(artifactID string, tree *pmdoc.Node, actor model.Actor) {
+	if l.seeds == nil {
+		l.seeds = make(map[string]ledgerSeed)
+	}
+	l.seeds[artifactID] = ledgerSeed{actor: actor, tree: tree}
 }
 
 // publish applies the committed transaction's live writes to their rooms and broadcasts them.

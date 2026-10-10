@@ -1,19 +1,23 @@
 package config
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/url"
 	"os"
 	"path"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -26,23 +30,39 @@ type Kubernetes struct {
 	Namespace string
 	// Image is the worker image, pinned by digest.
 	Image string
-	// StorageClass is the tree volume's class; required, because the cluster has no default.
+	// StorageClass is the issue volumes' class; required, because the cluster has no default.
 	StorageClass string
-	// TreeVolume is the tree volume's size, a Kubernetes quantity; 20Gi when the file sets none.
-	TreeVolume string
+	// IssueVolume is each issue's volume's size, a Kubernetes quantity, one volume per issue (the
+	// controller's pod owns one of its own); 20Gi when the file sets none.
+	IssueVolume string
 	// Kubeconfig is the credentials file the daemon's client reads; "" means in-cluster
 	// credentials. Context names the context in it to use, "" for its current context.
 	Kubeconfig string
 	Context    string
 	Scheduling Scheduling
-	// Resources are each role's container requests and limits. A role absent here gets none,
-	// which is the default for every role: one tree runs per node, and the pool's floor sizes it.
+	// Resources are each role's container reservation — the six workflow roles' and the
+	// controller's, whose pod a daemon under `controller: daemon` launches. After load every role is
+	// present with every field filled: the file's value where runtime.kubernetes.resources.<role>
+	// sets one, the daemon's default (DefaultResources) otherwise, field by field. CPU and Memory
+	// are each both the container's request and its limit, so every Legion pod is Guaranteed and
+	// bursts past nothing; at the defaults a six-role issue pod sums to 3 CPU and 19 GiB.
+	// EphemeralStorage bounds what the container writes to the node's disk — its root filesystem,
+	// which no volume backs: the role's $HOME, Oh My Pi's state home with its Chromium profiles and
+	// logs, the Go and Bun caches — since pods of unrelated trees share a node and one role filling
+	// the node's disk would put every pod on it under DiskPressure; a container past its own limit
+	// has its pod evicted, the offending issue's alone. EphemeralStorageRequest is what the scheduler
+	// fits to the node's allocatable ephemeral storage (its root volume), small by default so that it
+	// binds almost nothing.
 	Resources map[claim.Role]RoleResources
 	// Pod is what the operator adds to every pod (runtime.kubernetes.pod).
 	Pod PodConfig
 	// AgentSecrets is the secrets broker every pod is enrolled with (runtime.kubernetes.agent_secrets);
 	// nil when the deployment enrolls none, in which case pods carry no token for it.
 	AgentSecrets *AgentSecretsConfig
+	// SessionDSNSecret is the providers Secret's key that holds the postgres:// URL of the database
+	// every pod's Oh My Pi keeps its sessions in (`session_store: postgres`, `session_dsn_secret`);
+	// "" under `session_store: pvc`, the default, where each session is a file on the issue's volume.
+	SessionDSNSecret string
 }
 
 // Scheduling is where the pods may run beyond the Legion pool, which the runtime selects itself.
@@ -55,11 +75,51 @@ type Scheduling struct {
 // Toleration is one `scheduling.tolerations` entry. Value is "" under operator Exists.
 type Toleration struct{ Key, Operator, Value, Effect string }
 
-// RoleResources are one role's container requests and limits.
-type RoleResources struct{ Requests, Limits Quantities }
+// RoleResources are one role's reservation, each a Kubernetes quantity: the cpu and memory every
+// container of the role carries as both request and limit, and the ephemeral storage it carries as
+// a limit (EphemeralStorage) and as a request (EphemeralStorageRequest, at most the limit). "" is
+// unset only while the file is read; the settled block holds every field (DefaultResources fills
+// what the file leaves out).
+type RoleResources struct{ CPU, Memory, EphemeralStorage, EphemeralStorageRequest string }
 
-// Quantities are Kubernetes quantities for the three resources a role may set; "" leaves one unset.
-type Quantities struct{ CPU, Memory, EphemeralStorage string }
+// Reserved reports whether the role's pod reserves its CPU and memory and is bounded in both: CPU
+// and Memory each set, each the container's request and its limit. It is the resource-limits
+// capability's measure (capabilities.Deployment.RolesWithoutResources); a settled Kubernetes block
+// holds every role reserved, since DefaultResources fills what the file leaves out, and only a
+// Kubernetes value built without the loader (a test's) can report a role unreserved.
+func (r RoleResources) Reserved() bool {
+	return r.CPU != "" && r.Memory != ""
+}
+
+// defaultResources is each role's reservation when the file sets none: the roles that build and
+// test a change get the most (6Gi: a lane-running role's Go test lane, its agent and a headless
+// browser measured about 3.9 GiB of summed RSS against the earlier 4Gi, and a Guaranteed pod the
+// kernel OOM-kills mid-turn stalls its tree), the roles that read and write get less, and the
+// controller, which runs alone in its pod, gets a pod of its own size. The image probe pod takes
+// none of these: its own fixed 250m and 1Gi (internal/daemon/kubernetes.go, probeReservation),
+// since it starts one Oh My Pi at a time and runs no lane, and a probe sized as a role could not
+// boot on a full pool.
+// The ephemeral-storage limit bounds the role's writes to the node's disk (the container's root
+// filesystem: $HOME, the state home, the Go and Bun caches a build fills), 20Gi for the two roles
+// that build, 10Gi for the rest; the request is 1Gi for every role, since the scheduler fits it to
+// the node's allocatable ephemeral storage — its root volume, which nobody has sized for these
+// pods — and a small request binds scheduling to almost nothing. An operator who knows the root
+// volume raises the request so the scheduler reserves disk.
+var defaultResources = map[claim.Role]RoleResources{
+	claim.RoleArchitect:   {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RolePlanner:     {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleImplementer: {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleTester:      {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleReviewer:    {CPU: "750m", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleMerger:      {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+	claim.RoleController:  {CPU: "1", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+}
+
+// DefaultResources is every role's default reservation, the controller's included, as a fresh map
+// the caller may edit: what Kubernetes.Resources holds when runtime.kubernetes.resources is absent.
+func DefaultResources() map[claim.Role]RoleResources {
+	return maps.Clone(defaultResources)
+}
 
 // PodConfig is `runtime.kubernetes.pod`, what the operator adds to every pod Legion runs, the image
 // probe's included, in the API's own types: variables and volume mounts for the agent's container,
@@ -76,9 +136,9 @@ type PodConfig struct {
 }
 
 const (
-	kubernetesKey     = "runtime.kubernetes"
-	podKey            = kubernetesKey + ".pod"
-	defaultTreeVolume = "20Gi"
+	kubernetesKey      = "runtime.kubernetes"
+	podKey             = kubernetesKey + ".pod"
+	defaultIssueVolume = "20Gi"
 	// poolLabel is the node label that selects the Legion pool. The runtime sets it on every pod,
 	// and the cluster's admission policy requires its value.
 	poolLabel = "legion.dev/pool"
@@ -88,16 +148,16 @@ const (
 // probed.
 var imageDigestRef = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 
-// AgentSecretsConfig is `runtime.kubernetes.agent_secrets`: the broker's base
-// URL, the email of the person the daemon's own machine logins are approved by (the daemon runs its
-// own login at boot, on a background context, and logs the confirmation code once; no file ever
-// carries a launcher credential, since Login wins and holds it only in process memory), the
-// audience of the projected token every pod carries for it, and that token's lifetime. The audience
-// defaults to the broker's own (`agent-secrets`) and the lifetime to 3600 s, the most the cluster's
-// admission policy admits for a Legion worker token; the API server issues none under 600.
+// AgentSecretsConfig is `runtime.kubernetes.agent_secrets`: the broker's base URL (the daemon runs
+// its own machine login at boot, on a background context, and logs the confirmation code once; no
+// file ever carries a launcher credential, since Login wins and holds it only in process memory),
+// the audience of the projected token every pod carries for it, and that token's lifetime. The
+// login is the legion-daemon service's, which anyone signed in to Dispatch approves, so the block
+// names no approver. The audience defaults to the broker's own (`agent-secrets`) and the lifetime
+// to 3600 s, the most the cluster's admission policy admits for a Legion worker token; the API
+// server issues none under 600.
 type AgentSecretsConfig struct {
 	URL                string
-	Operator           string
 	Audience           string
 	TokenExpirySeconds int
 }
@@ -122,6 +182,9 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	if fields["operator"] != nil {
+		return nil, fmt.Errorf("%s.operator was removed (LEGION-664): the daemon's machine login is the legion-daemon service's, which anyone signed in to Dispatch approves, so it names no approver; delete the key", agentSecretsKey)
+	}
 	block := &AgentSecretsConfig{Audience: defaultAgentSecretsAudience, TokenExpirySeconds: defaultTokenExpirySeconds}
 	if block.URL, err = requiredString(fields["url"], agentSecretsKey+".url", ""); err != nil {
 		return nil, err
@@ -134,9 +197,6 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 		return nil, fmt.Errorf("%s.url must use https unless the host is a loopback address; got %q", agentSecretsKey, block.URL)
 	}
 	block.URL = strings.TrimSuffix(block.URL, "/")
-	if block.Operator, err = requiredString(fields["operator"], agentSecretsKey+".operator", ""); err != nil {
-		return nil, err
-	}
 	if audience, err := optionalString(fields["audience"], agentSecretsKey+".audience"); err != nil {
 		return nil, err
 	} else if audience != "" {
@@ -155,34 +215,64 @@ func readAgentSecrets(value *yaml.Node) (*AgentSecretsConfig, error) {
 	return block, nil
 }
 
+// isLoopbackHost is localhost, with or without the root's trailing dot, or a loopback IP address.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }
 
+// isUnspecifiedHost is the unspecified address (`0.0.0.0`, `::`): no host at all, which only a
+// listener may bind.
+func isUnspecifiedHost(host string) bool {
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsUnspecified()
+}
+
+// readAdvertiseHost is `advertise_host`: an IP address or a DNS-1123 name, the host part alone of
+// every pod's `--connect tcp://<host>:<port>`. The daemon adds the worker stream's port itself
+// (shimAddress, internal/daemon/daemon.go), and the shim parses that address as a URL, so anything
+// else (a scheme, a port, brackets, a path, a user, a query, a space or an underscore) would build
+// an address no pod's shim dials.
+func readAdvertiseHost(value *yaml.Node, key string) (*string, error) {
+	read, err := readNonEmptyString(value, key)
+	if err != nil || read == nil {
+		return read, err
+	}
+	if host := *read; net.ParseIP(host) == nil && len(validation.IsDNS1123Subdomain(strings.ToLower(host))) != 0 {
+		return nil, fmt.Errorf("%s must be an IP address or a DNS name, with no scheme, port, path or brackets: the daemon adds worker_stream_port itself (%s)", key, host)
+	}
+	return read, nil
+}
+
 // readKubernetes reads the `runtime.kubernetes` block, refusing any member it does not model and
-// any value a pod could not run with. What depends on keys outside the block is checked once the
-// whole file is read (checkKubernetesKeys).
+// any value a pod could not run with. A key an earlier shape of the block had (tree_volume, the
+// TypeScript daemon's role_profiles and gateway) is known so that its refusal names what replaced
+// it, which is what `legion start --check-config` shows the operator to edit. What depends on keys
+// outside the block is checked once the whole file is read (checkKubernetesKeys), and the
+// reservations the file leaves out are filled when the block is settled (resolveKubernetes).
 func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if value.Kind != yaml.MappingNode {
 		return nil, errors.New("runtime.kubernetes must be a mapping")
 	}
-	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "tree_volume",
+	fields, err := members(value, kubernetesKey, "namespace", "image", "storage_class", "issue_volume", "tree_volume",
 		"kubeconfig", "context", "scheduling", "resources", "gateway", "pod", "session_store", "session_dsn_secret",
 		"role_profiles", "agent_secrets")
 	if err != nil {
 		return nil, err
 	}
+	if fields["tree_volume"] != nil {
+		return nil, errors.New("runtime.kubernetes.tree_volume is now issue_volume: one volume per issue")
+	}
 	if fields["role_profiles"] != nil {
-		return nil, errors.New("unknown key runtime.kubernetes.role_profiles: each role's requests and limits are set under runtime.kubernetes.resources, and a role absent there gets none")
+		return nil, errors.New("unknown key runtime.kubernetes.role_profiles: a role's reservation is runtime.kubernetes.resources.<role>, a cpu and a memory each both request and limit, and a role absent there takes the daemon's default")
 	}
 	if fields["gateway"] != nil {
 		return nil, errors.New("runtime.kubernetes.gateway was removed (LEGION-270): configure pods with runtime.kubernetes.pod (docs/kubernetes.md, Operator configuration)")
 	}
-	block := &Kubernetes{TreeVolume: defaultTreeVolume}
+	block := &Kubernetes{IssueVolume: defaultIssueVolume}
 	if block.Namespace, err = requiredString(fields["namespace"], kubernetesKey+".namespace", ""); err != nil {
 		return nil, err
 	}
@@ -193,15 +283,15 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 		return nil, errors.New("runtime.kubernetes.image must be pinned by digest (@sha256:…)")
 	}
 	if block.StorageClass, err = requiredString(fields["storage_class"], kubernetesKey+".storage_class",
-		": the cluster has no default storage class for the tree volume"); err != nil {
+		": the cluster has no default storage class for the issue volumes"); err != nil {
 		return nil, err
 	}
-	treeVolume, err := readQuantity(fields["tree_volume"], kubernetesKey+".tree_volume")
+	issueVolume, err := readQuantity(fields["issue_volume"], kubernetesKey+".issue_volume")
 	if err != nil {
 		return nil, err
 	}
-	if treeVolume != "" {
-		block.TreeVolume = treeVolume
+	if issueVolume != "" {
+		block.IssueVolume = issueVolume
 	}
 	if block.Kubeconfig, err = optionalString(fields["kubeconfig"], kubernetesKey+".kubeconfig"); err != nil {
 		return nil, err
@@ -212,7 +302,7 @@ func readKubernetes(value *yaml.Node) (*Kubernetes, error) {
 	if block.Context != "" && block.Kubeconfig == "" {
 		return nil, errors.New("runtime.kubernetes.context names a kubeconfig context, so it requires runtime.kubernetes.kubeconfig")
 	}
-	if err := checkSessionStore(fields["session_store"], fields["session_dsn_secret"]); err != nil {
+	if block.SessionDSNSecret, err = readSessionStore(fields["session_store"], fields["session_dsn_secret"]); err != nil {
 		return nil, err
 	}
 	if block.Scheduling, err = readScheduling(fields["scheduling"]); err != nil {
@@ -573,7 +663,14 @@ func readPodMounts(value *yaml.Node, volumes []corev1.Volume) ([]corev1.VolumeMo
 }
 
 // resolveKubernetes settles `runtime: kubernetes`: the keys outside the block every pod needs, and
-// the block, its kubeconfig resolved against the file's directory.
+// the block, its kubeconfig resolved against the file's directory and every role's reservation
+// filled — the file's cpu, memory, ephemeral storage and its request where it set them, the
+// default for each field it left out — so the daemon translates seven complete reservations and
+// never one with a side missing. A role whose settled ephemeral-storage request exceeds its limit
+// is refused naming both, since the API server would refuse the pod (the file set one of the two,
+// or both: the defaults never exceed). The file's own block (file.Kubernetes) keeps only what the
+// file set, which resolveControllerLaunch reads to tell a controller the operator sized from one
+// the default sized.
 func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	if err := checkKubernetesKeys(file); err != nil {
 		return err
@@ -582,33 +679,62 @@ func resolveKubernetes(file fileConfig, configDir string, cfg *Config) error {
 	if block.Kubeconfig != "" {
 		block.Kubeconfig = underConfig(block.Kubeconfig, configDir)
 	}
+	block.Resources = DefaultResources()
+	for role, set := range file.Kubernetes.Resources {
+		settled := block.Resources[role]
+		block.Resources[role] = RoleResources{
+			CPU: cmp.Or(set.CPU, settled.CPU), Memory: cmp.Or(set.Memory, settled.Memory),
+			EphemeralStorage:        cmp.Or(set.EphemeralStorage, settled.EphemeralStorage),
+			EphemeralStorageRequest: cmp.Or(set.EphemeralStorageRequest, settled.EphemeralStorageRequest),
+		}
+	}
+	for _, role := range append(slices.Clone(claim.Roles), claim.RoleController) {
+		settled := block.Resources[role]
+		request, limit := resource.MustParse(settled.EphemeralStorageRequest), resource.MustParse(settled.EphemeralStorage)
+		if request.Cmp(limit) > 0 {
+			return fmt.Errorf("%s.resources.%s.ephemeral_storage_request %s exceeds ephemeral_storage %s", kubernetesKey, role, settled.EphemeralStorageRequest, settled.EphemeralStorage)
+		}
+	}
 	cfg.Runtime = Runtime{Name: "kubernetes", Kubernetes: &block}
 	return nil
 }
 
-// checkSessionStore reads `session_store` and `session_dsn_secret` only to refuse what the Go
-// runtime does not do: a pod's session lives on the tree volume until Stage 6 adds the database.
-func checkSessionStore(store, dsnSecret *yaml.Node) error {
+// secretDataKey is what Kubernetes accepts as a Secret's data key.
+var secretDataKey = regexp.MustCompile(`^[-._a-zA-Z0-9]+$`)
+
+// readSessionStore reads `session_store` and `session_dsn_secret`: the providers Secret's key that
+// holds the session database's URL under `postgres`, "" under `pvc`, the default, where each
+// session is a file on the issue's volume. postgres names its key, and pvc names none: an inert key
+// is refused, never ignored.
+func readSessionStore(store, dsnSecret *yaml.Node) (string, error) {
 	name, err := readString(store, kubernetesKey+".session_store")
 	if err != nil {
-		return err
+		return "", err
 	}
 	switch {
 	case name == nil || *name == "pvc":
+		if dsnSecret != nil {
+			return "", errors.New("runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it")
+		}
+		return "", nil
 	case *name == "postgres":
-		return errors.New("runtime.kubernetes.session_store postgres is not supported until Stage 6: a pod's session lives on the tree volume (pvc)")
 	default:
-		return errors.New("runtime.kubernetes.session_store must be 'pvc' or 'postgres'")
+		return "", errors.New("runtime.kubernetes.session_store must be 'pvc' or 'postgres'")
 	}
-	if dsnSecret != nil {
-		return errors.New("runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is pvc; remove it")
+	key, err := requiredString(dsnSecret, kubernetesKey+".session_dsn_secret",
+		" with runtime.kubernetes.session_store postgres: the key of the providers Secret that holds the session database's postgres:// URL")
+	if err != nil {
+		return "", err
 	}
-	return nil
+	if !secretDataKey.MatchString(key) {
+		return "", fmt.Errorf("runtime.kubernetes.session_dsn_secret %q is not a Secret data key ([-._a-zA-Z0-9]+)", key)
+	}
+	return key, nil
 }
 
 // readQuantity reads a positive Kubernetes quantity as the file wrote it, "" when unset. A bare
-// YAML number (`tree_volume: 20`) is its text. Zero is refused with the negatives: it is no size,
-// and the runtime refuses a zero tree volume.
+// YAML number (`issue_volume: 20`) is its text. Zero is refused with the negatives: it is no size,
+// and the runtime refuses a zero issue volume.
 func readQuantity(value *yaml.Node, key string) (string, error) {
 	if value == nil || value.Tag == "!!null" {
 		return "", nil
@@ -727,24 +853,32 @@ func readTolerations(value *yaml.Node, key string) ([]Toleration, error) {
 	return tolerations, nil
 }
 
-// readResources is a mapping of role to that role's requests and limits.
+// readResources is a mapping of role to that role's reservation, the file's own: each workflow
+// role, and the controller, whose pod a daemon under `controller: daemon` launches
+// (resolveControllerLaunch refuses its key otherwise). A role's entry sets any of `cpu`, `memory`,
+// `ephemeral_storage` (the container's limit on the node's disk) and `ephemeral_storage_request`
+// (what the scheduler reserves of it); what it leaves out is "" here and the default once settled
+// (resolveKubernetes, which also holds the request to the limit). The keys of the earlier shape, a
+// role's `requests` and `limits` mappings, are known so that each is refused naming the shape that
+// replaced it.
 func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 	const key = kubernetesKey + ".resources"
 	if value == nil {
 		return nil, nil
 	}
 	if value.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("%s must be a mapping of role to requests and limits", key)
+		return nil, fmt.Errorf("%s must be a mapping of role to its cpu and memory reservation", key)
 	}
-	roles := make([]string, len(claim.Roles))
-	for i, role := range claim.Roles {
-		roles[i] = string(role)
+	roles := make([]string, 0, len(claim.Roles)+1)
+	for _, role := range claim.Roles {
+		roles = append(roles, string(role))
 	}
+	roles = append(roles, string(claim.RoleController))
 	var resources map[claim.Role]RoleResources
 	for i := 0; i+1 < len(value.Content); i += 2 {
 		name, entry := value.Content[i].Value, value.Content[i+1]
 		role := claim.Role(name)
-		if !claim.IsRole(role) {
+		if !claim.IsRole(role) && role != claim.RoleController {
 			return nil, fmt.Errorf("%s key %q must be a role (%s)", key, name, strings.Join(roles, ", "))
 		}
 		if _, exists := resources[role]; exists {
@@ -752,17 +886,28 @@ func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 		}
 		field := key + "." + name
 		if entry.Kind != yaml.MappingNode {
-			return nil, fmt.Errorf("%s must be a mapping", field)
+			return nil, fmt.Errorf("%s must be a mapping of cpu and memory", field)
 		}
-		fields, err := members(entry, field, "requests", "limits")
+		fields, err := members(entry, field, "cpu", "memory", "ephemeral_storage", "ephemeral_storage_request", "requests", "limits")
 		if err != nil {
 			return nil, err
 		}
+		for _, gone := range []string{"requests", "limits"} {
+			if fields[gone] != nil {
+				return nil, fmt.Errorf("%s.%s is gone: a role's reservation is one cpu and one memory, each both its request and its limit", field, gone)
+			}
+		}
 		var read RoleResources
-		if read.Requests, err = readQuantities(fields["requests"], field+".requests"); err != nil {
+		if read.CPU, err = readQuantity(fields["cpu"], field+".cpu"); err != nil {
 			return nil, err
 		}
-		if read.Limits, err = readQuantities(fields["limits"], field+".limits"); err != nil {
+		if read.Memory, err = readQuantity(fields["memory"], field+".memory"); err != nil {
+			return nil, err
+		}
+		if read.EphemeralStorage, err = readQuantity(fields["ephemeral_storage"], field+".ephemeral_storage"); err != nil {
+			return nil, err
+		}
+		if read.EphemeralStorageRequest, err = readQuantity(fields["ephemeral_storage_request"], field+".ephemeral_storage_request"); err != nil {
 			return nil, err
 		}
 		if resources == nil {
@@ -771,31 +916,6 @@ func readResources(value *yaml.Node) (map[claim.Role]RoleResources, error) {
 		resources[role] = read
 	}
 	return resources, nil
-}
-
-func readQuantities(value *yaml.Node, key string) (Quantities, error) {
-	if value == nil {
-		return Quantities{}, nil
-	}
-	if value.Kind != yaml.MappingNode {
-		return Quantities{}, fmt.Errorf("%s must be a mapping", key)
-	}
-	fields, err := members(value, key, "cpu", "memory", "ephemeral_storage")
-	if err != nil {
-		return Quantities{}, err
-	}
-	var quantities Quantities
-	for _, part := range []struct {
-		name   string
-		target *string
-	}{
-		{"cpu", &quantities.CPU}, {"memory", &quantities.Memory}, {"ephemeral_storage", &quantities.EphemeralStorage},
-	} {
-		if *part.target, err = readQuantity(fields[part.name], key+"."+part.name); err != nil {
-			return Quantities{}, err
-		}
-	}
-	return quantities, nil
 }
 
 // checkKubernetesKeys refuses a file whose keys outside the block leave a pod unable to run, or
@@ -811,7 +931,7 @@ func checkKubernetesKeys(file fileConfig) error {
 		{"envoy_url", file.EnvoyURL == nil, "a pod cannot reach the loopback listener it defaults to"},
 		{"nats_urls", len(file.NatsURLs) == 0, "every pod's Envoy client connects to NATS"},
 		{"envoy_token_file", file.EnvoyTokenFile == nil, "every pod receives the Envoy bearer"},
-		{"operator_token_file", file.OperatorTokenFile == nil, "the daemon cannot launch the controller there; legion controller start presents this token"},
+		{"operator_token_file", file.OperatorTokenFile == nil, "legion claims presents this token, as legion controller start does under controller: operator"},
 		{"dispatch_url", file.DispatchURL == nil, "the workflow is what launches every pod"},
 		{"github_apps", file.GitHubApps == nil, "every pod's workspace is cloned with the implement App's token"},
 		{"projects", file.Projects == nil, "every pod's workspace is its project's repository"},
@@ -836,15 +956,24 @@ func checkKubernetesKeys(file fileConfig) error {
 }
 
 // checkPodReachable refuses an address pods are handed that no pod can reach. Every pod's shim
-// dials the worker stream at tcp://<bind>:<worker_stream_port>, so bind must name one of the
-// daemon host's own addresses, never loopback or the unspecified address it would listen on. Every
-// Legion URL a pod is handed - daemon_url, envoy_url, dispatch_url, and each nats_urls entry - must
-// name neither: a loopback host is, in a pod, the pod itself, and the unspecified address is no host
-// at all.
+// dials the worker stream at tcp://<host>:<worker_stream_port>, the host being AdvertiseHost when
+// the file sets one and Bind otherwise, so that host may be neither loopback nor the unspecified
+// address. Bind beside an AdvertiseHost is only where the daemon listens, so it may be the
+// unspecified address, but not loopback, where no pod reaches the listener at all. Every Legion URL
+// a pod is handed - daemon_url, envoy_url, dispatch_url, and each nats_urls entry - must name
+// neither: a loopback host is, in a pod, the pod itself, and the unspecified address is no host at
+// all.
 func checkPodReachable(cfg Config) error {
-	if ip := net.ParseIP(cfg.Bind); strings.EqualFold(cfg.Bind, "localhost") || ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
-		return fmt.Errorf("bind %s is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://%s; bind the daemon host's own address when runtime is kubernetes",
-			cfg.Bind, net.JoinHostPort(cfg.Bind, strconv.Itoa(cfg.WorkerStreamPort)))
+	key, host, why := "bind", cfg.Bind, "bind the daemon host's own address when runtime is kubernetes"
+	if cfg.AdvertiseHost != "" {
+		if isLoopbackHost(cfg.Bind) {
+			return fmt.Errorf("bind %s is loopback, where no pod reaches the worker stream, whatever advertise_host names; bind 0.0.0.0 or the daemon host's own address when runtime is kubernetes", cfg.Bind)
+		}
+		key, host, why = "advertise_host", cfg.AdvertiseHost, "name the host pods reach it at when runtime is kubernetes"
+	}
+	if isLoopbackHost(host) || isUnspecifiedHost(host) {
+		return fmt.Errorf("%s %s is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://%s; %s",
+			key, host, net.JoinHostPort(host, strconv.Itoa(cfg.WorkerStreamPort)), why)
 	}
 	addresses := []struct{ key, value string }{
 		{"daemon_url", cfg.DaemonURL}, {"envoy_url", cfg.EnvoyURL}, {"dispatch_url", cfg.DispatchURL},
@@ -858,12 +987,11 @@ func checkPodReachable(cfg Config) error {
 			return fmt.Errorf("%s must be a valid URL", address.key)
 		}
 		host := parsed.Hostname()
-		ip := net.ParseIP(host)
 		var why string
 		switch {
-		case strings.EqualFold(host, "localhost") || ip != nil && ip.IsLoopback():
+		case isLoopbackHost(host):
 			why = "names a loopback host, which in a pod is the pod itself"
-		case ip != nil && ip.IsUnspecified():
+		case isUnspecifiedHost(host):
 			why = "names the unspecified address, which is no host a pod can dial"
 		default:
 			continue

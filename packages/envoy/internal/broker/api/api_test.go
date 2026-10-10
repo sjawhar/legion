@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -45,11 +47,13 @@ const (
 
 // testServer is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to
 // its store — needed to seed fixtures (an enrollment, a launcher credential) the API itself has
-// no route to create directly — and the local OIDC issuer its pod verifier trusts, which mints the
+// no route to create directly — the secrets.Local standing in for Secrets Manager, which a test
+// writes to as a person would, and the local OIDC issuer its pod verifier trusts, which mints the
 // projected service-account tokens a pod enrollment presents.
 type testServer struct {
 	URL       string
 	Store     *store.Store
+	Secrets   *secrets.Local
 	podIssuer *oidctest.Issuer
 	podKey    *oidctest.Key
 }
@@ -64,6 +68,13 @@ const podAudience = "legion-broker-pod"
 // BROKER_K8S_OIDC_ISSUER is set, and mounts api.Register on an httptest.Server so every proof's
 // htu and every request object's aud have one real, consistent PublicURL to check against.
 func newTestServer(t *testing.T) *testServer {
+	t.Helper()
+	return newTestServerWith(t, func(*api.Deps) {})
+}
+
+// newTestServerWith is newTestServer with adjust applied to the api.Deps it registers, for a test
+// that needs one dependency wired otherwise, such as a tighter rate limit.
+func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	t.Helper()
 	st := storetest.Open(t)
 
@@ -99,13 +110,16 @@ func newTestServer(t *testing.T) *testServer {
 		Replay: enr.Replay,
 	}
 
-	api.Register(mux, api.Deps{
+	deps := api.Deps{
 		PublicURL: srv.URL, UIToken: testUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
-	})
+		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: cur, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
+	}
+	adjust(&deps)
+	api.Register(mux, deps)
 
-	return &testServer{URL: srv.URL, Store: st, podIssuer: issuer, podKey: podKey}
+	return &testServer{URL: srv.URL, Store: st, Secrets: local, podIssuer: issuer, podKey: podKey}
 }
 
 // newSessionEnrollment inserts a live box enrollment (and its backing launcher_credentials row)
@@ -232,12 +246,20 @@ type wireDecided struct {
 	CredentialID *string   `json:"credential_id"`
 }
 
+// wireSession is a record's or a pending entry's "session" field (LEGION-587): the request's own
+// override and its requesting enrollment's id, read independently.
+type wireSession struct {
+	Request    *string `json:"request"`
+	Enrollment *string `json:"enrollment"`
+}
+
 type wireRecord struct {
 	RecordID        string              `json:"record_id"`
 	Kind            string              `json:"kind"`
 	State           string              `json:"state"`
 	Approver        string              `json:"approver"`
 	Enrollment      *wireEnrollmentInfo `json:"enrollment"`
+	Session         wireSession         `json:"session"`
 	Identifiers     []string            `json:"identifiers"`
 	Service         *string             `json:"service"`
 	Reason          string              `json:"reason"`
@@ -270,10 +292,11 @@ type wireRequestStatus struct {
 }
 
 type wirePendingEntry struct {
-	RecordID    string    `json:"record_id"`
-	Kind        string    `json:"kind"`
-	Identifiers []string  `json:"identifiers"`
-	RequestedAt time.Time `json:"requested_at"`
+	RecordID    string      `json:"record_id"`
+	Kind        string      `json:"kind"`
+	Identifiers []string    `json:"identifiers"`
+	RequestedAt time.Time   `json:"requested_at"`
+	Session     wireSession `json:"session"`
 }
 
 type wireApproverGrant struct {
@@ -302,10 +325,12 @@ func signAgentSecretRequest(t *testing.T, key *ecdsa.PrivateKey, audience, reaso
 	return compact
 }
 
-func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, loginHint, host string) string {
+// signMachineLoginRequest signs a machine login's request object for one launcher_credential
+// detail on host, naming service ("" for a person's machine) and carrying loginHint ("" for none).
+func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, loginHint, host, service string) string {
 	t.Helper()
 	compact, err := record.Sign(key, audience, []record.AuthorizationDetail{
-		{Type: "launcher_credential", Identifier: host},
+		{Type: "launcher_credential", Identifier: host, Service: service},
 	}, "", loginHint, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
@@ -370,7 +395,7 @@ func TestEnrollmentRouteWithOldBearerHeaderIsLauncherInvalid(t *testing.T) {
 func (ts *testServer) mintLauncherCredential(t *testing.T, loginHint, host string) (credentialID string, key *ecdsa.PrivateKey) {
 	t.Helper()
 	key = newSigningKey(t)
-	return ts.approveMachineLogin(t, signMachineLoginRequest(t, key, ts.URL, loginHint, host), loginHint), key
+	return ts.approveMachineLogin(t, signMachineLoginRequest(t, key, ts.URL, loginHint, host, ""), loginHint), key
 }
 
 // approveMachineLogin posts a signed machine-login request object, looks its record up by the
@@ -443,7 +468,7 @@ func TestLauncherProofRejectedOnSessionAuthRoute(t *testing.T) {
 func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox")
+	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox", "")
 
 	status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	if status != http.StatusAccepted {
@@ -580,7 +605,7 @@ func TestMachineLoginLookupUnknownCodeIsNoSuchCode(t *testing.T) {
 func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox")
+	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox", "")
 	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
 	login := decode[struct {
 		PendingID string `json:"pending_id"`
@@ -602,16 +627,18 @@ func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 }
 
 // TestAgentSecretRequestLifecycle drives an approval-needing agent_secret request end to end:
-// creation (session proof), the UI's pending list and record read (with an enrollment and no code
-// required), approval by the record's approver, the session's own status/values reads, the UI's
-// grant list, and human revocation, refused for any login but the approver's.
+// creation (session proof, naming an explicit session_id override), the UI's pending list and
+// record read (with an enrollment, its session, and no code required), approval by the record's
+// approver, the session's own status/values reads, the UI's grant list, and human revocation,
+// refused for any login but the approver's.
 func TestAgentSecretRequestLifecycle(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), testApprover)
 
+	const sessionID = "sess-agent-secret-lifecycle"
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it for the demo", "DEEL_API_KEY")
 	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
-		map[string]any{"request": compact, "session_id": nil})
+		map[string]any{"request": compact, "session_id": sessionID})
 	if status != http.StatusOK {
 		t.Fatalf("POST /v1/requests = %d, want 200: %s", status, body)
 	}
@@ -635,6 +662,9 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 			if p.Kind != "agent_secret" || len(p.Identifiers) != 1 || p.Identifiers[0] != "DEEL_API_KEY" {
 				t.Fatalf("pending entry = %+v, want kind=agent_secret identifiers=[DEEL_API_KEY]", p)
 			}
+			if p.Session.Request == nil || *p.Session.Request != sessionID || p.Session.Enrollment != nil {
+				t.Fatalf("pending entry session = %+v, want request=%s and no enrollment session_id (this box enrolled none)", p.Session, sessionID)
+			}
 		}
 	}
 	if !found {
@@ -651,6 +681,9 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	}
 	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "box" || readBack.Enrollment.Operator != testApprover || readBack.Enrollment.Slot != nil {
 		t.Fatalf("record enrollment = %+v, want kind=box operator=%s and no slot", readBack.Enrollment, testApprover)
+	}
+	if readBack.Session.Request == nil || *readBack.Session.Request != sessionID || readBack.Session.Enrollment != nil {
+		t.Fatalf("record session = %+v, want request=%s and no enrollment session_id", readBack.Session, sessionID)
 	}
 
 	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
@@ -675,6 +708,9 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	decidedRead := decode[wireRecord](t, body)
 	if decidedRead.State != "approved" || decidedRead.Decided == nil || decidedRead.Decided.Event != "approved" || decidedRead.Decided.CredentialID != nil {
 		t.Fatalf("decided record read = %+v, want state=approved with its approved event and a null credential_id", decidedRead)
+	}
+	if decidedRead.Session.Request == nil || *decidedRead.Session.Request != sessionID {
+		t.Fatalf("decided record session = %+v, want request=%s still named after approval", decidedRead.Session, sessionID)
 	}
 
 	status, body = ts.session(t, sessionKey, enrollmentID, http.MethodGet, "/v1/requests/"+requestID, nil)
@@ -806,6 +842,27 @@ func TestCreateRequestNeedingTwoApproversIs400MixedApprovers(t *testing.T) {
 	}
 }
 
+// TestCreateRequestWithInvalidSessionIDIs400SessionIDInput pins, over real HTTP, that a
+// session_id override that is too long is refused 400 SESSION_ID_INPUT at record time
+// (LEGION-587's hardening). requests.TestCreateRefusesAnInvalidSessionID (machine_test.go)
+// already exercises Machine.Create's validSessionID bound directly (too-long, whitespace,
+// control-character, and the exact-128 boundary); this pins the same bound at the HTTP handler
+// boundary, the way UNKNOWN_SECRET and MIXED_APPROVERS are already covered above.
+func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it", "DEEL_API_KEY")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": compact, "session_id": strings.Repeat("a", 129)})
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST /v1/requests (session_id too long) = %d, want 400: %s", status, body)
+	}
+	werr := decode[wireError](t, body)
+	if werr.Code != "SESSION_ID_INPUT" {
+		t.Fatalf("code = %q, want SESSION_ID_INPUT", werr.Code)
+	}
+}
+
 // TestDecisionsTakeOnlyTheApproversLogin pins that only the record's approver decides it, and
 // only through Dispatch: the approver's own login sent without the UI bearer is 401 UI_INVALID,
 // another login's approve and deny are both 403 NOT_APPROVER, a missing approver is 400
@@ -896,7 +953,7 @@ func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
 	machineLogin := func(host string) (recordID, code string) {
 		t.Helper()
 		_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
-			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, host)})
+			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, host, "")})
 		code = decode[struct {
 			Code string `json:"code"`
 		}](t, body).Code
@@ -1049,5 +1106,85 @@ func TestPathValidation(t *testing.T) {
 	werr = decode[wireError](t, body)
 	if werr.Code != "GRANT_ID_INPUT" {
 		t.Fatalf("code = %q, want GRANT_ID_INPUT", werr.Code)
+	}
+}
+
+// TestALauncherCredentialRefusalRoundsRetryAfterUp pins that the machine-login route names its
+// Retry-After by the rule the reread route does: whole seconds rounded up, so a caller told to
+// wait does not come back before a token has returned.
+func TestALauncherCredentialRefusalRoundsRetryAfterUp(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
+			PerLogin:   ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
+		}
+	})
+	login := func() (int, string) {
+		t.Helper()
+		body, err := json.Marshal(map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox", "")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.Post(ts.URL+"/v1/launcher-credentials", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode, resp.Header.Get("Retry-After")
+	}
+	if status, _ := login(); status != http.StatusAccepted {
+		t.Fatalf("first machine login = %d, want 202", status)
+	}
+	if status, retryAfter := login(); status != http.StatusTooManyRequests || retryAfter != "2" {
+		t.Fatalf("second machine login = %d Retry-After=%q, want 429 with Retry-After 2 (1.5 s rounded up)", status, retryAfter)
+	}
+}
+
+// TestAServiceLoginAndAPersonsNeverShareARateLimitBucket pins the per-login bucket's key spaces:
+// every service's login spends one shared bucket, whatever service it names (the name is the
+// machine's own unauthenticated claim, so a fresh name must not buy a fresh bucket) and whatever
+// person its login_hint names, and a person's machine login spends that person's, even one whose
+// login_hint is the bare word the service bucket is keyed on, or a service's name. With one login
+// per bucket, each person's first login is accepted and only a second service's login is refused.
+func TestAServiceLoginAndAPersonsNeverShareARateLimitBucket(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 100},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 1},
+		}
+	})
+	login := func(loginHint, service string) int {
+		t.Helper()
+		status, _ := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
+			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, loginHint, "example-host-cluster", service)})
+		return status
+	}
+	for _, c := range []struct {
+		name, loginHint, service string
+		want                     int
+	}{
+		{"a service's login naming a person", testApprover, "legion-daemon", http.StatusAccepted},
+		{"a person's machine login naming the service bucket's bare key", "service", "", http.StatusAccepted},
+		{"a person's machine login naming a service's bare name", "other-service", "", http.StatusAccepted},
+		{"the person the service's login named", testApprover, "", http.StatusAccepted},
+		{"another service's login, under a name nobody registered", "", "other-service", http.StatusTooManyRequests},
+	} {
+		if got := login(c.loginHint, c.service); got != c.want {
+			t.Fatalf("%s = %d, want %d", c.name, got, c.want)
+		}
+	}
+}
+
+// TestAPersonsMachineLoginNamingNoOneIsRefused pins that a person's machine login must name the
+// person who decides it: one with no login_hint, or one naming the sentinel, is refused 400
+// REQUEST_INVALID before any record opens, while a service's login needs none.
+func TestAPersonsMachineLoginNamingNoOneIsRefused(t *testing.T) {
+	ts := newTestServer(t)
+	for _, hint := range []string{"", record.AnyoneApprover} {
+		status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
+			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, hint, "example-host-devbox", "")})
+		if status != http.StatusBadRequest || decode[wireError](t, body).Code != "REQUEST_INVALID" {
+			t.Fatalf("a person's machine login with login_hint %q = %d %s, want 400 REQUEST_INVALID", hint, status, body)
+		}
 	}
 }

@@ -26,7 +26,7 @@ import (
 )
 
 // TestLoginStatusFollowsTheCredentialTheHelperHolds: an approved machine login, then a re-login
-// the operator denies. The denied `launcher login` exits 1 naming the denial, while login-status
+// the operator denies. The denied `machine login` exits 1 naming the denial, while login-status
 // reads issued and exits 0, since the helper still holds the first login's credential, and says on
 // stderr that the most recent login was denied. While the credential is held, login-status ends
 // with the expiry the broker minted it with, a week out, and a box the helper enrolls with it
@@ -39,13 +39,13 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 	srv, sock := serveRealHelper(t, rig.URL, rig.Operator)
 	loginStatus := func() (string, string, int) {
 		t.Helper()
-		return runAgentSecrets(t, binary, rig.URL, t.TempDir(), []string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
+		return runAgentSecrets(t, binary, rig.URL, t.TempDir(), []string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login-status")
 	}
-	const prefix = "agent-secrets launcher login-status: "
+	const prefix = "agent-secrets machine login-status: "
 
 	// --- an approved login: the helper holds its credential ---
-	if code, exit, stderr := launcherLoginThen(t, rig, binary, sock, "approve", nil); exit != 0 {
-		t.Fatalf("approved launcher login (code %s): exit %d, stderr %q; want 0", code, exit, stderr)
+	if code, exit, stderr := machineLoginThen(t, rig, binary, sock, "approve", nil); exit != 0 {
+		t.Fatalf("approved machine login (code %s): exit %d, stderr %q; want 0", code, exit, stderr)
 	}
 	if !srv.Broker.HasCredential() {
 		t.Fatal("the approved login installed no launcher credential")
@@ -90,9 +90,9 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 	}
 
 	// --- a re-login the operator denies: the first credential is still held ---
-	denied, exit, stderr := launcherLoginThen(t, rig, binary, sock, "deny", nil)
-	if exit != 1 || stderr != "agent-secrets launcher login: denied\n" {
-		t.Fatalf("denied launcher login (code %s): exit %d, stderr %q; want 1 naming the denial", denied, exit, stderr)
+	denied, exit, stderr := machineLoginThen(t, rig, binary, sock, "deny", nil)
+	if exit != 1 || stderr != "agent-secrets machine login: denied\n" {
+		t.Fatalf("denied machine login (code %s): exit %d, stderr %q; want 1 naming the denial", denied, exit, stderr)
 	}
 	if !srv.Broker.HasCredential() {
 		t.Fatal("a denied re-login must leave the earlier login's credential in place")
@@ -104,29 +104,29 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 
 	// --- the broker refuses the held credential ---
 	refuseTheHeldCredential(t, rig, srv, sock)
-	want = prefix + "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login\n"
+	want = prefix + "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets machine login\n"
 	if stdout, stderr, exit := loginStatus(); exit != 1 || stdout != "expired\n" || stderr != want {
 		t.Fatalf("login-status after the broker refused the credential: exit %d, stdout %q, stderr %q; want 1, %q, %q", exit, stdout, stderr, "expired\n", want)
 	}
 
 	// --- a re-login denied while the helper holds no credential ---
-	if code, exit, stderr := launcherLoginThen(t, rig, binary, sock, "deny", nil); exit != 1 {
-		t.Fatalf("denied launcher login (code %s): exit %d, stderr %q; want 1", code, exit, stderr)
+	if code, exit, stderr := machineLoginThen(t, rig, binary, sock, "deny", nil); exit != 1 {
+		t.Fatalf("denied machine login (code %s): exit %d, stderr %q; want 1", code, exit, stderr)
 	}
-	want = prefix + "the most recent machine login was denied; run: agent-secrets launcher login\n"
+	want = prefix + "the most recent machine login was denied; run: agent-secrets machine login\n"
 	if stdout, stderr, exit := loginStatus(); exit != 1 || stdout != "denied\n" || stderr != want {
 		t.Fatalf("login-status after a denied login with no credential held: exit %d, stdout %q, stderr %q; want 1, %q, %q", exit, stdout, stderr, "denied\n", want)
 	}
 }
 
-// launcherLoginThen runs `agent-secrets launcher login` against the helper at sock and reads the
+// machineLoginThen runs `agent-secrets machine login` against the helper at sock and reads the
 // code it prints. It runs before (when non-nil) while that login is still pending, then decides
 // the login on the broker as the operator does on Dispatch's machine-login page
 // (brokertest.Rig.DecideMachineLogin; action is "approve" or "deny"), and returns the code with
 // the command's exit status and stderr once its poll has read the decision.
-func launcherLoginThen(t *testing.T, rig *brokertest.Rig, binary, sock, action string, before func()) (code string, exit int, stderr string) {
+func machineLoginThen(t *testing.T, rig *brokertest.Rig, binary, sock, action string, before func()) (code string, exit int, stderr string) {
 	t.Helper()
-	cmd := exec.Command(binary, "launcher", "login")
+	cmd := exec.Command(binary, "machine", "login")
 	cmd.Env = append(os.Environ(), "AGENT_SECRETS_HELPER_SOCK="+sock, "AGENT_SECRETS_URL="+rig.URL, "AGENT_SECRETS_KEY_DIR=", "AGENT_SECRETS_APPROVE_URL=")
 	var errOut strings.Builder
 	cmd.Stderr = &errOut
@@ -147,11 +147,11 @@ func launcherLoginThen(t *testing.T, rig *brokertest.Rig, binary, sock, action s
 	lines := bufio.NewScanner(out)
 	if !lines.Scan() {
 		<-waited
-		t.Fatalf("launcher login printed no code; stderr %q", errOut.String())
+		t.Fatalf("machine login printed no code; stderr %q", errOut.String())
 	}
 	code, ok := strings.CutPrefix(lines.Text(), "machine login code: ")
 	if !ok {
-		t.Fatalf("launcher login's first line is %q, want the machine login code", lines.Text())
+		t.Fatalf("machine login's first line is %q, want the machine login code", lines.Text())
 	}
 	go func() { // the rest of stdout, so the command never blocks writing it
 		for lines.Scan() {
@@ -168,11 +168,11 @@ func launcherLoginThen(t *testing.T, rig *brokertest.Rig, binary, sock, action s
 	case <-time.After(30 * time.Second):
 		_ = cmd.Process.Kill()
 		<-waited
-		t.Fatalf("launcher login never read the %s decision; stderr %q", action, errOut.String())
+		t.Fatalf("machine login never read the %s decision; stderr %q", action, errOut.String())
 	}
 	var exitErr *exec.ExitError
 	if waitErr != nil && !errors.As(waitErr, &exitErr) {
-		t.Fatalf("launcher login: %v", waitErr)
+		t.Fatalf("machine login: %v", waitErr)
 	}
 	return code, cmd.ProcessState.ExitCode(), errOut.String()
 }

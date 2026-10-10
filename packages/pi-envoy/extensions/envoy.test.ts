@@ -1,23 +1,33 @@
 import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { hostname, tmpdir } from "node:os";
-import { dirname, join } from "node:path";
 import {
-  DISPATCH_ISSUE_TOPIC_PREFIX,
-  dispatchIssueSubject,
-  dispatchToolSpecs,
-} from "@legion/contracts";
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
+import { hostname, tmpdir } from "node:os";
+import { delimiter, dirname, join } from "node:path";
+import { dispatchIssueSubject } from "@legion/contracts";
+import { shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
+import {
+  appendResult,
+  readSessionTitle,
+  sessionDirectory,
+} from "@legion/envoy-client/dispatch-session-state";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
-import { logger } from "@oh-my-pi/pi-utils";
+import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
+import { LOCAL_ENVOY_NOTICE, resetEnvoyPluginInterfaceForTests } from "@legion/pi-shared/interface";
+import type { MessageRenderer, MessageRendererTheme, PiApi } from "@legion/pi-shared/pi-types";
+import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
+import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
-import { matchInjectedUserTurn, resetInjectedUserTurnsForTests } from "../src/dispatch-user-turn";
 import { resetEnvoySessionsForTests } from "../src/envoy-session";
-import { LOCAL_ENVOY_NOTICE } from "../src/legion/phase-stall";
-import { claimEnvoyRole, onEnvoyRoleRegained } from "../src/legion/role-claim-bridge";
-import type { MessageRenderer, MessageRendererTheme, PiApi } from "../src/pi-types";
-import { hostAgentRegistryMock, testAgentRoster } from "./test-host-registry";
 
 type ToolResult = {
   readonly content: readonly { readonly type: "text"; readonly text: string }[];
@@ -46,6 +56,8 @@ type RegisteredCommand = {
 
 type SessionContext = {
   readonly cwd: string;
+  /** Oh My Pi's agent identity: the top-level session's runner is `main`, a `task` subagent's `sub`. */
+  readonly agent?: { readonly kind: "main" | "sub" };
   readonly sessionManager: {
     readonly getSessionId: () => string;
     readonly getSessionName?: () => string | undefined;
@@ -86,6 +98,7 @@ type TestPi = {
       | "message_start"
       | "session_stop"
       | "input"
+      | "tool_call"
       | "tool_result",
     handler: (event: unknown, context: SessionContext) => Promise<unknown>
   ) => void;
@@ -94,10 +107,6 @@ type TestPi = {
     options: unknown
   ) => void;
   readonly sendUserMessage: (content: string, options?: unknown) => void;
-  readonly askEphemeral?: (input: {
-    readonly prompt: string;
-    readonly signal?: AbortSignal;
-  }) => Promise<{ readonly replyText: string }>;
   readonly appendEntry: PiApi["appendEntry"];
 };
 type Subscription = {
@@ -245,9 +254,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   ...hostAgentRegistryMock,
 }));
 // Reads the host package, so it loads only after the mock above is in place.
-const { recordBootstrappedSession, resetLegionBootstrappedSessionForTests } = await import(
-  "../src/subagent-session"
-);
+const { recordBootstrappedSession } = await import("@legion/pi-shared/subagent-session");
 
 const originalFetch = globalThis.fetch;
 
@@ -261,15 +268,19 @@ const originalDispatchToken = process.env.DISPATCH_TOKEN;
 // must not see it, or the extension resolves a real Dispatch config and registers the tools.
 const originalDispatchTokenFile = process.env.DISPATCH_TOKEN_FILE;
 const originalTmuxPane = process.env.TMUX_PANE;
+// The dispatch command's contract with the extension: the session id and host it exports, and the
+// state directory both read, which each test points at a scratch directory of its own.
+const originalDispatchSessionId = process.env.DISPATCH_SESSION_ID;
+const originalDispatchHost = process.env.DISPATCH_HOST;
+const originalDispatchStateDir = process.env.DISPATCH_STATE_DIR;
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on
-  // globalThis would otherwise make every transcript here look like a subagent's, and the
-  // top-level session one test publishes would be the reply address the next test's subagent
-  // instance reports.
-  resetLegionBootstrappedSessionForTests();
+  // the process-wide interface would otherwise make every transcript here look like a
+  // subagent's, the top-level session one test publishes would be the reply address the next
+  // test's subagent instance reports, and a stale claim instance would capture a later claim.
+  resetEnvoyPluginInterfaceForTests();
   resetEnvoySessionsForTests();
-  resetInjectedUserTurnsForTests();
   testAgentRoster().splice(0);
   process.env.ENVOY_NATS_URL = "nats://nats-under-test:4222";
   // A test that never stubs fetch must not register its `ses_*` fixture on the real listener
@@ -282,6 +293,8 @@ beforeEach(() => {
   delete process.env.DISPATCH_TOKEN_FILE;
   process.env.HOME = "/nonexistent-home-for-envoy-tests";
   delete process.env.TMUX_PANE;
+  process.env.DISPATCH_STATE_DIR = mkdtempSync(join(tmpdir(), "envoy-dispatch-state-"));
+  delete process.env.DISPATCH_SESSION_ID;
 });
 
 afterEach(async () => {
@@ -304,6 +317,18 @@ afterEach(async () => {
   else process.env.PATH = originalPath;
   if (originalTmuxPane === undefined) delete process.env.TMUX_PANE;
   else process.env.TMUX_PANE = originalTmuxPane;
+  if (process.env.DISPATCH_STATE_DIR !== undefined) {
+    rmSync(process.env.DISPATCH_STATE_DIR, { recursive: true, force: true });
+  }
+  for (const [name, value] of [
+    ["DISPATCH_SESSION_ID", originalDispatchSessionId],
+    ["DISPATCH_HOST", originalDispatchHost],
+    ["DISPATCH_STATE_DIR", originalDispatchStateDir],
+  ] as const) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  procmgr.__resetShellConfigCacheForTests();
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
@@ -631,6 +656,12 @@ async function bootDirectSession(
     readonly accept?: (count: number) => AcceptAnswer;
     readonly entries?: readonly unknown[];
     readonly branch?: readonly unknown[];
+    /** Answers a Dispatch request outside `/api/v1/messages/`, such as the pictures a delivery
+     *  reads; undefined leaves it to the registration echo. */
+    readonly dispatch?: (url: URL) => Response | undefined;
+    /** Runs as the host is handed each delivery, before it takes it: a throw is the host refusing
+     *  the send. */
+    readonly beforeSend?: () => void;
   } = {}
 ) {
   process.env.DISPATCH_URL = "http://dispatch.test";
@@ -661,6 +692,8 @@ async function bootDirectSession(
       posts.push(`${init?.method ?? "GET"} ${url.pathname}`);
       return new Response(JSON.stringify({ code: "NOT_FOUND" }), { status: 404 });
     }
+    const answered = options.dispatch?.(url);
+    if (answered !== undefined) return answered;
     return responseWithRegistration(input, init, {});
   };
   // Query-string isolation gives each caller its own instance of this stateful extension, and a
@@ -679,11 +712,13 @@ async function bootDirectSession(
   envoyExtension({
     ...fixture.pi,
     sendMessage: (message: never, sendOptions: unknown) => {
+      options.beforeSend?.();
       recordedWhenDelivered.push(fixture.entries.length);
       fixture.pi.sendMessage(message, sendOptions);
       taken();
     },
     sendUserMessage: (content: string, sendOptions?: unknown) => {
+      options.beforeSend?.();
       recordedWhenDelivered.push(fixture.entries.length);
       fixture.pi.sendUserMessage(content, sendOptions);
       taken();
@@ -734,10 +769,8 @@ function responseWithRegistration(
   });
 }
 
-const dispatchToolNames = dispatchToolSpecs.map((spec) => spec.name);
-
 const UNASKED_WAIT_NUDGE =
-  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open it now: a decision block in the document it concerns (dispatch_doc_edit with an ask block), or dispatch_ask for a to-do only a human can do, naming exactly what you need and from whom.";
+  "You just said you are waiting on a human for something no open ask in Dispatch covers. Open it now: a decision block in the document it concerns (dispatch doc-edit with an ask block), or dispatch ask for a to-do only a human can do, naming exactly what you need and from whom.";
 
 /** Custom-message type of the nudge itself, which a session hears amid other deliveries. */
 const ASK_REMINDER_TYPE = "dispatch-ask-reminder";
@@ -768,21 +801,16 @@ async function bootAskNudge(
     readonly hasUI?: boolean;
     /** Awaited before the stop-time query answers, to hold its round trip open. */
     readonly holdStopQuery?: () => Promise<void>;
-    /**
-     * How the host answers the hidden self-check. A host initialised without the capability
-     * installs a stub that throws synchronously instead of rejecting, so this may throw rather
-     * than return a promise.
-     */
+    /** How the host answers the hidden self-check. */
     readonly selfCheck?: (input: {
       readonly prompt: string;
       readonly signal?: AbortSignal;
     }) => Promise<{ readonly replyText: string }>;
     /**
-     * Where the host serves its side turn: `pi.askEphemeral` (the fork's releases before
-     * Oh My Pi 18.3, the default), the extension context's `runEphemeralTurn` (18.3 on), or
-     * nowhere, which is a host that cannot serve a Dispatch BTW either.
+     * Whether the host serves a side turn (the extension context's `runEphemeralTurn`; true by
+     * default). A host without one cannot serve a Dispatch BTW either.
      */
-    readonly sideTurn?: "askEphemeral" | "runEphemeralTurn" | "none";
+    readonly sideTurn?: boolean;
     /**
      * A fresh TUI, whose session id the host mints only after `session_start`: the extension's
      * own `sessionID` stays empty until the registration heartbeat heals the drift.
@@ -804,6 +832,7 @@ async function bootAskNudge(
     | { readonly out: PromiseWithResolvers<void>; readonly gate: PromiseWithResolvers<void> }
     | undefined;
   let lastAsOf = "";
+  let dispatchCalls = 0;
   process.env.DISPATCH_URL = "http://dispatch.test";
   process.env.DISPATCH_TOKEN = "token";
   const queries: string[] = [];
@@ -868,14 +897,11 @@ async function bootAskNudge(
   const selfCheck = options.selfCheck;
   if (options.selfCheckTimeoutMs === undefined) delete process.env.ENVOY_SELF_CHECK_TIMEOUT_MS;
   else process.env.ENVOY_SELF_CHECK_TIMEOUT_MS = String(options.selfCheckTimeoutMs);
-  // Deliberately not an `async` wrapper: a host stub that throws synchronously must reach the
-  // extension as a synchronous throw, which is the whole of that case.
   const answer = (input: { readonly prompt: string; readonly signal?: AbortSignal }) => {
     asked.push(input);
     return selfCheck === undefined ? Promise.resolve({ replyText: "WAITING" }) : selfCheck(input);
   };
-  const host = options.sideTurn ?? "askEphemeral";
-  envoyExtension(host === "askEphemeral" ? { ...fixture.pi, askEphemeral: answer } : fixture.pi);
+  envoyExtension(fixture.pi);
   // A fresh TUI has no session yet at `session_start`; the host mints the id before the first
   // turn, and the extension's own `sessionID` heals only on the next heartbeat.
   let live = options.lazySessionID === true ? "" : sessionID;
@@ -899,11 +925,11 @@ async function bootAskNudge(
       if (options.holdTimers === true) held.push(callback);
       else timers.push(Promise.resolve().then(callback));
     },
-    ...(host === "runEphemeralTurn"
-      ? {
+    ...(options.sideTurn === false
+      ? {}
+      : {
           runEphemeralTurn: ({ promptText, signal }) => answer({ prompt: promptText, signal }),
-        }
-      : {}),
+        }),
   };
   await fixture.handlers.get("session_start")?.({}, context);
   live = sessionID;
@@ -983,15 +1009,39 @@ async function bootAskNudge(
       await drainTimers();
     },
     toolResult: (event: Record<string, unknown>) => toolResult(event, context),
+    /**
+     * A `dispatch` command the agent ran through `via` (bash by default; an `eval` cell runs
+     * `command` as its code): the CLI's ledger line for `tool` with `details` under this session,
+     * then the shell tool's own result, in the order Oh My Pi reports them.
+     */
+    dispatch: async (
+      command: string,
+      tool: string,
+      details: Readonly<Record<string, unknown>>,
+      via: "bash" | "eval" = "bash"
+    ) => {
+      appendResult(sessionDirectory(process.env, sessionID), { tool, details });
+      dispatchCalls += 1;
+      await toolResult(
+        {
+          toolName: via,
+          toolCallId: `call-dispatch-${dispatchCalls}`,
+          input: via === "bash" ? { command } : { language: "py", code: command },
+          details: {},
+          isError: false,
+        },
+        context
+      );
+    },
   };
 }
 
 /**
- * The same host with the run-end self-check available. Without a side turn the nudge has no
- * trigger at all, so neither lifecycle edge reads Dispatch.
+ * The same session on a host with the run-end self-check available. Without a side turn the nudge
+ * has no trigger at all, so neither lifecycle edge reads Dispatch.
  */
-function withSelfCheck(pi: TestPi): TestPi {
-  return { ...pi, askEphemeral: async () => ({ replyText: "PROCEEDING" }) };
+function withSelfCheck(context: SessionContext): SessionContext {
+  return { ...context, runEphemeralTurn: async () => ({ replyText: "PROCEEDING" }) };
 }
 
 describe("envoy OMP extension", () => {
@@ -1042,8 +1092,8 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?open-ask-summary");
     const fixture = createPi();
-    envoyExtension(withSelfCheck(fixture.pi));
-    const context = sessionContext("ses_reminder");
+    envoyExtension(fixture.pi);
+    const context = withSelfCheck(sessionContext("ses_reminder"));
     await fixture.handlers.get("session_start")?.({}, context);
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
@@ -1065,14 +1115,14 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?open-ask-unavailable");
     const fixture = createPi();
-    envoyExtension(withSelfCheck(fixture.pi));
-    const context = {
+    envoyExtension(fixture.pi);
+    const context = withSelfCheck({
       ...sessionContext("ses_unknown"),
       ui: {
         ...sessionContext("ses_unknown").ui,
         notify: (message: string) => notifications.push(message),
       },
-    };
+    });
     await fixture.handlers.get("session_start")?.({}, context);
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
@@ -1108,15 +1158,15 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?open-ask-availability-latch");
     const fixture = createPi();
-    envoyExtension(withSelfCheck(fixture.pi));
-    const context = {
+    envoyExtension(fixture.pi);
+    const context = withSelfCheck({
       ...sessionContext(),
       sessionManager: { ...topLevelSession, getSessionId: () => activeSessionID },
       ui: {
         ...sessionContext().ui,
         notify: (message: string) => notifications.push(message),
       },
-    };
+    });
     await fixture.handlers.get("session_start")?.({}, context);
     const beforeAgentStart = fixture.handlers.get("before_agent_start");
     if (beforeAgentStart === undefined) throw new Error("before_agent_start was not registered");
@@ -1173,40 +1223,21 @@ describe("envoy OMP extension", () => {
       "?author_session=ses_nudge_fires",
       "?author_session=ses_nudge_fires&since=2026-09-13T00%3A00%3A03Z",
     ]);
-    // One self-check per checked stop — the continuation's stop ran none — and each asks for
-    // the one word the steer hangs on.
+    // One self-check per checked stop — the continuation's stop ran none — each asking for the one
+    // word the steer hangs on, in the /btw wrapper (the host sends the prompt as given), with the
+    // extension's own abort signal.
     expect(session.asked.map((ask) => ask.prompt)).toEqual([
-      expect.stringContaining("WAITING or PROCEEDING"),
-      expect.stringContaining("WAITING or PROCEEDING"),
+      expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
+      expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
     ]);
     expect(session.asked[0]?.signal?.aborted).toBe(false);
     // The arming period lives in memory only: nothing about it reaches the transcript.
     expect(session.fixture.entries).toEqual([]);
   });
 
-  test("runs the self-check through the session context's runEphemeralTurn on an upstream host", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-context");
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_context", () => ({}), {
-      sideTurn: "runEphemeralTurn",
-    });
-
-    await session.userTurn();
-    await session.stop();
-
-    expect(session.fixture.deliveries).toMatchObject([
-      { customType: "dispatch-ask-reminder", options: { deliverAs: "steer", triggerTurn: true } },
-    ]);
-    // The self-check goes out in the /btw wrapper, with the extension's own abort signal.
-    expect(session.asked.map((ask) => ask.prompt)).toEqual([
-      expect.stringMatching(/^<btw>\n[\s\S]*WAITING or PROCEEDING[\s\S]*\n<\/btw>$/),
-    ]);
-    expect(session.asked[0]?.signal?.aborted).toBe(false);
-  });
-
   test("runs the stop-time check on the managed timer, after agent_end has returned", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-after-handler");
     const session = await bootAskNudge(envoyExtension, "ses_nudge_after_handler", () => ({}), {
-      sideTurn: "runEphemeralTurn",
       holdTimers: true,
     });
 
@@ -1313,7 +1344,7 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
-  test("neither a Dispatch write nor a failed tool call re-arms the check", async () => {
+  test("neither a dispatch command nor a failed tool call re-arms the check", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm-excluded");
     const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm_no", () => ({}), {
       selfCheck: async () => ({ replyText: "PROCEEDING" }),
@@ -1325,16 +1356,114 @@ describe("envoy OMP extension", () => {
 
     // A Dispatch read or write is the agent talking to the humans this nudge is about, not the
     // work it would be nudged for; a tool that failed moved nothing at all.
-    for (const event of [
-      { toolName: "dispatch_read", isError: false },
-      { toolName: "dispatch_comment", isError: false },
-      { toolName: "bash", isError: true },
-    ]) {
-      await session.toolResult({ toolCallId: "call", input: {}, details: {}, ...event });
-      await session.stop();
-    }
+    await session.dispatch("dispatch read --issue DSP-1", "dispatch_read", { issue: "DSP-1" });
+    await session.stop();
+    await session.dispatch("dispatch search --query 'saved carts'", "dispatch_search", {
+      query: "saved carts",
+    });
+    await session.stop();
+    await session.dispatch(
+      "dispatch comment --issue DSP-1 --body-file - <<'EOF'\nLooks right.\nEOF",
+      "dispatch_comment",
+      { issue: "DSP-1", comment: "c-1" }
+    );
+    await session.stop();
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-failed",
+      input: { command: "ls" },
+      details: {},
+      isError: true,
+    });
+    await session.stop();
     expect(session.asked).toHaveLength(1);
     expect(session.fixture.deliveries).toEqual([]);
+  });
+
+  test("a bash command that is not a dispatch command owes a check, ledger or not", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-rearm-ls");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_rearm_ls", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+
+    await session.userTurn();
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-ls",
+      input: { command: "ls" },
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.asked).toHaveLength(2);
+
+    // A command that ran `dispatch` beside other work is work, even though the ledger grew.
+    await session.dispatch("dispatch search --query x && make", "dispatch_search", {});
+    await session.stop();
+    expect(session.asked).toHaveLength(3);
+  });
+
+  test("a session starts reading the dispatch ledger at its end, so an earlier run's calls never count", async () => {
+    // The CLI's ledger from this session's previous life, a resume ago: an ask that run opened.
+    appendResult(sessionDirectory(process.env, "ses_nudge_resumed_ledger"), {
+      tool: "dispatch_ask",
+      details: { ask: "ask-old" },
+    });
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-resumed-ledger");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_resumed_ledger", () => ({}));
+
+    await session.userTurn();
+    await session.toolResult({
+      toolName: "bash",
+      toolCallId: "call-ls",
+      input: { command: "ls" },
+      details: {},
+      isError: false,
+    });
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+  });
+
+  test("a malformed ledger line is logged with its file and line and never stalls the check", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-malformed-ledger");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_malformed_ledger", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+    const ledger = join(
+      sessionDirectory(process.env, "ses_nudge_malformed_ledger"),
+      "results.jsonl"
+    );
+    const warnings: string[] = [];
+    const stopSink = logger.registerLogSink((entry) => {
+      if (entry.level === "warn") warnings.push(entry.message);
+    });
+    try {
+      await session.userTurn();
+      await session.stop();
+      expect(session.asked).toHaveLength(1);
+
+      // Two appends that interleaved into one line, then a dispatch ask that opened an ask.
+      mkdirSync(dirname(ledger), { recursive: true });
+      writeFileSync(ledger, '{"tool":"dispatch_se{"tool":"dispatch_ask"}\n', { flag: "a" });
+      await session.dispatch("dispatch ask --issue DSP-1 --question x", "dispatch_ask", {
+        issue: "DSP-1",
+        ask: "ask-1",
+      });
+      await session.stop();
+      // The ask the agent opened still counts: it spent the check rather than owing another.
+      expect(session.asked).toHaveLength(1);
+
+      // A later command reads on from past the bad line, which is named once.
+      await session.dispatch("dispatch search --query x", "dispatch_search", {});
+      await session.stop();
+      expect(session.asked).toHaveLength(1);
+    } finally {
+      stopSink();
+    }
+    expect(warnings.filter((warning) => warning.includes(`${ledger}:1:`))).toHaveLength(1);
   });
 
   test("one armed period pays for at most five checks however much work happens", async () => {
@@ -1458,6 +1587,33 @@ describe("envoy OMP extension", () => {
     expect(session.asked).toHaveLength(1);
   });
 
+  test("the drift heal names the live id for the dispatch command and reads that id's ledger", async () => {
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-drift-ledger");
+    // The host minted the id after `session_start` (a fresh TUI's first, or one it moved the
+    // session file off to), with no session event after which it refreshes the shell's
+    // environment: the heal names the id and refreshes that environment itself.
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_drift_ledger", () => ({}), {
+      lazySessionID: true,
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
+    expect(process.env.DISPATCH_SESSION_ID).toBeUndefined();
+    procmgr.refreshShellConfigCache();
+
+    await session.userTurn();
+    await session.heartbeat(session.nextRegistration());
+    expect(process.env.DISPATCH_SESSION_ID).toBe("ses_nudge_drift_ledger");
+    expect(procmgr.getShellConfig().env.DISPATCH_SESSION_ID).toBe("ses_nudge_drift_ledger");
+
+    // The ask the CLI records under the live id spends the period's check.
+    await session.dispatch(
+      "dispatch ask --issue DSP-1 --question 'Rotate the token?'",
+      "dispatch_ask",
+      { issue: "DSP-1", ask: "ask-1" }
+    );
+    await session.stop();
+    expect(session.asked).toEqual([]);
+  });
+
   test("re-establishing the same session during an Envoy outage keeps the armed period", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-nats-retry");
     // NATS is down when the session starts, so the extension retries `establishSession` every
@@ -1541,20 +1697,23 @@ describe("envoy OMP extension", () => {
       const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-subagent");
       const asked: string[] = [];
       const parent = createPi();
-      envoyExtension({ ...parent.pi, askEphemeral: async () => ({ replyText: "WAITING" }) });
+      envoyExtension(parent.pi);
       await parent.handlers.get("session_start")?.(
         {},
-        sessionWithTranscript("ses_parent", parentFile, [])
+        {
+          ...sessionWithTranscript("ses_parent", parentFile, []),
+          runEphemeralTurn: async () => ({ replyText: "WAITING" }),
+        }
       );
       const child = createPi();
-      envoyExtension({
-        ...child.pi,
-        askEphemeral: async () => {
+      envoyExtension(child.pi);
+      const childContext: SessionContext = {
+        ...sessionWithTranscript("ses_child", childFile, []),
+        runEphemeralTurn: async () => {
           asked.push("child");
           return { replyText: "WAITING" };
         },
-      });
-      const childContext = sessionWithTranscript("ses_child", childFile, []);
+      };
       await child.handlers.get("session_start")?.({}, childContext);
 
       await child.handlers.get("before_agent_start")?.({ prompt: "scout the repo" }, childContext);
@@ -1636,52 +1795,12 @@ describe("envoy OMP extension", () => {
     }
   });
 
-  test("survives a host whose ephemeral call throws instead of rejecting", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-selfcheck-throws");
-    const warnings: string[] = [];
-    const stopSink = logger.registerLogSink((entry) => {
-      if (entry.level === "warn") warnings.push(entry.message);
-    });
-    try {
-      // An extension host initialised without the capability installs a stub that throws
-      // synchronously, so `.then(onRejected)` never sees it: the throw would leave the handler
-      // before the check was spent, and every later settle would pay another Dispatch round
-      // trip and throw again, with the cap never engaging.
-      const session = await bootAskNudge(envoyExtension, "ses_nudge_throws", () => ({}), {
-        selfCheck: () => {
-          throw new Error("This extension host does not support ephemeral questions");
-        },
-      });
-
-      await session.userTurn();
-      for (let step = 0; step < 9; step += 1) {
-        await session.stop();
-        await session.toolResult({
-          toolName: "bash",
-          toolCallId: `call-${step}`,
-          input: {},
-          details: {},
-          isError: false,
-        });
-      }
-
-      // Each throw spent the check it ran for, so the period's five bound the damage: one
-      // arming query and five checked stops, then nothing.
-      expect(session.asked).toHaveLength(5);
-      expect(session.queries).toHaveLength(6);
-      expect(session.fixture.deliveries).toEqual([]);
-      expect(warnings).toEqual([expect.stringContaining("self-check failed")]);
-    } finally {
-      stopSink();
-    }
-  });
-
   test("never nudges on a host that cannot ask ephemerally", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-no-ephemeral");
     // The same OMP builds that cannot serve a Dispatch BTW: with no self-check there is no
     // trigger, so the session does not pay the arming round trip either.
     const session = await bootAskNudge(envoyExtension, "ses_nudge_no_ephemeral", () => ({}), {
-      sideTurn: "none",
+      sideTurn: false,
     });
 
     await session.userTurn();
@@ -1734,13 +1853,11 @@ describe("envoy OMP extension", () => {
     // An Envoy delivery woke the session while the hidden call was open, and that turn opened
     // the ask. Steering "you have no open ask" at an agent that has just opened one would send
     // it to open a second.
-    await session.toolResult({
-      toolName: "dispatch_ask",
-      toolCallId: "call-1",
-      input: {},
-      details: { ask: "ask-1" },
-      isError: false,
-    });
+    await session.dispatch(
+      "dispatch ask --issue DSP-1 --question 'Rotate the token?'",
+      "dispatch_ask",
+      { ask: "ask-1" }
+    );
     // A verdict it can no longer use is not left running either.
     expect(session.asked[0]?.signal?.aborted).toBe(true);
     release();
@@ -2084,25 +2201,21 @@ describe("envoy OMP extension", () => {
     const session = await bootAskNudge(envoyExtension, "ses_nudge_opens", () => ({}));
 
     await session.userTurn();
-    await session.toolResult({
-      toolName: "dispatch_ask",
-      toolCallId: "call-1",
-      input: {},
-      details: { ask: "ask-1" },
-      isError: false,
-    });
+    await session.dispatch(
+      "dispatch ask --issue DSP-1 --question 'Rotate the token?'",
+      "dispatch_ask",
+      { issue: "DSP-1", ask: "ask-1" }
+    );
     await session.stop();
     expect(session.fixture.deliveries).toEqual([]);
 
     // The next user turn arms a fresh period, and an approval request settles it the same way.
     await session.userTurn("write the spec");
-    await session.toolResult({
-      toolName: "dispatch_request_approval",
-      toolCallId: "call-2",
-      input: {},
-      details: { ask: "ask-2" },
-      isError: false,
-    });
+    await session.dispatch(
+      "dispatch request-approval --issue DSP-1 --summary 'A live sync replaces the nightly export.'",
+      "dispatch_request_approval",
+      { issue: "DSP-1", ask: "ask-2" }
+    );
     await session.stop();
     expect(session.fixture.deliveries).toEqual([]);
     expect(session.asked).toEqual([]);
@@ -2111,7 +2224,7 @@ describe("envoy OMP extension", () => {
   // Whether a document edit opened an ask is the server's reading of the document it wrote
   // (`advice.decision_blocks_added`), never a reading of the operations' markdown here: whether an
   // opener is a block depends on where it lands, as code or inside a blockquote or a list item.
-  test("a dispatch_doc_edit spends the check exactly when the server reports a decision block it added", async () => {
+  test("a dispatch doc-edit spends the check exactly when the server reports a decision block it added", async () => {
     // The query creates a fresh extension module with isolated module-level awareness state.
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-block");
     const session = await bootAskNudge(envoyExtension, "ses_nudge_document_block", () => ({}));
@@ -2120,13 +2233,15 @@ describe("envoy OMP extension", () => {
       advice: Record<string, unknown> | undefined
     ): Promise<void> => {
       await session.userTurn();
-      await session.toolResult({
-        toolName: "dispatch_doc_edit",
-        toolCallId: `call-${markdown.length}`,
-        input: { issue: "DSP-1", ops: [{ op: "insert", markdown, after: "end" }] },
-        details: advice === undefined ? { issue: "DSP-1" } : { issue: "DSP-1", advice },
-        isError: false,
-      });
+      await session.dispatch(
+        [
+          "dispatch doc-edit --issue DSP-1 --ops-json-file - <<'EOF'",
+          JSON.stringify([{ op: "insert", markdown, after: "end" }]),
+          "EOF",
+        ].join("\n"),
+        "dispatch_doc_edit",
+        advice === undefined ? { issue: "DSP-1" } : { issue: "DSP-1", advice }
+      );
       await session.stop();
     };
 
@@ -2155,104 +2270,61 @@ describe("envoy OMP extension", () => {
     expect(session.fixture.deliveries).toHaveLength(2);
   });
 
-  test("a tool-device write to a Dispatch device owes no check after the call it ran", async () => {
-    // Oh My Pi reports a tool-device call (a `write` to `xd://<tool>` carrying the tool's JSON
-    // arguments) twice: as the tool, then as the `write` (measured on 18.4.9).
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-tool-device");
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_tool_device", () => ({}));
-    const report = (tool: string, input: Record<string, unknown>, details = {}) =>
-      session.toolResult({ toolName: tool, toolCallId: tool, input, details, isError: false });
-    const deviceWrite = (tool: string, input: Record<string, unknown>) =>
-      session.toolResult({
-        toolName: "write",
-        toolCallId: tool,
-        input: { path: `xd://${tool}`, content: JSON.stringify(input) },
-        details: { xdev: { tool, mode: "execute" } },
-        isError: false,
-      });
-    const device = async (
-      tool: string,
-      input: Record<string, unknown>,
-      details: Record<string, unknown> = {}
-    ): Promise<void> => {
-      await report(tool, input, details);
-      await deviceWrite(tool, input);
-    };
-    const ask = { issue: "DSP-1", question: "Rotate the token?" };
+  test("an eval cell during which the ledger grew owes no check, and an ask it opened spends one", async () => {
+    // An eval cell reaches `dispatch` only through a shell its code starts, which no scan of the
+    // code can read, so the ledger growing during the cell is what says it ran one.
+    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-eval");
+    const session = await bootAskNudge(envoyExtension, "ses_nudge_eval", () => ({}), {
+      selfCheck: async () => ({ replyText: "PROCEEDING" }),
+    });
 
     await session.userTurn();
-    await device(
-      "dispatch_doc_edit",
-      {
-        issue: "DSP-1",
-        artifact: "spec",
-        ops: [{ op: "insert", markdown: ":::ask{#window}\nWhich deployment window?\n:::" }],
-      },
-      { issue: "DSP-1", advice: { decision_blocks_added: 1 } }
+    await session.stop();
+    expect(session.asked).toHaveLength(1);
+
+    await session.dispatch(
+      'run(["dispatch", "comment", "--issue", "DSP-1", "--body", "Asked above."])',
+      "dispatch_comment",
+      { issue: "DSP-1", comment: "c-1" },
+      "eval"
     );
     await session.stop();
-    await session.userTurn();
-    await device("dispatch_ask", ask);
-    await device("dispatch_comment", { issue: "DSP-1", body: "Asked above." });
-    await session.stop();
-    expect(session.asked).toEqual([]);
+    expect(session.asked).toHaveLength(1);
 
-    // A parallel call's result can land between the two reports. Its work owes a check, which the
-    // `write` does not spend by counting the same ask a second time.
-    await session.userTurn("next");
-    await report("dispatch_ask", ask);
+    // A cell that wrote nothing to the ledger is work.
     await session.toolResult({
-      toolName: "bash",
-      toolCallId: "call-work",
-      input: { command: "ls" },
+      toolName: "eval",
+      toolCallId: "call-eval-work",
+      input: { language: "py", code: "print(len(open('notes.md').read()))" },
       details: {},
       isError: false,
     });
-    await deviceWrite("dispatch_ask", ask);
     await session.stop();
-    expect(session.asked).toHaveLength(1);
+    expect(session.asked).toHaveLength(2);
+
+    await session.userTurn("next");
+    await session.dispatch(
+      'run(["dispatch", "ask", "--issue", "DSP-1", "--question", "Rotate the token?"])',
+      "dispatch_ask",
+      { issue: "DSP-1", ask: "ask-1" },
+      "eval"
+    );
+    await session.stop();
+    expect(session.asked).toHaveLength(2);
   });
 
-  test("a tool-device write to a non-Dispatch device still counts as work", async () => {
-    const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-device-work");
-    const session = await bootAskNudge(envoyExtension, "ses_nudge_device_work", () => ({}));
-    await session.userTurn();
-    await session.toolResult({
-      toolName: "dispatch_ask",
-      toolCallId: "call-ask",
-      input: { issue: "DSP-1", question: "Rotate the token?" },
-      details: { ask: "ask-1" },
-      isError: false,
-    });
-    // Oh My Pi's own devices (`resolve` applies a staged edit) report only the write.
-    await session.toolResult({
-      toolName: "write",
-      toolCallId: "call-resolve",
-      input: { path: "xd://resolve", content: "apply" },
-      details: { xdev: { tool: "resolve", mode: "execute" } },
-      isError: false,
-    });
-    await session.stop();
-    expect(session.asked).toHaveLength(1);
-  });
-
-  // Oh My Pi answers empty, `?` or `help` content written to `xd://<tool>` with the tool's docs
-  // (`details.xdev.mode` "help"): the tool never runs, so only the write is reported. That write
-  // opens no ask, so it must not spend the check the turn owes.
-  test("a tool-device help write to dispatch_ask or dispatch_request_approval spends no check", async () => {
-    for (const tool of ["dispatch_ask", "dispatch_request_approval"]) {
-      const { default: envoyExtension } = await import(`./envoy.ts?ask-nudge-device-help-${tool}`);
-      const session = await bootAskNudge(
-        envoyExtension,
-        `ses_nudge_device_help_${tool}`,
-        () => ({})
-      );
+  // `--help` prints a command's flags and calls nothing, so the CLI's ledger gains no line and the
+  // call opens no ask: it must not spend the check the turn owes.
+  test("dispatch ask --help or dispatch request-approval --help spends no check", async () => {
+    for (const command of ["ask", "request-approval"]) {
+      const { default: envoyExtension } = await import(`./envoy.ts?ask-nudge-help-${command}`);
+      const session = await bootAskNudge(envoyExtension, `ses_nudge_help_${command}`, () => ({}));
       await session.userTurn();
       await session.toolResult({
-        toolName: "write",
-        toolCallId: `call-help-${tool}`,
-        input: { path: `xd://${tool}`, content: "?" },
-        details: { xdev: { tool, mode: "help" } },
+        toolName: "bash",
+        toolCallId: `call-help-${command}`,
+        input: { command: `dispatch ${command} --help` },
+        details: {},
         isError: false,
       });
       await session.stop();
@@ -2262,42 +2334,36 @@ describe("envoy OMP extension", () => {
     }
   });
 
-  test("a document written through dispatch_issue or dispatch_artifact spends the check only when it holds a decision block", async () => {
+  test("a document written through dispatch issue or dispatch artifact spends the check only when it holds a decision block", async () => {
     // The query creates a fresh extension module with isolated module-level awareness state.
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-document-upload");
     const session = await bootAskNudge(envoyExtension, "ses_nudge_document_upload", () => ({}));
 
-    // The server's count, which a `path` upload carries too, not the input's text.
+    // The server's count, which a `--path` upload carries too, not the command's text.
     await session.userTurn();
-    await session.toolResult({
-      toolName: "dispatch_issue",
-      toolCallId: "call-issue",
-      input: { project: "DSP", title: "Saved carts" },
-      details: { issue: "DSP-1", advice: { decision_blocks: 1 } },
-      isError: false,
-    });
+    await session.dispatch(
+      "dispatch issue --project DSP --title 'Saved carts' --spec-file spec.md",
+      "dispatch_issue",
+      { issue: "DSP-1", advice: { decision_blocks: 1 } }
+    );
     await session.stop();
     expect(session.fixture.deliveries).toEqual([]);
 
     await session.userTurn();
-    await session.toolResult({
-      toolName: "dispatch_artifact",
-      toolCallId: "call-artifact",
-      input: { issue: "DSP-1", name: "spec.md", path: "/tmp/spec.md" },
-      details: { issue: "DSP-1", advice: { decision_blocks: 2 } },
-      isError: false,
-    });
+    await session.dispatch(
+      "dispatch artifact --issue DSP-1 --name spec.md --path /tmp/spec.md",
+      "dispatch_artifact",
+      { issue: "DSP-1", advice: { decision_blocks: 2 } }
+    );
     await session.stop();
     expect(session.fixture.deliveries).toEqual([]);
 
     await session.userTurn();
-    await session.toolResult({
-      toolName: "dispatch_artifact",
-      toolCallId: "call-artifact-plain",
-      input: { issue: "DSP-1", name: "notes.md", content: "Notes." },
-      details: { issue: "DSP-1", advice: { decision_blocks: 0 } },
-      isError: false,
-    });
+    await session.dispatch(
+      "dispatch artifact --issue DSP-1 --name notes.md --content Notes.",
+      "dispatch_artifact",
+      { issue: "DSP-1", advice: { decision_blocks: 0 } }
+    );
     await session.stop();
     expect(session.fixture.deliveries).toEqual([
       expect.objectContaining({ content: UNASKED_WAIT_NUDGE }),
@@ -2707,36 +2773,15 @@ describe("envoy OMP extension", () => {
     expect(actual.error.message).toBe(expected.error.message);
   });
 
-  test("registers every Envoy and Dispatch tool with lenient host validation so execute is the one error surface", async () => {
+  test("registers every Envoy tool with lenient host validation so execute is the one error surface", async () => {
     process.env.DISPATCH_URL = "http://127.0.0.1:8767";
     process.env.DISPATCH_TOKEN = "dispatch-token";
     const { default: envoyExtension } = await import("./envoy.ts?lenient-arg-validation");
     const fixture = createPi();
     envoyExtension(fixture.pi);
 
-    expect(fixture.tools.length).toBeGreaterThan(envoyToolSpecs.length);
+    expect(fixture.tools.map((tool) => tool.name)).toEqual(envoyToolSpecs.map((spec) => spec.name));
     expect(fixture.tools.filter((tool) => tool.lenientArgValidation !== true)).toEqual([]);
-  });
-
-  test("registers Dispatch tool schemas non-strict so an unknown key survives to the executor's own refusal", async () => {
-    // On installed OMP hosts a strict host schema makes the coercion pass delete an unknown
-    // key beside valid required fields — validation then "succeeds" with silently narrowed
-    // args and the tool never sees what the model wrote. Non-strict, the host accepts the
-    // call, unknown root fields are preserved, and `executeDispatchTool`'s always-strict
-    // re-parse names the invented field (see legion #1242 review; the xd:// half of the
-    // contract is can1357/oh-my-pi#12871).
-    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
-    process.env.DISPATCH_TOKEN = "dispatch-token";
-    const { default: envoyExtension } = await import("./envoy.ts?non-strict-dispatch-schema");
-    const fixture = createPi();
-    envoyExtension(fixture.pi);
-    const read = fixture.tools.find((tool) => tool.name === "dispatch_read");
-    if (read === undefined) throw new Error("dispatch_read was not registered");
-    const schema = read.parameters as z.ZodType;
-
-    const accepted = schema.safeParse({ artefact: "spec", issue: "LEGION-1" });
-    if (!accepted.success) throw new Error("the host schema must accept an unknown key");
-    expect(read.lenientArgValidation).toBe(true);
   });
 
   test("refuses an Envoy tool call once with every problem, before reaching the listener", async () => {
@@ -2796,69 +2841,6 @@ describe("envoy OMP extension", () => {
 
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toContain("no live session ses_missing");
-  });
-
-  test("a write that follows an ask subscribes to nothing and tells the agent once per ask", async () => {
-    const interestRegistrations: unknown[] = [];
-    globalThis.fetch = async (input, init) => {
-      const url = new URL(input.toString());
-      if (url.pathname === "/v1/interests/subscribe" && init?.body !== undefined) {
-        interestRegistrations.push(JSON.parse(String(init.body)));
-      }
-      return responseWithRegistration(input, init, {});
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?dispatch-follow-notice");
-    const fixture = createPi();
-
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext());
-    const registrationsAfterStart = interestRegistrations.length;
-    const toolResult = {
-      toolName: "dispatch_ask",
-      toolCallId: "call_1",
-      input: {},
-      details: { issue: "LEGION-1", ask: "ask-1", follows: { ask: "ask-1" } },
-      isError: false,
-    };
-
-    await fixture.handlers.get("tool_result")?.(toolResult, sessionContext());
-    // Model-visible, not a UI-only notification: the host never lets a
-    // tool_result handler amend the result the model already saw, so this
-    // goes through the same sendMessage/steer channel `deliver` uses for
-    // inbound envelopes.
-    expect(fixture.messages).toEqual([
-      `Following ask ask-1 on LEGION-1: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on LEGION-1: envoy_subscribe ${dispatchIssueSubject("LEGION-1", ">")}.`,
-    ]);
-    expect(fixture.deliveries[0]?.options).toEqual({ deliverAs: "steer", triggerTurn: false });
-    // The session's own doing, not an inbound event: the Legion phase-stall check skips it.
-    expect(fixture.deliveries[0]?.details).toEqual(LOCAL_ENVOY_NOTICE);
-    // D3: whole-issue subscription is the agent's explicit envoy_subscribe, never a side effect.
-    expect(natsState.controls.has(dispatchIssueSubject("LEGION-1", ">"))).toBe(false);
-    expect(natsState.controls.has(`${DISPATCH_ISSUE_TOPIC_PREFIX}LEGION-1`)).toBe(false);
-    expect(interestRegistrations).toHaveLength(registrationsAfterStart);
-
-    // A reply on the same ask, or its edit, is not news twice.
-    await fixture.handlers.get("tool_result")?.(
-      {
-        ...toolResult,
-        toolName: "dispatch_comment",
-        toolCallId: "call_2",
-        details: { issue: "LEGION-1", comment: "c-1", ask: "ask-1", follows: { ask: "ask-1" } },
-      },
-      sessionContext()
-    );
-    expect(fixture.messages).toHaveLength(1);
-
-    // A different ask is.
-    await fixture.handlers.get("tool_result")?.(
-      {
-        ...toolResult,
-        toolCallId: "call_3",
-        details: { issue: "LEGION-1", ask: "ask-2", follows: { ask: "ask-2" } },
-      },
-      sessionContext()
-    );
-    expect(fixture.messages).toHaveLength(2);
   });
 
   test("rejects malformed wildcard bases before opening subscriptions", async () => {
@@ -3204,237 +3186,103 @@ describe("envoy OMP extension", () => {
     ]);
   });
 
-  test("subscribes to nothing after a write: not an issue creation, not an error, not a read", async () => {
-    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
-    const { default: envoyExtension } = await import("./envoy.ts?dispatch-write-never-subscribes");
-    const fixture = createPi();
-
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.({}, sessionContext());
-    for (const result of [
-      { toolName: "dispatch_issue", toolCallId: "created", details: { issue: "LEGION-1" } },
-      {
-        toolName: "dispatch_ask",
-        toolCallId: "failed",
-        details: { issue: "LEGION-1", ask: "ask-1", follows: { ask: "ask-1" } },
-        isError: true,
-      },
-      { toolName: "dispatch_read", toolCallId: "read", details: { issue: "LEGION-1" } },
-      {
-        toolName: "dispatch_comment",
-        toolCallId: "comment",
-        details: { issue: "LEGION-1", comment: "c-1" },
-      },
-    ]) {
-      await fixture.handlers.get("tool_result")?.(
-        { input: {}, isError: false, ...result },
-        sessionContext()
-      );
-    }
-
-    expect(natsState.controls.has(dispatchIssueSubject("LEGION-1", ">"))).toBe(false);
-    expect(natsState.controls.has(`${DISPATCH_ISSUE_TOPIC_PREFIX}LEGION-1`)).toBe(false);
-    expect(fixture.messages).toEqual([]);
-  });
-
-  test("registers every shared Dispatch tool when URL and token are available", async () => {
+  test("registers no dispatch_* tool where Dispatch is configured: agents run the dispatch command", async () => {
     process.env.DISPATCH_URL = "http://127.0.0.1:8767";
     process.env.DISPATCH_TOKEN = "dispatch-token";
-    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-registration");
+    const { default: envoyExtension } = await import("./envoy.ts?no-dispatch-tools");
     const fixture = createPi();
 
     envoyExtension(fixture.pi);
 
-    expect(fixture.tools.map((tool) => tool.name)).toEqual(
-      expect.arrayContaining([...envoyToolSpecs.map((spec) => spec.name), ...dispatchToolNames])
-    );
-    expect(fixture.tools).toHaveLength(envoyToolSpecs.length + dispatchToolSpecs.length);
+    expect(fixture.tools.filter((tool) => tool.name.startsWith("dispatch_"))).toEqual([]);
+    expect(fixture.tools.map((tool) => tool.name)).toEqual(envoyToolSpecs.map((spec) => spec.name));
   });
 
-  test("executes dispatch_ask with the calling session identity and returns its structured result", async () => {
-    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
-    process.env.DISPATCH_TOKEN = "dispatch-token";
-    const requests: Array<{ readonly url: URL; readonly init: RequestInit | undefined }> = [];
-    globalThis.fetch = async (input, init) => {
-      const url = new URL(input.toString());
-      requests.push({ url, init });
-      return new Response(
-        JSON.stringify({
-          id: "ask_1",
-          issue_key: "LEGION-1",
-          urgency: "med",
-          question: "Should we ship B3?",
-        }),
-        { headers: { "content-type": "application/json" } }
-      );
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-ask");
+  test("puts the plugin's dispatch command first on PATH and names Oh My Pi as its host", async () => {
+    // A PATH without the plugin's bin, so the load is what puts it first (afterEach restores it).
+    process.env.PATH = "/usr/bin:/bin";
+    await import("./envoy.ts?plugin-bin-path");
+
+    const first = (process.env.PATH ?? "").split(delimiter)[0] ?? "";
+    expect(first).toBe(join(import.meta.dir, "..", "bin"));
+    const shim = statSync(join(first, "dispatch"));
+    expect(shim.isFile()).toBe(true);
+    expect(shim.mode & 0o111).toBe(0o111);
+    expect(process.env.DISPATCH_HOST).toBe("omp");
+  });
+
+  test("names the top-level session in DISPATCH_SESSION_ID at start and after a switch", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    const { default: envoyExtension } = await import("./envoy.ts?dispatch-session-id");
     const fixture = createPi();
     envoyExtension(fixture.pi);
-    const ask = fixture.tools.find((candidate) => candidate.name === "dispatch_ask");
-    if (ask === undefined) throw new Error("dispatch_ask was not registered");
-    const context = {
-      ...sessionContext("ses_live"),
-      sessionManager: {
-        ...topLevelSession,
-        getSessionId: () => "ses_live",
-        getSessionName: () => "current title",
-      },
-    };
 
-    const signal = new AbortController();
-    const result = await ask.execute(
-      "call_ask",
-      { issue: "LEGION-1", question: "Should we ship B3?" },
-      signal.signal,
-      undefined,
-      context
-    );
+    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_dispatch_env"));
+    expect(process.env.DISPATCH_SESSION_ID).toBe("ses_dispatch_env");
 
-    expect(result).toEqual({
-      content: [
-        {
-          type: "text",
-          text:
-            "Asked ask_1 on LEGION-1 (urgency med): Should we ship B3?\n" +
-            "You follow this ask: its answer and replies reach you directly. " +
-            `For every event on LEGION-1: envoy_subscribe ${dispatchIssueSubject("LEGION-1", ">")}`,
-        },
-      ],
-      details: { issue: "LEGION-1", ask: "ask_1", follows: { ask: "ask_1" } },
-    });
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.url.pathname).toBe("/api/v1/issues/LEGION-1/asks");
-    expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe(
-      "Bearer dispatch-token"
+    await fixture.handlers.get("session_switch")?.(
+      { reason: "new" },
+      sessionContext("ses_dispatch_env_new")
     );
-    const requestSignal = requests[0]?.init?.signal;
-    expect(requestSignal).toBeInstanceOf(AbortSignal);
-    signal.abort();
-    expect(requestSignal?.aborted).toBe(true);
-    expect(JSON.parse(String(requests[0]?.init?.body))).toMatchObject({
-      question: "Should we ship B3?",
-      actor: {
-        kind: "session",
-        id: "ses_live",
-        origin: { host: "omp", cwd: "/tmp/envoy-omp-test", session_title: "current title" },
-      },
-    });
+    expect(process.env.DISPATCH_SESSION_ID).toBe("ses_dispatch_env_new");
   });
 
-  test("a dispatch tool call follows a changed server URL without reloading the extension", async () => {
-    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
-    process.env.DISPATCH_TOKEN = "dispatch-token";
-    const hosts: string[] = [];
-    globalThis.fetch = async (input) => {
-      hosts.push(new URL(input.toString()).host);
-      return new Response(JSON.stringify({ id: "ask_1", issue_key: "LEGION-1", question: "Q?" }), {
-        headers: { "content-type": "application/json" },
-      });
-    };
-    // Every test in this block imports its own extension instance (query-string variants), the
-    // file's established way to get a fresh load-time state per test.
-    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-moved");
+  /** A context for `ses_title` whose live session name is `name()`, as agent `kind` runs it. */
+  const titledContext = (kind: "main" | "sub", name: () => string | undefined): SessionContext => ({
+    ...sessionContext("ses_title"),
+    agent: { kind },
+    sessionManager: { ...topLevelSession, getSessionId: () => "ses_title", getSessionName: name },
+  });
+
+  test("the main agent's shell command finds the session's current title in its title file", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    const { default: envoyExtension } = await import("./envoy.ts?title-file-main");
     const fixture = createPi();
     envoyExtension(fixture.pi);
-    const ask = fixture.tools.find((candidate) => candidate.name === "dispatch_ask");
-    if (ask === undefined) throw new Error("dispatch_ask was not registered");
-    const context = {
-      ...sessionContext("ses_live"),
-      sessionManager: {
-        ...topLevelSession,
-        getSessionId: () => "ses_live",
-        getSessionName: () => "t",
-      },
-    };
+    let title: string | undefined = "Saved carts";
+    const context = titledContext("main", () => title);
+    await fixture.handlers.get("session_start")?.({}, context);
+    const toolCall = fixture.handlers.get("tool_call");
+    if (toolCall === undefined) throw new Error("tool_call was not registered");
+    const titleFile = () => readSessionTitle(sessionDirectory(process.env, "ses_title"));
 
-    await ask.execute(
-      "call_1",
-      { issue: "LEGION-1", question: "Q?" },
-      undefined,
-      undefined,
+    // Only a tool that runs a shell needs it.
+    await toolCall({ toolName: "read", toolCallId: "call-read", input: { path: "x" } }, context);
+    expect(titleFile()).toBeUndefined();
+    await toolCall(
+      { toolName: "bash", toolCallId: "call-bash", input: { command: "dispatch whoami" } },
       context
     );
-    // Dispatch moved: the same live session must reach the new host on its next call.
-    process.env.DISPATCH_URL = "http://dispatch.moved.test:9000";
-    await ask.execute(
-      "call_2",
-      { issue: "LEGION-1", question: "Q?" },
-      undefined,
-      undefined,
+    expect(titleFile()).toBe("Saved carts");
+    // The session is renamed after it started; the next shell command, an eval cell's too, sees it.
+    title = "Saved carts, renamed";
+    await toolCall(
+      { toolName: "eval", toolCallId: "call-eval", input: { language: "py", code: "1" } },
       context
     );
-
-    expect(hosts).toEqual(["127.0.0.1:8767", "dispatch.moved.test:9000"]);
-
-    // A configuration that has since broken fails the call with its own reason,
-    // never with a request to the stale endpoint.
-    delete process.env.DISPATCH_TOKEN;
-    const failed = await ask.execute(
-      "call_3",
-      { issue: "LEGION-1", question: "Q?" },
-      undefined,
-      undefined,
-      context
-    );
-    expect(failed.isError).toBe(true);
-    expect(hosts).toHaveLength(2);
+    expect(titleFile()).toBe("Saved carts, renamed");
   });
 
-  test("executes dispatch_search without an issue and returns rows in details", async () => {
-    process.env.DISPATCH_URL = "http://127.0.0.1:8767";
-    process.env.DISPATCH_TOKEN = "dispatch-token";
-    const requests: Array<{ readonly url: URL; readonly init: RequestInit | undefined }> = [];
-    const results = [
-      {
-        kind: "document",
-        owner: { kind: "issue", key: "LEGION-2", title: "Astrolabe", status: "triage" },
-        artifact: { slug: "spec", name: "spec.md" },
-        id: "artifact-2",
-        snippet: "<mark>astrolabe</mark>",
-        rank: 1,
-        href: "/issues/LEGION-2/spec?q=astrolabe",
-      },
-    ];
-    globalThis.fetch = async (input, init) => {
-      const url = new URL(input.toString());
-      requests.push({ url, init });
-      if (url.pathname !== "/api/v1/search") throw new Error(`unexpected request: ${url.pathname}`);
-      return new Response(JSON.stringify({ results, took_ms: 7 }), {
-        headers: { "Content-Type": "application/json" },
-      });
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?native-dispatch-search");
+  test("a task subagent's shell command writes no title file: the session it names is its parent's", async () => {
+    globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+    const { default: envoyExtension } = await import("./envoy.ts?title-file-sub");
     const fixture = createPi();
     envoyExtension(fixture.pi);
-    const search = fixture.tools.find((candidate) => candidate.name === "dispatch_search");
-    if (search === undefined) throw new Error("dispatch_search was not registered");
-
-    const result = await search.execute(
-      "call_search",
-      { query: "astrolabe" },
-      undefined,
-      undefined,
-      sessionContext("ses_live")
+    await fixture.handlers.get("session_start")?.(
+      {},
+      titledContext("main", () => "Parent")
     );
+    const toolCall = fixture.handlers.get("tool_call");
+    if (toolCall === undefined) throw new Error("tool_call was not registered");
 
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.url.pathname).toBe("/api/v1/search");
-    expect(requests[0]?.url.searchParams.get("q")).toBe("astrolabe");
-    expect(new Headers(requests[0]?.init?.headers).get("authorization")).toBe(
-      "Bearer dispatch-token"
+    await toolCall(
+      { toolName: "bash", toolCallId: "call-sub", input: { command: "dispatch whoami" } },
+      titledContext("sub", () => "Scout the repo")
     );
-    expect(result.content).toEqual([
-      {
-        type: "text",
-        text: '1 result for "astrolabe" (7 ms)\nLEGION-2 [triage] Astrolabe - document spec.md: **astrolabe** -> http://127.0.0.1:8767/issues/LEGION-2/spec?q=astrolabe',
-      },
-    ]);
-    expect(result.isError).toBeUndefined();
-    expect(result.details).toEqual({ query: "astrolabe", results });
-    expect(result.details).not.toHaveProperty("topic");
+    expect(readSessionTitle(sessionDirectory(process.env, "ses_title"))).toBeUndefined();
   });
-  test("does not register Dispatch tools and reports the missing token once at session start", async () => {
+
+  test("reports a broken Dispatch configuration once at session start", async () => {
     process.env.DISPATCH_URL = "http://127.0.0.1:8767";
     delete process.env.DISPATCH_TOKEN;
     process.env.HOME = "/nonexistent-home-for-dispatch-gating";
@@ -3453,8 +3301,8 @@ describe("envoy OMP extension", () => {
       }
     );
     expect(
-      notifications.filter((message) => message.startsWith("envoy: dispatch tool disabled — "))
-    ).toEqual(["envoy: dispatch tool disabled — dispatch.token must be a non-empty bearer token"]);
+      notifications.filter((message) => message.startsWith("envoy: Dispatch disabled — "))
+    ).toEqual(["envoy: Dispatch disabled — dispatch.token must be a non-empty bearer token"]);
   });
 
   test("envoy_sessions rejects a non-string machine filter before calling Envoy", async () => {
@@ -4805,15 +4653,18 @@ describe("envoy OMP extension", () => {
     const fixture = createPi();
     const asked: string[] = [];
 
-    envoyExtension({
-      ...fixture.pi,
-      askEphemeral: async ({ prompt }) => {
-        calls.push("askEphemeral");
-        asked.push(prompt);
-        return { replyText: "Yes, ship it." };
-      },
-    });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_target"));
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_target"),
+        runEphemeralTurn: async ({ promptText }) => {
+          calls.push("runEphemeralTurn");
+          asked.push(promptText);
+          return { replyText: "Yes, ship it." };
+        },
+      }
+    );
     const agent = natsState.controls.get("notifications.agent.ses_target");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
     natsState.onPublish = (subject) => calls.push(`publish ${subject}`);
@@ -4833,7 +4684,8 @@ describe("envoy OMP extension", () => {
     );
     await replyPosted.promise;
 
-    expect(asked).toEqual(["Can this ship?"]);
+    // The host sends the prompt as given, so the question goes out in the /btw wrapper.
+    expect(asked).toEqual([expect.stringMatching(/^<btw>\n[\s\S]*\nCan this ship\?\n<\/btw>$/)]);
     expect(fixture.deliveries).toEqual([]);
     expect(replies).toEqual([
       {
@@ -4847,7 +4699,7 @@ describe("envoy OMP extension", () => {
     // reply inbox belongs to the server's PubAck, so no receipt is published —
     // the frame goes straight to the ephemeral question and the Dispatch reply.
     expect(calls).toEqual([
-      "askEphemeral",
+      "runEphemeralTurn",
       "fetch /api/v1/messages/11111111-1111-4111-8111-111111111111/reply",
     ]);
   });
@@ -4879,11 +4731,14 @@ describe("envoy OMP extension", () => {
     // Query-string isolation gives this stateful extension its own NATS subscription.
     const { default: envoyExtension } = await import("./envoy.ts?targeted-comment-btw");
     const fixture = createPi();
-    envoyExtension({
-      ...fixture.pi,
-      askEphemeral: async () => ({ replyText: "Comment reply." }),
-    });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_delivery"),
+        runEphemeralTurn: async () => ({ replyText: "Comment reply." }),
+      }
+    );
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
 
@@ -5283,6 +5138,226 @@ describe("envoy OMP extension", () => {
     }
   });
 
+  // A session is shown each picture once (`shownPictures`). A delivery's pictures count as shown
+  // once the host took the message that carries them, a session that moves onto a transcript (a
+  // fork, a resume, a restart) counts the pictures that transcript already shows, and the id a
+  // session leaves is forgotten.
+  describe("a session's pictures", () => {
+    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
+    const image = {
+      type: "image",
+      data: Buffer.from(png).toString("base64"),
+      mimeType: "image/png",
+    };
+
+    /** Dispatch serving LEGION-1's upload `slug`, a 10-byte PNG named shot.png. */
+    const pictureRoutes =
+      (slug: string) =>
+      (url: URL): Response | undefined => {
+        if (url.pathname === `/api/v1/issues/LEGION-1/artifacts/${slug}`) {
+          return Response.json({
+            id: `${slug}-id`,
+            name: "shot.png",
+            kind: "image",
+            versions: [{ number: 1, mime: "image/png", size: png.length }],
+          });
+        }
+        if (url.pathname === `/api/v1/artifacts/${slug}-id/versions/1`) {
+          return new Response(png, { headers: { "Content-Type": "image/png" } });
+        }
+        return undefined;
+      };
+
+    for (const [name, turn] of [
+      ["a card", false],
+      ["a person's own turn", true],
+    ] as const) {
+      test(`${name} whose send the host refused leaves its picture unshown, and Dispatch's retry shows it`, async () => {
+        const slug = turn ? "refused-turn-png" : "refused-card-png";
+        const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+        const body = `Look:\n\n![shot.png](${address})`;
+        let refusing = true;
+        const refused = Promise.withResolvers<void>();
+        const { agent, delivered, fixture } = await bootDirectSession(`pictures-${slug}`, {
+          // Dispatch's 200 makes the person's turn; a refused accept keeps the card.
+          accept: () => (turn ? { accepted: true, body } : { code: "UNAUTHORIZED", status: 401 }),
+          dispatch: pictureRoutes(slug),
+          beforeSend: () => {
+            if (!refusing) return;
+            refusing = false;
+            refused.resolve();
+            throw new Error("the host refused the message");
+          },
+        });
+        const warn = spyOn(console, "warn").mockImplementation(() => undefined);
+        try {
+          agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
+          await refused.promise;
+          // The model never saw it, so Dispatch's retry must carry it again.
+          expect(shownPictures("ses_delivery").has(address)).toBe(false);
+
+          agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
+          await delivered(1);
+        } finally {
+          warn.mockRestore();
+        }
+
+        const sent: readonly { readonly content: unknown }[] = turn
+          ? fixture.userMessages
+          : fixture.deliveries;
+        expect(sent).toHaveLength(1);
+        expect(sent[0]?.content).toEqual([
+          {
+            type: "text",
+            text: turn
+              ? body
+              : expect.stringContaining(`- image 1: ${address} (shot.png, image/png, 10 bytes)`),
+          },
+          image,
+        ]);
+        expect(shownPictures("ses_delivery").has(address)).toBe(true);
+      });
+    }
+
+    /**
+     * A transcript as Oh My Pi keeps it, showing a picture each way a session is shown one: a
+     * `dispatch_read` result (`read`), a delivered card (`card`) and a person's own turn (`turn`),
+     * beside one the read named without showing (`named`).
+     */
+    const transcript = (addresses: {
+      readonly read: string;
+      readonly card: string;
+      readonly turn: string;
+      readonly named: string;
+    }) => [
+      {
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "call-1",
+          toolName: "dispatch_read",
+          content: [
+            {
+              type: "text",
+              text: [
+                "LEGION-1: Pictures",
+                "Pictures:",
+                `- image 1: ${addresses.read} (a.png, image/png, 10 bytes)`,
+                `- not shown: ${addresses.named} (unavailable: Dispatch answered 404)`,
+              ].join("\n"),
+            },
+            image,
+          ],
+        },
+      },
+      {
+        type: "custom_message",
+        customType: "envoy-message",
+        content: [
+          {
+            type: "text",
+            text: `envoy: card\n\nPictures:\n- image 1: ${addresses.card} (b.png, image/png, 10 bytes)`,
+          },
+          image,
+        ],
+        display: true,
+      },
+      {
+        type: "message",
+        message: {
+          role: "user",
+          content: [{ type: "text", text: `Look:\n\n![c.png](${addresses.turn})` }, image],
+        },
+      },
+    ];
+
+    const transcriptAddresses = (prefix: string) => {
+      const address = (slug: string) => `dispatch://LEGION-1/artifact/${prefix}-${slug}-png@v1`;
+      return {
+        read: address("read"),
+        card: address("card"),
+        turn: address("turn"),
+        named: address("named"),
+      };
+    };
+
+    for (const reason of ["fork", "resume"] as const) {
+      test(`a ${reason} counts the pictures its transcript shows as shown and forgets the id it left`, async () => {
+        const [from, to] = [`ses_pictures_${reason}_from`, `ses_pictures_${reason}_to`];
+        const addresses = transcriptAddresses(reason);
+        globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+        const { default: envoyExtension } = await import(`./envoy.ts?pictures-${reason}`);
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        await fixture.handlers.get("session_start")?.({}, sessionContext(from));
+        shownPictures(from).add(`dispatch://LEGION-1/artifact/${reason}-earlier-png@v1`);
+
+        const moved = sessionContext(to);
+        await fixture.handlers.get("session_switch")?.(
+          { reason },
+          {
+            ...moved,
+            sessionManager: { ...moved.sessionManager, getBranch: () => transcript(addresses) },
+          }
+        );
+
+        expect([...shownPictures(to)].sort()).toEqual(
+          [addresses.card, addresses.read, addresses.turn].sort()
+        );
+        expect(shownPictures(from).size).toBe(0);
+      });
+    }
+
+    test("a session started on its transcript counts the pictures that transcript shows as shown", async () => {
+      const addresses = transcriptAddresses("restart");
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, []);
+      const { default: envoyExtension } = await import("./envoy.ts?pictures-restart");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+
+      const started = sessionContext("ses_pictures_restarted");
+      await fixture.handlers.get("session_start")?.(
+        {},
+        {
+          ...started,
+          sessionManager: { ...started.sessionManager, getBranch: () => transcript(addresses) },
+        }
+      );
+
+      expect([...shownPictures("ses_pictures_restarted")].sort()).toEqual(
+        [addresses.card, addresses.read, addresses.turn].sort()
+      );
+    });
+
+    test("a session that shuts down forgets the pictures it was shown", async () => {
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+      const { default: envoyExtension } = await import("./envoy.ts?pictures-shutdown");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, sessionContext("ses_pictures_shutdown"));
+      shownPictures("ses_pictures_shutdown").add("dispatch://LEGION-1/artifact/shut-png@v1");
+
+      await fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_pictures_shutdown"));
+
+      expect(shownPictures("ses_pictures_shutdown").size).toBe(0);
+    });
+
+    // A task subagent's instance never runs restoreLocalSessionState (its session_start returns
+    // early), so its closure's id stays empty while its tool calls carry the host's live id into
+    // the registry; its shutdown forgets that id, not the empty one.
+    test("a subagent instance that shuts down forgets the id its tool calls carried", async () => {
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+      const { default: envoyExtension } = await import("./envoy.ts?pictures-subagent-shutdown");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      shownPictures("ses_pictures_subagent").add("dispatch://LEGION-1/artifact/sub-png@v1");
+
+      await fixture.handlers.get("session_shutdown")?.({}, sessionContext("ses_pictures_subagent"));
+
+      expect(shownPictures("ses_pictures_subagent").size).toBe(0);
+    });
+  });
+
   test("deduplicates targeted Dispatch frames by dedupe key", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
     const { default: envoyExtension } = await import("./envoy.ts?targeted-dedupe");
@@ -5326,13 +5401,16 @@ describe("envoy OMP extension", () => {
     };
     const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-rejection");
     const fixture = createPi();
-    envoyExtension({
-      ...fixture.pi,
-      askEphemeral: async () => {
-        throw new Error("No active model on session");
-      },
-    });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_delivery"),
+        runEphemeralTurn: async () => {
+          throw new Error("No active model on session");
+        },
+      }
+    );
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
 
@@ -5370,15 +5448,18 @@ describe("envoy OMP extension", () => {
     const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-retry");
     const fixture = createPi();
     let sideTurns = 0;
-    envoyExtension({
-      ...fixture.pi,
-      askEphemeral: async () => {
-        sideTurns += 1;
-        if (sideTurns === 1) throw new Error("No API key for provider: openai");
-        return { replyText: `Answer ${sideTurns}` };
-      },
-    });
-    await fixture.handlers.get("session_start")?.({}, sessionContext("ses_delivery"));
+    envoyExtension(fixture.pi);
+    await fixture.handlers.get("session_start")?.(
+      {},
+      {
+        ...sessionContext("ses_delivery"),
+        runEphemeralTurn: async () => {
+          sideTurns += 1;
+          if (sideTurns === 1) throw new Error("No API key for provider: openai");
+          return { replyText: `Answer ${sideTurns}` };
+        },
+      }
+    );
     const agent = natsState.controls.get("notifications.agent.ses_delivery");
     if (agent === undefined) throw new Error("agent subject was not subscribed");
     const send = async (dedupeKey: string): Promise<void> => {
@@ -5400,99 +5481,6 @@ describe("envoy OMP extension", () => {
       { actor, attempt: 1, body: "Answer 2" },
       { actor, attempt: 1, body: "Answer 3" },
     ]);
-  });
-
-  test("answers a targeted BTW through the session context's runEphemeralTurn in the /btw prompt", async () => {
-    process.env.DISPATCH_URL = "http://dispatch.test";
-    process.env.DISPATCH_TOKEN = "dispatch-token";
-    const registrations: unknown[] = [];
-    const replies: unknown[] = [];
-    const posted = Promise.withResolvers<void>();
-    globalThis.fetch = async (input, init) => {
-      const path = new URL(input.toString()).pathname;
-      if (path === "/v1/interests/subscribe") {
-        registrations.push(JSON.parse(init?.body?.toString() ?? "{}"));
-      }
-      if (path === "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply") {
-        replies.push(JSON.parse(init?.body?.toString() ?? "{}"));
-        posted.resolve();
-      }
-      return responseWithRegistration(input, init, {});
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-context");
-    const fixture = createPi();
-    const prompts: string[] = [];
-    // An upstream host: the side turn is on the extension context, and `pi.askEphemeral` does
-    // not exist.
-    envoyExtension(fixture.pi);
-    await fixture.handlers.get("session_start")?.(
-      {},
-      {
-        ...sessionContext("ses_delivery"),
-        runEphemeralTurn: async ({ promptText }) => {
-          prompts.push(promptText);
-          return { replyText: "Yes, ship it." };
-        },
-      }
-    );
-    const agent = natsState.controls.get("notifications.agent.ses_delivery");
-    if (agent === undefined) throw new Error("agent subject was not subscribed");
-
-    agent.push(targetedDispatchEnvelope("btw", "targeted-context"));
-    await posted.promise;
-
-    expect(registrations).toMatchObject([{ capabilities: ["aside", "btw", "steer"] }]);
-    // The host sends the prompt as given, so the question goes out in the /btw wrapper the
-    // older `pi.askEphemeral` added itself.
-    expect(prompts).toEqual([
-      expect.stringMatching(/^<btw>\n[\s\S]*\nDelivery btw targeted-context\n<\/btw>$/),
-    ]);
-    expect(replies).toEqual([
-      { actor: { id: "ses_delivery", kind: "session" }, attempt: 1, body: "Yes, ship it." },
-    ]);
-    expect(fixture.deliveries).toEqual([]);
-  });
-
-  test("prefers the session context's runEphemeralTurn over pi.askEphemeral", async () => {
-    process.env.DISPATCH_URL = "http://dispatch.test";
-    process.env.DISPATCH_TOKEN = "dispatch-token";
-    const posted = Promise.withResolvers<void>();
-    globalThis.fetch = async (input, init) => {
-      if (
-        new URL(input.toString()).pathname ===
-        "/api/v1/messages/11111111-1111-4111-8111-111111111111/reply"
-      ) {
-        posted.resolve();
-      }
-      return responseWithRegistration(input, init, {});
-    };
-    const { default: envoyExtension } = await import("./envoy.ts?targeted-btw-precedence");
-    const fixture = createPi();
-    const calls: string[] = [];
-    envoyExtension({
-      ...fixture.pi,
-      askEphemeral: async () => {
-        calls.push("askEphemeral");
-        return { replyText: "from askEphemeral" };
-      },
-    });
-    await fixture.handlers.get("session_start")?.(
-      {},
-      {
-        ...sessionContext("ses_delivery"),
-        runEphemeralTurn: async () => {
-          calls.push("runEphemeralTurn");
-          return { replyText: "from runEphemeralTurn" };
-        },
-      }
-    );
-    const agent = natsState.controls.get("notifications.agent.ses_delivery");
-    if (agent === undefined) throw new Error("agent subject was not subscribed");
-
-    agent.push(targetedDispatchEnvelope("btw", "targeted-precedence"));
-    await posted.promise;
-
-    expect(calls).toEqual(["runEphemeralTurn"]);
   });
 
   test("refuses a BTW that drains in during session_shutdown without starting a side turn", async () => {

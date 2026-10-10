@@ -66,6 +66,16 @@ opens them in full, and Dispatch remembers that choice.
 If someone else moved cards while you were dragging, the move fails with "The board changed while
 you were moving this card - refreshed, try again." The Board shows the fresh order.
 
+### Lanes
+
+**Show lanes**, beside **Show Icebox & Done**, splits the Board into horizontal bands, one per
+priority: P0 down to P3, then a band for issues with no priority. Cards keep their rank order
+within each band. The choice persists per signed-in user, not in the page address, so it survives
+a reload.
+
+Dragging a card across lanes sets its priority, in the same drop that a drag across columns sets
+its status. Keyboard roving (`j`/`k`, the arrow keys) stays within the focused lane.
+
 ### Priority
 
 Priority runs from P0, the highest, to P3. An issue with no priority shows a muted **Priority**
@@ -123,6 +133,9 @@ The header holds the issue's key, title, and pin, then its controls:
 
 A line of details follows: labels, subscribers, the parent issue, linked GitHub issues and pull
 requests, and **Referenced by**. Choose the title, or press `e`, to edit it.
+
+A title shows in full, wrapped at any width, rather than cut off after two lines. A list that
+still clamps a title shows the whole of it on hover.
 
 - **Parent** shows the parent issue or **None**. You can edit it to move the issue under another.
 - **Subscribers: N** lists the agent sessions subscribed to the issue. **Unsubscribe** stops

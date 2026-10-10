@@ -9,6 +9,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -175,6 +176,42 @@ func TestStoredRenderOnlySchemaViolationLoadsForRepair(t *testing.T) {
 			t.Errorf("shutdown render-only service: %v", err)
 		}
 	})
+	for _, read := range []struct {
+		name string
+		read func() error
+	}{
+		{"text", func() error {
+			_, err := service.Text(context.Background(), artifactID)
+			return err
+		}},
+		{"text with token", func() error {
+			_, _, err := service.TextWithToken(context.Background(), artifactID)
+			return err
+		}},
+		{"text with blocks", func() error {
+			_, _, err := service.TextWithBlocks(context.Background(), artifactID)
+			return err
+		}},
+		{"blocks", func() error {
+			_, err := service.Blocks(context.Background(), artifactID)
+			return err
+		}},
+	} {
+		t.Run("cold/"+read.name, func(t *testing.T) {
+			if err := read.read(); !errors.Is(err, ErrDocOutsideSchema) {
+				t.Fatalf("cold read render-only violation: %v, want ErrDocOutsideSchema", err)
+			}
+			if cacheHas(service, artifactID) {
+				t.Fatal("a document the renderer refuses was cached")
+			}
+			if service.srv.GetDoc(artifactID) != nil {
+				t.Fatal("a cold schema read loaded the document room")
+			}
+		})
+	}
+	if _, err := service.BlockPath(context.Background(), artifactID, "absent"); !errors.Is(err, pmdoc.ErrTargetNotFound) {
+		t.Fatalf("cold path for absent block: %v, want ErrTargetNotFound", err)
+	}
 	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
 		t.Fatalf("load render-only violation for repair: %v", err)
 	}

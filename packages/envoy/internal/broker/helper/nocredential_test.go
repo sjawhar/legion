@@ -18,7 +18,7 @@ import (
 )
 
 // TestNoCredentialReasonNamesWhyTheHelperHoldsNone: every state login-status can report with no
-// credential held has its own reason, which the helper's journal and `launcher login-status` both
+// credential held has its own reason, which the helper's journal and `machine login-status` both
 // print: a login in flight outranks a dropped credential, a dropped credential names the cause the
 // helper recorded, and a helper from before credential_dropped, which sets login_refused only for
 // a broker refusal, reads as that refusal.
@@ -75,7 +75,7 @@ func TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll(t *testing.T) {
 	if sess == nil {
 		t.Fatal("the live process must be re-pinned")
 	}
-	line := waitForRecord(t, &out, "session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets launcher login, and have a human approve it")
+	line := waitForRecord(t, &out, "session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets machine login, and have a human approve it")
 	for k, v := range map[string]any{
 		"level": "ERROR", "runtime_id": sess.RuntimeID, "enrollment_id": "enr-prior",
 		"why": "no machine login since the helper started; a restart discards the launcher credential",
@@ -95,7 +95,7 @@ func TestABoxTheHelperCannotEnrollIsAnError(t *testing.T) {
 	if box := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-1", Thumbprint: "tp-1"}); box.OK || box.Code != CodeEnrollFailed || box.Error != noCredentialMsg {
 		t.Fatalf("enroll-box with no credential: %+v; want %s naming %q", box, CodeEnrollFailed, noCredentialMsg)
 	}
-	line := waitForRecord(t, &out, "session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it")
+	line := waitForRecord(t, &out, "session cannot enroll: the helper holds no launcher credential; run: agent-secrets machine login, and have a human approve it")
 	for k, v := range map[string]any{
 		"level": "ERROR", "runtime_id": "box-1",
 		"why": "no machine login since the helper started; a restart discards the launcher credential",
@@ -206,7 +206,7 @@ func TestALoginBetweenARefusalAndItsLineIsAnOrdinaryRetry(t *testing.T) {
 	if retry := waitForRecord(t, &out, "enroll failed; retrying"); retry["level"] != "WARN" {
 		t.Fatalf("the failed enroll: %v; want a WARN", retry)
 	}
-	noErrors(t, &out, dropRefused+"; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)")
+	noErrors(t, &out, dropRefused+"; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets machine login)")
 }
 
 // TestALoginWakesTheEnrollmentOfASessionRegisteredWithoutACredential: a session registered while

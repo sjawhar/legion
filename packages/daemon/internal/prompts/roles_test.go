@@ -24,9 +24,10 @@ var (
 	headlessOnly       = []string{
 		"LEGION_", "legion gh", "legion handoff", "handoff_", "legion threads", "envoy_publish", ".legion/",
 		"roleToken", "spawn_worker", "legion-worker",
-		// A task subagent the interactive fragment starts dispatches none of its own. The needle is
-		// the boot gate's own form (promptrefs), so a dispatch that carries other arguments is caught
-		// too.
+		// Naming a task agent is headless mechanics: the daemon's load probe checks that a pane's Oh
+		// My Pi finds every agent a role prompt names and runs it on its own model, and nothing
+		// checks an interactive session. The needle is the boot gate's own form (promptrefs), so a
+		// dispatch that carries other arguments is caught too.
 		`agent="`,
 	}
 	repoSpecific = []string{"Inspect", "inspect_ai", "inspect_", "Hawk", "middleman", "Taiga"}
@@ -204,7 +205,7 @@ func TestEveryTaskAgentARolePromptDispatchesIsShipped(t *testing.T) {
 		}
 	}
 	for agent, files := range agents {
-		if _, err := os.Stat(filepath.Join("..", "..", "..", "pi-envoy", "agents", agent+".md")); err != nil {
+		if _, err := os.Stat(filepath.Join("..", "..", "..", "pi-legion", "agents", agent+".md")); err != nil {
 			t.Errorf("task agent %s, dispatched by %q, is not shipped in the plugin's agents/: %v", agent, files, err)
 		}
 	}

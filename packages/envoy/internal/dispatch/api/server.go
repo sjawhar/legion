@@ -11,7 +11,9 @@ import (
 	"log/slog"
 	"mime"
 	"net/http"
+	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -23,8 +25,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/envoy"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -53,8 +57,12 @@ type Deps struct {
 	DefaultProject string
 	ServerURL      string
 	Docs           docs.API
-	Envoy          *envoy.Client
-	Events         *events.Broker
+	// Embedder embeds a search request's query for meaning search (LEGION-549); nil means
+	// Dispatch is configured without a Cohere key, and search answers keyword-only on every
+	// request, always setting SearchResponse.Degraded.
+	Embedder embed.Embedder
+	Envoy    *envoy.Client
+	Events   *events.Broker
 	// GitHub calls the GitHub App API for architecture-source access checks and the web app's
 	// GitHub reads; nil is the "no app credentials yet" state and answers ErrNoAppKey.
 	GitHub *githubapp.Client
@@ -73,10 +81,16 @@ type Deps struct {
 	// is unconfigured) means the feature is off: the pending list answers null, and every other
 	// handler that needs it answers 404 FEATURE_OFF.
 	AgentSecrets *agentsecrets.Client
-	// Lifetime bounds work a handler starts and does not wait for: it is the process's own
-	// context, cancelled when the server is shutting down, so a deploy stops a broadcast's
-	// remaining deliveries instead of leaving goroutines behind. Nil means unbounded, which
-	// is what a test gets.
+	// Files holds uploaded files' bytes outside Postgres (cmd/dispatch: DISPATCH_FILE_STORE_BUCKET);
+	// nil keeps them in each version's row, and a row that still holds bytes is served from the
+	// row either way (files.BackfillRows moves them).
+	Files files.Store
+	// Lifetime bounds work a handler starts and does not wait for, and every event stream: it is
+	// the process's own context, cancelled when the server is shutting down, so a deploy stops a
+	// broadcast's remaining deliveries instead of leaving goroutines behind, and ends each open
+	// stream (streamEvents, streamAgentConversation) so http.Server.Shutdown is not held for its
+	// whole budget by a connection that never goes idle. Nil means unbounded, which is what a
+	// test gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
@@ -103,7 +117,9 @@ type DepsInput struct {
 	// a test exercising a receipt timeout sets a short one rather than waiting that out.
 	EnvoyTimeout time.Duration
 	Docs         docs.API
-	Events       *events.Broker
+	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
+	Embedder embed.Embedder
+	Events   *events.Broker
 	// Lifetime is the process context background work runs on; see Deps.Lifetime.
 	Lifetime context.Context
 	// App is the loaded GitHub App credentials (nil when unconfigured);
@@ -117,7 +133,9 @@ type DepsInput struct {
 	// empty means the feature is off. AgentSecretsToken is the resolved UI bearer.
 	AgentSecretsURL   string
 	AgentSecretsToken string
-	TestHooksEnabled  bool
+	// Files is the uploaded-file store; nil keeps files in Postgres. See Deps.Files.
+	Files            files.Store
+	TestHooksEnabled bool
 	// StreamHeartbeat replaces the heartbeat of the event streams and the document socket
 	// (Deps.StreamHeartbeat). Zero keeps fifteen seconds; a test proving a connection closes
 	// sets a short one.
@@ -169,6 +187,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		DefaultProject:   defaultProject,
 		ServerURL:        strings.TrimSuffix(input.ServerURL, "/"),
 		Docs:             input.Docs,
+		Embedder:         input.Embedder,
 		Envoy:            envoyClient,
 		Events:           input.Events,
 		GitHub:           github,
@@ -176,6 +195,7 @@ func NewDeps(input DepsInput) (Deps, error) {
 		OIDC:             input.OIDC,
 		AgentStream:      input.AgentStream,
 		AgentSecrets:     agentSecretsClient,
+		Files:            input.Files,
 		Lifetime:         input.Lifetime,
 		TestHooksEnabled: input.TestHooksEnabled,
 		StreamHeartbeat:  heartbeat,
@@ -292,6 +312,23 @@ func (e *apiError) Error() string { return e.message }
 
 func errorf(status int, code, format string, args ...any) *apiError {
 	return &apiError{status: status, code: code, message: fmt.Sprintf(format, args...)}
+}
+
+// parseQueryInt reads one query parameter as an integer within [min, max]. present is false
+// when the caller did not supply the parameter at all; a parameter repeated, not an integer, or
+// outside the bound is present with valid false. issue_page.go's parseIssuePage and search.go's
+// handler each format their own code and message around a false valid, since the two routes
+// disagree on them.
+func parseQueryInt(query url.Values, field string, min, max int) (value int, present, valid bool) {
+	values, ok := query[field]
+	if !ok {
+		return 0, false, false
+	}
+	parsed, err := strconv.Atoi(values[0])
+	if len(values) != 1 || err != nil || parsed < min || parsed > max {
+		return 0, true, false
+	}
+	return parsed, true, true
 }
 
 // The codes writeHandlerError answers a document it cannot read or serve and an unclassified
@@ -590,6 +627,20 @@ func (s *server) requireActor(w http.ResponseWriter, r *http.Request, supplied *
 		return model.Actor{}, false
 	}
 	return actor, true
+}
+
+// decodeOptionalJSON decodes the request body into dst when the request carries one, so a route
+// whose body is optional (a cookie caller sends none; a bearer names its session in `actor`)
+// accepts both. It writes the decode error and returns false on a malformed body.
+func (s *server) decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if r.ContentLength == 0 {
+		return true
+	}
+	if err := decodeJSON(r, dst); err != nil {
+		s.writeHandlerError(w, err)
+		return false
+	}
+	return true
 }
 
 func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {

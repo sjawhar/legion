@@ -176,14 +176,7 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 	timer := time.NewTimer(s.markWait)
 	defer timer.Stop()
 	for {
-		var tree *pmdoc.Node
-		var readErr error
-		err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
-			tree, readErr = treeOf(doc)
-		})
-		if readErr != nil {
-			return Anchored{}, readErr
-		}
+		tree, err := s.docTree(ctx, artifactID)
 		if err != nil {
 			return Anchored{}, err
 		}
@@ -208,54 +201,28 @@ func (s *Service) VerifyMark(ctx context.Context, artifactID string, kind MarkKi
 // BlockForQuote returns the stable block that contains the one matching quote.
 // A quote spanning top-level siblings has no block identity.
 func (s *Service) BlockForQuote(ctx context.Context, artifactID, quote string) (string, error) {
-	var blockID string
-	var blockErr error
-	err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
-		tree, err := treeOf(doc)
-		if err != nil {
-			blockErr = err
-			return
-		}
-		r, err := pmdoc.FindQuote(tree, quote, nil, nil)
-		if err != nil {
-			blockErr = err
-			return
-		}
-		blockID, blockErr = pmdoc.BlockIDForRange(tree, r)
-	})
-	if blockErr != nil {
-		return "", blockErr
-	}
+	tree, err := s.docTree(ctx, artifactID)
 	if err != nil {
 		return "", err
 	}
-	return blockID, nil
+	r, err := pmdoc.FindQuote(tree, quote, nil, nil)
+	if err != nil {
+		return "", err
+	}
+	return pmdoc.BlockIDForRange(tree, r)
 }
 
 // SuggestionKind returns the kind recorded on a verified browser or server suggestion mark.
 func (s *Service) SuggestionKind(ctx context.Context, artifactID, id string) (string, error) {
-	var kind string
-	var markErr error
-	err := s.docView(ctx, artifactID, func(doc *crdt.Doc) {
-		tree, readErr := treeOf(doc)
-		if readErr != nil {
-			markErr = readErr
-			return
-		}
-		attrs, found := pmdoc.MarkAttrs(tree, string(MarkSuggestion), id)
-		if !found {
-			markErr = ErrAnchorMissing
-			return
-		}
-		kind, markErr = suggestionKind(attrs, id)
-	})
-	if markErr != nil {
-		return "", markErr
-	}
+	tree, err := s.docTree(ctx, artifactID)
 	if err != nil {
 		return "", err
 	}
-	return kind, nil
+	attrs, found := pmdoc.MarkAttrs(tree, string(MarkSuggestion), id)
+	if !found {
+		return "", ErrAnchorMissing
+	}
+	return suggestionKind(attrs, id)
 }
 
 // AcceptSuggestion applies the replacement for a suggestion mark.
@@ -650,7 +617,7 @@ func loadAnchorRefreshedCommentPayload(ctx context.Context, tx pgx.Tx, id string
 	}
 	var payload model.CommentEventPayload
 	if err := tx.QueryRow(ctx, `
-		select name, project_key, slug
+		select name, coalesce(project_key, ''), slug
 		from artifacts where id = $1
 	`, comment.Anchor.ArtifactID).Scan(&payload.ArtifactName, &payload.ProjectKey, &payload.ArtifactSlug); err != nil {
 		return model.CommentEventPayload{}, fmt.Errorf("load refreshed comment %q artifact: %w", id, err)
@@ -828,14 +795,12 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 		}
 		seen[mark] = struct{}{}
 		if _, found := recordedRefs[mark]; found {
-			state := s.room(room)
-			state.mu.Lock()
+			state := s.lockState(room)
 			delete(state.unrecorded, mark)
-			state.mu.Unlock()
+			s.unlockState(room, state)
 			continue
 		}
-		state := s.room(room)
-		state.mu.Lock()
+		state := s.lockState(room)
 		firstSeen, found := state.unrecorded[mark]
 		if !found {
 			firstSeen = now
@@ -847,10 +812,9 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 		} else if wait := s.unrecordedMarkTTL - age; next == 0 || wait < next {
 			next = wait
 		}
-		state.mu.Unlock()
+		s.unlockState(room, state)
 	}
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	for mark := range state.unrecorded {
 		if _, found := seen[mark]; !found {
 			delete(state.unrecorded, mark)
@@ -859,7 +823,7 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	if next > 0 {
 		s.scheduleSettleAfterLocked(room, state, next)
 	}
-	state.mu.Unlock()
+	s.unlockState(room, state)
 	if len(expired) == 0 {
 		return
 	}

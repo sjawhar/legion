@@ -54,7 +54,7 @@ sequenceDiagram
     alt granted at once
         Broker-->>CLI: granted
     else a person must approve
-        Broker-->>CLI: pending
+        Broker-->>CLI: pending, and the approver its record names
         Dispatch->>Broker: pending requests for the person signed in
         Person->>Dispatch: Approve
         Dispatch->>Broker: approve, as that person's login
@@ -75,7 +75,7 @@ container](/legion/broker/guides/run-an-agent-in-a-container/) shows a box's set
 | Piece | What it does | Where it runs |
 | --- | --- | --- |
 | Secrets Broker (`envoy-broker`) | Enrolls sessions, decides each request from the secret's owner and tier, records requests and decisions, and releases granted values. | A server, beside Postgres and the secret store. |
-| `agent-secrets` | The command an agent runs to use a secret, and the tool people and launchers use to log machines in and inspect sessions. | Wherever agents run. |
+| `agent-secrets` | The command an agent runs to use a secret, the tool people and launchers use to log machines in and inspect sessions, the tool people list and revoke their machine logins and live grants with (`machine list`, `grant list`), and the tool people manage the secrets themselves with, under their own AWS sign-in. | Wherever agents run, and a person's own machine. |
 | `agent-secrets-helper` | A per-user daemon that holds each host agent session's key, enrolls it, and signs for it. | Each machine that runs agents directly. |
 | Dispatch | Shows people the requests they must decide and the grants they can revoke, and passes their decisions to the broker. | Dispatch's server and web app. |
 | Legion | Enrolls every worker pod it runs on Kubernetes, so a phase worker can use `agent-secrets` like any other session. | Legion's daemon. |
@@ -100,10 +100,12 @@ every worker pod it starts, so each pod's agent gets only the grants of that pod
   agent's ask through the approval in Dispatch to the command that runs with it.
 - [Concepts](/legion/broker/concepts/): sessions, machine logins, owner and tier, grants, approvals
   and the audit record.
-- Guides: [approve a request](/legion/broker/guides/approve-a-request/),
+- Guides: [manage a secret](/legion/broker/guides/manage-a-secret/),
+  [approve a request](/legion/broker/guides/approve-a-request/),
   [log a machine in](/legion/broker/guides/log-a-machine-in/),
   [run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/),
-  [revoke a session or a grant](/legion/broker/guides/revoke-a-session/),
+  [revoke a session or a grant](/legion/broker/guides/revoke-a-session/), from Dispatch or from your
+  shell (`agent-secrets machine list`, `agent-secrets grant list`),
   [run the broker locally](/legion/broker/guides/run-locally/), and
   [troubleshooting](/legion/broker/guides/troubleshooting/).
 - [Operating the broker](/legion/broker/operate/): configuration, dependencies, health and logs.

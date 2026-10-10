@@ -25,8 +25,10 @@ const (
 	OutboxKindSupervise         OutboxKind = "supervise"
 	OutboxKindGateSeed          OutboxKind = "gate_seed"
 	OutboxKindLingerClose       OutboxKind = "linger_close"
+	OutboxKindIssueSuspend      OutboxKind = "issue_suspend"
 	OutboxKindWorkspaceRemove   OutboxKind = "workspace_remove"
 	OutboxKindMergeQueuePublish OutboxKind = "merge_queue_publish"
+	OutboxKindIssueBranch       OutboxKind = "issue_branch"
 )
 
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
@@ -119,6 +121,12 @@ type Notice struct {
 	ResendOf int64 `json:"resend_of,omitempty"`
 	// CatchUp is a catch-up notice's account of the tree, and absent from every other kind.
 	CatchUp *CatchUp `json:"catch_up,omitempty"`
+	// OpenCapabilities names the deployment capabilities with no decision
+	// (capabilities.Deployment.Open) when the daemon reports them; only a tick controller notice
+	// carries it (admit.Admission.ReportCapabilities), and a tick with no gap carries none. The
+	// controller reads each row's detail and the legion.yaml line that records a decision in
+	// `legion state`; a gap is the operator's to close or decide and never stops the walk.
+	OpenCapabilities []string `json:"openCapabilities,omitempty"`
 }
 
 // CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
@@ -187,8 +195,10 @@ const (
 
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
-// the one request that ends the claim, the tree's root claim included. There is no plain stop:
-// only the tree's close ends a claim from the workflow, so the op states it.
+// the request that ends the claim, the tree's root claim included; "issue_close" is a child issue's
+// close as done, which ends the claim as a tree close does and drops its session, since the
+// issue's volume the session lived on is released with the close (IssueSuspend's Release). There
+// is no plain stop: only a close ends a claim from the workflow, so the op states which.
 type SuperviseOp string
 
 // SuperviseRequest describes the session operation the outbox runner performs.
@@ -204,15 +214,16 @@ type SuperviseRequest struct {
 	// finishes without acting. It is empty for the architect, which serves every phase, and for a
 	// suspend or a tree's close, which must still act after the issue moves on.
 	Phase phase.Phase `json:"phase,omitempty"`
-	// Leaves is the phase a transition's suspend ends. Such a suspend finishes without acting once
-	// the issue is back in a phase its role works (workflow.SuspendApplies). It is empty for the
-	// suspends a linger or a child's leave queues, which stop every claim whatever phase its issue
-	// holds, and for every other operation.
-	Leaves phase.Phase `json:"leaves,omitempty"`
 	// ResumeTask marks Task as the phase's resume task (workflow.ResumePhaseTask), the one a
 	// re-admitted tree's promotion gives a mid-phase child: a claim that already holds a task for
 	// the same generation and phase is given it once it is ready, so the start delivers none.
 	ResumeTask bool `json:"resumeTask,omitempty"`
+	// Quiesce is the role whose phase a start takes over without that role's completion: CI settled
+	// red while it tested, or reviewed a round it had not completed (workflow's TriggerChecksRed). The
+	// start acts only once that role's claim is out of its turn (supervise.Machine.Quiesce), so the
+	// two never write the shared workspace together. It is empty for every other start, which a
+	// completion or a person's move hands the phase, and for every other operation.
+	Quiesce claim.Role `json:"quiesce,omitempty"`
 	// Linger is the root generation whose linger a tree close expires. A member keeps its
 	// generation across re-admission, so the close acts only while its tree lingers at that root
 	// generation: never in the tree's next run, nor in a later linger of it.
@@ -241,6 +252,20 @@ type LingerClose struct {
 
 func (LingerClose) OutboxKind() OutboxKind { return OutboxKindLingerClose }
 
+// IssueSuspend retains an issue's shared resources after its close stops every role. Both
+// workflow generations and this row's ID fence a later re-admission or start. Release is a child's
+// close as done: once every claim of the issue has retired, the issue's Sandbox and the volume it
+// owns are deleted rather than kept, so a later todo re-enters the child fresh. An absent field
+// reads false, the close that keeps.
+type IssueSuspend struct {
+	Tree           string `json:"tree"`
+	Generation     uint64 `json:"generation"`
+	TreeGeneration uint64 `json:"treeGeneration"`
+	Release        bool   `json:"release,omitempty"`
+}
+
+func (IssueSuspend) OutboxKind() OutboxKind { return OutboxKindIssueSuspend }
+
 // WorkspaceRemove removes the workspace named by the row's issue.
 type WorkspaceRemove struct {
 	// Linger is the root generation whose linger the removal expires. Like a tree close, it acts
@@ -260,6 +285,18 @@ type MergeQueuePublish struct {
 }
 
 func (MergeQueuePublish) OutboxKind() OutboxKind { return OutboxKindMergeQueuePublish }
+
+// IssueBranch creates the row's issue's branch, legion/<KEY>, on GitHub at main, where GitHub does
+// not have it yet, before any role of the issue starts: GitHub can refuse the push that creates a
+// branch of a large repository, where it takes a push that moves one. A start of the issue waits
+// while the row is unfinished (Store.ClaimDue).
+type IssueBranch struct {
+	// Generation is the issue generation the branch is created for. A row of an earlier generation,
+	// or of a tree that lingers, finishes without acting.
+	Generation uint64 `json:"generation"`
+}
+
+func (IssueBranch) OutboxKind() OutboxKind { return OutboxKindIssueBranch }
 
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
@@ -335,6 +372,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindIssueSuspend:
+		value := IssueSuspend{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	case OutboxKindWorkspaceRemove:
 		value := WorkspaceRemove{}
 		if err := decoder.Decode(&value); err != nil {
@@ -343,6 +386,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 		payload = value
 	case OutboxKindMergeQueuePublish:
 		value := MergeQueuePublish{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
+	case OutboxKindIssueBranch:
+		value := IssueBranch{}
 		if err := decoder.Decode(&value); err != nil {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
@@ -380,7 +429,11 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if length := dispatch.MessageBodyLength(value.Reason); length > MessagePostLimit {
 			return fmt.Errorf("a status write's reason is %d characters, over the %d a message holds", length, MessagePostLimit)
 		}
-	case MessagePost, GateSeed, LingerClose:
+	case MessagePost, GateSeed, LingerClose, IssueBranch:
+	case IssueSuspend:
+		if value.Tree == "" || value.Generation == 0 || value.TreeGeneration == 0 {
+			return fmt.Errorf("issue suspension requires its tree and both workflow generations")
+		}
 	case WorkspaceRemove:
 		if value.Linger == 0 {
 			return fmt.Errorf("workspace removal requires the root generation of its linger")
@@ -411,6 +464,9 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.ResumeTask && (value.Op != "start" || value.Task == "" || value.Phase == "") {
 			return fmt.Errorf("a supervise resume task requires a start with a task and a phase")
+		}
+		if value.Quiesce != "" && (value.Op != "start" || value.Quiesce == value.Role) {
+			return fmt.Errorf("a supervise quiesce names another role than its start's, and only a start carries one")
 		}
 	case MergeQueuePublish:
 		if value.Role == "" {
@@ -447,7 +503,7 @@ func controllerOnlyNoticeKind(kind NoticeKind) bool {
 
 func validSuperviseOp(op SuperviseOp) bool {
 	switch op {
-	case "start", "suspend", "tree_close":
+	case "start", "suspend", "tree_close", "issue_close":
 		return true
 	default:
 		return false

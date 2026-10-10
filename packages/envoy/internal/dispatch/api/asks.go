@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -273,7 +274,32 @@ func (s *server) createAskFor(w http.ResponseWriter, r *http.Request, owner owne
 		return
 	}
 	s.publish(events...)
-	WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
+	// LEGION-550. An ask on an issue searches that issue's project and, normally, rides its
+	// suggestions on the issue's own advice; one on an unlinked project document searches the
+	// document's and has no issue state to report, so its advice carries the suggestions alone.
+	// computeAndPersistSuggestions resolves the project itself (empty here) under its own
+	// deadline, so that lookup can no longer block this response past writeSuggestionTimeout the
+	// way it did when it ran here, before the call, on the request's unbounded context.
+	source := suggestionSource{kind: "ask", askID: ask.ID, actor: actor}
+	if owner.IssueKey != nil {
+		source.issueKey = *owner.IssueKey
+	} else if owner.ArtifactID != nil {
+		source.artifactID = *owner.ArtifactID
+	}
+	suggestions := s.computeAndPersistSuggestions(r.Context(), "", ask.Question, source)
+	// advice is nil both for a document owner and for an issue owner whose write-advice query
+	// itself failed (writeAdvice swallows that); either way, suggestions already computed and
+	// persisted ride along as suggestionsOnlyAdvice rather than being dropped on the floor.
+	if advice != nil {
+		advice.Suggestions = suggestions
+		WriteJSON(w, http.StatusCreated, withAdvice(ask, advice))
+		return
+	}
+	if suggestions != nil {
+		WriteJSON(w, http.StatusCreated, withRawAdvice(ask, suggestionsOnlyAdvice{Suggestions: suggestions}))
+		return
+	}
+	WriteJSON(w, http.StatusCreated, ask)
 }
 
 func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
@@ -374,7 +400,7 @@ func (s *server) editAsk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ask.Kind == "approval" {
-		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; revise its document, then, once the human has agreed to every point in it, hand the request back through dispatch_request_approval")
+		writeError(w, "ASK_KIND_FIXED", http.StatusConflict, "an approval ask's question and options are fixed; revise its document, then, once the human has agreed to every point in it, hand the request back with `dispatch request-approval`")
 		return
 	}
 	if actor.Kind == "session" && !ask.Author.SameAs(actor) {
@@ -566,10 +592,7 @@ func (s *server) listOpenAsks(w http.ResponseWriter, r *http.Request) {
 		), active as (
 			select
 				a.id::text,
-				case
-					when i.key is not null then '/issues/' || i.key || '?ask=' || a.id::text
-					else '/projects/' || ar.project_key || '/documents/' || ar.slug || '?ask=' || a.id::text
-				end as ref,
+				`+askItemRefExpression+` as ref,
 				a.question,
 				a.kind,
 				a.urgency,
@@ -691,6 +714,11 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	answers, err := s.loadAskAnswers(r.Context(), s.deps.Store.Pool, ask.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
 	followers, err := asks.Followers(r.Context(), s.deps.Store.Pool, ask.ID)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -700,8 +728,9 @@ func (s *server) getAsk(w http.ResponseWriter, r *http.Request) {
 		Ask       model.Ask           `json:"ask"`
 		Replies   []model.Comment     `json:"replies"`
 		Edits     []model.AskEdit     `json:"edits"`
+		Answers   []model.AskAnswer   `json:"answers"`
 		Followers []model.AskFollower `json:"followers"`
-	}{Ask: ask, Replies: replies, Edits: edits, Followers: followers})
+	}{Ask: ask, Replies: replies, Edits: edits, Answers: answers, Followers: followers})
 }
 
 // loadAskEdits reads every rewording of an ask back from its ask.edited events,
@@ -738,6 +767,54 @@ func (s *server) loadAskEdits(ctx context.Context, q queryer, askID string) ([]m
 		return nil, fmt.Errorf("load ask edits: %w", err)
 	}
 	return edits, nil
+}
+
+// answerEventsQuery selects the ask.answered events (aliased e) that record a person's own answer,
+// one row per answer. A document settlement can restore an answered block and write the same
+// answer event under its editor, so only an event whose actor is the user the answer names counts,
+// and the repeats of one answer (its ask and its `at`) collapse to the earliest event. columns is
+// the select list; filter narrows the events further. loadAskAnswers and listMyAnswers share it.
+func answerEventsQuery(columns, filter string) string {
+	return `select distinct on (e.payload->>'id', e.payload->'answer'->>'at') ` + columns + `
+		from events e
+		where e.type = 'ask.answered' and e.actor->>'kind' = 'user'
+		  and e.actor->>'id' = e.payload->'answer'->>'user' and ` + filter + `
+		order by e.payload->>'id', e.payload->'answer'->>'at', e.id asc`
+}
+
+// loadAskAnswers reads every real answer to one ask back from its ask.answered events
+// (answerEventsQuery), oldest first.
+func (s *server) loadAskAnswers(ctx context.Context, q queryer, askID string) ([]model.AskAnswer, error) {
+	rows, err := q.Query(ctx, answerEventsQuery(`e.payload->'answer', e.id`, `e.payload->>'id' = $1`), askID)
+	if err != nil {
+		return nil, fmt.Errorf("load ask answers: %w", err)
+	}
+	defer rows.Close()
+	type answerEvent struct {
+		answer model.AskAnswer
+		id     int64
+	}
+	events := []answerEvent{}
+	for rows.Next() {
+		var encoded []byte
+		var event answerEvent
+		if err := rows.Scan(&encoded, &event.id); err != nil {
+			return nil, fmt.Errorf("scan ask answer: %w", err)
+		}
+		if err := json.Unmarshal(encoded, &event.answer); err != nil {
+			return nil, fmt.Errorf("decode ask answer: %w", err)
+		}
+		events = append(events, event)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("load ask answers: %w", err)
+	}
+	sort.Slice(events, func(left, right int) bool { return events[left].id < events[right].id })
+	answers := make([]model.AskAnswer, len(events))
+	for index := range events {
+		answers[index] = events[index].answer
+	}
+	return answers, nil
 }
 
 // loadAsk reads one ask for a response: unlike lockAskForTransition, which feeds the

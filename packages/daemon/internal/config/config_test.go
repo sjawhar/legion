@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
 
@@ -124,9 +125,10 @@ func defaultsFor(port int) Config {
 			Implement: GitHubApp{AppID: "1", PrivateKey: "implement-test-key", Installations: map[string]string{}},
 			Review:    GitHubApp{AppID: "2", PrivateKey: "review-test-key", Installations: map[string]string{}},
 		},
-		Linger:         72 * time.Hour,
-		ReviewRoundCap: 3,
-		MaxFixAttempts: 3,
+		Linger:           72 * time.Hour,
+		ReviewRoundCap:   3,
+		MaxFixAttempts:   3,
+		ControllerLaunch: ControllerLaunchOperator,
 	}
 }
 
@@ -232,7 +234,8 @@ func TestLoadReadsEveryStage3Key(t *testing.T) {
 dispatch_token_file: tokens/DISPATCH_TOKEN
 projects:
   DEMO: { repo: acme/widgets }
-  OTHER: { repo: acme/other, merge_queue_role: merge-queue }
+  OTHER: { repo: acme/other, merge_queue_role: merge-queue, review_workflows: [.github/workflows/review.yml, .github/workflows/bot.yaml] }
+  EMPTY: { repo: acme/empty, review_workflows: [] }
 gates:
   design: off
 github_apps:
@@ -259,8 +262,10 @@ max_fix_attempts: 4
 		t.Errorf("DispatchTokenFile = %q, want %q", cfg.DispatchTokenFile, want)
 	}
 	if !reflect.DeepEqual(cfg.Projects, map[string]Project{
-		"DEMO":  {Repo: ghrepo.MustParse("acme/widgets")},
-		"OTHER": {Repo: ghrepo.MustParse("acme/other"), MergeQueueRole: "merge-queue"},
+		"DEMO": {Repo: ghrepo.MustParse("acme/widgets")},
+		"OTHER": {Repo: ghrepo.MustParse("acme/other"), MergeQueueRole: "merge-queue",
+			ReviewWorkflows: []string{".github/workflows/review.yml", ".github/workflows/bot.yaml"}},
+		"EMPTY": {Repo: ghrepo.MustParse("acme/empty")},
 	}) {
 		t.Errorf("Projects = %#v", cfg.Projects)
 	}
@@ -330,6 +335,11 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			want: "dispatch_url must be a valid URL",
 		},
 		{
+			name: "dispatch_url has a scheme that is not http or https",
+			body: strings.Replace(minimalFile, "dispatch_url: http://127.0.0.1:8080\n", "dispatch_url: htp://127.0.0.1:8080\n", 1),
+			want: `dispatch_url must be http or https, not "htp"`,
+		},
+		{
 			name: "dispatch_url is the /mcp endpoint",
 			body: strings.Replace(minimalFile, "dispatch_url: http://127.0.0.1:8080\n", "dispatch_url: http://127.0.0.1:8080/mcp/\n", 1),
 			want: "dispatch_url must be the dispatch service base URL, not the /mcp endpoint",
@@ -392,6 +402,26 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 			name: "projects entry has no repo",
 			body: minimalFile + "projects: {DEMO: {}}\n",
 			want: `projects.DEMO.repo must be "owner/name" (got "undefined")`,
+		},
+		{
+			name: "review_workflows is not a list",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: .github/workflows/review.yml }", 1),
+			want: "projects.DEMO.review_workflows must be an array of non-empty strings",
+		},
+		{
+			name: "a review workflow outside .github/workflows",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [review.yml] }", 1),
+			want: `projects.DEMO.review_workflows entry "review.yml" must be a workflow file's path, .github/workflows/<name>.yml or .yaml`,
+		},
+		{
+			name: "a review workflow in a subdirectory of .github/workflows",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [.github/workflows/bots/review.yml] }", 1),
+			want: `projects.DEMO.review_workflows entry ".github/workflows/bots/review.yml" must be a workflow file's path, .github/workflows/<name>.yml or .yaml`,
+		},
+		{
+			name: "a review workflow named twice",
+			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/widgets, review_workflows: [.github/workflows/review.yml, .github/workflows/review.yml] }", 1),
+			want: `projects.DEMO.review_workflows names ".github/workflows/review.yml" twice`,
 		},
 		{
 			name: "gates is not a mapping",
@@ -541,6 +571,25 @@ func TestWorkerStreamPortDefaultsToOnePastPort(t *testing.T) {
 	}
 }
 
+func TestEndpointURLKeepsAPath(t *testing.T) {
+	for _, tc := range []struct {
+		key, value string
+	}{
+		{"envoy_url", "https://envoy.example/tenant"},
+		{"nats_urls", "nats://nats.example:4222/tenant"},
+	} {
+		t.Run(tc.key, func(t *testing.T) {
+			got, err := endpointURL(tc.value, tc.key)
+			if err != nil {
+				t.Fatalf("endpointURL: %v", err)
+			}
+			if got.Path != "/tenant" {
+				t.Errorf("path = %q, want /tenant", got.Path)
+			}
+		})
+	}
+}
+
 func TestLoadRefuses(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -612,6 +661,28 @@ func TestLoadRefuses(t *testing.T) {
 			name: "daemon_url with a query string",
 			body: minimalFile + "daemon_url: http://127.0.0.1:13370/?x=1\n",
 			want: "daemon_url must not include a query string or fragment",
+		},
+		{
+			name: "nats_urls entry with a query string",
+			body: strings.Replace(minimalFile, "nats_urls: [nats://127.0.0.1:4222]\n",
+				`nats_urls: ["nats://127.0.0.1:4222?token=token"]`+"\n", 1),
+			want: `nats_urls entry "nats://127.0.0.1:4222?token=token" must not include a query string or fragment; use URL userinfo or a secret for credentials`,
+		},
+		{
+			name: "nats_urls entry with a fragment",
+			body: strings.Replace(minimalFile, "nats_urls: [nats://127.0.0.1:4222]\n",
+				`nats_urls: ["nats://127.0.0.1:4222#fragment"]`+"\n", 1),
+			want: `nats_urls entry "nats://127.0.0.1:4222#fragment" must not include a query string or fragment; use URL userinfo or a secret for credentials`,
+		},
+		{
+			name: "envoy_url with a query string",
+			body: minimalFile + "envoy_url: https://envoy.example?access_token=token\n",
+			want: "envoy_url must not include a query string or fragment; use URL userinfo or a secret for credentials",
+		},
+		{
+			name: "envoy_url with a fragment",
+			body: minimalFile + "envoy_url: https://envoy.example#fragment\n",
+			want: "envoy_url must not include a query string or fragment; use URL userinfo or a secret for credentials",
 		},
 		{
 			name: "worker_stream_port zero",
@@ -810,11 +881,6 @@ func TestLoadRefuses(t *testing.T) {
 			want: "unknown key worker_cap: the running-worker cap no longer exists (LEGION-208 Requirement 8)",
 		},
 		{
-			name: "tossed worker_idle_retire_seconds",
-			body: minimalFile + "worker_idle_retire_seconds: 600\n",
-			want: "unknown key worker_idle_retire_seconds: a worker is suspended when its phase ends, never after an idle window (LEGION-208 Design, \"Process supervision\")",
-		},
-		{
 			name: "tossed resync_interval_seconds",
 			body: minimalFile + "resync_interval_seconds: 600\n",
 			want: "unknown key resync_interval_seconds: the mirror of Dispatch and GitHub as truth, and resync's drift healing, no longer exist (LEGION-208 Design, \"Ported, and tossed\")",
@@ -975,18 +1041,24 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		modelled  = "modelled"
 		tossed    = "tossed"
 		migration = "migration-only"
+		// kubernetesOnly is a modelled key the tmux file this test loads refuses by name.
+		kubernetesOnly = "kubernetes-only"
 	)
 	for _, tc := range []struct {
 		key   string
 		line  string
 		class string
 		want  string
+		// wantPrefix, where set, replaces want: the refusal must start with it, and the reason that
+		// follows is the message's own wording.
+		wantPrefix string
 	}{
 		{key: "project", class: modelled},
 		{key: "state_dir", class: modelled},
 		{key: "postgres_dsn", class: modelled},
 		{key: "port", line: "port: 13370", class: modelled},
 		{key: "bind", line: "bind: 127.0.0.1", class: modelled},
+		{key: "advertise_host", line: "advertise_host: legion-daemon.legion.svc", class: kubernetesOnly, want: "advertise_host is not used when runtime is tmux: every pane dials the daemon's own unix socket; remove advertise_host"},
 		{key: "runtime", line: "runtime: tmux", class: modelled},
 		{key: "admission_cap", line: "admission_cap: 4", class: modelled},
 
@@ -1016,6 +1088,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		{key: "linger_hours", line: "linger_hours: 72", class: modelled},
 		{key: "review_round_cap", line: "review_round_cap: 3", class: modelled},
 		{key: "max_fix_attempts", line: "max_fix_attempts: 3", class: modelled},
+		{key: "capabilities", line: `capabilities: {decided: {secrets: "dispatch://LEGION-205 enrolls pods later"}}`, class: modelled},
 
 		{
 			key: "worker_cap", line: "worker_cap: 10", class: tossed,
@@ -1023,7 +1096,7 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 		},
 		{
 			key: "worker_idle_retire_seconds", line: "worker_idle_retire_seconds: 600", class: tossed,
-			want: "unknown key worker_idle_retire_seconds: a worker is suspended when its phase ends, never after an idle window (LEGION-208 Design, \"Process supervision\")",
+			wantPrefix: "unknown key worker_idle_retire_seconds: ",
 		},
 		{
 			key: "resync_interval_seconds", line: "resync_interval_seconds: 600", class: tossed,
@@ -1056,11 +1129,67 @@ func TestLoadClassifiesEveryShippedKey(t *testing.T) {
 				}
 			default:
 				if err == nil {
-					t.Fatalf("Load succeeded, want error %q", tc.want)
+					t.Fatalf("Load succeeded, want error %q", tc.want+tc.wantPrefix)
 				}
-				if err.Error() != tc.want {
+				if tc.wantPrefix != "" {
+					if !strings.HasPrefix(err.Error(), tc.wantPrefix) {
+						t.Errorf("Load error = %q, want a refusal starting %q", err.Error(), tc.wantPrefix)
+					}
+				} else if err.Error() != tc.want {
 					t.Errorf("Load error = %q, want %q", err.Error(), tc.want)
 				}
+			}
+		})
+	}
+}
+
+// advertise_host is the host of every pod's `--connect tcp://<host>:<port>`, which the shim reads as
+// a URL (shim.ParseAddress, internal/shim/config.go) and refuses with anything beyond a host and a
+// port, and the daemon adds the port itself (shimAddress, internal/daemon/daemon.go). So the loader
+// refuses, by its exact message, every value that is not an IP address or a DNS name: under
+// runtime: kubernetes, the one runtime that reads advertise_host, so no other refusal can stand in
+// for this one, rather than `legion start --check-config` passing a file no pod boots on.
+func TestAdvertiseHostMustBeABareHost(t *testing.T) {
+	const refused = "advertise_host must be an IP address or a DNS name, with no scheme, port, path or brackets: the daemon adds worker_stream_port itself"
+	for _, tc := range []struct{ name, yaml, want string }{
+		{"a scheme", "http://legion-daemon.legion.svc", refused + " (http://legion-daemon.legion.svc)"},
+		{"a port", "legion-daemon.legion.svc:13371", refused + " (legion-daemon.legion.svc:13371)"},
+		{"brackets", `"[::1]"`, refused + " ([::1])"},
+		{"an underscore", "legion_daemon.legion.svc", refused + " (legion_daemon.legion.svc)"},
+		{"a path", "legion-daemon.legion.svc/x", refused + " (legion-daemon.legion.svc/x)"},
+		{"a trailing slash", "legion-daemon.legion.svc/", refused + " (legion-daemon.legion.svc/)"},
+		{"a user", "legion@legion-daemon.legion.svc", refused + " (legion@legion-daemon.legion.svc)"},
+		{"a query", `"legion-daemon.legion.svc?x"`, refused + " (legion-daemon.legion.svc?x)"},
+		{"a fragment", `"legion-daemon.legion.svc#x"`, refused + " (legion-daemon.legion.svc#x)"},
+		{"a space", `"legion daemon"`, refused + " (legion daemon)"},
+		{"a space inside a DNS name", `"legion daemon.legion.svc"`, refused + " (legion daemon.legion.svc)"},
+		{"a zoned IPv6 address", `"fe80::1%eth0"`, refused + " (fe80::1%eth0)"},
+		{"blank", `""`, "advertise_host must not be empty"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"advertise_host: "+tc.yaml+"\n"), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("LoadForValidation error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// A bare host name and a bare IP address, IPv6 included, both pass under runtime: kubernetes, the
+// one runtime that reads advertise_host.
+func TestAdvertiseHostAcceptsABareHostOrIPAddress(t *testing.T) {
+	for _, tc := range []struct{ name, value string }{
+		{"a DNS name", "legion-daemon.legion.svc"},
+		{"an IPv4 address", "192.0.2.10"},
+		{"a bare IPv6 address", "2001:db8::1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"advertise_host: "+tc.value+"\n"), noEnv)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.AdvertiseHost != tc.value {
+				t.Errorf("AdvertiseHost = %q, want %q", cfg.AdvertiseHost, tc.value)
 			}
 		})
 	}
@@ -1076,5 +1205,63 @@ func TestLoadNamesAFileItCannotRead(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), path) {
 		t.Errorf("Load error = %q, want it to name %s", err.Error(), path)
+	}
+}
+
+// `capabilities.decided` records the operator's decision on a deployment capability, by name, with
+// the reason the daemon's report then shows in the gap's place (capabilities.Deployment). A name
+// the daemon does not measure from its deployment is refused naming the ones it does, and a blank
+// reason is refused: it would record nothing. Nothing is refused for being decided while present —
+// the report calls such a decision moot.
+func TestLoadReadsCapabilityDecisions(t *testing.T) {
+	t.Run("every decidable name, with its reason", func(t *testing.T) {
+		cfg, err := Load(writeConfigFile(t, minimalFile+`capabilities:
+  decided:
+    secrets: "dispatch://LEGION-205 enrolls pods later"
+    model-fallback: one model route, nothing to fall back to
+    resource-limits: "one tree per node; the pool's floor sizes it"
+    pool-capacity: "the pool is sized for the trees; the probe waits for room"
+`), noEnv)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		want := map[capabilities.Name]string{
+			capabilities.Secrets:        "dispatch://LEGION-205 enrolls pods later",
+			capabilities.ModelFallback:  "one model route, nothing to fall back to",
+			capabilities.ResourceLimits: "one tree per node; the pool's floor sizes it",
+			capabilities.PoolCapacity:   "the pool is sized for the trees; the probe waits for room",
+		}
+		if !reflect.DeepEqual(cfg.Capabilities.Decided, want) {
+			t.Errorf("Capabilities.Decided = %#v, want %#v", cfg.Capabilities.Decided, want)
+		}
+	})
+	t.Run("no block, and an empty one", func(t *testing.T) {
+		for _, body := range []string{minimalFile, minimalFile + "capabilities:\n", minimalFile + "capabilities: {}\n", minimalFile + "capabilities: {decided: {}}\n"} {
+			cfg, err := Load(writeConfigFile(t, body), noEnv)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if len(cfg.Capabilities.Decided) != 0 {
+				t.Errorf("Capabilities.Decided = %#v, want none", cfg.Capabilities.Decided)
+			}
+		}
+	})
+	for _, tc := range []struct{ name, line, want string }{
+		{"a name that is no deployment capability", `capabilities: {decided: {nonsense: "because"}}`, "unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback, resource-limits or pool-capacity"},
+		{"an image row, which no decision covers", `capabilities: {decided: {browser: "no Chromium"}}`, "unknown key capabilities.decided.browser: a decision may name secrets, model-fallback, resource-limits or pool-capacity"},
+		{"a blank reason", `capabilities: {decided: {secrets: "  "}}`, "capabilities.decided.secrets must not be empty"},
+		{"a null reason", `capabilities: {decided: {secrets: }}`, "capabilities.decided.secrets must not be empty"},
+		{"a reason that is not a string", `capabilities: {decided: {secrets: [a, b]}}`, "capabilities.decided.secrets must be a string"},
+		{"a name twice", "capabilities:\n  decided:\n    secrets: a\n    secrets: b", "capabilities.decided names secrets twice"},
+		{"decided not a mapping", `capabilities: {decided: secrets}`, "capabilities.decided must be a mapping of capability to reason"},
+		{"a member beside decided", `capabilities: {present: {secrets: yes}}`, "unknown key capabilities.present"},
+		{"the block not a mapping", `capabilities: [secrets]`, "capabilities must be a mapping"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, minimalFile+tc.line+"\n"), noEnv)
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Load error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }

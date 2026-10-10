@@ -146,6 +146,27 @@ type IssueClaimEventPayload struct {
 	Reason   string      `json:"reason"`
 }
 
+// ProgressCount is done of total: the task items of a spec, or the direct children of an issue.
+// Done is at most Total.
+type ProgressCount struct {
+	Done  int `json:"done"`
+	Total int `json:"total"`
+}
+
+// IssueProgress is an issue's progress as GitHub counts an issue's: Tasks the task-list items
+// (`- [ ]` / `- [x]`, nested lists included) of its primary document as its latest version
+// renders, nil when that document has none (or has not been counted yet, which the background
+// count after a deploy closes); Children its direct children (every status, icebox included),
+// done being `status = 'done'`, nil when it has none. Tasks is read from the counts a version
+// write stores on the issue (tasks_done, tasks_total); Children is computed from the children's
+// statuses on every read. It sits on every issue of the read, the list and the pinned list, and
+// never on an event payload, which is why it is a field of IssueSummary and of the read response
+// rather than of Issue.
+type IssueProgress struct {
+	Tasks    *ProgressCount `json:"tasks"`
+	Children *ProgressCount `json:"children"`
+}
+
 // Issue is the complete native issue record.
 type Issue struct {
 	Key               string          `json:"key"`
@@ -204,9 +225,10 @@ type IssueSummary struct {
 	Components IssueComponents `json:"components"`
 	Route      *string         `json:"route"`
 	IssueRouteReach
-	UpdatedAt time.Time `json:"updated_at"`
-	LastSeq   int       `json:"last_seq"`
-	OpenAsks  int       `json:"open_asks"`
+	UpdatedAt time.Time     `json:"updated_at"`
+	LastSeq   int           `json:"last_seq"`
+	OpenAsks  int           `json:"open_asks"`
+	Progress  IssueProgress `json:"progress"`
 }
 
 // IssueSummaryPage is one page of GET /api/v1/issues?limit=&offset=: the issues at [offset,
@@ -260,10 +282,22 @@ type SearchResult struct {
 	Href     string          `json:"href"`
 }
 
-// SearchResponse is the ranked global search result set.
+// SearchResponse is one page of the fused search result list.
 type SearchResponse struct {
 	Results []SearchResult `json:"results"`
-	TookMS  int64          `json:"took_ms"`
+	// Total counts every match of every kind. Reachable is how many of them the pages can return,
+	// since each kind lists only its best contracts.SearchKindDepth; an offset at or past it
+	// returns no results.
+	Total     int   `json:"total"`
+	Reachable int   `json:"reachable"`
+	Limit     int   `json:"limit"`
+	Offset    int   `json:"offset"`
+	TookMS    int64 `json:"took_ms"`
+	// Degraded names why search fell back to keyword-only ranking this request - today only
+	// "embedder_unavailable" (contracts.SearchDegradedEmbedderUnavailable; LEGION-549: no Bedrock
+	// credentials configured, the query's own embedding timed out, or Bedrock answered an error) -
+	// and is empty when meaning search ran normally.
+	Degraded string `json:"degraded,omitempty"`
 }
 
 // DuplicateCandidate is a potential duplicate issue proposed before creation.
@@ -274,6 +308,31 @@ type DuplicateCandidate struct {
 	Snippet     string `json:"snippet"`
 	SharedTerms int    `json:"shared_terms"`
 	Href        string `json:"href"`
+}
+
+// WriteSuggestion is one item LEGION-550's write-time feedback judges similar to what was just
+// filed: a fused-search hit (sjawhar/legion#1764) over the same project. AnsweredBy and
+// AnsweredAt are set only when this is the ask Suggestions.Decision names — the "past decision"
+// case, where the agent needs who answered and when, not just a link.
+type WriteSuggestion struct {
+	Kind       string          `json:"kind"`
+	Owner      SearchOwner     `json:"owner"`
+	Artifact   *SearchArtifact `json:"artifact,omitempty"`
+	ID         string          `json:"id"`
+	Snippet    string          `json:"snippet"`
+	Href       string          `json:"href"`
+	AnsweredBy string          `json:"answered_by,omitempty"`
+	AnsweredAt *time.Time      `json:"answered_at,omitempty"`
+}
+
+// Suggestions is LEGION-550's write-time feedback on a newly created issue or ask: the three
+// items most like it (Related) and, when an answered ask already settles the same question,
+// that decision (Decision). Neither ever refuses or delays the write past
+// writeSuggestionTimeout; Missing explains why search did not answer in time instead.
+type Suggestions struct {
+	Related  []WriteSuggestion `json:"related"`
+	Decision *WriteSuggestion  `json:"decision,omitempty"`
+	Missing  string            `json:"missing,omitempty"`
 }
 
 // IssueChild is a child item embedded in an issue detail response. The subtree counts
@@ -386,11 +445,14 @@ type ArchitectureTreeRetired struct {
 	IDs    []string `json:"ids"`
 }
 
-// Artifact is an issue-attached document or binary blob, or an unlinked project document.
+// Artifact is an issue-attached document or binary blob, an unlinked project document, or a
+// file an agent's conversation owns (SessionID set; IssueKey nil and Project empty, its RefKey
+// `agent/<session id>/<slug>`).
 type Artifact struct {
 	ID        string    `json:"id"`
 	IssueKey  *string   `json:"issue_key"`
 	Project   string    `json:"project"`
+	SessionID *string   `json:"session_id"`
 	RefKey    string    `json:"ref_key"`
 	Slug      string    `json:"slug"`
 	Name      string    `json:"name"`
@@ -559,6 +621,11 @@ type Ask struct {
 	EditedAt          *string `json:"edited_at"`
 	// Approval names the document an approval ask is about; nil for questions.
 	Approval *AskApproval `json:"approval,omitempty"`
+	// ApprovalArtifact is the document Approval.ArtifactID names, hydrated the same way
+	// AnchorArtifact and BlockArtifact are: live, by its current slug and primary flag, not a
+	// snapshot from when the request opened. nil for questions, and for an approval ask whose
+	// document has since been deleted.
+	ApprovalArtifact *AskAnchorArtifact `json:"approval_artifact,omitempty"`
 	// WaitingOn is whose reply an open ask needs next: a moved approval request stays with its
 	// agent while RequestedVersion is below Version, and a hand-back returns it to the human until
 	// a reply newer than the one it answered decides it. Set on ask reads only (inbox rows, ask lists,
@@ -657,6 +724,14 @@ func NewAskEventPayload(ask Ask, changes ReferenceChanges) AskEventPayload {
 	}
 }
 
+// AskAnsweredEventPayload is an ask.answered payload. PreviousAnswer is set only when a human
+// replaces their earlier answer; the asker and every follower receive it through the same event
+// path as the first answer.
+type AskAnsweredEventPayload struct {
+	AskEventPayload
+	PreviousAnswer *AskAnswer `json:"previous_answer,omitempty"`
+}
+
 // IssueEventPayload is the wire payload of every `issue.*` event: the issue's own fields, flat,
 // plus what the write moved in the reference graph. A new issue's spec text is indexed in the
 // creating transaction, so `issue.created` names the nodes that body cited.
@@ -733,6 +808,55 @@ type AskAnswer struct {
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
 	At       time.Time `json:"at"`
+}
+
+// OpenAskOwner identifies the issue or standalone project document holding an ask.
+type OpenAskOwner struct {
+	Issue    *OpenAskIssue    `json:"issue,omitempty"`
+	Document *OpenAskDocument `json:"document,omitempty"`
+}
+
+// OpenAskIssue is the issue shape an ask-owned list row needs.
+type OpenAskIssue struct {
+	Key   string `json:"key"`
+	Title string `json:"title"`
+}
+
+// OpenAskDocument is the project document shape an ask-owned list row needs.
+type OpenAskDocument struct {
+	Project string `json:"project"`
+	Slug    string `json:"slug"`
+	Name    string `json:"name"`
+}
+
+// MyAnswerReply is the reply carried by a row in a person's answer history.
+type MyAnswerReply struct {
+	ID   string `json:"id"`
+	Body string `json:"body"`
+}
+
+// MyAnswerRow is one answer or reply written by the caller, newest first.
+type MyAnswerRow struct {
+	Kind     string         `json:"kind"`
+	At       time.Time      `json:"at"`
+	AskID    string         `json:"ask_id"`
+	Ref      string         `json:"ref"`
+	Question string         `json:"question"`
+	AskKind  string         `json:"ask_kind"`
+	AskState string         `json:"ask_state"`
+	EditedAt *string        `json:"edited_at"`
+	Owner    OpenAskOwner   `json:"owner"`
+	Answer   *AskAnswer     `json:"answer,omitempty"`
+	Current  bool           `json:"current"`
+	Reply    *MyAnswerReply `json:"reply,omitempty"`
+}
+
+// MyAnswersResponse is a page of the caller's answers and ask replies.
+type MyAnswersResponse struct {
+	Rows   []MyAnswerRow `json:"rows"`
+	Total  int           `json:"total"`
+	Limit  int           `json:"limit"`
+	Offset int           `json:"offset"`
 }
 
 // AskResolution records why a question no longer needs a human answer.
@@ -1052,8 +1176,10 @@ type ArtifactReferences struct {
 	ReferencedBy []ReferencedBy      `json:"referenced_by"`
 }
 
-// GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; Ref is its
-// dispatch:// address and is empty for session nodes, which have none.
+// GraphNode is one end of a reference-graph edge. IssueKey and Project locate it; an artifact an
+// agent's conversation owns has neither and is located by Ref alone
+// (`dispatch://agent/<session id>/artifact/<slug>`). Ref is its dispatch:// address and is empty
+// for session nodes, which have none.
 type GraphNode struct {
 	Kind     string  `json:"kind"`
 	ID       string  `json:"id"`

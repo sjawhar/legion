@@ -2,7 +2,8 @@
 // record's own read, approve and deny routes. Part of the UI routes (uiAuth) Dispatch's server
 // relays to on behalf of the browser: the UI bearer proves Dispatch's server is the caller, and
 // Dispatch names the deciding human in the body's approver field from its own session, so a
-// decision is authorized by that login being the record's approver.
+// decision is authorized by the record's rule admitting that login (record.MayDecide): its
+// approver, or anyone signed in for a shared secret's request or a service's machine login.
 package api
 
 import (
@@ -16,6 +17,25 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
+
+// recordSessionResp is a credential request's two possibly-differing session ids, read
+// independently (LEGION-587): Enrollment is the id the requesting session's own enrollment
+// stated when it enrolled, Request is the id the request itself stated as an unsigned override
+// in its body. Either is null when that id was never set; a machine login (which has no request
+// row and no requesting enrollment) always answers both null. GET /v1/pending's own
+// pendingEntry.Session carries this same shape (handlers_ui_pending.go).
+type recordSessionResp struct {
+	// The id the request itself stated as an unsigned override in its body; null when it named
+	// none.
+	Request *string `json:"request"`
+	// The id the requesting session's own enrollment stated when it enrolled; null when it named
+	// none, or for a machine login, which has no requesting enrollment at all.
+	Enrollment *string `json:"enrollment"`
+}
+
+func sessionResp(s requests.Session) recordSessionResp {
+	return recordSessionResp{Request: strPtr(s.Request), Enrollment: strPtr(s.Enrollment)}
+}
 
 // recordEnrollmentResp is a record's or a grant's requesting enrollment. Slot is a pod
 // enrollment's slot, one of several independent identities in one pod, and null for every
@@ -56,10 +76,14 @@ type recordResponse struct {
 	// "pending", or how it ended: "approved", "denied", "expired", "cancelled" or "revoked".
 	State string `json:"state"`
 	// The one login that may decide it, or "anyone": any signed-in person may decide a request
-	// for a shared human-tier secret.
+	// for a shared human-tier secret, and a service's machine login. A service's machine login a
+	// broker before that rule opened still names a person here, and anyone signed in decides it too.
 	Approver string `json:"approver"`
 	// The session asking; null for a machine login.
 	Enrollment *recordEnrollmentResp `json:"enrollment"`
+	// The session this record names, read independently of each other; null fields where that id
+	// was never set (LEGION-587).
+	Session recordSessionResp `json:"session"`
 	// The secrets asked for, or the machine logging in.
 	Identifiers []string `json:"identifiers"`
 	// The service a machine login is for, when it logs a service in rather than a person's
@@ -87,6 +111,7 @@ func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 		RecordID: detail.RecordID, Kind: detail.Kind, State: detail.State, Approver: detail.Approver,
 		Identifiers: detail.Identifiers, Reason: detail.Reason, LifetimeSeconds: detail.LifetimeSeconds,
 		RulesVersion: detail.RulesVersion, ExpiresAt: detail.ExpiresAt, RequestedAt: detail.RequestedAt,
+		Session: sessionResp(detail.Session),
 	}
 	if detail.Enrollment != nil {
 		enr := enrollmentResp(*detail.Enrollment)
@@ -122,7 +147,8 @@ func (s *server) readRecord(w http.ResponseWriter, r *http.Request) {
 // checks it unconditionally on both approve and deny — and ignored for an agent_secret record,
 // which requests.Machine.ApplyDecision never asks for.
 type decideBody struct {
-	// The Dispatch login of the person deciding, which must be the record's approver.
+	// The Dispatch login of the person deciding, which the record's rule must admit: its approver,
+	// or anyone signed in for a shared secret's request or a service's machine login.
 	Approver string `json:"approver"`
 	// A machine login only: its confirmation code, typed again; ignored for a secret request.
 	Code *string `json:"code"`

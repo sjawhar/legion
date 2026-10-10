@@ -18,8 +18,16 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { ApprovalChip } from "../doc/ApprovalChip";
+import { shortSessionId } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { buildIssuePath, buildProjectPath, documentRoute, parseIssuePath } from "../refs/routes";
+import {
+  buildIssuePath,
+  buildProjectPath,
+  buildReferencePath,
+  documentRoute,
+  isAgentArtifact,
+  parseIssuePath,
+} from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { artifactVersionUrl, versionsNewestFirst } from "./ArtifactHeader";
 import { ArtifactDropZone, ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
@@ -70,6 +78,10 @@ function kindIcon(kind: Artifact["kind"]): ReactNode {
 }
 
 function artifactPath(artifact: Artifact): string {
+  // A conversation's picture has its own page, under its agent's session.
+  if (isAgentArtifact(artifact)) {
+    return buildReferencePath(documentRoute(artifact));
+  }
   return artifact.issue_key === null
     ? buildProjectPath({
         kind: "document",
@@ -81,6 +93,14 @@ function artifactPath(artifact: Artifact): string {
         kind: "artifact",
         slug: artifact.slug,
       });
+}
+
+/** Who owns an artifact, as a References row names it. */
+function artifactOwnerLabel(artifact: Artifact): string {
+  if (artifact.issue_key !== null) return artifact.issue_key;
+  return isAgentArtifact(artifact)
+    ? `agent ${shortSessionId(artifact.session_id)}`
+    : artifact.project;
 }
 
 // The issue's reference closure (every artifact reachable by following references, up to 8
@@ -110,7 +130,7 @@ function References({ references }: { references: IssueReferences }): ReactNode 
                 {artifact.name}
               </Link>
               <p className={textMutedOnSurface}>
-                {artifact.issue_key ?? artifact.project} · via {via.kind} · depth {depth}
+                {artifactOwnerLabel(artifact)} · via {via.kind} · depth {depth}
               </p>
             </li>
           ))}

@@ -4,6 +4,38 @@
 
 ### Added
 
+- A controller the Go daemon launches itself (`controller: daemon` in `legion.yaml`, LEGION-592)
+  runs as a controller session: a session with `LEGION_CONTROLLER=1` and `LEGION_BOOT_TOKEN_FILE`
+  registers on `/legion/v1/claims/register` with that boot token in place of a controller
+  capability, claims `legion-<project>-controller`, subscribes to the controller topic, and then
+  calls `/legion/v1/claims/ready`, when the daemon sends its start message. A claim step that fails
+  exits Oh My Pi, so the daemon relaunches it. The operator-launched controller is unchanged.
+- Pictures reach the model (LEGION-541): a `dispatch` command writes each picture its result
+  carries to a file and prints a `- picture: <path>` line for the agent to open, and an Inbox
+  delivery of a message, comment, ask or answer that embeds pictures carries them beside its text
+  (a card with a `Pictures:` section, a person's own turn with its text unchanged), at most 8 and
+  10 MiB of them, each read with the session's own Dispatch bearer within 20 s; a picture Dispatch
+  cannot serve leaves the delivery its text. A session is shown each picture once: a later
+  delivery or `dispatch read` that embeds one it was already shown names it as shown earlier
+  instead of sending it again, because every request carries the session's history and Anthropic
+  refuses one over 32 MB; `dispatch doc-read` shows it again. A delivery's pictures count as shown
+  once the host took the message that carries them, so the delivery Dispatch retries after a send
+  that failed shows them again. A session that moves onto a transcript (`/fork`, `/handoff`,
+  `/resume`, a restart) counts the pictures that transcript already shows: those a `dispatch read`
+  or `dispatch doc-read` result or a card names as shown, and a person's own turn whose every
+  picture was shown beside it. The session id the extension leaves or shuts down is forgotten.
+- The live agent conversation stream names the `provider/model` that produced each assistant turn
+  (LEGION-548), read off the host's own assistant message: the Dispatch live view shows it next to
+  the session's title and on the turn itself, and it switches within one turn of `/model`. Absent
+  for a client whose assistant message carries no model identity.
+- `plan-gap-analyst` also reads a spec before a human does, and reports every finding of a fourth
+  kind: a claim about how a system works today that the code, its documentation or command output
+  it was given does not show (a claim about live state it cannot read is reported as unverified),
+  and, when the caller gave it the owner's words to check against, a requirement that traces to
+  neither them nor a cited fact; a requirement in a version a human approved has its source. The
+  `dispatch-first` skill, which every session with Dispatch carries, says in "Design in the spec" to
+  have it check a spec against the code, the human's words and any command output a claim rests on,
+  before the first version and each approval request, and to resolve what it flags (LEGION-577).
 - A `dispatch-brainstorming` skill ships beside `dispatch` and `dispatch-first` (LEGION-475). In a
   session with Dispatch it replaces superpowers' `brainstorming` and `writing-plans`: the design
   conversation runs in the issue's spec, the first version holds only established facts and every
@@ -16,6 +48,55 @@
 
 ### Changed
 
+- `@sjawhar/pi-envoy` now bundles the `dispatch` command (LEGION-588) instead of registering
+  native Dispatch tools. Its sibling `@sjawhar/pi-legion` declares daemon API contract 17, which
+  makes the daemon's role prompts name that command; install both packages from the same commit.
+
+- `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the
+  claim form of `POST /legion/v1/grants`: the extension sends `push: true` only for a bash command
+  it judges to invoke `legion push` (alone, as a compound command's one segment, or a pipeline's
+  last stage), so the daemon mints that one grant with the longer `credential.pushTTL` (5 minutes)
+  rather than the ordinary 60-second `ttl` — jj's own working-copy snapshot before the network
+  push can outrun the ordinary grant on a near-full tree volume. Install this release together
+  with a Go `legion` built from the same commit: a daemon at 12 refuses the unknown field, and this
+  release against a daemon at 12 fails every grant mint, blocking every bash command in every pane.
+  Contract 13 also covers the worker image's `LEGION_REMOVABLE_WORKSPACES` payload, which the
+  image's own `legion` decodes strictly, so the daemon's image probe refuses an image that would
+  read a later shape of it the old way.
+
+- Each Legion role gets one set of instructions (LEGION-414). The skills and role prompts drop the
+  steps the daemon no longer runs: no role pushes a `.legion/` deletion, the reviewer approves the
+  clean head that still carries `.legion/`, the merger hands its READY packet to the daemon, which
+  posts it, and every push is `legion push`. A sub-architect ends with `sign_off` rather than a
+  phase completion the daemon refuses, a `gates.design: off` root still registers its spec, and
+  the controller skill names only the wakes the daemon sends. The `legion` tool's description says
+  the merger's `summary` is its READY packet and that the daemon accepts no architect's completion.
+- The `dispatch`, `legion-architect`, `legion-controller` and `legion-retro` skills, and the
+  dispatch issues reference, name no one by first name: every literal `Sami` reference becomes
+  `the human` or `the operator`, matching each file's own existing convention for the person an
+  agent asks for a decision or finds at the controller's tmux pane, and the two provenance-quoted
+  rulings keep their rule stated plainly, with the quote and attribution dropped. The shipped
+  skill reaches every installed user of this package, not only its author.
+- **Breaking:** the package is renamed `@sjawhar/pi-envoy` and carries the Envoy entry alone
+  (LEGION-247). `@sjawhar/pi-legion-envoy` gets no further release. What stays here is
+  `extensions/envoy.ts` (published as `dist/envoy.js`): Envoy messaging, subscriptions, delivery,
+  the `dispatch` command and the `dispatch-first` context, with the four skills every session
+  with Dispatch reads (`dispatch`, `dispatch-first`, `dispatch-brainstorming`, `envoy`) at
+  `dist/skills`. The Legion entry (`extensions/legion.ts`), its modules (the former `src/legion/`),
+  the task agents in `agents/`, the eight Legion skills and the `legion.daemonApiVersion` manifest
+  field moved to `@sjawhar/pi-legion` (`packages/pi-legion`), which a Legion pane loads beside this
+  package; this manifest has no `legion` key. The two entries meet through a versioned in-process
+  interface in the private workspace package `@legion/pi-shared` (`packages/pi-shared`, version 1,
+  one object on `globalThis` under `Symbol.for("legion.pi-shared.envoy-plugin-interface")`): this
+  entry publishes it at factory time, and the Legion entry claims roles, matches injected user turns
+  and reads the bootstrapped session through it, refusing to run in a Legion session when no
+  `@sjawhar/pi-envoy` is loaded, when the loaded one speaks another interface version, or when
+  `@sjawhar/pi-legion-envoy` is still installed beside it. Both plugins release from one commit and
+  the daemon's boot gate refuses a pair whose interface versions differ. A person who installed the
+  one package reinstalls once:
+  `omp plugin uninstall @sjawhar/pi-legion-envoy && omp plugin install @sjawhar/pi-envoy`; a Legion
+  deployment also runs `omp plugin install @sjawhar/pi-legion` in the daemon's profile, and the
+  worker image carries both at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`.
 - The architect and worker skills and the daemon's role prompts say what the daemon does: it
   starts and orders every phase from its fixed workflow table (LEGION-223). Nothing tells an agent
   to call `spawn_worker`, `release_wave` or `set_status`, which the `legion` tool no longer has.
@@ -124,6 +205,22 @@
 
 ### Fixed
 
+- The `legion-retro` skill brings the pull request body's path-derived content up to date before
+  the retro pushes its `docs/solutions/` commit (LEGION-592). A repository can require body content
+  that follows from the paths a diff touches, read by a required check; the retro commit can add a
+  path the approved body never accounted for, so that check failed at the retro head and the
+  merger, which reports a stale body rather than rewriting it, stopped before READY. The retro now
+  computes that content the way the repository's instructions say, for the files the pull request
+  changes at its commit, does the work any line of it affirms (inside `docs/solutions/` only, so
+  the approval stands), and writes only those lines into the live body before `legion push`, so
+  the push's checks read it. When it cannot, or its read of the body fails or comes back empty, it
+  pushes nothing and tells the architect, whose skill says how to answer; a push refused after the
+  body edit puts the body back. The
+  implementer's daemon prompt names `skill://legion-retro` for `Phase: retro`, and the merge-gate
+  reference, the architect skill, `skills/AGENTS.md` and the docs site name the body edit among
+  retro's outputs. The retro skill's opening no longer says its `docs/...` paths are in
+  sjawhar/legion: `docs/solutions/` and `.legion/` are on the issue branch of the repository being
+  worked in.
 - The run-end nudge no longer counts a tool-device `write` to a Dispatch device (`xd://dispatch_*`)
   as work. Oh My Pi reports the tool such a `write` ran first, and that report alone spends or owes
   the check; before, the `write` counted as work, so a `dispatch_ask` or a decision block made
@@ -140,6 +237,30 @@
   subagent check asks the host's agent roster first, which needs no publish; where the roster
   gives no opinion and the publish fails, it answers from the transcript on disk, logs a warning,
   and asks again at the next check instead of keeping the failure.
+- Every Legion role may launch `task` subagents (LEGION-551). The `tool_call` hook refused the
+  `task` tool to a root architect, a sub-architect and the merger; a subagent shares its parent's
+  identity and claims no role, so nothing it does clashes with its parent's claim. The architect
+  keeps its `edit`, `write`, `apply_patch` and general `bash` refusals and the merger its `edit`,
+  `write` and `apply_patch` refusals. Both architect role prompts say an architect may dispatch
+  subagents, for example to measure or investigate before the design gate opens, and the
+  interactive mechanics fragment no longer tells a coordinator's subagent to dispatch none of its
+  own. A root architect's pane now carries the operation-log rule its subagent's `bash` was
+  missing: every issue workspace, a root architect's included, is a jj workspace of one shared
+  clone, so `jj undo`/`jj op restore`/`jj abandon` there would rewrite other trees' commits too.
+  The same rule now also refuses the root architect's own `eval` and `hub` calls that spell out a
+  rewrite, which were never gated by the architect's `bash`-only rule.
+- Oh My Pi 18.3 replaced the `hub` tool with `wait`, `proc://` and `agent://`, and Legion's pinned
+  build is 18.6.0 (LEGION-555). The pane rules now hold the stdin a `write` sends to a supervised
+  service (`proc://<id>`) to the plain-text rule `eval` code is held to, so `legion handoff complete`
+  or a jj operation-log rewrite typed into a service's shell is refused as it was through a `hub`
+  send; a service starts as a `bash` command and is tokenised like any other. An architect,
+  reviewer or merger may `write` to `agent://` (a message to an agent of its own process) and to
+  `proc://` (job and service control), which the mutation gate refused as file writes. Both
+  checks read the target as Oh My Pi's `write` routes it: a path pasted as a `read` header
+  (`[proc://shell]`, `[proc://shell#ABCD]`) is the same target, and `<prefix>:conflict://N` is the
+  `conflict://N` file write it routes to, which the gate refuses whatever the prefix.
+- The Envoy tool results for a `task` subagent and the `envoy`, `legion-worker` and `dispatch`
+  skills name a `write` to `agent://` where they named `hub`, which Oh My Pi 18.3 removed.
 
 ### Added
 
@@ -446,3 +567,7 @@
   every turn. It reads open asks only to arm the run-end self-check, while an agent reads its own
   open asks with `dispatch_open_asks`.
 - Removed the NATS-based `{type:"shutdown"}` Legion control directive (`LegionControlDirective`, `requestShutdown`) — the daemon now gracefully stops every process, including the root architect, over its own `legion worker-shim` unix socket instead of publishing a control-subject directive.
+- The `pi.askEphemeral` fallback for fork releases before Oh My Pi 18.3 (LEGION-555). A targeted
+  Dispatch BTW and the stop-time self-check run on the extension context's `runEphemeralTurn`,
+  which Legion's pinned build and the fork's releases from 18.3 serve; the fork no longer ships
+  `pi.askEphemeral`. A host without `runEphemeralTurn` advertises `aside` and `steer` only.

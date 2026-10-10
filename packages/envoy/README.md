@@ -72,8 +72,8 @@ claim and receive that role, validates settled pull-request checks, lifecycle
 and comment topics, PR-less workflow behavior, obsolete-topic absence, and
 both renderers' direct-message summary/body contract.
 
-Docker downloads `nats:2.10-alpine` automatically on the first run when it is
-not already cached.
+Docker downloads it from `mirror.gcr.io/library/nats:2.10-alpine`, Google's
+Docker Hub mirror, on the first run when it is not already cached.
 
 Evidence remains in `packages/envoy/out/e2e/` after the run:
 

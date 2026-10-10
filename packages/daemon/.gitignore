@@ -1,0 +1,2 @@
+# Locally-built binary: `go build ./cmd/legion` from this directory writes it here (do not commit — 50MB+)
+/legion

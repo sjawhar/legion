@@ -4,6 +4,78 @@
 
 ### Changed
 
+- The `dispatch` command keeps its output whole when the session's own state fails (LEGION-588).
+  Under Claude Code the whole output, every line the CLI adds counted, stays under 25,000
+  characters: past it the result text and picture lines are written whole to a file the output
+  names, the text is cut first, then picture lines are dropped from the end with a line saying how
+  many, and the follow notice and the CLI's own lines are kept. A `state.json` that is not JSON
+  exits 2 naming the file before any request; a picture, ledger or memory write that fails after
+  Dispatch took the call prints the result and one line saying so. `readResultsSince` names a
+  ledger line that is not JSON, with its file and line number, to the callback it now takes, and
+  reads past it. An ask option whose label holds `: ` is written `--options-json`, so every option
+  list round-trips through `commandLine`. A single-value flag given twice is refused as given twice
+  whether or not its first value parsed.
+- `hasErrnoCode` is exported from `errors`, where claude-envoy now imports it.
+- A refusal names a Dispatch tool by its `dispatch` command and flags always; `ToolInputError`
+  and `formatZodIssues` no longer take a `syntax` option.
+
+### Removed
+
+- `requiresSubscriptionCapability` on every Envoy tool spec: nothing read it.
+
+### Added
+
+- A delivered `ask.answered` that changes an earlier answer renders `previous_answer`, an issue
+  log names the answer it replaced, and `dispatch_read` of an ask lists its earlier answers
+  (LEGION-622).
+- Pictures in Dispatch (LEGION-541). `dispatch_message`, `dispatch_comment` and `dispatch_ask` take
+  `images`, local paths of PNG, JPEG, GIF or WebP files (by their bytes) of at most 25 MiB: each is
+  uploaded to the issue, the project document's project, or, for a reply to a direct message, the
+  session's own conversation (`DispatchClient.agentArtifact`, `POST /api/v1/agents/{session}/artifacts`),
+  and appended as one `![<file name>](dispatch://<owner>/artifact/<slug>@vN)` line after a blank
+  line. The lines count toward the body and question caps; a call over the cap is refused with the
+  count before any upload, and a bad file is refused naming its path. `DispatchToolResult.images`
+  carries pictures the model is shown: `dispatch_doc_read` of an image (a
+  `dispatch://agent/<session id>/artifact/<slug>@vN` reference included) returns it, and
+  `dispatch_read` returns the pictures the messages, asks and comments it shows embed, newest
+  first, at most 8 and 10 MiB per read, with a `Pictures:` section naming each and the rest; a
+  picture over 3,750,000 bytes (5 MB of base64, the providers' bound) or of another type is described.
+  A host session is shown each picture once: a later `dispatch_read` names one it was already shown
+  as `shown earlier this session; dispatch_doc_read shows it again` instead of sending its bytes,
+  counting toward neither per-read cap, because every request carries the session's history and
+  Anthropic refuses one over 32 MB; `dispatch_doc_read` always shows the picture. A picture counts
+  as shown once the model has it, a tool result once it is returned and a host's delivery once the
+  host took it, so `readPictures` only reads the session's pictures and returns the ones it shows
+  (`PicturesRead.shown`). `dispatch_doc_read` names its picture on the `- image 1: <address> (...)`
+  line `dispatch_read` uses, and `shownPictureAddresses` reads those lines back from a transcript,
+  so a host counts the pictures a session it moves onto already carries. A host forgets a session
+  it stops serving (`forgetShownPictures`), and past 64 sessions the one used longest ago is
+  forgotten. A `dispatch://agent/<session id>/...` reference reads its session id by
+  `SESSION_ID_PATTERN`. `readPictures`, `shownPictures`, `shownPictureAddresses` and
+  `forgetShownPictures` (`@legion/envoy-client/dispatch-picture-tools`),
+  `@legion/envoy-client/dispatch-pictures` and `RenderInboundResult.pictures` serve the hosts'
+  deliveries.
+
+### Changed
+
+- `dispatch_issue` with a spec, and `dispatch_request_approval` when it opens, rewords or hands
+  back a request, add a line to their result asking whether a fresh reader checked the spec, naming
+  a read-only subagent (`plan-gap-analyst` on Oh My Pi) and the `dispatch-first` skill's "Design in
+  the spec" (LEGION-577). It never blocks the write; an issue created without a spec, a repeat
+  request that changed nothing, or a document already approved at its version has no such line.
+- `dispatch_issue` and `dispatch_ask` append LEGION-550's write-time feedback to their result,
+  from the new `WriteAdvice.suggestions`: up to three related items found by search (`Possibly
+  related, found by search:`, each with its status or owner and a link), and, for an ask, any
+  already-answered ask that may settle the same question (`A past decision may already answer
+  this: …, answered by <who> on <when>`). A slow or down search never blocks or delays the write;
+  `suggestions.missing` renders as `Related-item search was skipped: <reason>.` instead.
+- `dispatch_search` takes `offset` and says how far a page reaches: its first line reads
+  `20 results for "merge queue" (showing 1-20 of 1328, 78 ms)` when the query matches more than the
+  page, a line says when some matches cannot be paged to (each kind lists only its best 100) and to
+  narrow the query or name a project, and the last line names the next offset while more can be
+  reached. `details` carries `total`, `reachable`, `offset` and `limit`. A Dispatch from before
+  search paging answers no total and ignores `offset`, so a later page from it is refused rather
+  than shown as its first page again (LEGION-386, LEGION-382). `SearchOptions` takes `offset`.
 - Every text that says to request approval again says to do so only once the human has agreed to
   every point in the new version (LEGION-475): a stale approval's line in a document read;
   `dispatch_request_approval`'s refusal while a decision block is open, after an answer is folded
@@ -97,6 +169,9 @@
 
 ### Fixed
 
+- `dispatch_open_asks` links an issue ask by its item route, `/issues/<KEY>/asks/<id>`, which
+  `dispatchRefFromUrl` reads back as the ask; the link it printed before named the issue alone
+  (LEGION-622).
 - `dispatch_doc_read` of an uploaded file or image returns the file's text at its latest or named
   version, after a line naming its type, version and size, where it failed with Dispatch's
   `artifact is not a document`: it asked `/text`, which answers a file 400 `NOT_DOCUMENT`. A file

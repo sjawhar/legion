@@ -3,12 +3,14 @@ import type {
   Actor,
   Advised,
   Artifact,
+  ArtifactUploadResponse,
   Ask,
   AskRead,
   AskUrgency,
   BlockPath,
   Comment,
   CommentRead,
+  CreateArtifactInput,
   CreateAskInput,
   CreateCommentInput,
   DuplicateCandidate,
@@ -24,14 +26,16 @@ import type {
   IssueComponentsMode,
   IssueDetails,
   IssuePriority,
+  IssueProgress,
   IssueReferences,
   IssueRouteReach,
   IssueRouteStatus,
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
-  SearchResult,
+  Suggestions,
   WriteAdvice,
+  WriteSuggestion,
 } from "@legion/contracts";
 import {
   ASK_QUESTION_MAX,
@@ -39,18 +43,19 @@ import {
   actorLabel,
   claimHolds,
   DEFAULT_ISSUE_PAGE_LIMIT,
+  DISPATCH_BODY_MAX,
   dispatchToolSchema,
   dispatchToolSpecs,
   itemFromSearch,
   overCapMessage,
   PROJECT_KEY_PATTERN,
   serviceSubjectLabel,
-  snippetText,
   zodSchemaApi,
 } from "@legion/contracts";
 import { canonicalRepo } from "@legion/contracts/repo";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
+import { commandLine, commandName } from "./dispatch-command";
 import type { DispatchConfigResolution } from "./dispatch-config";
 import {
   type DispatchHost,
@@ -73,9 +78,36 @@ import {
   documentLabel,
   documentTopicOf,
   issueTopic,
+  type Owner,
   type OwnerTopic,
+  type ParsedDispatchRef,
+  parseDispatchRef,
 } from "./dispatch-owner";
+import {
+  type AgentArtifactRef,
+  askTexts,
+  datedBodies,
+  eventTexts,
+  localPictures,
+  type PicturesRead,
+  type PictureTextLimit,
+  parseAgentArtifactRef,
+  readPictures,
+  shownPictureLine,
+  shownPictures,
+  textWithPictures,
+} from "./dispatch-picture-tools";
+import {
+  type DatedText,
+  oversizePictureText,
+  PICTURE_SHOWN_MAX_BYTES,
+  picturesNewestFirst,
+  sniffPictureType,
+  type ToolImage,
+  toolImage,
+} from "./dispatch-pictures";
 import { messageFor } from "./errors";
+import { pageSummaryText, searchAnswer } from "./search-answer";
 import { formatZodIssues, ToolInputError } from "./tool-input-errors";
 
 /**
@@ -97,6 +129,7 @@ type ToolArguments = {
   readonly ops?: unknown;
   readonly in_reply_to?: unknown;
   readonly message?: unknown;
+  readonly images?: unknown;
 } & Record<string, unknown>;
 
 type ExecutorEnvironment = {
@@ -121,22 +154,8 @@ export interface ExecuteDispatchToolInput {
 export interface DispatchToolResult {
   readonly text: string;
   readonly details: Record<string, unknown>;
-}
-
-type Owner =
-  | { readonly kind: "issue"; readonly issue: string }
-  | {
-      readonly kind: "project";
-      readonly project: string;
-    };
-
-interface ParsedDispatchRef {
-  readonly owner: Owner;
-  readonly kind: "issue" | "spec" | "log" | "children" | "artifact" | "ask" | "comment" | "message";
-  readonly id: string;
-  readonly version?: number;
-  /** The document slug a project-owned ask or comment ref names. */
-  readonly artifact?: string;
+  /** Pictures the model is shown after the text, in the order the text names them. */
+  readonly images?: readonly ToolImage[];
 }
 
 interface ResolvedArtifact {
@@ -167,6 +186,15 @@ const triageAdviceShown = new Set<string>();
 export function resetAdviceMemory(): void {
   triageAdviceShown.clear();
 }
+
+/** The triage keys this process has shown, so a short-lived host can carry them across calls. */
+export function adviceMemory(): Set<string> {
+  return triageAdviceShown;
+}
+
+// Appended where a spec is created or sent to a human for approval; it never blocks the write.
+const SPEC_CHECK_REMINDER =
+  'Has a fresh reader checked this spec? Each claim about how a system works today should trace to code read or a command run, and each requirement to the human\'s words or a cited fact. If not, have a fresh read-only subagent check it now and fix what it finds: on Oh My Pi, `task(agent="scout")`, or whatever read-only agent your host bundles; a Legion architect\'s own spec uses the Legion plugin\'s `plan-gap-analyst` agent instead, which only a Legion session has. See the `dispatch-first` skill, "Design in the spec".';
 
 function renderAdvice(
   tool: string,
@@ -259,6 +287,39 @@ function renderAdvice(
   }
 
   return lines;
+}
+
+// renderSuggestions turns LEGION-550's write-time feedback into lines dispatch_issue and
+// dispatch_ask append to their result: the related items first, then any past decision,
+// so the agent sees both without a second search. Nothing here ever changes whether the write
+// already succeeded; a missing search says why instead of listing anything.
+function renderSuggestions(suggestions: Suggestions | undefined, configUrl: string): string[] {
+  if (suggestions === undefined) return [];
+  if (suggestions.missing !== undefined) {
+    return [`Related-item search was skipped: ${suggestions.missing}.`];
+  }
+  const lines: string[] = [];
+  if (suggestions.related.length > 0) {
+    lines.push("Possibly related, found by search:");
+    for (const item of suggestions.related) {
+      lines.push(`- ${suggestionLabel(item)} → ${new URL(item.href, configUrl).toString()}`);
+    }
+  }
+  if (suggestions.decision !== undefined) {
+    const item = suggestions.decision;
+    const when = item.answered_at === undefined ? "" : ` on ${item.answered_at}`;
+    lines.push(
+      `A past decision may already answer this: ${suggestionLabel(item)}, answered by ${item.answered_by}${when} → ${new URL(item.href, configUrl).toString()}`
+    );
+  }
+  return lines;
+}
+
+function suggestionLabel(item: WriteSuggestion): string {
+  if (item.owner.kind === "issue") {
+    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
+  }
+  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
 }
 
 function documentResultDetails(artifact: Artifact): Record<string, unknown> {
@@ -471,18 +532,6 @@ function duplicateCandidates(error: DispatchServiceError): DuplicateCandidate[] 
   return error.candidates;
 }
 
-function searchResultLine(result: SearchResult, baseUrl: string): string {
-  const href = new URL(result.href, baseUrl).toString();
-  const { owner } = result;
-  if (owner.kind === "document") {
-    const reference = dispatchDocumentRef(owner.project, owner.slug);
-    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
-  }
-  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
-  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
-  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
-}
-
 function askUrgency(args: ToolArguments): AskUrgency | undefined {
   const value = args.urgency;
   return ASK_URGENCIES.find((urgency) => urgency === value);
@@ -504,59 +553,12 @@ function askQuestionProblem(withRef: string): string | undefined {
     : undefined;
 }
 
-function parseDispatchRef(ref: string): ParsedDispatchRef | null {
-  const projectDocument = ref.match(
-    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?$/
-  );
-  if (projectDocument) {
-    const [, project, artifact, version, targetKind, targetID] = projectDocument;
-    if (
-      project === undefined ||
-      artifact === undefined ||
-      (version !== undefined && Number(version) < 1)
-    ) {
-      return null;
-    }
-    if (targetKind === undefined) {
-      return {
-        owner: { kind: "project", project },
-        kind: "artifact",
-        id: artifact,
-        ...(version === undefined ? {} : { version: Number(version) }),
-      };
-    }
-    if (targetID === undefined || (targetKind !== "ask" && targetKind !== "comment")) return null;
-    return {
-      owner: { kind: "project", project },
-      kind: targetKind,
-      id: targetID,
-      artifact,
-    };
-  }
-
-  const issueReference = ref.match(
-    /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec)|\/(log)|\/(children)|\/artifact\/([^/@]+)(?:@v(\d+))?|\/ask\/([^/]+)|\/comment\/([^/]+)|\/message\/([^/]+))?$/
-  );
-  if (!issueReference) return null;
-  const [, issue, spec, log, children, artifact, version, ask, comment, message] = issueReference;
-  if (!issue || (version !== undefined && Number(version) < 1)) return null;
-  const owner: Owner = { kind: "issue", issue };
-  if (spec) return { owner, kind: "spec", id: spec };
-  if (log) return { owner, kind: "log", id: log };
-  if (children) return { owner, kind: "children", id: children };
-  if (artifact) {
-    return {
-      owner,
-      kind: "artifact",
-      id: artifact,
-      ...(version === undefined ? {} : { version: Number(version) }),
-    };
-  }
-  if (ask) return { owner, kind: "ask", id: ask };
-  if (comment) return { owner, kind: "comment", id: comment };
-  if (message) return { owner, kind: "message", id: message };
-  return { owner, kind: "issue", id: issue };
-}
+/** The tools whose `images` argument sends pictures. */
+const pictureSendingTools: Readonly<Record<string, true>> = {
+  dispatch_ask: true,
+  dispatch_comment: true,
+  dispatch_message: true,
+};
 
 /** The address of the ask or comment `id` under a parsed ref's owner (a project-owned ref names its document). */
 function refTarget(ref: ParsedDispatchRef, kind: "ask" | "comment", id: string): string {
@@ -761,8 +763,9 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
 
 /**
  * The dispatch:// form of a dashboard URL on the configured server, or undefined when the
- * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, and log pages
- * plus project document pages (with their ?ask= / ?comment= deep links).
+ * value is not such a URL. Accepts the issue, spec, artifact, ask, comment, and log pages,
+ * project document pages (with their ?ask= / ?comment= deep links), and the page of an upload an
+ * agent's conversation owns (`/agents/<session id>/artifacts/<slug>`).
  */
 export function dispatchRefFromUrl(value: string, serverUrl: string): string | undefined {
   let url: URL;
@@ -802,6 +805,15 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
     if (message !== undefined) return `dispatch://${key}/message/${message}`;
     return `dispatch://${key}`;
   }
+  const agentArtifactPage = url.pathname.match(/^\/agents\/([^/]+)\/artifacts\/([^/]+)\/?$/);
+  if (agentArtifactPage) {
+    const [, session, slug] = agentArtifactPage;
+    try {
+      return `dispatch://agent/${decodeURIComponent(session ?? "")}/artifact/${decodeURIComponent(slug ?? "")}${versionOf("v")}`;
+    } catch {
+      return undefined;
+    }
+  }
   const documentPage = url.pathname.match(
     /^\/projects\/([A-Z][A-Z0-9]{1,9})\/documents\/([^/]+)\/?$/
   );
@@ -816,9 +828,10 @@ export function dispatchRefFromUrl(value: string, serverUrl: string): string | u
 const refGrammarProblem =
   "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
   "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
-  "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " +
-  "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename); " +
-  "a dashboard URL on this Dispatch server is accepted too";
+  "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " +
+  "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " +
+  "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
+  "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 
 const ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 
@@ -840,6 +853,8 @@ interface OwnerResolution {
   readonly args: ToolArguments;
   readonly ref: ParsedDispatchRef | null;
   readonly owner: Owner | null;
+  /** The conversation upload a `dispatch://agent/...` ref names; it has no issue or project. */
+  readonly agentArtifact?: AgentArtifactRef;
 }
 
 /**
@@ -863,6 +878,22 @@ async function resolveOwnerArguments(
   if (typeof refArgument === "string") {
     const refText = dispatchRefFromUrl(refArgument, serverUrl) ?? refArgument;
     if (refText !== refArgument) args = { ...input, ref: refText };
+    const agentArtifact = parseAgentArtifactRef(refText);
+    if (agentArtifact !== null) {
+      // A conversation's upload belongs to no issue or project a write could post into, so only a
+      // read names one, and by the ref alone.
+      if (tool !== "dispatch_doc_read") {
+        problems.push(
+          `ref ${refText} names a picture in a conversation on the Agents page; only dispatch doc-read reads one`
+        );
+      }
+      if (args.issue !== undefined || args.project !== undefined || args.artifact !== undefined) {
+        problems.push(
+          "a dispatch://agent/... ref names its upload alone: name no issue, project, or artifact with it"
+        );
+      }
+      return { args, ref: null, owner: null, agentArtifact };
+    }
     ref = parseDispatchRef(refText);
     if (ref === null) {
       problems.push(
@@ -1270,6 +1301,21 @@ function routeText(issue: RoutedIssue, titles?: ReadonlyMap<string, string>): st
   return issue.route + (issue.route_status == null ? "" : reach[issue.route_status]);
 }
 
+/**
+ * One issue's progress as the tools print it: `tasks 3/7, children 2/5`, each part only when the
+ * server counted it (`null` is a spec with no task list, an issue with no child), joined by sep.
+ * Empty when neither counted.
+ */
+function progressText(progress: IssueProgress | undefined, sep: string): string {
+  if (progress === undefined) return "";
+  const parts: string[] = [];
+  if (progress.tasks !== null) parts.push(`tasks ${progress.tasks.done}/${progress.tasks.total}`);
+  if (progress.children !== null) {
+    parts.push(`children ${progress.children.done}/${progress.children.total}`);
+  }
+  return parts.join(sep);
+}
+
 function issueSummary(
   issue: IssueDetails,
   events: readonly Event[],
@@ -1297,6 +1343,7 @@ function issueSummary(
     `Labels: ${issue.labels.length === 0 ? "none" : issue.labels.join(", ")}`,
     componentsLine(issue.components),
     `Route: ${routeText(issue, titles)}`,
+    `Progress: ${progressText(issue.progress, ", ") || "none"}`,
     ...(specApproval === undefined
       ? []
       : [`Spec ${specApproval.replace(/^Approval/, "approval")}`]),
@@ -1400,9 +1447,12 @@ function eventHead(event: Event): string | undefined {
     case "ask.handed_back":
     case "ask.resolved":
       return textHead(event.payload.question);
-    case "ask.answered":
-      return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}`;
+    case "ask.answered": {
+      const previousAnswer = event.payload.previous_answer;
+      return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}${previousAnswer === undefined ? "" : ` (was: ${textHead(askAnswerText(previousAnswer))})`}`;
+    }
     case "comment.created":
+    case "comment.answered":
     case "comment.anchor_refreshed":
     case "comment.edited":
     case "comment.resolved":
@@ -1453,8 +1503,9 @@ function childrenSummary(issue: IssueDetails): string {
   ].join("\n");
 }
 
-function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string {
+function askSummary({ ask, replies, answers }: AskRead, graph: readonly string[]): string {
   const answer = ask.answer;
+  const earlierAnswers = answers.slice(0, -1);
   const chain = replies.flatMap((reply) => [
     `${reply.id} · ${actorText(reply.author)}`,
     `Body: ${reply.body}`,
@@ -1476,6 +1527,14 @@ function askSummary({ ask, replies }: AskRead, graph: readonly string[]): string
           `- By: ${answer.user}`,
           `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
           ...(answer.text === null ? [] : [`- Text: ${answer.text}`]),
+        ]),
+    ...(earlierAnswers.length === 0
+      ? []
+      : [
+          "Earlier answers:",
+          ...earlierAnswers.map(
+            (earlier) => `- ${earlier.at} · ${earlier.user} · ${askAnswerText(earlier)}`
+          ),
         ]),
     ...(ask.resolution === undefined
       ? []
@@ -1661,25 +1720,60 @@ async function blockAsks(
 /**
  * dispatch_doc_read of an uploaded file or image. Dispatch serves a file's content only as the
  * bytes of one of its versions (its `/text` route answers a file 400 NOT_DOCUMENT), so this reads
- * the version asked for, or the latest, and returns it when it is UTF-8 text. A file carries no
- * token, anchors or approval, so nothing else is read; bytes that are not text are described,
- * with the route that serves them.
+ * the version asked for, or the latest. A picture a model takes (an image artifact whose bytes are
+ * a PNG, JPEG, GIF or WebP of at most `PICTURE_SHOWN_MAX_BYTES`) comes back as an image block with
+ * its name, type, version and size as the text, then the line naming it by its address
+ * (`dispatch://<owner>/artifact/<slug>@v<N>`, `owner` an issue key, a project key or
+ * `agent/<session id>`) as `dispatch_read` does, which a host reads back from a transcript; a
+ * larger picture is described without its bytes being fetched when Dispatch states its size. Any
+ * other file comes back as text when it is UTF-8, and is described with the route that serves its
+ * bytes when it is not. A file carries no token, anchors or approval, so nothing else is read. A
+ * picture is shown whatever `shown` holds, and joins it under its address, so the session's later
+ * reads name it instead of sending it.
  */
 async function readUploadedFile(
   client: DispatchClient,
-  resolved: ResolvedArtifact,
-  requested: number | undefined
+  artifact: Artifact,
+  details: Record<string, unknown>,
+  requested: number | undefined,
+  owner: string,
+  shown: Set<string> | undefined
 ): Promise<DispatchToolResult> {
-  const { artifact } = resolved;
   const latest = Math.max(0, ...artifact.versions.map((version) => version.number));
   const number = requested ?? latest;
-  const file = await client.fileVersion(artifact.id, number);
   const of = number === latest ? "" : ` of ${latest}`;
+  const bytesRoute = `GET /api/v1/artifacts/${artifact.id}/versions/${number} serves its bytes.`;
+  const tooLarge = (mime: string, bytes: number): DispatchToolResult => ({
+    text:
+      `${oversizePictureText(artifact.name, bytes)}, so dispatch doc-read cannot show this ` +
+      `uploaded ${mime} picture (version ${number}${of}). ${bytesRoute}`,
+    details,
+  });
+  const stated = artifact.versions.find((version) => version.number === number);
+  if (
+    artifact.kind === "image" &&
+    stated?.size !== undefined &&
+    stated.size > PICTURE_SHOWN_MAX_BYTES
+  ) {
+    return tooLarge(stated.mime ?? "image", stated.size);
+  }
+  const file = await client.fileVersion(artifact.id, number);
   const size = `${file.bytes.length.toLocaleString("en-US")} bytes`;
-  const details =
-    resolved.owner.kind === "project"
-      ? { project: artifact.project, document: documentLabel(artifact.project, artifact.slug) }
-      : { issue: resolved.issue?.key };
+  if (artifact.kind === "image") {
+    const image = toolImage(file.bytes);
+    if (image !== undefined) {
+      const address = `dispatch://${owner}/artifact/${artifact.slug}@v${number}`;
+      shown?.add(address);
+      return {
+        text:
+          `Picture ${artifact.name}: ${image.mimeType}, version ${number}${of}, ${size}.\n` +
+          shownPictureLine(1, address, artifact.name, image.mimeType, file.bytes.length),
+        details,
+        images: [image],
+      };
+    }
+    if (sniffPictureType(file.bytes) !== undefined) return tooLarge(file.mime, file.bytes.length);
+  }
   let text: string;
   try {
     text = new TextDecoder("utf-8", { fatal: true }).decode(file.bytes);
@@ -1687,7 +1781,7 @@ async function readUploadedFile(
     return {
       text:
         `${artifact.name} is an uploaded ${file.mime} file (version ${number}${of}, ${size}) that is not ` +
-        `UTF-8 text, so dispatch_doc_read cannot show it. GET /api/v1/artifacts/${artifact.id}/versions/${number} serves its bytes.`,
+        `UTF-8 text, so dispatch doc-read cannot show it. ${bytesRoute}`,
       details,
     };
   }
@@ -1748,16 +1842,16 @@ async function refuseOpenDecisionBlocks(
         ? "fold the answer into the text"
         : "write the decision into the text";
     return [
-      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`,
+      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`,
     ];
   });
   if (open.length === 0) return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
   throw new Error(
     [
-      `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
+      `dispatch ${commandName(tool)} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
       ...open.map((line) => `- ${line}`),
-      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason) and write their decision into the text with dispatch_doc_edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
+      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch doc-edit. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
     ].join("\n")
   );
 }
@@ -1815,11 +1909,11 @@ async function refuseRemovingOpenDecisionBlocks(
       : [`${open.length} decision blocks whose asks are`, "questions"];
   throw new Error(
     [
-      `${tool} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
+      `dispatch ${commandName(tool)} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
       ...open.map(
         (ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`
       ),
-      "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
+      "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch edit-ask if you asked it; each keeps it.",
     ].join("\n")
   );
 }
@@ -1960,9 +2054,13 @@ export async function executeDispatchTool(
               issue.message.startsWith("issue is required unless in_reply_to")))
         )
     );
-    problems.push(...formatZodIssues(issues, schema));
+    problems.push(...formatZodIssues(issues, schema, input.tool));
   }
   problems.push(...argumentProblems(input.tool, ownerArguments.args));
+  const pictures =
+    pictureSendingTools[input.tool] === true
+      ? await localPictures(ownerArguments.args.images, input.cwd, problems)
+      : [];
   if (problems.length > 0) throw new ToolInputError(input.tool, problems);
   // A factory, not one instance: the constructor starts the request deadline, and the main
   // path resolves the origin (a subprocess) before it needs a client.
@@ -1976,13 +2074,13 @@ export async function executeDispatchTool(
       return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
     }
     const sessionId = input.sessionId?.trim();
-    if (!sessionId) throw new Error("host session id is required for dispatch_open_asks");
+    if (!sessionId) throw new Error("host session id is required for dispatch open-asks");
     const response = await client.openAsks(sessionId);
     return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
   }
   if (input.tool === "dispatch_whoami") {
     const sessionId = input.sessionId?.trim();
-    if (!sessionId) throw new Error("host session id is required for dispatch_whoami");
+    if (!sessionId) throw new Error("host session id is required for dispatch whoami");
     const client = dispatchClient();
     const identity = await client.whoami();
     const owner = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
@@ -2028,6 +2126,32 @@ export async function executeDispatchTool(
     if (owner === null) throw new Error("issue or project is required");
     return owner;
   };
+  // The text a call posts with its pictures, each uploaded first to the owner the address names.
+  const postWithPictures = (
+    text: string,
+    limit: PictureTextLimit,
+    owner: string,
+    upload: (upload: CreateArtifactInput) => Promise<ArtifactUploadResponse>
+  ): Promise<string> => textWithPictures(input.tool, text, pictures, limit, owner, upload, actor);
+  // An ask or comment uploads to the project of the project document it is on, else to its issue.
+  const writePictures = (
+    resolved: ResolvedArtifact | undefined,
+    text: string,
+    limit: PictureTextLimit
+  ): Promise<string> => {
+    if (resolved?.owner.kind === "project") {
+      const { project } = resolved.owner;
+      return postWithPictures(text, limit, project, (upload) =>
+        client.projectArtifact(project, upload)
+      );
+    }
+    const issueKey = issue();
+    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
+  };
+  // The pictures this host session was already shown: dispatch_read names them instead of sending
+  // them again, and it and dispatch_doc_read add the ones their result shows.
+  const hostSession = input.sessionId?.trim();
+  const shown = hostSession ? shownPictures(hostSession) : undefined;
 
   switch (input.tool) {
     case "dispatch_issue": {
@@ -2065,10 +2189,12 @@ export async function executeDispatchTool(
             isPrimarySpec: spec !== undefined,
           }),
           ...(componentGuidance === undefined ? [] : [componentGuidance]),
+          ...renderSuggestions(created.advice?.suggestions, configUrl),
         ];
         return {
           text: [
             `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
+            ...(spec === undefined ? [] : [SPEC_CHECK_REMINDER]),
             ...adviceLines,
           ].join("\n"),
           details: {
@@ -2088,7 +2214,7 @@ export async function executeDispatchTool(
               const href = new URL(candidate.href, configUrl).toString();
               return `${candidate.key} [${candidate.status}] ${candidate.title} → ${href}`;
             }),
-            "Reference the existing issue, or call dispatch_issue again with force: true after reading it.",
+            "Reference the existing issue, or run dispatch issue again with --force after reading it.",
           ].join("\n"),
           details: { duplicates: candidates },
         };
@@ -2247,7 +2373,7 @@ export async function executeDispatchTool(
           // server that no longer matches this contract, worth saying rather than papering over.
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
-        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch_issue_update when you start, and release the claim when you stop.`;
+        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
         text: [text, notSubscribed(issueTopic(issueKey))].join("\n"),
@@ -2258,22 +2384,13 @@ export async function executeDispatchTool(
       const query = stringArg(args, "query");
       const project = optionalString(args, "project");
       const limit = optionalNumber(args, "limit");
+      const offset = optionalNumber(args, "offset");
       const search = await client.search(query, {
         ...(project === undefined ? {} : { project }),
         ...(limit === undefined ? {} : { limit }),
+        ...(offset === undefined ? {} : { offset }),
       });
-      const results = search.results;
-      const count = results.length;
-      return {
-        text:
-          count === 0
-            ? `No results for "${query}".`
-            : [
-                `${count} ${count === 1 ? "result" : "results"} for "${query}" (${search.took_ms} ms)`,
-                ...results.map((result) => searchResultLine(result, configUrl)),
-              ].join("\n"),
-        details: { query, results },
-      };
+      return searchAnswer(search, query, offset, configUrl);
     }
     case "dispatch_issues": {
       const project = stringArg(args, "project");
@@ -2315,6 +2432,7 @@ export async function executeDispatchTool(
         route_status: row.route_status ?? null,
         route_holder: row.route_holder ?? null,
         updated_at: row.updated_at,
+        progress: row.progress,
       }));
       const titles = await liveSessionTitles(
         client,
@@ -2325,7 +2443,7 @@ export async function executeDispatchTool(
         ? ""
         : rows.length === 0
           ? `showing 0-0 of ${total}`
-          : `showing ${offset + 1}-${offset + rows.length} of ${total}`;
+          : pageSummaryText(offset, rows.length, total);
       return {
         text:
           rows.length === 0
@@ -2333,19 +2451,22 @@ export async function executeDispatchTool(
             : [
                 `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` +
                   (isPartial ? ` (${showing})` : ""),
-                ...rows.map(
-                  (row) =>
+                ...rows.map((row) => {
+                  const progress = progressText(row.progress, " · ");
+                  return (
                     `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` +
                     (row.open_asks === 0
                       ? ""
                       : ` · ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) +
                     (row.claim === null ? "" : ` · claimed by ${claimText(row.claim, titles)}`) +
+                    (progress === "" ? "" : ` · ${progress}`) +
                     // A route that reaches a live session changes nothing about the row; one
                     // that reaches nobody, or cannot be judged, is what the owner audit reads.
                     (row.route === null || row.route_status === "live" || row.route_status === null
                       ? ""
                       : ` · route ${routeText(row)}`)
-                ),
+                  );
+                }),
               ].join("\n"),
         details: { issues: rows, total, offset, limit },
       };
@@ -2427,8 +2548,15 @@ export async function executeDispatchTool(
       const multiple = optionalBoolean(args, "multiple");
       const urgency = askUrgency(args);
       const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
+      const withRef = askQuestionWithRef(args);
+      const refAppended = withRef !== stringArg(args, "question");
+      const question = await writePictures(resolved, withRef, {
+        cap: ASK_QUESTION_MAX,
+        text: refAppended ? "question plus ref" : "question",
+        shorten: refAppended ? "shorten the question, drop the ref" : "shorten the question",
+      });
       const askInput = {
-        question: askQuestionWithRef(args),
+        question,
         ...(Array.isArray(options)
           ? { options: options as NonNullable<CreateAskInput["options"]> }
           : {}),
@@ -2447,7 +2575,10 @@ export async function executeDispatchTool(
           : resolved === undefined
             ? issueTopic(issue())
             : documentTopic(resolved.artifact);
-      const adviceLines = renderAdvice(input.tool, askOwner.label, ask.advice, {});
+      const adviceLines = [
+        ...renderAdvice(input.tool, askOwner.label, ask.advice, {}),
+        ...renderSuggestions(ask.advice?.suggestions, configUrl),
+      ];
       return {
         text: [
           `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}\n${followsAsk(askOwner)}`,
@@ -2501,8 +2632,13 @@ export async function executeDispatchTool(
       // The schema already refused reply_to alongside reply_to_ask, turn without reply_to_ask,
       // and a turn outside agent|human, so the value is the contract's shape.
       const requestedTurn = optionalString(args, "turn") as CreateCommentInput["turn"];
+      const body = await writePictures(resolved, stringArg(args, "body"), {
+        cap: DISPATCH_BODY_MAX,
+        text: "body",
+        shorten: "shorten the body",
+      });
       const commentInput: CreateCommentInput = {
-        body: stringArg(args, "body"),
+        body,
         ...(anchored === undefined ? {} : { anchor: anchored }),
         ...(replyTo === undefined ? {} : { reply_to: replyTo }),
         ...(replyToAsk === undefined ? {} : { ask_id: replyToAsk }),
@@ -2579,8 +2715,27 @@ export async function executeDispatchTool(
     }
     case "dispatch_message": {
       const inReplyTo = messageInReplyTo(args);
-      const body = stringArg(args, "body");
+      const written = stringArg(args, "body");
+      const bodyLimit: PictureTextLimit = {
+        cap: DISPATCH_BODY_MAX,
+        text: "body",
+        shorten: "shorten the body",
+      };
       if (owner === null && inReplyTo !== undefined) {
+        // A direct message's conversation belongs to no issue, so its pictures belong to this
+        // session's own conversation, where the person reads the reply.
+        let body = written;
+        if (pictures.length > 0) {
+          const sessionId = input.sessionId?.trim();
+          if (!sessionId) {
+            throw new Error(
+              "host session id is required to send pictures in a direct-message reply"
+            );
+          }
+          body = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) =>
+            client.agentArtifact(sessionId, upload)
+          );
+        }
         // No owner beside an `in_reply_to`: `resolveOwnerArguments` left it that way because the
         // caller named only the message it answers, which is a human's direct message to this
         // session - a conversation with no issue to post into. `POST /messages/{id}/reply` is
@@ -2622,7 +2777,7 @@ export async function executeDispatchTool(
             details: { message: reply.id, in_reply_to: inReplyTo, posted: false },
           };
         }
-        const readBack = `dispatch_read({message: "${inReplyTo}"}) reads the conversation back.`;
+        const readBack = `${commandLine("dispatch_read", { message: inReplyTo })} reads the conversation back.`;
         const parent = reply.in_reply_to ?? undefined;
         const follows = parent === inReplyTo ? undefined : parent;
         return {
@@ -2640,6 +2795,9 @@ export async function executeDispatchTool(
         };
       }
       const issueKey = issue();
+      const body = await postWithPictures(written, bodyLimit, issueKey, (upload) =>
+        client.artifact(issueKey, upload)
+      );
       const message = await client.message(issueKey, {
         body,
         ...(inReplyTo === undefined ? {} : { in_reply_to: inReplyTo }),
@@ -2729,6 +2887,19 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_doc_read": {
+      const { agentArtifact } = ownerArguments;
+      if (agentArtifact !== undefined) {
+        // A conversation's upload is a file or picture; Dispatch keeps no document there.
+        const artifact = await client.getAgentArtifact(agentArtifact.session, agentArtifact.slug);
+        return readUploadedFile(
+          client,
+          artifact,
+          { session: agentArtifact.session, artifact: artifact.slug },
+          optionalNumber(args, "version") ?? agentArtifact.version,
+          `agent/${agentArtifact.session}`,
+          shown
+        );
+      }
       const artifactReference =
         optionalString(args, "artifact") ??
         (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact"
@@ -2737,7 +2908,20 @@ export async function executeDispatchTool(
       const resolved = await resolveDocument(documentOwner(), artifactReference);
       const version = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
       if (resolved.artifact.kind === "file" || resolved.artifact.kind === "image") {
-        return readUploadedFile(client, resolved, version);
+        const { artifact } = resolved;
+        return readUploadedFile(
+          client,
+          artifact,
+          resolved.owner.kind === "project"
+            ? {
+                project: artifact.project,
+                document: documentLabel(artifact.project, artifact.slug),
+              }
+            : { issue: resolved.issue?.key },
+          version,
+          resolved.owner.kind === "project" ? resolved.owner.project : resolved.owner.issue,
+          shown
+        );
       }
       const documentPromise = client.docRead(resolved.artifact.id, version);
       const marksPromise = openArtifactMarks(client, resolved);
@@ -2804,7 +2988,7 @@ export async function executeDispatchTool(
         ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).`
         : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.`,
+        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.${result.recorded ? `\n${SPEC_CHECK_REMINDER}` : ""}`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }
@@ -2862,7 +3046,7 @@ export async function executeDispatchTool(
     }
     case "dispatch_follow": {
       const sessionId = input.sessionId?.trim();
-      if (!sessionId) throw new Error("host session id is required for dispatch_follow");
+      if (!sessionId) throw new Error("host session id is required for dispatch follow");
       const ask = await resolveAskArgument(input.tool, args, client, sessionId);
       const action = stringArg(args, "action");
       if (action === "unfollow") {
@@ -2879,25 +3063,37 @@ export async function executeDispatchTool(
     // Reads report their owner and follow nothing; no result subscribes the session.
     case "dispatch_read": {
       const message = optionalString(args, "message");
+      // The pictures the shown texts embed, read beside the graph: a `Pictures:` section that
+      // goes before `Referenced by:`, and the images it numbers.
+      const picturesOf = (texts: readonly DatedText[]) =>
+        readPictures(client, picturesNewestFirst(texts), shown);
+      // The result's images. A tool result is the model's once it is returned, so they join
+      // `shown` here, the last part of the result built, after every read that could fail it.
+      const showImages = (pictures: PicturesRead) => {
+        for (const address of pictures.shown) shown?.add(address);
+        return pictures.images.length === 0 ? {} : { images: pictures.images };
+      };
       if (message !== undefined) {
         const sessionId = input.sessionId?.trim();
-        if (!sessionId) throw new Error("host session id is required for dispatch_read({message})");
+        if (!sessionId) throw new Error("host session id is required for dispatch read --message");
         const thread = await client.getMessageThread(messageIdOf(message) as string, sessionId);
         const issueKey = thread.message.issue_key;
+        const [pictures, graph] = await Promise.all([
+          picturesOf(datedBodies([thread.message, ...thread.replies])),
+          issueKey === null
+            ? []
+            : graphSections(
+                client,
+                dispatchChildRef(dispatchIssueRef(issueKey), "message", thread.message.id)
+              ),
+        ]);
         return {
-          text: messageSummary(
-            thread,
-            issueKey === null
-              ? []
-              : await graphSections(
-                  client,
-                  dispatchChildRef(dispatchIssueRef(issueKey), "message", thread.message.id)
-                )
-          ),
+          text: messageSummary(thread, [...pictures.lines, ...graph]),
           details: {
             message: thread.message.id,
             ...(issueKey === null ? {} : { issue: issueKey }),
           },
+          ...showImages(pictures),
         };
       }
       if (ownerArguments.ref?.kind === "ask") {
@@ -2912,12 +3108,17 @@ export async function executeDispatchTool(
         );
         const askRead = await client.getAsk(id);
         const askRef = refTarget(ref, "ask", id);
+        const [pictures, graph] = await Promise.all([
+          picturesOf(askTexts(askRead)),
+          graphSections(client, askRef),
+        ]);
         return {
-          text: askSummary(askRead, await graphSections(client, askRef)),
+          text: askSummary(askRead, [...pictures.lines, ...graph]),
           details:
             ref.owner.kind === "project"
               ? { project: ref.owner.project }
               : { issue: ref.owner.issue },
+          ...showImages(pictures),
         };
       }
       if (ownerArguments.ref?.kind === "comment") {
@@ -2936,12 +3137,17 @@ export async function executeDispatchTool(
         );
         const comment = await client.getComment(id);
         const commentRef = refTarget(ref, "comment", id);
+        const [pictures, graph] = await Promise.all([
+          picturesOf(datedBodies([comment.comment, ...comment.replies])),
+          graphSections(client, commentRef),
+        ]);
         return {
-          text: commentSummary(comment, await graphSections(client, commentRef)),
+          text: commentSummary(comment, [...pictures.lines, ...graph]),
           details:
             ref.owner.kind === "project"
               ? { project: ref.owner.project }
               : { issue: comment.comment.issue_key },
+          ...showImages(pictures),
         };
       }
       if (ownerArguments.ref?.kind === "message") {
@@ -2957,9 +3163,14 @@ export async function executeDispatchTool(
           "message",
           ownerArguments.ref.id
         );
+        const [pictures, graph] = await Promise.all([
+          picturesOf(datedBodies([messageRead.message, ...messageRead.replies])),
+          graphSections(client, messageRef),
+        ]);
         return {
-          text: messageSummary(messageRead, await graphSections(client, messageRef)),
+          text: messageSummary(messageRead, [...pictures.lines, ...graph]),
           details: { issue: messageRead.message.issue_key },
+          ...showImages(pictures),
         };
       }
       if (documentOwner().kind === "project") {
@@ -2984,9 +3195,11 @@ export async function executeDispatchTool(
       const issueKey = issue();
       if (ownerArguments.ref?.kind === "log") {
         const read = await client.read(issueKey);
+        const pictures = await picturesOf(read.events.flatMap(eventTexts));
         return {
-          text: logSummary(read.issue, read.events),
+          text: [logSummary(read.issue, read.events), ...pictures.lines].join("\n"),
           details: { issue: read.issue.key },
+          ...showImages(pictures),
         };
       }
       if (ownerArguments.ref?.kind === "children") {
@@ -3003,14 +3216,25 @@ export async function executeDispatchTool(
       const read = await readPromise;
       // The claim's holder must read the same here as on the issue page, so the label comes
       // from the live registry — asked for only when a session holds this issue.
-      const [references, graph, titles] = await Promise.all([
+      const [references, graph, titles, pictures] = await Promise.all([
         referencesPromise,
         graphSections(client, dispatchIssueRef(read.issue.key)),
         liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
+        picturesOf([
+          ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
+          ...read.events.flatMap(eventTexts),
+        ]),
       ]);
       return {
-        text: issueSummary(read.issue, read.events, references, graph, titles),
+        text: issueSummary(
+          read.issue,
+          read.events,
+          references,
+          [...pictures.lines, ...graph],
+          titles
+        ),
         details: { issue: read.issue.key },
+        ...showImages(pictures),
       };
     }
     default:
@@ -3028,7 +3252,7 @@ async function resolveExistingIssue(
     if (dispatchAnswered(error, 404)) {
       throw new Error(
         `no Dispatch issue is linked to ${issueReference}; create it first with ` +
-          `dispatch_issue({ external: "${issueReference}", ... })`
+          `${commandLine("dispatch_issue", { external: issueReference })} --project <key> --title <title>`
       );
     }
     throw error;

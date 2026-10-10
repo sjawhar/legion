@@ -22,18 +22,24 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 	"unicode"
+
+	"golang.org/x/sync/semaphore"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapi"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/oidc"
@@ -45,6 +51,7 @@ import (
 type AppContext struct {
 	SigningKey     string
 	WebDistDir     string
+	AssetStore     AssetStore
 	Sessions       auth.SessionStore
 	People         auth.PeopleStore
 	Identity       identity.Identity
@@ -72,6 +79,7 @@ type AppContext struct {
 type AppContextOptions struct {
 	SigningKey     string
 	WebDistDir     string
+	AssetStore     AssetStore
 	Sessions       auth.SessionStore
 	People         auth.PeopleStore
 	Identity       identity.Identity
@@ -85,8 +93,10 @@ type AppContextOptions struct {
 	EnvoyURL       string
 	// EnvoyToken is the bearer every Envoy listener call sends (cmd/dispatch: ENVOY_TOKEN); empty
 	// sends none.
-	EnvoyToken    string
-	Docs          docs.API
+	EnvoyToken string
+	Docs       docs.API
+	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
+	Embedder      embed.Embedder
 	Events        *events.Broker
 	App           *auth.AppConfig
 	GitHubAPIBase string
@@ -97,7 +107,10 @@ type AppContextOptions struct {
 	// client; empty URL means the feature is off. See api.DepsInput.
 	AgentSecretsURL   string
 	AgentSecretsToken string
-	TestHooksEnabled  bool
+	// Files is the uploaded-file store main built from DISPATCH_FILE_STORE_BUCKET; nil keeps
+	// files in Postgres. See api.DepsInput.
+	Files            files.Store
+	TestHooksEnabled bool
 	// DevSignIn mounts GET /auth/_dev/signin, which issues the session cookie for any person
 	// named with no sign-in pool exchange, and makes the whole router refuse a request whose Host
 	// is not the dashboard origin. cmd/dispatch sets it from DISPATCH_DEV_SIGNIN behind its boot
@@ -139,6 +152,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		EnvoyURL:          opts.EnvoyURL,
 		EnvoyToken:        opts.EnvoyToken,
 		Docs:              opts.Docs,
+		Embedder:          opts.Embedder,
 		Events:            opts.Events,
 		App:               opts.App,
 		GitHubAPIBase:     opts.GitHubAPIBase,
@@ -147,6 +161,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		Lifetime:          opts.Lifetime,
 		AgentSecretsURL:   opts.AgentSecretsURL,
 		AgentSecretsToken: opts.AgentSecretsToken,
+		Files:             opts.Files,
 		TestHooksEnabled:  opts.TestHooksEnabled,
 	})
 	if err != nil {
@@ -155,6 +170,7 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	return &AppContext{
 		SigningKey:     opts.SigningKey,
 		WebDistDir:     opts.WebDistDir,
+		AssetStore:     opts.AssetStore,
 		Sessions:       opts.Sessions,
 		People:         opts.People,
 		Identity:       opts.Identity,
@@ -176,6 +192,13 @@ func (ctx *AppContext) Architecture() *architecture.Importer {
 	return ctx.apiDeps.Architecture
 }
 
+// GitHub is the shared GitHub App client the HTTP routes use (the architecture importer, the
+// REST proxy and the Settings access checks), so LEGION-567's delivery intake and reconcile sign
+// their own calls as the same App rather than loading credentials a second time.
+func (ctx *AppContext) GitHub() *githubapp.Client {
+	return ctx.apiDeps.GitHub
+}
+
 const (
 	pendingStateTTL  = 10 * time.Minute
 	maxPendingStates = 1000
@@ -187,6 +210,9 @@ type router struct {
 	ctx           *AppContext
 	pendingMu     sync.Mutex
 	pendingStates map[string]pendingState
+	// retainedHeld counts the bytes of retained objects held by responses in flight, up to
+	// maxRetainedBytesHeld (serveRetainedAsset).
+	retainedHeld *semaphore.Weighted
 }
 
 type pendingState struct {
@@ -197,7 +223,7 @@ type pendingState struct {
 
 // New returns an http.Handler that serves all dispatch routes.
 func New(ctx *AppContext) http.Handler {
-	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState)}
+	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState), retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /auth/start", r.authStart)
 	mux.HandleFunc("GET /auth/callback", r.authCallback)
@@ -421,11 +447,85 @@ func (r *router) staticHandler(w http.ResponseWriter, req *http.Request) {
 		writeError(w, http.StatusInternalServerError, "stat failed")
 		return
 	}
+	if isRetainedAssetPath(normalized) && r.ctx.AssetStore != nil {
+		r.serveRetainedAsset(w, req, strings.TrimPrefix(normalized, "/"))
+		return
+	}
 	if !isBrowserRoute(normalized) {
 		writeError(w, http.StatusNotFound, "not found")
 		return
 	}
 	servePage(w, req, filepath.Join(r.ctx.WebDistDir, "index.html"))
+}
+
+// isRetainedAssetPath reports whether normalized names a file below an asset root: the only paths
+// the retained-asset store is asked for, never a page or an asset root itself.
+func isRetainedAssetPath(normalized string) bool {
+	return isReservedPath(normalized, assetRoots) && !slices.Contains(assetRoots, normalized)
+}
+
+// serveRetainedAsset answers a local asset miss from the retained-asset store. The whole object is
+// read under retainedAssetFetchTimeout before anything is written, so a slow, failed or short read
+// is an uncached 502 and never a 200 carrying the immutable header; the browser's download of the
+// bytes read is not bounded by that timeout. A read that instead runs out of that shared bound
+// (errors.Is(err, context.DeadlineExceeded), most often because most of it was already spent
+// waiting for memory-cap room) is answered the same way the cap's own refusal is, a 503, not a 502
+// store failure: the store was never actually unhealthy, only asked too late to answer in time.
+//
+// An object stays in memory until its client has read it, so the bytes held at once are capped at
+// maxRetainedBytesHeld. Before asking the store a request reserves the most one object can hold,
+// waiting within the same bound for earlier requests to give theirs back, so a burst of a stale
+// tab's chunks is served in turn and a request that cannot reserve in time is a 503 that asks the
+// store nothing. A request whose context ends because its client went away while still queued for
+// that room logs nothing more than a debug line and writes no response, since the cap was never
+// the reason and nobody is left to answer. Once the object is read the request keeps only its size
+// until its response is written or its client goes away.
+func (r *router) serveRetainedAsset(w http.ResponseWriter, req *http.Request, key string) {
+	ctx, cancel := context.WithTimeout(req.Context(), retainedAssetFetchTimeout)
+	defer cancel()
+	if err := r.retainedHeld.Acquire(ctx, maxRetainedAssetSize); err != nil {
+		if errors.Is(err, context.Canceled) {
+			slog.Debug("dispatch: retained asset request canceled while queued for the memory cap", "key", key)
+			return
+		}
+		refuseRetainedAssetAtCap(w, key)
+		return
+	}
+	held := maxRetainedAssetSize
+	// Release reads held when the handler returns: the object's size once it is read.
+	defer func() { r.retainedHeld.Release(held) }()
+
+	asset, err := r.ctx.AssetStore.GetAsset(ctx, key)
+	if errors.Is(err, ErrAssetNotFound) {
+		writeError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		refuseRetainedAssetAtCap(w, key)
+		return
+	}
+	if err != nil {
+		slog.Error("dispatch: retained asset store failed", "key", key, "error", err)
+		writeError(w, http.StatusBadGateway, "retained asset store unavailable")
+		return
+	}
+	r.retainedHeld.Release(held - int64(len(asset)))
+	held = int64(len(asset))
+
+	w.Header().Set("Cache-Control", assetCacheControl)
+	w.Header().Set("Content-Type", contentType(key))
+	http.ServeContent(w, req, key, time.Time{}, bytes.NewReader(asset))
+}
+
+// refuseRetainedAssetAtCap answers the shared 503 a request past its fetch bound gets, whether the
+// bound ran out waiting for memory-cap room or inside the store call itself: both are the same
+// "try again shortly" condition from the client's side, never a store failure to alarm an operator
+// over.
+func refuseRetainedAssetAtCap(w http.ResponseWriter, key string) {
+	slog.Warn("dispatch: retained asset refused at the memory cap", "key", key, "cap_bytes", maxRetainedBytesHeld)
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Retry-After", "1")
+	writeError(w, http.StatusServiceUnavailable, "retained assets are at their memory cap; retry")
 }
 
 // isBrowserRoute reports whether an unmatched, non-static path should fall

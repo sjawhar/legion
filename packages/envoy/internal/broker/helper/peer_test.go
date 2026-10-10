@@ -23,20 +23,25 @@ func sleeper(t *testing.T) *exec.Cmd {
 	return cmd
 }
 
+// TestDescendsFromRealProcesses: descendsFrom over /proc says a child descends from its parent and
+// a process from itself, never a parent from its child or pid 1 from anything, and every one of
+// those real walks reaches root or init without an error.
 func TestDescendsFromRealProcesses(t *testing.T) {
 	child := sleeper(t)
 	self := os.Getpid()
-	if !DescendsFrom(child.Process.Pid, self) {
-		t.Fatal("a child must descend from the test process")
-	}
-	if !DescendsFrom(self, self) {
-		t.Fatal("a process descends from itself")
-	}
-	if DescendsFrom(self, child.Process.Pid) {
-		t.Fatal("a parent does not descend from its child")
-	}
-	if DescendsFrom(1, self) {
-		t.Fatal("pid 1 descends from nothing")
+	for _, tc := range []struct {
+		name      string
+		pid, root int
+		want      bool
+	}{
+		{"a child descends from the test process", child.Process.Pid, self, true},
+		{"a process descends from itself", self, self, true},
+		{"a parent does not descend from its child", self, child.Process.Pid, false},
+		{"pid 1 descends from nothing", 1, self, false},
+	} {
+		if in, err := descendsFrom(tc.pid, tc.root, procParent); in != tc.want || err != nil {
+			t.Fatalf("%s: descendsFrom(%d, %d) = %v, %v; want %v, nil", tc.name, tc.pid, tc.root, in, err, tc.want)
+		}
 	}
 }
 

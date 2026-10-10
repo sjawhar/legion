@@ -82,6 +82,7 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
   queryClient.setQueryData(["artifact", "artifact-1", "text"], { markdown: "stale" });
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask: blockAsk,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -154,6 +155,7 @@ test("after Ask back on a decision block, the hosted card's turn label follows t
   const listIssueAsks = spyOn(api, "listIssueAsks").mockResolvedValue([handedOver]);
   const getAsk = spyOn(api, "getAsk").mockResolvedValue({
     ask: openAsk,
+    answers: [],
     edits: [],
     followers: [],
     replies: [],

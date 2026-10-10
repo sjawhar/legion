@@ -9,8 +9,11 @@
 // Each check prints what it observed, each line naming the identity that observed it, and then
 // `CHECK <name>: PASS`. The first check that does not hold prints `CHECK <name>: FAIL: <why>` and
 // ends the run. The agent every pod runs is a stub (decision 7): the Go shim bridges it as it would
-// Oh My Pi, and it appends its pod's uid to a marker file on the tree volume — the session file a
-// resume names — and sleeps.
+// Oh My Pi, and it appends its own role, pod uid and generation to a marker file on the issue's volume
+// — the session file a resume names — and sleeps. The marker is the issue pod's: SandboxName (see
+// names.go) is shared by all six of an issue's role claims, so one issue pod's resident roles each
+// append their own launches to the same file, and a check reads only its own claim's lines back out
+// of it (roleIncarnations).
 //
 // This file is the rig: the run's inputs, the boot-token registry, the observation and log
 // records, the runtime's lifecycle, and the launches and reads every check shares. The checks
@@ -69,38 +72,40 @@ var liveChecks = []liveCheck{
 	{"boot-refusal-negative", (*liveRig).checkBootRefusal, nil},
 	{"image-probe", (*liveRig).checkImageProbe, nil},
 	{"image-probe-negative", (*liveRig).checkImageProbeRefusal, nil},
+	{"image-probe-capability-negative", (*liveRig).checkImageProbeCapabilityRefusal, nil},
 	{"root-ready", (*liveRig).checkRootReady, nil},
 	{"gvisor", (*liveRig).checkGVisor, nil},
+	{"resources", (*liveRig).checkResources, nil},
 	{"operator-token", (*liveRig).checkOperatorToken, nil},
 	{"pod-baseline", (*liveRig).checkPodBaseline, nil},
 	{"provider-key", (*liveRig).checkProviderKey, nil},
 	{"adopt-working-copy", (*liveRig).checkAdoptWorkingCopy, nil},
-	{"worker-colocated", (*liveRig).checkWorkerColocated, nil},
-	{"secrets-two-pods-enrolled", (*liveRig).checkSecretsTwoPodsEnrolled, secretsBlocked},
+	{"worker-shares-issue-pod", (*liveRig).checkWorkerSharesIssuePod, nil},
+	{"secrets-two-roles-enrolled", (*liveRig).checkSecretsTwoRolesEnrolled, secretsBlocked},
 	{"secrets-automatic-grant", (*liveRig).checkSecretsAutomaticGrant, secretsBlocked},
 	{"secrets-cross-pod-negative", (*liveRig).checkSecretsCrossPodNegative, secretsBlocked},
 	{"secrets-copied-token-negative", (*liveRig).checkSecretsCopiedTokenNegative, secretsBlocked},
 	{"secrets-self-enroll-negative", (*liveRig).checkSecretsSelfEnrollNegative, secretsBlocked},
 	{"secrets-approval-ask", (*liveRig).checkSecretsApprovalAsk, secretsBlocked},
 	{"suspend", (*liveRig).checkSuspend, nil},
-	{"no-affinity", (*liveRig).checkNoAffinity, nil},
+	{"role-container-isolation", (*liveRig).checkRoleContainerIsolation, nil},
 	{"resume", (*liveRig).checkResume, nil},
 	{"same-agent-negative", (*liveRig).checkSameAgentNegative, nil},
-	{"kill-pod", (*liveRig).checkKillPod, nil},
+	{"kill-launcher", (*liveRig).checkKillLauncher, nil},
 	{"stale-incarnation", (*liveRig).checkStaleIncarnation, nil},
 	{"secrets-old-uid-and-revocation", (*liveRig).checkSecretsOldUIDAndRevocation, secretsBlocked},
 	{"respawn-before-register", (*liveRig).checkRespawnBeforeRegister, nil},
-	{"concurrent-provision", (*liveRig).checkConcurrentProvision, nil},
+	{"independent-provision", (*liveRig).checkIndependentProvision, nil},
 	{"re-adopt", (*liveRig).checkReAdopt, nil},
 	{"orphan-sweep", (*liveRig).checkOrphanSweep, nil},
-	{"release-tree", (*liveRig).checkReleaseTree, nil},
+	{"release-preserves-issue", (*liveRig).checkReleasePreservesIssue, nil},
+	{"postgres-resume", (*liveRig).checkPostgresResume, nil},
 }
 
 // The runtime's settings for the run: the boot timeout covers a Karpenter node coming up and the
 // worker image's pull, which is what a first pod on an empty pool waits for.
 const (
 	liveBootTimeout   = 5 * time.Minute
-	liveBootIntervals = 3
 	liveGrace         = 15 * time.Second
 	liveProbeInterval = 10 * time.Second
 	liveAdoptTimeout  = time.Minute
@@ -112,12 +117,72 @@ const (
 	liveSettle = 2*liveProbeInterval + 5*time.Second
 )
 
-// liveTreeVolume is the tree volume's size, the daemon configuration's default. The run sets no
-// scheduling beyond the Legion pool the runtime selects: every pod of a tree requires the node of
-// the tree's first scheduled pod (the tree volume attaches to one node), and the `legion`
-// NodePool's own floor, karpenter.k8s.aws/instance-cpu Gt 3 (set in the deployment repository), is what makes that
-// node a 4-vCPU one with room for the tree while no pod requests anything (Stage 4b decision 2).
-var liveTreeVolume = resource.MustParse("20Gi")
+// liveIssueVolume is the issue volume's size, the daemon configuration's default. The run sets no
+// scheduling beyond the Legion pool the runtime selects: no pod asks for another pod's node or
+// keeps off one (every issue pod owns its volume, LEGION-632), and every pod reserves what
+// liveResources gives its roles, so the scheduler, and Karpenter under the `legion` NodePool's
+// floor (karpenter.k8s.aws/instance-cpu Gt 3, set in the deployment repository), place it where
+// the pool has room.
+var liveIssueVolume = resource.MustParse("20Gi")
+
+// liveOverrides are the roles whose reservation the rig sets itself, as a deployment's
+// `runtime.kubernetes.resources.<role>` does, field by field: the implementer's and tester's cpu
+// and memory, the tester's ephemeral-storage limit beside them, the reviewer's memory alone (its
+// cpu stays the default). The architect, planner and merger keep config.DefaultResources(), so the
+// root's pod carries a reservation from each path — an override, a default, and one with a field
+// of each — and the `resources` check tells them apart, the disk bound's two paths included. The
+// stub agent sleeps, so the overrides size the pods down from the defaults' 3 CPU and 19 GiB to
+// 2.5 CPU and 6 GiB, which nproc and MemTotal in the pod are then checked against.
+var liveOverrides = map[claim.Role]config.RoleResources{
+	claim.RoleImplementer: {CPU: "500m", Memory: "1Gi"},
+	claim.RoleTester:      {CPU: "500m", Memory: "1Gi", EphemeralStorage: "30Gi"},
+	claim.RoleReviewer:    {Memory: "1Gi"},
+}
+
+// liveResources are the reservations the rig hands the runtime (Options.Resources): the daemon's
+// defaults as it translates them (reservations, manifest_test.go) with liveOverrides applied field
+// by field, as resolveKubernetes settles a file's `resources` block. Cpu and memory are each the
+// request and the limit alike; the ephemeral-storage limit and request are set apart, as the file
+// sets them. The image probe carries none of these: its own fixed reservation (probeReservation,
+// manifest_test.go), as the daemon hands it.
+func liveResources() map[claim.Role]corev1.ResourceRequirements {
+	resources := reservations()
+	for role, override := range liveOverrides {
+		requirements := resources[role]
+		for name, value := range map[corev1.ResourceName]string{corev1.ResourceCPU: override.CPU, corev1.ResourceMemory: override.Memory} {
+			if value == "" {
+				continue
+			}
+			quantity := resource.MustParse(value)
+			requirements.Requests[name] = quantity
+			requirements.Limits[name] = quantity.DeepCopy()
+		}
+		if override.EphemeralStorage != "" {
+			requirements.Limits[corev1.ResourceEphemeralStorage] = resource.MustParse(override.EphemeralStorage)
+		}
+		if override.EphemeralStorageRequest != "" {
+			requirements.Requests[corev1.ResourceEphemeralStorage] = resource.MustParse(override.EphemeralStorageRequest)
+		}
+		resources[role] = requirements
+	}
+	return resources
+}
+
+// overridden reports whether role's reservation field name comes from liveOverrides rather than
+// the defaults: for ephemeral-storage, whether either side of the bound does.
+func overridden(role claim.Role, name corev1.ResourceName) bool {
+	override, ok := liveOverrides[role]
+	if !ok {
+		return false
+	}
+	switch name {
+	case corev1.ResourceCPU:
+		return override.CPU != ""
+	case corev1.ResourceEphemeralStorage:
+		return override.EphemeralStorage != "" || override.EphemeralStorageRequest != ""
+	}
+	return override.Memory != ""
+}
 
 // The run's one provider key: the variable its agents' Oh My Pi gets, and the key of the providers
 // Secret (ProvidersSecretName) the script creates for the run, holding a value no model route reads.
@@ -131,9 +196,11 @@ const (
 // namespace and a common name would let one run delete another's route.
 const fixtureConfigMap = "legion-operator-route"
 
-// The stub agent (decision 7): the shim runs it after its hello is acknowledged, with the Oh My Pi
-// arguments the runtime appends as the shell's positional parameters, which it ignores.
-var stubAgent = []string{"/bin/sh", "-c", `printf '%s\n' "$POD_UID" >>"$LEGION_E2E_MARKER" && exec sleep infinity`, "stage4a-stub"}
+// The marker is the runtime locator's process incarnation: an unchanged pod UID plus the launch
+// generation, prefixed with the role that launched it since the marker is one issue pod's, shared
+// by every resident role (SandboxName). A role restart keeps the pod UID but must append a new
+// incarnation.
+var stubAgent = []string{"/bin/sh", "-c", `printf '%s:%s/%s\n' "$LEGION_ROLE" "$POD_UID" "$LEGION_GENERATION" >>"$LEGION_E2E_MARKER" && exec sleep infinity`, "stage4a-stub"}
 
 // liveEnv is what the script hands the harness.
 type liveEnv struct {
@@ -147,13 +214,18 @@ type liveEnv struct {
 	// audience filled in, the operator's pod every launch carries; operatorConfigMap is the run's
 	// copy of the ConfigMap it names.
 	operatorPodFile, operatorConfigMap string
-	// The agent-secrets checks' inputs: the production broker, the email of the
-	// person this run's machine login is approved by (an attended step: the operator enters the
-	// printed code on the Dispatch credential page and clicks Approve during the run), and the
-	// sha256 of the automatic rule's dummy value, and the checkout's agent-secrets binary. Every
-	// field here is read with os.Getenv, unlike the rest of liveEnv: unset is a blocked run of the
-	// secrets-* checks, never a refusal to start (secretsBlocked).
+	// The agent-secrets checks' inputs: the production broker, the email of the person who
+	// approves the run's credential request for LEGION_E2E_APPROVAL, the sha256 of the automatic
+	// rule's dummy value, and the checkout's agent-secrets binary. With all four set the harness
+	// also starts a legion-daemon machine login, which any person signed in to Dispatch approves
+	// during the run (an attended step: they enter the printed code on the Dispatch credential page
+	// and click Approve). Every field here is read with os.Getenv, unlike the rest of liveEnv: unset
+	// is a blocked run of the secrets-* checks, never a refusal to start (secretsBlocked).
 	agentSecretsURL, agentSecretsOperator, agentSecretsAutoSHA, agentSecretsBin string
+	// The scratch Postgres the script started for postgres-resume: the file holding its URL, which
+	// the script also wrote into the providers Secret under liveSessionsSecretKey, and the address it
+	// listens on, which every pod must reach as it reaches the worker stream.
+	sessionDSNFile, sessionDBAddress string
 }
 
 func readLiveEnv(t *testing.T) liveEnv {
@@ -186,6 +258,8 @@ func readLiveEnv(t *testing.T) liveEnv {
 		agentSecretsOperator: os.Getenv("LEGION_E2E_AGENT_SECRETS_OPERATOR"),
 		agentSecretsAutoSHA:  os.Getenv("LEGION_E2E_AGENT_SECRETS_AUTO_SHA256"),
 		agentSecretsBin:      os.Getenv("LEGION_E2E_AGENT_SECRETS_BIN"),
+		sessionDSNFile:       get("LEGION_E2E_SESSION_DSN_FILE"),
+		sessionDBAddress:     get("LEGION_E2E_SESSION_DB_ADDRESS"),
 	}
 	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
 	if err != nil {
@@ -312,22 +386,22 @@ func (g *registry) mint(c claim.Token, armed bool) (string, uint64) {
 	return token, gen
 }
 
-func (g *registry) resolve(bootToken string) (claim.Token, uint64, bool, bool) {
+func (g *registry) resolve(bootToken string) (claim.Token, uint64, bool, bool, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	m, ok := g.byToken[bootToken]
 	switch {
 	case !ok:
-		return "", 0, false, false
+		return "", 0, false, false, nil
 	case !m.armed:
 		g.refused[m.claim]++
-		return "", 0, false, false
+		return "", 0, false, false, nil
 	case m.gen != g.current[m.claim]:
 		g.refused[m.claim]++
-		return m.claim, m.gen, true, true
+		return m.claim, m.gen, true, true, nil
 	}
 	g.pending[m.claim] = m.hash
-	return m.claim, m.gen, false, true
+	return m.claim, m.gen, false, true, nil
 }
 
 func (g *registry) hello(event stream.Hello) {
@@ -504,6 +578,9 @@ type liveRig struct {
 	obs  *observations
 	logs *logRecorder
 	log  *slog.Logger
+	// trees is the durable state every runtime of the run reads (Options.Store): every tree live
+	// until a check records its cleanup confirmed.
+	trees *fakeStore
 
 	// The current runtime instance and its listener; stop ends both.
 	rt      *Runtime
@@ -533,6 +610,9 @@ type liveRig struct {
 	enrollments        map[claim.Token]liveEnrollment
 	grants             map[claim.Token]string
 	requests           map[claim.Token]string
+	// sessionStore is the providers Secret's key every runtime started from now on keeps sessions
+	// in (Options.SessionDSNKey, session_store postgres): set by postgres-resume, "" before it.
+	sessionStore string
 }
 
 func TestStage4aSandboxRuntimeLive(t *testing.T) {
@@ -580,7 +660,7 @@ func note(who, format string, args ...any) {
 func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &liveRig{
-		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})},
+		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})}, trees: newFakeStore(),
 		enrollments: map[claim.Token]liveEnrollment{}, grants: map[claim.Token]string{},
 	}
 	fail := func(format string, args ...any) {
@@ -611,13 +691,13 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	if r.dyn, err = dynamic.NewForConfig(own); err != nil {
 		fail("%v", err)
 	}
-	if env.agentSecretsURL != "" && env.agentSecretsOperator != "" {
-		client := &agentsecrets.Client{URL: env.agentSecretsURL, Operator: env.agentSecretsOperator}
+	if agentSecretsBlockReason(env.agentSecretsURL, env.agentSecretsOperator, env.agentSecretsAutoSHA, env.agentSecretsBin) == "" {
+		client := &agentsecrets.Client{URL: env.agentSecretsURL}
 		code, err := client.Login(r.ctx)
 		if err != nil {
 			fail("%v", err)
 		}
-		fmt.Printf("STAGE4A: approve machine login code %s on the Dispatch credential page as %s\n", code, env.agentSecretsOperator)
+		fmt.Printf("STAGE4A: approve machine login code %s on the Dispatch credential page, signed in as any person\n", code)
 		var state agentsecrets.LoginState
 		pollErr := r.poll(10*time.Minute, "machine login "+code+" to be approved", func() (bool, error) {
 			state = client.LoginStatus()
@@ -657,7 +737,15 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		{"worker", "S4A-1", "S4A-1", claim.RoleImplementer},
 		{"second", "S4A-1", "S4A-1", claim.RoleTester},
 		{"fresh", "S4A-1", "S4A-1", claim.RoleReviewer},
-		{"orphan", "S4A-1", "S4A-1", claim.RoleMerger},
+		// orphan is a separate issue pod: its unrecorded Sandbox can be swept or deleted without
+		// taking the root issue's resident roles with it. Its role is its own tree's architect, the
+		// claim a tree's first launch is in the daemon.
+		{"orphan", "S4A-4", "S4A-4", claim.RoleArchitect},
+		// sessions is postgres-resume's own tree, launched once the runtime keeps sessions in the
+		// scratch database: its pod is the only one created under session_store postgres.
+		{"sessions", "S4A-5", "S4A-5", claim.RoleArchitect},
+		// root2 and child2 are two issues of one tree, each in a Sandbox and on a volume of its own
+		// (independent-provision).
 		{"root2", "S4A-2", "S4A-2", claim.RoleArchitect},
 		{"child2", "S4A-2", "S4A-3", claim.RolePlanner},
 	} {
@@ -689,8 +777,39 @@ func sameLocator(a, b runtime.Locator) bool {
 		(a.Sandbox == nil) == (b.Sandbox == nil) && (a.Sandbox == nil || *a.Sandbox == *b.Sandbox)
 }
 
-// startRuntime binds a fresh listener on the devbox's private address and builds a fresh runtime
-// on it, as a daemon boot does, with an Observe feeding the run's observation record.
+// runtimeOptions are the Options every runtime of the run is built from, as a daemon boot builds
+// them: the operator's pod, the run's provider key, the stub agent, and the worker stream at
+// address, through ln.
+func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
+	opts := Options{
+		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", IssueVolume: liveIssueVolume,
+		Resources: liveResources(),
+		StreamURL: address,
+		Tools: Tools{
+			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
+			AgentSecrets: "/opt/legion/bin/agent-secrets",
+		},
+		// Stage4a drives Runtime directly to prove Kubernetes mechanics; the daemon's store is the
+		// in-memory one, which outlives each runtime as Postgres outlives a daemon restart.
+		Store: r.trees,
+		Pod:   r.pod, ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
+		Agent: stubAgent, BootTimeout: liveBootTimeout,
+		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
+		Tokens: r.tokens, Conns: ln, Log: r.log, SessionDSNKey: r.sessionStore,
+	}
+	if r.env.agentSecretsURL != "" {
+		opts.AgentSecrets = &AgentSecrets{URL: r.env.agentSecretsURL, Audience: "agent-secrets", TokenExpiry: time.Hour}
+	}
+	return opts
+}
+
+// streamAddress is the worker stream's address on the devbox's private address: every runtime of
+// the run is built on it, and every pod's shim dials it.
+func (r *liveRig) streamAddress() string { return "tcp://" + r.env.streamHost + ":" + r.env.streamPort }
+
+// startRuntime binds a fresh listener on the devbox's private address, builds a fresh runtime on
+// it and registers the runtime's launcher acceptor, as a daemon boot does (sandboxRuntime), with an
+// Observe feeding the run's observation record.
 func (r *liveRig) startRuntime() error {
 	if r.tokens.apps == nil {
 		if err := r.resolveApp(); err != nil {
@@ -698,34 +817,20 @@ func (r *liveRig) startRuntime() error {
 		}
 	}
 	ctx, stop := context.WithCancel(r.ctx)
-	address := "tcp://" + r.env.streamHost + ":" + r.env.streamPort
+	address := r.streamAddress()
 	ln, err := stream.Listen(ctx, address, r.reg.resolve, stream.Options{RPCTimeout: 30 * time.Second, Log: r.log})
 	if err != nil {
 		stop()
 		holder, _ := exec.Command("ss", "-Hltnp", "sport = :"+r.env.streamPort).CombinedOutput()
 		return fmt.Errorf("the worker stream cannot bind %s: %v; the port's holder: %s", address, err, strings.TrimSpace(string(holder)))
 	}
-	opts := Options{
-		Namespace: r.env.namespace, Project: r.env.project, Image: r.env.image, StorageClass: "gp2", TreeVolume: liveTreeVolume,
-		StreamURL: address,
-		Tools: Tools{
-			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
-			AgentSecrets: "/opt/legion/bin/agent-secrets",
-		},
-		Pod:          r.pod,
-		ProviderKeys: map[string]string{liveProviderKey: liveProvidersSecretKey},
-		Agent:        stubAgent, BootTimeout: liveBootTimeout, BootIntervals: liveBootIntervals,
-		TerminationGrace: liveGrace, ProbeInterval: liveProbeInterval, AdoptTimeout: liveAdoptTimeout,
-		Tokens: r.tokens, Conns: ln, Log: r.log,
-	}
-	if r.env.agentSecretsURL != "" {
-		opts.AgentSecrets = &AgentSecrets{URL: r.env.agentSecretsURL, Audience: "agent-secrets", TokenExpiry: time.Hour}
-	}
+	opts := r.runtimeOptions(address, ln)
 	rt, err := New(ctx, r.rc, opts)
 	if err != nil {
 		stop()
 		return err
 	}
+	ln.SetLauncherResolver(rt.LauncherResolver())
 	observe, err := rt.Observe(ctx)
 	if err != nil {
 		stop()
@@ -799,16 +904,52 @@ func (r *liveRig) kubectl(args ...string) (string, error) {
 
 // exec runs a command in a claim's main container, through the admin context.
 func (r *liveRig) exec(c *liveClaim, command ...string) (string, error) {
-	out, err := r.kubectl(append([]string{"exec", SandboxName(c.token), "-c", mainContainer, "--"}, command...)...)
+	out, err := r.kubectl(append([]string{"exec", SandboxName(c.token), "-c", string(c.role), "--"}, command...)...)
 	return strings.TrimSpace(out), err
 }
 
+// issuePVCs are the run's PersistentVolumeClaims labelled with issue, as the operator reads them:
+// `<name> <phase>` each, in name order, none when the issue has no volume. An issue's volume is
+// selected by the issue label its Sandbox's claim template put on it, never by the tree's: the
+// restricted runtime identity has no PVC verb, so this is an operator step.
+func (r *liveRig) issuePVCs(issue string) ([]string, error) {
+	out, err := r.kubectl("get", "pvc", "-l", labelProject+"="+r.env.project+","+labelIssue+"="+labelValue(issue),
+		"-o", `jsonpath={range .items[*]}{.metadata.name} {.status.phase}{"\n"}{end}`)
+	if err != nil {
+		return nil, err
+	}
+	lines := strings.Split(strings.TrimSpace(out), "\n")
+	lines = slices.DeleteFunc(lines, func(line string) bool { return line == "" })
+	slices.Sort(lines)
+	return lines, nil
+}
+
+// markerLines reads the marker with `test ! -e || cat`, not a bare `cat`: a marker a poll reads
+// before the stub agent has written to it does not exist yet, and a bare `cat`'s non-zero exit
+// would reach the caller as an error — a poll returns on the first error, never retrying — rather
+// than "not yet" (awaitRunning's own poll, the first launch of an issue: root at root-ready, root2
+// and child2 at independent-provision, an orphan's first launch).
 func (r *liveRig) markerLines(c *liveClaim) ([]string, error) {
-	out, err := r.exec(c, "cat", c.marker)
+	out, err := r.exec(c, "sh", "-c", `test ! -e "$1" || cat -- "$1"`, "sh", c.marker)
 	if err != nil {
 		return nil, err
 	}
 	return strings.Fields(out), nil
+}
+
+// roleIncarnations is markerLines filtered to one role's own "role:incarnation" entries, with the
+// role prefix stripped back to the bare incarnation: the marker is the issue pod's (SandboxName),
+// shared by every resident role that has started in it, so its raw lines also hold every sibling
+// role's own launches.
+func roleIncarnations(lines []string, role claim.Role) []string {
+	prefix := string(role) + ":"
+	var own []string
+	for _, line := range lines {
+		if rest, ok := strings.CutPrefix(line, prefix); ok {
+			own = append(own, rest)
+		}
+	}
+	return own
 }
 
 // ---- reads under the runtime identity ----------------------------------------------------------
@@ -897,8 +1038,10 @@ func (r *liveRig) resume(c *liveClaim, file string) (runtime.Locator, error) {
 }
 
 // awaitRunning waits for the claim's current pod to run with its Sandbox Ready, then for its
-// shim's hello at the current generation. A pod that runs and never says hello within one boot
-// interval is a network-path failure, named as one.
+// shim's hello at the current generation, then for the stub agent's own marker line — the hello
+// only proves the shim dialed in before spawning its child (shim.go:204/317); nothing else orders
+// the child's first write against whatever a caller does next (a stop, a marker read). A pod that
+// runs and never says hello within one boot interval is a network-path failure, named as one.
 func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, error) {
 	name := SandboxName(c.token)
 	var pod *corev1.Pod
@@ -910,8 +1053,8 @@ func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, err
 		if err != nil {
 			return false, err
 		}
-		if string(p.UID) != c.loc.Incarnation {
-			return false, fmt.Errorf("pod %s is uid %s, not the incarnation %s the launch returned", name, p.UID, c.loc.Incarnation)
+		if string(p.UID) != c.loc.Sandbox.PodUID {
+			return false, fmt.Errorf("pod %s is uid %s, not the pod uid %s the launch returned in process %s", name, p.UID, c.loc.Sandbox.PodUID, c.loc.Incarnation)
 		}
 		if terminal(p) {
 			log, _ := r.initLog(name)
@@ -931,6 +1074,16 @@ func (r *liveRig) awaitRunning(c *liveClaim, since time.Time) (registration, err
 	reg, ok := r.reg.await(c.token, c.gen, since, liveBootTimeout)
 	if !ok {
 		return registration{}, r.networkPathFailure(pod)
+	}
+	wrote := string(c.role) + ":" + c.loc.Incarnation
+	if err := r.poll(liveBootTimeout, "marker "+c.marker+" to hold "+wrote, func() (bool, error) {
+		lines, err := r.markerLines(c)
+		if err != nil {
+			return false, err
+		}
+		return slices.Contains(lines, wrote), nil
+	}); err != nil {
+		return registration{}, err
 	}
 	return reg, nil
 }
@@ -962,27 +1115,14 @@ func (r *liveRig) networkPathFailure(pod *corev1.Pod) error {
 		pod.Name, pod.UID, pod.Spec.NodeName, r.env.streamHost, r.env.streamPort, liveBootTimeout, groups, r.env.streamPort)
 }
 
-// suspend is a Suspend of the claim's running process, then the wait for its pod to be gone.
+// suspend is a role-process stop. It leaves the issue pod in place; its launcher reports the
+// child exit, so Runtime.Suspend returns only after that role's process is gone.
 func (r *liveRig) suspend(c *liveClaim) error {
 	if err := r.rt.Suspend(r.ctx, *c.loc); err != nil {
 		return err
 	}
-	if err := r.awaitPodGone(c); err != nil {
-		return err
-	}
 	c.loc, c.state = nil, stateSuspended
 	return nil
-}
-
-func (r *liveRig) awaitPodGone(c *liveClaim) error {
-	name := SandboxName(c.token)
-	return r.poll(liveGoneLimit, "pod "+name+" to be gone", func() (bool, error) {
-		_, err := r.getPod(name)
-		if apierrors.IsNotFound(err) {
-			return true, nil
-		}
-		return false, err
-	})
 }
 
 // ensureRunning and ensureSuspended put a claim where a check starts from: nothing to do in a full

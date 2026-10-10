@@ -29,8 +29,10 @@ import (
 
 const (
 	defaultConfigPath = "./legion.yaml"
-	// stopTimeout bounds the wait for a stopping daemon, whose own exit is two bounded steps —
-	// draining the API and stamping the boot.
+	// stopTimeout bounds the wait for a stopping daemon, which returns at most 22 s after its stop
+	// begins once its boot is recorded: its stop budget, the boot's stamp and the store's close
+	// (the daemon package's stopBudget). A signal before then waits out the boot step under way
+	// first, each bounded by the boot's own 30 s (the daemon package's Run).
 	stopTimeout = 30 * time.Second
 	// requestTimeout bounds a CLI read of a daemon's HTTP API.
 	requestTimeout = 5 * time.Second
@@ -64,16 +66,18 @@ var commands = map[string]commandEntry{
 	"status":         {runStatus, "say whether a team's daemon is running, or set an issue's Dispatch status"},
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
 	"worker-shim":    {runWorkerShim, "bridge an agent's Oh My Pi to the daemon's worker stream (the daemon starts it in every pod)"},
+	"launcher":       {runLauncher, "PID 1 of one role container in an issue pod: starts and stops that role's worker-shim on the daemon's command"},
 	"model-token":    {runModelToken, "sign a pod in to Cognito with its service-account token and print the access token (a model apiKey command)"},
 	"claims":         {runClaims, "the operator's hand on the daemon's claims"},
+	"sessions":       {runSessions, "copy recorded session files into Oh My Pi's session database (runtime.kubernetes.session_store postgres)"},
 	"gh":             {runGh, "run gh with a GitHub token from this session's grant; merges and GitHub-issue writes are refused"},
 	"credential":     {runCredential, "git credential helper answering with a token from this session's grant"},
 	"handoff":        {runHandoff, "write or read a phase's .legion/ handoff, or report the phase complete"},
 	"threads":        {runThreads, "resolve a pull request's review threads whose opener accepted the reply"},
 	"push":           {runPush, "push the issue branch (@-) to legion/<issue>, the one push every phase worker uses"},
 	"probe-image":    {runProbeImage, "run the worker image's launch probes (the image build and the daemon's probe Sandbox run it)"},
-	"workspace-init": {runWorkspaceInit, "a Sandbox pod's two init containers: fetch the repository, provision the issue's workspace"},
-	"controller":     {runController, "start the controller, the interactive Oh My Pi session an operator talks to"},
+	"workspace-init": {runWorkspaceInit, "a Sandbox pod's init containers: fetch the repository, provision the issue's workspace, prepare the controller's volume"},
+	"controller":     {runController, "start the operator's controller, the interactive Oh My Pi session an operator talks to"},
 }
 
 // helpRequested says whether a command's first argument asks for its usage.
@@ -186,7 +190,8 @@ func runStart(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 // starts with, the daemon's own NATS nkey seed among them), and nothing else: no store, no team, no
 // file written, and no process but `mise where <tool>` when a tmux configuration's omp_invocation
 // names a mise tool. The OK line names each NATS nkey seed's public key when there is one, never
-// the seed.
+// the seed. After it, one line per deployment capability the file alone leaves open, in the words
+// boot logs it with (capabilities.Deployment.OpenFromConfiguration): a report, so the exit stays 0.
 func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 	cfg, err := config.LoadForValidation(configPath, nil)
 	paneNatsUser, daemonNatsUser := "", ""
@@ -205,6 +210,9 @@ func checkStartConfig(configPath string, stdout, stderr io.Writer) int {
 		ok += " nats-daemon-nkey-user=" + daemonNatsUser
 	}
 	fmt.Fprintln(stdout, ok)
+	for _, gap := range daemon.Deployment(cfg).OpenFromConfiguration() {
+		fmt.Fprintln(stdout, gap.OpenLine())
+	}
 	return 0
 }
 

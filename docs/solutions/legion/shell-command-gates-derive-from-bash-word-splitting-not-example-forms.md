@@ -30,7 +30,9 @@ second run rewrote nine of LEGION-30's commits (see
 `shared-main-repo-hazards-for-concurrent-issue-workspaces.md`, Hazard 2). LEGION-45 (#1020) made
 the Legion extension's `tool_call` hook refuse `jj undo`, `jj abandon`, and
 `jj op restore|revert|abandon|undo` in every phase-worker pane, for `bash` commands (tokenised),
-and for `eval` code and `hub` process starts (a plain-text rule).
+and for `eval` code and `hub` process starts (a plain-text rule). Oh My Pi 18.3 removed `hub`: a
+supervised service now starts as a `bash` command, tokenised like any other, and the plain-text
+rule reads the stdin a `write` sends to it (`proc://<id>`) where it read a `hub` start.
 
 The guard took three review rounds. Each round the reviewer found a form of the same command
 that bash hands to `jj` as the identical argv but the matcher tokenised differently, and each
@@ -102,6 +104,11 @@ wrong — fix the rule, never add an allow-list or a special case for the row.
 
 ## A gate on shared pane state runs ahead of the subagent exemption
 
+**Superseded 2026-10-08 (LEGION-630):** the role gate (the architect's, reviewer's and merger's
+tool refusals, and the architect's one-`legion`-command bash rule) and the handoff-complete rule
+are gone; no role is refused a tool. The operation-log rule is the one pane rule, and it still
+runs ahead of the subagent exemption. What follows records the gates as they stood.
+
 `legion.ts`'s `tool_call` hook exempted a `task` subagent's own tool calls from every gate
 (`if (await checkSubagentSession(context)) return undefined;`), on the reasoning that the
 parent's gate had already governed the parent's `task` call. That holds for gates on
@@ -121,6 +128,11 @@ guard before the exemption. Two consequences a future gate author inherits:
   state: after `checkSubagentSession`, as today. Shared pane or workspace state: ahead of it,
   judged from the environment rather than from the session's capability. Write the answer in
   the gate's comment.
+
+**Superseded 2026-10-08 (LEGION-630):** there is no role gate left for the operation-log rule to
+run ahead of: it is the one pane rule, still judged from the environment ahead of the subagent
+exemption, and a sub-architect's `jj undo` still gets the shared-log reason.
+
 - **Sub-architects are phase-worker panes.** A guard judged from the environment ahead of every
   role gate answers a sub-architect's `jj undo` with the shared-log reason, not the architect's
   blanket "delegates all code work" reason; the root architect's and controller's panes never

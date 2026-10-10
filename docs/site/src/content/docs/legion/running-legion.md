@@ -49,14 +49,39 @@ and the checks that branch requires (its rulesets and its branch protection), th
 - **A node pool for Legion.** Every pod selects nodes labelled `legion.dev/pool=legion` and
   tolerates the taint `legion.dev/pool=legion:NoSchedule`. You may add node selectors, tolerations
   and a priority class under `runtime.kubernetes.scheduling`, but not the pool label itself.
-- **One tree per node.** A tree's pods share one `ReadWriteOnce` volume, so they must run on the
-  same node, and pods of different trees never share a node. Pods carry no resource requests unless
-  you set them per role under `runtime.kubernetes.resources`, so the pool's node size decides what a
-  tree gets: give every node room for a whole tree (four vCPUs is a good floor), and keep
-  `admission_cap` at or below the number of nodes the pool can hold, or the extra trees' pods wait
-  unscheduled.
-- **A namespace and a storage class.** The tree volume (`tree_volume`, 20Gi by default) comes from
-  `storage_class`, which is required.
+- **One reservation per pod, no affinity.** Every container of a Legion pod reserves cpu and memory
+  with its request equal to its limit, so every pod is `Guaranteed`, and bounds its ephemeral
+  storage — the node's disk its root filesystem writes to: `$HOME`, Oh My Pi's state home, the Go
+  and Bun caches a build fills — with a per-role limit over a smaller request. A role's reservation
+  is `runtime.kubernetes.resources.<role>` (`cpu`, `memory`, `ephemeral_storage` the disk limit,
+  `ephemeral_storage_request` what the scheduler reserves of it, each optional, the request at most
+  the limit), and the daemon's defaults fill the rest — 750m and 6Gi for the implementer and
+  tester; 750m and 4Gi for the reviewer; 250m and 1Gi for the architect, planner and merger; 1 CPU
+  and 4Gi for the controller (`controller: daemon` only); 20Gi of disk for the implementer and
+  tester and 10Gi for every other role, over a 1Gi request each. The image probe pod, which every
+  boot runs before anything is served, carries a fixed reservation of its own and no role's share:
+  250m and 1Gi over 5Gi of disk and a 1Gi request, since `legion probe-image` starts one Oh My Pi
+  at a time and runs no lane or browser, and a probe sized as a role could keep the daemon from
+  booting on a full pool. A pool with no room even for that does not stop the daemon: its probe pod
+  stays Pending Unschedulable, it logs `boot probe is waiting on capacity` with the scheduler's
+  reason and tries again every 5 minutes, serving nothing until the probe passes, and the
+  `pool-capacity` row of `legion state`'s capability report then records how many attempts waited
+  and why, open until `capabilities.decided.pool-capacity` names a reason. A six-role issue pod
+  sums to 3 CPU and 19 GiB at the defaults, its disk limits to 80Gi over 6Gi requested. A container
+  past its disk limit has its own pod evicted, the offending issue's alone, rather than the node
+  reaching `DiskPressure` where another tree's pod can go; the 1Gi request reserves almost no disk,
+  so a node's root volume can be oversubscribed by the pods' limits — an operator who knows the
+  root volume raises `ephemeral_storage_request` toward a role's expected use so the scheduler
+  reserves disk and places no pod a full node could not hold. No pod carries an affinity: each
+  issue pod owns its volume, so the scheduler places it wherever the pool has room and Karpenter
+  adds nodes under the pool's limits. Concurrent issue pods are bounded by what the pool's
+  `limits.cpu` and `limits.memory` leave for pods of that sum (two per 8-vCPU floor node, about 80
+  at `limits.cpu: 256`, or `limits.memory` / 19 GiB when that is smaller) once the probe pod and,
+  under `controller: daemon`, the controller's pod are counted; `admission_cap` bounds roots alone,
+  a tree of N children runs N+1 pods, and an issue pod the pool cannot place stays `Pending` until
+  the daemon reads it dead and, once its launch failures run out, fails the claim.
+- **A namespace and a storage class.** Each issue's volume (`issue_volume`, 20Gi by default; the
+  daemon-launched controller's pod owns one too) comes from `storage_class`, which is required.
 - **Pod Security.** Pods run under the `restricted` profile: user 1000, no privilege escalation, all
   capabilities dropped, the `RuntimeDefault` seccomp profile, and no automounted API token.
 - **A ServiceAccount for the agents' pods**, named in `runtime.kubernetes.pod.service_account`
@@ -76,13 +101,20 @@ and the checks that branch requires (its rulesets and its branch protection), th
 
 ## The worker image
 
-Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's plugin, the
-`legion` CLI and a general toolchain (git, jj, gh, Node, uv, the AWS CLI).
+Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
+(`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI and a general toolchain (git, jj, gh,
+Node, uv, the AWS CLI).
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
 is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
-GitHub release; for any tag, `docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>`
-prints it. Tags are `sha-<the commit's first 12 hex digits>` for every build and `<legion version>`
-for a release.
+GitHub release; for a `sha-` or release-version worker-image tag,
+`docker buildx imagetools inspect ghcr.io/sjawhar/legion-worker:<tag>` prints its digest. Worker-image
+tags are `sha-<the commit's first 12 hex digits>` for every build and `<legion version>` for a
+release. The package also currently holds `sha256-<image digest hex>` OCI referrer indexes from
+earlier proof runs; they hold attestations, not worker images, so inspecting one does not print a
+worker-image digest. A tag does not say which build published it, and a pull request's build publishes
+a `sha-` tag too. Every build except a pull request's carries a GitHub artifact attestation, and
+`docs/kubernetes.md` in the repository ("Pin by digest, never by tag") gives the `gh attestation
+verify` command that accepts an image only when `main` built it from the commit its tag names.
 
 If your repositories need more than the image carries, build your own image `FROM` it by digest,
 put the extra commands in `/usr/local/bin` or `/usr/bin`, and pin `runtime.kubernetes.image` to your
@@ -93,19 +125,29 @@ image's digest.
 The daemon reads one file, `legion.yaml`. Relative paths in it resolve against the file's own
 directory. The repository's `deploy/kubernetes/daemon/legion.yaml.example`, rendered in the
 [configuration reference](/legion/legion/reference/config/), is a complete file for a Kubernetes
-deployment: copy it and replace every value. Each one is a placeholder (documentation addresses,
-made-up App ids, an all-zero image digest) that reaches nothing. As written, the file passes the
-[configuration check](#check-and-start-the-daemon) once the three token files and the kubeconfig it
-names exist and `LEGION_POSTGRES_DSN` (or `postgres_dsn`) names a Postgres.
+deployment: copy it and replace every value that names your deployment (documentation addresses,
+made-up App ids, an all-zero image digest, the example's `advertise_host`). `bind: 0.0.0.0` is
+already real: a daemon whose own pod restarts onto a new IP binds every interface. As written, the
+file passes the [configuration check](#check-and-start-the-daemon) once the three token files and
+the kubeconfig it names exist and `LEGION_POSTGRES_DSN` (or `postgres_dsn`) names a Postgres.
 
 What each part is for:
 
 - **`project`** is the Dispatch project key, and it must also be a key of `projects`, which maps
   each Dispatch project the daemon runs to its GitHub repository. A project may name a
   `merge_queue_role`, a role that receives a copy of every `READY`, and a notice withdrawing it
-  when the head's own CI turns red before the merge.
-- **`bind`**, **`daemon_url`**, **`envoy_url`**, **`dispatch_url`** and every **`nats_urls`** entry
-  are handed to pods, so none of them may be a loopback or unspecified address.
+  when the head's own CI turns red before the merge, or the head starts conflicting with its base.
+  It may also list `review_workflows`, the paths (`.github/workflows/<name>.yml`, each once) of the
+  workflows its base branch requires that review the code and fail on their own findings, such as a
+  review bot's. A red only they make, in testing or review, goes to the reviewer, who adjudicates
+  their findings and re-runs them, rather than back to the implementer; any other red required
+  workflow sends the work back, as a red required check does. None is declared unless you list it.
+- **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
+  worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
+  none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
+  only) is an IP address or a DNS name, such as the Service that fronts a daemon whose own pod
+  restarts onto a new IP. Beside it, `bind` is only where the daemon listens: it may be `0.0.0.0`,
+  but not loopback, where no pod reaches it.
 - **`github_apps`**: each App takes exactly one of `private_key` (the PEM itself),
   `private_key_command` (a command whose output is the PEM) or `private_key_secret`. The daemon
   finds each App's installations itself; `installations` (owner to installation id) is optional.
@@ -119,8 +161,11 @@ What each part is for:
 - **`nats_nkey_seed_file`** and **`nats_daemon_nkey_seed_file`** (optional) are the NATS nkey user
   seeds for the agents and for the daemon's own connection, each in a file only its owner can read.
 - **`runtime.kubernetes.agent_secrets`** (optional) enrolls every pod with the
-  [Secrets Broker](/legion/broker/): `url` is the broker, `operator` the email of the person who
-  approves the daemon's own machine login on Dispatch's credential page.
+  [Secrets Broker](/legion/broker/): `url` is the broker. The daemon's own machine login is the
+  `legion-daemon` service's, which anyone signed in to Dispatch approves on its credential page.
+- **`controller`** (optional) is who runs the project's controller: `operator` (the default), you,
+  with `legion controller start`, or `daemon`, a pod the daemon launches and keeps running
+  ([Start the controller](#start-the-controller)).
 - Workflow limits, all optional: `linger_hours` (72), `review_round_cap` (3), `max_fix_attempts`
   (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
   `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
@@ -199,21 +244,23 @@ legion start --config legion.yaml
 
 The daemon runs in the foreground and logs JSON lines to standard error. At every boot it checks
 that Agent Sandbox is installed and runs the worker image's launch probes in a probe Sandbox
-(`legion-probe-<project>-<digest prefix>`): the image's plugin must speak this daemon's contract,
+(`legion-probe-<project>-<digest prefix>`): the image's Legion plugin must speak this daemon's contract
+and load with its Envoy plugin,
 every agent's model must resolve, and every model key must work. Nothing restarts the daemon on its
 own, so run it under a process supervisor you trust. `legion stop --config legion.yaml` stops it,
 and `legion legions` lists the daemons registered on the machine.
 
 The `legion` binary the daemon runs and the worker image must come from the same commit. The
 image carries that binary, which embeds Legion's role prompts, at `/opt/legion/bin/legion` and
-Legion's Oh My Pi plugin at `/opt/legion/pi-legion-envoy`, so you can take both from the image
-you pinned:
+Legion's two Oh My Pi plugins at `/opt/legion/pi-envoy` and `/opt/legion/pi-legion`, so you can
+take all three from the image you pinned:
 
 ```sh
 image=ghcr.io/sjawhar/legion-worker@sha256:<digest>
 id=$(docker create --platform linux/amd64 "$image")
 docker cp "$id:/opt/legion/bin/legion" ./legion
-docker cp "$id:/opt/legion/pi-legion-envoy" ./pi-legion-envoy
+docker cp "$id:/opt/legion/pi-envoy" ./pi-envoy
+docker cp "$id:/opt/legion/pi-legion" ./pi-legion
 docker rm "$id"
 ```
 
@@ -222,14 +269,62 @@ with Go.
 
 ## Start the controller
 
-The controller runs on your own machine, in your terminal, as an interactive Oh My Pi session. It
-reads a small file of its own, never `legion.yaml`; the repository's
-`deploy/kubernetes/daemon/controller.yaml.example` is the complete shape (rendered in the
-[configuration reference](/legion/legion/reference/config/)):
+The controller runs in one of two places, as `controller` in `legion.yaml` says: on your own
+machine, in your terminal, which is the default (`controller: operator`), or in the cluster, as a
+pod the daemon launches and keeps running (`controller: daemon`).
 
-1. Install Oh My Pi, then Legion's plugin from the same image as the daemon
-   (`omp plugin install ./pi-legion-envoy`, copied out as above). Set `omp_invocation`, or
-   `LEGION_OMP_PATH` to the absolute path of `omp`.
+### In the cluster
+
+Set `controller: daemon` in `legion.yaml` (it needs `runtime: kubernetes`) and restart the daemon.
+It launches the controller at boot as an Agent Sandbox pod, `legion-<project>-controller`, with the
+same model access as the workers and a volume of its own for its session, relaunches it when it
+dies, and resumes the same session. You start nothing, and `legion controller start` against this
+daemon is refused: one controller runs per project. Nobody types into the pod: reach the controller
+through Dispatch (a message to its session on the Agents page, a reply to an ask it opened, a
+mention) and read its session with `kubectl logs <pod> -c controller`, its one container's log. A
+Send from the Agents page is answered in the conversation that page shows.
+`legion claims list` shows its claim.
+Size its pod under `runtime.kubernetes.resources.controller`: with no requests it is the first pod
+the kubelet evicts under memory pressure.
+To hand the controller back to a person, set `controller: operator`, drop
+`runtime.kubernetes.resources.controller` (the daemon refuses that key unless `controller: daemon`)
+and restart the daemon: at boot it stops its own controller's claim and releases the pod, deleting
+the pod's volume and the session on it, and you then start the controller on your machine as below.
+Switching to `controller: daemon` again starts a fresh controller, not the old session.
+
+A daemon built before LEGION-592 cannot run against a database a `controller: daemon` daemon used:
+it lists the controller's claim as an issue keyed `""`, which every agent's plugin refuses. So to
+stop using the in-cluster controller, switch to `controller: operator` on this release rather than
+rolling back the image. If you must roll back, do it in this order:
+
+1. Remove `controller` and `runtime.kubernetes.resources.controller` from `legion.yaml`: the
+   earlier release refuses both as unknown keys, and without them this release runs
+   `controller: operator`. Restart this release once with that file. Do not skip this boot: only
+   this release ends the stopped controller's registration. It is done when `legion claims list`
+   shows `legion-<project>-controller` `retired`. If the boot is refused,
+   stop and follow the refusal's entry in [Troubleshooting](/legion/legion/troubleshooting/).
+2. Stop that daemon: the earlier release must not run beside it for the same project, and while it
+   runs it still holds the claim in memory, so any write of that claim would put the row back.
+3. `<project>` is your `project` lowercased with every character outside `a-z0-9` dropped
+   (`project: LEGION` gives `legion-legion-controller`). Run
+   `select token, state from claims where token = 'legion-<project>-controller';`, which must
+   return exactly one row, `retired`; then
+   `delete from claims where token = 'legion-<project>-controller';`, which must answer
+   `DELETE 1`. Never delete by role: other projects' daemons may share the database. If either
+   answer is anything else, do not start the earlier release.
+4. Start the earlier release.
+
+`docs/kubernetes.md` in the repository ("Daemon-launched controller") explains why.
+
+### On your machine
+
+The controller runs in your terminal as an interactive Oh My Pi session. It reads a small file of
+its own, never `legion.yaml`; the repository's `deploy/kubernetes/daemon/controller.yaml.example` is
+the complete shape (rendered in the [configuration reference](/legion/legion/reference/config/)):
+
+1. Install Oh My Pi, then Legion's two plugins from the same image as the daemon
+   (`omp plugin install ./pi-envoy && omp plugin install ./pi-legion`, copied out as above). Set
+   `omp_invocation`, or `LEGION_OMP_PATH` to the absolute path of `omp`.
 2. Copy the example, set `project` to the daemon's project and `daemon_url` to the daemon's API as
    your machine reaches it (through a port-forward or a tunnel if need be), and put the operator
    token, the Envoy token, the agents' NATS seed (optional) and a Dispatch token for the controller
@@ -242,7 +337,7 @@ reads a small file of its own, never `legion.yaml`; the repository's
    legion controller start --config controller.yaml --daemon-url http://127.0.0.1:13370
    ```
 
-The command checks the file and the plugin, fetches a fresh controller credential from the daemon
+The command checks the file and the plugins, fetches a fresh controller credential from the daemon
 with your operator token, and starts Oh My Pi in the foreground; its first turn runs the
 controller's start procedure with nothing typed. Running it again replaces the previous controller.
 Closing the terminal leaves the project without one, and the daemon logs
@@ -251,7 +346,7 @@ Closing the terminal leaves the project without one, and the daemon logs
 ## Upgrade
 
 1. **Pick the new image** and note its digest ([The worker image](#the-worker-image)), and take the
-   `legion` binary and plugin from it.
+   `legion` binary and both plugins from it.
 2. **Update `legion.yaml`**: set `runtime.kubernetes.image` to the new digest and run
    `legion start --config legion.yaml --check-config`.
 3. **Restart the daemon** with the new binary: stop it through your supervisor (or
@@ -271,7 +366,7 @@ Closing the terminal leaves the project without one, and the daemon logs
 
    A suspension waits for the agent's current turn to land; the resumed agent continues the same
    conversation in a new pod.
-5. **Restart the controller** with the new binary and plugin.
+5. **Restart the controller** with the new binary and plugins.
 
 ## Observe
 
@@ -306,11 +401,12 @@ Closing the terminal leaves the project without one, and the daemon logs
   controller's daily report on the project's `Legion daily report` issue.
 - **The controller's terminal** is where the controller says what it did each turn. You can type to
   it at any time; a message from you is always handled first.
-- **The cluster** shows each agent as a Sandbox and a pod labelled with its tree, issue and role:
+- **The cluster** shows each issue as a Sandbox and a pod labelled with its tree and issue, with one
+  container per role:
 
   ```sh
   kubectl -n legion get sandboxes,pods -l legion.dev/tree=WIDGETS-12
-  kubectl -n legion logs <pod> -c worker            # the agent's shim and Oh My Pi
+  kubectl -n legion logs <pod> -c implementer       # that role's launcher, its shim and Oh My Pi
   kubectl -n legion logs <pod> -c workspace-init    # the workspace provisioning
   ```
 

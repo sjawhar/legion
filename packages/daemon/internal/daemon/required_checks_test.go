@@ -50,6 +50,31 @@ func rulesetsStandIn(t *testing.T, failing *atomic.Bool) *httptest.Server {
 	return server
 }
 
+// mergeableStandIn is GitHub's REST API for acme/widgets as the required-checks read sees it: pull
+// request 86 on base main, whose GitHub `mergeable` field is the literal JSON state, whose
+// rulesets require pr-checks-result and whose branch protection requires nothing.
+func mergeableStandIn(t *testing.T, state string) *httptest.Server {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer outbox-token" {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/repos/acme/widgets/pulls/86":
+			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":` + state + `}`))
+		case "/repos/acme/widgets/rules/branches/main":
+			w.Write([]byte(`[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"pr-checks-result"}]}}]`))
+		case "/repos/acme/widgets/branches/main":
+			w.Write([]byte(`{"name":"main","protected":false}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
 // seedStuckRound records the round a live tree got stuck in before the daemon read required sets:
 // the reviewer approved its own handoff head and completed, and the code head's settlement that
 // stands for it is red only on two workflow_dispatch lanes and an advisory review check, beside a
@@ -81,9 +106,9 @@ func seedStuckRound(t *testing.T, pool *pgxpool.Pool) {
 }
 
 // requiredRuntime is a workflow runtime over pool whose required-checks read goes to api, logging
-// to log.
-func requiredRuntime(pool *pgxpool.Pool, api string, log *slog.Logger) *workflowRuntime {
-	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)
+// to log, for a project that declares reviewWorkflows.
+func requiredRuntime(pool *pgxpool.Pool, api string, log *slog.Logger, reviewWorkflows ...string) *workflowRuntime {
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", ReviewWorkflows: reviewWorkflows}, log)
 	return &workflowRuntime{
 		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, handlers: []intake.Handler{engine},
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api,
@@ -165,12 +190,15 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 		name    string
 		status  int
 		headers map[string]string
+		body    string
 		reads   int64
 	}{
-		{"429", http.StatusTooManyRequests, nil, 1},
-		{"403 out of rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "0"}, 1},
-		{"403 with retry-after", http.StatusForbidden, map[string]string{"Retry-After": "60"}, 1},
-		{"403 that is not a rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4999"}, 2},
+		{"429", http.StatusTooManyRequests, nil, "", 1},
+		{"403 out of rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "0"}, "", 1},
+		{"403 with retry-after", http.StatusForbidden, map[string]string{"Retry-After": "60"}, "", 1},
+		{"403 for a secondary rate limit named only by its message", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4321"},
+			`{"message":"You have exceeded a secondary rate limit. Please wait a few minutes before you try again."}`, 1},
+		{"403 that is not a rate limit", http.StatusForbidden, map[string]string{"X-RateLimit-Remaining": "4999"}, "", 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
@@ -192,7 +220,11 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 				for name, value := range tc.headers {
 					w.Header().Set(name, value)
 				}
-				http.Error(w, `{"message":"refused"}`, tc.status)
+				body := tc.body
+				if body == "" {
+					body = `{"message":"refused"}`
+				}
+				http.Error(w, body, tc.status)
 			}))
 			defer server.Close()
 			requiredRuntime(pool, server.URL, quietLogger()).readRequiredChecks(context.Background())
@@ -207,8 +239,8 @@ func TestARateLimitAnswerEndsTheRequiredChecksPass(t *testing.T) {
 // shapes: pull request 86 on base main, whose rulesets require the workflow
 // .github/workflows/claude-pr-review.yml (a workflows rule) and the check pr-checks-result (a
 // required_status_checks rule), and whose branch protection requires nothing. The head code's
-// workflow runs are runs, a JSON array.
-func requiredWorkflowStandIn(t *testing.T, runs string) *httptest.Server {
+// workflow runs are what runs answers when asked, a JSON array.
+func requiredWorkflowStandIn(t *testing.T, runs func() string) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer outbox-token" {
@@ -229,7 +261,8 @@ func requiredWorkflowStandIn(t *testing.T, runs string) *httptest.Server {
 				http.NotFound(w, r)
 				return
 			}
-			w.Write([]byte(`{"total_count":` + strconv.Itoa(strings.Count(runs, `"path"`)) + `,"workflow_runs":` + runs + `}`))
+			answer := runs()
+			w.Write([]byte(`{"total_count":` + strconv.Itoa(strings.Count(answer, `"path"`)) + `,"workflow_runs":` + answer + `}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -238,69 +271,97 @@ func requiredWorkflowStandIn(t *testing.T, runs string) *httptest.Server {
 	return server
 }
 
-// The daemon's pass judges a ruleset's required workflow by its latest run on the head, as it
-// judges a required check by the settlement: a failed run is CI red at the head. In testing that
-// sends the work back to implementing, as a failed required check does. In awaiting_merge, where
-// every worker is suspended, it does too, so a READY head that turns red wakes the implementer
-// instead of stranding the tree. A run still going, or one that succeeded, moves nothing. The
-// pull request's required checks were read before and passed at the head, so only the workflow
-// can decide anything.
-func TestARequiredWorkflowThatFailsOnTheHeadSendsTheWorkBack(t *testing.T) {
-	review := func(status, conclusion string) string {
-		return `[{"id":37,"name":"Review PR #86","path":".github/workflows/claude-pr-review.yml","event":"pull_request","status":"` + status +
-			`","conclusion":` + conclusion + `,"repository":{"id":4242}},` +
-			`{"id":38,"name":"PR Checks","path":".github/workflows/pr-checks.yml","event":"pull_request","status":"completed","conclusion":"success","repository":{"id":4242}}]`
+// reviewRuns is the head's workflow runs: the required review workflow's run 37 at attempt, with
+// status and conclusion, beside a passing run of a workflow the base does not require.
+func reviewRuns(attempt int, status, conclusion string) string {
+	return `[{"id":37,"run_attempt":` + strconv.Itoa(attempt) + `,"name":"Review PR #86","path":".github/workflows/claude-pr-review.yml","event":"pull_request","status":"` + status +
+		`","conclusion":` + conclusion + `,"repository":{"id":4242}},` +
+		`{"id":38,"run_attempt":1,"name":"PR Checks","path":".github/workflows/pr-checks.yml","event":"pull_request","status":"completed","conclusion":"success","repository":{"id":4242}}]`
+}
+
+// seedCapture records CAPTURE-1 in from with its pull request 86 at head code, whose required check
+// passed there, and its phases.
+func seedCapture(t *testing.T, pool *pgxpool.Pool, from phase.Phase, status string, phases ...record.PhaseRow) {
+	t.Helper()
+	records := record.NewStore()
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		ctx := context.Background()
+		if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-1", Tree: "CAPTURE-1", Project: "CAPTURE", Title: "root",
+			Phase: from, Generation: 1, Status: status, Rank: "U"}); err != nil {
+			return err
+		}
+		if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "CAPTURE-1", Repo: "acme/widgets",
+			Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code", CheckedHead: "code", Failing: []string{},
+			CheckRuns:  []record.AttemptRun{{Name: "pr-checks-result", ID: 1}, {Name: "review", ID: 2}},
+			Generation: 1, Snapshot: "settled", Required: []string{"pr-checks-result"}}); err != nil {
+			return err
+		}
+		for _, row := range append([]record.PhaseRow{{Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim"}}, phases...) {
+			if err := records.PutPhase(ctx, tx, row); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed the issue: %v", err)
 	}
+}
+
+// noticeReasons is the reason of every notice of kind in the outbox.
+func noticeReasons(t *testing.T, pool *pgxpool.Pool, kind string) []string {
+	t.Helper()
+	var reasons []string
+	rows, err := pool.Query(context.Background(), "select payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = $1", kind)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var reason string
+		if err := rows.Scan(&reason); err != nil {
+			t.Fatal(err)
+		}
+		reasons = append(reasons, reason)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return reasons
+}
+
+// The daemon's pass judges a ruleset's required workflow by its latest run on the head, as it
+// judges a required check by the settlement: a failed run is CI red at the head. In testing, where
+// the required checks passed, a red only a review workflow the project declares makes is the
+// reviewer's round's to decide, so the tester goes on; the same workflow undeclared is a failing
+// check, and sends the work back to implementing. In awaiting_merge, where every worker is
+// suspended, a failed run sends the work back to implementing whether declared or not, so a READY
+// head that turns red wakes the implementer instead of stranding the tree. A run still going, or one
+// that succeeded, moves nothing. The pull request's required checks were read before and passed at
+// the head, so only the workflow can decide anything.
+func TestAFailedRequiredWorkflowSendsTheWorkBackUnlessTheReviewRoundDecidesIt(t *testing.T) {
+	const declared = ".github/workflows/claude-pr-review.yml"
 	for _, tc := range []struct {
-		name   string
-		from   phase.Phase
-		status string
-		runs   string
-		want   phase.Phase
+		name     string
+		from     phase.Phase
+		status   string
+		runs     string
+		declared []string
+		want     phase.Phase
 	}{
-		{"failed, in testing", phase.Testing, "testing", review("completed", `"failure"`), phase.Implementing},
-		{"failed, in awaiting_merge", phase.AwaitingMerge, "retro", review("completed", `"failure"`), phase.Implementing},
-		{"still running, in awaiting_merge", phase.AwaitingMerge, "retro", review("in_progress", "null"), phase.AwaitingMerge},
-		{"succeeded, in awaiting_merge", phase.AwaitingMerge, "retro", review("completed", `"success"`), phase.AwaitingMerge},
+		{"failed, declared, in testing", phase.Testing, "testing", reviewRuns(1, "completed", `"failure"`), []string{declared}, phase.Testing},
+		{"failed, undeclared, in testing", phase.Testing, "testing", reviewRuns(1, "completed", `"failure"`), nil, phase.Implementing},
+		{"failed, declared, in awaiting_merge", phase.AwaitingMerge, "retro", reviewRuns(1, "completed", `"failure"`), []string{declared}, phase.Implementing},
+		{"still running, in awaiting_merge", phase.AwaitingMerge, "retro", reviewRuns(1, "in_progress", "null"), []string{declared}, phase.AwaitingMerge},
+		{"succeeded, in awaiting_merge", phase.AwaitingMerge, "retro", reviewRuns(1, "completed", `"success"`), []string{declared}, phase.AwaitingMerge},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := isolatedOutboxPool(t)
-			records := record.NewStore()
-			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-				ctx := context.Background()
-				if err := records.PutIssue(ctx, tx, record.Issue{Key: "CAPTURE-1", Tree: "CAPTURE-1", Project: "CAPTURE", Title: "root",
-					Phase: tc.from, Generation: 1, Status: tc.status, Rank: "U"}); err != nil {
-					return err
-				}
-				if err := records.PutPullRequest(ctx, tx, record.PullRequest{State: record.PullRequestOpen, Issue: "CAPTURE-1", Repo: "acme/widgets",
-					Number: 86, Branch: "legion/CAPTURE-1", HeadSHA: "code", CheckedHead: "code", Failing: []string{},
-					CheckRuns:  []record.AttemptRun{{Name: "pr-checks-result", ID: 1}, {Name: "review", ID: 2}},
-					Generation: 1, Snapshot: "settled", Required: []string{"pr-checks-result"}}); err != nil {
-					return err
-				}
-				return records.PutPhase(ctx, tx, record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			}); err != nil {
-				t.Fatalf("seed the issue: %v", err)
-			}
-			requiredRuntime(pool, requiredWorkflowStandIn(t, tc.runs).URL, quietLogger()).readRequiredChecks(context.Background())
+			seedCapture(t, pool, tc.from, tc.status)
+			requiredRuntime(pool, requiredWorkflowStandIn(t, func() string { return tc.runs }).URL, quietLogger(), tc.declared...).readRequiredChecks(context.Background())
 			if got, _ := capturePhase(t, pool); got != tc.want {
 				t.Fatalf("after the pass the issue is in %s, want %s", got, tc.want)
 			}
-			var reasons []string
-			rows, err := pool.Query(context.Background(), "select payload->>'reason' from outbox where kind = 'notice' and payload->>'kind' = 'checks-red'")
-			if err != nil {
-				t.Fatal(err)
-			}
-			for rows.Next() {
-				var reason string
-				if err := rows.Scan(&reason); err != nil {
-					t.Fatal(err)
-				}
-				reasons = append(reasons, reason)
-			}
-			if err := rows.Err(); err != nil {
-				t.Fatal(err)
-			}
+			reasons := noticeReasons(t, pool, "checks-red")
 			if want := "CI is red at code: .github/workflows/claude-pr-review.yml"; tc.want == phase.Implementing && (len(reasons) != 1 || reasons[0] != want) {
 				t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
 			}
@@ -308,5 +369,123 @@ func TestARequiredWorkflowThatFailsOnTheHeadSendsTheWorkBack(t *testing.T) {
 				t.Fatalf("checks-red notices %q, want none", reasons)
 			}
 		})
+	}
+}
+
+// A re-run of a declared review workflow keeps its run's id and raises its attempt, so the pass
+// reads a re-run that ended red as a change even when no pass read it running: the approved round
+// stuck on the first red is told again, naming the re-run's red, and the architect sees the re-run
+// that stayed red. A pass that finds the same attempt again tells nothing more.
+func TestARerunThatEndsRedBetweenTwoPassesIsToldAgain(t *testing.T) {
+	const declared = ".github/workflows/claude-pr-review.yml"
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.Reviewing, "needs_review", record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleReviewer, Claim: "review-claim",
+		HandoffCommit: "code", Summary: "approved", Decision: &record.ReviewDecision{State: "approved", Body: "looks right", Head: "code"}})
+	attempt := 1
+	w := requiredRuntime(pool, requiredWorkflowStandIn(t, func() string { return reviewRuns(attempt, "completed", `"failure"`) }).URL, quietLogger(), declared)
+	for _, pass := range []struct {
+		attempt, told int
+	}{{1, 1}, {2, 2}, {2, 2}} {
+		attempt = pass.attempt
+		w.readRequiredChecks(context.Background())
+		stuck := noticeReasons(t, pool, "review-stuck")
+		if len(stuck) != pass.told || !strings.Contains(stuck[len(stuck)-1], "CI is red at code: "+declared+"; only declared review workflows are red") {
+			t.Fatalf("after the pass that read attempt %d, review-stuck notices %q, want %d naming the review workflow", pass.attempt, stuck, pass.told)
+		}
+	}
+	if got, _ := capturePhase(t, pool); got != phase.Reviewing {
+		t.Fatalf("the issue is in %s, want reviewing", got)
+	}
+}
+
+// The required-checks pass's one read of a pull request already carries GitHub's `mergeable`
+// field, so a head that starts conflicting with its base is caught without a further GitHub call:
+// in awaiting_merge the daemon sends the tree back to implementing exactly as a red CI verdict
+// does, naming the base to merge forward, since GitHub computes no merge ref for a conflicting
+// head and runs no checks on it at all. A read that finds `mergeable` still null - GitHub has not
+// computed it yet - or true moves nothing. The pass must apply the fact and decide even when the
+// read only confirms what is already stored: a conflict can be recorded while the issue is still
+// in testing, reviewing, retro or merging, where nothing moves yet, and the first read after the
+// issue reaches awaiting_merge has to catch it then, with no change in the GitHub answer to key
+// off.
+func TestTheRequiredChecksPassCatchesAHeadThatStartsConflictingWithItsBase(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		state        string
+		stored       record.Mergeability
+		mergeability record.Mergeability
+		want         phase.Phase
+	}{
+		{"conflicting", "false", "", record.MergeabilityConflicting, phase.Implementing},
+		{"not yet computed", "null", "", record.MergeabilityUnknown, phase.AwaitingMerge},
+		{"mergeable", "true", "", record.MergeabilityMergeable, phase.AwaitingMerge},
+		{"conflict already recorded", "false", record.MergeabilityConflicting, record.MergeabilityConflicting, phase.Implementing},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			seedCapture(t, pool, phase.AwaitingMerge, "retro",
+				record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "code", Summary: "READY #86 at code"})
+			if tc.stored != "" {
+				if _, err := pool.Exec(context.Background(), "update pull_requests set mergeability = $1 where issue = 'CAPTURE-1'", string(tc.stored)); err != nil {
+					t.Fatalf("seed the stored mergeability: %v", err)
+				}
+			}
+			w := requiredRuntime(pool, mergeableStandIn(t, tc.state).URL, quietLogger())
+			w.readRequiredChecks(context.Background())
+			got, pr := capturePhase(t, pool)
+			if got != tc.want {
+				t.Fatalf("after the pass the issue is in %s, want %s", got, tc.want)
+			}
+			if pr.Mergeability != tc.mergeability {
+				t.Fatalf("recorded mergeability = %q, want %q", pr.Mergeability, tc.mergeability)
+			}
+			if tc.want != phase.Implementing {
+				return
+			}
+			want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
+			reasons := noticeReasons(t, pool, "checks-red")
+			if len(reasons) != 1 || !strings.Contains(reasons[0], want) {
+				t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
+			}
+		})
+	}
+}
+
+// The pull request's mergeability is applied before requiredFor ever runs (required_checks.go's
+// split of pullRequestMergeability from requiredFor), so a later failure reading what the base
+// requires - here the rulesets answer a 502 - never discards the conflict already decoded: the
+// issue still goes back to implementing on the conflict alone, with CONFLICTING recorded, even
+// though the required set is never read that pass.
+func TestAFailedRulesetsReadNeverDiscardsAnAlreadyDecodedConflict(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.AwaitingMerge, "retro",
+		record.PhaseRow{Issue: "CAPTURE-1", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "code", Summary: "READY #86 at code"})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer outbox-token" {
+			http.Error(w, `{"message":"Bad credentials"}`, http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/repos/acme/widgets/pulls/86":
+			w.Write([]byte(`{"number":86,"base":{"ref":"main"},"mergeable":false}`))
+		case "/repos/acme/widgets/rules/branches/main":
+			http.Error(w, `{"message":"Server Error"}`, http.StatusBadGateway)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	requiredRuntime(pool, server.URL, quietLogger()).readRequiredChecks(context.Background())
+	got, pr := capturePhase(t, pool)
+	if got != phase.Implementing {
+		t.Fatalf("after the pass the issue is in %s, want implementing: the conflict must withdraw the READY whether or not the rulesets read succeeds", got)
+	}
+	if pr.Mergeability != record.MergeabilityConflicting {
+		t.Fatalf("recorded mergeability = %q, want CONFLICTING", pr.Mergeability)
+	}
+	want := "the head conflicts with main: GitHub runs no checks on it; merge main forward"
+	reasons := noticeReasons(t, pool, "checks-red")
+	if len(reasons) != 1 || !strings.Contains(reasons[0], want) {
+		t.Fatalf("checks-red notices %q, want one saying %q", reasons, want)
 	}
 }

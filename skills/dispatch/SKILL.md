@@ -1,19 +1,21 @@
 ---
 name: dispatch
-description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; before asking a design question or brainstorming a change; and when asking Sami a question, updating the spec, commenting on a document, attaching an artifact, or calling a dispatch_* tool."
+description: "Use before posting a message, a status update, or a periodic status update; before asking a question that references another message, artifact, or eval; before asking a design question or brainstorming a change; and when asking the human a question, updating the spec, commenting on a document, attaching an artifact, or running a dispatch command."
 ---
 
 # Dispatch
 
 Dispatch is your issue's or project document's living spec, asks, comments, and artifacts — a high-signal record for the humans who
 decide, never a log of your work. The transcript is your scratch pad; progress and status stay there. Anything meant for a human
-goes through a `dispatch_*` tool.
+goes through the `dispatch` command, which runs in your shell: `dispatch --help` lists the commands, and `dispatch <command> --help`
+each one's flags and an example. A field is a flag (`--issue LEGION-3`); long text goes on stdin with `--<field>-file -` and a
+quoted here-document (`<<'EOF'` … `EOF`), and an object or list field takes JSON (`--ops-json`). What it prints is the result; it
+exits 0 when it wrote or read, 1 when Dispatch refused, and 2 on a usage error.
 
 The server enforces high signal: an ask question is at most 800 characters with at most eight options; comment and message bodies are at
 most 2,000 characters; a markdown document is at most 1 MiB and any other file at most 25 MiB. It refuses over-limit input with the number
-to trim (`question is 50 characters over the 800-character limit (850/800)`); it never truncates it. A tool call with several problems is
-refused once, every problem listed (`<tool> was not called: N problems`), so one corrected call lands. GitHub threads and markers no
-longer exist.
+to trim (`question is 50 characters over the 800-character limit (850/800)`); it never truncates it. A command with several problems is
+refused once, every problem listed (`dispatch <command> was not called: N problems`), so one corrected call lands.
 
 ## Where the detail lives
 
@@ -23,14 +25,14 @@ after `skill://dispatch/` is relative to this skill's base directory.
 
 | When you are about to | Read |
 | --- | --- |
-| call `dispatch_doc_edit`: rewrite a paragraph, insert or move a block, change a table's cells, rows or columns | [Editing a document](skill://dispatch/references/document-edits.md) |
+| run `dispatch doc-edit`: rewrite a paragraph, insert or move a block, change a table's cells, rows or columns | [Editing a document](skill://dispatch/references/document-edits.md) |
 | write a typed block (an `:::ask`, a callout), comment on or suggest a change to a document, upload an artifact, or retry after `DOC_SERVICE_UNAVAILABLE` | [Documents](skill://dispatch/references/documents.md) |
 | choose your next issue, claim one, move its status or priority, reorder a board, or audit a project's backlog | [Working an issue](skill://dispatch/references/issues.md) |
 | find who answers an ask, edit, retract or resolve one, reply with the turn, or follow a thread | [Asks after they open](skill://dispatch/references/asks.md) |
 | catch up after a restart, trace what cites a node, or write a `dispatch://` reference | [Reading back](skill://dispatch/references/reading.md) |
 | answer a BTW, Aside or Steer frame, or a message from the Agents page | [Targeted and direct messages](skill://dispatch/references/messages.md) |
 | see a worked ask, a reply that names its mechanism, a message not to send, and where a draft goes | [Before and after](skill://dispatch/references/examples.md) |
-| set up a token, or call a route the tools do not cover | [Authentication and the HTTP API](skill://dispatch/references/api.md) |
+| set up a token, or call a route the commands do not cover | [Authentication and the HTTP API](skill://dispatch/references/api.md) |
 
 ## Design changes are brainstormed here
 
@@ -47,7 +49,7 @@ not share this session's vocabulary, and is often on a phone. Write for that per
 - Plain English, full sentences, one idea per sentence. Never repo shorthand or nouns you coined:
   not "fix 8c", "READY-target", "PR B", "spec@v3", "the pair", "the packet" — say what the thing is.
 - A real name is not a coined noun: name a product, a tool and its operation
-  (`dispatch_request_approval`), an event type (`artifact.approved`), a route, a setting or a
+  (`dispatch request-approval`), an event type (`artifact.approved`), a route, a setting or a
   status exactly, and say how it works in a clause ("the daemon opens the gate when Dispatch emits
   `artifact.approved` for that document at that version"), never with a vague verb such as
   "notice", "accept", "tell" or "pick up" ([before and after](skill://dispatch/references/examples.md#naming-the-mechanism)).
@@ -66,7 +68,7 @@ not share this session's vocabulary, and is often on a phone. Write for that per
   has a human subject, even on a sentence you already simplified; a lead naming what a change does
   inside a system leaves the reader nothing to act on. Where the judgment rule below applies, the
   judgment leads and this rule shapes the sentence under it.
-- Before posting, test it: could Sami, reading only this text on his phone, know what he is being
+- Before posting, test it: could the human, reading only this text on their phone, know what they are being
   told or asked? If not, rewrite it. Length is not the problem; density is.
 - When an ask or message communicates a judgment, lead with that judgment in one sentence and put the mechanism underneath it. Do not make the reader ask a second time whether the result is a win. This shapes communication only when a judgment exists; it does not pre-decide an open question or remove its genuine options.
 - When a Dispatch message states a root cause, include the reproducing command or test in that same message. Without it, label the diagnosis a hypothesis; a diagnosis still in progress may say so plainly. This boundary applies to causal claims, not to reporting that an investigation has started.
@@ -82,9 +84,10 @@ a new version that keeps the human's own text, never a second "spec" artifact be
   says. Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
 - **A settled point records the person's own words and the date**, quoted, so no reader mistakes
   it for your inference; an answer that is only a chosen option is recorded in the form
-  `<name> chose "Commit author" on the question below (<date>)`, naming them from `dispatch_whoami`
+  `<name> chose "Commit author" on the question below (<date>)`, naming them from `dispatch whoami`
   or the conversation, or "the person" when the token names no owner — never a name you were not
-  given. A point you inferred says so, with the reasoning; during a live brainstorming
+  given. A point you inferred says so, with the reasoning — a security concern, a restriction, or
+  a cost nobody measured is exactly this, not a settled constraint; during a live brainstorming
   conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference out of the spec
   until the human has agreed to it. One carried in from another document keeps its provenance: an
   agent's inference there is marked one here, or stays out until the human raises it.
@@ -116,20 +119,20 @@ A decision a human must make is an `:::ask` block at the end of the section that
 shaped as [Writing for the human](#writing-for-the-human) says for a question, with what
 constrains the answer split into measured, known and unknown. It asks how to solve the problem,
 never whether to apply a change already chosen. Never gather decisions into a list, at the top,
-at the bottom or in an "open questions" section, and never ask one as a standalone `dispatch_ask`
+at the bottom or in an "open questions" section, and never ask one as a standalone `dispatch ask`
 that points at the spec.
 
 The block is what reaches the human's Inbox. A question phrased as prose in the spec reaches
 nobody. A spec with no ask blocks is fine only when the issue genuinely needs no human decision.
-What `dispatch_issue` and `dispatch_artifact` answer about a spec's blocks, and how to check an edit
+What `dispatch issue` and `dispatch artifact` answer about a spec's blocks, and how to check an edit
 wrote one, is in [Typed blocks](skill://dispatch/references/documents.md#typed-blocks).
 
 **Wrong:** a **Decisions needed** list at the top of the spec with three bullets.
 **Right:** each decision an `:::ask{#slug}` block at the end of the design section that discusses
 it, with 2–4 options, a recommendation, and surrounding prose that explains the trade-off.
 
-A spec that already has the pile is repaired with `move`, not rewritten: `dispatch_doc_edit` with
-`{ op: "move", block: "<block-uuid>", after: "<the last sentence of the section that discusses it>" }` relocates
+A spec that already has the pile is repaired with `move`, not rewritten: `dispatch doc-edit` with
+`--ops-json '[{"op":"move","block":"<block-uuid>","after":"<the last sentence of the section that discusses it>"}]'` relocates
 the block and keeps its ask, its answer and its followers; the context paragraphs that were lifted
 out of Design move the same way, and the emptied section is deleted. An ask block has two ids that
 differ; [Editing a document](skill://dispatch/references/document-edits.md) says which.
@@ -139,39 +142,32 @@ See [Typed blocks](#typed-blocks) for the syntax and [Before you ask](#before-yo
 
 ## Your owner
 
-Every session works on an issue or project document. Legion pre-fills `issue` from `LEGION_ISSUE`: use a native issue key such as
+Every session works on an issue or project document. Legion pre-fills `--issue` from `LEGION_ISSUE`: use a native issue key such as
 `LEGION-3`, an external `owner/repo#n` reference, or a bare positive number (resolved against the cwd repository). Otherwise pass
-exactly one owner to every owner-scoped tool: `issue` for an issue, or `project` and `artifact` for an unlinked project document (see
+exactly one owner to every owner-scoped command: `--issue` for an issue, or `--project` and `--artifact` for an unlinked project document (see
 [Reference forms](skill://dispatch/references/reading.md) for the resulting ref shape). An external issue reference addresses the existing Dispatch issue linked to
-that GitHub issue or pull request. Only `dispatch_issue` with `external` creates a native issue; if no issue is linked, call
-`dispatch_issue({ external: "owner/repo#n", project: "<project>", title: "<title>" })` before addressing it.
+that GitHub issue or pull request. Only `dispatch issue` with `--external` creates a native issue; if no issue is linked, run
+`dispatch issue --external owner/repo#n --project <project> --title '<title>'` before addressing it.
 
-Create an issue for newly tracked work with:
-```ts
-dispatch_issue({ project, title, parent?, external?, spec?, force?, labels?: string[], priority?: 0 | 1 | 2 | 3, assignee?: string })
-```
-`labels` are optional initial labels: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. `priority` is yours on creation too — see [Priority is yours to set](skill://dispatch/references/issues.md). Set `assignee` (the email of a person who has signed in to Dispatch) only when the human said who owns the work; otherwise the default above applies, so a child inherits its parent's assignee. It returns
-`details` `{ issue }`; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch_issue` only to create an issue; never use it to park a question. When `spec` is supplied,
+Create an issue for newly tracked work with `dispatch issue --project <KEY> --title '<title>'` (`dispatch issue --help` lists `--parent`, `--spec-file`, `--label`, `--priority` and the rest).
+Labels are optional: Dispatch trims them, preserves their case, and removes case-insensitive duplicates. `--priority` is yours on creation too — see [Priority is yours to set](skill://dispatch/references/issues.md). Set `--assignee` (the email of a person who has signed in to Dispatch) only when the human said who owns the work; otherwise the default above applies, so a child inherits its parent's assignee. It prints
+the new key; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch issue` only to create an issue; never use it to park a question. When you pass a spec,
 follow [Writing a spec](#writing-a-spec).
 
 ## Search first
 
 `skill://dispatch-first`, which every session with Dispatch carries, says how to search before
 you plan, start a design document, file an issue, ask, post a finding or start work, and what to
-do with each hit. What it leaves out:
-```ts
-dispatch_search({ query, project?, limit? })
-```
-Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`. It returns the best `limit` hits (20
-by default, 50 at most) across issues, documents, comments, asks, and messages. A query over
-1,000 characters is refused before it is sent: search with the few words `skill://dispatch-first`
-describes, never a pasted passage. Issue-owned hit lines start with the issue key; standalone
-project-document hit lines start with `dispatch://PROJECT/artifact/<slug>`, followed by the
-absolute link. Cite the hit you build on (`dispatch://KEY` or the document reference), or state
-"no prior issue" in the spec.
+do with each hit. What it leaves out (`dispatch search --help` has `--project`, `--limit` and `--offset`):
+Websearch syntax applies: `"merge queue"`, `-daemon`, `OR`. Issues, documents, asks, comments, and messages rank separately; the
+merged page orders each kind's best in turn — issue, document, ask, comment, message — and a bare issue key ranks first. Each
+kind's list also merges a query embedding's meaning match with keyword hits (LEGION-549): a paraphrase with no shared word can
+still match; without an embedder, it says so and ranks by keyword alone. A page holds `--limit` hits (20 default, 50 max); the first
+line gives the total (`showing 1-20 of 312`); see [Search paging](skill://dispatch/references/issues.md#search-paging) for more.
+Queries over 1,000 characters are refused: use the few words `skill://dispatch-first` names, never a pasted passage. Issue hits
+start with the issue key; document hits start with `dispatch://PROJECT/artifact/<slug>`, then the link. Cite the hit (`dispatch://KEY` or the doc ref) or say "no prior issue".
 
-`dispatch_issue` refuses a title that near-duplicates an issue in the same project and returns the candidates (`POSSIBLE_DUPLICATE`).
-Read them; reference the existing issue, or repeat the call with `force: true` when it is genuinely new work.
+`dispatch issue` refuses a title that near-duplicates an issue in the same project and prints the candidates (`POSSIBLE_DUPLICATE`). Read them; reference the existing issue, or run it again with `--force` when it is genuinely new work.
 The check compares title words only (shared stemmed terms), never meaning: "four tests that fail a
 merge" pairs with "four CI gates that cannot fail a merge". So when you force past a candidate, give
 the new issue a title that names what differs where you can, and open its spec with the
@@ -189,9 +185,9 @@ is the tell.
 
 Before you start implementing an issue, claim it, and release the claim when you stop: finished,
 handing over, or moving to something else. Closing the issue releases it for you.
-```ts
-dispatch_claim({ issue: "LEGION-234" })                  // I am implementing this
-dispatch_claim({ issue: "LEGION-234", release: true })   // I have stopped; it is free
+```bash
+dispatch claim --issue LEGION-234             # I am implementing this
+dispatch claim --issue LEGION-234 --release   # I have stopped; it is free
 ```
 A claim is intent to implement: reading, commenting, asking, or gating a pull request claims
 nothing. `409 ISSUE_CLAIMED` means someone else holds the issue; never work it in parallel. What
@@ -201,10 +197,10 @@ each refusal means, and when a claim is yours to take, is in
 ## Issue status is yours to move
 
 Claiming and moving the status are two actions, and you do both: when you start,
-`dispatch_claim({ issue })` and `dispatch_issue_update({ issue, status: "in_progress" })`. Outside
+`dispatch claim --issue <KEY>` and `dispatch issue-update --issue <KEY> --status in_progress`. Outside
 Legion the session doing the work moves its issue and the children it owns: `in_progress` when
 implementation starts, `testing` while the change is proven on a production-like surface,
-`needs_review` when its pull request waits on the merge queue, and `done`, with a `reason`, once
+`needs_review` when its pull request waits on the merge queue, and `done`, with a `--reason`, once
 the change has been driven in production. Never write the status of an issue that carries the
 `legion` label, or of any issue under one: the Legion daemon writes those. Closing, clearing a
 field, and choosing your next issue are in [Working an issue](skill://dispatch/references/issues.md).
@@ -216,11 +212,11 @@ block in that document ([Decision blocks](#decision-blocks)), whatever phase the
 whether or not the document was approved: a block in an approved document makes the approval
 stale, which is right. A Legion phase worker sends such a decision to its architect, which writes
 the block (`skill://legion-worker`). A to-do or permission only a human can give, or a decision
-with no document to live in, is a `dispatch_ask`. The gates below apply to both.
+with no document to live in, is a `dispatch ask`. The gates below apply to both.
 
 ### Before you ask
 
-Every `dispatch_ask` passes four gates first:
+Every `dispatch ask` passes four gates first:
 
 1. **Does it need his authority, taste, or risk appetite?** This is the bar for a decision
    written as an `:::ask` block in context ([Decision blocks](#decision-blocks)). Technical
@@ -228,7 +224,7 @@ Every `dispatch_ask` passes four gates first:
    internals are your lane's to decide where the work happens, in the plan or the code, not in the
    spec. A contract between two lanes is settled by those two lanes over Envoy, and you open no ask
    for it. A halt condition (a change to IAM, deletion or exposure of production data, anything
-   that reaches a customer) passes this gate: it is your own `dispatch_ask` to Sami on your own
+   that reaches a customer) passes this gate: it is your own `dispatch ask` to the human on your own
    issue.
 2. **Is there genuine uncertainty, and have you measured what you can?** If there is none, it is
    a plan you execute. The one legitimate ask without uncertainty is permission for an action
@@ -245,7 +241,7 @@ Every `dispatch_ask` passes four gates first:
    Report what the measurement could **not** establish, with its own control: "I found no
    evidence" and "there is no evidence to find" read alike and mean opposite things, and a
    control that shares the query's blind spot proves neither. Before you say you are waiting on
-   him, run `dispatch_open_asks` (below) — and the test for a new ask is not whether you asked on
+   him, run `dispatch open-asks` (below) — and the test for a new ask is not whether you asked on
    this issue before, but whether it asks him to re-report something he has already answered.
 3. **Can someone who has not read the code answer it on a phone?** Write it as
    [Writing for the human](#writing-for-the-human) says — who can do what today and what changes
@@ -268,35 +264,27 @@ Every `dispatch_ask` passes four gates first:
 Nobody audits or retracts another session's asks: passing every gate, and carrying the content
 instead of pointing at another message in prose (below), is the asking session's own check.
 
-Open a standalone ask with:
-```ts
-dispatch_ask({
-  issue?,
-  project?,
-  artifact?,
-  ref?,
-  question,
-  options?: { label, description? }[],
-  multiple?,
-  urgency?,
-  anchor?: { artifact, quote, occurrence? },
-})
+Open a standalone ask with `dispatch ask` (`dispatch ask --help` lists its flags), one `--option` per choice:
+```bash
+dispatch ask --issue <KEY> --question-file - --option 'Label: what it costs' --option 'Other: what it costs' <<'EOF'
+<the problem, what constrains the answer, and your recommendation with its reason>
+EOF
 ```
-It returns `details` `{ issue, ask, follows: { ask } }` for an issue or `{ project, artifact, document, ask, follows: { ask } }` for a project document: you follow the ask you opened (see [Following](#following)).
+It prints the ask's id; you follow the ask you opened (see [Following](#following)).
 
-References belong in the question text; `ref` is sugar that appends its `dispatch://` value to the question as a rendered link.
+References belong in the question text; `--ref` is sugar that appends its `dispatch://` value to the question as a rendered link.
 
 An ask is read on a phone by someone who has not read the code. Write its question and options as
 [Writing for the human](#writing-for-the-human) says, and apply its phone test before posting.
 Never lead a question with a file path, line number, sequence number, document version or role token: its own text explains the problem.
-Evidence below it may cite one where the reader checks it, or anchor the ask to the passage with `anchor: { artifact, quote, occurrence? }`; `occurrence` is zero-based and selects a repeated quote.
+Evidence below it may cite one where the reader checks it, or anchor the ask to the passage with `--anchor-json '{"artifact":"spec","quote":"…"}'`; an optional `occurrence` is zero-based and selects a repeated quote.
 A quote anchor is pinned to its lowest complete
 containing block while retaining its quote as display text, so rewording the passage keeps it
 attached; a quote spanning top-level blocks, and existing anchors without a block, stay readable
 against their original document version if their quote disappears.
 
 An ask must be answerable from its own text and its anchor alone. Anchor a to-do about a document
-passage with `anchor`. Follow up on an ask or comment with `dispatch_comment`; cite anything else
+passage with `--anchor-json`. Follow up on an ask or comment with `dispatch comment`; cite anything else
 with a `dispatch://` reference (see [References](#references)). Never write "see above", "the
 message above", or "as attached".
 
@@ -321,56 +309,56 @@ they must read to decide belongs in the spec in the first place — see [Artifac
 
 ### When you need a human
 
-Before saying you are waiting for human input, call `dispatch_open_asks`. With no arguments it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch_open_asks({ project })` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you see what a whole project is waiting on rather than just your own asks.
+Before saying you are waiting for human input, run `dispatch open-asks`. With no flags it lists this session's active asks across open issues and project documents, including whether the human or agent owes the next reply. With `dispatch open-asks --project <KEY>` it lists every open ask in that project — on its issues and on its documents, whoever authored them — which is how you see what a whole project is waiting on rather than just your own asks.
 
-**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that Sami has not already settled, write a decision block in the document that records the work before the first implementation commit; in a Legion tree the architect writes it, and a phase worker sends the decision to its architect. A lane's schema decision or a contract two lanes agree does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, its options): build it without a block, as gate 4 of [Before you ask](#before-you-ask) says. This rule covers only product shape outside what he asked for, and its block comes before the commit that sets that shape.
+**Unsettled product shape needs a decision before implementation.** When a page, navigation entry, table key, customer-scoping rule, or persisted sidecar would set product shape that the human has not already settled, write a decision block in the document that records the work before the first implementation commit; in a Legion tree the architect writes it, and a phase worker sends the decision to its architect. A lane's schema decision or a contract two lanes agree does not settle product shape. This does not turn a user-specified decision or routine implementation into an approval request. A control or behaviour the human asked for in words is settled by those words, together with every choice inside it that his words do not make (where it sits, its defaults, …
 
 **Anything you are blocked on a human for is visible in Dispatch.** An agent waits on a human only
 through an open ask. A to-do, permission, credential or grant renewal, setting only they can
-change, review click, or conflict between two of their own rules is a `dispatch_ask` the moment you
+change, review click, or conflict between two of their own rules is a `dispatch ask` the moment you
 know. Start with the problem and why it matters, then the constraints, options and their costs, and
 your recommendation. For an action only the human can perform, state what it changes and risks;
 never make the action itself the question (a design decision is a decision block, as above). Never
 write a human to-do only into a spec, a comment reply, a message, or a pull-request body: nothing
 in those paths reaches the human's Inbox, and a human who is not reading the document does not
 know they are the blocker. Before asking, try to remove the step: a value already on the machine, a
-permission you already hold, an API that replaces the click. One ask per item, `urgency: "high"`
+permission you already hold, an API that replaces the click. One ask per item, `--urgency high`
 when work is stopped on it; while it is open, keep working on everything that is not.
 
 Once an ask is open (who answers it, handing a human a to-do, editing, retracting or resolving it,
-answering a clarification, whose turn a reply gives), see
+answering a clarification, whose turn a reply gives, an answer the human changes), see
 [Asks after they open](skill://dispatch/references/asks.md).
 
 ## Architecture components
 
 Attach every architectural issue to the components it changes. Attach the root before decomposing it: children inherit the root's effective attachment unless they deliberately set their own, so one root attachment classifies the whole tree.
 
-```
-dispatch_issue({ project: "CORE", title: "...", components: { mode: "explicit", ids: ["dispatch-server", "web"] } })
-dispatch_issue_update({ issue: "CORE-12", components: { mode: "explicit", ids: ["web"] } })   // this issue's own set, replacing what it inherited
-dispatch_issue_update({ issue: "CORE-13", components: { mode: "none", reason: "hiring, not code" } })
-dispatch_issue_update({ issue: "CORE-14", components: { mode: "inherit" } })                  // back to the parent chain's attachment
+```bash
+dispatch issue --project CORE --title '...' --components-json '{"mode":"explicit","ids":["dispatch-server","web"]}'
+dispatch issue-update --issue CORE-12 --components-json '{"mode":"explicit","ids":["web"]}'  # its own set, replacing what it inherited
+dispatch issue-update --issue CORE-13 --components-json '{"mode":"none","reason":"hiring, not code"}'
+dispatch issue-update --issue CORE-14 --components-json '{"mode":"inherit"}'                 # back to the parent chain's attachment
 ```
 
-No native Dispatch tool lists component ids. Read the configured model with `GET /api/v1/projects/{key}/architecture` and use each non-external `components[].id`; when its source repository is your checkout, those ids are the file names under `.dispatch/architecture/` (`web.md` → `web`). An id absent from the model, or an `external` component, is refused with `COMPONENTS_INPUT`.
+No `dispatch` command lists component ids. Read the configured model with `GET /api/v1/projects/{key}/architecture` and use each non-external `components[].id`; when its source repository is your checkout, those ids are the file names under `.dispatch/architecture/` (`web.md` → `web`). An id absent from the model, or an `external` component, is refused with `COMPONENTS_INPUT`.
 
-Use `mode: "none"` with a concrete reason only when the work is genuinely non-architectural (for example hiring, process, or operations work). A closed issue can be classified without reopening. Change code and its architecture description (`.dispatch/architecture/<id>.md`) in the same review. When the model you read is behind your checkout, `dispatch_architecture_sync` imports it now ([Syncing a project's architecture model](skill://dispatch/references/issues.md)).
+Use `"mode":"none"` with a concrete reason only when the work is genuinely non-architectural (for example hiring, process, or operations work). A closed issue can be classified without reopening. Change code and its architecture description (`.dispatch/architecture/<id>.md`) in the same review. When the model you read is behind your checkout, `dispatch architecture-sync` imports it now ([Syncing a project's architecture model](skill://dispatch/references/issues.md)).
 
 ## Close what you opened
 
 An ask you opened is yours until it is answered or you resolve it. When the answer arrives some
-other way — Sami said it live, a later comment settled it, or the question became moot because the
-design moved — resolve it yourself with `dispatch_resolve_ask` in the same turn you learn that.
+other way — the human said it live, a later comment settled it, or the question became moot because the
+design moved — resolve it yourself with `dispatch resolve-ask` in the same turn you learn that.
 Never leave it for the human to clear.
 
 Every later write on the issue answers `You still have an open ask on …` and names it. Treat that
 as the checklist: if it is still needed, leave it; if it was answered elsewhere, resolve it with
 the resolving fact as the reason. Before posting a new ask, inspect your open ones. If the new ask
-supersedes one, retract the old one with `dispatch_resolve_ask` and kind `retracted` in the same
+supersedes one, retract the old one with `dispatch resolve-ask --kind retracted` in the same
 turn.
 
 See [Following](#following) for why you receive what happens to asks you open and
-[What comes back](skill://dispatch/references/reading.md) for finding them again with `dispatch_open_asks`.
+[What comes back](skill://dispatch/references/reading.md) for finding them again with `dispatch open-asks`.
 
 ## Approval of a spec
 
@@ -387,37 +375,38 @@ hold (`skill://legion-architect`).
 When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
 the human's Inbox waits on nobody. When a human asks for approval while a block is open, do not
 request it and do not hold it silently: name each open block and ask them to answer it or waive
-it. For a waiver, close the block with `dispatch_resolve_ask` (`kind: "resolved"`, their words as
-`reason`), then write their decision into the text in their words and request.
-`dispatch_request_approval` refuses while any block is open.
+it. For a waiver, close the block with `dispatch resolve-ask --kind resolved` (their words as
+`--reason`), then write their decision into the text in their words and request.
+`dispatch request-approval` refuses while any block is open.
 
 An approval request carries nothing new: a point the human has not agreed to gets its own decision
 block first, with your recommendation, or, when it is a choice you can make yourself
 ([Before you ask](#before-you-ask), gate 1) and the human will not want a say in it, comes out of
 the spec and is made where the work happens; an inference you cannot defend in a decision block
-comes out of the spec. `summary` says in one to three sentences what the human is approving and
+comes out of the spec. `--summary` says in one to three sentences what the human is approving and
 nothing else: no commentary on itself or on the conversation, and no open question. The Inbox
 shows it after "Approve spec.md (version N)?". Never write "Approve" options into an ordinary
-`dispatch_ask`; only humans approve. The call, its result and its answer:
+`dispatch ask`; only humans approve. The call, its result and its answer:
 [Approval requests](skill://dispatch/references/documents.md#approval-requests).
 
 ## The Spec
 
 The spec holds the design and the decisions that shaped it, written as [Writing a spec](#writing-a-spec)
 says, which also lists what it never carries. It changes when the conversation changes it, and
-every version that records a decision is named with `dispatch_doc_edit`'s `summary`.
+every version that records a decision is named with `dispatch doc-edit --summary`.
 
-Read the current document before changing it:
-
-```ts
-dispatch_doc_read({ issue?, project?, artifact?, version?, ref? })
-```
-It returns live or versioned markdown with open marks. A live read ends with a document token; `issue` with an omitted
-`artifact` reads the issue specification; a project needs `artifact`; and a `dispatch://PROJECT/artifact/<document-ref>`
+Read the current document before changing it with `dispatch doc-read` (`--issue`, or `--project`
+and `--artifact`, an optional `--version`, or `--ref`).
+It prints live or versioned markdown with open marks. A live read ends with a document token; `--issue` with no
+`--artifact` reads the issue specification; a project needs `--artifact`; and a `dispatch://PROJECT/artifact/<document-ref>`
 ref supplies both, where `document-ref` is the slug (an id or a filename resolves when no document has that slug). A file
-`dispatch_artifact` uploaded reads its text at the latest or named version, or a description when it is not UTF-8 text.
+`dispatch artifact` uploaded reads its text at the latest or named version, or a description when it is not UTF-8 text.
+A picture (PNG, JPEG, GIF or WebP under 3,750,000 bytes, 5 MB of base64) is written to a file, and the command prints a
+`- picture: <path>` line with its type and size: open it with your file-read tool. That includes
+`dispatch://agent/<session id>/artifact/<slug>@vN`, one a person sent you on the Agents page. A session is shown each picture once,
+since the provider refuses a request over 32 MB: later reads and deliveries name it, and `dispatch doc-read` shows it again (after compaction too).
 
-Editing one is [Editing a document](skill://dispatch/references/document-edits.md): the shape of `dispatch_doc_edit`,
+Editing one is [Editing a document](skill://dispatch/references/document-edits.md): the shape of `dispatch doc-edit`,
 how to quote the text you mean, one `replace` per paragraph, preconditions against a stale edit, and
 what each operation costs a block's id and its anchors.
 
@@ -432,12 +421,12 @@ as [Documents](skill://dispatch/references/documents.md) says.
 a summary — goes in the spec as a section: the spec is the one document they open. A separate
 artifact is for a real file: something sent as-is, a long report, a binary, a screenshot.
 
-When you do upload one, the spec links it as `dispatch://KEY/artifact/<slug>` (the `slug` from the
-upload result; it renders as a link) at the place the reader needs it, and the ask that needs the
+When you do upload one, the spec links it as `dispatch://KEY/artifact/<slug>` (the slug the
+upload prints; it renders as a link) at the place the reader needs it, and the ask that needs the
 decision carries the same reference. A heading or a sentence naming the filename is not a
 reference.
 
-Uploading one (`dispatch_artifact`, its slugs, versions and Markdown rules) is in
+Uploading one (`dispatch artifact`, its slugs, versions and Markdown rules) is in
 [Documents](skill://dispatch/references/documents.md).
 
 ## Structure over stream
@@ -451,12 +440,12 @@ Dispatch is a structured workspace, never a message stream. The structure IS the
   document, or an artifact on the issue it belongs to.
 - **Content lives in documents; decisions live in asks; messages only announce.** A draft the
   human must read goes in the issue's spec (see [Artifacts](#artifacts)), which the dashboard renders with versions and margins; the
-  ask that needs their word references it (`ref`, or the `dispatch://` link inline) instead of
+  ask that needs their word references it (`--ref`, or the `dispatch://` link inline) instead of
   restating it. A message never carries a body a human has to scroll.
 - **Never split one deliverable across a message + an ask that points at it.** Ask the question
   with the document reference in the question text; the reader lands on the content in one click.
 
-The tool result answers your third consecutive message on an issue with no human reply with
+The command answers your third consecutive message on an issue with no human reply with
 `You've sent N messages …`. That is the ledger pattern being named; stop and either wait or ask
 once.
 
@@ -467,12 +456,17 @@ change a human must know about now: a deliverable landed. Nothing else — no pr
 "starting X", no "still working", no restating the spec, no status on a timer. Your transcript is where work is narrated; the
 pull request is where it is summarised. One message that a human reads beats ten that train them to skip you.
 
-```ts
-dispatch_message({ issue, body })
+```bash
+dispatch message --issue <KEY> --body-file - <<'EOF'
+<what landed, with its link>
+EOF
 ```
 
-It returns `details` `{ issue, message }`. `body` is capped at 2,000 characters. A message is not a decision
-(a decision block, or `dispatch_ask` for a human to-do) or document feedback (`dispatch_comment`), and it does not wake anyone unless the issue is routed.
+The body is capped at 2,000 characters. A message is not a decision
+(a decision block, or `dispatch ask` for a human to-do) or document feedback (`dispatch comment`), and it does not wake anyone unless the issue is routed.
+
+**Pictures.** To show a screenshot inline, pass its path with `--image` (`dispatch message`, `dispatch comment`, `dispatch ask`);
+`dispatch read` writes the pictures what it shows embeds to files and prints their paths. Both are in [Documents](skill://dispatch/references/documents.md), "Artifacts".
 
 A BTW, Aside or Steer frame, or a message from the Agents page, is answered as
 [Targeted and direct messages](skill://dispatch/references/messages.md) says.

@@ -2,6 +2,7 @@ package sandbox
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -10,12 +11,14 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 const (
@@ -53,6 +56,22 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		return []k8sruntime.Object{sandboxObject(t, name, sandboxUID, mode, labels, conditions...), pod}
 	}
 	running := corev1.PodStatus{Phase: corev1.PodRunning}
+	for _, role := range claim.Roles {
+		running.ContainerStatuses = append(running.ContainerStatuses, corev1.ContainerStatus{
+			Name: string(role), State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+		})
+	}
+	withStatus := func(name string, state corev1.ContainerState) corev1.PodStatus {
+		status := running
+		status.ContainerStatuses = slices.Clone(running.ContainerStatuses)
+		for i := range status.ContainerStatuses {
+			if status.ContainerStatuses[i].Name == name {
+				status.ContainerStatuses[i].State = state
+			}
+		}
+		return status
+	}
+	alive := &shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 1, PID: 42}}
 	failed := func(statuses ...corev1.ContainerStatus) corev1.PodStatus {
 		status := corev1.PodStatus{Phase: corev1.PodFailed}
 		for _, s := range statuses {
@@ -64,9 +83,56 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		}
 		return status
 	}
+	// launchedUnder is a pod whose containers are the ones a runtime with testOptions edited by edit
+	// creates, as a daemon under that configuration left it running.
+	launchedUnder := func(edit func(*Options)) func(*corev1.Pod) {
+		opts := testOptions()
+		edit(&opts)
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		containers := podOf(t, r, workerSpec(t)).Containers
+		return func(p *corev1.Pod) { p.Spec.Containers = containers }
+	}
+	unmoved := func(*Options) {}
+	// withoutConnect drops the tester launcher's --connect and its address, as no pod this runtime
+	// builds is.
+	withoutConnect := func(p *corev1.Pod) {
+		for i := range p.Spec.Containers {
+			if c := &p.Spec.Containers[i]; c.Name == workerContainer {
+				flag := slices.Index(c.Command, connectFlag)
+				c.Command = slices.Delete(slices.Clone(c.Command), flag, flag+2)
+			}
+		}
+	}
+	// withRecord annotates the Sandbox of objects with value as the tester's address record.
+	withRecord := func(objects []k8sruntime.Object, value string) []k8sruntime.Object {
+		s := objects[0].(*unstructured.Unstructured)
+		s.SetAnnotations(map[string]string{addressesAnnotation(claim.RoleTester): value})
+		return objects
+	}
+	// recordUnder is the tester's record of generation, as a runtime with testOptions edited by edit
+	// writes it when it starts that generation.
+	recordUnder := func(edit func(*Options), generation uint64) string {
+		opts := testOptions()
+		edit(&opts)
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, err := r.recordFor(claim.RoleTester, generation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return record
+	}
+	movedDaemon := func(o *Options) { o.DaemonURL = movedDaemonURL }
+	pending := corev1.PodStatus{Phase: corev1.PodPending}
 	for _, tc := range []struct {
 		row           string
 		objects       []k8sruntime.Object
+		launcher      *shimwire.LauncherState
 		want          runtime.ObservationKind
 		detail        []string
 		absent        []string
@@ -91,38 +157,38 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		},
 		{
 			row:     "4 another uid, before its phase is read",
-			objects: withPod(modeRunning, nil, "uid-pod-newer", sandboxUID, failed(terminated(mainContainer, 137, "Error"))),
-			want:    runtime.NotRecordedProcess, detail: []string{"is uid uid-pod-newer, not the recorded " + recorded},
+			objects: withPod(modeRunning, nil, "uid-pod-newer", sandboxUID, failed(terminated(workerContainer, 137, "Error"))),
+			want:    runtime.NotRecordedProcess, detail: []string{"is uid uid-pod-newer, not the recorded pod UID " + recorded},
 		},
 		{
-			row:     "5 the main container ended",
-			objects: withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 0, "Completed"), terminated(mainContainer, 137, "Error"))),
+			row:     "5 the role container ended with the pod",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 0, "Completed"), terminated(workerContainer, 137, "Error"))),
 			want:    runtime.Gone,
-			detail:  []string{"pod " + name + " (uid " + recorded + ") Failed: main container worker terminated (Error, exit code 137)", "last lines of worker:\nfake logs"},
+			detail:  []string{"pod " + name + " (uid " + recorded + ") Failed: role container tester terminated (Error, exit code 137)", "last lines of tester:\nfake logs"},
 		},
 		{
 			row:           "5 workspace-init lost the workspace",
 			objects:       withPod(modeRunning, nil, recorded, sandboxUID, failed(terminated(initContainer, 3, "Error"))),
 			want:          runtime.Gone,
 			workspaceLost: true,
-			detail:        []string{"the tree volume was lost: pod " + name, "init container workspace-init terminated (Error, exit code 3)", "last lines of workspace-init:"},
+			detail:        []string{"the issue's volume was lost: pod " + name, "init container workspace-init terminated (Error, exit code 3)", "last lines of workspace-init:"},
 		},
 		{
 			row:     "5 the agent exited cleanly",
-			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{terminated(mainContainer, 0, "Completed")}}),
-			want:    runtime.Gone, detail: []string{"Succeeded: main container worker terminated (Completed, exit code 0)"},
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{terminated(workerContainer, 0, "Completed")}}),
+			want:    runtime.Gone, detail: []string{"Succeeded: role container tester terminated (Completed, exit code 0)"},
 		},
 		{
 			row: "5 before 7, quoting Finished only when current",
 			objects: withPod(modeRunning, []metav1.Condition{
 				condition(conditionReady, "False", reasonReconcilerError, 2), condition(conditionFinished, "True", "PodFailed", 2),
-			}, recorded, sandboxUID, failed(terminated(mainContainer, 1, "Error"))),
+			}, recorded, sandboxUID, failed(terminated(workerContainer, 1, "Error"))),
 			want: runtime.Gone, detail: []string{"; sandbox Finished=True PodFailed;"},
 		},
 		{
 			row: "5 a Finished left by the previous generation is not quoted",
 			objects: withPod(modeRunning, []metav1.Condition{condition(conditionFinished, "True", "PodSucceeded", 1)},
-				recorded, sandboxUID, failed(terminated(mainContainer, 1, "Error"))),
+				recorded, sandboxUID, failed(terminated(workerContainer, 1, "Error"))),
 			want: runtime.Gone, absent: []string{"Finished"},
 		},
 		{
@@ -146,9 +212,10 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want:    runtime.Uncertain, detail: []string{"Ready=False MultiplePods"},
 		},
 		{
-			row:     "7 a reconciler error left by the previous generation",
-			objects: withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", reasonReconcilerError, 1)}, recorded, sandboxUID, running),
-			want:    runtime.Alive,
+			row:      "7 a reconciler error left by the previous generation",
+			objects:  withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", reasonReconcilerError, 1)}, recorded, sandboxUID, running),
+			launcher: alive,
+			want:     runtime.Alive,
 		},
 		{
 			row: "8 pending before its init container starts (B4)",
@@ -163,9 +230,51 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want:    runtime.Alive,
 		},
 		{
-			row:     "8 running",
+			row:      "8 running",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: alive,
+			want:     runtime.Alive, detail: []string{"(uid " + recorded + ") role container tester runs generation 1"},
+		},
+		{
+			row: "8 a neighbour's container restarting leaves the role alive",
+			objects: withPod(modeRunning, []metav1.Condition{condition(conditionReady, "False", "ContainersNotReady", 2)}, recorded, sandboxUID,
+				withStatus(string(claim.RoleArchitect), corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}})),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:     "8 the role launcher is not connected",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, running),
-			want:    runtime.Alive, detail: []string{"(uid " + recorded + ") Running"},
+			want:    runtime.Uncertain, detail: []string{"role launcher tester is disconnected"},
+		},
+		{
+			row:      "8 the launcher runs a later generation",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: &shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 2, PID: 43}},
+			want:     runtime.NotRecordedProcess, detail: []string{"runs generation 2, not the recorded 1"},
+		},
+		{
+			row:      "8 the launcher reports the recorded generation exited",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: &shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: 143, Signal: "terminated"}},
+			want:     runtime.Gone, detail: []string{"reports generation 1 exited (code 143, signal terminated)"},
+		},
+		{
+			row:     "8 the role container terminated with no launcher connected",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}})),
+			want:    runtime.Gone, detail: []string{"role container tester terminated (OOMKilled, exit code 137)"},
+		},
+		{
+			row:      "8 a terminated role container outranks a launcher reporting another generation",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}})),
+			launcher: &shimwire.LauncherState{Child: &shimwire.LauncherChild{Generation: 2, PID: 43}},
+			want:     runtime.Gone, detail: []string{"role container tester terminated (OOMKilled, exit code 137)"},
+		},
+		{
+			row:      "8 a restarted launcher's recorded child outranks its previous container instance's terminated status",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}})),
+			launcher: alive,
+			want:     runtime.Alive, detail: []string{"role container tester runs generation 1"},
 		},
 		{
 			row: "8 a pod being deleted is alive until it is gone",
@@ -173,7 +282,8 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 				now := metav1.NewTime(rigNow)
 				p.DeletionTimestamp, p.Finalizers = &now, []string{"test/hold"}
 			}),
-			want: runtime.Alive,
+			launcher: alive,
+			want:     runtime.Alive,
 		},
 		{
 			row: "8 a new pod's ADD while the sandbox still holds the old Finished (B5)",
@@ -183,6 +293,71 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want: runtime.Alive,
 		},
 		{
+			row:      "8 a role launcher dialing the stream a pod created now is handed, with no record, is alive",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:      "8 a role launcher with no --connect is never read as stale for want of it",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream), withoutConnect),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:     "9 a moved worker stream, before the launcher's state is read",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(moveStream)),
+			want:    runtime.StaleAddress,
+			detail:  []string{movedAddress{connectFlag, movedStreamURL, testOptions().StreamURL}.String()},
+			absent:  []string{"disconnected", "LEGION_DAEMON_URL"},
+		},
+		{
+			row:     "9 a pending pod dialing a moved worker stream",
+			objects: withPod(modeRunning, nil, recorded, sandboxUID, pending, launchedUnder(moveStream)),
+			want:    runtime.StaleAddress,
+			detail:  []string{movedAddress{connectFlag, movedStreamURL, testOptions().StreamURL}.String()},
+		},
+		{
+			row:      "8 a generation recorded with every address a generation started now is handed",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(unmoved, 1)),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:      "9 a generation started with a moved daemon URL",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(movedDaemon, 1)),
+			launcher: alive,
+			want:     runtime.StaleAddress,
+			detail:   []string{"role container tester runs generation 1", movedAddress{"LEGION_DAEMON_URL", movedDaemonURL, testOptions().DaemonURL}.String()},
+			absent:   []string{connectFlag, "ENVOY_URL"},
+		},
+		{
+			row: "9 every moved address of a generation is named",
+			objects: withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(func(o *Options) {
+				o.DaemonURL, o.EnvoyURL = movedDaemonURL, "http://192.0.2.9:9020"
+			}, 1)),
+			launcher: alive,
+			want:     runtime.StaleAddress,
+			detail: []string{
+				movedAddress{"LEGION_DAEMON_URL", movedDaemonURL, testOptions().DaemonURL}.String(),
+				movedAddress{"ENVOY_URL", "http://192.0.2.9:9020", testOptions().EnvoyURL}.String(),
+			},
+			absent: []string{"ENVOY_NATS_URL"},
+		},
+		{
+			row:      "8 the record of another generation is not compared",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), recordUnder(movedDaemon, 2)),
+			launcher: alive,
+			want:     runtime.Alive,
+		},
+		{
+			row:      "9 an unreadable record proves nothing about the generation's addresses",
+			objects:  withRecord(withPod(modeRunning, nil, recorded, sandboxUID, running, launchedUnder(unmoved)), "{not json"),
+			launcher: alive,
+			want:     runtime.StaleAddress,
+			detail:   []string{"the address record " + addressesAnnotation(claim.RoleTester) + " is unreadable"},
+		},
+		{
 			row:     "a phase the mapping has no row for is uncertain",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, corev1.PodStatus{Phase: corev1.PodUnknown}),
 			want:    runtime.Uncertain, detail: []string{"phase Unknown"},
@@ -190,6 +365,9 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 	} {
 		t.Run(tc.row, func(t *testing.T) {
 			g := newRig(t, tc.objects, withoutController())
+			if tc.launcher != nil {
+				g.reportLauncher(workerToken, *tc.launcher)
+			}
 			loc := sandboxLocator(workerToken, recorded)
 			obs, err := g.r.Probe(g.ctx, loc)
 			if err != nil {

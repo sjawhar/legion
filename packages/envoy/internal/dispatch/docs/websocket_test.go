@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,11 +15,21 @@ import (
 	"github.com/reearth/ygo/crdt"
 	"github.com/reearth/ygo/encoding"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
+
+// connectPeer connects login's browser to artifactID's room through the document server at
+// serverURL, at the schema version the dashboard presents, so the room takes its edits.
+func connectPeer(t *testing.T, serverURL, artifactID, login string) *docstest.Peer {
+	t.Helper()
+	url := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws/doc/" + artifactID +
+		"?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
+	return docstest.Dial(t, url, http.Header{"X-Dispatch-User": []string{login}}, artifactID, crdt.New())
+}
 
 func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 	service, artifactID := newTestService(t)
@@ -37,7 +48,6 @@ func TestIssueCloseClosesOpenDocumentConnection(t *testing.T) {
 		t.Fatalf("close document issue: %v", err)
 	}
 	service.SetIssueClosed(context.Background(), "DOC-1", true)
-	waitForRoomClosed(t, service, artifactID)
 	waitForNoLiveDocument(t, service, artifactID)
 	connection.SetReadDeadline(time.Now().Add(time.Second))
 	for {
@@ -233,7 +243,7 @@ func TestASocketsPreloadIsServedOnlyWhileTheHistoryHasNotMoved(t *testing.T) {
 	adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
 	preload := func(t *testing.T) []byte {
 		t.Helper()
-		_, loaded, err := service.loadDocument(context.Background(), artifactID)
+		_, loaded, err := service.loadTree(context.Background(), artifactID)
 		if err != nil || loaded == nil || len(loaded.Update) == 0 {
 			t.Fatalf("load cold document: loaded=%v err=%v, want its durable history", loaded, err)
 		}
@@ -316,7 +326,7 @@ func TestDocumentSocketRefusesARoomOutsideTheSchema(t *testing.T) {
 	}
 }
 
-func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
+func TestShutdownClosesDocumentPeers(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -356,7 +366,9 @@ func TestShutdownClosesDocumentPeersBeforeDrain(t *testing.T) {
 	}
 }
 
-func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
+// Shutdown returns at its caller's deadline while an editor is connected and a durable append waits
+// on a lock, and the append still reaches the store once the lock is released.
+func TestShutdownReturnsAtItsDeadlineWithAnEditorConnectedAndAnAppendLocked(t *testing.T) {
 	database := storetest.Open(t)
 	artifactID := createDocument(t, database, "before")
 	service := New(Deps{
@@ -391,16 +403,25 @@ func TestShutdownBoundsPeerCloseDuringLockedAppend(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
 	defer cancel()
 	if err := service.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("shutdown with peer and append lock = %v, want deadline exceeded", err)
+		t.Fatalf("shutdown with an editor connected and an append locked = %v, want deadline exceeded", err)
 	}
 	if err := locker.Commit(context.Background()); err != nil {
 		t.Fatalf("release append lock: %v", err)
 	}
-	waitForPersistedUpdates(t, service, artifactID, 2)
+	// Not waitForPersistedUpdates: Shutdown's CloseRoom evicts this room once the append lands
+	// (room.connected), and ygo compacts an evicted room's history to one row (compactKeep),
+	// so a row-count check here races the compaction that normally follows eviction. The
+	// durable-append signal alone proves the locked write reached the store; the content check
+	// below proves what it reached the store as.
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer waitCancel()
+	if err := service.waitForDurableAppends(waitCtx, artifactID); err != nil {
+		t.Fatalf("wait for the locked append to be stored: %v", err)
+	}
 	reloaded := New(Deps{Store: database, Events: events.NewBroker(), Settle: time.Hour})
 	defer reloaded.Shutdown(context.Background())
 	if got, err := reloaded.Text(context.Background(), artifactID); err != nil || got != "after\n" {
-		t.Fatalf("text after peer-bounded shutdown = %q (%v), want after", got, err)
+		t.Fatalf("text after the shutdown the locked append outlasted = %q (%v), want after", got, err)
 	}
 }
 

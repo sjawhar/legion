@@ -1,6 +1,6 @@
 ---
 title: Revoke a session or a grant
-description: End a grant from Dispatch or from the session holding it, cancel a pending request, end a session so nothing it held still works, and end a machine's login.
+description: End a grant from Dispatch, from your shell or from the session holding it, cancel a pending request, end a session so nothing it held still works, and end a machine's login.
 sidebar:
   order: 12
 ---
@@ -42,6 +42,32 @@ $ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"appro
 Dispatch's server holds; on the [local stack](/legion/broker/guides/run-locally/) you can make it
 yourself.)
 
+## Revoke a grant from your shell
+
+From your own shell on a machine that is logged in (not from inside an agent session),
+`agent-secrets grant list` lists the same grants as **Live grants**, and `agent-secrets grant revoke`
+ends one as **Revoke** does, withholding included. Both call the broker under the machine's login:
+the helper signs each call with the machine's credential, and refuses a process inside a registered
+session's process tree (`IN_SESSION`), so an agent's own commands cannot act as you. The check
+covers that process tree only. A process a session sends out of it, with `( cmd & )`, `setsid -f`
+or a tmux server the session started, passes it, and any process running as your user can stop the
+helper anyway. Through these commands such a process can list and revoke your own machine logins,
+never a service's machine login, and your grants, which include grants you approved on any
+session, a service's pod among them. `agent-secrets enroll --helper` is open to any process of
+your user, so such a process can also enroll a box and read your agent secrets.
+
+```console
+$ agent-secrets grant list
+GRANT_ID                              SECRETS          GRANTED    APPROVER         SESSION                                    OPERATOR         EXPIRES
+f26b6b78-2819-4b1d-abbd-d6990ca1a776  DEMO_API_KEY     approval   ada@example.com  host/example-host-laptop:1989345:35362384  ada@example.com  2026-10-10T15:56:07Z
+cc63d479-ddae-4052-b93b-b4b5df37adf0  DEMO_READ_TOKEN  automatic  -                host/example-host-devbox:1989344:35362384  ada@example.com  2026-10-10T15:56:06Z
+$ agent-secrets grant revoke f26b6b78-2819-4b1d-abbd-d6990ca1a776
+revoked f26b6b78-2819-4b1d-abbd-d6990ca1a776
+```
+
+`GRANTED` is `automatic` or `approval`, and `APPROVER` is `-` for an automatic grant. `--json`
+prints the broker's answer, the same body the **Live grants** page reads.
+
 ## Revoke a grant from its session
 
 A session can end any of its own grants, by the grant id `agent-secrets self` lists. A session
@@ -59,11 +85,14 @@ lease_expires_at: 2026-10-03T03:36:40Z
 
 ## End every session's access to a secret
 
-Retag the secret in Secrets Manager so its sessions no longer get it automatically: set its `tier`
-to `human`, so every request for it needs a person's approval, or give it another `owner`, so the
-sessions that had it are no longer the owner's own. Deleting the secret, or moving it out of
-`BROKER_SECRETS_PREFIX`, ends access altogether. Once the broker rereads the namespace, at most five
-minutes later, it refuses each read of a grant given automatically under the old tags with
+Retag the secret so its sessions no longer get it automatically: set its `tier` to `human`
+(`agent-secrets secret retag NAME --tier human`), so every request for it needs a person's
+approval, or give it another `owner`, so the sessions that had it are no longer the owner's own.
+Deleting the secret (`agent-secrets secret delete NAME`), or moving it out of
+`BROKER_SECRETS_PREFIX`, ends access altogether
+([manage a secret](/legion/broker/guides/manage-a-secret/)). Once the broker rereads the secret, at
+once after a write through `agent-secrets secret` and within about ten minutes after one made any
+other way, it refuses each read of a grant given automatically under the old tags with
 `GRANT_NOT_LIVE`, and the session's next request for the secret waits for a person's approval. The
 change applies to every session that got the secret automatically, where revoking a grant of your
 own session in Dispatch withholds it from that session alone.
@@ -97,23 +126,23 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
   on its next run, within `BROKER_SWEEP_SECONDS`, and logs
   `broker sweeper: ended an enrollment whose lease lapsed`. The
   [configuration reference](/legion/broker/reference/config/) gives both settings' defaults.
-- **Its machine login is revoked.** The person who approved the machine login that enrolled it
-  revokes that login, which ends every session it enrolled
-  ([end a machine's login](#end-a-machines-login)).
+- **Its machine login is revoked.** Whoever may revoke the machine login that enrolled it — the
+  person who approved a person's machine login, or anyone signed in for a service's — revokes that
+  login, which ends every session it enrolled ([end a machine's login](#end-a-machines-login)).
 
 ## End a machine's login
 
 A machine login lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval, but its sessions
 outlive it: a session renews its lease with its own key, never with the machine's credential, so a
 box keeps working after the machine's credential expires, and so does a host session while the
-helper that renews it runs. The person who approved the login can end it, and every session it
-enrolled, at any time: for a machine that is lost, compromised or no longer used, or a Legion
-daemon whose pods must lose their secrets now. Dispatch's machine-login page
-(`/credentials/machine`) lists **Your machine logins**: every machine logged in as you, and every
-service whose login you approved, such as the Legion daemon's, shown as `legion-daemon on <host>`,
-each with when its login was issued and when it expires. A login that has expired stays listed,
-marked `expired, sessions still running`, while a session it enrolled still runs, so revoking every
-row a machine has ends every session it started, those of its earlier logins included. Click
+helper that renews it runs. A login can be ended, with every session it enrolled, at any time: for
+a machine that is lost, compromised or no longer used, or a Legion daemon whose pods must lose
+their secrets now. Dispatch's machine-login page (`/credentials/machine`) lists **Machine logins**:
+every machine logged in as you, and every service's login, such as the Legion daemon's, shown as
+`legion-daemon on <host>` whoever approved it, each with who approved it, when its login was issued
+and when it expires. A login that has expired stays listed, marked `expired, sessions still
+running`, while a session it enrolled still runs, so revoking every row a machine has ends every
+session it started, those of its earlier logins included. Click
 **Revoke** on its row and confirm. The broker then, at once:
 
 - refuses the login's credential, so it enrolls no more sessions; and
@@ -121,29 +150,60 @@ row a machine has ends every session it started, those of its earlier logins inc
   daemon's login) as [ending a session](#end-a-session) does: each one's grants are revoked and its
   pending requests cancelled, and its next call is refused `PROOF_INVALID`.
 
-Only the person who approved the login may revoke it; the broker refuses anyone else
-`NOT_APPROVER`. A revoked login stays revoked: the machine runs `agent-secrets launcher login`
-again, or the Legion daemon starts a new login, and that person approves the new code.
+Only the person who approved a person's machine login may revoke it; the broker refuses anyone else
+`NOT_APPROVER`. Anyone signed in may revoke a service's login. A revoked login stays revoked: the
+machine runs `agent-secrets machine login` again and its person approves the new code, or the
+Legion daemon starts a new login and anyone signed in approves its code.
+
+From your own shell on a logged-in machine, `agent-secrets machine list` lists your own machines'
+logins, row for row as the machine-login page lists them, and `agent-secrets machine revoke` ends
+one, under that machine's login. A service's login is not listed there, and `machine revoke` of
+one is refused `NOT_FOUND` as for an id it does not know. Revoking the machine's own login (its id
+is the one `machine revoke` warns about) ends that machine's access too: its next command is
+refused `LAUNCHER_INVALID` until it logs in again.
+
+```console
+$ agent-secrets machine list
+CREDENTIAL_ID                         HOST                 APPROVED_BY      ISSUED                EXPIRES               STATE
+d4187389-953c-4156-90c1-1dd937e9bf0b  example-host-devbox  ada@example.com  2026-10-10T14:56:01Z  2026-10-17T14:56:01Z  ok
+a2df6d16-adc1-434e-b479-496defb3a5c8  example-host-laptop  ada@example.com  2026-10-10T14:55:53Z  2026-10-17T14:55:53Z  ok
+$ agent-secrets machine revoke 8f4c8ae4-b73e-4a60-a591-725667480f1a
+agent-secrets machine revoke: no such machine login (NOT_FOUND)
+$ agent-secrets machine revoke a2df6d16-adc1-434e-b479-496defb3a5c8
+revoked a2df6d16-adc1-434e-b479-496defb3a5c8
+```
+
+The machine-login page lists that service's login, the Legion daemon's, beside them, and revokes
+it:
 
 ```console
 $ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL/v1/launcher-credentials?approver=ada@example.com"
-{"credentials":[{"credential_id":"5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34","host":"example-host-devbox","service":null,"issued_at":"2026-10-03T09:12:40.512Z","expires_at":"2026-10-10T09:12:40.508Z","expired":false},{"credential_id":"0b6c1d55-3e7a-4f02-8c19-6a4e2d7b9f10","host":"example-host-cluster","service":"legion-daemon","issued_at":"2026-10-02T17:40:03.101Z","expires_at":"2026-10-09T17:40:03.097Z","expired":false},{"credential_id":"9a4e1c27-5b3d-4f8a-a6e0-2d7c1b9f4e83","host":"example-host-devbox","service":null,"issued_at":"2026-09-26T09:10:12.044Z","expires_at":"2026-10-03T09:10:12.040Z","expired":true}]}
-$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34/revoke-by-approver"
+{"credentials":[{"credential_id":"d4187389-953c-4156-90c1-1dd937e9bf0b","host":"example-host-devbox","service":null,"approved_by":"ada@example.com","issued_at":"2026-10-10T14:56:01.121955Z","expires_at":"2026-10-17T14:56:01.122701Z","expired":false},{"credential_id":"8f4c8ae4-b73e-4a60-a591-725667480f1a","host":"example-host-cluster","service":"legion-daemon","approved_by":"bob@example.com","issued_at":"2026-10-10T14:55:59.906427Z","expires_at":"2026-10-17T14:55:59.9071Z","expired":false}]}
+$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/8f4c8ae4-b73e-4a60-a591-725667480f1a/revoke-by-approver"
 {"state":"revoked"}
 ```
 
 (Those are the calls Dispatch's server makes, as above.)
 
+`STATE` is `expired` for a login past its expiry whose sessions still run. `--json` prints the
+broker's answer, the machine-login page's rows for your own machines. On the machine whose login was
+revoked, every machine and grant command is refused from then on:
+
+```console
+$ agent-secrets machine list
+agent-secrets machine list: the launcher credential is not valid (LAUNCHER_INVALID); this machine's login is expired or revoked (run: agent-secrets machine login)
+```
+
 Nothing tells the machine's helper; it finds out the next time it calls the broker. A session's
 renewal, within a third of `BROKER_LEASE_SECONDS`, is refused; revoking that session's enrollment is
 refused too, and the helper drops the credential and logs at ERROR `the broker refused the launcher
 credential (…); cleared: no session can enroll until a human approves a new machine login`. From
-then `agent-secrets launcher login-status` exits 1:
+then `agent-secrets machine login-status` exits 1:
 
 ```console
-$ agent-secrets launcher login-status
+$ agent-secrets machine login-status
 expired
-agent-secrets launcher login-status: the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login
+agent-secrets machine login-status: the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets machine login
 ```
 
 A helper with no session running finds out when it next enrolls one. The Legion daemon finds out

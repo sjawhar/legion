@@ -50,6 +50,11 @@ judgment across many files). Do not name any other agent.
 | 3. Framework docs | `read` the library's documentation URL | [library] [topic] |
 | 4. External practices | `web_search`, then `read` the primary source | Current best practices for [topic] |
 
+Before relying on a step 1 hit, also search for `supersedes: docs/solutions/<its-path>` and
+`Extends docs/solutions/<its-path>` naming it: a newer file may extend or supersede what you
+found, and Legion runs no pass that reconciles these links, so following them is the only way to
+know the hit is still current.
+
 ## Output
 
 **Found:** Answer with source (file:line or URL)

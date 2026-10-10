@@ -107,7 +107,7 @@ collect_transcripts() {
 }
 
 cleanup() {
-  local status=$? p
+  local status=$? p audit_failed=
   set +e
   # Teardown is best effort, and errexit off does not turn the ERR trap off: a command that fails
   # here is a warning about the teardown, never a check's FAIL line, and the run's exit status is
@@ -116,7 +116,7 @@ cleanup() {
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
   if [ -z "${ok:-}" ] && [ -z "$audited" ] && [ -n "$prod_baseline" ]; then
     printf 'production audit after failure:\n' >&2
-    production_audit >&2
+    production_audit >&2 || audit_failed=1
   fi
   stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
@@ -139,6 +139,15 @@ cleanup() {
   # (129, 130, 143, as trapped below) stopped the run and gets none.
   [ -n "${ok:-}" ] || [[ $status =~ ^(129|130|143)$ ]] ||
     bash "$root/scripts/e2e/lib/model-gateway-unserved.sh" --notes "$evidence/model-gateway" "$check_started" "$check" >&2 || true
+  # smoke-main-clean begins only once every checkpoint before it has passed, and it touches nothing
+  # but the smoke repository and its main's lock: its failure is the fixture's teardown, not the
+  # workflow under test, and the run's last line says so. Not when a production guard tripped during
+  # it, though: a pane endpoint violation (which aborts its wait) or an audit above that found rig
+  # writes or could not tell, which at this checkpoint is the run's first. Then the ordinary failure
+  # stands. The status stays the failure's either way, since the checkpoints after it never ran.
+  [ -n "${ok:-}" ] || [ "$check" != smoke-main-clean ] || [ -n "$audit_failed" ] ||
+    [ -s "$evidence/pane-endpoint-violation.txt" ] || [[ $status =~ ^(129|130|143)$ ]] ||
+    printf 'stage 3 e2e: FAIL (fixture teardown, check smoke-main-clean): every checkpoint before it passed, the workflow under test through its human merge and sign-off included; only the cleanup of %s main failed, and the checkpoints after it did not run\n' "$repo" >&2
   return 0
 }
 trap cleanup EXIT
@@ -640,7 +649,7 @@ docker ps >/dev/null
 # Docker assigns the containers' host ports when it binds them, so neither can lose a race.
 docker run -d --name "$pg_container" --mount type=tmpfs,destination=/var/lib/postgresql/data \
   -e POSTGRES_USER=legion -e POSTGRES_PASSWORD="$(cat "$work/postgres-password")" -e POSTGRES_DB=dispatch \
-  -p "127.0.0.1::5432" postgres:16 >/dev/null
+  -p "127.0.0.1::5432" pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
 port_pg=$(docker port "$pg_container" 5432/tcp | sed -n '1s/.*://p')
 [ -n "$port_pg" ] || fail "docker assigned Postgres no host port"
 until_true 60 "Postgres to accept TCP connections" docker exec "$pg_container" pg_isready -h 127.0.0.1 -p 5432 -U legion -d dispatch
@@ -662,7 +671,8 @@ SMOKE_REPO="$repo" SMOKE_RIG_NATS="nats://127.0.0.1:$port_nats" \
     bun run "$root/scripts/e2e/lib/envoy-bridge.ts"
 until_true 90 "the GitHub ingress bridge to report ready" grep -q 'BRIDGE READY' "$evidence/logs/bridge.log"
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
+envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
 pin=$(<"$root/.omp-pin")
 mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
@@ -679,7 +689,7 @@ instruction precisely, use the Go-daemon Legion tools and handoffs, and do not c
 the issue's smoke branch.
 EOF
 start_daemon
-note "project $project, profile $profile, plugin $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
+note "project $project, profile $profile, plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest"), NATS/Dispatch/daemon ports $port_nats/$port_dispatch/$port_daemon"
 pane_watcher &
 watcher_pid=$!
 production_baseline
@@ -725,7 +735,7 @@ primary_issue() {
   pass
 
   begin primary-planner-handoff
-  send_agent "$root_issue" planner "Stage 3 proof planning operation: write the required .legion/plan.json handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
+  send_agent "$root_issue" planner "Stage 3 proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
   wait_for_phase "$root_issue" implementing
   assert_handoff_committer "$root_issue" planner planning 0
   wait_for_worker "$root_issue" implementer
@@ -886,7 +896,7 @@ primary_issue() {
   # no background child before release_smoke_main, or it inherits the descriptor and holds the smoke
   # main past this run's window.
   hold_smoke_main
-  gh -R "$repo" pr merge "$pr_number" --squash --delete-branch
+  merge_when_clean "$repo" "$pr_number" --squash --delete-branch
   wait_for_phase "$root_issue" production_check 300
   # The resumed implementer's task names production_check, and it may record the check before the
   # proof's instruction reaches it; its completion is observed, not its instruction.

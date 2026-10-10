@@ -16,10 +16,10 @@ import (
 )
 
 // uv puts a package into a .venv from its cache, and with the two on one filesystem it hardlinks
-// them unless told to copy. The worker container keeps uv's cache on the tree volume beside every
-// workspace of the tree (TestUvKeepsItsPythonsAndCacheOnTheTreeVolume), so a hardlinked install
-// would hand one agent's in-place edit inside its .venv to the cache and to every other .venv of the
-// tree that installed the package: the shared-inode failure TestBunCacheHomeIsMountedFromNoVolume
+// them unless told to copy. The worker container keeps uv's cache on the issue's volume beside every
+// workspace on it (TestUvKeepsItsPythonsAndCacheOnTheIssueVolume), so a hardlinked install
+// would hand one agent's in-place edit inside its .venv to the cache and to every other .venv on
+// the volume that installed the package: the shared-inode failure TestBunCacheHomeIsMountedFromNoVolume
 // keeps bun's cache from. Installed with the worker container's UV_LINK_MODE by the uv the image
 // ships, no file of the .venv is an inode the cache holds. The same install with
 // UV_LINK_MODE=hardlink shares them, so the check sees the failure it guards.
@@ -29,7 +29,7 @@ func TestUvCacheSharesNoInodeWithAVenv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	linkMode := envOf(containerNamed(t, podOf(t, r, workerSpec(t), false), mainContainer))["UV_LINK_MODE"]
+	linkMode := envOf(workerOf(t, r, workerSpec(t)))["UV_LINK_MODE"]
 	wheel := writeWheel(t)
 	if shared := uvSharedInodes(t, uv, wheel, linkMode); len(shared) != 0 {
 		t.Errorf("installed with the worker container's UV_LINK_MODE %q, these .venv files are inodes the cache holds: %v", linkMode, shared)

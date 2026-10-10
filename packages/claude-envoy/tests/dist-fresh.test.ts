@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test"
-import { cp, mkdtemp, readdir, readFile, rm } from "node:fs/promises"
+import { cp, mkdtemp, readdir, readFile, rm, stat } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { isAbsolute, join, resolve } from "node:path"
 import ts from "typescript"
-import { BUNDLE_ENTRYPOINTS, buildBundles } from "../scripts/build"
+import { assertPinnedBun, BUNDLE_ENTRYPOINTS, buildBundles } from "../scripts/build"
 
 const packageRoot = resolve(import.meta.dir, "..")
 const distDirectory = join(packageRoot, "dist")
@@ -193,6 +193,35 @@ test("the committed bundles contain only runtime builtin module specifiers", asy
   }
 })
 
+// Claude Code puts the plugin's bin/ on the Bash tool's PATH, and its plugin cache holds the git
+// tree with no node_modules, so bin/dispatch has to run the committed bundle as it stands.
+test("bin/dispatch is executable and runs the committed dist/dispatch.js without node_modules", async () => {
+  expect(BUNDLE_ENTRYPOINTS).toHaveProperty("dispatch", "../envoy-client/bin/dispatch.ts")
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-bin-"))
+  try {
+    await cp(join(packageRoot, "bin"), join(scratch, "bin"), { recursive: true })
+    await cp(distDirectory, join(scratch, "dist"), { recursive: true })
+    const shim = join(scratch, "bin", "dispatch")
+    expect((await stat(join(packageRoot, "bin", "dispatch"))).mode & 0o111).toBe(0o111)
+    const run = Bun.spawn([shim, "--help"], {
+      cwd: scratch,
+      env: { PATH: process.env["PATH"] ?? "", HOME: scratch },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+    const [exitCode, stdout, stderr] = await Promise.all([
+      run.exited,
+      new Response(run.stdout).text(),
+      new Response(run.stderr).text(),
+    ])
+
+    expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: "" })
+    expect(stdout).toStartWith("Usage: dispatch ")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 /** Where two bundles part ways, with 80 characters of each side around it. */
 function describeMismatch(file: string, fresh: Buffer, current: Buffer): string {
   const shorter = Math.min(fresh.length, current.length)
@@ -223,3 +252,19 @@ test("rebuilding reproduces the committed bundle byte for byte", async () => {
     await rm(scratch, { recursive: true, force: true })
   }
 }, 30_000)
+
+// `bun run build`/`bun run check-dist` spawn a new "bun" to run scripts/build.ts, and that spawn
+// resolves "bun" from PATH rather than reusing whichever binary the caller invoked `bun run` with
+// (LEGION-568): a devbox whose default Bun (a version manager's active version) differs from the
+// pin would otherwise silently bundle with it instead, and the bundler's output depends on the
+// exact Bun build. buildBundles refuses before it ever calls Bun.build(); these check the pure
+// comparison a real mismatch would hit, without needing a second real Bun installed to prove it.
+test("buildBundles refuses a Bun other than .bun-version pins", () => {
+  expect(() => assertPinnedBun("1.4.2", "1.3.14")).toThrow(
+    /refusing to build under Bun 1\.4\.2.*\.bun-version pins 1\.3\.14/s,
+  )
+})
+
+test("a Bun matching .bun-version proceeds", () => {
+  expect(() => assertPinnedBun("1.3.14", "1.3.14")).not.toThrow()
+})

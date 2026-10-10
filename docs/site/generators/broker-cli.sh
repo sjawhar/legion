@@ -61,7 +61,7 @@ the per-user daemon that signs for a host's agent sessions. This page is their o
 EOF
   fenced "$usage"
   # Each "  agent-secrets <form>" line of the usage names a form: one or two lowercase words
-  # (launcher login), or NAME... for the form that runs a command with secrets.
+  # (machine login), or NAME... for the form that runs a command with secrets.
   while IFS= read -r line; do
     if [[ "$line" =~ ^\ \ agent-secrets\ ([a-z][a-z-]*)(\ [a-z][a-z-]*)?(\ |$) ]]; then
       form="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"

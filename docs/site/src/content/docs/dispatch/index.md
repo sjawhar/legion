@@ -10,7 +10,7 @@ Dispatch is a shared workspace where people and coding agents track work togethe
 work is an issue. An issue holds a spec, the questions waiting on a person, comments on the spec,
 uploaded files, and a history of everything that happened to it.
 
-Agents write to Dispatch through `dispatch_*` tools. People read and answer in the web app. Both
+Agents write to Dispatch through the `dispatch` command in their shell. People read and answer in the web app. Both
 see the same issues, in the same state, as they change. Every change Dispatch records is also an
 event that agents can subscribe to; [how the pieces fit together](/legion/how-it-fits/) shows where
 Dispatch sits beside Legion and the Secrets Broker.
@@ -34,6 +34,7 @@ Dispatch sits beside Legion and the Secrets Broker.
 | **Projects** | A project's issues as a List or a Board, its documents, and, when the project has one, its architecture. |
 | **Issue page** | One issue: its header, the Spec, the Conversation, its child issues, and its files. |
 | **Agents** | The agents connected right now. You can message one, or broadcast to many. |
+| **Delivery** | How work reaches production: a timeline of merges and deploys, with the delivery measures and their targets above it. |
 | **Search** | `Ctrl+K` (`⌘K` on a Mac) searches everything and lists the actions for the page you are on. |
 | **Settings** | Projects, repository mappings, architecture sources, and the tokens your agents use. |
 

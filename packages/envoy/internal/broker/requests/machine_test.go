@@ -6,16 +6,20 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
@@ -29,15 +33,18 @@ const (
 	fixtureOperator = "sami@example.com"
 	// otherPerson owns ALICE_KEY.
 	otherPerson = "alice@example.com"
-	// fixtureService is the one registered service, which owns SERVICE_KEY.
-	fixtureService = "legion"
+	// fixtureService is the one registered service, which owns SERVICE_KEY, and fixtureSubject the
+	// service account its pods run as.
+	fixtureService = "example-service"
+	fixtureSubject = "system:serviceaccount:example:example-sa"
 )
 
 // fixtureSecrets are the fixture's namespace secrets: DEEL_API_KEY, the operator's and human-tier,
 // needs the operator's approval whoever asks; ALICE_KEY, another person's agent-tier secret, needs
 // alice's approval for the operator's session; AUTO_TOKEN, the operator's agent-tier secret, is
 // automatic for the operator's session; SHARED_KEY, shared and human-tier, needs anyone's approval;
-// SERVICE_KEY, the registered service's, is denied to every session, since none is the service.
+// SERVICE_KEY, the registered service's, goes at once to the pods its launcher enrolled running as
+// fixtureSubject (newServiceEnrollment) and is denied to every other session.
 func fixtureSecrets() []secrets.LocalSecret {
 	return []secrets.LocalSecret{
 		policytest.Secret("DEEL_API_KEY", fixtureOperator, policy.TierHuman, "deel-v1"),
@@ -80,10 +87,26 @@ func replayer(st *store.Store) func(context.Context, string, time.Time) (bool, e
 // newEnrollment inserts a live enrollment directly, rather than through enroll.Service.Create:
 // that service still writes the enrollments.approver_kind/approver_issue columns migration 0005
 // already dropped (Task 7's own fix, tracked in this task's report, not this file's job), so it
-// cannot be used to build fixtures on this schema yet. Returns the enrollment id and the
-// requester's own signing key, whose RFC 7638 thumbprint the row carries (and Create checks a
-// request object's iss against).
+// cannot be used to build fixtures on this schema yet. Its launcher credential is a person's
+// (operator) or no one's, and names no service. Returns the enrollment id and the requester's own
+// signing key, whose RFC 7638 thumbprint the row carries (and Create checks a request object's iss
+// against).
 func newEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, operator, subject *string) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	return insertEnrollment(t, st, kind, runtimeID, operator, nil, subject)
+}
+
+// newServiceEnrollment is newEnrollment for a pod a service's launcher enrolled, running as the
+// service account subject: its launcher credential names service and no operator, the shape the
+// Legion daemon's machine login mints.
+func newServiceEnrollment(t *testing.T, st *store.Store, service, subject, runtimeID string) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	return insertEnrollment(t, st, "pod", runtimeID, nil, &service, &subject)
+}
+
+// insertEnrollment inserts a launcher credential naming operator and service, and a live
+// enrollment under it.
+func insertEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, operator, service, subject *string) (string, *ecdsa.PrivateKey) {
 	t.Helper()
 	ctx := context.Background()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -95,8 +118,8 @@ func newEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, operat
 		t.Fatalf("thumbprint: %v", err)
 	}
 	credentialID := uuid.New()
-	if _, err := st.Pool.Exec(ctx, `insert into launcher_credentials (id, operator, host, key_thumbprint, public_jwk, expires_at)
-		values ($1,$2,'devbox-test',$3,'{}'::jsonb, now() + interval '30 days')`, credentialID, operator, uuid.NewString()); err != nil {
+	if _, err := st.Pool.Exec(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, expires_at)
+		values ($1,$2,$3,'devbox-test',$4,'{}'::jsonb, now() + interval '30 days')`, credentialID, operator, service, uuid.NewString()); err != nil {
 		t.Fatalf("insert launcher_credentials: %v", err)
 	}
 	id := uuid.NewString()
@@ -108,9 +131,9 @@ func newEnrollment(t *testing.T, st *store.Store, kind, runtimeID string, operat
 }
 
 // newFixture opens a store on a fresh schema, loads the policy of fixtureSecrets with
-// fixtureService registered, and enrolls one live box session the operator runs. Returns the
-// Machine, that enrollment's id, its own signing key (for record.Sign), and the login
-// DEEL_API_KEY's records name as approver (its owner, the operator).
+// fixtureService registered, its pods running as fixtureSubject, and enrolls one live box session
+// the operator runs. Returns the Machine, that enrollment's id, its own signing key (for
+// record.Sign), and the login DEEL_API_KEY's records name as approver (its owner, the operator).
 func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ecdsa.PrivateKey, approver string) {
 	t.Helper()
 	st := storetest.Open(t)
@@ -118,14 +141,15 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 	enrollmentID, requesterKey = newEnrollment(t, st, "box", "box-a-"+t.Name(), new(fixtureOperator), nil)
 
 	m = &Machine{
-		Store:      st,
-		Policy:     policytest.Current(t, local, fixtureService),
-		Secrets:    secrets.AWS{Client: local},
-		MaxGrant:   time.Hour,
-		PendingTTL: 12 * time.Hour,
-		Audience:   testAudience,
-		Skew:       time.Minute,
-		Replay:     replayer(st),
+		Store:           st,
+		Policy:          policytest.Current(t, local, fixtureService),
+		Secrets:         secrets.AWS{Client: local},
+		MaxGrant:        time.Hour,
+		PendingTTL:      12 * time.Hour,
+		Audience:        testAudience,
+		Skew:            time.Minute,
+		Replay:          replayer(st),
+		ServiceAccounts: map[string]string{fixtureService: fixtureSubject},
 	}
 	m.Chain = NewChainVerifier(st, testAudience, time.Minute)
 	return m, enrollmentID, requesterKey, fixtureOperator
@@ -317,6 +341,28 @@ func TestCreateRefusesLoginHintAndForeignThumbprint(t *testing.T) {
 	}
 }
 
+// TestCreateRefusesAnInvalidSessionID pins the bound on the request's own session_id override
+// (LEGION-587's hardening): an unsigned claim any enrolled process may send, capped and
+// shape-checked before it is ever stored.
+func TestCreateRefusesAnInvalidSessionID(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+	for name, sessionID := range map[string]string{
+		"too long":          strings.Repeat("a", maxSessionIDLength+1),
+		"whitespace":        "sess with space",
+		"control character": "sess\twith\ttab",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY"), sessionID); !errors.Is(err, ErrSessionIDInvalid) {
+				t.Fatalf("Create(session_id=%q) = %v, want ErrSessionIDInvalid", sessionID, err)
+			}
+		})
+	}
+	if _, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "DEEL_API_KEY"), strings.Repeat("a", maxSessionIDLength)); err != nil {
+		t.Fatalf("Create(session_id at the exact limit) = %v, want no error", err)
+	}
+}
+
 func TestAutomaticAndDeniedEvaluationsWriteNoRecordRow(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
@@ -344,6 +390,67 @@ func TestDenyOpensNoRecord(t *testing.T) {
 	}
 }
 
+// TestAServicesSecretGoesToItsOwnPodsAlone pins who a registered service's secret reaches: a pod
+// enrolled under the service's launcher credential and running as the service account the service
+// is registered with gets SERVICE_KEY at once, with a grant and no record, and its value is
+// released; once another secret's tags move the policy, the grant still releases it and the same
+// request reuses it, since the session is still the service's. A machine login's service name is
+// the machine's own claim, which anyone signed in to Dispatch may approve, so the service account is what
+// proves the service: a pod under the service's login running as another account, a pod running
+// as the service's account under a login for a service the broker does not register, the
+// operator's own host session, and a pod no service's launcher enrolled are each denied it with no
+// record. Nobody approved the service pod's grant and it runs on no one's machine, so no person's
+// grant list holds it.
+func TestAServicesSecretGoesToItsOwnPodsAlone(t *testing.T) {
+	m, _, _, operator := newFixture(t)
+	ctx := context.Background()
+	pod, podKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "pod-"+t.Name())
+
+	granted, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it", "SERVICE_KEY"), "")
+	if err != nil || granted.State != "granted" || granted.GrantID == nil || granted.RecordID != nil {
+		t.Fatalf("Create(the service's pod) = %+v, %v; want granted at once, with a grant and no record", granted, err)
+	}
+	if values, _, err := m.Values(ctx, *granted.GrantID, pod); err != nil || values["SERVICE_KEY"] != "service-v1" {
+		t.Fatalf("Values(the service's pod) = %v, %v; want SERVICE_KEY released", values, err)
+	}
+	retag(t, m, policytest.Secret("SHARED_TOKEN", policy.OwnerShared, policy.TierAgent, "shared-token-v1"))
+	if values, _, err := m.Values(ctx, *granted.GrantID, pod); err != nil || values["SERVICE_KEY"] != "service-v1" {
+		t.Fatalf("Values(the service's pod) after the policy moved = %v, %v; want SERVICE_KEY still released", values, err)
+	}
+	if again, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it again", "SERVICE_KEY"), ""); err != nil || again.ID != granted.ID {
+		t.Fatalf("Create(the service's pod) again after the policy moved = %+v, %v; want request %s reused", again, err, granted.ID)
+	}
+
+	impostor, impostorKey := newServiceEnrollment(t, m.Store, fixtureService, "system:serviceaccount:example:other-sa", "impostor-pod-"+t.Name())
+	unlisted, unlistedKey := newServiceEnrollment(t, m.Store, "unlisted-service", fixtureSubject, "unlisted-pod-"+t.Name())
+	host, hostKey := newEnrollment(t, m.Store, "host", "host-"+t.Name(), new(operator), nil)
+	plainPod, plainPodKey := newEnrollment(t, m.Store, "pod", "plain-pod-"+t.Name(), nil, new(fixtureSubject))
+	for who, r := range map[string]struct {
+		enrollment string
+		key        *ecdsa.PrivateKey
+	}{
+		"a pod under the service's login running as another account":       {impostor, impostorKey},
+		"a pod running as the service's account under an unlisted service": {unlisted, unlistedKey},
+		"the operator's host session":                                      {host, hostKey},
+		"a pod no service's launcher enrolled":                             {plainPod, plainPodKey},
+	} {
+		denied, err := m.Create(ctx, r.enrollment, signRequest(t, m, r.key, "need it", "SERVICE_KEY"), "")
+		if err != nil || denied.State != "denied" || denied.GrantID != nil || denied.RecordID != nil {
+			t.Errorf("Create(%s) = %+v, %v; want denied with no grant and no record", who, denied, err)
+		}
+	}
+
+	var records int
+	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from credential_requests`).Scan(&records); err != nil || records != 0 {
+		t.Fatalf("credential_requests rows = %d, %v; want none", records, err)
+	}
+	for _, person := range []string{operator, otherPerson, record.AnyoneApprover} {
+		if grants, err := m.GrantsForApprover(ctx, person); err != nil || len(grants) != 0 {
+			t.Errorf("GrantsForApprover(%s) = %+v, %v; want nothing", person, grants, err)
+		}
+	}
+}
+
 // TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten pins the shared broker contract's
 // "identifier must name a rule's secret (else 400 UNKNOWN_SECRET at record time)": a request
 // naming a secret no
@@ -360,6 +467,151 @@ func TestCreateRefusesAnUnknownSecretNameWithNoRecordWritten(t *testing.T) {
 	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from requests where enrollment_id=$1`, enr).Scan(&count); err != nil || count != 0 {
 		t.Fatalf("requests rows for enrollment = %d, %v, want 0 (an unknown secret name aborts the whole Create call)", count, err)
 	}
+}
+
+// TestCreateServesASecretCreatedAfterTheLastReload pins the miss path: a request naming a secret
+// the policy's listing has not seen yet is served on its first request, not refused until the
+// five-minute reload.
+func TestCreateServesASecretCreatedAfterTheLastReload(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	// No Policy.Refresh: the cached Set predates the Put, as production's does for up to 5 minutes.
+	req, err := m.Create(context.Background(), enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), "")
+	if err != nil || req.State != "granted" || req.GrantID == nil {
+		t.Fatalf("Create(BRAND_NEW_KEY) = %+v, %v; want an automatic grant via the miss-path reread", req, err)
+	}
+}
+
+// TestMissRereadsAreBoundedPerEnrollment pins the miss path's bound: a session inventing names
+// costs at most its enrollment's burst of DescribeSecret calls, and a miss past it is refused
+// without one.
+func TestMissRereadsAreBoundedPerEnrollment(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	m.MissRereads = &ratelimit.Limit{Every: time.Hour, Burst: 2}
+	count := &countingDescriber{DescribeSecretAPIClient: fixtureStore(m)}
+	loader := policytest.Loader(fixtureStore(m), fixtureService) // the fixture's services, as newFixture registers them
+	loader.Describer = count
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Policy = cur
+	for i := range 3 {
+		if _, err := m.Create(context.Background(), enr, signRequest(t, m, key, "miss", fmt.Sprintf("NO_SUCH_KEY_%d", i)), ""); !errors.Is(err, policy.ErrUnknownSecret) {
+			t.Fatalf("miss %d: %v", i, err)
+		}
+	}
+	if got := count.calls.Load(); got != 2 {
+		t.Fatalf("DescribeSecret calls = %d, want 2 (the burst); the third miss must skip the reread", got)
+	}
+}
+
+// TestANameNoSecretCanCarrySpendsNoMissReread pins that a requested name no secret can carry -
+// free text, or one past Secrets Manager's name limit - is refused before it costs the
+// enrollment a miss-path token: after a request naming only such names, a secret created since
+// the last reload is still served by the enrollment's one reread.
+func TestANameNoSecretCanCarrySpendsNoMissReread(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	m.MissRereads = &ratelimit.Limit{Every: time.Hour, Burst: 1}
+	ctx := context.Background()
+	tooLong := "A" + strings.Repeat("B", 512-len(policytest.Prefix))
+	if _, err := m.Create(ctx, enr, signRequest(t, m, key, "free text", "not a secret name", tooLong), ""); !errors.Is(err, policy.ErrUnknownSecret) {
+		t.Fatalf("Create(names no secret can carry) = %v, want policy.ErrUnknownSecret", err)
+	}
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), "")
+	if err != nil || req.State != "granted" {
+		t.Fatalf("Create(BRAND_NEW_KEY) after the invalid names = %+v, %v; want granted through the reread they must not have spent", req, err)
+	}
+}
+
+// countingDescriber counts the DescribeSecret calls a policy reread makes.
+type countingDescriber struct {
+	policy.DescribeSecretAPIClient
+	calls atomic.Int64
+}
+
+func (c *countingDescriber) DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, opts ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	c.calls.Add(1)
+	return c.DescribeSecretAPIClient.DescribeSecret(ctx, in, opts...)
+}
+
+// TestARereadItsCallerAbandonedRaisesNoAlarm pins that a miss-path reread cut short by its own
+// request's end is that request's failure, not Secrets Manager's: the broker logs no
+// LoadFailedMessage, the line the policy alarm filters on, and answers the request with its
+// context's error, writing no request and so no grant.
+func TestARereadItsCallerAbandonedRaisesNoAlarm(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	loader := policytest.Loader(fixtureStore(m), fixtureService)
+	loader.Describer = abandoningDescriber{cancel: cancel}
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Policy = cur
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	logged := policytest.CaptureLog(t)
+	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), "")
+	if !errors.Is(err, context.Canceled) || req.GrantID != nil {
+		t.Fatalf("Create whose request ended during the reread = %+v, %v; want context.Canceled and no grant", req, err)
+	}
+	if strings.Contains(logged.String(), policy.LoadFailedMessage) {
+		t.Fatalf("an abandoned reread logged the alarm's line:\n%s", logged.String())
+	}
+	var written int
+	if err := m.Store.Pool.QueryRow(context.Background(), `select count(*) from requests where enrollment_id=$1`, enr).Scan(&written); err != nil || written != 0 {
+		t.Fatalf("requests rows for the enrollment = %d, %v; want 0", written, err)
+	}
+}
+
+// abandoningDescriber is a client that goes away while the reread's DescribeSecret is in flight:
+// it ends the request's context and fails as the AWS SDK does once its context has ended.
+type abandoningDescriber struct{ cancel context.CancelFunc }
+
+func (d abandoningDescriber) DescribeSecret(ctx context.Context, _ *secretsmanager.DescribeSecretInput, _ ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	d.cancel()
+	return nil, fmt.Errorf("operation error Secrets Manager: DescribeSecret, %w", ctx.Err())
+}
+
+// TestAnOrdinaryRereadFailureRaisesThePolicyAlarm pins the other half of that rule: a reread
+// Secrets Manager itself fails, while the request is still live, logs LoadFailedMessage once,
+// naming the requested secret, and the name stays unknown with no request written.
+func TestAnOrdinaryRereadFailureRaisesThePolicyAlarm(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	loader := policytest.Loader(fixtureStore(m), fixtureService)
+	loader.Describer = failingDescriber{err: errors.New("throttled")}
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.Policy = cur
+	fixtureStore(m).Put(policytest.Secret("BRAND_NEW_KEY", fixtureOperator, policy.TierAgent, "v1"))
+	logged := policytest.CaptureLog(t)
+	if _, err := m.Create(context.Background(), enr, signRequest(t, m, key, "need it", "BRAND_NEW_KEY"), ""); !errors.Is(err, policy.ErrUnknownSecret) {
+		t.Fatalf("Create whose reread Secrets Manager failed = %v; want policy.ErrUnknownSecret", err)
+	}
+	var alarms []string
+	for _, line := range strings.Split(logged.String(), "\n") {
+		if strings.Contains(line, policy.LoadFailedMessage) {
+			alarms = append(alarms, line)
+		}
+	}
+	if len(alarms) != 1 || !strings.Contains(alarms[0], "name=BRAND_NEW_KEY") {
+		t.Fatalf("alarm lines = %q; want exactly one naming BRAND_NEW_KEY\n%s", alarms, logged.String())
+	}
+	var written int
+	if err := m.Store.Pool.QueryRow(context.Background(), `select count(*) from requests where enrollment_id=$1`, enr).Scan(&written); err != nil || written != 0 {
+		t.Fatalf("requests rows for the enrollment = %d, %v; want 0", written, err)
+	}
+}
+
+// failingDescriber is a Secrets Manager that answers every DescribeSecret with err.
+type failingDescriber struct{ err error }
+
+func (d failingDescriber) DescribeSecret(context.Context, *secretsmanager.DescribeSecretInput, ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error) {
+	return nil, d.err
 }
 
 func TestCoalescesIdenticalPendingAndReturnsTheFirstRecordID(t *testing.T) {
@@ -691,13 +943,13 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 	if err != nil || automatic.GrantID == nil {
 		t.Fatalf("Create(automatic) = %+v, %v", automatic, err)
 	}
-	if err := m.RevokeByApprover(ctx, *automatic.GrantID, "mallory"); !errors.Is(err, ErrNotApprover) {
+	if err := m.RevokeByApprover(ctx, *automatic.GrantID, "mallory", "human:mallory"); !errors.Is(err, ErrNotApprover) {
 		t.Fatalf("RevokeByApprover(mallory, not the operator) = %v, want ErrNotApprover", err)
 	}
 	if _, _, err := m.Values(ctx, *automatic.GrantID, enr); err != nil {
 		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
 	}
-	if err := m.RevokeByApprover(ctx, *automatic.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *automatic.GrantID, operator, record.HumanActor(operator)); err != nil {
 		t.Fatalf("RevokeByApprover(the operator) = %v", err)
 	}
 
@@ -711,17 +963,17 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(alice): %+v %v", dec, err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, "mallory"); !errors.Is(err, ErrNotApprover) {
+	if err := m.RevokeByApprover(ctx, dec.GrantID, "mallory", "human:mallory"); !errors.Is(err, ErrNotApprover) {
 		t.Fatalf("RevokeByApprover(a login that is neither approver nor operator) = %v, want ErrNotApprover", err)
 	}
 	if _, _, err := m.Values(ctx, dec.GrantID, enr); err != nil {
 		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, "Alice@Example.com"); err != nil {
+	if err := m.RevokeByApprover(ctx, dec.GrantID, "Alice@Example.com", record.HumanActor(otherPerson)); err != nil {
 		t.Fatalf("RevokeByApprover(the approver) = %v", err)
 	}
 	var actor string
-	if err := m.Store.Pool.QueryRow(ctx, `select actor from audit where kind='grant.revoked' and grant_id=$1`, dec.GrantID).Scan(&actor); err != nil || actor != "human:"+otherPerson {
+	if err := m.Store.Pool.QueryRow(ctx, `select actor from audit where kind='grant.revoked' and grant_id=$1`, dec.GrantID).Scan(&actor); err != nil || actor != record.HumanActor(otherPerson) {
 		t.Fatalf("grant.revoked actor = %q, %v, want human:%s", actor, err, otherPerson)
 	}
 }
@@ -835,17 +1087,33 @@ func TestUnchangedPermissionSurvivesAPolicyChange(t *testing.T) {
 
 // TestValuesNamesASecretDeletedBeforeTheNextRefresh pins that a granted secret deleted from Secrets
 // Manager before the policy's next refresh is refused as ErrSecretNotInStore naming the secret, not
-// an opaque failure.
+// an opaque failure: deleted at once, or scheduled for deletion with a recovery window (the
+// console's and the CLI's default), whose value Secrets Manager refuses to read as an invalid
+// request rather than a missing secret.
 func TestValuesNamesASecretDeletedBeforeTheNextRefresh(t *testing.T) {
-	m, enr, key, _ := newFixture(t)
-	ctx := context.Background()
-	granted, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "AUTO_TOKEN"), "")
-	if err != nil || granted.GrantID == nil {
-		t.Fatalf("Create = %+v, %v", granted, err)
-	}
-	fixtureStore(m).Delete(policytest.ID("AUTO_TOKEN"))
-	if _, _, err := m.Values(ctx, *granted.GrantID, enr); !errors.Is(err, ErrSecretNotInStore) || !strings.Contains(err.Error(), "AUTO_TOKEN") {
-		t.Fatalf("Values = %v, want ErrSecretNotInStore naming AUTO_TOKEN", err)
+	for shape, remove := range map[string]func(*secrets.Local){
+		"deleted at once": func(store *secrets.Local) { store.Delete(policytest.ID("AUTO_TOKEN")) },
+		"scheduled for deletion": func(store *secrets.Local) {
+			for _, s := range fixtureSecrets() {
+				if s.Name == policytest.ID("AUTO_TOKEN") {
+					s.DeletedAt = new(time.Now().Add(7 * 24 * time.Hour))
+					store.Put(s)
+				}
+			}
+		},
+	} {
+		t.Run(shape, func(t *testing.T) {
+			m, enr, key, _ := newFixture(t)
+			ctx := context.Background()
+			granted, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", "AUTO_TOKEN"), "")
+			if err != nil || granted.GrantID == nil {
+				t.Fatalf("Create = %+v, %v", granted, err)
+			}
+			remove(fixtureStore(m))
+			if _, _, err := m.Values(ctx, *granted.GrantID, enr); !errors.Is(err, ErrSecretNotInStore) || !strings.Contains(err.Error(), "AUTO_TOKEN") {
+				t.Fatalf("Values = %v, want ErrSecretNotInStore naming AUTO_TOKEN", err)
+			}
+		})
 	}
 }
 
@@ -876,11 +1144,13 @@ func TestRevokingARevokedGrantWritesNoSecondAuditRow(t *testing.T) {
 }
 
 // TestEveryRequesterIsDecidedByOwnerAndTier drives the policy's whole table through Create: the
-// owner's own session, another person's session and a pod each ask for a person's agent-tier and
-// human-tier secret, a shared agent-tier and human-tier secret, and a service's secret. A request
-// that needs approval writes a record naming the approver and reaches that approver's pending
-// list: another person's session or a pod asking for a person's agent-tier secret is an approval
-// request to its owner.
+// owner's own session, another person's session, a pod, and a pod the service's launcher enrolled
+// running as fixtureSubject each ask for a person's agent-tier and human-tier secret, a shared
+// agent-tier and human-tier secret, and a service's secret. A request that needs approval writes a
+// record naming the
+// approver and reaches that approver's pending list: another person's session or a pod asking for
+// a person's agent-tier secret is an approval request to its owner. The service's pod is a pod
+// with no operator to every secret but the service's own, which it alone gets at once.
 func TestEveryRequesterIsDecidedByOwnerAndTier(t *testing.T) {
 	const otherOperator = "bob@example.com"
 	type outcome struct{ state, approver string }
@@ -899,12 +1169,17 @@ func TestEveryRequesterIsDecidedByOwnerAndTier(t *testing.T) {
 			"AUTO_TOKEN": approval(fixtureOperator), "DEEL_API_KEY": approval(fixtureOperator),
 			"SHARED_TOKEN": granted, "SHARED_KEY": approval(record.AnyoneApprover), "SERVICE_KEY": denied,
 		},
+		"the service's pod": {
+			"AUTO_TOKEN": approval(fixtureOperator), "DEEL_API_KEY": approval(fixtureOperator),
+			"SHARED_TOKEN": granted, "SHARED_KEY": approval(record.AnyoneApprover), "SERVICE_KEY": granted,
+		},
 	}
 	m, ownerEnr, ownerKey, _ := newFixture(t)
 	retag(t, m, policytest.Secret("SHARED_TOKEN", policy.OwnerShared, policy.TierAgent, "shared-token-v1"))
 	ctx := context.Background()
 	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-other-"+t.Name(), new(otherOperator), nil)
 	podEnr, podKey := newEnrollment(t, m.Store, "pod", "pod-"+t.Name(), nil, new("system:serviceaccount:legion:worker"))
+	servicePodEnr, servicePodKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "service-pod-"+t.Name())
 	requesters := map[string]struct {
 		enrollment string
 		key        *ecdsa.PrivateKey
@@ -912,6 +1187,7 @@ func TestEveryRequesterIsDecidedByOwnerAndTier(t *testing.T) {
 		"owner's session":          {ownerEnr, ownerKey},
 		"another person's session": {otherEnr, otherKey},
 		"pod":                      {podEnr, podKey},
+		"the service's pod":        {servicePodEnr, servicePodKey},
 	}
 	for who, row := range table {
 		for name, want := range row {
@@ -982,5 +1258,27 @@ func TestAnyoneDecidesASharedHumanTierRequest(t *testing.T) {
 	}
 	if pending, err := m.PendingForApprover(ctx, "carol@example.com"); err != nil || len(pending) != 0 {
 		t.Fatalf("PendingForApprover(carol) after bob decided = %+v, %v, want nothing", pending, err)
+	}
+}
+
+// TestAServiceGrantStopsWhenItsServiceAccountChanges pins that a grant of a service's secret is
+// re-checked on every use, not only once the policy's version moves: the registered service
+// accounts are not in the version, so once BROKER_SERVICES binds the service to another account the
+// pod's grant releases nothing and its next request is denied rather than reusing the grant.
+func TestAServiceGrantStopsWhenItsServiceAccountChanges(t *testing.T) {
+	m, _, _, _ := newFixture(t)
+	ctx := context.Background()
+	pod, podKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "pod-"+t.Name())
+	granted, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it", "SERVICE_KEY"), "")
+	if err != nil || granted.State != "granted" || granted.GrantID == nil {
+		t.Fatalf("Create(the service's pod) = %+v, %v; want granted", granted, err)
+	}
+	m.ServiceAccounts = map[string]string{fixtureService: "system:serviceaccount:example:other-sa"}
+	if values, _, err := m.Values(ctx, *granted.GrantID, pod); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values after the service's account changed = %v, %v; want ErrGrantNotLive", values, err)
+	}
+	again, err := m.Create(ctx, pod, signRequest(t, m, podKey, "need it again", "SERVICE_KEY"), "")
+	if err != nil || again.ID == granted.ID || again.State != "denied" || again.GrantID != nil {
+		t.Fatalf("Create after the service's account changed = %+v, %v; want a new request, denied, not request %s reused", again, err, granted.ID)
 	}
 }

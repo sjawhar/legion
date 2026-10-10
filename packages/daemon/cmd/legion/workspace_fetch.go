@@ -16,9 +16,10 @@ import (
 const workspaceFetchUsage = "legion workspace-init fetch --repo <owner>/<repo> --feed <dir>"
 
 // workspaceFetch reads the provisioning token and clones the repository from GitHub into the
-// feed, the container's own volume, with no git configuration but its own. It reads --repo before
-// anything else, resolves git alone, and touches nothing but the feed and its own TMPDIR, where
-// the one-shot credential goes.
+// feed, the container's own volume, with no git configuration but its own. It reads --repo
+// before anything else, resolves git alone, and refuses before it ever touches the feed or its
+// own TMPDIR, where the one-shot credential goes — every check (--repo, --feed, the token, git on
+// PATH) runs first, so a refusal here leaves neither behind.
 func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) error {
 	repository, err := ghrepo.Parse("--repo", repo)
 	if err != nil {
@@ -38,6 +39,9 @@ func workspaceFetch(ctx context.Context, repo, feed string, stdout io.Writer) er
 	tools, err := provisioningTools("git")
 	if err != nil {
 		return err
+	}
+	if err := os.MkdirAll(feed, 0o700); err != nil {
+		return fmt.Errorf("create the feed directory %s: %w", feed, err)
 	}
 	fed, err := workspace.Fetch(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), workspace.FetchRequest{
 		Repo: repository, Token: token, CredentialDir: os.TempDir(), Feed: feed,

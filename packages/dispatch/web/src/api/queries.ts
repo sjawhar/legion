@@ -1,9 +1,9 @@
-import { type QueryFunctionContext, queryOptions } from "@tanstack/react-query";
+import { keepPreviousData, type QueryFunctionContext, queryOptions } from "@tanstack/react-query";
 
 import { beginInboxFetch, finishInboxFetch } from "../features/inbox/ask-thread-freshness";
 import { projectIssuesQueryKey } from "../features/project/issue-filters";
 
-import { api } from "./client";
+import { api, type DeliveryTimelineOptions } from "./client";
 import type { InboxRow } from "./types";
 
 /** The signed-in principal (`/auth/whoami`). One key shared by every surface that reads it. */
@@ -117,3 +117,40 @@ function boardMovesSettled(context: QueryFunctionContext, project: string): Prom
   signal.addEventListener("abort", abort);
   return settled.promise;
 }
+
+/** The delivery timeline's one read, keyed by every facet so a filter change refetches its own
+ *  cache entry: `GET /api/v1/delivery/timeline` applies the window, the search and every facet
+ *  server-side (LEGION-567's plan, "API"). The page keeps showing the previous answer while a new
+ *  selection's read is in flight, as a filter change in the prototype it ports never blanks it. */
+export const deliveryTimelineQuery = (filters: DeliveryTimelineOptions) =>
+  queryOptions({
+    placeholderData: keepPreviousData,
+    queryKey: ["delivery", "timeline", filters],
+    queryFn: () => api.getDeliveryTimeline(filters),
+  });
+
+/** The measures panel's read, keyed under `["delivery"]` beside the timeline so a settings save's
+ *  `invalidateQueries({ queryKey: ["delivery"] })` refreshes both, and by the same filters so the
+ *  window, the search and every facet drive the measures as they drive the timeline. */
+export const deliveryMeasuresQuery = (filters: DeliveryTimelineOptions) =>
+  queryOptions({
+    queryKey: ["delivery", "measures", filters],
+    queryFn: () => api.getDeliveryMeasures(filters),
+  });
+
+/** One deploy-repository run with every job it ran: a finished run's jobs no longer change, so
+ *  the drill-down reads it once per run. */
+export const deliveryRunQuery = (id: number) =>
+  queryOptions({
+    queryKey: ["delivery", "run", id],
+    queryFn: () => api.getDeliveryRun(id),
+  });
+
+/** The delivery timeline's configuration record, or `null` until someone sets it: the Settings
+ *  section's form reads it, while the Delivery page's setup form starts from the `null` the
+ *  timeline's `DELIVERY_NOT_CONFIGURED` already implies and reads nothing. */
+export const deliverySettingsQuery = () =>
+  queryOptions({
+    queryKey: ["delivery-settings"],
+    queryFn: () => api.getDeliverySettings(),
+  });

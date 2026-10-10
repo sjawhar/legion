@@ -1,57 +1,58 @@
-import type { ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 
+import { borderDefault } from "../../theme/classes";
+import { useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
-  isProjectRoute,
   parseDispatchReference,
   referenceRouteFromHref,
   referenceSpans,
+  shortForm,
 } from "./routes";
-import { useReferenceTarget } from "./Unfurl";
 
 export interface ReferenceAnchor {
-  readonly anchor: HTMLAnchorElement;
+  /** The element the `RefLink` portal renders into: the `<a>` itself, or whatever a surface put
+   *  in its place (`MarkdownPreview` keeps no link inside the link it sits in). */
+  readonly anchor: HTMLElement;
   readonly key: string;
   readonly route: DispatchReferenceRoute;
+  /** The words the anchor showed before they were cleared for the portal: a bare reference's
+   *  `dispatch://…`, or the text a Markdown link gave it. */
+  readonly text: string;
 }
 
-/** The ref's compact fallback text, shown until `useReferenceTarget` resolves a title (or if
- * resolution never finds one, e.g. a deleted ask). Mirrors `buildDispatchReference`'s shape
- * without the `dispatch://` scheme, so it reads like a second, shorter reference. */
-export function shortForm(route: DispatchReferenceRoute): string {
-  if (isProjectRoute(route)) {
-    const base = `${route.project}/${route.slug}`;
-    return route.item === undefined ? base : `${base} ${route.item.kind}`;
-  }
-  switch (route.kind) {
-    case "issue":
-      return route.key;
-    case "spec":
-      return `${route.key} spec`;
-    case "conversation":
-      return `${route.key} log`;
-    case "children":
-      return `${route.key} children`;
-    case "artifacts":
-      return `${route.key} artifacts`;
-    case "artifact":
-      return `${route.key} ${route.slug}`;
-    case "ask":
-      return `${route.key} ask`;
-    case "comment":
-      return `${route.key} comment`;
-    case "message":
-      return `${route.key} message`;
-  }
-}
+/** The 40 px square a picture shows as beside its title, wherever a line holds it: the Artifacts
+ *  tab's thumbnail. `not-prose` keeps Markdown's figure margins off it. */
+export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrink-0 rounded border object-cover align-middle ${borderDefault}`;
 
 /** Portal content for an inline reference anchor: the resolved title once
- * `useReferenceTarget` has it, the ref's short form until then. */
+ * `useReferenceTarget` has it, the ref's short form until then, and beside it the picture's
+ * thumbnail when the reference names an image artifact. A thumbnail the browser cannot draw (a
+ * pinned version the server does not serve) is dropped, leaving the title alone, so a stale or
+ * hand-written reference never shows a broken-image glyph. */
 export function RefLink({ route }: { route: DispatchReferenceRoute }): ReactNode {
-  const { title } = useReferenceTarget(route);
-  return <>{title ?? shortForm(route)}</>;
+  const { picture, title } = useReferenceTarget(route);
+  // The address that failed, not a flag: a plain reference names the latest version, so a version
+  // uploaded since gets its own load instead of inheriting the last one's failure.
+  const [failedPicture, setFailedPicture] = useState<string>();
+  return (
+    <>
+      {picture === undefined || picture === failedPicture ? null : (
+        <>
+          <img
+            alt=""
+            className={pictureThumbnailClassName}
+            loading="lazy"
+            onError={() => setFailedPicture(picture)}
+            src={picture}
+          />{" "}
+        </>
+      )}
+      {title ?? shortForm(route)}
+    </>
+  );
 }
 
 const excludedRefAncestorTags: Record<string, true> = { A: true, CODE: true, PRE: true };
@@ -120,7 +121,8 @@ export function linkifyDispatchRefs(root: HTMLElement): void {
  * link a user wrote by hand, or a bare `http(s)://` URL remark-gfm autolinked — rewrites its href
  * to the SPA route via `buildReferencePath`, and clears its text so the caller can
  * portal a `RefLink` in to render the resolved title. An external link, or an href that fails to
- * parse as a reference, is left untouched.
+ * parse as a reference, is left untouched, and so is a picture's link (`data-dispatch-picture`,
+ * the engine's `pictureSerializer`), whose content is a `DispatchPicture` rather than a title.
  *
  * `@legion/proof-editor`'s Markdown link serializer sanitizes a `dispatch://` href to `""`
  * (Milkdown's link sanitizer only allows http/https/mailto/tel/ftp — a document strangers can
@@ -135,7 +137,7 @@ export function collectReferenceAnchors(
 ): ReferenceAnchor[] {
   const targets: ReferenceAnchor[] = [];
   let index = 0;
-  for (const anchor of root.querySelectorAll("a")) {
+  for (const anchor of root.querySelectorAll<HTMLAnchorElement>("a:not([data-dispatch-picture])")) {
     const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
     if (href === null) {
       continue;
@@ -147,8 +149,9 @@ export function collectReferenceAnchors(
     anchor.setAttribute("href", buildReferencePath(route));
     const reference = buildDispatchReference(route);
     anchor.setAttribute("data-dispatch-ref", reference);
+    const text = anchor.textContent ?? "";
     anchor.replaceChildren();
-    targets.push({ anchor, key: `${reference}:${index}`, route });
+    targets.push({ anchor, key: `${reference}:${index}`, route, text });
     index += 1;
   }
   return targets;

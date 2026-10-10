@@ -7,8 +7,11 @@ import {
   textMutedOnCanvas,
   textPrimaryOnCanvas,
 } from "../../theme/classes";
+import { useAgents } from "../conversation/useAgents";
 import { Timestamp } from "../refs/Timestamp";
+import { CredentialSessionLines } from "./CredentialSessionLines";
 import { machineName } from "./machineLogins";
+import { credentialSessionNamesAnyone } from "./session";
 
 const LIFETIME_UNITS: ReadonlyArray<{ seconds: number; unit: string }> = [
   { seconds: 86400, unit: "day" },
@@ -27,7 +30,8 @@ function formatLifetime(seconds: number): string {
   return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
-/** The approver a request names when any signed-in person may decide it: a shared secret's. */
+/** The approver a record names when any signed-in person may decide it: a shared secret's request,
+ *  and a service's machine login. */
 const ANYONE_APPROVER = "anyone";
 
 /** One label and value; the value wraps inside its grid cell, so a 64-hex policy version or a long
@@ -52,6 +56,10 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
  * this same layout before their own (page-specific) decision/action controls.
  */
 export function CredentialRecordFacts({ record }: { record: CredentialRecord }): ReactNode {
+  const { agents, isError, isPending } = useAgents(
+    credentialSessionNamesAnyone(record.session),
+    true
+  );
   return (
     <div className="space-y-4">
       <dl className="grid grid-cols-2 gap-3 text-sm">
@@ -65,6 +73,16 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
             : `${record.enrollment.kind} · ${record.enrollment.runtime_id} · ${record.enrollment.operator || "—"}`}
         </Fact>
         {record.enrollment?.slot ? <Fact label="Worker slot">{record.enrollment.slot}</Fact> : null}
+        <Fact label="Session">
+          <div className="flex flex-col gap-1">
+            <CredentialSessionLines
+              agents={agents}
+              isError={isError}
+              isPending={isPending}
+              session={record.session}
+            />
+          </div>
+        </Fact>
         <Fact label="Lifetime">{formatLifetime(record.lifetime_seconds)}</Fact>
         <Fact label="Requested">
           <Timestamp at={record.requested_at} />

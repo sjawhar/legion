@@ -80,12 +80,18 @@ template, and the later phases fill in their own lines:
 - **Look at first** and **Not proven / risk**: written by Legion's reviewer, naming where a wrong
   decision would hurt and every claim left unproven.
 - **Production**: written by the implementer after the merge.
+- Any line your repository's own instructions derive from the paths the change touches, such as a
+  checklist named for each kind of path: after the approval, the retro recomputes it for the whole
+  change, its notes included, the way those instructions say, before it pushes the notes.
 
-Legion's reviewer posts its review as the review App. A review you submit on GitHub while the issue
-is in `needs_review` counts the same way: **Request changes** sends the work back to the
-implementer with your comments, and an approval of the head can end the round. A plain comment
-moves nothing. The pull request also carries a `.legion/` directory of handoff files; the operator
-removes it from the default branch after the merge.
+Legion's reviewer posts its review as the review App. A review from anyone with write access to the
+repository, submitted on GitHub while the issue is in `needs_review`, counts the same way:
+**Request changes** sends the work back to the implementer with your comments, and an approval of
+the head can end the round. A review from an account without write access decides nothing, since
+any GitHub account can review a public repository's pull request, and a plain comment moves
+nothing. The approved head also carries the tree's handoff files under `.legion/<issue>/`. Retro's
+last commit removes them, so the head you merge carries none and the merge brings no handoff onto
+the default branch; the pull request's file list shows them only until that commit.
 
 ## Merge
 

@@ -2,12 +2,36 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AnswerAskInput.expected_answer_at`, `AskRead.answers`, `InboxThread.answers`,
+  `MyAnswerRow`, `MyAnswersResponse`, and `AskAnsweredEventPayload`, whose
+  `previous_answer` names the answer a human changed (LEGION-622).
+- `images` on `dispatch_message`, `dispatch_comment` and `dispatch_ask`, and `DISPATCH_BODY_MAX`;
+  `Artifact.session_id` (optional: a Dispatch older than conversation-owned artifacts omits it) for
+  an upload an agent's conversation owns; `dispatch_doc_read` and `dispatch_read` describe the
+  pictures they return; the reference table pins `dispatch://agent/<session id>/artifact/<slug>`
+  and the picture syntax; `SESSION_ID_PATTERN` and `isSessionId`, the one session-id rule the
+  dashboard and envoy-client read a reference by (the server's `text.IsSessionID`), and
+  `pictureCaption`, the one caption a picture line carries (LEGION-541).
+
 ### Changed
 
 - Added `ISSUE_TITLE_MAX` (1,000), the longest issue title in UTF-16 units that
   `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept, generated into Go as
   `contracts.IssueTitleMax`; the dashboard's title fields take it as their `maxLength`
   (LEGION-505).
+- Added `WriteAdvice.suggestions`, `Suggestions` and `WriteSuggestion`: `POST /api/v1/issues` and
+  `POST /api/v1/issues/{key}/asks` now return, without ever refusing or delaying the write, the
+  three fused-search hits (sjawhar/legion#1764) most like what was just filed and, for an ask,
+  any already-answered ask that settles the same question, with who answered and when
+  (LEGION-550).
+- `SearchResponse` carries `total`, `reachable`, `limit` and `offset`, and `dispatch_search` takes
+  `offset`; its description says each kind of content is ranked on its own and the lists merged,
+  that an issue key searched alone lists that issue first, and that each kind lists at most its
+  best `SEARCH_KIND_DEPTH` (LEGION-386, LEGION-382).
+- Added `SEARCH_KIND_DEPTH` (100), how many of its best matches each kind lists before
+  `GET /api/v1/search` merges the kinds, generated into Go as `contracts.SearchKindDepth`.
 - The `dispatch_doc_read` description says it reads an uploaded file's text at its latest or named
   version, and describes a file that is not UTF-8 text.
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
@@ -61,6 +85,13 @@
 
 ### Added
 
+- `LegionThreadsResolveRequest` and `LegionThreadsResolveResponse`, the body and the answer of the
+  Legion daemon's `POST /legion/v1/threads/resolve`, which the reviewer pane's `legion threads
+  resolve` calls: the grant and the pull request it names, then each unresolved review thread's
+  outcome, exactly one of `resolved` (on whose acceptance) or `leftOpen` (why), `withheld`, the
+  count of threads whose newest comment is a draft in the implement App's pending review, which the
+  answer never names, and `refused`, the thread GitHub refused to resolve and its message, when one
+  stopped the run (LEGION-544).
 - `ArtifactRebuildReport`, the answer of `POST /api/v1/artifacts/{id}/rebuild`: what the rebuild
   removed, the head it wrote, the validation error the history failed with, and `source_version`,
   the version the rebuilt document holds (its latest saved version, or the version supplied
@@ -129,6 +160,11 @@
   accept route's answer: the attempt with the message's stored `body`), the `message.accepted`
   event (`MessageAcceptedEventPayload`), and `broadcast_id` on
   `DispatchTargetedMessagePayloadSchema` (LEGION-394).
+- Added optional `AgentStreamMessage.model`, the `provider/model` that produced an assistant turn
+  (e.g. `anthropic/claude-opus-5`), read off the host's own assistant message; absent on a user
+  message and on an assistant turn whose host carries no model identity. Added
+  `AGENT_STREAM_LIMITS.modelChars`, the cap the publisher applies to it before the frame leaves
+  the session (LEGION-548).
 - Added `IssueSummaryPage` (`{issues, total, limit, offset}`), the answer of
   `GET /api/v1/issues?limit=&offset=`, and `MAX_ISSUE_PAGE_LIMIT` (250) and
   `DEFAULT_ISSUE_PAGE_LIMIT` (50), generated into Go as `contracts.MaxIssuePageLimit` and

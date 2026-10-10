@@ -36,10 +36,14 @@ func TestSpawnPersistsTheBootTokenHashBeforeItLaunches(t *testing.T) {
 	if spec.ResumeSessionFile != "" || spec.Env["LEGION_ISSUE"] != "LEGION-209" {
 		t.Errorf("spawned %+v, want a fresh launch with the specs' environment", spec)
 	}
+	// The launch's first write follows the claim's admission (Store.AdmitClaim), which binds its
+	// tree epoch before anything launches. The history also holds the harness's own write, made
+	// before onPut was set.
 	history := h.store.history()
-	first := history[1]
-	if first.State != StateLaunching || first.Locator != nil || !bytes.Equal(first.BootTokenHash, c.BootTokenHash) || spawnsAtPut[0] != 0 {
-		t.Errorf("first write %+v after %d spawns, want the launch's boot token hash before any spawn", first, spawnsAtPut[0])
+	first := slices.IndexFunc(history, func(c Claim) bool { return c.State == StateLaunching })
+	before := len(history) - len(spawnsAtPut)
+	if first < before || history[first].Locator != nil || !bytes.Equal(history[first].BootTokenHash, c.BootTokenHash) || spawnsAtPut[first-before] != 0 {
+		t.Errorf("writes %+v (spawns at each %v), want the launch's first to carry its boot token hash before any spawn", history, spawnsAtPut)
 	}
 	if last := history[len(history)-1]; last.Locator == nil || *last.Locator != h.locator() {
 		t.Errorf("last write %+v, want the spawned locator", last)
@@ -225,98 +229,6 @@ func TestABootIntervalWithADeadProcessCountsOneLaunchFailure(t *testing.T) {
 	if h.generation() != 2 {
 		t.Errorf("generation %d, want the relaunch's 2", h.generation())
 	}
-}
-
-func TestTheRegistrationDeadlineRetiresALiveUnregisteredProcess(t *testing.T) {
-	for _, state := range []ClaimState{StateLaunching, StateShimConnected} {
-		t.Run(string(state), func(t *testing.T) {
-			h := newHarness(t)
-			h.reach(state)
-			alive := h.locator()
-
-			h.advance(deadline)
-
-			if suspends := h.wantCalls("Suspend", 1); suspends[0].Locator != alive {
-				t.Errorf("suspended %+v, want the live process", suspends[0].Locator)
-			}
-			h.wantCalls("Release", 0)
-			h.wantBudgets(Budgets{LaunchFailures: 1})
-			h.wantCalls("Spawn", 2)
-			methods := h.rt.Methods()
-			var spawns []int
-			for i, method := range methods {
-				if method == "Spawn" {
-					spawns = append(spawns, i)
-				}
-			}
-			if slices.Index(methods, "Suspend") > spawns[1] {
-				t.Errorf("runtime calls %v: the relaunch came before the suspension", methods)
-			}
-			h.wantState(StateLaunching)
-		})
-	}
-}
-
-func TestTheRegistrationDeadlineWithADeadProcessCountsOneFailureWithoutASuspension(t *testing.T) {
-	h := newHarness(t)
-	h.launch()
-	h.rt.ScriptProbe(fake.ProbeResult{Kind: runtime.Alive}, fake.ProbeResult{Kind: runtime.Alive}, fake.ProbeResult{Kind: runtime.Gone})
-
-	h.advance(deadline)
-
-	h.wantCalls("Suspend", 0)
-	h.wantBudgets(Budgets{LaunchFailures: 1})
-	h.wantCalls("Spawn", 2)
-}
-
-func TestASuspendThatFailsAtTheDeadlineIsRetriedAtTheNextProbe(t *testing.T) {
-	h := newHarness(t)
-	h.launch()
-	alive := h.locator()
-	h.rt.FailSuspend(errBoom)
-
-	h.advance(deadline)
-	h.wantCalls("Suspend", 1)
-	h.wantBudgets(Budgets{})
-	h.wantState(StateLaunching)
-	if h.locator() != alive {
-		t.Fatalf("locator %+v, want the process the suspension could not end", h.locator())
-	}
-
-	h.rt.FailSuspend(nil)
-	h.advance(testProbe)
-	h.wantCalls("Suspend", 2)
-	h.wantBudgets(Budgets{LaunchFailures: 1})
-	h.wantCalls("Spawn", 2)
-}
-
-// A daemon that restarts while a claim is booting watches it again from its own start: the
-// in-memory timers did not survive, and a process that never registers must still be retired.
-func TestABootingClaimIsWatchedAgainAfterARestart(t *testing.T) {
-	h := newHarness(t)
-	h.reach(StateShimConnected)
-	alive := h.locator()
-	h.restart()
-
-	h.advance(deadline)
-
-	if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != alive {
-		t.Errorf("suspended %+v, want the process that never registered", suspend.Locator)
-	}
-	h.wantBudgets(Budgets{LaunchFailures: 1})
-	h.wantState(StateLaunching)
-}
-
-func TestRegistrationEndsTheBootWatch(t *testing.T) {
-	h := newHarness(t)
-	h.reach(StateRegistered)
-	if live := h.clock.Live(); live != 0 {
-		t.Errorf("%d timers still armed after registration", live)
-	}
-	h.advance(2 * deadline)
-	h.wantCalls("Probe", 0)
-	h.wantCalls("Suspend", 0)
-	h.wantState(StateRegistered)
 }
 
 // deathCharged is what one death charges a claim reach walked to state: a launch failure, and a

@@ -2,7 +2,7 @@
 
 ## Your job
 
-Verify as forge facts, never from reports: checks green at the current head, every review thread carrying the acceptance the thread rule below asks for, and both proof lines present, the implementer's own and the tester's. Each proof names a production-like surface, command or run id, observation, ancestor head, and negative control. Run the thermonuclear pair once at that head — the head the owner's `ce-simplify-code` pass left final — when the diff touches runtime code; a docs-only diff gets none. Submit one review per round carrying every inline comment.
+Verify as forge facts, never from reports: checks green at the current head, every review thread carrying the acceptance the thread rule below asks for, and both proof lines present, the implementer's own and the tester's. Each proof names a production-like surface, command or run id, observation, ancestor head, and negative control. Run the thermonuclear pair once at the head the round reviews when the diff touches runtime code; a docs-only diff gets none. Submit one review per round carrying every inline comment.
 
 Read the plan beside the spec. Where the plan records a departure from the spec's design, review the change against the plan's design; the spec's acceptance criteria bind either way.
 

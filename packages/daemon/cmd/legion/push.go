@@ -68,23 +68,25 @@ Pushes @- to legion/<LEGION_ISSUE>, the worker skill's push of the issue branch:
 then sets the bookmark and pushes.
 
 A push skips CI only when it changes nothing but handoffs whose phase guarantees a later push to
-the branch: the planner's .legion/plan.json, the tester's .legion/test.json, and a reviewer's
-.legion/review.json whose verdict is "changes_requested". Its head commit then ends with GitHub's
-"skip-checks: true" trailer, so the push starts no workflow, and the Go daemon carries the code
-head's verdict to it. Every other push runs CI in full: one carrying code, a reviewer round with
-any other verdict or none, the .legion/ deletion, and a rewrite. The paths are read from the
-push's commits, not from its net tree diff: no commit may touch a path outside those three, even
-one a later commit undoes, because the daemon classifies the push from the union of its commits'
-paths and a head this rule skipped over such a commit would carry no verdict at all. A trailer an
-earlier push left on @- is removed. Never add or remove the trailer yourself.
+the branch: the planner's .legion/<issue>/plan.json, the tester's .legion/<issue>/test.json, and a
+reviewer's .legion/<issue>/review.json whose verdict is "changes_requested". Its head commit then
+ends with GitHub's "skip-checks: true" trailer, so the push starts no workflow, and the Go daemon
+carries the code head's verdict to it. Every other push runs CI in full: one carrying code, a
+reviewer round with any other verdict or none, retro's removal of .legion/<issue>/, which leaves the
+head a human merges, and a rewrite. The paths are read from the push's commits, not from its net
+tree diff: no commit may touch a path outside those three, even one a later commit undoes, because
+the daemon classifies the push from the union of its commits' paths and a head this rule skipped
+over such a commit would carry no verdict at all. A trailer an earlier push left on @- is removed.
+Never add or remove the trailer yourself.
 
-Those three files are an allow-list, narrower than the sentence that opens this rule: .legion/
-implement.json and .legion/architect.json are excluded although their phases are also followed by
-a later push. Narrower is the safe direction and the only one. The daemon's carry rule accepts any
-.legion/ path (classify.ClassifyPush), so every head this command skips is one it will carry a
-verdict to; widening the set here without widening that rule is what breaks, and the row "the
-implementer's handoff alone" in TestPushSkipsCIOnlyForHandoffsALaterPushFollows pins the
-exclusion. Do not reconcile the two by widening this set.
+Those three files are an allow-list, narrower than the sentence that opens this rule:
+.legion/<issue>/implement.json and .legion/<issue>/architect.json are excluded although their
+phases are also followed by a later push. Narrower is the safe direction and the only one. The
+daemon's carry rule accepts any .legion/ path (classify.ClassifyPush), so every head this command
+skips is one it will carry a verdict to; widening the set here without widening that rule is what
+breaks, and the row "the implementer's handoff alone" in
+TestPushSkipsCIOnlyForHandoffsALaterPushFollows pins the exclusion. Do not reconcile the two by
+widening this set.
 
 Reading the paths from the commits also bounds their union at three, so the listener's cap on the
 paths it publishes - past which it marks the list truncated, which the daemon reads as an
@@ -133,9 +135,11 @@ func runPush(_ context.Context, args []string, stdout, stderr io.Writer) int {
 }
 
 func push(workspaceFlag string, stdout, stderr io.Writer) error {
-	issue := os.Getenv("LEGION_ISSUE")
-	if issue == "" {
-		return errors.New("LEGION_ISSUE is not set")
+	// Validated before anything is built from it: the branch, the recorded tip's file name and
+	// skipsCI's permitted paths all name the issue.
+	issue, err := resolveIssue()
+	if err != nil {
+		return err
 	}
 	jj := os.Getenv("LEGION_JJ_PATH")
 	if jj == "" || !filepath.IsAbs(jj) {
@@ -145,7 +149,7 @@ func push(workspaceFlag string, stdout, stderr io.Writer) error {
 	if dir == "" {
 		dir = os.Getenv("LEGION_WORKSPACE")
 	}
-	dir, err := resolveWorkspace(dir)
+	dir, err = resolveWorkspace(dir)
 	if err != nil {
 		return err
 	}
@@ -178,7 +182,7 @@ func push(workspaceFlag string, stdout, stderr io.Writer) error {
 		return err
 	}
 	if head != pushed {
-		skip, err := skipsCI(jj, dir, pushed, rewritten)
+		skip, err := skipsCI(jj, dir, issue, pushed, rewritten)
 		if err != nil {
 			return err
 		}
@@ -225,7 +229,7 @@ func push(workspaceFlag string, stdout, stderr io.Writer) error {
 //
 // The net diff is then read for what only it can say: that the push changes something at all, that
 // each handoff is present at @- rather than deleted, and that a review is a request for changes.
-func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
+func skipsCI(jj, dir, issue, pushed, rewritten string) (bool, error) {
 	if rewritten != "" {
 		return false, nil
 	}
@@ -233,7 +237,10 @@ func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
 	if base == "" {
 		base = "heads(::@- & ::trunk())"
 	}
-	const permitted = `files(~".legion/plan.json" & ~".legion/test.json" & ~".legion/review.json")`
+	planPath := filepath.ToSlash(handoffFile(issue, "plan.json"))
+	testPath := filepath.ToSlash(handoffFile(issue, "test.json"))
+	reviewPath := filepath.ToSlash(handoffFile(issue, "review.json"))
+	permitted := fmt.Sprintf("files(~%q & ~%q & ~%q)", planPath, testPath, reviewPath)
 	touching, err := pushJJ(jj, dir, "log", "--no-graph", "-T", `commit_id ++ "\n"`, "-r", base+"..@- & "+permitted)
 	if err != nil || touching != "" {
 		return false, err
@@ -248,7 +255,7 @@ func skipsCI(jj, dir, pushed, rewritten string) (bool, error) {
 		if err != nil {
 			return false, nil
 		}
-		if path == ".legion/review.json" {
+		if path == reviewPath {
 			var review struct {
 				Verdict string `json:"verdict"`
 			}

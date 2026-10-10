@@ -80,9 +80,19 @@ func fakeOMP() int {
 		}
 	}()
 
+	// FAKE_OMP_HOLD_READY names a file the fake waits for before its first line, so a test can
+	// tell what the shim does at the spawn from what it does on the child's first frame.
+	if hold := os.Getenv("FAKE_OMP_HOLD_READY"); hold != "" {
+		for {
+			if _, err := os.Stat(hold); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	emit(fmt.Sprintf(`{"type":"fake_ready","pid":%d}`, os.Getpid()))
 	if message := os.Getenv("FAKE_OMP_EXTENSION_ERROR"); message != "" {
-		emit(fmt.Sprintf(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion-envoy/dist/legion.js","event":"session_start","error":%q}`, message))
+		emit(fmt.Sprintf(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion/dist/legion.js","event":"session_start","error":%q}`, message))
 	}
 	if os.Getenv("FAKE_OMP_HUGE_LINE") == "1" {
 		emit(`{"type":"fake_huge","pad":"` + strings.Repeat("x", 2<<20) + `"}`)
@@ -525,6 +535,172 @@ func TestOMPIsSpawnedOnlyAfterTheHelloAck(t *testing.T) {
 	}
 	if got := frameTypes(child.received(t)); !reflect.DeepEqual(got, []string{shimwire.TypeGetState}) {
 		t.Fatalf("OMP read %v; the pre-ack prompt must never reach it", got)
+	}
+}
+
+// The workspace's CodeGraph warm-up (Config.WarmCodegraph) starts on the first line the child
+// writes, with the workspace LEGION_WORKSPACE names: not before the ack, not at the spawn — Oh My
+// Pi's first frame is its `ready`, once its extensions are loaded — and exactly once for the shim's
+// life, so neither a later frame nor a connection redialled while the child runs starts a second
+// one. A Config without the hook, a tmux pane's or the controller's, runs nothing.
+func TestTheCodegraphWarmUpStartsOnTheChildsFirstFrameOnce(t *testing.T) {
+	const workspace = "/legion/workspaces/acme/widgets/widgets-7"
+	path := socketPath(t)
+	daemon := listen(t, path)
+	hold := filepath.Join(t.TempDir(), "ready")
+	child := newOMP(t, "LEGION_WORKSPACE="+workspace, "FAKE_OMP_HOLD_READY="+hold)
+	var mu sync.Mutex
+	var warmed []string
+	calls := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(warmed)
+	}
+	cfg := config(t, path, child)
+	cfg.WarmCodegraph = func(_ context.Context, dir string) {
+		mu.Lock()
+		defer mu.Unlock()
+		warmed = append(warmed, dir)
+	}
+	sh := run(t, cfg, newClock())
+
+	p := daemon.accept(t)
+	p.expectHello(t)
+	p.send(t, shimwire.HelloAck{})
+	sh.log.await(t, "[worker-shim] spawned ", 1)
+	for deadline := time.Now().Add(200 * time.Millisecond); time.Now().Before(deadline) && !child.started(); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls(); len(got) != 0 {
+		t.Fatalf("the warm-up started at the spawn, before the child wrote anything: %v", got)
+	}
+	if err := os.WriteFile(hold, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.expectRaw(t, "fake_ready")
+	for deadline := time.Now().Add(waitLimit); len(calls()) == 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the warm-up never started after the child's first frame; log:\n%s", sh.log)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls(); !slices.Equal(got, []string{workspace}) {
+		t.Fatalf("the warm-up was started with %v, want once with %q", got, workspace)
+	}
+
+	p.send(t, shimwire.Prompt{ID: "p1", DeliveryID: "d1", Message: "go"})
+	p.expect(t, shimwire.Response{ID: "p1", Command: "prompt", Success: true})
+	p.expect(t, shimwire.AgentStart{})
+	p.expect(t, shimwire.AgentEnd{})
+	_ = p.conn.Close()
+	sh.log.await(t, "reconnecting", 1)
+	p = daemon.accept(t)
+	p.expectHello(t)
+	p.send(t, shimwire.HelloAck{})
+	p.send(t, shimwire.GetState{ID: "probe"})
+	if raw := p.next(t).(shimwire.Response); raw.ID != "probe" {
+		t.Fatalf("the probe was answered as %#v", raw)
+	}
+	if got := calls(); !slices.Equal(got, []string{workspace}) {
+		t.Fatalf("later frames and a redial started the warm-up again: %v", got)
+	}
+
+	t.Run("nothing runs without the hook", func(t *testing.T) {
+		path := socketPath(t)
+		daemon := listen(t, path)
+		child := newOMP(t, "LEGION_WORKSPACE="+workspace)
+		sh := run(t, config(t, path, child), newClock())
+		p := daemon.accept(t)
+		p.open(t)
+		p.send(t, shimwire.GetState{ID: "probe"})
+		if raw := p.next(t).(shimwire.Response); raw.ID != "probe" {
+			t.Fatalf("the probe was answered as %#v", raw)
+		}
+		if sh.log.count("warm-up") != 0 {
+			t.Fatalf("a shim with no hook said something of a warm-up; log:\n%s", sh.log)
+		}
+	})
+}
+
+// The shim ends with its child, and the warm-up ends with the shim: the moment the child is told
+// to stop the warm-up's context is ended — the build it started stops on that, not at the child's
+// exit, so an agent that spends its whole grace ignoring SIGTERM costs the stop nothing more — and
+// Run returns the child's status only once the warm-up has returned, so the lease the warm-up
+// releases on its way out is gone before the launcher reads the shim as exited. A role stopped
+// mid-build (the launcher's one SIGTERM to the whole group) otherwise left `.codegraph/legion-warm.lock`
+// behind, and its relaunch within the minute read a live build and skipped its own.
+func TestTheShimEndsOnlyOnceAnInFlightWarmUpHasReturned(t *testing.T) {
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t, "LEGION_WORKSPACE=/legion/workspaces/acme/widgets/widgets-7", "FAKE_OMP_IGNORE_SIGTERM=1")
+	var mu sync.Mutex
+	var returned time.Time
+	ended := make(chan struct{})
+	cfg := config(t, path, child)
+	cfg.WarmCodegraph = func(ctx context.Context, _ string) {
+		<-ctx.Done()
+		close(ended)
+		// What a real warm-up does here: its codegraph child ends on the same context, it logs the
+		// end and releases the lease. That takes time the shim must wait out.
+		time.Sleep(300 * time.Millisecond)
+		mu.Lock()
+		returned = time.Now()
+		mu.Unlock()
+	}
+	clock := newClock()
+	sh := run(t, cfg, clock)
+	p := daemon.accept(t)
+	p.open(t)
+
+	p.send(t, shimwire.Shutdown{})
+	p.expectRaw(t, "fake_sigterm")
+	expired := clock.next(t, grace)
+	// The child is ignoring its SIGTERM and still running; the warm-up has already been ended.
+	select {
+	case <-ended:
+	case <-time.After(waitLimit):
+		t.Fatalf("the warm-up's context did not end when the child was told to stop; log:\n%s", sh.log)
+	}
+	expired.elapse()
+	if code := sh.wait(t); code != 128+int(syscall.SIGKILL) {
+		t.Fatalf("the shim exited %d, want the child's %d", code, 128+int(syscall.SIGKILL))
+	}
+	exited := time.Now()
+	mu.Lock()
+	defer mu.Unlock()
+	if returned.IsZero() || returned.After(exited) {
+		t.Fatalf("Run returned at %s with the warm-up still running (it returned at %s); log:\n%s", exited.Format(time.StampMilli), returned.Format(time.StampMilli), sh.log)
+	}
+}
+
+// The wait for the warm-up is what the role's stop grace leaves once the child's own grace and the
+// stdout drain are spent (warmUpDrain, pinned in drain_test.go), so a warm-up that never returns
+// cannot hold the shim past the grace at which its launcher kills it (with the lease then left
+// behind, the failure the wait prevents): Run returns without it, saying so, and a runtime whose
+// stop grace leaves nothing gets no wait at all.
+func TestTheWaitForTheWarmUpIsBoundedByTheStopGrace(t *testing.T) {
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t, "LEGION_WORKSPACE=/legion/workspaces/acme/widgets/widgets-7")
+	cfg := config(t, path, child)
+	// grace is the test's 3 s; a 3.5 s stop grace leaves half a second less the 1 s stdout drain:
+	// nothing, so Run returns at once without the warm-up, which never returns.
+	cfg.StopGrace = grace + 500*time.Millisecond
+	never := make(chan struct{})
+	cfg.WarmCodegraph = func(ctx context.Context, _ string) { <-never }
+	defer close(never)
+	clock := newClock()
+	sh := run(t, cfg, clock)
+	p := daemon.accept(t)
+	p.open(t)
+
+	p.send(t, shimwire.Shutdown{})
+	clock.next(t, grace)
+	if code := sh.wait(t); code != 128+int(syscall.SIGTERM) {
+		t.Fatalf("the shim exited %d, want the child's %d", code, 128+int(syscall.SIGTERM))
+	}
+	if sh.log.count("the CodeGraph warm-up is still running") != 1 {
+		t.Fatalf("the shim left without saying the warm-up still ran; log:\n%s", sh.log)
 	}
 }
 
@@ -1011,5 +1187,5 @@ func TestTheShimLogsAnExtensionError(t *testing.T) {
 	sh := run(t, config(t, path, child), newClock())
 	daemon.accept(t).open(t)
 
-	sh.log.awaitLine(t, "extension_error /opt/legion/pi-legion-envoy/dist/legion.js session_start: LEGION_DAEMON_URL is required for Legion", 1)
+	sh.log.awaitLine(t, "extension_error /opt/legion/pi-legion/dist/legion.js session_start: LEGION_DAEMON_URL is required for Legion", 1)
 }

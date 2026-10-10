@@ -38,7 +38,9 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		{"no boot token", func(s *SpawnSpec) { s.BootToken = "" }, "spawn legion-omp-legion-43-tester: no boot token"},
 		{"an issue that is a path", func(s *SpawnSpec) { s.Issue = "../../etc" }, `spawn legion-omp-legion-43-tester: issue "../../etc" is not an issue key`},
 		{"a tree that is not an issue key", func(s *SpawnSpec) { s.Tree = "legion-42" }, `spawn legion-omp-legion-43-tester: tree "legion-42" is not an issue key`},
-		{"a role no claim is on", func(s *SpawnSpec) { s.Role = "controller" }, `spawn legion-omp-legion-43-tester: "controller" is not a role`},
+		{"a role no claim is on", func(s *SpawnSpec) { s.Role = "operator" }, `spawn legion-omp-legion-43-tester: "operator" is not a role`},
+		{"the controller's role on an issue", func(s *SpawnSpec) { s.Role = claim.RoleController },
+			`spawn legion-omp-legion-43-tester: the controller's claim is on no issue and no tree (issue "LEGION-43", tree "LEGION-42")`},
 		// The token is derived from the project, issue and role, and every runtime names the
 		// agent's workspace, Secret and pod after it. A spec whose token is another claim's would
 		// run this claim's work under that one's name, with that one's credentials beside it.
@@ -77,5 +79,63 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		if err := ValidateSpawnSpec(spec, owned); err != nil {
 			t.Errorf("a well-formed spec %s was refused: %v", name, err)
 		}
+	}
+}
+
+func controllerSpec() SpawnSpec {
+	return SpawnSpec{
+		Claim:      claim.ControllerToken("omp"),
+		Project:    "omp",
+		Role:       claim.RoleController,
+		Generation: 1,
+		BootToken:  "boot-secret",
+		Env:        map[string]string{},
+		Secrets:    map[string]string{"ENVOY_TOKEN": "envoy-secret"},
+		Prompt:     PromptParts{RolePromptPaths: []string{"/roles/controller-root.md"}},
+	}
+}
+
+// The project controller's launch, under `controller: daemon`, is a spec of its own shape: the
+// controller role, the project's controller token, and no issue, tree, repository or workspace —
+// the controller works Dispatch, never a checkout. Anything else on it is refused, as a workflow
+// claim's spec is, before a runtime touches anything.
+func TestValidateSpawnSpecHoldsTheControllersLaunchToItsOwnShape(t *testing.T) {
+	owned := map[string]bool{"LEGION_BOOT_TOKEN_FILE": true}
+	for name, mutate := range map[string]func(*SpawnSpec){
+		"as it is":           func(*SpawnSpec) {},
+		"resuming a session": func(s *SpawnSpec) { s.ResumeSessionFile = "/sessions/controller.jsonl" },
+	} {
+		spec := controllerSpec()
+		mutate(&spec)
+		if err := ValidateSpawnSpec(spec, owned); err != nil {
+			t.Errorf("the controller's well-formed spec %s was refused: %v", name, err)
+		}
+	}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*SpawnSpec)
+		want   string
+	}{
+		{"no project", func(s *SpawnSpec) { s.Project = "" }, "spawn legion-omp-controller: no project"},
+		{"no boot token", func(s *SpawnSpec) { s.BootToken = "" }, "spawn legion-omp-controller: no boot token"},
+		{"an issue", func(s *SpawnSpec) { s.Issue = "LEGION-43" },
+			`spawn legion-omp-controller: the controller's claim is on no issue and no tree (issue "LEGION-43", tree "")`},
+		{"another project's token", func(s *SpawnSpec) { s.Claim = claim.ControllerToken("legion") },
+			"spawn legion-legion-controller: the controller's claim token of project omp is legion-omp-controller"},
+		{"a repository", func(s *SpawnSpec) { s.Repository = ghrepo.MustParse("sjawhar/legion") },
+			"spawn legion-omp-controller: the controller works no repository (got sjawhar/legion)"},
+		{"a recovered workspace", func(s *SpawnSpec) { s.WorkspaceRecoveredFrom = "legion/LEGION-43" },
+			"spawn legion-omp-controller: the controller has no workspace to recover (got legion/LEGION-43)"},
+		{"no role prompt", func(s *SpawnSpec) { s.Prompt.RolePromptPaths = nil }, "spawn legion-omp-controller: no role prompt"},
+		{"a credential as a value", func(s *SpawnSpec) { s.Env["ANTHROPIC_API_KEY"] = "sk-x" },
+			"spawn legion-omp-controller: Env carries ANTHROPIC_API_KEY, a credential-shaped name; a secret travels in Secrets, as a file"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spec := controllerSpec()
+			tc.mutate(&spec)
+			if err := ValidateSpawnSpec(spec, owned); err == nil || err.Error() != tc.want {
+				t.Fatalf("ValidateSpawnSpec = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }

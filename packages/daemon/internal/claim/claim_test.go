@@ -207,3 +207,50 @@ func TestNewTokenIsTheShippedRoleToken(t *testing.T) {
 		})
 	}
 }
+
+// The project controller's claim, which the daemon launches under `controller: daemon`, is on the
+// role `controller`: the word the operator's controller already registers as and its pane is told
+// as LEGION_ROLE. It is no workflow role — it holds no issue — so IsRole refuses it, no NewToken
+// builds a token of it on an issue, and its one token is ControllerToken.
+func TestTheControllerRoleIsTheControllersOwnAndNoWorkflowRole(t *testing.T) {
+	if RoleController != "controller" {
+		t.Fatalf("RoleController = %q, want the wire word controller", RoleController)
+	}
+	if IsRole(RoleController) {
+		t.Fatal("IsRole(RoleController) = true; the controller holds no issue, so it is no workflow role")
+	}
+	if token, err := NewToken("legion", "LEGION-208", RoleController); err == nil {
+		t.Fatalf("NewToken on an issue as the controller = %q, want a refusal", token)
+	}
+	if !IsController(RoleController, "", "") {
+		t.Fatal("IsController(controller, no issue, no tree) = false, want true")
+	}
+	for _, place := range []struct{ issue, tree string }{{"LEGION-208", ""}, {"", "LEGION-208"}, {"LEGION-208", "LEGION-208"}} {
+		if IsController(RoleController, place.issue, place.tree) {
+			t.Errorf("IsController(controller, %q, %q) = true; the controller's claim is on no issue", place.issue, place.tree)
+		}
+	}
+	if IsController(RoleArchitect, "", "") {
+		t.Error("IsController(architect, no issue, no tree) = true, want false")
+	}
+}
+
+// A token names its role: a workflow role's token the role it ends in, and the controller's token
+// the controller, which Cut does not split. Anything else names no role, a token that only looks
+// like the controller's included.
+func TestATokenNamesItsRoleTheControllersIncluded(t *testing.T) {
+	for token, want := range map[Token]Role{
+		"legion-legion-legion-208-tester":    RoleTester,
+		"legion-legion-legion-208-architect": RoleArchitect,
+		ControllerToken("legion"):            RoleController,
+	} {
+		if role, ok := token.Role(); !ok || role != want {
+			t.Errorf("%s.Role() = %q, %t; want %q", token, role, ok, want)
+		}
+	}
+	for _, token := range []Token{"legion-legion-legion-208", "legion--controller", "legion-a-b-controller", "other-legion-controller", "legion-Legion-controller"} {
+		if role, ok := token.Role(); ok {
+			t.Errorf("%s.Role() = %q, want none", token, role)
+		}
+	}
+}

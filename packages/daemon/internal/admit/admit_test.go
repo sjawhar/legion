@@ -39,6 +39,7 @@ func TestApplyFactAdmitsRootAndQueuesWhenFull(t *testing.T) {
 	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-208", Index: 0, AdmittedAt: fixedNow}})
 	assertEffects(t, pool, []effect{
 		{kind: record.OutboxKindDispatchStatus, issue: "LEGION-208", payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
+		{kind: record.OutboxKindIssueBranch, issue: "LEGION-208", payload: record.IssueBranch{Generation: 1}},
 		{kind: record.OutboxKindSupervise, issue: "LEGION-208", payload: record.SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 1}},
 	})
 
@@ -51,6 +52,7 @@ func TestApplyFactAdmitsRootAndQueuesWhenFull(t *testing.T) {
 	assertWaiting(t, pool, []string{"LEGION-209"})
 	assertEffects(t, pool, []effect{
 		{kind: record.OutboxKindDispatchStatus, issue: "LEGION-208", payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
+		{kind: record.OutboxKindIssueBranch, issue: "LEGION-208", payload: record.IssueBranch{Generation: 1}},
 		{kind: record.OutboxKindSupervise, issue: "LEGION-208", payload: record.SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 1}},
 	})
 }
@@ -81,6 +83,26 @@ func TestApplyFactPromotesWaitingRootsInRankOrder(t *testing.T) {
 		{Issue: "LEGION-B", Index: 1, AdmittedAt: fixedNow},
 	})
 	assertWaiting(t, pool, []string{"LEGION-C"})
+}
+
+// A workflow root whose key names a tree the operator opened (an operator root spawn, or the
+// lifecycle migration's operator tree) cannot be admitted while that lifecycle is open. That is
+// the one root's wait: the fact goes on and admits the next root in rank order, and intake keeps
+// flowing.
+func TestAnOperatorTreeHoldsOnlyItsOwnWorkflowRootsAdmission(t *testing.T) {
+	pool := migratedPool(t)
+	var logged bytes.Buffer
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(&logged, nil)))
+	if _, err := pool.Exec(context.Background(), `insert into tree_lifecycles (project, tree, epoch, authority) values ('legion', 'LEGION-OPS', 1, 'operator')`); err != nil {
+		t.Fatal(err)
+	}
+	apply(t, pool, admission, "arrive-ops", intake.DispatchIssue{Key: "LEGION-OPS", Seq: 1, Type: "issue.updated", Status: "todo", Title: "held by the operator", Rank: "A", HandedOver: handed}, engineStub{})
+	apply(t, pool, admission, "arrive-b", intake.DispatchIssue{Key: "LEGION-B", Seq: 1, Type: "issue.updated", Status: "todo", Title: "rank B", Rank: "B", HandedOver: handed}, engineStub{})
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-B", Index: 0, AdmittedAt: fixedNow}})
+	assertWaiting(t, pool, []string{"LEGION-OPS"})
+	if !strings.Contains(logged.String(), "admission waits for its tree's other authority") || !strings.Contains(logged.String(), "issue=LEGION-OPS") {
+		t.Fatalf("log %q, want the held root's wait named", logged.String())
+	}
 }
 
 func TestApplyFactLeavesEngineRecordedChildWithoutSlotOrEffects(t *testing.T) {
@@ -151,6 +173,7 @@ func TestApplyFactReleasesSlotWhenEngineCompletesPhaseAndPromotesHead(t *testing
 	}
 	assertEffects(t, pool, []effect{
 		{kind: record.OutboxKindDispatchStatus, issue: "LEGION-NEXT", payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
+		{kind: record.OutboxKindIssueBranch, issue: "LEGION-NEXT", payload: record.IssueBranch{Generation: 1}},
 		{kind: record.OutboxKindSupervise, issue: "LEGION-NEXT", payload: record.SuperviseRequest{Op: "start", Tree: "LEGION-NEXT", Role: claim.RoleArchitect, Generation: 1}},
 	})
 }
@@ -189,6 +212,7 @@ func TestApplyFactReadmitsLingeringRootAndIgnoresOwnStatusEcho(t *testing.T) {
 	assertSlots(t, pool, []record.Slot{{Issue: lingering.Key, Index: 0, AdmittedAt: fixedNow}})
 	readmittedEffects := []effect{
 		{kind: record.OutboxKindDispatchStatus, issue: lingering.Key, payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
+		{kind: record.OutboxKindIssueBranch, issue: lingering.Key, payload: record.IssueBranch{Generation: 4}},
 		{kind: record.OutboxKindSupervise, issue: lingering.Key, payload: record.SuperviseRequest{Op: "start", Tree: lingering.Key, Role: claim.RoleArchitect, Generation: 4}},
 	}
 	assertEffects(t, pool, readmittedEffects)
@@ -225,9 +249,55 @@ func TestReadmissionStartsTheTreesMidPhaseChildren(t *testing.T) {
 
 	assertEffects(t, pool, []effect{
 		{kind: record.OutboxKindDispatchStatus, issue: root.Key, payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
+		{kind: record.OutboxKindIssueBranch, issue: root.Key, payload: record.IssueBranch{Generation: 2}},
 		{kind: record.OutboxKindSupervise, issue: root.Key, payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleArchitect, Generation: 2}},
+		{kind: record.OutboxKindIssueBranch, issue: "LEGION-209", payload: record.IssueBranch{Generation: 1}},
 		{kind: record.OutboxKindSupervise, issue: "LEGION-209", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing,
 			Task: "Continue mid-phase child. Issue: LEGION-209. Phase: testing. Resume the existing phase work.", ResumeTask: true}},
+	})
+}
+
+// A re-admitted tree's merging child is resumed with no approved head: the re-admission clears the
+// generation, which empties the review round's decision with the rest of the tree's handoffs
+// (record.ClearTreeGeneration), so the merger refuses for want of one and the round is reviewed
+// again rather than merged on the last generation's approval.
+func TestAResumedMergerIsToldNoApprovedHeadAcrossGenerations(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	root := record.Issue{Key: "LEGION-208", Project: "LEGION", Title: "root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
+	putIssue(t, pool, root)
+	parentKey := root.Key
+	putIssue(t, pool, record.Issue{Key: "LEGION-209", Project: "LEGION", Title: "merging child", Tree: root.Key, Parent: &parentKey,
+		Phase: phase.Merging, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1})
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleReviewer, Claim: "review-claim",
+			HandoffCommit: "approved-head", Decision: &record.ReviewDecision{State: "approved", Head: "approved-head"}}); err != nil {
+			t.Fatalf("seed the reviewer's row: %v", err)
+		}
+	})
+
+	apply(t, pool, admission, "readmit", intake.DispatchIssue{Key: root.Key, Seq: 2, Type: "issue.updated", Status: "todo", Title: root.Title, Rank: root.Rank, HandedOver: handed}, engine)
+
+	assertEffects(t, pool, []effect{
+		{kind: record.OutboxKindDispatchStatus, issue: root.Key, payload: record.StatusWrite{Status: "in_progress", ObservedStatus: "todo"}},
+		{kind: record.OutboxKindIssueBranch, issue: root.Key, payload: record.IssueBranch{Generation: 2}},
+		{kind: record.OutboxKindSupervise, issue: root.Key, payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleArchitect, Generation: 2}},
+		{kind: record.OutboxKindIssueBranch, issue: "LEGION-209", payload: record.IssueBranch{Generation: 1}},
+		{kind: record.OutboxKindSupervise, issue: "LEGION-209", payload: record.SuperviseRequest{Op: "start", Tree: root.Key, Role: claim.RoleMerger, Generation: 1, Phase: phase.Merging,
+			Task: "Continue merging child. Issue: LEGION-209. Phase: merging. Resume the existing phase work.", ResumeTask: true}},
+	})
+	inTx(t, pool, func(tx pgx.Tx) {
+		rows, err := record.NewStore().Phases(context.Background(), tx, "LEGION-209")
+		if err != nil {
+			t.Fatalf("read the child's phase rows: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Role != claim.RoleReviewer {
+			t.Fatalf("phase rows = %#v, want the reviewer's row still standing", rows)
+		}
+		if rows[0].Decision != nil || rows[0].HandoffCommit != "" {
+			t.Fatalf("reviewer row = %#v, want its decision and handoff cleared with the generation", rows[0])
+		}
 	})
 }
 
@@ -289,8 +359,6 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 		confirmedPending func(generation uint64, p phase.Phase)
 		// otherClaim records a claim on the same issue and role under another daemon's project token.
 		otherClaim func(state string, lastStart int64)
-		// suspendLeaving queues a transition's suspend, which ends phase leaves.
-		suspendLeaving func(leaves phase.Phase)
 	}
 	for _, tc := range []struct {
 		name  string
@@ -367,10 +435,6 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 			s.otherClaim("working", 0)
 			s.enqueue("suspend", 1)
 		}, want: 1},
-		{name: "a live claim with only a suspend of the phase the child is back in queued", setup: func(s seed) {
-			s.claim("working", 1, 0)
-			s.suspendLeaving(phase.Testing)
-		}, want: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -452,9 +516,6 @@ func TestPromotionStartsAChildUnlessItsWorkerIsStartedForTheRun(t *testing.T) {
 						t.Fatal(err)
 					}
 					putClaim(other, "otherlegion", state, 1, lastStart)
-				},
-				suspendLeaving: func(leaves phase.Phase) {
-					enqueueRequest(record.SuperviseRequest{Op: "suspend", Tree: root.Key, Role: claim.RoleTester, Generation: child.Generation, Leaves: leaves})
 				},
 			})
 			// resumes counts the starts that carry the phase's task marked as its resume task.
@@ -778,8 +839,8 @@ func TestReconcileFillsRaisedCapInRankOrderAndIsIdempotent(t *testing.T) {
 	})
 	assertWaiting(t, pool, []string{"LEGION-C"})
 	firstEffects := effects(t, pool)
-	if len(firstEffects) != 4 {
-		t.Fatalf("effects after raised-cap reconcile = %#v, want two status and two supervise rows", firstEffects)
+	if len(firstEffects) != 6 {
+		t.Fatalf("effects after raised-cap reconcile = %#v, want two status, two issue_branch and two supervise rows", firstEffects)
 	}
 
 	reconcile(t, pool, admission, summaries)

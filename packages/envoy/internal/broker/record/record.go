@@ -48,11 +48,29 @@ func ValidSlot(slot string) bool {
 	return slotPattern.MatchString(slot)
 }
 
+// ValidService reports whether service may name a service: lowercase letters, digits and hyphens,
+// at most 64, the form a machine login's launcher_credential detail names its service in.
+func ValidService(service string) bool {
+	return servicePattern.MatchString(service)
+}
+
 // CanonicalLogin lowercases and trims the name Dispatch signs a person in with, their email (a
 // record created before people were named by email keeps the GitHub login it was decided under).
 // Every login comparison in the module goes through this form on both sides.
 func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
+}
+
+// HumanActor is the audit actor of a change a person made in Dispatch: "human:" and their
+// canonical login, the person Dispatch's server vouches for from its own signed-in session.
+func HumanActor(login string) string {
+	return "human:" + CanonicalLogin(login)
+}
+
+// LauncherActor is the audit actor of a change a machine login's own launcher proof made:
+// "launcher:" and that launcher credential's id, whose own row names its operator.
+func LauncherActor(credentialID string) string {
+	return "launcher:" + credentialID
 }
 
 // AnyoneApprover is the approver of a record anyone signed in to Dispatch may decide: a request
@@ -86,6 +104,15 @@ type RequestObject struct {
 	Details    []AuthorizationDetail
 	Reason     string
 	LoginHint  string // machine logins only
+}
+
+// Service is the service a machine login is for: its one launcher_credential detail's service, ""
+// for a person's machine and for every request for agent secrets.
+func (o RequestObject) Service() string {
+	if len(o.Details) == 1 && o.Details[0].Type == KindLauncherCredential {
+		return o.Details[0].Service
+	}
+	return ""
 }
 
 // requestClaims is the JSON payload of a credential-request object (RFC 9101 §4 shape, RAR
@@ -194,7 +221,7 @@ func validateDetails(details []AuthorizationDetail) error {
 	if len(d.Identifier) > 253 || !hostnamePattern.MatchString(d.Identifier) {
 		return errors.New("launcher_credential identifier is not a valid hostname")
 	}
-	if d.Service != "" && !servicePattern.MatchString(d.Service) {
+	if d.Service != "" && !ValidService(d.Service) {
 		return errors.New("launcher_credential service does not match [a-z0-9-]{1,64}")
 	}
 	return nil
@@ -370,28 +397,36 @@ func ParseBody(canonical string) (Body, error) {
 }
 
 // ApproverLogin canonicalizes login and returns it when it may decide this record, a record of
-// kind, and ErrNotApprover otherwise (MayDecide). A record's approver is resolved when it is
-// created — a secret's owner, AnyoneApprover for a shared human-tier secret, or a machine login's
-// login_hint — so this one comparison is every decision's and every chain re-check's approver
-// rule, and the login it returns is the one a decision records.
-func (b Body) ApproverLogin(kind, login string) (string, error) {
+// kind whose verified request object names service (RequestObject.Service), and ErrNotApprover
+// otherwise (MayDecide). A record's approver is resolved when it is created — a secret's owner,
+// AnyoneApprover for a shared human-tier secret, a person's machine login's login_hint, or
+// AnyoneApprover for a service's login — and a service's login is decided by the service its
+// signed request names whatever approver its record stored, so this one comparison is every
+// decision's and every chain re-check's approver rule, and the login it returns is the one a
+// decision records.
+func (b Body) ApproverLogin(kind, service, login string) (string, error) {
 	login = CanonicalLogin(login)
-	if !MayDecide(kind, b.Approver, login) {
+	if !MayDecide(kind, b.Approver, service, login) {
 		return "", ErrNotApprover
 	}
 	return login, nil
 }
 
-// MayDecide reports whether login may decide a record of kind whose approver is approver: the
-// person the approver names, or, for an agent_secret record whose approver is AnyoneApprover, any
-// login at all. No login is AnyoneApprover itself. A machine login's approver is the person whose
-// machine it becomes, so AnyoneApprover there admits no one, whatever binary opened the record.
-func MayDecide(kind, approver, login string) bool {
+// MayDecide reports whether login may decide a record of kind whose approver is approver and whose
+// signed request names service: for a machine login that names a service, any login at all, since
+// its credential acts as that service and as no person; for an agent_secret record whose approver
+// is AnyoneApprover, any login; and otherwise the person the approver names. No login is
+// AnyoneApprover itself, and no empty login decides anything. A person's machine login's approver
+// is the person whose machine it becomes, so AnyoneApprover there admits no one, whatever binary
+// opened the record.
+func MayDecide(kind, approver, service, login string) bool {
 	login, approver = CanonicalLogin(login), CanonicalLogin(approver)
-	if login == "" || login == AnyoneApprover {
+	switch {
+	case login == "" || login == AnyoneApprover:
 		return false
-	}
-	if approver == AnyoneApprover && kind == KindAgentSecret {
+	case kind == KindLauncherCredential && service != "":
+		return true
+	case kind == KindAgentSecret && approver == AnyoneApprover:
 		return true
 	}
 	return login == approver

@@ -73,18 +73,47 @@ func (c *brokerCounters) holdPendingPolls(gate chan struct{}) {
 	c.pendingPoll = gate
 }
 
+// fakePending are fakeBroker's never-resolving pending requests, keyed by the name that asks for
+// each: its request id, its record, and the approver its answers carry. PENDING_UNNAMED's carry
+// none, as a broker from before the approver field answers.
+var fakePending = map[string]struct{ requestID, recordID, approver string }{
+	"PENDING_ME":      {"req-pending", "rec-pending-1", "ada@example.com"},
+	"PENDING_ANYONE":  {"req-pending-anyone", "rec-pending-anyone", record.AnyoneApprover},
+	"PENDING_UNNAMED": {"req-pending-unnamed", "rec-pending-unnamed", ""},
+}
+
+// pendingAnswer is fakeBroker's answer for a fakePending entry, request fields included or not.
+func pendingAnswer(name string, request bool) map[string]any {
+	p := fakePending[name]
+	answer := map[string]any{"state": "pending", "grant_id": nil, "record_id": p.recordID}
+	if p.approver != "" {
+		answer["approver"] = p.approver
+	}
+	if request {
+		answer["request_id"] = p.requestID
+		answer["secrets"] = []map[string]string{{"name": name, "decision": "approval"}}
+	} else {
+		answer["decided_at"], answer["decision"] = nil, nil
+	}
+	return answer
+}
+
+// approvedStatusJSON is fakeBroker's GET /v1/requests/req-approved, byte for byte: a request a
+// person approved, which keeps the record and the approver it waited on, as the broker answers it.
+const approvedStatusJSON = `{"state":"granted","grant_id":"grant-approved","record_id":"rec-approved","approver":"ada@example.com","decided_at":"2026-10-09T12:00:00Z","decision":{"by":"ada@example.com","at":"2026-10-09T12:00:00Z"}}`
+
 // fakeBroker serves just enough of the broker's HTTP API for the exec-form and --json
 // tests: POST /v1/requests decodes the signed request object CreateRequest posts (verifying it
 // with record.VerifyRequestObject against the fake's own URL as audience — a real, non-stubbed
 // check, since the wire shape under test IS that signed object) and routes on its first
-// authorization_detail's identifier to a canned granted/pending/denied/unreleased/no-trailing-
-// newline response, GET /v1/requests/{id} answers the pending case's own request id with the
-// same never-resolving pending state (and 404s any other id, since a granted-or-denied-
-// immediately response must never be polled), POST /v1/grants/{id}/values releases one canned
-// value (or, for the unreleased case, none at all), and GET /v1/enrollments/self echoes
-// testEnrollmentID. It does not verify the outer Proof header at all — proof.Verifier's own
-// behavior is covered by internal/broker/proof and internal/broker/api's test suites, not this
-// package's.
+// authorization_detail's identifier to a canned granted/pending/approved/denied/unreleased/no-
+// trailing-newline response, GET /v1/requests/{id} answers each fakePending request's own id with
+// the same never-resolving pending state and req-approved with approvedStatusJSON (and 404s any
+// other id, since a granted-or-denied-immediately response must never be polled), POST
+// /v1/grants/{id}/values releases one canned value (or, for the unreleased case, none at all),
+// and GET /v1/enrollments/self echoes testEnrollmentID. It does not verify the outer Proof header
+// at all — proof.Verifier's own behavior is covered by internal/broker/proof and
+// internal/broker/api's test suites, not this package's.
 func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	t.Helper()
 	counters := &brokerCounters{}
@@ -115,39 +144,52 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 			writeJSON(w, map[string]any{
 				"request_id": "req-granted", "state": "granted",
 				"secrets":  []map[string]string{{"name": name, "decision": "automatic"}},
-				"grant_id": "grant-granted", "record_id": nil,
+				"grant_id": "grant-granted", "record_id": nil, "approver": nil,
 			})
-		case "PENDING_ME":
+		case "PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED":
+			writeJSON(w, pendingAnswer(name, true))
+		case "APPROVED_ME":
 			writeJSON(w, map[string]any{
-				"request_id": "req-pending", "state": "pending",
+				"request_id": "req-approved", "state": "granted",
 				"secrets":  []map[string]string{{"name": name, "decision": "approval"}},
-				"grant_id": nil, "record_id": "rec-pending-1",
+				"grant_id": "grant-approved", "record_id": "rec-approved", "approver": "ada@example.com",
 			})
 		case "DENY_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-denied", "state": "denied",
 				"secrets":  []map[string]string{{"name": name, "decision": "deny"}},
-				"grant_id": nil, "record_id": nil,
+				"grant_id": nil, "record_id": nil, "approver": nil,
 			})
 		case "UNRELEASED_ME":
 			writeJSON(w, map[string]any{
 				"request_id": "req-unreleased", "state": "granted",
 				"secrets":  []map[string]string{{"name": name, "decision": "automatic"}},
-				"grant_id": "grant-unreleased", "record_id": nil,
+				"grant_id": "grant-unreleased", "record_id": nil, "approver": nil,
 			})
 		case "NONEWLINE_ME":
 			// Written with http.ResponseWriter.Write directly, with NO trailing newline, unlike
 			// every other case (which goes through writeJSON's json.Encoder, always "\n"
 			// terminated) — this is the fixture for the writeVerbatim byte-exact test.
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic"}],"grant_id":"grant-nonewline","record_id":null}`))
+			_, _ = w.Write([]byte(`{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic"}],"grant_id":"grant-nonewline","record_id":null,"approver":null}`))
 		default:
 			w.WriteHeader(http.StatusBadRequest)
 		}
 	})
 	mux.HandleFunc("GET /v1/requests/{id}", func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&counters.getRequest, 1)
-		if r.PathValue("id") != "req-pending" {
+		if r.PathValue("id") == "req-approved" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(approvedStatusJSON))
+			return
+		}
+		name := ""
+		for n, p := range fakePending {
+			if p.requestID == r.PathValue("id") {
+				name = n
+			}
+		}
+		if name == "" {
 			// A request the fake decided immediately (granted or denied) must never be polled;
 			// failing loudly here (rather than serving it) is the reuse-transparency test's proof
 			// that cmdExec does not enter its pending-wait loop for an already-decided response.
@@ -164,7 +206,7 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 				return
 			}
 		}
-		writeJSON(w, map[string]any{"state": "pending", "grant_id": nil, "record_id": "rec-pending-1", "decided_at": nil, "decision": nil})
+		writeJSON(w, pendingAnswer(name, false))
 	})
 	mux.HandleFunc("POST /v1/grants/grant-granted/values", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
@@ -321,79 +363,155 @@ func TestExecFormGrantRunsChildWithValueInEnvironment(t *testing.T) {
 	}
 }
 
+// pendingSentences is the sentence each fakePending request's wait names whom it waits on and where
+// they decide it with, keyed by the name that asks for it and then by AGENT_SECRETS_APPROVE_URL:
+// unset (the Inbox), or the record's page under https://dispatch.example/. PENDING_UNNAMED's
+// broker names no approver, so its sentence says so.
+var pendingSentences = map[string]map[string]string{
+	"PENDING_ME": {
+		"":                          "waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox",
+		"https://dispatch.example/": "waiting for ada@example.com to approve it in Dispatch: https://dispatch.example/credentials/rec-pending-1",
+	},
+	"PENDING_ANYONE": {
+		"":                          "waiting for anyone signed in to Dispatch to approve it under Credential requests in their Inbox",
+		"https://dispatch.example/": "waiting for anyone signed in to Dispatch to approve it: https://dispatch.example/credentials/rec-pending-anyone",
+	},
+	"PENDING_UNNAMED": {
+		"":                          "waiting for approval under Credential requests in the Dispatch Inbox; the broker does not say whose",
+		"https://dispatch.example/": "waiting for approval in Dispatch: https://dispatch.example/credentials/rec-pending-unnamed; the broker does not say whose",
+	},
+}
+
 // TestExecFormPendingExitsSeventyFiveWithNoChild also pins what the wait says, and that it says it
-// before it waits: the request id and the bound, and where to decide it — the record's Dispatch
-// page under AGENT_SECRETS_APPROVE_URL, or the Inbox when that is unset. The fake broker holds the
-// first status poll until the test has read those two lines from the command's stderr, so lines
-// printed only once the wait ends never arrive in time.
+// before it waits: the request id and the bound, then whom it waits on and where they decide it —
+// the approver the broker names (a person, or anyone signed in to Dispatch), and the record's
+// Dispatch page under AGENT_SECRETS_APPROVE_URL, or the Inbox when that is unset. The fake broker
+// holds the first status poll until the test has read those two lines from the command's stderr,
+// so lines printed only once the wait ends never arrive in time.
 func TestExecFormPendingExitsSeventyFiveWithNoChild(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, counters := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	for _, tc := range []struct {
-		name, approveURL, where string
-	}{
-		{"inbox", "", "agent-secrets: approve or deny it under Credential requests in the Dispatch Inbox\n"},
-		{"record page", "https://dispatch.example/", "agent-secrets: approve or deny it at https://dispatch.example/credentials/rec-pending-1\n"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			announced := make(chan struct{})
-			counters.holdPendingPolls(announced)
-			released := false
-			release := func() {
-				if !released {
-					released = true
-					close(announced)
+	for _, name := range []string{"PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED"} {
+		for approveURL, sentence := range pendingSentences[name] {
+			t.Run(name+" "+approveURL, func(t *testing.T) {
+				requestID := fakePending[name].requestID
+				announced := make(chan struct{})
+				counters.holdPendingPolls(announced)
+				released := false
+				release := func() {
+					if !released {
+						released = true
+						close(announced)
+					}
 				}
-			}
-			defer release()
+				defer release()
 
-			cmd := exec.Command(binary, "PENDING_ME", "--wait", "200ms", "--", "sh", "-c", "echo ran-the-child")
-			cmd.Env = append(os.Environ(), "AGENT_SECRETS_URL="+broker.URL, "AGENT_SECRETS_KEY_DIR="+keyDir,
-				"AGENT_SECRETS_APPROVE_URL="+tc.approveURL)
-			var stdout strings.Builder
-			cmd.Stdout = &stdout
-			pipe, err := cmd.StderrPipe()
-			if err != nil {
-				t.Fatalf("stderr pipe: %v", err)
-			}
-			if err := cmd.Start(); err != nil {
-				t.Fatalf("start agent-secrets: %v", err)
-			}
-			stderr := bufio.NewReader(pipe)
-			lines := make(chan string, 1)
-			go func() {
-				first, _ := stderr.ReadString('\n')
-				second, _ := stderr.ReadString('\n')
-				lines <- first + second
-			}()
-			want := "agent-secrets: request req-pending is waiting for approval; waiting up to 200ms\n" + tc.where
-			select {
-			case got := <-lines:
-				if got != want {
-					t.Errorf("stderr began %q, want %q", got, want)
+				cmd := exec.Command(binary, name, "--wait", "200ms", "--", "sh", "-c", "echo ran-the-child")
+				cmd.Env = append(os.Environ(), "AGENT_SECRETS_URL="+broker.URL, "AGENT_SECRETS_KEY_DIR="+keyDir,
+					"AGENT_SECRETS_APPROVE_URL="+approveURL)
+				var stdout strings.Builder
+				cmd.Stdout = &stdout
+				pipe, err := cmd.StderrPipe()
+				if err != nil {
+					t.Fatalf("stderr pipe: %v", err)
 				}
-			case <-time.After(10 * time.Second):
+				if err := cmd.Start(); err != nil {
+					t.Fatalf("start agent-secrets: %v", err)
+				}
+				stderr := bufio.NewReader(pipe)
+				lines := make(chan string, 1)
+				go func() {
+					first, _ := stderr.ReadString('\n')
+					second, _ := stderr.ReadString('\n')
+					lines <- first + second
+				}()
+				want := "agent-secrets: request " + requestID + " is waiting for approval; waiting up to 200ms\n" +
+					"agent-secrets: " + sentence + "\n"
+				select {
+				case got := <-lines:
+					if got != want {
+						t.Errorf("stderr began %q, want %q", got, want)
+					}
+				case <-time.After(10 * time.Second):
+					release()
+					t.Errorf("stderr said nothing within 10s while the status poll was held, and %q once it returned; want %q before the wait",
+						<-lines, want)
+				}
 				release()
-				t.Errorf("stderr said nothing within 10s while the status poll was held, and %q once it returned; want %q before the wait",
-					<-lines, want)
-			}
-			release()
-			rest, _ := io.ReadAll(stderr)
-			err = cmd.Wait()
-			var exitErr *exec.ExitError
-			if !errors.As(err, &exitErr) || exitErr.ExitCode() != exitPending {
-				t.Fatalf("exit = %v, want %d (pending): stdout=%q stderr=%q", err, exitPending, stdout.String(), rest)
-			}
-			if strings.Contains(stdout.String(), "ran-the-child") {
-				t.Fatalf("child ran while request was still pending: stdout=%q", stdout.String())
-			}
-			if !strings.Contains(string(rest), "agent-secrets status req-pending") {
-				t.Fatalf("stderr = %q, want the request id and the status command to check it", rest)
-			}
-		})
+				rest, _ := io.ReadAll(stderr)
+				err = cmd.Wait()
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) || exitErr.ExitCode() != exitPending {
+					t.Fatalf("exit = %v, want %d (pending): stdout=%q stderr=%q", err, exitPending, stdout.String(), rest)
+				}
+				if strings.Contains(stdout.String(), "ran-the-child") {
+					t.Fatalf("child ran while request was still pending: stdout=%q", stdout.String())
+				}
+				if !strings.Contains(string(rest), "agent-secrets status "+requestID) {
+					t.Fatalf("stderr = %q, want the request id and the status command to check it", rest)
+				}
+			})
+		}
+	}
+}
+
+// TestRequestAndStatusNameWhomAPendingRequestWaitsOn pins the text forms of request and status for
+// a pending request: after its id and state, the same sentence the exec form's wait prints, naming
+// the approver the broker names and where they decide it; request exits 75 and status 0, as
+// before.
+func TestRequestAndStatusNameWhomAPendingRequestWaitsOn(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	keyDir := newKeyDir(t)
+
+	for _, name := range []string{"PENDING_ME", "PENDING_ANYONE", "PENDING_UNNAMED"} {
+		for approveURL, sentence := range pendingSentences[name] {
+			t.Run(name+" "+approveURL, func(t *testing.T) {
+				env := []string{"AGENT_SECRETS_APPROVE_URL=" + approveURL}
+				requestID := fakePending[name].requestID
+				stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, env, "request", name)
+				if want := "request_id: " + requestID + "\nstate: pending\n" + sentence + "\n"; exit != exitPending || stdout != want {
+					t.Errorf("request %s = exit %d stdout %q (stderr %q); want exit %d stdout %q", name, exit, stdout, stderr, exitPending, want)
+				}
+				stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir, env, "status", requestID)
+				if want := "state: pending\n" + sentence + "\n"; exit != 0 || stdout != want {
+					t.Errorf("status %s = exit %d stdout %q (stderr %q); want exit 0 stdout %q", requestID, exit, stdout, stderr, want)
+				}
+			})
+		}
+	}
+}
+
+// TestADecidedRequestSaysNothingOfWaiting pins that only a pending request prints the waiting
+// line: a request a person approved keeps its record and approver on the broker's answers, and
+// request and status still print no `waiting for …` line for it, under any
+// AGENT_SECRETS_APPROVE_URL. status --json prints the broker's answer byte for byte, approver
+// included.
+func TestADecidedRequestSaysNothingOfWaiting(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	broker, _ := fakeBroker(t)
+	defer broker.Close()
+	keyDir := newKeyDir(t)
+
+	for _, approveURL := range []string{"", "https://dispatch.example/"} {
+		env := []string{"AGENT_SECRETS_APPROVE_URL=" + approveURL}
+		stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, env, "request", "APPROVED_ME")
+		if want := "request_id: req-approved\nstate: granted\n"; exit != 0 || stdout != want {
+			t.Errorf("request APPROVED_ME (approve URL %q) = exit %d stdout %q (stderr %q); want exit 0 stdout %q", approveURL, exit, stdout, stderr, want)
+		}
+		stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir, env, "status", "req-approved")
+		if want := "state: granted\ngrant_id: grant-approved\ndecided_by: ada@example.com\n"; exit != 0 || stdout != want {
+			t.Errorf("status req-approved (approve URL %q) = exit %d stdout %q (stderr %q); want exit 0 stdout %q", approveURL, exit, stdout, stderr, want)
+		}
+	}
+
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "status", "req-approved", "--json")
+	if exit != 0 || stdout != approvedStatusJSON {
+		t.Errorf("status req-approved --json = exit %d stdout %q (stderr %q); want exit 0 and the broker's answer byte for byte %q", exit, stdout, stderr, approvedStatusJSON)
 	}
 }
 
@@ -757,7 +875,7 @@ func TestRequestJSONPrintsExactlyOneContractObject(t *testing.T) {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
 	obj := oneJSONObject(t, stdout)
-	want := map[string]bool{"request_id": true, "state": true, "secrets": true, "grant_id": true, "record_id": true}
+	want := map[string]bool{"request_id": true, "state": true, "secrets": true, "grant_id": true, "record_id": true, "approver": true}
 	if got := keySet(obj); !mapsEqual(got, want) {
 		t.Fatalf("keys = %v, want %v", got, want)
 	}
@@ -775,7 +893,7 @@ func TestRequestJSONIsByteIdenticalToTheBrokerResponse(t *testing.T) {
 	defer broker.Close()
 	keyDir := newKeyDir(t)
 
-	const wantExact = `{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic"}],"grant_id":"grant-nonewline","record_id":null}`
+	const wantExact = `{"request_id":"req-nonewline","state":"granted","secrets":[{"name":"NONEWLINE_ME","decision":"automatic"}],"grant_id":"grant-nonewline","record_id":null,"approver":null}`
 	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, nil, "request", "NONEWLINE_ME", "--json")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
@@ -849,10 +967,12 @@ func TestRequestSignsARequestObject(t *testing.T) {
 	audience = srv.URL
 	mu.Unlock()
 
-	// OMP_SESSION_ID is cleared: this test's own process may run inside an omp session, whose id
-	// the client would otherwise forward as session_id (the behavior
-	// TestRequestAndExecFormSendOMPSessionIDAsSessionID pins).
-	stdout, stderr, exit := runAgentSecrets(t, binary, srv.URL, keyDir, []string{"OMP_SESSION_ID="},
+	// Every one of requestSessionID's three env vars is cleared: this test's own process may run
+	// inside an omp session, whose id the client would otherwise forward as session_id (the
+	// behavior TestRequestAndExecFormSendSessionIDWithFallbackOrder pins), and a Claude Code or
+	// Envoy-registered session sets the other two the same way.
+	stdout, stderr, exit := runAgentSecrets(t, binary, srv.URL, keyDir,
+		[]string{"OMP_SESSION_ID=", "ENVOY_SESSION_ID=", "CLAUDE_CODE_SESSION_ID="},
 		"request", "GRANT_ME", "--reason", "need it for the build")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
@@ -874,8 +994,8 @@ func TestRequestSignsARequestObject(t *testing.T) {
 	}
 }
 
-// fakeLoginHelper serves just the launcher-login socket ops (login, login-status) a bare unix
-// listener needs to drive cmdLauncher's own poll loop, letting each test's states slice fully
+// fakeLoginHelper serves just the machine-login socket ops (login, login-status) a bare unix
+// listener needs to drive cmdMachineLogin's own poll loop, letting each test's states slice fully
 // drive the poll loop through however many pending answers it wants before a terminal state.
 func fakeLoginHelper(t *testing.T, code string, states []string) string {
 	t.Helper()
@@ -915,15 +1035,15 @@ func fakeLoginHelper(t *testing.T, code string, states []string) string {
 	return sock
 }
 
-// TestLauncherLoginPrintsTheCodeAndWaits pins the socket-based launcher login: it prints the
+// TestMachineLoginPrintsTheCodeAndWaits pins the socket-based machine login: it prints the
 // confirmation code and, since AGENT_SECRETS_APPROVE_URL is unset, the generic Dispatch-page
 // line, then polls login-status through two pending answers before exiting 0 on "issued".
-func TestLauncherLoginPrintsTheCodeAndWaits(t *testing.T) {
+func TestMachineLoginPrintsTheCodeAndWaits(t *testing.T) {
 	t.Setenv("AGENT_SECRETS_APPROVE_URL", "")
 	binary := buildAgentSecrets(t)
 	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"pending", "pending", "issued"})
 	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
-		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login")
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -933,15 +1053,15 @@ func TestLauncherLoginPrintsTheCodeAndWaits(t *testing.T) {
 	}
 }
 
-// TestLauncherLoginPrintsTheDispatchURLWhenApproveURLIsSet pins the other half of the two-line
+// TestMachineLoginPrintsTheDispatchURLWhenApproveURLIsSet pins the other half of the two-line
 // contract: with AGENT_SECRETS_APPROVE_URL set, the second line names it instead of the generic
 // "Dispatch credential page" fallback.
-func TestLauncherLoginPrintsTheDispatchURLWhenApproveURLIsSet(t *testing.T) {
+func TestMachineLoginPrintsTheDispatchURLWhenApproveURLIsSet(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"issued"})
 	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
 		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock, "AGENT_SECRETS_APPROVE_URL=https://dispatch.example/"},
-		"launcher", "login")
+		"machine", "login")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -951,13 +1071,13 @@ func TestLauncherLoginPrintsTheDispatchURLWhenApproveURLIsSet(t *testing.T) {
 	}
 }
 
-// TestLauncherLoginExitsOneOnDenied pins the terminal-failure half of the poll loop: a
+// TestMachineLoginExitsOneOnDenied pins the terminal-failure half of the poll loop: a
 // login-status answer of "denied" exits 1 and names the state, never retrying past it.
-func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
+func TestMachineLoginExitsOneOnDenied(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	sock := fakeLoginHelper(t, "KQ7M-X4PZ", []string{"denied"})
 	_, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
-		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login")
+		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login")
 	if exit != 1 {
 		t.Fatalf("exit = %d, want 1: stderr=%q", exit, stderr)
 	}
@@ -966,7 +1086,7 @@ func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
 	}
 }
 
-// TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld pins login-status's read-only,
+// TestMachineLoginStatusExitsZeroOnlyWhileACredentialIsHeld pins login-status's read-only,
 // single-shot contract: it prints a bare state on stdout and its exit code is a
 // liveness probe — 0, printing "issued", while the helper holds a launcher credential, and 1 for
 // every login state with none, "none" when login was never run (empty LoginState) — with a single
@@ -977,10 +1097,10 @@ func TestLauncherLoginExitsOneOnDenied(t *testing.T) {
 // no credential and no login in flight (never logged in, denied, or expired, which is also what a
 // credential the broker rejected becomes) says on stderr to run the login again, and a login in
 // flight outranks a refused credential.
-func TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
+func TestMachineLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	const held = "the helper still holds the launcher credential an earlier login issued"
-	const prefix = "agent-secrets launcher login-status: "
+	const prefix = "agent-secrets machine login-status: "
 	const unknown = prefix + "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)\n"
 	expiresAt := time.Now().Add(50 * time.Hour).UTC().Format(time.RFC3339)
 	for _, tc := range []struct {
@@ -1008,11 +1128,11 @@ func TestLauncherLoginStatusExitsZeroOnlyWhileACredentialIsHeld(t *testing.T) {
 			tc.resp.OK, tc.resp.Code = true, "KQ7M-X4PZ"
 			sock, reqs := fakeHelper(t, tc.resp)
 			stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
-				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
+				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login-status")
 			if exit != tc.exit || stdout != tc.want {
 				t.Fatalf("exit = %d stdout = %q, want exit %d stdout %q (stderr=%q)", exit, stdout, tc.exit, tc.want, stderr)
 			}
-			if got := strings.Contains(stderr, "run: agent-secrets launcher login"); got != tc.remedy {
+			if got := strings.Contains(stderr, "run: agent-secrets machine login"); got != tc.remedy {
 				t.Fatalf("stderr = %q, want the login remedy: %v", stderr, tc.remedy)
 			}
 			if tc.stderr != "" && stderr != tc.stderr {
@@ -1034,7 +1154,7 @@ func TestCredentialExpiryLine(t *testing.T) {
 		{"2026-10-10T11:59:30Z", "the launcher credential expires at 2026-10-10T11:59:30Z (in 6d23h59m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
 		{"2026-10-03T15:05:00Z", "the launcher credential expires at 2026-10-03T15:05:00Z (in 3h5m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
 		{"2026-10-03T12:00:40Z", "the launcher credential expires at 2026-10-03T12:00:40Z (in 0m); the broker has no renewal, so a new machine login a human approves must replace it before then"},
-		{"2026-10-03T12:00:00Z", "the launcher credential expired at 2026-10-03T12:00:00Z; run: agent-secrets launcher login"},
+		{"2026-10-03T12:00:00Z", "the launcher credential expired at 2026-10-03T12:00:00Z; run: agent-secrets machine login"},
 		{"", "the helper does not know when the launcher credential expires (it, or its broker, is older than this client)"},
 		{"next tuesday", `the helper reported an unreadable launcher credential expiry "next tuesday"`},
 	} {
@@ -1105,17 +1225,23 @@ func TestEnrollHelperFlagValidation(t *testing.T) {
 	}
 }
 
-// TestRequestAndExecFormSendOMPSessionIDAsSessionID is the regression for the review's finding
+// TestRequestAndExecFormSendSessionIDWithFallbackOrder is the regression for the review's finding
 // I3: POST /v1/requests carries session_id so the broker can wake this host session directly
 // once its request is decided (host enrollments carry no session_id of their own) — both call
-// sites, cmdRequest and cmdExec, must forward OMP_SESSION_ID rather than leaving it "".
-func TestRequestAndExecFormSendOMPSessionIDAsSessionID(t *testing.T) {
+// sites, cmdRequest and cmdExec, must forward requestSessionID()'s answer rather than leaving it
+// "" — and for LEGION-587's fallback order: with OMP_SESSION_ID unset, the request form still
+// sends ENVOY_SESSION_ID. requestSessionID's own three-way fallback order is pinned at the unit
+// level by TestRequestSessionIDFallbackOrder, below; this test is the proof that both real call
+// sites actually call it rather than os.Getenv("OMP_SESSION_ID") directly.
+func TestRequestAndExecFormSendSessionIDWithFallbackOrder(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	broker, counters := fakeBroker(t)
 	defer broker.Close()
 	keyDir := newKeyDir(t)
+	clearFallbacks := []string{"ENVOY_SESSION_ID=", "CLAUDE_CODE_SESSION_ID="}
 
-	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir, []string{"OMP_SESSION_ID=sess-request-123"}, "request", "GRANT_ME")
+	stdout, stderr, exit := runAgentSecrets(t, binary, broker.URL, keyDir,
+		append([]string{"OMP_SESSION_ID=sess-request-123"}, clearFallbacks...), "request", "GRANT_ME")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -1123,11 +1249,52 @@ func TestRequestAndExecFormSendOMPSessionIDAsSessionID(t *testing.T) {
 		t.Fatalf("request form session_id = %q, want %q", got, "sess-request-123")
 	}
 
-	stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir, []string{"OMP_SESSION_ID=sess-exec-456"}, "GRANT_ME", "--", "true")
+	stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir,
+		append([]string{"OMP_SESSION_ID=sess-exec-456"}, clearFallbacks...), "GRANT_ME", "--", "true")
 	if exit != 0 {
 		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
 	if got := counters.sessionID(); got != "sess-exec-456" {
 		t.Fatalf("exec form session_id = %q, want %q", got, "sess-exec-456")
+	}
+
+	// OMP_SESSION_ID unset: the request form falls back to ENVOY_SESSION_ID.
+	stdout, stderr, exit = runAgentSecrets(t, binary, broker.URL, keyDir,
+		[]string{"OMP_SESSION_ID=", "ENVOY_SESSION_ID=sess-envoy-789", "CLAUDE_CODE_SESSION_ID="},
+		"request", "GRANT_ME")
+	if exit != 0 {
+		t.Fatalf("exit = %d, want 0: stdout=%q stderr=%q", exit, stdout, stderr)
+	}
+	if got := counters.sessionID(); got != "sess-envoy-789" {
+		t.Fatalf("request form fallback session_id = %q, want %q", got, "sess-envoy-789")
+	}
+}
+
+// TestRequestSessionIDFallbackOrder pins requestSessionID's own fallback order (LEGION-587):
+// OMP_SESSION_ID first, then ENVOY_SESSION_ID, then CLAUDE_CODE_SESSION_ID, empty when none is
+// set. This process's own environment may already carry one of the three (a Pi session sets its
+// own OMP_SESSION_ID), so every case sets all three explicitly rather than relying on any being
+// unset already.
+func TestRequestSessionIDFallbackOrder(t *testing.T) {
+	cases := []struct {
+		name               string
+		omp, envoy, claude string
+		want               string
+	}{
+		{"OMP_SESSION_ID alone", "sess-omp", "", "", "sess-omp"},
+		{"OMP_SESSION_ID wins over the others", "sess-omp", "sess-envoy", "sess-claude", "sess-omp"},
+		{"ENVOY_SESSION_ID when OMP_SESSION_ID is unset", "", "sess-envoy", "sess-claude", "sess-envoy"},
+		{"CLAUDE_CODE_SESSION_ID when the first two are unset", "", "", "sess-claude", "sess-claude"},
+		{"empty when none is set", "", "", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("OMP_SESSION_ID", c.omp)
+			t.Setenv("ENVOY_SESSION_ID", c.envoy)
+			t.Setenv("CLAUDE_CODE_SESSION_ID", c.claude)
+			if got := requestSessionID(); got != c.want {
+				t.Fatalf("requestSessionID() = %q, want %q", got, c.want)
+			}
+		})
 	}
 }

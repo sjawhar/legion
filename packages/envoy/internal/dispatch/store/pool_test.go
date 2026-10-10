@@ -200,6 +200,51 @@ func TestPoolRefusesASecondConnectionWhileOneIsHeld(t *testing.T) {
 	}
 }
 
+// Reads a caller runs side by side each take one connection: each read's context carries a hold
+// mark of its own, so one read's open cursor does not refuse the other, while each is still
+// refused a second connection of its own, and a caller already holding one is refused them all.
+func TestConcurrentReadsEachHoldOneConnection(t *testing.T) {
+	database := openTestStore(t)
+	ctx := WithTransactionTracking(context.Background())
+
+	first, err := ForConcurrentRead(ctx)
+	if err != nil {
+		t.Fatalf("first read's context: %v", err)
+	}
+	second, err := ForConcurrentRead(ctx)
+	if err != nil {
+		t.Fatalf("second read's context: %v", err)
+	}
+	rows, err := database.Pool.Query(first, "select generate_series(1, 2)")
+	if err != nil {
+		t.Fatalf("first read's cursor: %v", err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		t.Fatalf("first read's first row: %v", rows.Err())
+	}
+	var one int
+	if err := database.Pool.QueryRow(second, "select 1").Scan(&one); err != nil {
+		t.Fatalf("second read beside the first's open cursor: %v, want it served", err)
+	}
+	if err := database.Pool.QueryRow(first, "select 1").Scan(&one); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("a second connection under the first read's cursor: %v, want ErrNestedAcquire", err)
+	}
+	if err := database.Pool.QueryRow(ctx, "select 1").Scan(&one); err != nil {
+		t.Fatalf("the caller's own read beside its reads: %v, want it served", err)
+	}
+	rows.Close()
+
+	tx, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := ForConcurrentRead(ctx); !errors.Is(err, ErrNestedAcquire) {
+		t.Fatalf("concurrent reads under an open transaction: %v, want ErrNestedAcquire", err)
+	}
+}
+
 // A refusal is keyed and logged by the call site that asked for the connection: one caller
 // tripping the guard in a loop logs its stack once, and another caller still logs its own.
 // Leaving Begin's guard to BeginTx, instead of to the unexported begin both entry points share,

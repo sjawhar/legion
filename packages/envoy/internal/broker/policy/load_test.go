@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -252,25 +253,48 @@ func TestLoadServesASecretOnlyWhileAVersionIsCurrent(t *testing.T) {
 	}
 }
 
+// TestHasCurrentVersionIsTheRuleLoadServesBy pins the exported rule both the broker's load and the
+// agent-secrets CLI's VALUE column read: a secret has a value while one of its versions carries
+// AWSCURRENT, and not otherwise.
+func TestHasCurrentVersionIsTheRuleLoadServesBy(t *testing.T) {
+	for _, tc := range []struct {
+		stages map[string][]string
+		want   bool
+	}{
+		{onlyCurrent, true},
+		{map[string][]string{"v1": {"AWSPREVIOUS"}, "v2": {"AWSCURRENT"}, "v3": {"AWSPENDING"}}, true},
+		{nil, false},
+		{map[string][]string{}, false},
+		{map[string][]string{"v1": {"AWSPENDING"}}, false},
+		{map[string][]string{"v1": {"AWSPREVIOUS"}}, false},
+	} {
+		if got := policy.HasCurrentVersion(tc.stages); got != tc.want {
+			t.Fatalf("HasCurrentVersion(%v) = %v, want %v", tc.stages, got, tc.want)
+		}
+	}
+}
+
 // TestReloadServesASecretOnceItIsGivenAValue pins that a secret created and tagged without a value
 // is left out of the live policy, and that the reload after its value is put serves it, with no
-// restart.
+// restart. Its synctest bubble waits for the reload goroutine to return.
 func TestReloadServesASecretOnceItIsGivenAValue(t *testing.T) {
-	store := secrets.NewLocal(policytest.Secret("SEEDED_LATER", owner, policy.TierHuman, ""))
-	logged := policytest.CaptureLog(t)
-	cur, err := policy.NewCurrent(t.Context(), policytest.Loader(store), 10*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewCurrent: %v", err)
-	}
-	if _, served := cur.Get().Secrets["SEEDED_LATER"]; served {
-		t.Fatalf("served SEEDED_LATER before it had a value: %+v", cur.Get().Secrets)
-	}
-	if want := refusedLine("SEEDED_LATER", policy.ReasonNoCurrentValue); !strings.HasPrefix(logged.String(), want) {
-		t.Fatalf("logged:\n%s\nwant it to open with %q", logged, want)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		store := secrets.NewLocal(policytest.Secret("SEEDED_LATER", owner, policy.TierHuman, ""))
+		logged := policytest.CaptureLog(t)
+		cur, err := policy.NewCurrent(t.Context(), policytest.Loader(store), 10*time.Millisecond)
+		if err != nil {
+			t.Fatalf("NewCurrent: %v", err)
+		}
+		if _, served := cur.Get().Secrets["SEEDED_LATER"]; served {
+			t.Fatalf("served SEEDED_LATER before it had a value: %+v", cur.Get().Secrets)
+		}
+		if want := refusedLine("SEEDED_LATER", policy.ReasonNoCurrentValue); !strings.HasPrefix(logged.String(), want) {
+			t.Fatalf("logged:\n%s\nwant it to open with %q", logged, want)
+		}
 
-	store.Put(policytest.Secret("SEEDED_LATER", owner, policy.TierHuman, "seeded-v1"))
-	await(t, func() bool { return cur.Get().Secrets["SEEDED_LATER"].Name == "SEEDED_LATER" })
+		store.Put(policytest.Secret("SEEDED_LATER", owner, policy.TierHuman, "seeded-v1"))
+		await(t, func() bool { return cur.Get().Secrets["SEEDED_LATER"].Name == "SEEDED_LATER" })
+	})
 }
 
 // failingSecrets fails ListSecrets once failing is set.
@@ -293,36 +317,39 @@ func (f *failingSecrets) ListSecrets(ctx context.Context, in *secretsmanager.Lis
 // TestReloadKeepsThePolicyWhenSecretsManagerFails pins the live policy across reloads: a tag edit
 // takes effect on the next tick, a reload that cannot reach Secrets Manager logs the exact line
 // the deployment's alarm filters on and keeps the previous policy, and a first load that fails
-// fails the broker's boot.
+// fails the broker's boot. Its synctest bubble waits for the reload goroutine to return, so no
+// failed reload logs into a later test's capture.
 func TestReloadKeepsThePolicyWhenSecretsManagerFails(t *testing.T) {
-	store := &failingSecrets{Local: secrets.NewLocal(policytest.Secret("DEEL_API_KEY", owner, policy.TierAgent, "v"))}
-	loader := policy.Loader{Secrets: store, Aliases: store, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
-	logged := policytest.CaptureLog(t)
-	cur, err := policy.NewCurrent(t.Context(), loader, 10*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewCurrent: %v", err)
-	}
-	first := cur.Get()
+	synctest.Test(t, func(t *testing.T) {
+		store := &failingSecrets{Local: secrets.NewLocal(policytest.Secret("DEEL_API_KEY", owner, policy.TierAgent, "v"))}
+		loader := policy.Loader{Secrets: store, Aliases: store, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+		logged := policytest.CaptureLog(t)
+		cur, err := policy.NewCurrent(t.Context(), loader, 10*time.Millisecond)
+		if err != nil {
+			t.Fatalf("NewCurrent: %v", err)
+		}
+		first := cur.Get()
 
-	store.Put(policytest.Secret("DEEL_API_KEY", owner, policy.TierHuman, "v"))
-	await(t, func() bool { return cur.Get().Secrets["DEEL_API_KEY"].Tier == policy.TierHuman })
-	if cur.Get().Version == first.Version {
-		t.Fatalf("a tag edit left the version at %s", first.Version)
-	}
+		store.Put(policytest.Secret("DEEL_API_KEY", owner, policy.TierHuman, "v"))
+		await(t, func() bool { return cur.Get().Secrets["DEEL_API_KEY"].Tier == policy.TierHuman })
+		if cur.Get().Version == first.Version {
+			t.Fatalf("a tag edit left the version at %s", first.Version)
+		}
 
-	edited := cur.Get()
-	store.mu.Lock()
-	store.failing = true
-	store.mu.Unlock()
-	const failed = "ERROR agent secret policy load failed; previous policy kept error=\"list secrets under " + policytest.Prefix + ": ThrottlingException: Rate exceeded\"\n"
-	await(t, func() bool { return strings.Contains(logged.String(), failed) })
-	if cur.Get() != edited {
-		t.Fatalf("a failed reload replaced the policy: %+v", cur.Get())
-	}
+		edited := cur.Get()
+		store.mu.Lock()
+		store.failing = true
+		store.mu.Unlock()
+		const failed = "ERROR agent secret policy load failed; previous policy kept error=\"list secrets under " + policytest.Prefix + ": ThrottlingException: Rate exceeded\"\n"
+		await(t, func() bool { return strings.Contains(logged.String(), failed) })
+		if cur.Get() != edited {
+			t.Fatalf("a failed reload replaced the policy: %+v", cur.Get())
+		}
 
-	if _, err := policy.NewCurrent(t.Context(), loader, time.Hour); err == nil {
-		t.Fatal("NewCurrent with Secrets Manager failing = nil error, want the first load's failure")
-	}
+		if _, err := policy.NewCurrent(t.Context(), loader, time.Hour); err == nil {
+			t.Fatal("NewCurrent with Secrets Manager failing = nil error, want the first load's failure")
+		}
+	})
 }
 
 func await(t *testing.T, done func() bool) {
@@ -382,5 +409,105 @@ func TestVersionNamesThePolicyNotItsListingOrder(t *testing.T) {
 		if load(a, changed) == base {
 			t.Errorf("a changed %s left the version unchanged", name)
 		}
+	}
+}
+
+// goldenFixture is a fixed namespace whose Version a full Load produced at legion main 7544b767,
+// before NewSet existed. A change to the digest's bytes or order fails TestGoldenDigest, and the
+// production digests (requests.rules_version rows) would shift with it.
+func goldenFixture() *secrets.Local {
+	return secrets.NewLocal(
+		policytest.Secret("A0", "ada@example.com", policy.TierAgent, "v1"),
+		policytest.Secret("A_B", "ada@example.com", policy.TierHuman, "v1"),
+		policytest.Secret("DEEL_API_KEY", policy.OwnerShared, policy.TierHuman, "v1"),
+	)
+}
+
+func TestGoldenDigest(t *testing.T) {
+	const want = "252a3be479774f1163b99a7fbeeec17d523eb5e7048d54f90b8cb5e702fc16ca"
+	set, err := policytest.Loader(goldenFixture()).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.Version != want {
+		t.Fatalf("Version = %s, want the pre-change golden %s: the digest bytes or order changed", set.Version, want)
+	}
+}
+
+// TestMergedSetVersionEqualsAFullLoads pins the digest contract: building the same contents by a
+// full Load and by single-name merges gives byte-equal Versions — including names whose slug order
+// differs from their Name order ("A_B" vs "A0": '-' < '0' but '_' > '0').
+func TestMergedSetVersionEqualsAFullLoads(t *testing.T) {
+	store := secrets.NewLocal(policytest.Secret("A0", "ada@example.com", policy.TierAgent, "v1"))
+	cur := policytest.Current(t, store)
+	store.Put(policytest.Secret("A_B", "ada@example.com", policy.TierAgent, "v1"))
+	if lk, err := cur.RefreshOne(context.Background(), "A_B"); err != nil || !lk.Served {
+		t.Fatalf("RefreshOne(A_B) = %+v, %v", lk, err)
+	}
+	merged := cur.Get().Version
+	full, err := policytest.Loader(store).Load(context.Background())
+	if err != nil || full.Version != merged {
+		t.Fatalf("merged Version %s != full load's %s (%v)", merged, full.Version, err)
+	}
+}
+
+// TestLoadOneAnswersOneNameByLoadsRules pins LoadOne against Load for the same secret: served, or
+// refused with Load's exact RefusedMessage line, or absent - none exists, or it is scheduled for
+// deletion - which is no refusal and logs nothing. A name no secret can carry is ErrNameInvalid.
+func TestLoadOneAnswersOneNameByLoadsRules(t *testing.T) {
+	deleting := policytest.Secret("DELETING", owner, policy.TierAgent, "v")
+	deleting.DeletedAt = new(time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC))
+	store := secrets.NewLocal(
+		policytest.Secret("SERVED", owner, policy.TierHuman, "v"),
+		policytest.Secret("ADMIN_TIER", owner, "admin", "v"),
+		deleting,
+	)
+	loader := policytest.Loader(store)
+	logged := policytest.CaptureLog(t)
+	ctx := context.Background()
+
+	lk, err := loader.LoadOne(ctx, "SERVED")
+	if s := lk.Secret; err != nil || !lk.Served || lk.Reason != "" || s.Name != "SERVED" || s.Owner != owner || s.Tier != policy.TierHuman || s.ARN != secrets.LocalARN(policytest.ID("SERVED")) {
+		t.Fatalf("LoadOne(SERVED) = %+v, %v; want it served, %s's, human, read by its ARN", lk, err, owner)
+	}
+	for name, reason := range map[string]string{
+		"ADMIN_TIER": policy.ReasonTierTagMalformed,
+		"MISSING":    policy.ReasonAbsent,
+		"DELETING":   policy.ReasonAbsent,
+	} {
+		if lk, err := loader.LoadOne(ctx, name); err != nil || lk.Served || lk.Reason != reason {
+			t.Errorf("LoadOne(%s) = %+v, %v; want unserved for %s", name, lk, err, reason)
+		}
+	}
+	if want := refusedLine("ADMIN_TIER", policy.ReasonTierTagMalformed); logged.String() != want {
+		t.Errorf("logged %q, want only the refusal %q", logged.String(), want)
+	}
+	if _, err := loader.LoadOne(ctx, "serv-ed"); !errors.Is(err, policy.ErrNameInvalid) {
+		t.Errorf("LoadOne(serv-ed) = %v, want ErrNameInvalid", err)
+	}
+
+	set, err := loader.Load(ctx)
+	if _, listed := set.Secrets["DELETING"]; err != nil || listed {
+		t.Fatalf("Load served a secret scheduled for deletion (%v): %+v", err, set.Secrets)
+	}
+}
+
+// TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit pins the 512-character limit on a
+// secret's name: a request name whose id under the prefix is exactly that long is described as any
+// other, and one a character longer is ErrNameInvalid with no DescribeSecret made, since Secrets
+// Manager refuses a longer SecretId as invalid input rather than answering it not found.
+func TestLoadOneMakesNoCallForAnIDPastSecretsManagersNameLimit(t *testing.T) {
+	store := secrets.NewLocal()
+	count := &countingDescriber{DescribeSecretAPIClient: store}
+	loader := policytest.Loader(store)
+	loader.Describer = count
+	ctx := context.Background()
+
+	atLimit := "A" + strings.Repeat("B", 512-len(policytest.Prefix)-1)
+	if lk, err := loader.LoadOne(ctx, atLimit); err != nil || lk.Served || lk.Reason != policy.ReasonAbsent || count.calls.Load() != 1 {
+		t.Fatalf("LoadOne(a name whose id is 512 characters) = %+v, %v after %d DescribeSecret calls; want absent after one", lk, err, count.calls.Load())
+	}
+	if lk, err := loader.LoadOne(ctx, atLimit+"C"); !errors.Is(err, policy.ErrNameInvalid) || count.calls.Load() != 1 {
+		t.Fatalf("LoadOne(a name whose id is 513 characters) = %+v, %v after %d DescribeSecret calls; want ErrNameInvalid with no further call", lk, err, count.calls.Load())
 	}
 }

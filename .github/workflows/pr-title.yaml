@@ -9,8 +9,15 @@ on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
 
-# The job clones the repository for check-pr-text.sh and reads the pull request's commits through
-# the API; it writes nothing.
+# A new push to a pull request cancels this workflow's still-running check; it has no other
+# trigger today, but the key still branches on event name for consistency with the other
+# three workflows' blocks (why: this PR's description).
+concurrency:
+  group: pr-title-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The job clones the repository for check-pr-text.sh, which reads the pull request's commits
+# through the compare route (`contents: read`); it writes nothing.
 permissions: {}
 
 jobs:
@@ -18,7 +25,6 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      pull-requests: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:

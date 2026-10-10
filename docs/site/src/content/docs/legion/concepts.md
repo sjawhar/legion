@@ -22,14 +22,18 @@ section can use the words without stopping to explain them.
   never reads or writes a GitHub issue.
 - **GitHub** holds the code: one branch, `legion/<KEY>`, and one pull request per issue. Legion acts
   there through two GitHub Apps, so the account that reviews a change is never the one that wrote
-  it.
+  it. The daemon creates a root's branch at `main` when it admits the root, before its architect
+  starts, and a child's when the child starts planning in its tree, so no agent's push is the one
+  that creates a branch: GitHub can refuse that push on a large repository.
 
 ## The controller
 
-The controller is the one Legion agent a person talks to directly. The operator starts it with
-`legion controller start` in a terminal on their own machine, and it runs there as an interactive
-Oh My Pi session; closing that terminal leaves the project without a controller until someone runs
-the command again. The daemon wakes it when something needs a judgment no tree owns:
+The controller is the one Legion agent a person talks to directly. By default (`controller:
+operator`) the operator starts it with `legion controller start` in a terminal on their own machine,
+and it runs there as an interactive Oh My Pi session; closing that terminal leaves the project
+without a controller until someone runs the command again. Under `controller: daemon` (Kubernetes
+only) the daemon launches it as a pod in the cluster and relaunches it when it dies; a person
+reaches it through Dispatch. The daemon wakes it when something needs a judgment no tree owns:
 
 - a new `triage` issue labelled `legion` to admit, park, or leave alone;
 - a free admission slot to fill (see [Admission](#admission-and-the-legion-label));
@@ -71,17 +75,26 @@ comes back, with everything it knew, the next time its role is needed.
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Exercises the change against the issue's acceptance criteria and reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
-| `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue. | implement App |
+| `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
 | `merging` | merger | Checks the approved head and the required checks and workflows, then sends `READY`. | implement App |
 | `awaiting_merge` | none | Waits for a person to merge the pull request. | none |
 | `production_check` | implementer | After the merge, drives the change in production and records what it saw. | implement App |
 
 A failed test, red CI on the head, or a review that requests changes sends the issue back to
-`implementing`, and the change goes through the tester again before the reviewer sees it. Red CI
-on the head of an issue in `awaiting_merge` sends it back too, when the head's own checks or
-required workflow runs are red: the work returns through testing, review and `READY`, since GitHub
-will not merge the head it was ready for, and the project's merge-queue role, when one is set, is
-told the `READY` is withdrawn.
+`implementing`, and the change goes through the tester again before the reviewer sees it. In
+testing and review, a red that only review workflows make is the exception, with every required
+check passing or still undecided: a project can declare, in `projects.<KEY>.review_workflows`, the
+required workflows that review the code, such as a review bot that fails while any thread it
+opened stands, which the implementer cannot answer, so the reviewer's round decides it. The
+reviewer answers each of the bot's threads (accepting it with a reason, or requesting changes), has
+the daemon resolve the ones it accepted, and re-runs the failed run; its approval of the head ends
+the round once the head reads green. Any other red required workflow, a test or lint workflow, sends
+the issue back as a red required check does, and so does every red required workflow when the
+project declares none. Red CI on the head of an issue in `awaiting_merge` sends it back too, when
+the head's own checks or required workflow runs are red, review workflows included: the work
+returns through testing, review and `READY`, since GitHub will not merge the head it was ready for,
+and the issue, and the project's merge-queue role when one is set, are told the `READY` is
+withdrawn.
 
 ## Admission and the `legion` label
 
@@ -117,9 +130,18 @@ architect has written its spec.
 ## Handoffs on the issue branch
 
 Each phase ends by writing a **handoff**, a small JSON file committed to the issue's branch under
-`.legion/`: `architect.json`, `plan.json`, `implement.json`, `test.json`, and `review.json`. The next
-phase reads the ones before it. A handoff is the copy that survives: when a worker comes back after
-a restart, or a memory disagrees with a file, the committed handoff wins. The merger writes none.
+its own `.legion/<issue>/` directory: `architect.json`, `plan.json`, `implement.json`, `test.json`,
+and `review.json`. The next phase reads the ones before it. A handoff is the copy that survives:
+when a worker comes back after a restart, or a memory disagrees with a file, the committed handoff
+wins. The merger writes none.
+
+Each tree writes only under its own directory, so trees running at the same time never touch the
+same file. Handoffs belong to the issue branch, not the default branch: nothing on the default
+branch reads one, so retro's last commit removes the tree's `.legion/<issue>/` from the head a
+human merges, and the merger's `READY` is refused while that head still carries it. The merge
+therefore brings no handoff onto the default branch, and no later branch starts with one. The
+removal sits above the reviewer's approved head beside retro's notes, so it costs no test or review
+round; the handoffs stay on the issue branch below it, where a worker still reads them.
 
 ## Review signalling
 
@@ -158,9 +180,11 @@ Legion uses GitHub's own review mechanisms rather than labels:
   refuses is logged with the repository and the HTTP status.
 - **Review threads** close one by one, and only once the thread's opener (or, for a thread a bot
   opened, Legion's reviewer) accepts the reply.
-- Two limits stop a loop: after `review_round_cap` review rounds (three by default), or once
+- Two limits flag a loop: after `review_round_cap` rounds (three by default), or once
   `max_fix_attempts` pushes fail to turn CI green (three by default), the daemon posts a message on
-  the issue and hands the decision to the architect.
+  the issue and tells the architect; neither stops a worker. Every move back to an earlier phase
+  counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
+  daemon's own move when CI turns red or the head starts conflicting with its base.
 
 ## READY and the human merge
 
@@ -174,11 +198,11 @@ READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pul
 ```
 
 followed by the pull request's outcome and its known risks. A project can also name a merge-queue
-role (`merge_queue_role`) that gets the same packet, and, when the head's own CI turns red while
-the issue awaits its merge, a message that the `READY` is withdrawn, naming the red checks. Legion
-never merges, and every merge-shaped `gh` command an agent tries is refused. A person merges under
-the repository's own branch protection and code-owner rules, which Legion neither reads nor
-changes.
+role (`merge_queue_role`) that gets the same packet. When the head's own CI turns red while the
+issue awaits its merge, the daemon posts on the issue, and tells that role, that the `READY` is
+withdrawn, naming the red checks. Legion never merges, and every merge-shaped `gh` command an agent
+tries is refused. A person merges under the repository's own branch protection and code-owner
+rules, which Legion neither reads nor changes.
 
 ## The production check
 

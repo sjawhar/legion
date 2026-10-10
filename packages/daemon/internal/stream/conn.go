@@ -67,6 +67,7 @@ type Conn struct {
 	// seq is the order the listener registered the connection in (Sequence).
 	seq        uint64
 	claim      claim.Token
+	nc         net.Conn
 	writer     *shimwire.Writer
 	rpcTimeout time.Duration
 	log        *slog.Logger
@@ -106,6 +107,7 @@ type ackedPrompt struct {
 func newConn(nc net.Conn, token claim.Token, rpcTimeout time.Duration, log *slog.Logger, events *eventQueue) *Conn {
 	return &Conn{
 		claim:       token,
+		nc:          nc,
 		writer:      shimwire.NewWriter(connWriter{nc: nc, timeout: rpcTimeout}),
 		rpcTimeout:  rpcTimeout,
 		log:         log,
@@ -194,6 +196,18 @@ func (c *Conn) GetState(ctx context.Context) (runtime.ConnState, error) {
 		return runtime.ConnState{}, fmt.Errorf("worker-stream: %s get_state answer carries no data.isStreaming", c.claim)
 	}
 	return runtime.ConnState{IsStreaming: *data.IsStreaming}, nil
+}
+
+// Abort asks OMP to end its running turn and returns on OMP's answer, which it gives once the
+// agent is idle. The turn's agent_end can still follow the answer on the wire, so the TurnEnd event
+// is what says the turn is over. A refusal is a *RefusedError; every other failure is transport.
+func (c *Conn) Abort(ctx context.Context) error {
+	if err := c.Negotiate(ctx); err != nil {
+		return err
+	}
+	id := rand.Text()
+	_, err := c.call(ctx, shimwire.Abort{ID: id}, id, "")
+	return err
 }
 
 // Shutdown asks the shim to end OMP: SIGTERM, then SIGKILL once the shim's grace runs out. The

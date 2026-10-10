@@ -8,7 +8,10 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"reflect"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +24,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	legionstore "github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
@@ -90,11 +94,13 @@ func TestGateRegistrationWithDesignGateOffStartsPlanningAndSeedsApprovalRead(t *
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate outbox: %v", err)
 	}
-	if want := []string{"gate_seed", "notice", "supervise", "notice"}; !sameStrings(kinds, want) {
+	if want := []string{"gate_seed", "notice", "issue_branch", "supervise", "notice"}; !sameStrings(kinds, want) {
 		t.Fatalf("outbox kinds = %v, want %v", kinds, want)
 	}
 }
 
+// A child entering an open gate is recorded and its planning started in one fact, its planner's
+// start queued behind the row creating the child's branch, which the start waits for.
 func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -116,7 +122,15 @@ func TestRegisteredOpenGateRecordsChildAndStartsPlanningInTheSameFact(t *testing
 	if tree != "LEGION-208" || gotPhase != string(phase.Planning) {
 		t.Fatalf("child tree/phase = %q/%q, want LEGION-208/planning", tree, gotPhase)
 	}
-	assertOutboxKinds(t, pool, []string{"supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"issue_branch", "supervise", "notice"})
+	var branchIssue string
+	var generation int
+	if err := pool.QueryRow(ctx, "select issue, (payload->>'generation')::int from outbox where kind = 'issue_branch'").Scan(&branchIssue, &generation); err != nil {
+		t.Fatalf("read the branch row: %v", err)
+	}
+	if branchIssue != "LEGION-209" || generation != 4 {
+		t.Fatalf("branch row = %s at generation %d, want the child's at the generation it entered, 4", branchIssue, generation)
+	}
 }
 
 func TestRefusedReadyIsCommittedAndApprovalAdvancesWithoutSecondReady(t *testing.T) {
@@ -279,7 +293,7 @@ func TestImplementationReachesTestingWhenHandoffAndPullRequestArriveInEitherOrde
 			if gotPhase != string(phase.Testing) {
 				t.Fatalf("issue phase = %q, want testing", gotPhase)
 			}
-			assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "supervise", "notice"})
+			assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "notice"})
 		})
 	}
 }
@@ -297,7 +311,7 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 	}
 
 	js := testJetStream(t)
-	stop := startConsume(t, js, pool, engine)
+	stop := startConsume(t, js, pool, engine, nil)
 	defer stop()
 	publishCaptured(t, js, "notifications.dispatch.issue.CAPTURE-4.artifact.version", "../intake/testdata/dispatch/artifact-version.json")
 	testwait.Eventually(t, "captured version closes gate", func() bool {
@@ -311,6 +325,10 @@ func TestCapturedArtifactVersionAndApprovalFlowThroughConsume(t *testing.T) {
 	})
 }
 
+// The captured review's author, `reviewer`, is not the review App, so the approval decides the round
+// only because GitHub gives that account write access to the repository, which the consumer reads
+// before the fact reaches the engine: the review's whole path, decode, permission read and apply,
+// runs through the real consumer.
 func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -318,8 +336,16 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 	// The base requires no check, so the head's green settlement, which names none, is green.
 	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head-captured", CheckedHead: "head-captured", Failing: []string{}, Required: []string{}})
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1"})
+	var mu sync.Mutex
+	var asked []string
+	writers := func(_ context.Context, review intake.PullRequestReview) (bool, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		asked = append(asked, review.Repo+" "+review.Author)
+		return review.Repo == "sjawhar/legion" && review.Author == "reviewer", nil
+	}
 	js := testJetStream(t)
-	stop := startConsume(t, js, pool, testEngine(config.DesignGateRootIssues, nil))
+	stop := startConsume(t, js, pool, testEngine(config.DesignGateRootIssues, nil), writers)
 	defer stop()
 	publishCaptured(t, js, "notifications.github.sjawhar.legion.pr.42.review", "../intake/testdata/github/review.json")
 	testwait.Eventually(t, "captured approval reaches retro", func() bool {
@@ -329,7 +355,12 @@ func TestCapturedApprovedReviewFlowsThroughConsumeToRetro(t *testing.T) {
 		}
 		return gotPhase == string(phase.Retro) && status == "retro"
 	})
-	assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "supervise", "notice"})
+	assertOutboxKinds(t, pool, []string{"dispatch_status", "supervise", "notice"})
+	mu.Lock()
+	defer mu.Unlock()
+	if want := []string{"sjawhar/legion reviewer"}; !slices.Equal(asked, want) {
+		t.Fatalf("the consumer asked GitHub about %v, want %v", asked, want)
+	}
 }
 
 func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
@@ -341,15 +372,11 @@ func TestReviewRoundCapPostsOneMessageAndNoticeForTheThirdRound(t *testing.T) {
 	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Rounds: 2})
 	engine := testEngine(config.DesignGateRootIssues, nil)
 
-	if _, err := intake.ApplyFact(ctx, pool, "github", "changes-requested", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head"}, engine, admissionStub{}); err != nil {
+	if _, err := intake.ApplyFact(ctx, pool, "github", "changes-requested", intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Author: testReviewApp}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact review: %v", err)
 	}
-	assertOutboxKinds(t, pool, []string{"dispatch_message", "notice", "dispatch_status", "supervise", "supervise", "notice"})
-	var rounds int
-	if err := pool.QueryRow(ctx, "select rounds from phases where issue = $1 and role = $2", "LEGION-208", "implementer").Scan(&rounds); err != nil {
-		t.Fatalf("read implementer rounds: %v", err)
-	}
-	if rounds != 3 {
+	assertOutboxKinds(t, pool, []string{"dispatch_message", "notice", "dispatch_status", "supervise", "notice"})
+	if rounds := implementerRounds(t, pool); rounds != 3 {
 		t.Fatalf("implementer rounds = %d, want 3", rounds)
 	}
 }
@@ -382,10 +409,67 @@ func TestProductionCheckCompletionTellsTheArchitectAndAwaitsSignOff(t *testing.T
 	if err := json.Unmarshal(payload, &notice); err != nil {
 		t.Fatalf("decode notice %s: %v", payload, err)
 	}
-	if want := (record.Notice{Kind: "phase-finished", Role: claim.RoleImplementer, Phase: phase.ProductionCheck, Summary: "the merged change serves"}); notice != want {
+	if want := (record.Notice{Kind: "phase-finished", Role: claim.RoleImplementer, Phase: phase.ProductionCheck, Summary: "the merged change serves"}); !reflect.DeepEqual(notice, want) {
 		t.Fatalf("notice = %+v, want %+v", notice, want)
 	}
 	assertOutboxKinds(t, pool, []string{"notice"})
+}
+
+// The merger is started with the head the review round approved, from the round's recorded
+// decision, so it never chooses among the pull request's reviews itself. A round with no recorded
+// approval names no head, and the merger refuses for want of it.
+func TestTheMergerIsStartedWithTheRoundsApprovedHead(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		decision *record.ReviewDecision
+		want     string
+	}{
+		{"an approved round", &record.ReviewDecision{State: "approved", Head: "approved-head"}, " Approved head: approved-head."},
+		{"no recorded approval", nil, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Retro, Generation: 1, Status: "retro", Rank: "U"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "approved-head", Decision: tc.decision})
+			if _, err := intake.ApplyFact(context.Background(), pool, "api", "retro", intake.HandoffComplete{Generation: 1,
+				Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Summary: "learnings recorded", Commit: "retro-docs",
+			}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
+				t.Fatalf("ApplyFact retro: %v", err)
+			}
+			task := startTask(t, pool, claim.RoleMerger)
+			if !strings.Contains(task, "Phase: merging.") {
+				t.Fatalf("merger task %q, want a merger started on merging", task)
+			}
+			if got := strings.Contains(task, "Approved head:"); got != (tc.want != "") || !strings.HasSuffix(task, tc.want) {
+				t.Fatalf("merger task %q, want it to end with %q", task, tc.want)
+			}
+		})
+	}
+}
+
+// The merger reads the approved head from its task by the label this package writes, so a rename
+// on either side alone fails here rather than leaving the merger reading a line it never gets.
+func TestTheMergerPromptReadsTheApprovedHeadLabel(t *testing.T) {
+	composer, err := prompts.New(t.TempDir())
+	if err != nil {
+		t.Fatalf("compose the shipped prompts: %v", err)
+	}
+	parts, err := composer.Compose(claim.RoleMerger, false)
+	if err != nil {
+		t.Fatalf("compose the merger's prompt: %v", err)
+	}
+	var prompt strings.Builder
+	for _, path := range parts.RolePromptPaths {
+		part, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read role prompt part %s: %v", path, err)
+		}
+		prompt.Write(part)
+	}
+	if want := "task's `" + approvedHeadLabel + ":` line"; !strings.Contains(prompt.String(), want) {
+		t.Fatalf("the merger's prompt does not say %q, the label its start task carries", want)
+	}
 }
 
 // The architect learns what a phase produced from its phase-finished notice: the worker's own
@@ -449,9 +533,9 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 			everyClaim[issue+"/"+string(role)]++
 		}
 	}
-	// The sign-off's own transition suspends the implementer it moves off, before linger does.
+	// The close suspends every claim once, the implementer the sign-off moves off among them: no
+	// transition suspends a worker of its own.
 	suspended := superviseRequests(t, pool, "suspend")
-	suspended["LEGION-208/implementer"]--
 	if !sameCounts(suspended, everyClaim) {
 		t.Fatalf("linger suspended %v, want each tree claim once: %v", suspended, everyClaim)
 	}
@@ -522,6 +606,8 @@ func assertOutboxCount(t *testing.T, pool *pgxpool.Pool, kind string, want int) 
 	}
 }
 
+// Every forward row applies through intake with its status, start and notice, and none suspends the
+// worker whose phase it ends: a role stays live from its first assignment until its issue closes.
 func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -538,21 +624,21 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RolePlanner, Claim: "claim", Commit: "plan"}
 			},
-			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"supervise", "supervise", "notice"},
+			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"supervise", "notice"},
 		},
 		{
 			name: "tester pass", current: phase.Testing, role: claim.RoleTester,
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "pass", Commit: "test"}
 			},
-			wantPhase: phase.Reviewing, wantStatus: "needs_review", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
+			wantPhase: phase.Reviewing, wantStatus: "needs_review", wantOutbox: []string{"dispatch_status", "supervise", "notice"},
 		},
 		{
 			name: "tester fail", current: phase.Testing, role: claim.RoleTester,
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "claim", Verdict: "fail", Commit: "test"}
 			},
-			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
+			wantPhase: phase.Implementing, wantStatus: "in_progress", wantOutbox: []string{"dispatch_status", "supervise", "notice"},
 		},
 		{
 			name: "approved review", current: phase.Reviewing, role: claim.RoleReviewer,
@@ -563,16 +649,16 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 				seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", CheckedHead: "head", Failing: []string{}, Required: []string{}})
 			},
 			fact: func() intake.Fact {
-				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}
+				return intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}
 			},
-			wantPhase: phase.Retro, wantStatus: "retro", wantOutbox: []string{"dispatch_status", "supervise", "supervise", "notice"},
+			wantPhase: phase.Retro, wantStatus: "retro", wantOutbox: []string{"dispatch_status", "supervise", "notice"},
 		},
 		{
 			name: "retro completion", current: phase.Retro, role: claim.RoleImplementer,
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "claim", Commit: "retro"}
 			},
-			wantPhase: phase.Merging, wantStatus: "retro", wantOutbox: []string{"supervise", "supervise", "notice"},
+			wantPhase: phase.Merging, wantStatus: "retro", wantOutbox: []string{"supervise", "notice"},
 		},
 		{
 			name: "approved merger ready", current: phase.Merging, role: claim.RoleMerger,
@@ -582,7 +668,7 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 			fact: func() intake.Fact {
 				return intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "claim", Ready: true, Summary: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"}
 			},
-			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"supervise", "notice", "dispatch_message"},
+			wantPhase: phase.AwaitingMerge, wantStatus: "retro", wantOutbox: []string{"notice", "dispatch_message"},
 		},
 		{
 			name: "merged pull request", current: phase.AwaitingMerge,
@@ -616,6 +702,9 @@ func TestRemainingForwardRowsApplyThroughIntake(t *testing.T) {
 				t.Fatalf("phase/status = %q/%q, want %q/%q", gotPhase, gotStatus, tc.wantPhase, tc.wantStatus)
 			}
 			assertOutboxKinds(t, pool, tc.wantOutbox)
+			if suspended := superviseRequests(t, pool, "suspend"); len(suspended) != 0 {
+				t.Fatalf("the %s suspended %v, want no worker stopped by a phase change", tc.name, suspended)
+			}
 			assertStartTasksNamePhase(t, pool, tc.wantPhase)
 		})
 	}
@@ -658,6 +747,10 @@ func fixtureStatus(current phase.Phase) string {
 	}
 }
 
+// Every backward edge applies through intake, and the worker that asked for it is not stopped: its
+// assignment ends with the move, and the start of the phase it moved to delivers the next one.
+// Every move a backward row serves applies, and counts the implementer one round, as every move
+// back to an earlier phase does.
 func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 	for _, from := range []phase.Phase{phase.Implementing, phase.Testing, phase.Reviewing, phase.Retro, phase.Merging, phase.ProductionCheck} {
 		for _, to := range requiredBackwardTargets(from) {
@@ -669,15 +762,51 @@ func TestEveryBackwardEdgeAppliesThroughIntake(t *testing.T) {
 				if _, err := intake.ApplyFact(context.Background(), pool, "api", string(from)+"-"+string(to), intake.BackwardMove{Issue: "LEGION-208", Requester: role, To: to, Reason: "correct"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{}); err != nil {
 					t.Fatalf("ApplyFact backward: %v", err)
 				}
-				var got string
-				if err := pool.QueryRow(t.Context(), "select phase from issues where key = $1", "LEGION-208").Scan(&got); err != nil {
-					t.Fatalf("read phase: %v", err)
+				if got, rounds := issuePhase(t, pool), implementerRounds(t, pool); got != to || rounds != 1 {
+					t.Fatalf("phase = %q, rounds %d; want %q and one round", got, rounds, to)
 				}
-				if got != string(to) {
-					t.Fatalf("phase = %q, want %q", got, to)
+				if suspended := superviseRequests(t, pool, "suspend"); len(suspended) != 0 {
+					t.Fatalf("the move back from %s to %s suspended %v, want the requesting %s left running", from, to, suspended, role)
+				}
+				if started := superviseRequests(t, pool, "start"); started["LEGION-208/"+string(RoleFor(to))] != 1 {
+					t.Fatalf("the move back to %s started %v, want its %s started once", to, started, RoleFor(to))
 				}
 			})
 		}
+	}
+}
+
+// A backward move no backward row serves is refused, and nothing moves or is counted: to
+// awaiting_merge, which no worker holds; to the phase the issue is already in or a later one; out
+// of awaiting_merge, where no worker holds a phase; by a role that does not run the phase; or to no
+// phase at all, which the row lookup would otherwise take to match any row.
+func TestABackwardMoveNoRowServesIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		from      phase.Phase
+		requester claim.Role
+		to        phase.Phase
+	}{
+		{"production_check to awaiting_merge", phase.ProductionCheck, claim.RoleImplementer, phase.AwaitingMerge},
+		{"implementing to implementing", phase.Implementing, claim.RoleImplementer, phase.Implementing},
+		{"testing to a later phase", phase.Testing, claim.RoleTester, phase.Reviewing},
+		{"out of awaiting_merge", phase.AwaitingMerge, claim.RoleImplementer, phase.Implementing},
+		{"by a role that does not run the phase", phase.Testing, claim.RoleReviewer, phase.Implementing},
+		{"to no phase", phase.Testing, claim.RoleTester, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "backward", Phase: tc.from, Generation: 1, Status: fixtureStatus(tc.from), Rank: "U"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			result, err := intake.ApplyFact(context.Background(), pool, "api", "backward", intake.BackwardMove{Issue: "LEGION-208", Requester: tc.requester, To: tc.to, Reason: "probe"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{})
+			if err != nil || refusalCode(result) != "BACKWARD_REFUSED" {
+				t.Fatalf("the move = %+v, %v; want BACKWARD_REFUSED", result.Refusal, err)
+			}
+			if got, rounds := issuePhase(t, pool), implementerRounds(t, pool); got != tc.from || rounds != 0 {
+				t.Fatalf("phase = %q, rounds %d; want %q and no round", got, rounds, tc.from)
+			}
+			assertOutboxKinds(t, pool, []string{})
+		})
 	}
 }
 
@@ -733,11 +862,15 @@ func seedRecord(t *testing.T, pool *pgxpool.Pool, put func(pgx.Tx) error) {
 	}
 }
 
+// testReviewApp is the review App's bot login the test engines configure: a review it submits
+// decides a round.
+const testReviewApp = "legion-reviewer[bot]"
+
 // testEngine is the engine the workflow tests drive, under the design gate policy given and
 // logging to log (the default logger when nil).
 func testEngine(policy config.DesignGate, log *slog.Logger) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour,
+		Project: "LEGION", DesignGate: policy, ReviewRoundCap: 3, MaxFixAttempts: 3, Linger: time.Hour, ReviewAppLogin: testReviewApp,
 		Clock: func() time.Time { return time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC) },
 	}, log)
 }
@@ -786,11 +919,13 @@ func testJetStream(t *testing.T) jetstream.JetStream {
 	return js
 }
 
-func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engine *Engine) func() {
+// startConsume runs the consumers on js, applying through engine, with permission as the
+// consumer's ReviewPermission (nil reads none).
+func startConsume(t *testing.T, js jetstream.JetStream, pool *pgxpool.Pool, engine *Engine, permission func(context.Context, intake.PullRequestReview) (bool, error)) func() {
 	t.Helper()
 	consumers, err := intake.OpenConsumers(t.Context(), js, intake.ConsumerSpec{
 		Project: "CAPTURE", Repositories: []ghrepo.Repository{ghrepo.MustParse("sjawhar/legion")}, AckWait: time.Second, NakDelay: time.Millisecond,
-		Logger: slog.Default(),
+		Logger: slog.Default(), ReviewPermission: permission,
 	})
 	if err != nil {
 		t.Fatalf("OpenConsumers: %v", err)

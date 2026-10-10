@@ -196,7 +196,7 @@ func TestGitHubTokenRefusesClaimReplacedDuringTokenAwait(t *testing.T) {
 }
 
 // A claim's capability belongs to its registered, running agent. When the process dies (before the
-// relaunch registers), is suspended at the end of its phase, or is stopped, the old secret mints no
+// relaunch registers), is suspended (its issue's close, or an operator), or is stopped, the old secret mints no
 // grant and a grant it already minted redeems nothing, as the shipped daemon revokes a session's
 // capability and grants on death, retirement, and teardown.
 func TestAClaimLeavingItsRunningStatesRevokesItsSecretAndGrants(t *testing.T) {
@@ -300,4 +300,49 @@ func TestGitHubTokenNamesEveryLegionAppLogin(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A grant request naming push:true through the real route lives the credential package's
+// pushTTL (5 minutes), not the ordinary ttl (60 seconds): `legion push`'s own jj snapshot can run
+// past the ordinary grant on a near-full tree volume (dispatch://LEGION-583). A plain request —
+// push omitted, the shape every other command sends — keeps the ordinary ttl. The grant service
+// mints on the wall clock (credential.New(nil)), unlike the machines' stillClock, so each
+// expiresAt is read back against a window bracketing the mint rather than an exact instant.
+func TestAGrantRequestNamingPushLivesLongerThanAnOrdinaryGrant(t *testing.T) {
+	h := newHarness(t)
+	worker := newLiveClaim(t, h, "LEGION-208", claim.RoleImplementer)
+
+	assertExpiresWithin := func(expiresAt string, before time.Time, want time.Duration) {
+		t.Helper()
+		got, err := time.Parse(timeFormat, expiresAt)
+		if err != nil {
+			t.Fatalf("parse expiresAt %q: %v", expiresAt, err)
+		}
+		lifetime := got.Sub(before)
+		if lifetime < want-2*time.Second || lifetime > want+2*time.Second {
+			t.Fatalf("grant lifetime = %s, want close to %s", lifetime, want)
+		}
+	}
+
+	before := time.Now()
+	ordinary := h.request(http.MethodPost, "/legion/v1/grants", GrantRequest{
+		SessionID: worker.session, Secret: worker.secret, Tree: worker.tree, Issue: worker.issue,
+	}, nil)
+	if ordinary.Code != http.StatusOK {
+		t.Fatalf("mint ordinary grant = %d: %s", ordinary.Code, ordinary.Body)
+	}
+	var ordinaryResponse GrantResponse
+	decodeInto(t, ordinary, &ordinaryResponse)
+	assertExpiresWithin(ordinaryResponse.ExpiresAt, before, 60*time.Second)
+
+	before = time.Now()
+	pushed := h.request(http.MethodPost, "/legion/v1/grants", GrantRequest{
+		SessionID: worker.session, Secret: worker.secret, Tree: worker.tree, Issue: worker.issue, Push: true,
+	}, nil)
+	if pushed.Code != http.StatusOK {
+		t.Fatalf("mint push grant = %d: %s", pushed.Code, pushed.Body)
+	}
+	var pushedResponse GrantResponse
+	decodeInto(t, pushed, &pushedResponse)
+	assertExpiresWithin(pushedResponse.ExpiresAt, before, 5*time.Minute)
 }

@@ -327,3 +327,124 @@ describe("a user turn a Dispatch message became", () => {
     expect(dispatchIds(published)).toEqual([undefined]);
   });
 });
+
+// The provider/model that produced an assistant turn (LEGION-548), read off the host's own
+// assistant message, so the live view's header and transcript can show it without guessing.
+describe("the model that produced an assistant turn", () => {
+  test("combines provider and model from the host message onto the published frame", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.record(
+      SUBJECT,
+      {
+        content: [{ text: "Hi", type: "text" }],
+        model: "claude-opus-5",
+        provider: "anthropic",
+        role: "assistant",
+        timestamp: 50,
+      },
+      false
+    );
+    const frame = published[0];
+    expect(frame?.kind === "message" && frame.message.model).toBe("anthropic/claude-opus-5");
+  });
+
+  test("carries none when the host names only one of the pair", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.record(
+      SUBJECT,
+      { content: [], model: "claude-opus-5", role: "assistant", timestamp: 50 },
+      false
+    );
+    const frame = published[0];
+    expect(frame?.kind === "message" && frame.message.model).toBeUndefined();
+  });
+
+  test("never reaches a user message, even when its host object names one", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.record(
+      SUBJECT,
+      {
+        content: "ship it",
+        model: "claude-opus-5",
+        provider: "anthropic",
+        role: "user",
+        timestamp: 10,
+      },
+      false
+    );
+    const frame = published[0];
+    expect(frame?.kind === "message" && frame.message.model).toBeUndefined();
+  });
+
+  test("switches with the session's own model on the next turn", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.record(
+      SUBJECT,
+      {
+        content: [{ text: "first", type: "text" }],
+        model: "claude-opus-5",
+        provider: "anthropic",
+        role: "assistant",
+        timestamp: 10,
+      },
+      false
+    );
+    publisher.record(
+      SUBJECT,
+      {
+        content: [{ text: "second", type: "text" }],
+        model: "claude-sonnet-5",
+        provider: "anthropic",
+        role: "assistant",
+        timestamp: 20,
+      },
+      false
+    );
+    expect(published.map((frame) => frame.kind === "message" && frame.message.model)).toEqual([
+      "anthropic/claude-opus-5",
+      "anthropic/claude-sonnet-5",
+    ]);
+  });
+
+  // An empty string still satisfies `typeof x === "string"`, so the type check alone would
+  // combine it into a malformed `/claude-opus-5` or `anthropic/`.
+  test("carries none when the host names an empty provider or an empty model", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.record(
+      SUBJECT,
+      { content: [], model: "claude-opus-5", provider: "", role: "assistant", timestamp: 50 },
+      false
+    );
+    publisher.record(
+      SUBJECT,
+      { content: [], model: "", provider: "anthropic", role: "assistant", timestamp: 60 },
+      false
+    );
+    expect(published.map((frame) => frame.kind === "message" && frame.message.model)).toEqual([
+      undefined,
+      undefined,
+    ]);
+  });
+
+  test("caps an oversized combined model before it leaves the session", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    const oversized = "x".repeat(AGENT_STREAM_LIMITS.modelChars);
+    publisher.record(
+      SUBJECT,
+      { content: [], model: oversized, provider: "anthropic", role: "assistant", timestamp: 50 },
+      false
+    );
+    const frame = published[0];
+    const model = frame?.kind === "message" ? frame.message.model : undefined;
+    expect(model).toBe(
+      `anthropic/${oversized}`.slice(0, AGENT_STREAM_LIMITS.modelChars) +
+        AGENT_STREAM_TRUNCATION_SUFFIX
+    );
+  });
+});

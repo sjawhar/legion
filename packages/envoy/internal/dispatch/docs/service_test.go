@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"runtime"
 	"strings"
@@ -836,7 +837,7 @@ func TestAttributesTheEditorDerivesSettleWithoutAVersion(t *testing.T) {
 			settleCurrentGeneration(t, service, artifactID)
 
 			assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 1, 0)
-			if pending := pendingAuthors(service, artifactID); len(pending) != 0 {
+			if pending := pendingAuthors(t, service, artifactID); len(pending) != 0 {
 				t.Fatalf("pending authors = %v, want none (reader %v changed nothing)", pending, reader)
 			}
 		})
@@ -901,7 +902,7 @@ func TestAMarkInsideAWordWritesNoVersion(t *testing.T) {
 				settleCurrentGeneration(t, service, artifactID)
 
 				assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 0)
-				if pending := pendingAuthors(service, artifactID); len(pending) != 0 {
+				if pending := pendingAuthors(t, service, artifactID); len(pending) != 0 {
 					t.Fatalf("pending authors = %v, want none (a mark is not content)", pending)
 				}
 			})
@@ -988,11 +989,24 @@ func TestAReaderIsNoAuthorOfAnAgentsVersion(t *testing.T) {
 	}
 }
 
-func pendingAuthors(service *Service, artifactID string) []model.Actor {
+// pendingAuthors is every author the document owes a version: the room's in-flight credits no
+// committed version has listed and its durable pending authors. F is read first: a credit that
+// lands in between commits to R before it leaves F, so the R read that follows holds it.
+func pendingAuthors(t *testing.T, service *Service, artifactID string) []model.Actor {
+	t.Helper()
+	owed := make(map[string]model.Actor)
 	state := service.room(artifactID)
 	state.mu.Lock()
-	defer state.mu.Unlock()
-	return actorSlice(state.pending)
+	for _, record := range state.unconsumedInflightLocked(state.creditSeq.Load()) {
+		maps.Copy(owed, record.authors)
+	}
+	state.mu.Unlock()
+	durable, err := readPendingAuthors(context.Background(), service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the document's pending authors: %v", err)
+	}
+	maps.Copy(owed, durable)
+	return actorSlice(owed)
 }
 
 // setHeadingID returns a live edit that gives every heading id, as the editor's heading plugin
@@ -1121,7 +1135,7 @@ func TestSettleCapturesOnlyItsOwnIdentityUpdate(t *testing.T) {
 	// The load armed the settlement the seeded update owes, which moved the generation.
 	state := service.room(artifactID)
 	state.mu.Lock()
-	armed := state.gen
+	armed := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, armed)
 	<-foreignApplied
@@ -1148,7 +1162,7 @@ func TestSettleCapturesOnlyItsOwnIdentityUpdate(t *testing.T) {
 		t.Fatalf("identity update changed document = %q, want only identity repairs", markdown)
 	}
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	if generation != armed+1 {
 		t.Fatalf("generation after foreign update = %d, want %d", generation, armed+1)
@@ -1173,7 +1187,7 @@ func TestSettleStampsLegacyChangeInExactlyOneVersion(t *testing.T) {
 	waitForPersistedProofText(t, database, artifactID, "after\n")
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 
@@ -1230,7 +1244,7 @@ func TestSettleDiscardsIdentityUpdateWhenVersionTransactionFails(t *testing.T) {
 	waitForPersistedProofText(t, database, artifactID, "after\n")
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 
@@ -1319,7 +1333,7 @@ func TestFailedSettlementDoesNotDiscardSuccessorRoomUpdate(t *testing.T) {
 	<-entered
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 	if persistence.released.CompareAndSwap(false, true) {
@@ -1737,6 +1751,101 @@ func TestSettleAttributesServiceWrittenAskBlockToTheAPIActorWhilePeerConnected(t
 	}
 }
 
+// A service edit's ask block belongs to that service actor even when a browser edits elsewhere
+// before settlement. The service knows which write introduced the block; the browser's later
+// content is not its author (LEGION-503).
+func TestSettleAttributesAServiceWrittenAskBlockToItsWriterAfterBrowserEdits(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin agent edit: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{
+		Op: "insert", After: "end", Markdown: ":::ask{#agent-after-browser urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n",
+	}}, agent, nil); err != nil {
+		t.Fatalf("agent writes an ask block: %v", err)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit agent edit: %v", err)
+	}
+	editLiveTree(t, service, artifactID, appendBlocks(t, "Bob typed later.\n"))
+	settleCurrentGeneration(t, service, artifactID)
+
+	if author := blockAskAuthor(t, service, artifactID, "agent-after-browser"); author != agent {
+		t.Fatalf("service-written ask author = %#v, want %v", author, agent)
+	}
+	if actor := blockAskOpenedActor(t, service, artifactID, "agent-after-browser"); actor != agent {
+		t.Fatalf("ask.opened actor = %#v, want %v", actor, agent)
+	}
+	if !blockAskFollows(t, service, artifactID, "agent-after-browser", agent.ID) {
+		t.Fatalf("service-written ask does not follow its author %q", agent.ID)
+	}
+}
+
+// An upload's ask block belongs to its uploader even when a browser edits elsewhere before
+// settlement. The upload is a service write that introduced the block (LEGION-503).
+func TestSettleAttributesAnUploadedAskBlockToItsUploaderAfterBrowserEdits(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := joinedReplaceText(service, artifactID, "before\n\n:::ask{#upload-after-browser urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n", alice); err != nil {
+		t.Fatalf("upload the ask block: %v", err)
+	}
+	editLiveTree(t, service, artifactID, appendBlocks(t, "Bob typed later.\n"))
+	settleCurrentGeneration(t, service, artifactID)
+
+	if author := blockAskAuthor(t, service, artifactID, "upload-after-browser"); author != alice {
+		t.Fatalf("uploaded ask author = %#v, want %v", author, alice)
+	}
+	if actor := blockAskOpenedActor(t, service, artifactID, "upload-after-browser"); actor != alice {
+		t.Fatalf("ask.opened actor = %#v, want %v", actor, alice)
+	}
+}
+
+// A settlement attributes the block ask it indexes to the room's latest editor, whose change its
+// version credits, not to an author still pending from an earlier change: an author whose edits
+// came to nothing - typed and undone - stays pending past the settlement that found nothing to
+// version (LEGION-503), and sorts ahead of the ask's writer here.
+func TestSettleAttributesAnAskBlockToItsLatestEditorOverAnEarlierPendingAuthor(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	settleCurrentGeneration(t, service, artifactID)
+	typed := model.Actor{Kind: "user", ID: "bob"}
+	connectionID := service.nextConnection.Add(1)
+	service.addConnection(artifactID, connectionID, typed)
+	editLiveTree(t, service, artifactID, replaceRun("before", "before, typed"))
+	editLiveTree(t, service, artifactID, replaceRun("before, typed", "before"))
+	settleCurrentGeneration(t, service, artifactID)
+	service.removeConnection(artifactID, connectionID)
+
+	writer := model.Actor{Kind: "user", ID: "carol"}
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{{
+		Op: "insert", After: "end", Markdown: ":::ask{#carol-ask urgency=\"med\" multiple=\"false\"}\nShip it?\n:::\n",
+	}}, writer, nil); err != nil {
+		t.Fatalf("carol's edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if author := blockAskAuthor(t, service, artifactID, "carol-ask"); author != writer {
+		t.Fatalf("ask author = %#v, want %v, who wrote it", author, writer)
+	}
+}
+
 // snapshotAndCommitVersion versions the live text the way an anchored comment does, which
 // consumes the room's pending authors ahead of the next settlement.
 func snapshotAndCommitVersion(t *testing.T, service *Service, artifactID string, actor model.Actor) {
@@ -1772,7 +1881,7 @@ func settleCurrentGeneration(t *testing.T, service *Service, artifactID string) 
 	}
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
 }
@@ -1807,6 +1916,40 @@ func blockAskAuthor(t *testing.T, service *Service, artifactID, blockID string) 
 	return author
 }
 
+func blockAskOpenedActor(t *testing.T, service *Service, artifactID, blockID string) model.Actor {
+	t.Helper()
+	var raw []byte
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select e.actor
+		from events e
+		join asks a on e.payload->>'id' = a.id::text
+		where e.type = 'ask.opened' and a.block_artifact_id = $1 and a.block_id = $2
+	`, artifactID, blockID).Scan(&raw); err != nil {
+		t.Fatalf("read block ask %q opened actor: %v", blockID, err)
+	}
+	var actor model.Actor
+	if err := json.Unmarshal(raw, &actor); err != nil {
+		t.Fatalf("decode block ask %q opened actor: %v", blockID, err)
+	}
+	return actor
+}
+
+func blockAskFollows(t *testing.T, service *Service, artifactID, blockID, sessionID string) bool {
+	t.Helper()
+	var follows bool
+	if err := service.store.Pool.QueryRow(context.Background(), `
+		select exists(
+			select 1
+			from ask_followers f
+			join asks a on a.id = f.ask_id
+			where a.block_artifact_id = $1 and a.block_id = $2 and f.session_id = $3
+		)
+	`, artifactID, blockID, sessionID).Scan(&follows); err != nil {
+		t.Fatalf("read block ask %q followers: %v", blockID, err)
+	}
+	return follows
+}
+
 func TestSupersededSettleGenerationDoesNotWrite(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
@@ -1815,11 +1958,11 @@ func TestSupersededSettleGenerationDoesNotWrite(t *testing.T) {
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	state := service.room(artifactID)
 	state.mu.Lock()
-	stale := state.gen
+	stale := state.roomGeneration
 	state.mu.Unlock()
 	service.scheduleSettle(artifactID)
 	state.mu.Lock()
-	current := state.gen
+	current := state.roomGeneration
 	state.mu.Unlock()
 
 	service.settleRoom(artifactID, stale)
@@ -2085,7 +2228,7 @@ func TestAdversarialSettlementDoesNotMissAppendAfterClassConsume(t *testing.T) {
 		state.mu.Unlock()
 		t.Fatal("stop armed settlement")
 	}
-	generation := state.gen
+	generation := state.roomGeneration
 	service.settle = 10 * time.Millisecond
 	state.mu.Unlock()
 	service.settleRoom(artifactID, generation)
@@ -2290,7 +2433,7 @@ func TestSettleCapturesAuthorsAtSnapshotTime(t *testing.T) {
 	}
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 	blocker, err := service.store.Pool.Begin(context.Background())
 	if err != nil {
@@ -2307,7 +2450,7 @@ func TestSettleCapturesAuthorsAtSnapshotTime(t *testing.T) {
 		close(settled)
 	}()
 	waitForDatabaseLock(t, service.store)
-	service.recordActor(artifactID, second)
+	service.recordActor(t, artifactID, second)
 	if err := blocker.Commit(context.Background()); err != nil {
 		t.Fatalf("release document lock: %v", err)
 	}
@@ -2341,6 +2484,8 @@ func waitForDatabaseLock(t *testing.T, database *store.Store) {
 	t.Fatal("settlement did not wait on the document lock")
 }
 
+// failingOnceVersionedStore fails the first load of the stored document, of either kind: a room's
+// (Load) or a cold read's (LoadDocument).
 type failingOnceVersionedStore struct {
 	VersionedStore
 	loads atomic.Int32
@@ -2353,6 +2498,15 @@ func (s *failingOnceVersionedStore) Load(ctx context.Context, room string) (pers
 	return s.VersionedStore.Load(ctx, room)
 }
 
+func (s *failingOnceVersionedStore) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	if s.loads.Add(1) == 1 {
+		return LoadedDocument{}, errors.New("transient load failure")
+	}
+	return s.VersionedStore.LoadDocument(ctx, room)
+}
+
+// failingVersionedStore fails the store with loadErr, every read of it included, or loads every
+// document as loadUpdate, one stored state at version 1, or fails appends with appendErr.
 type failingVersionedStore struct {
 	VersionedStore
 	loadErr        error
@@ -2374,11 +2528,48 @@ func (s failingVersionedStore) Load(ctx context.Context, room string) (persisten
 	return s.VersionedStore.Load(ctx, room)
 }
 
+func (s failingVersionedStore) DocumentStamp(ctx context.Context, room string) (DocumentStamp, error) {
+	if s.respectContext && ctx.Err() != nil {
+		return DocumentStamp{}, ctx.Err()
+	}
+	if s.loadErr != nil {
+		return DocumentStamp{}, s.loadErr
+	}
+	if s.loadUpdate != nil {
+		return DocumentStamp{Version: 1}, nil
+	}
+	return s.VersionedStore.DocumentStamp(ctx, room)
+}
+
+func (s failingVersionedStore) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	if s.respectContext && ctx.Err() != nil {
+		return LoadedDocument{}, ctx.Err()
+	}
+	if s.loadErr != nil {
+		return LoadedDocument{}, s.loadErr
+	}
+	if s.loadUpdate != nil {
+		doc := newDocumentCopy()
+		if err := crdt.ApplyUpdateV1(doc, s.loadUpdate, nil); err != nil {
+			return LoadedDocument{}, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
+		}
+		return LoadedDocument{Doc: doc, Stamp: DocumentStamp{Version: 1}}, nil
+	}
+	return s.VersionedStore.LoadDocument(ctx, room)
+}
+
 func (s failingVersionedStore) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
 	if s.appendErr != nil {
 		return 0, s.appendErr
 	}
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
+}
+
+func (s failingVersionedStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+	if s.appendErr != nil {
+		return 0, s.appendErr
+	}
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
 type failingBackfillVersionedStore struct {
@@ -2416,21 +2607,46 @@ func (s *blockingFirstAppendStore) AppendUpdate(ctx context.Context, room string
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
-func (s *blockingFirstAppendStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+func (s *blockingFirstAppendStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if s.blocked.CompareAndSwap(false, true) {
 		close(s.entered)
 		<-s.release
 	}
-	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
-// recordActor makes actor a pending author of room's next version, and its latest editor.
-func (s *Service) recordActor(room string, actor model.Actor) {
-	state := s.room(room)
-	state.mu.Lock()
-	state.pending[actorKey(actor)] = actor
-	state.lastActor = new(actor)
+// room is the state the service holds for room now, created when it holds none, for a test to read
+// or arrange under its lock.
+func (s *Service) room(name string) *roomState {
+	state := s.lockState(name)
 	state.mu.Unlock()
+	return state
+}
+
+// recordActor makes actor a pending author of room's next version, and its latest editor, as a
+// landed browser edit does: a durable pending author, written under the document's advisory lock
+// (AppendUpdateWithCredit), and the room's latest edit source.
+func (s *Service) recordActor(t *testing.T, room string, actor model.Actor) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := s.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin recording %s: %v", actor.ID, err)
+	}
+	defer tx.Rollback(ctx)
+	if err := lockDocumentRoom(ctx, tx, room); err != nil {
+		t.Fatalf("lock the document to record %s: %v", actor.ID, err)
+	}
+	if err := upsertPendingAuthors(ctx, tx, room, pendingAuthorsAt(map[string]model.Actor{actorKey(actor): actor}, 0)); err != nil {
+		t.Fatalf("record %s as a pending author: %v", actor.ID, err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit %s as a pending author: %v", actor.ID, err)
+	}
+	state := s.lockState(room)
+	state.lastActor = new(actor)
+	state.unsettled = true
+	s.unlockState(room, state)
 }
 
 func seedServiceText(t *testing.T, service *Service, artifactID, markdown string) {
@@ -2658,13 +2874,14 @@ func browserReplaceText(t *testing.T, service *Service, artifactID, markdown str
 	editLiveTree(t, service, artifactID, func(*pmdoc.Node) *pmdoc.Node { return written })
 }
 
-// liveTree reads the resident tree under the room lock.
+// liveTree reads the resident room as of one moment under its document lock (Service.liveTree),
+// inside the Apply that loads and holds the room.
 func liveTree(t *testing.T, service *Service, artifactID string) *pmdoc.Node {
 	t.Helper()
 	var tree *pmdoc.Node
 	err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		var readErr error
-		tree, readErr = pmdoc.Read(doc.GetXmlFragment(fragmentName))
+		tree, readErr = service.liveTree(artifactID, doc)
 		if readErr != nil {
 			t.Errorf("read live tree: %v", readErr)
 		}
@@ -2715,17 +2932,6 @@ func deleteRun(text string) func(*pmdoc.Node) *pmdoc.Node {
 		visit(tree)
 		return tree
 	}
-}
-func waitForRoomClosed(t *testing.T, service *Service, artifactID string) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if service.roomClosed(artifactID) {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatal("document room did not close after issue event")
 }
 
 // waitForRoomFailure returns once the room has failed. failRoom evicts the failed room from a

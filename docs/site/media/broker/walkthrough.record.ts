@@ -458,7 +458,7 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     let code = "";
     await terminalSection("t1-login.cast", async (mark) => {
       mark("typing");
-      await type("agent-secrets launcher login");
+      await type("agent-secrets machine login");
       await enter();
       code = (await waitForScreen(printed.loginCode, "a login code"))[1];
       mark("code");
@@ -499,7 +499,7 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     );
     await terminalSection("t2-session.cast", async (mark) => {
       mark("status-typing");
-      await type("agent-secrets launcher login-status");
+      await type("agent-secrets machine login-status");
       await enter();
       await waitForScreen(/^issued$/m, "issued");
       mark("issued");

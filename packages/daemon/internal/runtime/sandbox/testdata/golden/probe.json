@@ -31,7 +31,9 @@
               "--daemon-api-version",
               "3",
               "--plugin-root",
-              "/opt/legion/pi-legion-envoy",
+              "/opt/legion/pi-legion",
+              "--envoy-plugin-root",
+              "/opt/legion/pi-envoy",
               "--pod-safety",
               "--role-references",
               "{\"LEGION_PROMPT_AGENTS\":{\"oracle\":[\"roles/core/planner.md\"]},\"LEGION_PROMPT_SKILLS\":{}}"
@@ -40,10 +42,13 @@
             "name": "probe",
             "resources": {
               "limits": {
-                "memory": "2Gi"
+                "cpu": "250m",
+                "ephemeral-storage": "5Gi",
+                "memory": "1Gi"
               },
               "requests": {
-                "cpu": "500m",
+                "cpu": "250m",
+                "ephemeral-storage": "1Gi",
                 "memory": "1Gi"
               }
             },

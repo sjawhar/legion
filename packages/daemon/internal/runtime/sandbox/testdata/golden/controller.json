@@ -1,0 +1,245 @@
+{
+  "apiVersion": "agents.x-k8s.io/v1beta1",
+  "kind": "Sandbox",
+  "metadata": {
+    "labels": {
+      "legion.dev/project": "legion",
+      "legion.dev/role": "controller"
+    },
+    "name": "legion-legion-controller",
+    "namespace": "legion"
+  },
+  "spec": {
+    "operatingMode": "Running",
+    "podTemplate": {
+      "metadata": {
+        "annotations": {
+          "karpenter.sh/do-not-disrupt": "true"
+        },
+        "labels": {
+          "legion.dev/project": "legion",
+          "legion.dev/role": "controller"
+        }
+      },
+      "spec": {
+        "automountServiceAccountToken": false,
+        "containers": [
+          {
+            "command": [
+              "/opt/legion/bin/legion",
+              "launcher",
+              "--connect",
+              "tcp://192.0.2.250:13371",
+              "--token-file",
+              "/var/run/legion/launcher/LAUNCHER_TOKEN",
+              "--sandbox",
+              "legion-legion-controller",
+              "--role",
+              "controller",
+              "--private-dir",
+              "/var/run/legion/private",
+              "--stop-grace",
+              "30s"
+            ],
+            "env": [
+              {
+                "name": "POD_UID",
+                "valueFrom": {
+                  "fieldRef": {
+                    "fieldPath": "metadata.uid"
+                  }
+                }
+              }
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "controller",
+            "resources": {
+              "limits": {
+                "cpu": "1",
+                "ephemeral-storage": "10Gi",
+                "memory": "4Gi"
+              },
+              "requests": {
+                "cpu": "1",
+                "ephemeral-storage": "1Gi",
+                "memory": "4Gi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/legion",
+                "name": "issue"
+              },
+              {
+                "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
+                "name": "issue",
+                "subPath": "sessions"
+              },
+              {
+                "mountPath": "/var/run/legion/launcher",
+                "name": "launcher-controller",
+                "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/legion/private",
+                "name": "private-controller"
+              },
+              {
+                "mountPath": "/var/run/legion/state",
+                "name": "state-controller"
+              },
+              {
+                "mountPath": "/home/legion/.config",
+                "name": "config"
+              }
+            ],
+            "workingDir": "/legion"
+          }
+        ],
+        "enableServiceLinks": false,
+        "initContainers": [
+          {
+            "command": [
+              "/opt/legion/bin/legion",
+              "workspace-init",
+              "controller",
+              "--root",
+              "/legion"
+            ],
+            "env": [
+              {
+                "name": "PATH",
+                "value": "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
+              }
+            ],
+            "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
+            "name": "workspace-init",
+            "resources": {
+              "limits": {
+                "cpu": "1",
+                "ephemeral-storage": "10Gi",
+                "memory": "4Gi"
+              },
+              "requests": {
+                "cpu": "1",
+                "ephemeral-storage": "1Gi",
+                "memory": "4Gi"
+              }
+            },
+            "securityContext": {
+              "allowPrivilegeEscalation": false,
+              "capabilities": {
+                "drop": [
+                  "ALL"
+                ]
+              },
+              "seccompProfile": {
+                "type": "RuntimeDefault"
+              }
+            },
+            "volumeMounts": [
+              {
+                "mountPath": "/legion",
+                "name": "issue"
+              }
+            ],
+            "workingDir": "/legion"
+          }
+        ],
+        "nodeSelector": {
+          "legion.dev/pool": "legion"
+        },
+        "priorityClassName": "legion",
+        "restartPolicy": "Always",
+        "runtimeClassName": "gvisor",
+        "securityContext": {
+          "fsGroup": 1000,
+          "runAsGroup": 1000,
+          "runAsNonRoot": true,
+          "runAsUser": 1000
+        },
+        "terminationGracePeriodSeconds": 30,
+        "tolerations": [
+          {
+            "effect": "NoSchedule",
+            "key": "legion.dev/pool",
+            "operator": "Equal",
+            "value": "legion"
+          }
+        ],
+        "volumes": [
+          {
+            "name": "issue",
+            "persistentVolumeClaim": {
+              "claimName": "issue-legion-legion-controller"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "config"
+          },
+          {
+            "name": "launcher-controller",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "LAUNCHER_TOKEN",
+                  "path": "LAUNCHER_TOKEN"
+                }
+              ],
+              "secretName": "legion-legion-controller-controller-boot"
+            }
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "private-controller"
+          },
+          {
+            "emptyDir": {
+              "medium": "Memory"
+            },
+            "name": "state-controller"
+          }
+        ]
+      }
+    },
+    "volumeClaimTemplates": [
+      {
+        "metadata": {
+          "labels": {
+            "legion.dev/project": "legion",
+            "legion.dev/role": "controller"
+          },
+          "name": "issue"
+        },
+        "spec": {
+          "accessModes": [
+            "ReadWriteOnce"
+          ],
+          "resources": {
+            "requests": {
+              "storage": "20Gi"
+            }
+          },
+          "storageClassName": "gp2"
+        }
+      }
+    ]
+  }
+}
