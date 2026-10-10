@@ -115,7 +115,7 @@ func TestGenerateJWTSignsShippedClaims(t *testing.T) {
 	verifyAppJWT(t, token, &key.PublicKey, now, "12345")
 }
 
-func TestAppRoleForEveryClaimRole(t *testing.T) {
+func TestAppRoleForEveryRole(t *testing.T) {
 	for _, tc := range []struct {
 		role claim.Role
 		want AppRole
@@ -126,6 +126,7 @@ func TestAppRoleForEveryClaimRole(t *testing.T) {
 		{claim.RoleTester, Review},
 		{claim.RoleReviewer, Review},
 		{claim.RoleMerger, Implement},
+		{claim.RoleController, Review},
 	} {
 		t.Run(string(tc.role), func(t *testing.T) {
 			if got := AppRoleFor(tc.role); got != tc.want {

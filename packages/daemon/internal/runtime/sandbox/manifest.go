@@ -100,18 +100,19 @@ const sessionDSNFile = "OMP_SESSION_SQL_DSN"
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
 // probe's, whose names the operator's volumes may not take: the shared ones and each launcher
 // role's private ones. The agent-secrets volumes are reserved whether or not this deployment
-// enrolls: an operator's pod may never claim them. A key volume and a gh volume are a workflow
-// role's alone: the controller never enrolls (enrolledWith) and holds no GitHub credential
-// (podKind.holdsGitHubCredential), so no pod carries one of its.
+// enrolls: an operator's pod may never claim them. A key volume is a workflow role's alone: the
+// controller never enrolls (enrolledWith), so no pod carries one of its. A gh volume is any
+// launcher role's, the controller's included: every launcherRoles entry holds a GitHub credential
+// (podKind.holdsGitHubCredential).
 func legionVolumeNames() []string {
 	names := []string{
 		treeVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
 	}
 	for _, role := range launcherRoles {
-		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role))
+		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role), roleVolume(ghVolume, role))
 	}
 	for _, role := range claim.Roles {
-		names = append(names, roleVolume(agentSecretsKeyVolume, role), roleVolume(ghVolume, role))
+		names = append(names, roleVolume(agentSecretsKeyVolume, role))
 	}
 	slices.Sort(names)
 	return names

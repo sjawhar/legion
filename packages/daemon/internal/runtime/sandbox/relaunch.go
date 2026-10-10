@@ -379,12 +379,12 @@ func (r *Runtime) waitedOut(s *sandbox) string {
 // writeLauncherSecrets makes, for each launcher role of the pod (l.roles), a role-private Secret
 // holding a fresh launcher token. It runs only before a new pod starts, so every pod's launchers
 // authenticate with tokens no earlier pod held; a role's launch credentials travel in its
-// launcher's start command instead (launcherCommand). In an issue pod (podKind.holdsGitHubCredential)
-// the Secret also carries the role's GitHub credential, its gh hosts.yml and config.yml rendered
-// from the role's App token (Options.GitHubCredential), which its container projects at GHConfigDir;
-// a mint that fails fails the launch naming the role, as a provisioning-token mint does, since a pod
-// whose gh holds no token would start every role unable to reach GitHub. The controller's Secret
-// holds the launcher token alone.
+// launcher's start command instead (launcherCommand). In a pod whose kind holds a GitHub credential
+// (podKind.holdsGitHubCredential) — an issue pod's roles and the controller's — the Secret also
+// carries the role's GitHub credential, its gh hosts.yml and config.yml rendered from the role's
+// App token (Options.GitHubCredential), which its container projects at GHConfigDir; a mint that
+// fails fails the launch naming the role, as a provisioning-token mint does, since a pod whose gh
+// holds no token would start every role unable to reach GitHub.
 func (r *Runtime) writeLauncherSecrets(ctx context.Context, s *sandbox, l launch) error {
 	for _, role := range l.roles {
 		token, err := launcherToken()

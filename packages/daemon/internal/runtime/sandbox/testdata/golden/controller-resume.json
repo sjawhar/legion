@@ -91,6 +91,11 @@
               {
                 "mountPath": "/home/legion/.config",
                 "name": "config"
+              },
+              {
+                "mountPath": "/var/run/legion/gh",
+                "name": "gh-controller",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion"
@@ -197,6 +202,23 @@
               "medium": "Memory"
             },
             "name": "state-controller"
+          },
+          {
+            "name": "gh-controller",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "github-hosts",
+                  "path": "hosts.yml"
+                },
+                {
+                  "key": "github-config",
+                  "path": "config.yml"
+                }
+              ],
+              "secretName": "legion-legion-controller-controller-boot"
+            }
           }
         ]
       }

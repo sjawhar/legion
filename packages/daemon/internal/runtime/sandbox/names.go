@@ -14,12 +14,13 @@ import (
 // The pod's own paths. The tree volume is mounted whole at TreeRoot in workspace-init and each
 // role launcher, and sessions stay on it. Each role container has its own launcher token
 // projection at LauncherDir, and its own memory-backed LauncherPrivateDir, where its launcher
-// writes the generation's boot token and launch credentials, and StateDir. GHConfigDir is an issue
-// pod's role container's GH_CONFIG_DIR: the read-only projection of its role Secret's two gh files
-// (GitHubHostsKey as ghconfig.HostsFile, GitHubConfigKey as ghconfig.ConfigFile), mounted in that
-// role's container alone, which its plain `gh` and the clone's `gh auth git-credential` helper
-// read the role's App token from. The kubelet rewrites a whole-volume Secret projection in place
-// when the Secret changes, so the refresher's Secret update is what the next gh runs with.
+// writes the generation's boot token and launch credentials, and StateDir. GHConfigDir is a role
+// container's GH_CONFIG_DIR, in an issue pod or the controller's: the read-only projection of its
+// role Secret's two gh files (GitHubHostsKey as ghconfig.HostsFile, GitHubConfigKey as
+// ghconfig.ConfigFile), mounted in that role's container alone, which its plain `gh` and the
+// clone's `gh auth git-credential` helper read the role's App token from. The kubelet rewrites a
+// whole-volume Secret projection in place when the Secret changes, so the refresher's Secret
+// update is what the next gh runs with.
 const (
 	TreeRoot           = "/legion"
 	SessionsSubPath    = "sessions"
@@ -88,9 +89,10 @@ const (
 )
 
 // The keys of a role's Secret that carry its GitHub credential beside the launcher token: the
-// rendered hosts.yml and config.yml (ghconfig.Rendered), written for every role of an issue pod
-// and never for the controller's, which has no App. credentialFromSecret hashes the launcher token
-// alone, so the refresher rewrites these two without changing the launcher's binding.
+// rendered hosts.yml and config.yml (ghconfig.Rendered), written for every role whose pod kind
+// holds a credential (podKind.holdsGitHubCredential): every workflow role of an issue pod and the
+// controller's. credentialFromSecret hashes the launcher token alone, so the refresher rewrites
+// these two without changing the launcher's binding.
 const (
 	GitHubHostsKey  = "github-hosts"
 	GitHubConfigKey = "github-config"
