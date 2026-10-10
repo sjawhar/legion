@@ -2,8 +2,8 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -74,16 +74,6 @@ func requireSize(t *testing.T, read string, version model.Version, want int) {
 	}
 }
 
-// decodeJSONBytes decodes body, a response a test already read, as T.
-func decodeJSONBytes[T any](t *testing.T, body []byte) T {
-	t.Helper()
-	var value T
-	if err := json.Unmarshal(body, &value); err != nil {
-		t.Fatalf("decode %.200s: %v", body, err)
-	}
-	return value
-}
-
 // The artifact list, a document's metadata and each version's metadata say how big the stored
 // document is, so a person or a monitor can find one near the cap without the read that renders
 // it. A document 101 bytes under the cap is listed with its markdown's byte size on every route
@@ -139,13 +129,13 @@ func TestArtifactListsGiveANearCapDocumentsStoredSizeWithoutRenderingIt(t *testi
 		t.Fatalf("%s does not list artifact %s", read, id)
 		return model.Artifact{}
 	}
-	read := func(path string) []byte {
+	read := func(path string) *httptest.ResponseRecorder {
 		t.Helper()
 		response := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice")
 		if response.Code != http.StatusOK {
 			t.Fatalf("GET %s: status=%d body=%.300s", path, response.Code, response.Body.String())
 		}
-		return response.Body.Bytes()
+		return response
 	}
 	only := func(read string, artifact model.Artifact) model.Version {
 		t.Helper()
@@ -156,15 +146,15 @@ func TestArtifactListsGiveANearCapDocumentsStoredSizeWithoutRenderingIt(t *testi
 	}
 
 	issueList := "/api/v1/issues/" + issue.Key + "/artifacts"
-	listed := decodeJSONBytes[[]model.Artifact](t, read(issueList))
+	listed := decodeBody[[]model.Artifact](t, read(issueList))
 	requireSize(t, issueList, only(issueList, find(issueList, listed, document.ID)), len(nearCap))
 	requireSize(t, issueList, only(issueList, find(issueList, listed, issue.PrimaryArtifactID)), len(spec))
 
 	projectList := "/api/v1/projects/TEST/artifacts"
-	requireSize(t, projectList, only(projectList, find(projectList, decodeJSONBytes[[]model.Artifact](t, read(projectList)), document.ID)), len(nearCap))
+	requireSize(t, projectList, only(projectList, find(projectList, decodeBody[[]model.Artifact](t, read(projectList)), document.ID)), len(nearCap))
 
 	issueRead := "/api/v1/issues/" + issue.Key
-	detail := decodeJSONBytes[struct {
+	detail := decodeBody[struct {
 		Artifacts []model.Artifact `json:"artifacts"`
 	}](t, read(issueRead))
 	requireSize(t, issueRead, only(issueRead, find(issueRead, detail.Artifacts, document.ID)), len(nearCap))
@@ -173,15 +163,14 @@ func TestArtifactListsGiveANearCapDocumentsStoredSizeWithoutRenderingIt(t *testi
 		"/api/v1/artifacts/" + document.ID,
 		"/api/v1/issues/" + issue.Key + "/artifacts/" + document.Slug,
 	} {
-		requireSize(t, path, only(path, decodeJSONBytes[model.Artifact](t, read(path))), len(nearCap))
+		requireSize(t, path, only(path, decodeBody[model.Artifact](t, read(path))), len(nearCap))
 	}
 
 	for _, path := range []string{
 		"/api/v1/artifacts/" + document.ID + "/versions/1",
 		"/api/v1/issues/" + issue.Key + "/artifacts/" + document.Slug + "/versions/1",
 	} {
-		version := decodeJSONBytes[model.Version](t, read(path))
-		requireSize(t, path, version, len(nearCap))
+		requireSize(t, path, decodeBody[model.Version](t, read(path)), len(nearCap))
 	}
 
 	watch.watch(false)

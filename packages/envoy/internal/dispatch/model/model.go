@@ -584,7 +584,7 @@ type Version struct {
 	Authors   []Actor   `json:"authors"`
 	CreatedAt time.Time `json:"created_at"`
 	// Size is how many bytes the version stores: a file's or an image's bytes, or a document's
-	// markdown, the rendering the version recorded. Every version read selects it as VersionSize.
+	// markdown, the rendering the version recorded.
 	Size   *int    `json:"size,omitempty"`
 	MIME   *string `json:"mime,omitempty"`
 	SHA256 *string `json:"sha256,omitempty"`

@@ -26,7 +26,7 @@ import {
   textSecondaryOnCanvas,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { formatArtifactBytes } from "../artifacts/ArtifactHeader";
+import { formatArtifactBytes, versionsNewestFirst } from "../artifacts/ArtifactHeader";
 import {
   ArtifactDropZone,
   ArtifactUploadStatus,
@@ -44,7 +44,7 @@ function documentUpdatedAt(document: Artifact): string {
 function DocumentRow({ document }: { document: Artifact }): ReactNode {
   // The latest version's stored size (its markdown's bytes), so a document near the size cap
   // shows in the list without being opened.
-  const size = document.versions.at(-1)?.size;
+  const size = versionsNewestFirst(document.versions)[0]?.size;
   return (
     <li
       aria-label={document.name}

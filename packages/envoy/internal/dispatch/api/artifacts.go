@@ -1243,9 +1243,14 @@ func (s *server) findArtifactByName(ctx context.Context, q queryer, target artif
 	return artifact, nil
 }
 
+// versionColumns is the column list a version read selects over artifact_versions aliased v, in
+// the order scanned into model.Version: number, named, summary, authors, created_at, size, mime,
+// sha256. The size never reads a document's markdown (model.VersionSize).
+const versionColumns = `v.number, v.named, v.summary, v.authors, v.created_at, ` + model.VersionSize + `, v.mime, v.sha256`
+
 func (s *server) loadVersions(ctx context.Context, q queryer, artifactID string) ([]model.Version, error) {
 	rows, err := q.Query(ctx, `
-		select v.number, v.named, v.summary, v.authors, v.created_at, `+model.VersionSize+`, v.mime, v.sha256
+		select `+versionColumns+`
 		from artifact_versions v where v.artifact_id = $1 order by v.number
 	`, artifactID)
 	if err != nil {
@@ -1267,21 +1272,25 @@ func (s *server) loadVersions(ctx context.Context, q queryer, artifactID string)
 	return versions, rows.Err()
 }
 
+// loadVersion reads one version of a document with its markdown, which the content route answers,
+// so its size is that markdown's length rather than a second read of the column.
 func (s *server) loadVersion(ctx context.Context, q queryer, artifactID string, number int, markdown *string) (model.Version, error) {
 	var version model.Version
 	var authors []byte
 	if err := q.QueryRow(ctx, `
-		select v.number, v.named, v.summary, v.authors, v.created_at, `+model.VersionSize+`, v.mime, v.sha256, v.markdown
+		select v.number, v.named, v.summary, v.authors, v.created_at, v.mime, v.sha256, v.markdown
 		from artifact_versions v where v.artifact_id = $1 and v.number = $2
 	`, artifactID, number).Scan(
 		&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt,
-		&version.Size, &version.MIME, &version.SHA256, markdown,
+		&version.MIME, &version.SHA256, markdown,
 	); err != nil {
 		return model.Version{}, err
 	}
 	if err := json.Unmarshal(authors, &version.Authors); err != nil {
 		return model.Version{}, fmt.Errorf("decode version authors: %w", err)
 	}
+	size := len(*markdown)
+	version.Size = &size
 	return version, nil
 }
 
