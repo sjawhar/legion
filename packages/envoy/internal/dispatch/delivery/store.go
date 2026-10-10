@@ -818,6 +818,30 @@ func ListRunsStartedIn(ctx context.Context, pool *store.Pool, repo string, kind 
 	return runs, rows.Err()
 }
 
+// RunsWithJobs is a list of runs and every job of each, keyed by run id.
+type RunsWithJobs struct {
+	Runs []DeliveryRun
+	Jobs map[int64][]DeliveryRunJob
+}
+
+// ListRunsWithJobsStartedIn is ListRunsStartedIn's runs with ListRunJobsForRuns' jobs of them: the
+// Pipeline page's two reads, the PR-checks runs and the deploy runs of its shown days.
+func ListRunsWithJobsStartedIn(ctx context.Context, pool *store.Pool, repo string, kind DeliveryRunKind, branch, event string, from, to time.Time) (RunsWithJobs, error) {
+	runs, err := ListRunsStartedIn(ctx, pool, repo, kind, branch, event, from, to)
+	if err != nil {
+		return RunsWithJobs{}, err
+	}
+	runIDs := make([]int64, len(runs))
+	for i, run := range runs {
+		runIDs[i] = run.RunID
+	}
+	jobs, err := ListRunJobsForRuns(ctx, pool, repo, runIDs)
+	if err != nil {
+		return RunsWithJobs{}, err
+	}
+	return RunsWithJobs{Runs: runs, Jobs: jobs}, nil
+}
+
 // maxPullRequestsPerWindow bounds ListPullRequestsInWindow: a window a caller (the API, a future
 // script) opens too wide should fail loudly against this limit rather than return an unbounded
 // result set that could exhaust memory -- 28 days of this population is on the order of a few

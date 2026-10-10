@@ -2760,6 +2760,105 @@ export interface DeliveryMeasuresResponse {
   readonly freshness: DeliveryTimelineResponse["freshness"];
 }
 
+/** One shown UTC day's, or the shown days', results of one Pipeline stage. Only results that ended
+ *  in success or failure are timed; a cancelled one is counted beside them, and anything else
+ *  (skipped, still running) is not counted at all. */
+export interface DeliveryTimingCell {
+  /** Timed results: success or failure. */
+  readonly n: number;
+  /** The timed results' median minutes, to one decimal; null when none. */
+  readonly median_minutes: number | null;
+  readonly p90_minutes: number | null;
+  readonly success: number;
+  /** Failures, a timed-out result among them. */
+  readonly failure: number;
+  readonly cancelled: number;
+  /** `success / (success + failure)`, to four decimals; null when both are 0. */
+  readonly success_rate: number | null;
+}
+
+/** One shown UTC day of a Pipeline stage; `partial` is today. */
+export interface DeliveryTimingDay extends DeliveryTimingCell {
+  /** `YYYY-MM-DD`, UTC: the day each run started (a job by its run's start). */
+  readonly day: string;
+  readonly partial: boolean;
+}
+
+/** One Pipeline stage per shown day, oldest first, and over all of them. */
+export interface DeliveryTiming {
+  readonly days: readonly DeliveryTimingDay[];
+  readonly total: DeliveryTimingCell;
+}
+
+/** One PR-checks job's timing, by its name as a run lists it. */
+export interface DeliveryJobTiming extends DeliveryTiming {
+  readonly name: string;
+}
+
+/** One deploy-workflow job's timing in push runs on main, by the job name the settings give. */
+export interface DeliveryDeployJobTiming extends DeliveryTiming {
+  readonly job: string;
+}
+
+/** A PR-checks job that failed in the last 24 hours: its failures there, out of how many timed
+ *  results, and the run of its latest failure. */
+export interface DeliveryFailingJob {
+  readonly name: string;
+  readonly failures: number;
+  readonly results: number;
+  readonly last_failed_at: string;
+  readonly last_run_url: string;
+}
+
+/** One shown merge day's, or the shown days', lead times in minutes, unrounded. */
+export interface DeliveryLeadTimeCell {
+  readonly n: number;
+  readonly median_minutes: number | null;
+  readonly p90_minutes: number | null;
+  readonly max_minutes: number | null;
+}
+
+/** One shown UTC merge day's lead times; `partial` is today. */
+export interface DeliveryLeadTimeDay extends DeliveryLeadTimeCell {
+  readonly day: string;
+  readonly partial: boolean;
+}
+
+/** One lead time per shown merge day, oldest first, and over all of them. */
+export interface DeliveryLeadTimeTiming {
+  readonly days: readonly DeliveryLeadTimeDay[];
+  readonly total: DeliveryLeadTimeCell;
+}
+
+/**
+ * `GET /api/v1/delivery/pipeline?at`: the Pipeline page over the seven UTC days ending on `at`'s
+ * (default now), computed on request from stored facts and followed by neither the timeline's
+ * window nor its facets. `pr_checks` is the PR-checks workflow's pull_request runs: their whole
+ * run time, their five slowest jobs (a job needs 50 timed results in the seven days to rank), and
+ * the jobs that failed in the 24 hours before `at`, the roll-up job the settings name left out.
+ * The three deploy jobs are timed in the deploy workflow's push runs on main;
+ * `staging_e2e` and `staging_apply` are null when the settings name no such job. The two lead
+ * times bucket every population pull request merged in the shown days by its merge day, judged
+ * against `targets`.
+ */
+export interface DeliveryPipelineResponse {
+  /** The seven shown UTC days, oldest first; the last is `at`'s. */
+  readonly days: readonly string[];
+  readonly computed_at: string;
+  readonly pr_checks: {
+    readonly run: DeliveryTiming;
+    readonly slowest_jobs: readonly DeliveryJobTiming[];
+    readonly failing_jobs: readonly DeliveryFailingJob[];
+  };
+  readonly staging_e2e: DeliveryDeployJobTiming | null;
+  readonly staging_apply: DeliveryDeployJobTiming | null;
+  readonly production_apply: DeliveryDeployJobTiming;
+  readonly merge_to_production: DeliveryLeadTimeTiming;
+  readonly opened_to_merge: DeliveryLeadTimeTiming;
+  readonly targets: DeliveryTargets;
+  readonly freshness: DeliveryTimelineResponse["freshness"];
+}
+
 /**
  * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or
  * `null` until someone sets it, and `PUT /api/v1/settings/delivery` answers the record it stored.
