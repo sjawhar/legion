@@ -2824,8 +2824,17 @@ grep -q "x-access-token" <<<"$status" || fail "gh auth status in the implementer
 for pair in implementer:legion-implementer[bot] reviewer:legion-reviewer[bot]; do
   viewer=$(pod_viewer "$gh_pod" "${pair%%:*}") || fail "gh in the ${pair%%:*} container of $gh_pod answered no viewer"
   [ "$viewer" = "${pair#*:}" ] || fail "gh in the ${pair%%:*} container of $gh_pod acts as $viewer, want ${pair#*:}"
-  listed=$(pod_exec "$gh_pod" "${pair%%:*}" sh -c "ls -A $gh_config_dir | sort | tr '\n' ' '")
-  [ "$listed" = "config.yml hosts.yml " ] || fail "the ${pair%%:*} container's $gh_config_dir holds '$listed', want config.yml and hosts.yml alone"
+  # The directory is a whole-volume Secret projection (the mount the hour-boundary refresh needs:
+  # the kubelet rewrites it in place when the Secret changes, where a subPath mount never sees an
+  # update), so beside the two gh files it always lists the kubelet's atomic-writer entries, `..data`
+  # and a `..<timestamp>` directory. The two files are required; a `..`-prefixed entry is the
+  # kubelet's; anything else is a stranger, named.
+  listed=$(pod_exec "$gh_pod" "${pair%%:*}" sh -c "ls -A $gh_config_dir") || fail "could not list the ${pair%%:*} container's $gh_config_dir"
+  for want in config.yml hosts.yml; do
+    grep -qxF -- "$want" <<<"$listed" || fail "the ${pair%%:*} container's $gh_config_dir lacks $want; it holds: $(tr '\n' ' ' <<<"$listed")"
+  done
+  strangers=$(grep -vxF -e config.yml -e hosts.yml <<<"$listed" | grep -v '^\.\.' || true)
+  [ -z "$strangers" ] || fail "the ${pair%%:*} container's $gh_config_dir holds an entry that is neither a gh file nor the kubelet's: $(tr '\n' ' ' <<<"$strangers")"
 done
 impl_hash=$(gh_hosts_hash "$gh_pod" implementer) || fail "could not hash the implementer's hosts.yml"
 rev_hash=$(gh_hosts_hash "$gh_pod" reviewer) || fail "could not hash the reviewer's hosts.yml"
