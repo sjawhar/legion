@@ -2064,7 +2064,8 @@ bound counts the quiet since the last input, restarted at each read, not the tim
 began. Without brackets, it drains through 200 ms of quiet after the line with no total bound, and
 Ctrl-C ends it; that drain feeds the same reader (`drainAfterTheLine`), so a paste that begins in it
 restarts the same bound and is read through its closing mark, and a signal key inside it is pasted
-text.
+text. A paste-start mark split so only its first bytes arrive before the line ends holds the drain
+for `splitMarkGapMillis` (1 s) for the rest of the mark, so a late paste still opens.
 Anything but line endings after the first line is refused with exit 2. Bytes arriving after that
 quiet window can reach the shell; multi-line values should be piped, not pasted.
 A terminal hang-up before the line or paste ends returns an error, never a partial value, and so
