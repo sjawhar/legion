@@ -29,6 +29,7 @@ type fakeBroker struct {
 	loginSeq      int
 	loginAttempts int            // every POST /v1/launcher-credentials, refused ones included
 	refuseLogins  []enrollAnswer // answered, in order, to the next logins instead of accepting them; status 0 drops the connection
+	hangLogins    chan struct{}  // when set, every login waits for it to close (or its request to end) before answering
 
 	// enrollment-route behavior: answered in order, the last entry repeating once exhausted.
 	enrollAnswers []enrollAnswer
@@ -93,6 +94,16 @@ func (b *fakeBroker) handleLoginRequest(w http.ResponseWriter, r *http.Request) 
 
 	b.mu.Lock()
 	b.loginAttempts++
+	hang := b.hangLogins
+	b.mu.Unlock()
+	if hang != nil {
+		select {
+		case <-hang:
+		case <-r.Context().Done():
+			return
+		}
+	}
+	b.mu.Lock()
 	if len(b.refuseLogins) > 0 {
 		refused := b.refuseLogins[0]
 		b.refuseLogins = b.refuseLogins[1:]
@@ -787,6 +798,52 @@ func TestEnrollmentsDuringAPendingLoginStartNoSecondLogin(t *testing.T) {
 	}
 	broker.setPending(1, "issued", "cred-1")
 	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "the login to become issued")
+}
+
+// TestAnEnrollDuringALoginPOSTReturnsWithinItsDeadline: while a login's POST hangs (the boot
+// login, on a background context), an Enroll with no credential answers NO_MACHINE_CREDENTIAL
+// within its own deadline instead of waiting behind that POST, since its caller holds the claim's
+// machine lock for the whole call.
+func TestAnEnrollDuringALoginPOSTReturnsWithinItsDeadline(t *testing.T) {
+	withFastPolling(t)
+	withLoginRetry(t, 0, 0)
+	broker, server := newFakeBroker(t)
+	hang := make(chan struct{})
+	broker.hangLogins = hang
+	// Released at cleanup, the hung login is refused, so no poll goroutine outlives the test.
+	broker.refuseLogins = []enrollAnswer{{http.StatusServiceUnavailable, `{"code":"UNAVAILABLE","error":"down"}`}}
+	c := &Client{URL: server.URL, HTTP: server.Client()}
+	booted := make(chan struct{})
+	go func() {
+		defer close(booted)
+		_, _ = c.Login(context.Background())
+	}()
+	t.Cleanup(func() {
+		close(hang)
+		<-booted
+	})
+	eventually(t, func() bool { return broker.loginAttemptCount() == 1 }, "the boot login's POST to reach the broker")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	enrolled := make(chan error, 1)
+	start := time.Now()
+	go func() {
+		_, err := c.Enroll(ctx, podEnrollment)
+		enrolled <- err
+	}()
+	select {
+	case err := <-enrolled:
+		var api *APIError
+		if elapsed := time.Since(start); elapsed > time.Second || !errors.As(err, &api) || api.Code != "NO_MACHINE_CREDENTIAL" {
+			t.Fatalf("Enroll during a hung login POST = %v after %v, want NO_MACHINE_CREDENTIAL within its 100ms deadline", err, elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Enroll during a hung login POST had not returned after 2s, want NO_MACHINE_CREDENTIAL within its 100ms deadline")
+	}
+	if got := broker.loginAttemptCount(); got != 1 {
+		t.Fatalf("broker saw %d logins, want only the hung boot login", got)
+	}
 }
 
 // TestALoginThatFailedWaitsBeforeTheNext: after a login ends without a credential, enrollments

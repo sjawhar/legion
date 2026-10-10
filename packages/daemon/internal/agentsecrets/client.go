@@ -364,9 +364,13 @@ func (c *Client) doProof(ctx context.Context, method, path string, body any) (in
 // retryLogin starts a fresh machine login when the client holds no credential, no login is
 // pending, and the wait after the last login that ended without a credential has passed: the
 // supervisor's next observation of a pod then retries the login the daemon's boot started, with
-// no restart. settle records how the new login ends, and noCredentialError reports it.
+// no restart. settle records how the new login ends, and noCredentialError reports it. A held
+// loginMu means a login is already opening or settling, so retryLogin returns at once rather than
+// hold its caller (an Enroll or Revoke, under its claim's machine lock) behind that login's POST.
 func (c *Client) retryLogin(ctx context.Context) {
-	c.loginMu.Lock()
+	if !c.loginMu.TryLock() {
+		return
+	}
 	defer c.loginMu.Unlock()
 	if c.cred.Load() != nil || c.LoginStatus().State == "pending" || time.Now().Before(c.nextLogin) {
 		return
