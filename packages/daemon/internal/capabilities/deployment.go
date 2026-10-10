@@ -177,15 +177,19 @@ func (d Deployment) image(row Capability) (string, string) {
 // proves the row, and the summary.
 func (d Deployment) live(row Capability) State {
 	state := State{Name: row.Name}
-	var failing []string
-	proved, latest := 0, -1
+	var named []string
+	failed, proved, latest := 0, 0, -1
 	for i, session := range d.Sessions {
 		measured, ok := session.row(row.Name)
 		switch {
 		case !ok:
 			continue
 		case !measured.OK:
-			failing = append(failing, session.label()+": "+measured.Detail)
+			// The first three failing sessions are named; the rest are counted, so a swarm's worth
+			// of sessions never fills the line.
+			if failed++; failed <= maxFailingNamed {
+				named = append(named, session.label()+": "+measured.Detail)
+			}
 			continue
 		}
 		proved++
@@ -194,10 +198,9 @@ func (d Deployment) live(row Capability) State {
 		}
 	}
 	switch {
-	case len(failing) > 0:
-		named := failing[:min(len(failing), maxFailingNamed)]
+	case failed > 0:
 		state.Status, state.Detail = StatusOpen, strings.Join(named, "; ")
-		if more := len(failing) - len(named); more > 0 {
+		if more := failed - len(named); more > 0 {
 			state.Detail += fmt.Sprintf(" +%d more", more)
 		}
 	case proved > 0:
@@ -213,7 +216,7 @@ func (d Deployment) live(row Capability) State {
 }
 
 // maxFailingNamed is how many failing sessions an open live row's detail names before it counts
-// the rest: three say what is wrong without a swarm's worth of sessions filling the line.
+// the rest.
 const maxFailingNamed = 3
 
 // row is s's measurement of name, and whether its report carries one.
@@ -226,19 +229,10 @@ func (s Session) row(name Name) (Row, bool) {
 	return Row{}, false
 }
 
-// label is how a live row's detail names s: its pod and container under a sandbox locator, its
-// pane under tmux — a locator naming neither, which runtime.Locator.Validate refuses, falls back
-// to the claim — then its claim's role and issue.
+// label is how a live row's detail names s: its process (runtime.Locator.Label), then its claim's
+// role and issue.
 func (s Session) label() string {
-	locator := s.Report.Locator
-	where := "claim " + string(s.Report.Claim)
-	switch {
-	case locator.Sandbox != nil:
-		where = "pod " + locator.Sandbox.Name + "/" + locator.Sandbox.Container
-	case locator.Tmux != nil:
-		where = "pane " + locator.Tmux.Window + ":" + locator.Tmux.Pane
-	}
-	return fmt.Sprintf("%s (%s, %s)", where, s.Role, s.Issue)
+	return fmt.Sprintf("%s (%s, %s)", s.Report.Locator.Label(), s.Role, s.Issue)
 }
 
 // withheldDetail is a withheld row's detail as CheckImage renders it: the ruling, the summary.

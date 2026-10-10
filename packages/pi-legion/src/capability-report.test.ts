@@ -423,6 +423,30 @@ describe("mcp", () => {
     expect(rows.mcp).toEqual({ ok: false, detail: "connection pool closed" });
     expect(fake.calls).toEqual(["wait", "disconnectAll"]);
   });
+
+  test("disconnects when the check's budget aborts a connection that never finishes", async () => {
+    const fake: FakeManager = { statuses: {}, calls: [] };
+    const never = new Promise<void>(() => undefined);
+    const stuck = {
+      ...manager(fake),
+      waitForPendingConnections: () => {
+        fake.calls.push("wait");
+        return never;
+      },
+    };
+    const report = await measureCapabilities(
+      fakeHost({
+        loadMCPConfigs: configured,
+        discoverMCPServers: async () => ({ manager: stuck, errors: [] }),
+      }),
+      input(),
+      { checkMs: 20, reportMs: 500 }
+    );
+    const mcp = report.rows.find((row) => row.name === "mcp");
+    expect(mcp).toEqual({ name: "mcp", ok: false, detail: "did not finish within 20 ms" });
+    // The abort tore the second set of clients down; the finally that never ran would have.
+    expect(fake.calls).toEqual(["wait", "disconnectAll"]);
+  });
 });
 
 describe("repository-extensions", () => {

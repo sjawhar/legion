@@ -1,4 +1,3 @@
-import { accessSync, constants, statSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
 import type { LegionCapabilityReportBody, LegionCapabilityRow } from "@legion/contracts/legion-api";
@@ -167,17 +166,7 @@ function commandFailure(result: CommandResult): string {
 
 /** The first executable `name` on `process.env.PATH`, or `name` itself when none is. */
 function whichOnPath(name: string): string {
-  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
-    if (directory === "") continue;
-    const candidate = path.join(directory, name);
-    try {
-      accessSync(candidate, constants.X_OK);
-      if (statSync(candidate).isFile()) return candidate;
-    } catch {
-      // Not here; the next PATH entry may have it.
-    }
-  }
-  return name;
+  return Bun.which(name, { PATH: process.env.PATH ?? "" }) ?? name;
 }
 
 const checkSubagents: Check = async (host, input) => {
@@ -246,11 +235,20 @@ function mcpErrorFor(errors: readonly unknown[], name: string): string | undefin
   return undefined;
 }
 
-const checkMCP: Check = async (host, input) => {
+const checkMCP: Check = async (host, input, signal) => {
   const { configs, sources } = await host.loadMCPConfigs(input.cwd);
   const configured = Object.keys(configs);
   if (configured.length === 0) return ok("no MCP server configured");
   const { manager, errors } = await host.discoverMCPServers(input.cwd);
+  // The session's own MCP clients are the host's; these are a second, short-lived set, torn down
+  // when the check ends and when its budget aborts it mid-connection, so a server that never
+  // finishes connecting leaves no client running for the session's lifetime.
+  let torn: Promise<void> | undefined;
+  const tearDown = () => {
+    torn ??= manager.disconnectAll().catch(() => undefined);
+    return torn;
+  };
+  signal.addEventListener("abort", tearDown, { once: true });
   try {
     await manager.waitForPendingConnections();
     const connected: string[] = [];
@@ -270,8 +268,8 @@ const checkMCP: Check = async (host, input) => {
     const suffix = connected.length === 0 ? "" : `; connected: ${connected.join(", ")}`;
     return failed(`not connected: ${unconnected.join(", ")}${suffix}`);
   } finally {
-    // The session's own MCP clients are the host's; these were a second, short-lived set.
-    await manager.disconnectAll().catch(() => undefined);
+    signal.removeEventListener("abort", tearDown);
+    await tearDown();
   }
 };
 

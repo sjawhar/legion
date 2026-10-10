@@ -1,5 +1,4 @@
 import {
-  type LegionCapabilityReportBody,
   LegionChildRequest,
   LegionControllerGrantRequest,
   LegionControllerRegisterResponse,
@@ -14,6 +13,7 @@ import {
   LegionIssueStatusRequest,
   LegionPhaseBackwardRequest,
   LegionPhaseRetryRequest,
+  type LegionReadyRequest,
   LegionRegisterResponse,
   type LegionRegistration,
   LegionRootCloseRequest,
@@ -47,23 +47,17 @@ export interface RegisterInput {
   readonly pluginContract: number;
 }
 
-/** The claim the registration issued, authenticated by its secret: what every claim route after
- * `claims/register` carries. */
-interface ClaimInput {
+/** `claim.ReadyRequest`: the claim the registration issued, authenticated by its secret, and the
+ * session's report of the six live capability rows (`src/capability-report.ts`, contract 19); the
+ * controller's ready carries none. */
+export type ReadyInput = z.input<typeof LegionReadyRequest>;
+
+/** `claim.ExitRequest`: the agent reporting its own end, and why. */
+export interface ExitInput {
   readonly claimToken: string;
   readonly sessionId: string;
   readonly secret: string;
   readonly generation: number;
-}
-
-/** `claim.ReadyRequest`: the claim, and the session's report of the six live capability rows
- * (`src/capability-report.ts`, contract 19); the controller's ready carries none. */
-export interface ReadyInput extends ClaimInput {
-  readonly capabilities?: LegionCapabilityReportBody;
-}
-
-/** `claim.ExitRequest`: the agent reporting its own end, and why. */
-export interface ExitInput extends ClaimInput {
   readonly reason: string;
 }
 

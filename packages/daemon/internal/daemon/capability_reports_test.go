@@ -277,36 +277,6 @@ func TestCapabilityReportedKeepsPersistsAndLogsTheReport(t *testing.T) {
 	}
 }
 
-// A report from a pod names its pod and container.
-func TestLocatorLabelNamesThePodOrPane(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		locator runtime.Locator
-		want    string
-	}{
-		{
-			name: "pod",
-			locator: runtime.Locator{Runtime: runtime.RuntimeSandbox, Claim: "legion-LEGION-209-implementer", Incarnation: "pod-uid/3",
-				Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-209", PodUID: "pod-uid", Container: "implementer", Generation: 3}},
-			want: "pod legion-209/implementer",
-		},
-		{
-			name:    "pane",
-			locator: *reportingClaim("legion-LEGION-209-implementer", claim.RoleImplementer, supervise.StateReady).Locator,
-			want:    "pane @1:%1",
-		},
-		{
-			name:    "no process",
-			locator: runtime.Locator{Claim: "legion-LEGION-209-implementer"},
-			want:    "claim legion-LEGION-209-implementer",
-		},
-	} {
-		if got := locatorLabel(tc.locator); got != tc.want {
-			t.Errorf("%s: locatorLabel = %q, want %q", tc.name, got, tc.want)
-		}
-	}
-}
-
 // The store is shared across projects: boot keeps the reports of this project's claims alone.
 func TestReportsOfClaimsKeepsThisProjectsAlone(t *testing.T) {
 	own := reportingClaim("legion-LEGION-209-implementer", claim.RoleImplementer, supervise.StateReady)
@@ -321,19 +291,19 @@ func TestReportsOfClaimsKeepsThisProjectsAlone(t *testing.T) {
 	}
 }
 
-// The task agents the registration answers are sorted, and an empty list rather than nil when the
-// prompts dispatch none: the plugin's strict reader takes an array.
-func TestPromptAgentsAreSortedAndNeverNil(t *testing.T) {
+// The task agents the registration answers are sorted, and none when the prompts dispatch none
+// (the API's register writes an empty list for a nil slice).
+func TestPromptAgentsAreSorted(t *testing.T) {
 	names := promptrefs.New()
 	names.Text("roles/core/architect.md", []byte(`task(agent="plan-gap-analyst") then task(agent="deep-worker")`))
 	names.Text("roles/core/reviewer.md", []byte(`task(agent="oracle") and skill://legion-worker`))
 	if got, want := promptAgents(names), []string{"deep-worker", "oracle", "plan-gap-analyst"}; !slices.Equal(got, want) {
 		t.Errorf("promptAgents = %v, want %v", got, want)
 	}
-	if got := promptAgents(promptrefs.New()); got == nil || len(got) != 0 {
-		t.Errorf("promptAgents with none = %#v, want an empty, non-nil list", got)
+	if got := promptAgents(promptrefs.New()); len(got) != 0 {
+		t.Errorf("promptAgents with none = %v, want none", got)
 	}
-	if got := promptAgents(promptrefs.Names{}); got == nil || len(got) != 0 {
-		t.Errorf("promptAgents of the zero Names = %#v, want an empty, non-nil list", got)
+	if got := promptAgents(promptrefs.Names{}); len(got) != 0 {
+		t.Errorf("promptAgents of the zero Names = %v, want none", got)
 	}
 }

@@ -829,8 +829,7 @@ func (s *supervision) deployment() capabilities.Deployment {
 		if !ok || c.Locator == nil || report.Locator.Incarnation != c.Locator.Incarnation {
 			continue
 		}
-		switch c.State {
-		case supervise.StateReady, supervise.StateWorking, supervise.StateIdle:
+		if claimTookRole(c.State) {
 			d.Sessions = append(d.Sessions, capabilities.Session{Role: c.Role, Issue: c.Issue, Report: report})
 		}
 	}
@@ -863,18 +862,14 @@ func (s *supervision) capabilityReported(ctx context.Context, c supervise.Claim,
 	if err := s.reportStore.PutCapabilityReport(ctx, report); err != nil {
 		s.log.Error("capabilities: the session's report could not be persisted; it is kept until the daemon stops", "claim", c.Token, "error", err)
 	}
-	rows := make([]claim.CapabilityRow, len(report.Rows))
-	for i, row := range report.Rows {
-		rows[i] = claim.CapabilityRow{Name: string(row.Name), OK: row.OK, Detail: row.Detail}
-	}
 	// A slice of strings and booleans always marshals.
-	encoded, _ := json.Marshal(rows)
+	encoded, _ := json.Marshal(report.Rows)
 	log := s.log.With("claim", c.Token, "role", c.Role, "issue", c.Issue,
-		"locator", locatorLabel(report.Locator), "incarnation", report.Locator.Incarnation)
+		"locator", report.Locator.Label(), "incarnation", report.Locator.Incarnation)
 	log.Info("capabilities: session reported", "elapsedMs", report.ElapsedMs, "rows", string(encoded))
 	for _, row := range report.Rows {
 		if !row.OK {
-			log.Warn(fmt.Sprintf("capability %s is open: %s", row.Name, row.Detail), "capability", string(row.Name))
+			log.Warn(capabilities.State{Name: row.Name, Detail: row.Detail}.OpenLine(), "capability", string(row.Name))
 		}
 	}
 }
@@ -886,19 +881,6 @@ func (s *supervision) capabilityReports() map[claim.Token]capabilities.Report {
 	s.reportMu.Lock()
 	defer s.reportMu.Unlock()
 	return maps.Clone(s.reports)
-}
-
-// locatorLabel is how a log line names the process a report came from: its pod and container
-// under a sandbox locator, its pane under tmux, and the claim alone when the locator names no
-// process (api's report of a claim whose machine held none).
-func locatorLabel(locator runtime.Locator) string {
-	switch {
-	case locator.Sandbox != nil:
-		return "pod " + locator.Sandbox.Name + "/" + locator.Sandbox.Container
-	case locator.Tmux != nil:
-		return "pane " + locator.Tmux.Window + ":" + locator.Tmux.Pane
-	}
-	return "claim " + string(locator.Claim)
 }
 
 // reportsOfClaims is the stored reports of claims, by claim: the store is shared across projects,
@@ -918,14 +900,10 @@ func reportsOfClaims(reports []capabilities.Report, claims []supervise.Claim) ma
 }
 
 // promptAgents is the sorted names of every task agent the role prompts dispatch
-// (prompts.RoleReferences), which the registration answers (api.Options.PromptAgents): an empty
-// list, never nil, when the prompts dispatch none.
+// (prompts.RoleReferences), which the registration answers (api.Options.PromptAgents, whose
+// register writes an empty list for none).
 func promptAgents(references promptrefs.Names) []string {
-	agents := slices.Sorted(maps.Keys(references[promptrefs.TaskAgents]))
-	if agents == nil {
-		return []string{}
-	}
-	return agents
+	return slices.Sorted(maps.Keys(references[promptrefs.TaskAgents]))
 }
 
 // reportCapabilities names the deployment capabilities with no decision, in the table's order, and

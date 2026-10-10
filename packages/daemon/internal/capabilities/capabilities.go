@@ -104,35 +104,32 @@ var Table = []Capability{
 
 // Decidable is the SiteDeployment names in Table order: what a legion.yaml decided line may name,
 // and what the daemon measures from its deployment (Deployment.Report).
-func Decidable() []Name {
-	var names []Name
-	for _, row := range Table {
-		if row.Site == SiteDeployment {
-			names = append(names, row.Name)
-		}
-	}
-	return names
-}
+func Decidable() []Name { return namesAtSite(SiteDeployment) }
 
 // Live is the SiteLive names in Table order: the rows each session measures at its start and
 // reports with its ready, which Normalize fills out and Deployment.Report renders.
-func Live() []Name {
+func Live() []Name { return namesAtSite(SiteLive) }
+
+// namesAtSite is the names of Table's rows checked at site, in Table order.
+func namesAtSite(site Site) []Name {
 	var names []Name
 	for _, row := range Table {
-		if row.Site == SiteLive {
+		if row.Site == site {
 			names = append(names, row.Name)
 		}
 	}
 	return names
 }
 
-// Row is one live row's measurement as a session reported it, normalised (Normalize).
+// Row is one live row's measurement as a session reported it, normalised (Normalize). Its JSON is
+// the daemon log's `rows` attribute on a report (one object per row, as the wire spells them); the
+// store and the state each keep a shape of their own.
 type Row struct {
-	Name Name
+	Name Name `json:"name"`
 	// OK is whether the session's check of the row passed.
-	OK bool
+	OK bool `json:"ok"`
 	// Detail is the fact the check found, passed or not, at most MaxReportDetail bytes.
-	Detail string
+	Detail string `json:"detail"`
 }
 
 // Report is one session's normalised report of the live rows, as the daemon keeps and persists it:
