@@ -1,31 +1,15 @@
 {
-  "codeHead": "1b7ab7b123bc4ca6f26fb60d3990c4985f5b8859",
-  "completed": "2026-10-10T07:50:59.643203871Z",
+  "codeHead": "0b6fa13ed1031d09903a28fe7e0ef09d12ce9faa",
+  "completed": "2026-10-10T08:14:52.605513453Z",
   "critical": 0,
-  "fastFollow": "Unchanged from round 1: controllerStartGitHubCredential as three branches (controllerCredentialNoApp, ghconfig.Clear); resolveReviewBody clearing BodyTruncated only when restored; hoist byApp in review(); split review_session_test.go and controller_credential_test.go; one background-run helper for the two refresh-loop tests; for the architect, a follow-up issue to carry the footer's session from Envoy's normalizer so the GitHub read can go.",
-  "forgeFacts": "PR #1878 base legion/LEGION-631, head c208d060 (the tester's handoff, skip-checks: true, above the implementer's 94babdb5 on code head 1b7ab7b1), MERGEABLE. Required checks lint, typecheck, test, pr-title success at 94babdb5 (Tests 38033384236, PR Title 38033384189 and 38033439813); read_record checksVerdict green at c208d060. Not required: Legion Envoy and Contracts run 38033384311 job envoy-go-race failed at 94babdb5 in a package the diff does not touch (passed at 1c2d93c5 and 8b2b8a02 on the same envoy code), dispatch job still in progress. Threads: four, all mine from round 1, each with the implementer's Fixed in reply; I replied Accepted: fixed in c03a22fbad30 (review_body.go:69, reply 4236913971), Accepted: fixed in c03a22fbad30 and 1b7ab7b123bc (review.go:281, reply 4236914024), Accepted: fixed in 1b7ab7b123bc (SKILL.md:248, reply 4236914106), Accepted: fixed in c03a22fbad30 (podkind.go:395, reply 4236914219); none resolved yet (the implementer's legion threads resolve closes them). Both proof lines present; the tester's round 3 drove the route's refusals (G) and re-ran the fixed lanes. Census searches re-run at this head match the body's list.",
-  "important": 1,
+  "fastFollow": "Round 1's list unchanged (controllerStartGitHubCredential as three branches with ghconfig.Clear; resolveReviewBody clearing BodyTruncated only when restored; hoist byApp; split review_session_test.go and controller_credential_test.go; one background-run test helper; for the architect: a follow-up issue carrying the footer's session from Envoy's normalizer) plus round 3's: the unquotable-label skip as a row of the walk's skip table (so the report counts it and no take-time skip costs a slot); the summary template names the key and reason, not the label text; the guard's three literal pins as two shape assertions (gh pr view followed by anything but ', --label followed by anything but ' or legion); SKILL.md:446's single-quoted \u003ctitle\u003e gets the same quoting clause.",
+  "forgeFacts": "PR #1878 base legion/LEGION-631, head ef49bef7 (the tester's handoff, skip-checks: true, above the implementer's 4adda6ba on code head 0b6fa13e), MERGEABLE. Required checks lint, typecheck, test, pr-title success at 4adda6ba (Tests 38036039523, Docs 38036039492); read_record checksVerdict green at ef49bef7; Legion Envoy and Contracts jobs dispatch, dispatch-memory, envoy-go, envoy-go-race still in progress at 4adda6ba (none required). Threads: six, all mine; round 1's four are resolved (the implementer's legion threads resolve) with my Accepted: as newest; round 2's two (SKILL.md:244 label row, skills-guard.test.ts:96) now carry my Accepted: fixed in 0b6fa13ed103 (replies 4236999996, 4237000062). Both proof lines present; the tester's round 4 re-ran the skills-guard, biome and the acceptance rg at 4adda6ba and notes no Go change since round 3 (the rig A-F and the route refusals G stand on byte-identical cmd/legion and api). Census: rows 2-3 carry rollout lines, the Outcome and row 4 state the footer's limit, Size names 0b6fa13e, Fast-follow carries round 1's list.",
+  "important": 0,
   "issue": "LEGION-668",
-  "keyFindings": [
-    {
-      "description": "Security[untrusted-input]: the take step substitutes each issue label into `dispatch issue-update --issue \u003cKEY\u003e --label \u003ceach current label\u003e --label legion` with no shape or quoting rule, the class round 1 closed for \u003curl\u003e; Dispatch bounds a label's length only (packages/envoy/internal/dispatch/api/issue_queries.go:161-180 normalizeIssueLabels), and this change puts the review App's full token in the session that runs it. Fix: pass each label single-quoted exactly as Labels: shows it; a label that cannot be single-quoted skips the issue and is named in the summary; pin in skills-guard. ASVS v5.0.0-2.3.2.",
-      "file": "skills/legion-controller/SKILL.md:276",
-      "severity": "important"
-    },
-    {
-      "description": "The pin is positive-only: nothing asserts the bare `gh pr view \u003curl\u003e` is absent, so the form round 1 removed can return beside the quoted one; :96 is subsumed by :93-95. Add not.toContain(\"gh pr view \u003curl\u003e\"), drop :96.",
-      "file": "packages/pi-legion/src/skills-guard.test.ts:93-97",
-      "severity": "minor"
-    },
-    {
-      "description": "Census rows 2 (controller start exits 1 post-mint) and 3 (controller pod launch fails on a failed mint) lack the rollout line the section's own contract promises: row 2's is the contract check at /controller/secret (a contract-19 CLI against a pre-19 daemon is refused 409 before any mint), so the post-mint exit is a same-contract daemon's genuine failure, an immediate refusal; row 3 immediate. Row 4 / Outcome: state that the footer tells review-App sessions apart and does not authenticate them (plan D1's accepted limit). Size parenthetical is 94babdb5's +2476; +2485 at c208d060. Fast-follow reads none; carry round 1's named item.",
-      "file": "PR body",
-      "severity": "minor"
-    }
-  ],
-  "minor": 2,
+  "keyFindings": [],
+  "minor": 0,
   "notProven": [
-    "Written into the PR body's Not proven / risk at c208d060: acceptance 1's two live stage 4b checks UNREACHED (the architect's decision, Envoy f55c2b203d224f416a1ad0ecf430b2ad); this round's label-row finding; the footer's accepted limit (tells sessions apart, does not authenticate them); the tester's no-per-request-deadline risk; plan D1's accepted stall; the non-required envoy-go-race red at 94babdb5."
+    "Written into the PR body's Not proven / risk at ef49bef7: acceptance 1's two live stage 4b checks UNREACHED (the architect's decision, Envoy f55c2b203d224f416a1ad0ecf430b2ad); the footer's accepted limit (tells sessions apart, does not authenticate them); the tester's no-per-request-deadline risk; plan D1's accepted stall; the non-required envoy-go-race red at 94babdb5 in untouched envoy code."
   ],
   "phase": "review",
   "previousRounds": [
@@ -35,13 +19,20 @@
       "reviewedHead": "7e1866b42628b4306153f0de569888cdfb014fd6",
       "round": 1,
       "verdict": "changes_requested"
+    },
+    {
+      "handoff": "fc1e866ed7e80f3ffebfd60b4444dddcbde6cdef",
+      "review": "https://github.com/sjawhar/legion/pull/1878#pullrequestreview-5478203167",
+      "reviewedHead": "fc1e866ed7e80f3ffebfd60b4444dddcbde6cdef",
+      "round": 2,
+      "verdict": "changes_requested"
     }
   ],
-  "reviewedHead": "c208d0600405b8d7424e6e1da87fcadfe4567c76",
-  "round": 2,
+  "reviewedHead": "ef49bef721720cd2a46c855161422e771c527748",
+  "round": 3,
   "schemaVersion": 1,
-  "securityLine": "Security: authz - unchanged from round 1 (review.go:217-231); design note: the session half is a confused-deputy guard, not authentication - LegionSession() is an unauthenticated substring of the body (intake/facts.go:171-198), the reviewer publishes its session id in every review (prompts/roles/reviewer.md:14), read_state serves it to the controller (api/state.go:191-202); plan D1's accepted limit, no regression (ASVS v5.0.0-1.2.5). untrusted-input - the diff's URL path is neutralized shape-first then quoted (SKILL.md:244,263-266); the unchanged label row SKILL.md:276 is not (finding 1, ASVS v5.0.0-2.3.2); the footer parse never re-enters a command (facts.go:181-198). prompt/agent-def - the round edits the controller skill, architect-common.md:12 and the skills-guard; none steers this reviewer. secret, sandbox, transport, supply-chain - no surface in this round's diff.",
-  "thermonuclear": "Pair ran at c208d060. deep-review: round 1's four fixes judged complete and behaviour-preserving (reviewerCanWrite re-read step by step against its predecessor; all four RetryLater sites held or the standing-limit gate; warnOnCommit same on-commit deferral; stage 4b's APPROVE-of-head grep still matches; holdsGitHubCredential deletion leaves goldens unchanged); new: Medium Security[untrusted-input] on the unchanged label row SKILL.md:276; Medium design note that the footer is forgeable by any review-App token holder (plan D1's accepted limit, no regression); Minor: positive-only guard pin and dead assertion :96, census rows 2-3 without rollout lines, Size parenthetical stale; hardening: holdIfLimited holds on any RetryLater (pre-existing), architect-common.md omits the unrecorded-session fallback (harmless by construction), the Pull-request states header names only External links. code-quality: sound round, nothing new broken, Fast-follow: none is wrong. Reviewer's own re-runs on a scratch Postgres 16.4: internal/daemon ReviewBody|ReviewPermission|ReviewerCanWrite|RateLimit, internal/workflow (non-NATS), internal/runtime/sandbox, internal/prompts green.",
-  "threads": "Four open at c208d060, all mine, each newest comment now my Accepted: (ids 4236913971, 4236914024, 4236914106, 4236914219); this round opens two (SKILL.md:244 for the label row at :276; skills-guard.test.ts:96).",
-  "verdict": "changes_requested"
+  "securityLine": "Security: untrusted-input - the boundary is SKILL.md:273-279: each label single-quoted and an unquotable one skipped before any write; Dispatch bounds a label by length only (issue_queries.go:161-179) and single-quoting neutralizes everything but ', which the rule skips; the URL path is gated by shape then quoted (SKILL.md:244,263-266); the one later pass that can re-create command context is the day's report body (\u003c\u003c'EOF', SKILL.md:323), into which the new summary template may carry a rejected label's text - Low, hardening, no behaviour change. agent-def - the round edits the controller skill and its guard; neither steers this reviewer. authz, secret, sandbox, transport, supply-chain - no surface in this round's diff; rounds 1-2's lines stand on byte-identical code.",
+  "thermonuclear": "Pair ran at ef49bef7 over the round's 11-line diff (SKILL.md take step; skills-guard). Both round-2 asks complete: each label single-quoted exactly as Labels: shows it, an unquotable label skipped before any write and named in the summary; the guard asserts the bare gh pr view \u003curl\u003e absent (a real negative: present at e523c111), the subsumed line dropped, the label rule pinned; 8 pass / 20 expect(). Every bash command the controller skill instructs was enumerated with its substitutions: \u003cKEY\u003e/\u003cPROJECT\u003e are server-shaped (server.go:42-43), \u003clogin\u003e is a canonical person email (issue_assignee.go:44-55), the URL and label paths are gated then quoted. Residuals, none changing behaviour: Low - the summary template names the rejected label verbatim and the day's report body is a \u003c\u003c'EOF' heredoc (counts, not raw text, are prescribed there); Minor - a label with a line break or ', ' is indistinguishable from two labels in the Labels: rendering (join ', '), so that branch of the rule cannot be decided from the input it names (pre-existing reading); Minor - the two label pins are positive-only; Nit/structural - the new skip lives in Take step 1 rather than the skip table, so the report's per-row counts cannot show it and a take-time skip costs the turn a slot. code-quality: vocabulary consistent with the URL row; one structural suggestion (table row) and the rule-over-literals test shape; verdict approve. All carried in the Fast-follow line.",
+  "threads": "Six, all mine: four resolved with my Accepted: newest; two open with my Accepted: fixed in 0b6fa13ed103 newest (4236999996, 4237000062), the implementer's or merger's legion threads resolve closes them. None opened this round.",
+  "verdict": "approved"
 }
