@@ -4,12 +4,10 @@ import (
 	"crypto/ecdsa"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
-	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
 const (
@@ -27,18 +25,13 @@ func (ts *testServer) podToken(t *testing.T, account, podUID string) string {
 }
 
 // mintServiceLauncherCredential is mintLauncherCredential for a service login (a launcher
-// credential detail naming service legion-daemon): the credential has no operator and enrolls pods
-// only, the shape the Legion daemon logs in with.
+// credential detail naming service legion-daemon, and no login_hint): the credential has no
+// operator and enrolls pods only, the shape the Legion daemon logs in with. testApprover approves
+// it, as any signed-in person may.
 func (ts *testServer) mintServiceLauncherCredential(t *testing.T) (credentialID string, key *ecdsa.PrivateKey) {
 	t.Helper()
 	key = newSigningKey(t)
-	compact, err := record.Sign(key, ts.URL, []record.AuthorizationDetail{
-		{Type: "launcher_credential", Identifier: "cluster.example", Service: "legion-daemon"},
-	}, "", testApprover, time.Now())
-	if err != nil {
-		t.Fatalf("record.Sign: %v", err)
-	}
-	return ts.approveMachineLogin(t, compact, testApprover), key
+	return ts.approveMachineLogin(t, signMachineLoginRequest(t, key, ts.URL, "", "cluster.example", "legion-daemon"), testApprover), key
 }
 
 type wireEnrolled struct {

@@ -6,7 +6,7 @@
 # bundler output differs across Bun releases, so a published SPA must not be built by whatever
 # 1.x is newest that day. .github/scripts/check-bun-version.sh keeps this equal to .bun-version.
 ARG BUN_VERSION=1.3.14
-FROM oven/bun:${BUN_VERSION} AS web
+FROM mirror.gcr.io/oven/bun:${BUN_VERSION} AS web
 
 WORKDIR /repo
 
@@ -37,7 +37,7 @@ RUN cd packages/contracts && bun run gen:go
 RUN cd packages/dispatch && bun run build:web
 
 # Go version must match go.mod.
-FROM golang:1.26.8-alpine AS build
+FROM mirror.gcr.io/library/golang:1.26.8-alpine AS build
 
 WORKDIR /src
 
@@ -88,7 +88,7 @@ RUN if [ -n "$LEGION_COMMIT" ] && ! printf '%s' "$LEGION_COMMIT" | grep -Eqx '[0
 
 # Minimal runtime — static binary, no shell needed.
 # curl is included for HEALTHCHECK and operational debugging.
-FROM debian:bookworm-slim
+FROM mirror.gcr.io/library/debian:bookworm-slim
 
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 

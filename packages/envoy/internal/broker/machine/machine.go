@@ -1,8 +1,9 @@
 // Package machine implements machine logins: a typed-code approval flow that
-// mints key-bound launcher credentials. A machine (an operator's box, a Kubernetes pod, or an
-// automated service like the Legion daemon) signs a credential-request object naming the
-// operator it logs in as (login_hint) and a single launcher_credential authorization detail, and
-// polls Login's pendingID for a human to approve the confirmation code Login also mints.
+// mints key-bound launcher credentials. A machine (an operator's box, or an automated service like
+// the Legion daemon, whose pods it enrolls) signs a credential-request object carrying a single
+// launcher_credential authorization detail — naming the service a service's login is for, or, for
+// a person's machine, the operator it logs in as in its login_hint — and polls Login's pendingID
+// for a human to approve the confirmation code Login also mints.
 // Machine-login records are decided here, not in requests.Machine: ApplyDecision takes the
 // deciding human's Dispatch login and the typed code and, on approval, mints the credential
 // directly — there is no Dispatch ask anywhere in this flow, and no bearer token in any response.
@@ -126,9 +127,11 @@ func deref(s *string) string {
 }
 
 // Login verifies a signed machine credential-request object and opens a pending record for a
-// human to approve or deny: login_hint is required (it names the operator who must decide it, so
-// it is never record.AnyoneApprover) and authorization_details must carry exactly one
-// launcher_credential entry.
+// human to approve or deny. authorization_details must carry exactly one launcher_credential
+// entry. A service's login, one whose entry names a service, is decided by anyone signed in to
+// Dispatch: its record's approver is record.AnyoneApprover, and any login_hint it carries is
+// ignored. A person's machine login must carry a login_hint naming the person who decides it and
+// whose machine it becomes, so never record.AnyoneApprover.
 // Nothing here touches Dispatch; the record and its poll row are the whole state, and rate
 // limiting this unauthenticated route is the api layer's job, not this one's.
 func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, code string, err error) {
@@ -137,14 +140,18 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 	if err != nil {
 		return "", "", err
 	}
-	if obj.LoginHint == "" {
-		return "", "", fmt.Errorf("%w: login_hint is required for a machine login", record.ErrRequestInvalid)
-	}
-	if record.CanonicalLogin(obj.LoginHint) == record.AnyoneApprover {
-		return "", "", fmt.Errorf("%w: a machine login's login_hint names its operator, never %q", record.ErrRequestInvalid, record.AnyoneApprover)
-	}
 	if len(obj.Details) != 1 || obj.Details[0].Type != record.KindLauncherCredential {
 		return "", "", fmt.Errorf("%w: exactly one launcher_credential detail is required", record.ErrRequestInvalid)
+	}
+	approver := record.AnyoneApprover
+	if obj.Service() == "" {
+		approver = record.CanonicalLogin(obj.LoginHint)
+		if approver == "" {
+			return "", "", fmt.Errorf("%w: login_hint is required for a person's machine login", record.ErrRequestInvalid)
+		}
+		if approver == record.AnyoneApprover {
+			return "", "", fmt.Errorf("%w: a person's machine login's login_hint names its operator, never %q", record.ErrRequestInvalid, record.AnyoneApprover)
+		}
 	}
 	fresh, err := s.Replay(ctx, obj.JTI, obj.Expires.Add(s.Skew+jtiRetentionMargin))
 	if err != nil {
@@ -165,7 +172,7 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 
 	body := record.Body{
 		Request:         compactRequest,
-		Approver:        record.CanonicalLogin(obj.LoginHint),
+		Approver:        approver,
 		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-", Operator: ""},
 		LifetimeSeconds: int(s.CredentialLifetime.Seconds()),
 		RulesVersion:    s.Policy.Get().Version,
@@ -194,9 +201,11 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 
 // ApplyDecision decides a pending machine login. code must match the record's own — a wrong code
 // means the human is looking at a different login than the one they're deciding, refused before
-// anything else is checked (CODE_MISMATCH). login, the deciding human's Dispatch login, must be
-// the record's own approver (record.ErrNotApprover), checked next, so another login is refused the
-// same way whatever the record's state. A record that already carries a decision is
+// anything else is checked (CODE_MISMATCH). login, the deciding human's Dispatch login, must be one
+// the record's rule admits (record.ErrNotApprover), checked next against the request object its
+// record embeds, re-verified as of the record's creation: for a service's login any login, for a
+// person's machine login that person alone. So another login is refused the same way whatever the
+// record's state. A record that already carries a decision is
 // ErrAlreadyDecided, and one that expired undecided — recorded expired by the sweeper, or past its
 // expires_at before the sweeper got to it — is ErrLoginExpired, both checked under the record's
 // row lock before anything is minted, so a second decision, one racing the first and one after
@@ -247,7 +256,13 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		return "", "", err
 	}
 
-	login, err = body.ApproverLogin(record.KindLauncherCredential, login)
+	// now is the record's own creation time: the request object's iat and exp bound how fresh it
+	// had to be when Login accepted it, never how long the login may wait for its decision.
+	obj, err := record.VerifyRequestObject(body.Request, s.Audience, s.Skew, createdAt)
+	if err != nil {
+		return "", "", err
+	}
+	login, err = body.ApproverLogin(record.KindLauncherCredential, obj.Service(), login)
 	if err != nil {
 		return "", "", err
 	}
@@ -269,10 +284,6 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 
 	var credID *string
 	if approve {
-		obj, err := record.VerifyRequestObject(body.Request, s.Audience, s.Skew, createdAt)
-		if err != nil {
-			return "", "", err
-		}
 		jwk, err := embeddedJWK(body.Request)
 		if err != nil {
 			return "", "", err

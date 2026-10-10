@@ -2000,7 +2000,7 @@ an owner tag naming a service is refused as malformed unless `Loader.Services` l
 `requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod
 and its verified `enrollments.subject` is the service account `BROKER_SERVICES` binds that service
 to (`requests.Machine.ServiceAccounts`, `requester()`): a machine login's service name is the machine's
-claim, approved by whoever its `login_hint` names. So a `legion-worker` pod the Legion daemon's
+claim, which anyone signed in to Dispatch may approve. So a `legion-worker` pod the Legion daemon's
 login enrolled is `legion-daemon`'s, and a service's secret goes at once to those pods and to no
 one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
@@ -2223,10 +2223,16 @@ reload; a reread spends a token from either bucket only when both allow it
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
 with the refusing limit's `Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
-`BROKER_TRUSTED_PROXY_HEADER` above) and per named operator — the per-operator bucket keys on the
-request body's own `operator` field, so an attacker naming a specific victim operator repeatedly
-can still lock out that operator's launcher logins at a low rate; this is inherent to a
-per-operator limit on an unauthenticated route and is an accepted risk, not a bug. Read `routes()`
+`BROKER_TRUSTED_PROXY_HEADER` above) and per login (`LauncherLimits.PerLogin`) — the per-login
+bucket keys on the signed request object itself (`launcherLoginKey`): one shared `service` bucket
+for every service's login, whatever service or `login_hint` it names, since a service's name is the
+machine's own claim and a bucket per name would give every invented name one, and `person:<login>`
+for a person's machine login, so the two never share a bucket; an attacker naming a specific
+victim operator, or naming any service, repeatedly can still lock out those machine logins at a
+low rate; this is inherent to a per-login
+limit on an unauthenticated route and is an accepted risk, not a bug. A request object `Login`
+refuses (a person's login with no `login_hint`, or `anyone`, a replayed `jti`) is
+`400 REQUEST_INVALID`. Read `routes()`
 for the current, authoritative route list.
 
 `internal/broker/record` implements the credential-request record every human decision turns
@@ -2245,13 +2251,17 @@ equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `r
 400 runes with bidi/zero-width categories refused, and `authorization_details` either every entry
 `agent_secret` or exactly one `launcher_credential` entry naming a valid hostname and an optional
 `[a-z0-9-]{1,64}` service).
-`Body.ApproverLogin(kind, login)` (`record.MayDecide`) is the one approver comparison: a record's
-approver is resolved when the record is created (a secret's owner, `anyone` for a shared
-human-tier secret, or a machine login's `login_hint`, which is never `anyone`), and every decision
-and every chain re-check compares the canonical lowercase login against it, any login but `anyone`
-itself deciding an `agent_secret` record whose approver is `anyone`, no login deciding a machine
-login whose approver is `anyone` (one a binary from before `Login` refused that hint could have
-opened), and a decision recording the canonical login it returns. `record.ChainVerifier`
+`Body.ApproverLogin(kind, service, login)` (`record.MayDecide`) is the one approver comparison. A
+record's approver is resolved when the record is created (a secret's owner, `anyone` for a shared
+human-tier secret, a person's machine login's `login_hint`, which is never `anyone`, or `anyone` for
+a service's machine login), and every decision and every chain re-check compares the canonical
+lowercase login against it, with `service` the one the record's signed request object names
+(`RequestObject.Service()`, re-read from `Body.Request`, never from the stored approver): any login
+but `anyone` itself deciding a machine login whose request names a service, whatever its record
+stored (a broker before that rule stored the person its `login_hint` named), and an `agent_secret`
+record whose approver is `anyone`; no login deciding a person's machine login whose approver is
+`anyone` (one a binary from before `Login` refused that hint could have opened); and a decision
+recording the canonical login it returns. `record.ChainVerifier`
 (`chain.go`, built per record kind by `store.Store.ChainVerifier`, whose `Kind` also selects that
 rule, so a record of one kind never backs the other's credential) is
 what "every release re-verifies the whole chain" means in code: given a record id it re-fetches
@@ -2312,7 +2322,8 @@ request is: `GET /v1/pending`
 reads it as pending only then; a decided record's terminal event names the decision, and a request
 cancelled with no cancelled event on its record, the shape an ended enrollment's requests had
 before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
-pending while it carries no terminal event. `Values` releases a
+pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver
+`anyone`) for every approver. `Values` releases a
 live grant's values, each read from the secret its request froze (the ARN), re-checking the
 enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
 since the grant was decided, or any granted name is a service's (`anyServiceOwned`: the version does
@@ -2369,8 +2380,10 @@ null `approver` and `record_id` for an automatic one. Audit rows never carry sec
 `secrets.Reader` on release and never persisted.
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
-machine login. `Login` verifies a machine's signed request object (`login_hint` required — the
-approving operator's email — and exactly one `launcher_credential` authorization detail), mints an
+machine login. `Login` verifies a machine's signed request object (exactly one `launcher_credential`
+authorization detail; a person's machine login also needs a `login_hint`, the approving operator's
+email, never `anyone`, while a service's login, one whose detail names a `service`, needs none and
+any it carries is ignored, its record's approver `anyone`), mints an
 eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
@@ -2379,8 +2392,9 @@ pending login by that human-readable code alone (`LookupByCode` / `POST /v1/mach
 record (ruling 13: a direct link can never approve a machine login, only the typed code selects
 it), so `code` is required and checked again on the decision itself, before the approver
 (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
-update`, which an event insert's foreign-key check does not wait on), refuses any login but the
-record's own approver (`403 NOT_APPROVER`) whatever the record's state, answers a record that
+update`, which an event insert's foreign-key check does not wait on), refuses any login the
+record's rule does not admit (`403 NOT_APPROVER`: anyone signed in decides a service's login, only
+its person a person's machine login) whatever the record's state, answers a record that
 already carries a terminal event, or is past its `expires_at` before the sweeper has recorded it
 expired, `409 RECORD_TERMINAL` before minting anything, as a decided `agent_secret` record
 answers, so a second click, a concurrent one and a late one all get it — but a record past its
@@ -2398,23 +2412,25 @@ the minted credential's id and `expires_at` — no token is ever returned; the c
 only with proofs signed by the key the request object embedded. The broker has no renewal route:
 past `expires_at` the machine logs in again, with a new key, a new code and a new human approval.
 
-`GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person approved that
-can still reach a secret (id, host, service, issued, expires, `expired`): every unrevoked one that
-is unexpired or still has a live enrollment, live as `Lookup` means it (not revoked, its lease not
-lapsed). A login's enrollments outlive its expiry, since `Renew` and `Lookup` never read the
-credential (each session renews with its own key), so an expired login stays listed,
-`expired: true`, until its last enrollment ends or its lease lapses, swept or not, and revoking
-every listed login ends every session the person's machines started.
+`GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person may revoke that
+can still reach a secret (id, host, service, `approved_by`, issued, expires, `expired`): every
+unrevoked one that is unexpired or still has a live enrollment, live as `Lookup` means it (not
+revoked, its lease not lapsed). A login's enrollments outlive its expiry, since `Renew` and `Lookup`
+never read the credential (each session renews with its own key), so an expired login stays
+listed, `expired: true`, until its last enrollment ends or its lease lapses, swept or not, and
+revoking every listed login ends every session the person's machines started.
 `POST /v1/launcher-credentials/{id}/revoke-by-approver` `{approver}` ends one, expired or not
-(`enroll.Service.RevokeCredential`). Both key on the approver of the `launcher_credential` record
-the credential was minted from (`credential_requests.approver`, joined through
-`launcher_credentials.record_id` and required to be of kind `launcher_credential`), never on the
-credential's `operator`: a service's credential (the Legion daemon's, `service` set) has no operator
-(`authorized` needs it null to enroll pods), and the person who approved it is the one accountable
-for it. For a person's own machine the two are the same person (`machine.Service.ApplyDecision`
-mints the operator from the approving login), so one rule covers both. Anyone but that approver is
-`403 NOT_APPROVER`; an unknown id, like a credential minted from no `launcher_credential` record
-(only `ApplyDecision` mints one, always from its record), is `404 NOT_FOUND`.
+(`enroll.Service.RevokeCredential`). A service's credential (the Legion daemon's,
+`launcher_credentials.service` set) has no operator (`authorized` needs it null to enroll pods) and
+acts as no person, so both routes give it to every login but `anyone` and an empty one, whoever
+approved it. A person's own credential keys on the approver of the `launcher_credential` record it
+was minted from (`credential_requests.approver`, joined through `launcher_credentials.record_id`
+and required to be of kind `launcher_credential`), never on the credential's `operator`; the two
+are the same person (`machine.Service.ApplyDecision` mints the operator from the approving login).
+`approved_by` is the login the record's `approved` event records (`credential_request_events`).
+Anyone the rule does not admit is `403 NOT_APPROVER`; an unknown id, like a credential minted from
+no `launcher_credential` record (only `ApplyDecision` mints one, always from its record), is
+`404 NOT_FOUND`.
 In one transaction it sets the credential's `revoked_at`, so its launcher proofs stop
 authenticating, ends every enrollment the credential made through `endEnrollment` (a person's host
 sessions and boxes, or every pod a service's login enrolled: grants revoked, pending requests
@@ -2430,8 +2446,8 @@ renewal of a session is refused `PROOF_INVALID`, revoking that lapsed enrollment
 `LAUNCHER_INVALID`, and the helper drops the credential as for any refusal; a helper with no live
 session learns it at its next enrollment, and the Legion daemon at its next pod enrollment or
 unenrollment, after which it starts a new
-machine login. Dispatch's machine-login page lists and revokes the signed-in person's through these
-two routes.
+machine login. Dispatch's machine-login page lists and revokes, through these two routes, the
+signed-in person's own machines' logins and every service's.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then

@@ -92,9 +92,9 @@ export function createControllerSession(deps: {
    * a capability: it registers with that token, as every pane does, and once it holds the role and
    * the topic it reports ready on `claims/ready`, which is when the daemon hands it the start
    * message. Any step of its claim that fails exits Oh My Pi, so the daemon relaunches it, as a
-   * pane's failed boot does: nobody reads its session. A root architect's or phase worker's pane
-   * carries a boot token too, its own claim's: `/legion-claim-controller` run there is a takeover
-   * by hand like any other, which needs the capability and stops before any daemon call without it.
+   * pane's failed boot does. A root architect's or phase worker's pane carries a boot token too,
+   * its own claim's: `/legion-claim-controller` run there is a takeover by hand like any other,
+   * which needs the capability and stops before any daemon call without it.
    */
   const claim = async (context: CommandContext | SessionContext): Promise<void> => {
     const supervised =

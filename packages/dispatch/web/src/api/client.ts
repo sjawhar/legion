@@ -819,14 +819,16 @@ export class DispatchApiClient {
     });
   }
 
-  /** `GET /api/v1/machine-logins`: the machine logins the viewer approved, their own machines'
-   *  and any service's, that are unexpired or expired with a session still running. */
+  /** `GET /api/v1/machine-logins`: the machine logins the viewer may revoke, their own machines'
+   *  and every service's, whoever approved it, that are unexpired or expired with a session still
+   *  running. */
   getMachineLogins(): Promise<MachineLoginsResponse> {
     return this.json<MachineLoginsResponse>("/api/v1/machine-logins");
   }
 
-  /** Revoke a machine login the viewer approved, expired or not: Dispatch names the viewer as the
-   *  person revoking, and every session the login enrolled ends with it. */
+  /** Revoke a machine login, expired or not: a service's, or one of the viewer's machines'.
+   *  Dispatch names the viewer as the person revoking, and every session the login enrolled ends
+   *  with it. */
   async revokeMachineLogin(credentialId: string): Promise<void> {
     await this.response(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {
       body: JSON.stringify({}),

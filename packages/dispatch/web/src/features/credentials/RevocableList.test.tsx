@@ -63,14 +63,15 @@ const sections: Section[] = [
   },
   {
     empty: "No live machine logins.",
-    heading: "Your machine logins",
-    refusal: "only the person who approved the machine login may revoke it",
+    heading: "Machine logins",
+    refusal: "only the person who approved a person's machine login may revoke it",
     rowId: "cred-devbox",
     section: () => <MachineLoginsSection />,
     stub: (revoke) => {
       const list = spyOn(api, "getMachineLogins").mockResolvedValue({
         credentials: [
           {
+            approved_by: "ada@example.com",
             credential_id: "cred-devbox",
             expired: false,
             expires_at: "2026-10-10T12:00:00Z",

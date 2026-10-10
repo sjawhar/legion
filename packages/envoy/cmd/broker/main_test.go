@@ -26,10 +26,13 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
+// testUIToken is the UI bearer every broker these tests start is configured with.
+const testUIToken = "test-token-0123456789abcdef0123456789abcdef"
+
 // productionEnv is the configuration every broker needs besides its addresses and database: the
 // namespace it serves and the key every secret there is on.
 var productionEnv = []string{
-	"BROKER_UI_TOKEN=test-token-0123456789abcdef0123456789abcdef",
+	"BROKER_UI_TOKEN=" + testUIToken,
 	"BROKER_SECRETS_PREFIX=example/agent-secrets/",
 	"BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
 }

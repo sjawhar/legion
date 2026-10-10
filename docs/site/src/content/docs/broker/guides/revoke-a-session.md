@@ -97,23 +97,23 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
   on its next run, within `BROKER_SWEEP_SECONDS`, and logs
   `broker sweeper: ended an enrollment whose lease lapsed`. The
   [configuration reference](/legion/broker/reference/config/) gives both settings' defaults.
-- **Its machine login is revoked.** The person who approved the machine login that enrolled it
-  revokes that login, which ends every session it enrolled
-  ([end a machine's login](#end-a-machines-login)).
+- **Its machine login is revoked.** Whoever may revoke the machine login that enrolled it — the
+  person who approved a person's machine login, or anyone signed in for a service's — revokes that
+  login, which ends every session it enrolled ([end a machine's login](#end-a-machines-login)).
 
 ## End a machine's login
 
 A machine login lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval, but its sessions
 outlive it: a session renews its lease with its own key, never with the machine's credential, so a
 box keeps working after the machine's credential expires, and so does a host session while the
-helper that renews it runs. The person who approved the login can end it, and every session it
-enrolled, at any time: for a machine that is lost, compromised or no longer used, or a Legion
-daemon whose pods must lose their secrets now. Dispatch's machine-login page
-(`/credentials/machine`) lists **Your machine logins**: every machine logged in as you, and every
-service whose login you approved, such as the Legion daemon's, shown as `legion-daemon on <host>`,
-each with when its login was issued and when it expires. A login that has expired stays listed,
-marked `expired, sessions still running`, while a session it enrolled still runs, so revoking every
-row a machine has ends every session it started, those of its earlier logins included. Click
+helper that renews it runs. A login can be ended, with every session it enrolled, at any time: for
+a machine that is lost, compromised or no longer used, or a Legion daemon whose pods must lose
+their secrets now. Dispatch's machine-login page (`/credentials/machine`) lists **Machine logins**:
+every machine logged in as you, and every service's login, such as the Legion daemon's, shown as
+`legion-daemon on <host>` whoever approved it, each with who approved it, when its login was issued
+and when it expires. A login that has expired stays listed, marked `expired, sessions still
+running`, while a session it enrolled still runs, so revoking every row a machine has ends every
+session it started, those of its earlier logins included. Click
 **Revoke** on its row and confirm. The broker then, at once:
 
 - refuses the login's credential, so it enrolls no more sessions; and
@@ -121,13 +121,14 @@ row a machine has ends every session it started, those of its earlier logins inc
   daemon's login) as [ending a session](#end-a-session) does: each one's grants are revoked and its
   pending requests cancelled, and its next call is refused `PROOF_INVALID`.
 
-Only the person who approved the login may revoke it; the broker refuses anyone else
-`NOT_APPROVER`. A revoked login stays revoked: the machine runs `agent-secrets launcher login`
-again, or the Legion daemon starts a new login, and that person approves the new code.
+Only the person who approved a person's machine login may revoke it; the broker refuses anyone else
+`NOT_APPROVER`. Anyone signed in may revoke a service's login. A revoked login stays revoked: the
+machine runs `agent-secrets launcher login` again and its person approves the new code, or the
+Legion daemon starts a new login and anyone signed in approves its code.
 
 ```console
 $ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL/v1/launcher-credentials?approver=ada@example.com"
-{"credentials":[{"credential_id":"5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34","host":"example-host-devbox","service":null,"issued_at":"2026-10-03T09:12:40.512Z","expires_at":"2026-10-10T09:12:40.508Z","expired":false},{"credential_id":"0b6c1d55-3e7a-4f02-8c19-6a4e2d7b9f10","host":"example-host-cluster","service":"legion-daemon","issued_at":"2026-10-02T17:40:03.101Z","expires_at":"2026-10-09T17:40:03.097Z","expired":false},{"credential_id":"9a4e1c27-5b3d-4f8a-a6e0-2d7c1b9f4e83","host":"example-host-devbox","service":null,"issued_at":"2026-09-26T09:10:12.044Z","expires_at":"2026-10-03T09:10:12.040Z","expired":true}]}
+{"credentials":[{"credential_id":"5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34","host":"example-host-devbox","service":null,"approved_by":"ada@example.com","issued_at":"2026-10-03T09:12:40.512Z","expires_at":"2026-10-10T09:12:40.508Z","expired":false},{"credential_id":"0b6c1d55-3e7a-4f02-8c19-6a4e2d7b9f10","host":"example-host-cluster","service":"legion-daemon","approved_by":"bob@example.com","issued_at":"2026-10-02T17:40:03.101Z","expires_at":"2026-10-09T17:40:03.097Z","expired":false},{"credential_id":"9a4e1c27-5b3d-4f8a-a6e0-2d7c1b9f4e83","host":"example-host-devbox","service":null,"approved_by":"ada@example.com","issued_at":"2026-09-26T09:10:12.044Z","expires_at":"2026-10-03T09:10:12.040Z","expired":true}]}
 $ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/5d2b7f0e-8a41-4c3e-9b6f-0c7e2a9d1f34/revoke-by-approver"
 {"state":"revoked"}
 ```

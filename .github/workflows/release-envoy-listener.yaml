@@ -104,6 +104,10 @@ jobs:
     env:
       # The listener image the smoke test runs against, built by the step below.
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
+      # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
+      # clean up, and its image (testcontainers/ryuk, on Docker Hub) would be one more registry
+      # pull the smoke test could fail on.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -111,15 +115,18 @@ jobs:
         with:
           persist-credentials: false
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          image: mirror.gcr.io/tonistiigi/binfmt:latest
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
         with:
           # provenance-add-gha (true by default on the docker-container driver) stages
           # $GITHUB_EVENT_PATH's full JSON into any provenance predicate a build below computes,
           # attached to the pushed image or not. false here keeps every build this builder runs —
           # smoke and publish alike — free of that, regardless of each build's own provenance
-          # setting.
+          # setting. image= is the driver's own default BuildKit image, through the mirror.
           driver-opts: |
             provenance-add-gha=false
+            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -155,11 +162,10 @@ jobs:
             LEGION_COMMIT=${{ github.sha }}
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}
       # 5m bounds only what the test does: start both containers behind the test's own 60 s
-      # health wait, and assert. This job sets no TESTCONTAINERS_RYUK_DISABLED and pre-pulls
-      # nothing, so unlike envoy-smoke it also pulls NATS and Ryuk from Docker Hub here,
-      # unretried. envoy-smoke has measured 1.82 s, 3.16 s and 1.88 s, and a loaded devbox
-      # 2.2–20.7 s across four runs; the bound is deliberate headroom over those plus two
-      # pulls, not a build budget.
+      # health wait, and assert. This job pre-pulls nothing, so unlike envoy-smoke it also pulls
+      # NATS (testnats.Image) here, unretried. envoy-smoke has measured 1.82 s, 3.16 s and
+      # 1.88 s, and a loaded devbox 2.2–20.7 s across four runs; the bound is deliberate headroom
+      # over those plus that pull, not a build budget.
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy
@@ -228,6 +234,9 @@ jobs:
           fetch-depth: 0
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver-opts: |
+            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Determine publication
         id: publish

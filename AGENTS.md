@@ -39,6 +39,7 @@ is that runtime's live proof).
 - **Zod 4** at one exact version in every manifest that declares it: `@legion/contracts` hands its schemas to other packages, and two zod 4 copies meeting in one call fail the typecheck or the load. Raising zod edits every manifest together; `.github/scripts/check-zod-version.sh` fails the build until they agree
 - **Biome** for lint/format, **tsc** for type checking, **Bun test** for tests
 - **jj (Jujutsu)** for version control, native **Dispatch** for issue tracking
+- **Container images** from Docker Hub are pulled through Google's mirror `mirror.gcr.io` (`mirror.gcr.io/library/<name>` for an official image, same tags and digests) in Dockerfiles, workflows and tests, because GitHub-hosted runners hit Docker Hub's anonymous pull rate limit; CI jobs that run testcontainers set `TESTCONTAINERS_RYUK_DISABLED`, so its Ryuk image is never pulled
 
 ## Commands
 

@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 /** The NATS server image the tests run; CI pulls it before the tests. */
-const NATS_IMAGE = "nats:2.10";
+const NATS_IMAGE = "mirror.gcr.io/library/nats:2.10";
 
 export interface NatsServer {
   readonly url: string;
