@@ -144,21 +144,15 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 	tty.stopped, tty.notice = false, false
 	r := newPromptReader(saved, controlling, ignored)
 	buf := make([]byte, 512)
-	var pasteDeadline time.Time // when an open paste is given up; reset at each read, zero outside one
 	for {
-		// An open paste restarts the bound at each read, so it is the quiet since the last
-		// input, not the time since the paste began, that gives a still-arriving paste up: a
-		// slow paste is read on however long it takes, and only one that falls quiet for the
-		// whole bound without closing is abandoned.
+		// Outside a paste the read blocks until input; an open paste bounds each read at
+		// maxPasteDrain, so it is the quiet since the last input that gives a still-arriving
+		// paste up, not the time since it began.
 		tty.wait = -1
 		if r.inPaste {
-			if pasteDeadline.IsZero() {
-				pasteDeadline = time.Now().Add(maxPasteDrain)
-			}
-			tty.wait = max(0, int((time.Until(pasteDeadline) + time.Millisecond - 1).Milliseconds()))
-		} else {
-			pasteDeadline = time.Time{}
+			tty.wait = int(maxPasteDrain.Milliseconds())
 		}
+		began := time.Now()
 		n, err := tty.read(buf)
 		if err != nil {
 			return nil, err
@@ -170,7 +164,7 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 			tty.stopped = false
 		}
 		if n == 0 {
-			if r.inPaste && !time.Now().Before(pasteDeadline) {
+			if r.inPaste && time.Since(began) >= maxPasteDrain {
 				// The paste fell quiet for the whole bound without closing, so the signal
 				// keys pressed since were pasted text: give it up rather than read it forever.
 				return nil, errPasteCutShort
@@ -185,7 +179,6 @@ func readHiddenAtTerminal(fd int, prompt, onStop func()) (line []byte, err error
 			}
 			return nil, errValueCutShort
 		}
-		pasteDeadline = time.Time{} // input arrived: a still-open paste restarts the bound
 		done, sig := r.feed(buf[:n])
 		if sig != 0 {
 			if err := tty.raise(sig); err != nil {
