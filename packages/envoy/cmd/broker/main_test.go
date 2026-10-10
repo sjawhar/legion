@@ -182,10 +182,17 @@ func TestMainRefusesAnIAMURLThatDoesNotVerifyItsHost(t *testing.T) {
 	}
 }
 
+// signInLine matches the one line the broker logs at boot, before it reaches for AWS or the
+// database, naming how it signs in to its database: method rds-iam or password.
+func signInLine(method string) *regexp.Regexp {
+	return regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} INFO database sign-in method=` + method + `$`)
+}
+
 // TestMainMintsTokensBeforeOpeningTheDatabase drives the real binary with a verified IAM-form
 // URL and no AWS region: it refuses naming the region, which proves the token minter is built
 // from the AWS config before the database is opened. A broker that opened the database first
-// would fail on the unresolvable host instead.
+// would fail on the unresolvable host instead. Before the refusal it logs that it signs in by
+// RDS IAM token, and never by password.
 func TestMainMintsTokensBeforeOpeningTheDatabase(t *testing.T) {
 	out := runRefusedBroker(t, buildBroker(t),
 		"BROKER_DATABASE_URL=postgres://agent_secrets_broker@"+rdsTestHost+":5432/agent_secrets?sslmode=verify-full&sslrootcert=../../docker/rds-global-bundle.pem",
@@ -194,12 +201,16 @@ func TestMainMintsTokensBeforeOpeningTheDatabase(t *testing.T) {
 	if !strings.Contains(out, "needs an AWS region") {
 		t.Fatalf("broker refused, but not for the missing AWS region the token minter needs: %s", out)
 	}
+	if !signInLine("rds-iam").MatchString(out) || signInLine("password").MatchString(out) {
+		t.Fatalf("broker output has no line matching %s, or names the password method too:\n%s", signInLine("rds-iam"), out)
+	}
 }
 
 // TestMainSignsInToALocalPasswordlessURLAsGiven drives the real binary with a passwordless URL to
 // a local Postgres, with no AWS configuration at all: it is not an RDS endpoint, so the broker
 // mints no token and signs in as the URL says (here with the password libpq's passfile holds), and
-// boots. A broker that took it for IAM would refuse for the missing AWS region.
+// boots. A broker that took it for IAM would refuse for the missing AWS region. Its boot log says
+// it signs in by password, the one a passfile supplies from outside the URL, and never by token.
 func TestMainSignsInToALocalPasswordlessURLAsGiven(t *testing.T) {
 	databaseURL := storetest.URL(t)
 	parsed, err := url.Parse(databaseURL)
@@ -216,7 +227,7 @@ func TestMainSignsInToALocalPasswordlessURLAsGiven(t *testing.T) {
 	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	addr, _ := startBroker(t, append(noAWSEnv(t),
+	addr, boot := startBroker(t, append(noAWSEnv(t),
 		"BROKER_DATABASE_URL="+parsed.String(),
 		"PGPASSFILE="+passfile,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
@@ -224,42 +235,9 @@ func TestMainSignsInToALocalPasswordlessURLAsGiven(t *testing.T) {
 		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
 	)...)
 	requireHealthy(t, addr)
-}
-
-// TestMainLogsHowItSignsInToTheDatabase drives the real binary twice and reads the one line it
-// logs at boot, before it opens the database, naming how it signs in: method=rds-iam for an
-// IAM-form URL (refused right after for the missing AWS region, so the line comes before anything
-// reaches for AWS or the database), and method=password for a URL to a local Postgres carrying its
-// own password, which boots. Each run names its own method and never the other, so an operator can
-// tell a token sign-in from a password one without reading the task's environment.
-func TestMainLogsHowItSignsInToTheDatabase(t *testing.T) {
-	signIn := func(method string) *regexp.Regexp {
-		return regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} INFO database sign-in method=` + method + `$`)
+	if !signInLine("password").MatchString(boot) || signInLine("rds-iam").MatchString(boot) {
+		t.Fatalf("boot log has no line matching %s, or names the rds-iam method too:\n%s", signInLine("password"), boot)
 	}
-	t.Run("rds-iam", func(t *testing.T) {
-		out := runRefusedBroker(t, buildBroker(t),
-			"BROKER_DATABASE_URL=postgres://agent_secrets_broker@"+rdsTestHost+":5432/agent_secrets?sslmode=verify-full&sslrootcert=../../docker/rds-global-bundle.pem",
-			"BROKER_PUBLIC_URL=https://secrets.internal.example",
-		)
-		if !signIn("rds-iam").MatchString(out) || signIn("password").MatchString(out) {
-			t.Fatalf("broker output has no line matching %s, or names the password method too:\n%s", signIn("rds-iam"), out)
-		}
-	})
-	t.Run("password", func(t *testing.T) {
-		fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
-		if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		_, boot := startBroker(t, append(noAWSEnv(t),
-			"BROKER_DATABASE_URL="+storetest.URL(t),
-			"BROKER_LISTEN_ADDR=127.0.0.1:0",
-			"BROKER_PUBLIC_URL=http://127.0.0.1:0",
-			"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
-		)...)
-		if !signIn("password").MatchString(boot) || signIn("rds-iam").MatchString(boot) {
-			t.Fatalf("boot log has no line matching %s, or names the rds-iam method too:\n%s", signIn("password"), boot)
-		}
-	})
 }
 
 // startBroker builds and starts the broker binary with productionEnv and env, stops it with
