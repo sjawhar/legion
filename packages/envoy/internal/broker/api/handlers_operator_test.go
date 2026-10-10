@@ -254,7 +254,8 @@ func TestOperatorGrantsMatchTheApproversDispatchList(t *testing.T) {
 // the operator's machine login ends the grant. Its revoke is the operator's, so it withholds the
 // secret the grant got automatically from that session and ends the session's other grant that got
 // it automatically; every row it writes names the calling machine login, not a person signed in to
-// Dispatch.
+// Dispatch. On a grant its session already ended, the operator's revoke still withholds, which a
+// grant.withheld audit row records, naming the calling machine login too.
 func TestOperatorRevokesAGrant(t *testing.T) {
 	ts := newTestServer(t)
 	credID, machineKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
@@ -323,6 +324,57 @@ func TestOperatorRevokesAGrant(t *testing.T) {
 	if got := ts.column(t, `select detail->>'withheld' from audit where kind='grant.revoked' and grant_id=$1`, grantID); !slices.Equal(got, []string{`["WORKER_TOKEN"]`}) {
 		t.Fatalf("revoked grant's audit withheld = %v, want [WORKER_TOKEN]", got)
 	}
+
+	other, otherBoxKey := ts.enrolledBox(t, machineKey, credID, "box-2-"+t.Name())
+	ended := ts.requestAs(t, otherBoxKey, other, "WORKER_TOKEN")
+	if ended.GrantID == nil {
+		t.Fatalf("the second box's WORKER_TOKEN request = %+v, want granted at once", ended)
+	}
+	if status, body := ts.session(t, otherBoxKey, other, http.MethodPost, "/v1/grants/"+*ended.GrantID+"/revoke", nil); status != http.StatusOK {
+		t.Fatalf("the second box revoking its own grant = %d %s, want 200", status, body)
+	}
+	if status, body := ts.launcher(t, machineKey, credID, http.MethodPost, "/v1/operator/grants/"+*ended.GrantID+"/revoke", nil); status != http.StatusOK {
+		t.Fatalf("the operator's revoke of a grant its session ended = %d %s, want 200", status, body)
+	}
+	if got := ts.column(t, `select actor || ' ' || (detail->>'withheld') from audit where kind='grant.withheld' and grant_id=$1`, *ended.GrantID); !slices.Equal(got, []string{actor + ` ["WORKER_TOKEN"]`}) {
+		t.Fatalf("grant.withheld audit rows = %v, want [%s [\"WORKER_TOKEN\"]]", got, actor)
+	}
+}
+
+// TestAnApproverWhoIsNotTheOperatorRevokesWithoutWithholding: a person who approved a grant on
+// another person's session ends it through the operator route as its approver, not its operator,
+// so nothing is withheld from that session: its other grant that got a secret automatically stays
+// live, it gets that secret at once again, and the grant's audit row withholds nothing.
+func TestAnApproverWhoIsNotTheOperatorRevokesWithoutWithholding(t *testing.T) {
+	ts := newTestServer(t)
+	credID, machineKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
+	mallory, malloryKey := ts.mintLauncherCredential(t, "mallory@example.com", "example-host-devbox-m")
+	box, boxKey := ts.enrolledBox(t, malloryKey, mallory, "box-m-"+t.Name())
+	automatic := ts.requestAs(t, boxKey, box, "WORKER_TOKEN")
+	if automatic.GrantID == nil {
+		t.Fatalf("request WORKER_TOKEN = %+v, want granted at once", automatic)
+	}
+	mixed := ts.approveAs(t, ts.requestAs(t, boxKey, box, "WORKER_TOKEN", "DEEL_API_KEY"), testApprover)
+
+	status, body := ts.launcher(t, machineKey, credID, http.MethodPost, "/v1/operator/grants/"+mixed+"/revoke", nil)
+	if status != http.StatusOK || decode[stateBody](t, body).State != "revoked" {
+		t.Fatalf("the approver's revoke through the operator route = %d %s, want 200 revoked", status, body)
+	}
+	if status, body := ts.session(t, boxKey, box, http.MethodPost, "/v1/grants/"+mixed+"/values", nil); status != http.StatusForbidden || decode[wireError](t, body).Code != "GRANT_NOT_LIVE" {
+		t.Fatalf("values of the revoked grant = %d %s, want 403 GRANT_NOT_LIVE", status, body)
+	}
+	if status, body := ts.session(t, boxKey, box, http.MethodPost, "/v1/grants/"+*automatic.GrantID+"/values", nil); status != http.StatusOK {
+		t.Fatalf("values of the session's automatic grant = %d %s, want 200: an approver's revoke withholds nothing", status, body)
+	}
+	if again := ts.requestAs(t, boxKey, box, "WORKER_TOKEN"); again.State != "granted" {
+		t.Fatalf("the session's next WORKER_TOKEN request = %+v, want it granted at once", again)
+	}
+	if got := ts.column(t, `select name from withheld_secrets where enrollment_id=$1`, box); len(got) != 0 {
+		t.Fatalf("withheld from mallory's session = %v, want nothing", got)
+	}
+	if got := ts.column(t, `select actor || ' ' || coalesce(detail->>'withheld', '-') from audit where kind in ('grant.revoked', 'grant.withheld') and grant_id=$1`, mixed); !slices.Equal(got, []string{"launcher:" + credID + " -"}) {
+		t.Fatalf("the revoked grant's audit rows = %v, want one grant.revoked by launcher:%s withholding nothing", got, credID)
+	}
 }
 
 // TestOperatorRevokesAnotherOfTheirMachinesAsTheCallingLogin: from one machine a person ends their
@@ -367,6 +419,9 @@ func TestOperatorRevokesAnotherOfTheirMachinesAsTheCallingLogin(t *testing.T) {
 		{"enrollment.revoked audit actor", `select actor from audit where kind='enrollment.revoked' and enrollment_id=$1`, box},
 		{"grant revoked_by", `select revoked_by from grants where id=$1`, *granted.GrantID},
 		{"cancelled request's decided_by", `select decided_by from requests where id=$1`, pending.RequestID},
+		{"cancelled request's request.cancelled audit actor", `select actor from audit where kind='request.cancelled' and request_id=$1`, pending.RequestID},
+		{"cancelled request's record event actor", `select ev.actor from credential_request_events ev join requests r on r.record_id = ev.record_id
+			where r.id=$1 and ev.event='cancelled'`, pending.RequestID},
 	} {
 		if got := ts.column(t, check.query, check.arg); !slices.Equal(got, []string{actor}) {
 			t.Fatalf("%s = %v, want [%s]", check.what, got, actor)
