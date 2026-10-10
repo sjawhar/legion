@@ -125,6 +125,12 @@ type Client struct {
 	// two differ.
 	connEvents   uint64
 	hookedEvents uint64
+	// drained is the connection Drain drains, and drainedReconnects how many times it had
+	// reconnected in place when Drain stopped the client, both set under mu in the step that stops
+	// it, so a reconnect callback can tell a reconnect before the drain from one during it
+	// (closeStopped).
+	drained           *nats.Conn
+	drainedReconnects uint64
 
 	// recovery state
 	recovering int32
@@ -529,7 +535,9 @@ func (c *Client) Close() {
 // sends reaches the server, so no subscription would drain and a reconnect would re-send them.
 // A bind in flight at the stop is not waited for: one that ends while the subscriptions drain
 // installs its own, which the next pass drains, and one that ends after the last pass drains its
-// own, which the connection's drain takes (endBind). The close ends one still in flight.
+// own, which the connection's drain takes (endBind). The close ends one still in flight. A
+// reconnect nats.go reports once the client has stopped closes the connection only when it came
+// after the stop (closeStopped).
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	c.subscriptionsMu.Lock()
@@ -537,9 +545,12 @@ func (c *Client) Drain(timeout time.Duration) error {
 		c.stopMode = clientDraining
 	}
 	c.subscriptionsMu.Unlock()
-	c.stop()
+	// The stop and the reconnect count are one step under mu, so a reconnect callback that finds
+	// the client stopped also finds the count (closeStopped).
 	c.mu.Lock()
+	c.stop()
 	conn := c.Conn
+	c.drained, c.drainedReconnects = conn, conn.Stats().Reconnects
 	c.mu.Unlock()
 	defer conn.Close()
 	if conn.IsReconnecting() {
