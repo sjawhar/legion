@@ -27,9 +27,10 @@ type fakeBroker struct {
 	logins        []loginClaims           // one entry per accepted POST /v1/launcher-credentials, in order
 	pending       map[string]pendingState // pendingID -> current answer
 	loginSeq      int
-	loginAttempts int            // every POST /v1/launcher-credentials, refused ones included
-	refuseLogins  []enrollAnswer // answered, in order, to the next logins instead of accepting them; status 0 drops the connection
-	hangLogins    chan struct{}  // when set, every login waits for it to close (or its request to end) before answering
+	loginAttempts int                // every POST /v1/launcher-credentials, refused ones included
+	refuseLogins  []enrollAnswer     // answered, in order, to the next logins instead of accepting them; status 0 drops the connection
+	hangLogins    chan struct{}      // when set, every login waits for it to close (or its request to end) before answering
+	holdEnrolls   chan chan struct{} // when set, every enrollment-route request sends a channel here and answers once the test closes it
 
 	// enrollment-route behavior: answered in order, the last entry repeating once exhausted.
 	enrollAnswers []enrollAnswer
@@ -187,6 +188,23 @@ func (b *fakeBroker) handleEnrollmentRoute(w http.ResponseWriter, r *http.Reques
 			if err := json.Unmarshal(raw, &req.body); err != nil {
 				b.t.Errorf("enrollment request body is not JSON: %v", err)
 			}
+		}
+	}
+
+	b.mu.Lock()
+	held := b.holdEnrolls
+	b.mu.Unlock()
+	if held != nil {
+		release := make(chan struct{})
+		select {
+		case held <- release:
+		case <-r.Context().Done():
+			return
+		}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return
 		}
 	}
 
@@ -436,6 +454,121 @@ func TestReLoginPollSurvivesCallerContextCancellation(t *testing.T) {
 	broker.setPending(1, "issued", "cred-2")
 	eventually(t, func() bool { return c.LoginStatus().State == "issued" },
 		"re-login to survive the caller's context cancellation and resolve to issued")
+}
+
+// held401 gives c a live credential the broker answers 401 to, holding each enrollment-route
+// request at the broker until the test releases it, so several can be in flight on that one
+// credential at once.
+func held401(t *testing.T) (*fakeBroker, *Client, chan chan struct{}) {
+	t.Helper()
+	broker, c := newIssuedClient(t)
+	held := make(chan chan struct{})
+	broker.holdEnrolls = held
+	broker.enrollAnswers = []enrollAnswer{{status: http.StatusUnauthorized, body: `{"code":"LAUNCHER_INVALID","error":"expired"}`}}
+	return broker, c, held
+}
+
+// enrollAsync runs Enroll in the background and answers its error on the returned channel.
+func enrollAsync(ctx context.Context, c *Client) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Enroll(ctx, podEnrollment)
+		done <- err
+	}()
+	return done
+}
+
+// TestConcurrent401sStartOneLogin: five Enrolls that each get a 401 on the same credential send
+// one login, under the wait like any other: only the call that cleared the credential retries it,
+// and a refused retry waits before the next.
+func TestConcurrent401sStartOneLogin(t *testing.T) {
+	withFastPolling(t)
+	withLoginRetry(t, time.Hour, 4*time.Hour)
+	broker, c, held := held401(t)
+	refused := enrollAnswer{http.StatusTooManyRequests, `{"code":"RATE_LIMITED","error":"too many"}`}
+	broker.refuseLogins = []enrollAnswer{refused, refused, refused, refused, refused}
+	var done []<-chan error
+	var releases []chan struct{}
+	for range 5 {
+		done = append(done, enrollAsync(context.Background(), c))
+		releases = append(releases, <-held)
+	}
+	for _, release := range releases {
+		close(release)
+	}
+	for _, d := range done {
+		if err := <-d; err == nil {
+			t.Fatal("an Enroll answered 401 succeeded")
+		}
+	}
+	if got := broker.loginAttemptCount(); got != 1 {
+		t.Fatalf("broker saw %d logins from 5 Enrolls answered 401 on one credential, want 1", got)
+	}
+}
+
+// TestA401DuringAnotherLoginPOSTReturnsWithinItsDeadline: an Enroll answered 401 on a credential
+// another call already cleared, while that call's fresh login POST hangs, answers
+// NO_MACHINE_CREDENTIAL within its 100 ms deadline instead of waiting behind that POST.
+func TestA401DuringAnotherLoginPOSTReturnsWithinItsDeadline(t *testing.T) {
+	withFastPolling(t)
+	withLoginRetry(t, 0, 0)
+	broker, c, held := held401(t)
+	hang := make(chan struct{})
+	broker.hangLogins = hang
+	down := enrollAnswer{http.StatusServiceUnavailable, `{"code":"UNAVAILABLE","error":"down"}`}
+	broker.refuseLogins = []enrollAnswer{down, down}
+	first := enrollAsync(context.Background(), c)
+	releaseFirst := <-held
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	second := enrollAsync(ctx, c)
+	releaseSecond := <-held
+	t.Cleanup(func() {
+		close(hang)
+		<-first
+	})
+	close(releaseFirst)
+	eventually(t, func() bool { return broker.loginAttemptCount() == 1 }, "the first 401's fresh login POST to reach the broker")
+	close(releaseSecond)
+	select {
+	case err := <-second:
+		var api *APIError
+		if elapsed := time.Since(start); elapsed > time.Second || !errors.As(err, &api) || api.Code != "NO_MACHINE_CREDENTIAL" {
+			t.Fatalf("second 401'd Enroll = %v after %v, want NO_MACHINE_CREDENTIAL within its 100ms deadline", err, elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second 401'd Enroll had not returned after 2s, want NO_MACHINE_CREDENTIAL within its 100ms deadline")
+	}
+}
+
+// TestALate401OnTheOldCredentialStartsNoLogin: an Enroll answered 401 on the old credential after
+// the fresh login it led to was approved starts no login and leaves the new credential and the
+// "issued" state alone.
+func TestALate401OnTheOldCredentialStartsNoLogin(t *testing.T) {
+	withFastPolling(t)
+	withLoginRetry(t, 0, 0)
+	broker, c, held := held401(t)
+	first := enrollAsync(context.Background(), c)
+	releaseFirst := <-held
+	late := enrollAsync(context.Background(), c)
+	releaseLate := <-held
+	close(releaseFirst)
+	<-first
+	eventually(t, func() bool { return broker.loginCount() == 1 }, "the first 401's fresh login")
+	broker.setPending(1, "issued", "cred-2")
+	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "the fresh login to be issued")
+	broker.mu.Lock()
+	broker.refuseLogins = []enrollAnswer{{http.StatusTooManyRequests, `{"code":"RATE_LIMITED","error":"too many"}`}}
+	broker.mu.Unlock()
+	close(releaseLate)
+	<-late
+	if got := broker.loginAttemptCount(); got != 1 {
+		t.Fatalf("broker saw %d logins, want only the first 401's: a late 401 on the old credential must start none", got)
+	}
+	if got, cred := c.LoginStatus(), c.cred.Load(); got.State != "issued" || cred == nil || cred.id != "cred-2" {
+		t.Fatalf("after a late 401 on the old credential: state %+v, credential %v; want issued and cred-2 held", got, cred)
+	}
 }
 
 // TestConcurrentLoginStartsExactlyOnePendingLogin pins Login's "idempotent while pending"

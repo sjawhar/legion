@@ -149,9 +149,12 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 	return c.loginLocked(ctx)
 }
 
-// loginLocked is Login with loginMu held. Its pending check is the one guard against a second
-// login while one is pending, for Login and retryLogin alike.
+// loginLocked is Login with loginMu held. Its checks are the one guard against a second login,
+// for Login and retryLogin alike: none starts while a credential is live or a login is pending.
 func (c *Client) loginLocked(ctx context.Context) (string, error) {
+	if c.cred.Load() != nil {
+		return c.LoginStatus().Code, nil
+	}
 	if state := c.LoginStatus(); state.State == "pending" {
 		return state.Code, nil
 	}
@@ -333,8 +336,10 @@ func (c *Client) Revoke(ctx context.Context, id string) error {
 // the Proof header — never Authorization, which no route on this client uses any more. With no
 // credential it starts a fresh login when none is pending and the retry wait has passed
 // (retryLogin), and answers NO_MACHINE_CREDENTIAL naming the login's state. A 401
-// (LAUNCHER_INVALID) clears the credential that failed and starts a fresh login at once before
-// answering the same way.
+// (LAUNCHER_INVALID) clears the credential that failed; only the call that cleared it retries the
+// login (retryLogin, under the same TryLock and wait), so concurrent 401s on one credential start
+// one login and a late 401 on a replaced credential starts none. Either way it answers
+// NO_MACHINE_CREDENTIAL naming the login's state.
 func (c *Client) doProof(ctx context.Context, method, path string, body any) (int, []byte, error) {
 	cred := c.cred.Load()
 	if cred == nil {
@@ -352,9 +357,8 @@ func (c *Client) doProof(ctx context.Context, method, path string, body any) (in
 		return 0, nil, err
 	}
 	if status == http.StatusUnauthorized {
-		c.cred.CompareAndSwap(cred, nil)
-		if _, loginErr := c.Login(ctx); loginErr != nil {
-			return 0, nil, fmt.Errorf("agent-secrets: launcher credential invalid, and a fresh login failed: %w", loginErr)
+		if c.cred.CompareAndSwap(cred, nil) {
+			c.retryLogin(ctx)
 		}
 		return 0, nil, c.noCredentialError()
 	}
