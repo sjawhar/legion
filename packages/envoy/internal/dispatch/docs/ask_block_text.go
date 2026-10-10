@@ -62,7 +62,7 @@ func (s *Service) SetAskBlockText(
 	actor model.Actor,
 ) (AskBlockText, error) {
 	var stored *AskBlockText
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		tree, err := treeOf(doc)
 		if err != nil {
 			return err

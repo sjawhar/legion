@@ -336,6 +336,14 @@ to the document: settlement weighs each such answer and leaves out the ones the 
 room for (`withholdAnswers`). A joined
 operation never writes the room: it runs on the transaction's fork of the room's document
 (`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
+A document no room holds is forked from the store (`coldFork`) and loads no room until the
+committed write is published, so a cold edit holds one copy of the document rather than a room
+beside its fork; an upload's version on such a fork takes out the stored updates through the head
+that read loaded and no in-flight credit. Each operation's mutate starts from the tree `applyLive`
+already read rather than reading its own, and a write drops its fork and rendering once it
+commits, before its publish loads the room (`releaseFork`), since a pooled connection's context
+can keep the write reachable long after it answered (LEGION-504). The `nodeToken` hash streams the
+token's encoding (`pmdoc.WriteTokenJSON`) rather than holding it whole.
 The handler ends the transaction with
 `ledger.Commit`, which records each settlement credit with the document content and takes each
 version's authors back out of that record, commits, credits the writes' actor to their rooms,

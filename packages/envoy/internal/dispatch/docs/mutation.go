@@ -68,7 +68,13 @@ func recoverMutation(room string, err *error) {
 // does not commit never reaches the room, a browser or a version's authors. It returns
 // websocket.ErrNoChanges when mutate wrote nothing, as the room's Apply does, and
 // ErrServiceUnavailable when the room its slot is on failed before its append.
-func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(*crdt.Doc, func(func(*crdt.Transaction))) error) error {
+//
+// mutate is handed the fork and current, the fork's tree as the operation starts, which applyLive
+// reads anyway to weigh the write against: a mutate that starts from it reads no tree of its own,
+// and so holds no third copy of a heavy document beside the fork and the tree it writes (LEGION-504).
+// current is applyLive's to compare with what the write leaves, so a mutate never changes it. It is
+// nil when the fork's tree is outside the schema.
+func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.Actor, mutate func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error) error {
 	if s.shuttingDown(artifactID) {
 		return ErrServiceUnavailable
 	}
@@ -127,7 +133,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	margin, stopMargin := watchMargin(fork)
 	mutateErr := func() (err error) {
 		defer recoverMutation(artifactID, &err)
-		return mutate(fork, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
+		return mutate(fork, before, func(inner func(*crdt.Transaction)) { fork.Transact(inner) })
 	}()
 	stopMargin()
 	unsubscribe()
@@ -289,14 +295,12 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	if err != nil {
 		return "", err
 	}
-	// The live document's locks, in their order (see liveWrite), before the write reads the room:
-	// its owner row and writer slot, then, with the room loaded, its advisory lock. The upload's
-	// version clears every pending author and each in-flight credit its read of the room held
-	// (Ledger.WroteVersion), so no edit may land between that read and its commit.
+	// The live document's locks, in their order (see liveWrite), before the write reads the
+	// document: its owner row and writer slot, then its advisory lock. The upload's version clears
+	// every pending author and each in-flight credit its read held (Ledger.WroteVersion), so no
+	// edit may land between that read and its commit. A document no room holds is read from the
+	// store under that lock (coldFork), which loads no room for the write.
 	if _, err := s.joinLiveWrite(ctx, ledgerFrom(ctx), artifactID); err != nil {
-		return "", err
-	}
-	if err := s.warmLiveDocument(ctx, artifactID); err != nil {
 		return "", err
 	}
 	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
@@ -304,7 +308,7 @@ func (s *Service) ReplaceText(ctx context.Context, artifactID, markdown string, 
 	}
 	var canonical string
 	var unchanged bool
-	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		current, err := treeOf(doc)
 		var currentMarkdown string
@@ -847,12 +851,10 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 		return s.applyOpsUnconditional(ctx, artifactID, ops, actor)
 	}
 	// The live document's locks, in their order (see liveWrite): its owner row and, unless the
-	// room has failed, its writer slot; then, with the room loaded, its advisory lock, held from
-	// before the precondition is read.
+	// room has failed, its writer slot; then its advisory lock, held from before the precondition
+	// is read. A document no room holds is forked from the store under that lock (coldFork), which
+	// loads no room while the lock is held.
 	if _, err := s.joinLiveWrite(ctx, ledgerFrom(ctx), artifactID); err != nil {
-		return EditOutcome{}, err
-	}
-	if err := s.warmLiveDocument(ctx, artifactID); err != nil {
 		return EditOutcome{}, err
 	}
 	if err := lockDocumentRoom(ctx, tx, artifactID); err != nil {
@@ -888,13 +890,13 @@ func (s *Service) ApplyOps(ctx context.Context, artifactID string, ops []model.E
 	if err := lockTableAnchorRows(ctx, tx, artifactID, snapshots); err != nil {
 		return EditOutcome{}, err
 	}
-	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	err = s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		// Read before the Yjs transaction opens: the state vector takes the document lock.
 		since := authoredClock(ctx, artifactID, doc)
 		var mutationErr error
 		transact(func(transaction *crdt.Transaction) {
-			tree, err := treeOfTransaction(transaction, fragment)
+			tree, err := editTree(current, func() (*pmdoc.Node, error) { return treeOfTransaction(transaction, fragment) })
 			if err != nil {
 				mutationErr = err
 				return
@@ -973,10 +975,10 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		return EditOutcome{Token: token}, nil
 	}
 	var outcome EditOutcome
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		since := authoredClock(ctx, artifactID, doc)
-		tree, err := treeOf(doc)
+		tree, err := editTree(current, func() (*pmdoc.Node, error) { return treeOf(doc) })
 		if err != nil {
 			return err
 		}
@@ -1014,6 +1016,17 @@ func (s *Service) applyOpsUnconditional(ctx context.Context, artifactID string, 
 		return EditOutcome{}, fmt.Errorf("apply live document operations: %w", err)
 	}
 	return outcome, nil
+}
+
+// editTree is the tree an edit batch starts from: current, applyLive's own read of the fork, which
+// the batch's operations copy rather than change, unless a block lacks its id. The ids an edit
+// stamps (stampAskBlockIDs) go on a tree read for the edit, since current is applyLive's to
+// compare with. A nil current, a tree outside the schema, is read again, for its refusal.
+func editTree(current *pmdoc.Node, read func() (*pmdoc.Node, error)) (*pmdoc.Node, error) {
+	if current != nil && pmdoc.BlockIDRepairCount(current) == 0 {
+		return current, nil
+	}
+	return read()
 }
 
 // SetBlockAttributes applies server-owned typed-block state through the
@@ -1059,7 +1072,7 @@ func withoutAnswer(attributes map[string]any) (withheld map[string]any, withhold
 }
 
 func (s *Service) setBlockAttributes(ctx context.Context, artifactID, blockID string, attributes map[string]any, actor model.Actor) error {
-	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+	return s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 		fragment := doc.GetXmlFragment(fragmentName)
 		tree, err := treeOf(doc)
 		if err != nil {
@@ -1211,8 +1224,12 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 			return nil, "", authorCapture{}, err
 		}
 	}
-	if err := s.warmLiveDocument(ctx, room); err != nil {
-		return nil, "", authorCapture{}, err
+	// A write of the transaction's own holds the document already, in its fork; loading a room for
+	// it would hold a second copy beside that fork until the write commits (LEGION-504).
+	if write == nil {
+		if err := s.warmLiveDocument(ctx, room); err != nil {
+			return nil, "", authorCapture{}, err
+		}
 	}
 	// The warmed-read hook deliberately evicts a loaded room in tests. It runs before this
 	// transaction takes the document lock: CloseRoom flushes a room's persistence, which may
