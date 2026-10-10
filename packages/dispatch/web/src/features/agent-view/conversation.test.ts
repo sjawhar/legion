@@ -359,6 +359,11 @@ describe("the session's slash commands", () => {
       },
       { commands: [], kind: "commands", seq: "9", v: 1 },
       { commands: [], kind: "commands", seq: 10, v: 2 },
+      // A person types a command as one token, so the session never lists an empty name or one
+      // holding whitespace (pi-envoy's `setCommands` drops both); one on the bus is forged.
+      { commands: [{ name: "", source: "builtin" }], kind: "commands", seq: 11, v: 1 },
+      { commands: [{ name: " ", source: "builtin" }], kind: "commands", seq: 12, v: 1 },
+      { commands: [{ name: "two words", source: "prompt" }], kind: "commands", seq: 13, v: 1 },
     ] as unknown as AgentStreamFrame[];
     const state = applyFrames(EMPTY_CONVERSATION, [commandsFrame(1, LISTED), ...bad]);
     expect(sessionCommands(state)).toEqual(LISTED);

@@ -43,12 +43,15 @@ const COMMAND_SOURCES: Record<AgentStreamCommand["source"], true> = {
 };
 
 /** Whether one listed command has the contract's shape. The list is the bus's like any frame, and
- *  the composer renders every field of it. */
+ *  the composer renders every field of it. A name is one token a person types after the slash, so
+ *  an empty name or one holding whitespace is no command the session lists (pi-envoy's
+ *  `setCommands` drops both). */
 function isCommand(command: AgentStreamCommand | null | undefined): boolean {
   return (
     typeof command === "object" &&
     command !== null &&
     typeof command.name === "string" &&
+    /^\S+$/u.test(command.name) &&
     (command.description === undefined || typeof command.description === "string") &&
     typeof command.source === "string" &&
     Object.hasOwn(COMMAND_SOURCES, command.source) &&

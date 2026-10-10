@@ -22,6 +22,12 @@
 //     opens the same page on Send and, for each <typed>, types it key by key, waits for the
 //     composer's slash-command list and reads it, then empties the message; sends nothing. Prints
 //     {"<typed>": {"offered","terminalOnly"}, ...}.
+//   bun scripts/e2e/lib/dispatch-user-turns.ts forge <dispatch-url> <login> <session> <nats-url> <shot.png> <control> <frame>...
+//     opens the same page on Send, reads the composer's list for `/`, publishes each <frame> on
+//     agentstream.<session>.frames as a bare bus client while the page watches, reads the list
+//     again and counts the page's error screens, then publishes <control>, a well-formed list, and
+//     reads the list once more, so a run can tell frames that reached the page and were refused from
+//     frames that never reached it. Prints {"before","after","errorScreens","control"}.
 //   bun scripts/e2e/lib/dispatch-user-turns.ts envelope <nats-url> <session> <message-id> <seconds>
 //     prints the envelope Dispatch published on notifications.agent.<session> for Dispatch message
 //     <message-id>, as the notification stream holds it; exits 1 when it holds none.
@@ -65,6 +71,7 @@ interface LocatorLike {
   press(key: string): Promise<void>;
   pressSequentially(text: string): Promise<void>;
   textContent(): Promise<string | null>;
+  count(): Promise<number>;
 }
 
 async function withPage<T>(
@@ -208,6 +215,47 @@ async function list(): Promise<void> {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
+async function forge(): Promise<void> {
+  const [base, login, session, url, shot, control, ...frames] = args;
+  if (!base || !login || !session || !url || !shot || !control || frames.length === 0) {
+    refuse(
+      "usage: forge <dispatch-url> <login> <session> <nats-url> <shot.png> <control> <frame>..."
+    );
+  }
+  const nc = await connect({ name: "legion-e2e-user-turns", servers: url, timeout: 10_000 });
+  try {
+    const result = await withPage(base, login, session, async (page) => {
+      const picker = page.getByRole("combobox", { name: "Delivery mode" });
+      await picker.waitFor({ timeout: 30_000 });
+      await picker.selectOption("steer");
+      const input = page.getByTestId("agent-composer").locator("textarea");
+      const read = async () => {
+        await input.pressSequentially("/");
+        const listed = await offeredCommands(page);
+        await input.fill("");
+        return listed;
+      };
+      const publish = async (frame: string) => {
+        nc.publish(`agentstream.${session}.frames`, new TextEncoder().encode(frame));
+        await nc.flush();
+      };
+      const before = await read();
+      for (const frame of frames) await publish(frame);
+      // The relay forwards each frame as it arrives; this is time for the page to take them.
+      await page.waitForTimeout(3_000);
+      const after = await read();
+      const errorScreens = await page.getByTestId("error-boundary").count();
+      await page.screenshot({ fullPage: true, path: shot });
+      await publish(control);
+      await page.waitForTimeout(3_000);
+      return { after, before, control: await read(), errorScreens };
+    });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  } finally {
+    await nc.close();
+  }
+}
+
 async function count(): Promise<void> {
   const [base, login, session, shot, ...bodies] = args;
   if (!base || !login || !session || !shot || bodies.length === 0) {
@@ -344,10 +392,11 @@ async function publish(): Promise<void> {
 if (command === "send") await send();
 else if (command === "complete") await complete();
 else if (command === "list") await list();
+else if (command === "forge") await forge();
 else if (command === "count") await count();
 else if (command === "envelope") await envelope();
 else if (command === "publish") await publish();
 else
   refuse(
-    `unknown command ${command ?? "(none)"}: send, complete, list, count, envelope or publish`
+    `unknown command ${command ?? "(none)"}: send, complete, list, forge, count, envelope or publish`
   );

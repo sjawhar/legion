@@ -934,7 +934,8 @@ is written there.
 LEGION-394's acceptance: a person's direct Send or Aside from Dispatch's conversation page is the
 session's own user turn, and everything else keeps its Envoy card. One real session — the pinned
 Oh My Pi (`.omp-pin`, run as a mise tool spec) with this checkout's Envoy plugin in an isolated
-profile, launched with `controller-start-tmux.sh`'s `operator_env` line, its cwd under `/tmp` —
+profile, launched with `controller-start-tmux.sh`'s `operator_env` line and `OMP_SKIP_SETUP=1` (a
+fresh profile's first launch otherwise sits in the first-run setup wizard), its cwd under `/tmp` —
 registers with a real Envoy listener and NATS. Dispatch, built from the checkout with NATS on and
 its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
 conversation page as the person the header names. The session's model turns go through the model
@@ -942,8 +943,12 @@ gateway on the operator's own hawk login ([`lib/install-model-gateway.sh`](#libi
 The profile also holds what the slash-command checks send, each named with the run's token: a
 skill (`skills/<name>/SKILL.md`), a prompt template (`prompts/<name>.md`), a file command
 (`commands/<name>.md`), an extension (`extensions/<name>.ts`) registering a command that writes its
-arguments under the run's work directory, and `compaction.keepRecentTokens: 200` appended to the
-`config.yml` the model route wrote, so the run's one `/compact` has history to summarize.
+arguments to `checks/extension-command-args` and appending the role, `customType` and `tag` of every
+`message_start` the host hands extensions to `checks/message-starts.jsonl`, and
+`compaction.keepRecentTokens: 200` appended to the `config.yml` the model route wrote, so the run's
+one `/compact` has history to summarize. Each slash-command check waits until the session is idle
+before it sends, since the page refuses a send while a turn runs: a stopped answer with no message
+or custom message after it and no background job the model started still owed its result.
 
 ```bash
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/dispatch-user-turns.sh     # → "dispatch user turns e2e: PASS", exit 0
@@ -953,7 +958,7 @@ LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/dispatch-user-
 | :--- | :--- | :--- |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
 | `DISPATCH_USER_TURNS_OMP` | the pinned build, `.omp-pin`'s mise tool spec (`github:sjawhar/oh-my-pi@<version>`) | another Oh My Pi, as a mise tool spec |
-| `DISPATCH_USER_TURNS_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e-user-turns-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `logs/` (the listener, Dispatch and the SPA build), `checks/` (the page's screenshots and the session's pane at exit) and `session.jsonl`, the session's transcript |
+| `DISPATCH_USER_TURNS_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e-user-turns-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `logs/` (the listener, Dispatch and the SPA build), `checks/` (the page's screenshots, the session's pane at exit, `extension-command-args` and `message-starts.jsonl`) and `session.jsonl`, the session's transcript |
 
 Each check prints `== <name>`, what it observed, and `ok <name>`. The first check that fails ends the
 run non-zero and names itself. On any exit the run removes its scratch directory, the isolated
@@ -975,9 +980,10 @@ Postgres and NATS containers; a run that finds another's leftovers refuses to st
 | `a-carded-send-and-a-frame-forged-for-it-inside-the-minute-get-cards` | with the session's Dispatch token file made wrong, the person's Send arrives as a card, since the session cannot accept it; with the token restored, a frame forged with the listener token names that attempt within 45 s of the Send, while Dispatch would still accept it: the session's own record of the attempts it delivered keeps it a card, with neither the Send's text nor the forged text a user message, and Dispatch records no acceptance |
 | `a-persons-retry-of-a-carded-send-is-their-turn` | the person retries that Send as an Aside (`POST /api/v1/messages/{id}/deliveries`, attempt 2), an attempt the session never delivered: one user message that is exactly the body, and Dispatch records attempt 2 accepted |
 | `the-composer-lists-the-sessions-commands` | typed key by key in the composer, `/rig` lists the rig's template, file command and extension command, `/skill:rig` its skill, and `/sess`, `/comp` and `/new` the built-ins `session`, `compact` and `new`, `new` alone marked terminal only; nothing is sent |
-| `a-skill-runs-as-the-skill` | `/skill:<name> …` picked from the list and sent: one `skill-prompt` custom message tagged with the Dispatch message id, no user message holding the raw text, and the session answers with the skill's code word |
+| `a-forged-command-list-changes-nothing-on-the-page` | with a page open, a bare bus client publishes five malformed `commands` frames on `agentstream.<session>.frames`, each at a sequence number far above the session's own (an unknown `source`, `commands` not a list, an empty name, a whitespace name, `v` 2): the page's list stays the session's and no error screen shows; a well-formed list published after them replaces it, so the frames reached the page; a fresh page lists the session's own again |
+| `a-skill-runs-as-the-skill` | `/skill:<name> …` picked from the list and sent: one `skill-prompt` custom message tagged with the Dispatch message id, one `message_start` for it that the rig's extension saw (the host event Legion's phase-stall check reads), no user message holding the raw text, and the session answers with the skill's code word |
 | `a-template-and-a-file-command-run-as-their-expansions` | each picked and sent with an argument: one user message tagged with its Dispatch id, holding the expansion with the argument substituted rather than the raw `/name`, and the session answers it |
-| `an-extension-command-runs-its-handler` | the extension's command picked and sent with arguments: its handler wrote exactly those arguments to its file, and no user message was submitted |
+| `an-extension-command-runs-its-handler` | the extension's command picked and sent with arguments: its handler wrote exactly those arguments to `checks/extension-command-args`, and no user message was submitted |
 | `session-replies-with-its-id` | `/session`: the first line of the session's Dispatch reply to it is `Session: <session id>` |
 | `compact-compacts-and-replies` | `/compact`, sent once, after the checks above gave the session history: the reply starts `Compaction complete`, and the transcript gains a `compaction` entry |
 | `new-is-terminal-only` | `/new`: the reply says it runs only in the session's own terminal and nothing was sent, and the listener lists the same session with the same user messages |

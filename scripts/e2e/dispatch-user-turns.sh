@@ -33,7 +33,8 @@
 # own and goes on any exit: its scratch directory, the isolated profile under the HOME it gives Oh
 # My Pi (make_omp_home, lib/omp-home.sh), its tmux server, its listener and Dispatch, and its
 # Postgres and NATS containers. DISPATCH_USER_TURNS_EVIDENCE_DIR (default a fresh /tmp directory,
-# kept and printed) keeps the logs, the page's screenshots and the session transcript.
+# kept and printed) keeps the logs, the page's screenshots, the session transcript, the arguments
+# the rig's extension command recorded and every `message_start` its extension saw.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce, so no process here inherits an operator's seed.
@@ -133,9 +134,26 @@ skill_prompts() {
 has_skill_prompt() { [ "$(skill_prompts "$1")" -gt 0 ]; }
 compactions() { jq -s '[.[] | select(.type == "compaction")] | length' "$session_file"; }
 user_messages() { jq -s '[.[] | select(.type == "message" and .message.role == "user")] | length' "$session_file"; }
-# settled: the session's last message is an answer that ended its run, so no turn is running.
+# settled: no turn is running and none is about to start. Oh My Pi writes an answer to the
+# transcript only when it ends, so idle is a stopped answer that nothing after it follows into a turn:
+# no message entry (a user message, a tool result) and no `custom_message` (a card, a skill prompt,
+# a background job's result), each of which the pinned host appends only for a turn it runs, and no
+# background job still owed: one the model started (its tool result's `details.async.state` is
+# `running`, tools/bash.ts and tools/eval.ts) and neither got delivered as an `async-result`, which
+# starts the next turn (session/async-job-delivery.ts), nor took with the job tool, whose result
+# lists it settled (async/job-control.ts, consumeJobResults). An extension's own `custom` record and
+# a `compaction` start nothing.
 settled() {
-  jq -se '[.[] | select(.type == "message")] | last | .message.role == "assistant" and .message.stopReason == "stop"' "$session_file" >/dev/null
+  jq -se '[.[] | objects] as $e
+    | ($e | to_entries | map(select(.value.type == "message" and .value.message.role == "assistant"
+        and .value.message.stopReason == "stop")) | last | .key) as $stop
+    | ([$e[] | select(.type == "message" and .message.role == "toolResult") | .message.details.async?
+        | select(.state? == "running") | .jobId]
+      - [$e[] | (select(.type == "custom_message" and .customType == "async-result") | .details.jobs[]?.jobId),
+        (select(.type == "message" and .message.role == "toolResult") | .message.details.jobs[]?
+          | select(.status != "running") | .id)]) as $owed
+    | $stop != null and ($e[$stop + 1:] | all(.type != "message" and .type != "custom_message")) and ($owed | length == 0)' \
+    "$session_file" >/dev/null
 }
 
 # ---- the services ----------------------------------------------------------------------------------
@@ -160,10 +178,12 @@ page() { bun "$root/scripts/e2e/lib/dispatch-user-turns.ts" "$@"; }
 
 # The operator's shell less the running session's own Oh My Pi variables (controller-start-tmux.sh's
 # operator_env), with the run's HOME and profile, and this run's listener, NATS and Dispatch.
+# OMP_SKIP_SETUP keeps a fresh profile's first launch out of the first-run setup wizard, which
+# otherwise holds the terminal for the whole run (packages/tui/src/setup/wizard.ts at the pin).
 launch_session() {
   local command
   command=$(printf '%q ' env -u OMP_SESSION_ID -u OMPCODE -u PI_CONFIG_FILES -u ENVOY_NATS_URL -u LEGION_OMP_PATH \
-    HOME="$omp_home" OMP_PROFILE="$profile" \
+    HOME="$omp_home" OMP_PROFILE="$profile" OMP_SKIP_SETUP=1 \
     ENVOY_URL="http://127.0.0.1:$envoy_port" ENVOY_TOKEN_FILE="$work/envoy-token" ENVOY_NATS_URL="$nats_url" \
     DISPATCH_URL="http://127.0.0.1:$dispatch_port" DISPATCH_TOKEN_FILE="$work/dispatch-token" \
     mise x "$omp_tool" -- omp "$@")
@@ -231,7 +251,8 @@ skill_name=rigskill$run
 template_name=rigplan$run
 file_command_name=rigdeploy$run
 extension_command_name=rigrecord$run
-extension_record=$work/extension-command-args
+extension_record=$evidence/checks/extension-command-args
+message_starts=$evidence/checks/message-starts.jsonl
 # A skill: `<agentDir>/skills/<name>/SKILL.md` with a description (loadSkills, `requireDescription`).
 mkdir -p "$profile_agent/skills/$skill_name"
 cat >"$profile_agent/skills/$skill_name/SKILL.md" <<EOF
@@ -259,18 +280,31 @@ description: LEGION-394 rig file command $run
 ---
 LEGION-394 $run file command expansion: my deploy's code word is DEPLOY\$ARGUMENTS. What is my deploy's code word?
 EOF
-# An extension command: `<agentDir>/extensions/<name>.ts` (discovery/builtin.ts, loadExtensionModules;
+# An extension: `<agentDir>/extensions/<name>.ts` (discovery/builtin.ts, loadExtensionModules;
 # discoverExtensionModulePaths takes a direct `*.ts`), whose default export is the factory
-# (extensibility/extensions/loader.ts, getExtensionFactory). It records its arguments to a file under
-# this run's work directory and submits nothing.
+# (extensibility/extensions/loader.ts, getExtensionFactory). Its command writes its arguments to the
+# evidence directory and submits nothing. It also appends one line for every `message_start` the
+# host hands extensions (MessageStartEvent, extensibility/extensions/types.ts), so the run keeps the
+# event Legion's phase-stall match reads, not just the transcript entry the host writes afterwards.
 mkdir -p "$profile_agent/extensions"
 cat >"$profile_agent/extensions/$extension_command_name.ts" <<EOF
-export default function (pi: { registerCommand(name: string, options: { description: string; handler(args: string): Promise<void> }): void }) {
+import { appendFileSync } from "node:fs";
+
+interface RigPi {
+  registerCommand(name: string, options: { description: string; handler(args: string): Promise<void> }): void;
+  on(event: "message_start", handler: (event: { message: Record<string, unknown> }) => void): void;
+}
+
+export default function (pi: RigPi) {
   pi.registerCommand("$extension_command_name", {
     description: "LEGION-394 rig extension command $run",
     handler: async (args) => {
       await Bun.write("$extension_record", args);
     },
+  });
+  pi.on("message_start", ({ message }) => {
+    const { customType, role, tag } = message;
+    appendFileSync("$message_starts", \`\${JSON.stringify({ customType, role, tag })}\\n\`);
   });
 }
 EOF
@@ -507,6 +541,31 @@ jq -e '.["/comp"].terminalOnly | index("compact") | not' <<<"$lists" >/dev/null 
 note "the list offers the rig's template, file command, extension command and skill, and session, compact and new, new marked terminal only"
 pass
 
+begin a-forged-command-list-changes-nothing-on-the-page
+# Anything that reaches NATS can publish on the session's frames subject, which the relay forwards
+# to every page watching (packages/envoy/internal/dispatch/agentstream). With a page open, each frame
+# below breaks one rule of the contract, at a sequence number far above the session's own, so a page
+# that took any would show it: its list must stay the session's, with no error screen. A well-formed
+# list published last must replace it, which shows the frames reached the page and were refused. A
+# fresh page, served the session's own replay, then lists what the session sent.
+forged=$(page forge "http://127.0.0.1:$dispatch_port" "$login" "$session_id" "$nats_url" "$evidence/checks/composer-after-forgery.png" \
+  '{"v":1,"kind":"commands","seq":900010,"commands":[{"name":"forgedcontrol'"$run"'","source":"builtin"}]}' \
+  '{"v":1,"kind":"commands","seq":900001,"commands":[{"name":"forgedsource","source":"terminal"}]}' \
+  '{"v":1,"kind":"commands","seq":900002,"commands":"forged-not-a-list"}' \
+  '{"v":1,"kind":"commands","seq":900003,"commands":[{"name":"","source":"builtin"}]}' \
+  '{"v":1,"kind":"commands","seq":900004,"commands":[{"name":" ","source":"builtin"}]}' \
+  '{"v":2,"kind":"commands","seq":900005,"commands":[{"name":"forgedversion","source":"builtin"}]}')
+note "$forged"
+jq -e '.after == .before and .errorScreens == 0' <<<"$forged" >/dev/null ||
+  fail "a malformed frame changed the page's list or showed an error screen: $forged"
+jq -e --arg c "forgedcontrol$run" '.control.offered == [$c]' <<<"$forged" >/dev/null ||
+  fail "the well-formed control list never reached the page, so the refusals above prove nothing: $forged"
+fresh_lists=$(page list "http://127.0.0.1:$dispatch_port" "$login" "$session_id" "$evidence/checks/composer-list-after-forgery.png" \
+  "/rig" "/skill:rig" "/sess" "/comp" "/new")
+[ "$fresh_lists" = "$lists" ] || fail "a fresh page lists $fresh_lists after the forgery, want the session's $lists"
+note "five malformed commands frames left the open page's list as it was, with no error screen; the control list replaced it; a fresh page lists the session's own"
+pass
+
 begin a-skill-runs-as-the-skill
 until_true 180 "the session to finish its last run" settled
 skill_body="/skill:$skill_name for run $run"
@@ -517,7 +576,11 @@ until_true 120 "the skill prompt tagged $skill_id" has_skill_prompt "$skill_id"
 until_true 180 "the session to answer the skill" replied "SKILL$run"
 [ "$(skill_prompts "$skill_id")" = 1 ] || fail "the skill became $(skill_prompts "$skill_id") skill prompts, want 1"
 [ "$(user_mentions "/skill:$skill_name")" = 0 ] || fail "the raw /skill: text became a user message"
-note "message $skill_id: one skill-prompt custom message tagged with it, no raw user message; the session answered SKILL$run"
+# The host event Legion's phase-stall match reads (pi-legion's `message_start` handler), as the rig's
+# own extension recorded it, not the transcript entry the host writes after it.
+skill_starts=$(jq -sc --arg id "$skill_id" '[.[] | select(.role == "custom" and .customType == "skill-prompt" and .tag == $id)] | length' "$message_starts")
+[ "$skill_starts" = 1 ] || fail "extensions saw $skill_starts message_start events for the skill prompt tagged $skill_id, want 1"
+note "message $skill_id: one skill-prompt custom message tagged with it, and one message_start for it that extensions saw; no raw user message; the session answered SKILL$run"
 pass
 
 begin a-template-and-a-file-command-run-as-their-expansions
@@ -546,7 +609,7 @@ until_true 60 "the extension command's record" test -s "$extension_record"
 [ "$(user_mentions "/$extension_command_name")" = 0 ] || fail "the extension command's raw text became a user message"
 extension_id=$(message_id "$extension_body")
 [ "$(tagged_user_texts "$extension_id")" = "[]" ] || fail "the extension command submitted a user message"
-note "the handler recorded \"alpha $run\"; no user message"
+note "the handler recorded \"alpha $run\" in $extension_record; no user message"
 pass
 
 begin session-replies-with-its-id
