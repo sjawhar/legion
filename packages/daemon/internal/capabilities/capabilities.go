@@ -9,7 +9,9 @@ package capabilities
 
 import (
 	"slices"
+	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -128,7 +130,12 @@ type Row struct {
 	Name Name `json:"name"`
 	// OK is whether the session's check of the row passed.
 	OK bool `json:"ok"`
-	// Detail is the fact the check found, passed or not, at most MaxReportDetail bytes.
+	// Detail is the fact the check found, passed or not, as one line of at most MaxReportDetail
+	// bytes (cleanDetail): it reaches the daemon log, the store and the controller's daily report
+	// with nothing delimiting it, so no newline or control character the session sent survives.
+	// A row that is not OK always has one — "no detail reported" when the session sent none — since
+	// the state's `open[].detail` is a non-empty string; an OK row's may be empty, a passing check
+	// with nothing to add.
 	Detail string `json:"detail"`
 }
 
@@ -164,9 +171,10 @@ type Session struct {
 const MaxReportDetail = 1024
 
 // Normalize turns a wire report's rows into the rows the daemon keeps: a name Table has no live
-// row for is dropped (returned in dropped, in wire order), a detail is cut at MaxReportDetail on
-// a rune boundary, a live row the wire lacks is appended as not OK with the detail "not reported
-// by this session", and the kept rows are in Table order; a name sent twice keeps the first.
+// row for is dropped (returned in dropped, in wire order), a detail is cleaned to one line and cut
+// at MaxReportDetail (cleanDetail), a row that is not OK with no detail left reads "no detail
+// reported", a live row the wire lacks is appended as not OK with the detail "not reported by this
+// session", and the kept rows are in Table order; a name sent twice keeps the first.
 func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 	live := Live()
 	byName := make(map[Name]Row, len(live))
@@ -179,7 +187,11 @@ func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 		if _, seen := byName[name]; seen {
 			continue
 		}
-		byName[name] = Row{Name: name, OK: row.OK, Detail: truncate(row.Detail, MaxReportDetail)}
+		detail := cleanDetail(row.Detail)
+		if !row.OK && detail == "" {
+			detail = "no detail reported"
+		}
+		byName[name] = Row{Name: name, OK: row.OK, Detail: detail}
 	}
 	kept = make([]Row, 0, len(live))
 	for _, name := range live {
@@ -190,6 +202,21 @@ func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 		kept = append(kept, row)
 	}
 	return kept, dropped
+}
+
+// cleanDetail is a reported detail as one printed line: every control rune — a newline, a tab,
+// an escape — is a space, whitespace runs are one space with none at either end, and the line is
+// cut at MaxReportDetail on a rune boundary. A detail quotes names the worked repository chooses
+// (a server in `.mcp.json`, a file under `.omp/`), and a name must neither split a log line nor
+// put a line of its own into the controller's instructions.
+func cleanDetail(text string) string {
+	spaced := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return ' '
+		}
+		return r
+	}, text)
+	return truncate(strings.Join(strings.Fields(spaced), " "), MaxReportDetail)
 }
 
 // truncate is text cut to at most max bytes on a rune boundary, so a cut never leaves a partial

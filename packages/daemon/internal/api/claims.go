@@ -152,7 +152,7 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	if req.Capabilities != nil {
 		report := s.capabilityReport(c, req)
 		if s.capabilityReported != nil {
-			s.capabilityReported(r.Context(), c, report)
+			s.capabilityReported(ctx, c, report)
 		}
 	}
 	if s.claimReady != nil {

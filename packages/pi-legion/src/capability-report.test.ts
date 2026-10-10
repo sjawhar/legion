@@ -447,6 +447,70 @@ describe("mcp", () => {
     // The abort tore the second set of clients down; the finally that never ran would have.
     expect(fake.calls).toEqual(["wait", "disconnectAll"]);
   });
+
+  test("redacts the userinfo of a URL the recorded error quotes", async () => {
+    const fake: FakeManager = { statuses: { alpha: "connected", beta: "failed" }, calls: [] };
+    const rows = await measure(
+      fakeHost({
+        loadMCPConfigs: configured,
+        discoverMCPServers: async () => ({
+          manager: manager(fake),
+          errors: [
+            {
+              path: "mcp:beta",
+              error: "fetch failed: https://user:secret@mcp.example/sse (HTTP 401)",
+            },
+          ],
+        }),
+      })
+    );
+    expect(rows.mcp).toEqual({
+      ok: false,
+      detail:
+        "not connected: beta (fetch failed: https://***@mcp.example/sse (HTTP 401)); connected: alpha (.omp/mcp.json)",
+    });
+  });
+
+  test("disconnects when the budget aborted while the manager was still being made", async () => {
+    const fake: FakeManager = { statuses: {}, calls: [] };
+    const tornDown = Promise.withResolvers<void>();
+    const stuck = {
+      ...manager(fake),
+      waitForPendingConnections: () => {
+        fake.calls.push("wait");
+        return new Promise<void>(() => undefined);
+      },
+      disconnectAll: async () => {
+        fake.calls.push("disconnectAll");
+        tornDown.resolve();
+      },
+    };
+    // The manager exists only once the report has settled, which aborts every check's signal —
+    // the command checks', read here — and the report settles once the mcp check's own 20 ms
+    // budget has aborted it. A listener the check adds after that never hears the abort.
+    const settled = Promise.withResolvers<void>();
+    const report = await measureCapabilities(
+      fakeHost({
+        loadMCPConfigs: configured,
+        discoverMCPServers: async () => {
+          await settled.promise;
+          return { manager: stuck, errors: [] };
+        },
+        run: async (_command, _args, options) => {
+          options.signal.addEventListener("abort", () => settled.resolve(), { once: true });
+          return { code: 0, stdout: "legion-implementer[bot]\n", stderr: "" };
+        },
+      }),
+      input(),
+      { checkMs: 20, reportMs: 500 }
+    );
+    const mcp = report.rows.find((row) => row.name === "mcp");
+    expect(mcp).toEqual({ name: "mcp", ok: false, detail: "did not finish within 20 ms" });
+    // The check found its signal already aborted and tore the clients down before waiting on a
+    // connection that never finishes; the finally that never runs would have.
+    await tornDown.promise;
+    expect(fake.calls).toEqual(["disconnectAll", "wait"]);
+  });
 });
 
 describe("repository-extensions", () => {

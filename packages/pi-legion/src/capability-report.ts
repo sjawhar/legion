@@ -217,22 +217,30 @@ const checkWebSearch: Check = async (host, input, signal) => {
   return ok(`web_search registered; provider ${String(provider)} answered in ${elapsed} ms`);
 };
 
-/** The error `discoverMCPServers` recorded for `name`, when its `errors` carry one. Oh My Pi
- * records `{path: "mcp:<name>", error}`; a `server` or `name` member and a `message` are read
- * the same way, and anything else naming the server is quoted whole. */
+/** `scheme://userinfo@` in a URL: the credentials a connection error may quote. */
+const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi;
+
+/** The error `discoverMCPServers` recorded for `name`, when its `errors` carry one, with every
+ * URL's userinfo in it replaced by `***`: a server's connection error can quote its URL whole,
+ * token and all, and the detail travels to the daemon's log and the state. Oh My Pi records
+ * `{path: "mcp:<name>", error}`; a `server` or `name` member and a `message` are read the same
+ * way, and anything else naming the server is quoted whole. */
 function mcpErrorFor(errors: readonly unknown[], name: string): string | undefined {
+  let quoted: string | undefined;
   for (const entry of errors) {
     if (typeof entry !== "object" || entry === null) {
-      if (String(entry).includes(name)) return String(entry);
-      continue;
+      if (!String(entry).includes(name)) continue;
+      quoted = String(entry);
+      break;
     }
     const record = entry as Record<string, unknown>;
     const names = [record.server, record.name, record.path];
     if (!names.some((value) => value === name || value === `mcp:${name}`)) continue;
     const message = record.error ?? record.message;
-    return message === undefined ? String(entry) : String(message);
+    quoted = message === undefined ? String(entry) : String(message);
+    break;
   }
-  return undefined;
+  return quoted?.replace(URL_USERINFO, "$1***@");
 }
 
 const checkMCP: Check = async (host, input, signal) => {
@@ -241,14 +249,17 @@ const checkMCP: Check = async (host, input, signal) => {
   if (configured.length === 0) return ok("no MCP server configured");
   const { manager, errors } = await host.discoverMCPServers(input.cwd);
   // The session's own MCP clients are the host's; these are a second, short-lived set, torn down
-  // when the check ends and when its budget aborts it mid-connection, so a server that never
-  // finishes connecting leaves no client running for the session's lifetime.
+  // when the check ends and when its budget aborts it, so a server that never finishes connecting
+  // leaves no client running for the session's lifetime. The listener covers an abort after the
+  // manager exists; the line after it, one that came while the manager was still being made,
+  // which no listener added since can hear.
   let torn: Promise<void> | undefined;
   const tearDown = () => {
     torn ??= manager.disconnectAll().catch(() => undefined);
     return torn;
   };
   signal.addEventListener("abort", tearDown, { once: true });
+  if (signal.aborted) void tearDown();
   try {
     await manager.waitForPendingConnections();
     const connected: string[] = [];

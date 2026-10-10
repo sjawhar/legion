@@ -376,6 +376,24 @@ test("the state golden shows a claim's capability report beside its locator", ()
   };
   delete withoutReport.issues["LEGION-208"]?.workers.implementer?.claim.capabilities;
   expect(LegionStateResponse.safeParse(withoutReport).success).toBeTrue();
+
+  // The implementer's report in a parsed copy of the golden, altered one member at a time.
+  const parsedReport = () => {
+    const document = LegionStateResponse.parse(fixture("state.json"));
+    const report = document.issues["LEGION-208"]?.workers.implementer?.claim.capabilities;
+    if (report === undefined) throw new Error("state.json: the implementer has no report");
+    return { document, report };
+  };
+
+  // A report the API recorded from a claim whose machine held no process names no incarnation.
+  const unlocated = parsedReport();
+  unlocated.report.incarnation = "";
+  expect(LegionStateResponse.safeParse(unlocated.document).success).toBeTrue();
+
+  // The daemon floors an open row's detail (`capabilities.Normalize`); the schema stays the guard.
+  const blank = parsedReport();
+  blank.report.open = [{ name: "github", detail: "" }];
+  expect(LegionStateResponse.safeParse(blank.document).success).toBeFalse();
 });
 
 // An operator spawns a claim on an issue no workflow records — `legion claims spawn`, which is

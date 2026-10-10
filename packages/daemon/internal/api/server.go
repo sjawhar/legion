@@ -109,7 +109,9 @@ type Options struct {
 	// CapabilityReported is told, after a ready the claim took, of the capability report that ready
 	// carried, normalised (capabilities.Normalize), with the claim as the ready left it. A ready that
 	// carries no report — the controller's — tells no one, and so does a ready the claim refuses.
-	// Nil tells no one. It is called before the route answers the agent, so it returns at once.
+	// Nil tells no one. It may persist the report before it returns — the daemon's writes the
+	// store — on a context that outlives the agent's connection, and the route answers the agent
+	// once it has returned.
 	CapabilityReported func(ctx context.Context, c supervise.Claim, report capabilities.Report)
 }
 

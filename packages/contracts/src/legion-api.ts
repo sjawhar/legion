@@ -111,10 +111,13 @@ const legionLocator = z.discriminatedUnion("runtime", [
  * the fact the check found (`open`). `incarnation` is the reporting process's: the daemon keeps a
  * claim's latest report whatever its incarnation, so a reader compares it with
  * `locator.incarnation` to tell a report of the running process from one a relaunch has outlived
- * (contract 19). `ok` and `open` are never null. */
+ * (contract 19). It is empty for a report the API recorded from a claim whose machine held no
+ * process (`runtime.Locator{Claim}`), which no reader compares with a locator. `ok` and `open`
+ * are never null; the daemon floors an open row's detail (`capabilities.Normalize`), and the
+ * schema stays the guard. */
 const legionCapabilityReportView = z.strictObject({
   measuredAt: timestamp,
-  incarnation: nonEmptyString,
+  incarnation: z.string(),
   ok: z.array(nonEmptyString),
   open: z.array(z.strictObject({ name: nonEmptyString, detail: nonEmptyString })),
 });

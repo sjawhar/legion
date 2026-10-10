@@ -128,8 +128,10 @@ func unreported(sent ...Row) []Row {
 }
 
 // Normalize turns what a session sent into the rows the daemon keeps: a name Table has no live
-// row for is dropped and returned, a detail longer than MaxReportDetail is cut on a rune
-// boundary, a live row the wire lacks is filled in as not reported, the rows come out in Table
+// row for is dropped and returned, a detail is one line (newlines, tabs and control characters
+// out, whitespace runs collapsed) cut on a rune boundary when longer than MaxReportDetail, a
+// failing row with no detail left reads "no detail reported" while a passing row's empty detail
+// stays empty, a live row the wire lacks is filled in as not reported, the rows come out in Table
 // order whatever order the wire sent them, and a name sent twice keeps the first.
 func TestNormalizeKeepsTheLiveRowsInTableOrder(t *testing.T) {
 	long := strings.Repeat("€", 400)
@@ -159,9 +161,29 @@ func TestNormalizeKeepsTheLiveRowsInTableOrder(t *testing.T) {
 			wantKept: unreported(Row{Name: WebSearch, Detail: strings.Repeat("€", 341)}),
 		},
 		{
-			name:     "keeps a detail of exactly the limit",
-			rows:     []claim.CapabilityRow{{Name: "mcp", OK: true, Detail: strings.Repeat("a", MaxReportDetail)}},
+			name:     "keeps a detail of exactly the limit, cleaned before the cut",
+			rows:     []claim.CapabilityRow{{Name: "mcp", OK: true, Detail: "\n " + strings.Repeat("a", MaxReportDetail) + "\t"}},
 			wantKept: unreported(Row{Name: MCP, OK: true, Detail: strings.Repeat("a", MaxReportDetail)}),
+		},
+		{
+			name:     "floors a failing row's empty detail",
+			rows:     []claim.CapabilityRow{{Name: "github", OK: false, Detail: ""}},
+			wantKept: unreported(Row{Name: GitHub, Detail: "no detail reported"}),
+		},
+		{
+			name:     "floors a failing row's detail that is only whitespace",
+			rows:     []claim.CapabilityRow{{Name: "github", OK: false, Detail: "  \n\t "}},
+			wantKept: unreported(Row{Name: GitHub, Detail: "no detail reported"}),
+		},
+		{
+			name:     "keeps a passing row's empty detail empty",
+			rows:     []claim.CapabilityRow{{Name: "github", OK: true, Detail: ""}},
+			wantKept: unreported(Row{Name: GitHub, OK: true, Detail: ""}),
+		},
+		{
+			name:     "puts a detail on one line with its control characters out",
+			rows:     []claim.CapabilityRow{{Name: "mcp", OK: false, Detail: "not connected: evil\nserver\x1b[31m (boom)"}},
+			wantKept: unreported(Row{Name: MCP, Detail: "not connected: evil server [31m (boom)"}),
 		},
 		{
 			name: "orders the rows as Table does",
