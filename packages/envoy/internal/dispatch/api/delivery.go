@@ -510,7 +510,8 @@ func deliveryProductionView(jobs []delivery.DeliveryRunJob, productionJobName st
 // productionApplies is delivery.ProductionApplies for a read, which warns about each run it sets
 // apart, a successfully concluded run with no production job, once per run and configured job
 // name for the life of the process: the timeline and the measures judge the same runs on every
-// read, and a run's jobs no longer change once it has concluded.
+// read, so the line would otherwise repeat for one run on every page load. A changed
+// production_job_name is a new key, so a misconfiguration is named again under its new value.
 func (s *server) productionApplies(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, productionJobName string) []delivery.Apply {
 	applies, unmatched := delivery.ProductionApplies(runs, jobsByRun, productionJobName)
 	for _, missing := range unmatched {
