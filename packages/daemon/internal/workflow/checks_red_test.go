@@ -426,14 +426,15 @@ func TestAConflictRecordedBeforeAwaitingMergeIsWithdrawnOnTheFirstReadAfterReady
 	}
 }
 
-// At max_fix_attempts the daemon stops sending the work back on CI red, and the architect decides
-// what comes next (skill://legion-architect's pr-blocked row): the red verdict that finds the
-// count exhausted is posted on the issue and told to the architect once, and the issue stays in
-// its phase. Every later red at that count stays there too, and tells nothing new: a re-run that
-// fails again, a red that returns after the head read green (a flaky check flapping), and, in
-// reviewing, the reviewer's completion of its round, which asks the round what the red comes to. A
-// cap that held the first red and let the next one through would bound nothing. A fix pushed onto
-// the red raises the count, and its red is told again, and held the same way.
+// At max_fix_attempts the daemon stops sending the work back from testing or reviewing on CI red at
+// the head the count last counted, and the architect decides what comes next
+// (skill://legion-architect's pr-blocked row): the red verdict that finds the count exhausted is
+// posted on the issue and told to the architect once, and the issue stays in its phase. Every later
+// red at that head stays there too, and tells nothing new: a re-run that fails again, a red that
+// returns after the head read green (a flaky check flapping), and, in reviewing, the reviewer's
+// completion of its round, which asks the round what the red comes to. A cap that held the first
+// red and let the next one through would bound nothing. A fix pushed onto the red raises the count,
+// and its red is told again, and held the same way.
 func TestAnExhaustedFixAttemptCountHoldsEveryRedAtThatCount(t *testing.T) {
 	const required = "pr-checks-result"
 	settlement := func(attempt int, failing ...string) intake.Fact {
@@ -458,8 +459,6 @@ func TestAnExhaustedFixAttemptCountHoldsEveryRedAtThatCount(t *testing.T) {
 		{"in reviewing, red twice", phase.Reviewing, "needs_review", true, 3, 0, []intake.Fact{settlement(1, required), settlement(2, required)}},
 		{"in reviewing, red, green, red", phase.Reviewing, "needs_review", true, 3, 0, []intake.Fact{settlement(1, required), settlement(2), settlement(3, required)}},
 		{"in reviewing, red, then the reviewer completes", phase.Reviewing, "needs_review", false, 3, 0, []intake.Fact{settlement(1, required), completion}},
-		{"in awaiting_merge, red twice", phase.AwaitingMerge, "retro", false, 3, 0, []intake.Fact{settlement(1, required), settlement(2, required)}},
-		{"in awaiting_merge, red, green, red", phase.AwaitingMerge, "retro", false, 3, 0, []intake.Fact{settlement(1, required), settlement(2), settlement(3, required)}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -469,15 +468,12 @@ func TestAnExhaustedFixAttemptCountHoldsEveryRedAtThatCount(t *testing.T) {
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head", Required: []string{required},
 				FixAttempts: tc.attempts, BlockedAttempts: tc.reported, HeadCounted: "head"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			switch tc.from {
-			case phase.Reviewing:
+			if tc.from == phase.Reviewing {
 				reviewer := record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim"}
 				if tc.completed {
 					reviewer.HandoffCommit, reviewer.Summary = "head", "reviewed"
 				}
 				seedPhase(t, pool, reviewer)
-			case phase.AwaitingMerge:
-				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
 			}
 			engine := readyEngine("merge-queue")
 			for i, fact := range tc.facts {
@@ -504,9 +500,6 @@ func TestAnExhaustedFixAttemptCountHoldsEveryRedAtThatCount(t *testing.T) {
 			assertOutboxCount(t, pool, "supervise", 0)
 			if rounds := implementerRounds(t, pool); rounds != 0 {
 				t.Fatalf("rounds = %d, want none: nothing went back", rounds)
-			}
-			if published := mergeQueuePublishes(t, pool); len(published) != 0 {
-				t.Fatalf("merge queue publishes %v, want none: the READY stands", published)
 			}
 		})
 	}
@@ -558,6 +551,196 @@ func TestAnExhaustedFixAttemptCountStillTakesTheReviewersRequestForChanges(t *te
 			}
 		})
 	}
+}
+
+// The cap bounds the loop it counts: pushes onto a red verdict. A code head pushed onto a green one
+// - the implementer's answer to a request for changes after a re-run turned the counted head green
+// - raises no count, so a red there in testing is new and not the loop's: it sends the work back
+// with a checks-red, as below the cap, whether or not the count was already reported. The next push
+// onto that red raises the count and is reported then. A red reaching a handoff-only head from the
+// counted code head it replaced is the loop's: it sends nothing back (a handoff head never does),
+// and it reports the count once, as a red at the counted head itself would.
+func TestARedAtACodeHeadTheExhaustedCountNeverCoveredSendsTheWorkBack(t *testing.T) {
+	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
+	settlement := func(head string, attempt int, failing ...string) intake.Fact {
+		return settledAt(head, required, attempt, failing...)
+	}
+	for _, tc := range []struct {
+		name     string
+		reported int
+		facts    []intake.Fact
+		// want is the phase the last fact leaves the issue in; checksRed and blocked count the
+		// architect's notices of each kind.
+		want               phase.Phase
+		checksRed, blocked int
+	}{
+		{"a head pushed onto green after the count was reported", 3,
+			[]intake.Fact{settlement("h3", 1, required), settlement("h3", 2), syncedTo("h4"), pushedFromTo("h3", "h4", "src/widget.go", implementer), settlement("h4", 1, required)},
+			phase.Implementing, 1, 0},
+		{"a head pushed onto green after the count went green unreported", 0,
+			[]intake.Fact{settlement("h3", 1), syncedTo("h4"), pushedFromTo("h3", "h4", "src/widget.go", implementer), settlement("h4", 1, required)},
+			phase.Implementing, 1, 0},
+		{"a handoff head over the counted head, the counted head's red carried to it", 0,
+			[]intake.Fact{syncedTo("h3t"), pushedFromTo("h3", "h3t", ".legion/LEGION-208/test.json", testReviewApp), settlement("h3", 1, required)},
+			phase.Testing, 0, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "U"})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h3", Required: []string{required},
+				FixAttempts: 3, BlockedAttempts: tc.reported, HeadCounted: "h3"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+			engine := readyEngine("merge-queue")
+			last := len(tc.facts) - 1
+			for i, fact := range tc.facts[:last] {
+				applyRefusingNothing(t, pool, engine, fact)
+				if got := issuePhase(t, pool); got != phase.Testing {
+					t.Fatalf("after fact %d (%T) the issue is in %s, want testing", i+1, fact, got)
+				}
+			}
+			applyRefusingNothing(t, pool, engine, tc.facts[last])
+			if got := issuePhase(t, pool); got != tc.want {
+				t.Fatalf("after the last red the issue is in %s, want %s", got, tc.want)
+			}
+			checksRed, blocked := 0, 0
+			for _, kind := range noticeKinds(t, pool, "LEGION-208") {
+				switch kind {
+				case "checks-red":
+					checksRed++
+				case "pr-blocked":
+					blocked++
+				}
+			}
+			if checksRed != tc.checksRed || blocked != tc.blocked {
+				t.Fatalf("checks-red notices %d and pr-blocked notices %d, want %d and %d", checksRed, blocked, tc.checksRed, tc.blocked)
+			}
+			var attempts int
+			if err := pool.QueryRow(context.Background(), "select fix_attempts from pull_requests where issue = 'LEGION-208'").Scan(&attempts); err != nil {
+				t.Fatalf("read the fix attempts: %v", err)
+			}
+			if attempts != 3 {
+				t.Fatalf("fix attempts = %d, want 3: no push onto a red verdict was made", attempts)
+			}
+		})
+	}
+}
+
+// In awaiting_merge no implementer loops for the fix-attempt cap to bound, and GitHub will not merge
+// a red head, so a red there withdraws the READY and sends the work back whatever the count: never
+// held, never left standing. That holds for a count told in testing before the work went green and
+// moved on through review, retro and READY, and for a READY head that is itself the head the count
+// last counted. The withdrawal is told by its checks-red; a count already reported is not reported
+// again.
+func TestAnExhaustedFixAttemptCountNeverHoldsARedInAwaitingMerge(t *testing.T) {
+	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
+	tester := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleTester, Claim: "test-claim", Commit: "test-1", Summary: "passed", Verdict: "pass"}
+	approval := intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "h3", HeadSHA: "h3", Author: testReviewApp, Body: "approved"}
+	reviewer := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleReviewer, Claim: "review-claim", Commit: "review-1", Summary: "reviewed"}
+	retro := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim", Commit: "retro-1", Summary: "retro"}
+	ready := intake.HandoffComplete{Generation: 1, Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", Ready: true, Summary: readyPacket, Commit: "h4"}
+	for _, tc := range []struct {
+		name string
+		from phase.Phase
+		// steps carry the issue to awaiting_merge, each leaving it in the phase named beside it.
+		steps []struct {
+			fact  intake.Fact
+			phase phase.Phase
+		}
+		red intake.Fact
+	}{
+		{"a count told in testing, then green, review, retro and READY", phase.Testing, []struct {
+			fact  intake.Fact
+			phase phase.Phase
+		}{
+			{settledAt("h3", required, 1, required), phase.Testing},
+			{settledAt("h3", required, 2), phase.Testing},
+			{tester, phase.Reviewing},
+			{approval, phase.Reviewing},
+			{reviewer, phase.Retro},
+			{syncedTo("h4"), phase.Retro},
+			{pushedFromTo("h3", "h4", "docs/solutions/legion/widget.md", implementer), phase.Retro},
+			{settledAt("h4", required, 1), phase.Retro},
+			{retro, phase.Merging},
+			{ready, phase.AwaitingMerge},
+		}, settledAt("h4", required, 2, required)},
+		{"a READY head the count last counted", phase.AwaitingMerge, nil, settledAt("h3", required, 1, required)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			status := map[phase.Phase]string{phase.Testing: "testing", phase.AwaitingMerge: "retro"}[tc.from]
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+				Phase: tc.from, Generation: 1, Status: status, Rank: "U"})
+			seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: new(1)})
+			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "h3", Required: []string{required}, FixAttempts: 3, HeadCounted: "h3"})
+			for role, token := range map[claim.Role]claim.Token{claim.RoleImplementer: "implement-claim", claim.RoleTester: "test-claim", claim.RoleReviewer: "review-claim", claim.RoleMerger: "merge-claim"} {
+				row := record.PhaseRow{Issue: "LEGION-208", Role: role, Claim: token}
+				if tc.from == phase.AwaitingMerge && role == claim.RoleMerger {
+					row.HandoffCommit, row.Summary = "h3", "READY #42 at h3"
+				}
+				seedPhase(t, pool, row)
+			}
+			engine := readyEngine("merge-queue")
+			for i, step := range tc.steps {
+				applyRefusingNothing(t, pool, engine, step.fact)
+				if got := issuePhase(t, pool); got != step.phase {
+					t.Fatalf("after step %d (%T) the issue is in %s, want %s", i+1, step.fact, got, step.phase)
+				}
+			}
+			applyRefusingNothing(t, pool, engine, tc.red)
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("after the red at the READY head the issue is in %s, want implementing: a READY never stands on red", got)
+			}
+			checksRed, blocked := 0, 0
+			for _, kind := range noticeKinds(t, pool, "LEGION-208") {
+				switch kind {
+				case "checks-red":
+					checksRed++
+				case "pr-blocked":
+					blocked++
+				}
+			}
+			wantBlocked := 0
+			if tc.from == phase.Testing {
+				wantBlocked = 1
+			}
+			if checksRed != 1 || blocked != wantBlocked {
+				t.Fatalf("checks-red notices %d and pr-blocked notices %d, want 1 and %d", checksRed, blocked, wantBlocked)
+			}
+			withdrawn := 0
+			for _, published := range mergeQueuePublishes(t, pool) {
+				if strings.Contains(published.Packet, "READY withdrawn") {
+					withdrawn++
+				}
+			}
+			if withdrawn != 1 {
+				t.Fatalf("READY withdrawals published %d, want 1", withdrawn)
+			}
+		})
+	}
+}
+
+// settledAt is a CI settlement of head on the one check required, attempt numbering its run and its
+// fence, failing the checks named.
+func settledAt(head, required string, attempt int, failing ...string) intake.Fact {
+	return intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: head,
+		CheckRuns: []record.AttemptRun{{Name: required, ID: int64(attempt)}}, Generation: int64(attempt),
+		Snapshot: head + "-" + strconv.Itoa(attempt), Failing: append([]string{}, failing...)}
+}
+
+// syncedTo is GitHub's synchronize of the pull request to head.
+func syncedTo(head string) intake.Fact {
+	return intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
+}
+
+// pushedFromTo is the branch push that replaced from with to, changing paths (newline-separated),
+// by pusher.
+func pushedFromTo(from, to, paths, pusher string) intake.Fact {
+	unforced, whole := "false", "false"
+	return intake.Push{Repo: "sjawhar/legion", Branch: "legion/LEGION-208", Before: from, After: to,
+		ChangedPaths: &paths, Truncated: &whole, Forced: &unforced, Pusher: pusher}
 }
 
 // Checks can flap: red, then green on a re-run, then red again. Below the cap the first red sends

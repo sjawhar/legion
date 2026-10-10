@@ -308,23 +308,26 @@ func ConflictWithdrawsReady(pr record.PullRequest) bool {
 	return pr.State == record.PullRequestOpen && pr.Mergeability == record.MergeabilityConflicting
 }
 
-// FixAttemptsExhausted says whether the verdict that stands for the head is red with the pull
-// request's fix attempts at cap: the work has failed to turn CI green that many times, so a red
-// verdict no longer sends it back by itself. The architect decides what follows (the pr-blocked
-// notice BlockFixAttempt reports), and every red at that count is held the same way, since a cap
-// that held the first red and let the next through would bound nothing. A green head at an
-// exhausted count is the fix that worked.
-func FixAttemptsExhausted(pr record.PullRequest, cap int) bool {
-	return cap > 0 && pr.FixAttempts >= cap && HeadVerdict(pr) == "red"
+// FixAttemptCapHolds says whether the red verdict standing for the head is one the fix-attempt cap
+// holds: the pull request's fix attempts are at cap, and the head is the one whose push the count
+// last counted (HeadCounted), a push onto a red verdict. That head is the loop the cap bounds, so
+// its red no longer sends the work back from testing or reviewing by itself, however often it
+// returns - a re-run failing again, a red after the head read green - and the architect decides
+// what follows (workflow's decideChecks and reviewRound). Any other head is not that loop: a code
+// head pushed onto a green verdict raised no count, so its red is new, and a head a handoff-only
+// push left sends nothing back of its own (RedSendsBack). A green head is the fix that worked.
+func FixAttemptCapHolds(pr record.PullRequest, cap int) bool {
+	return cap > 0 && pr.FixAttempts >= cap && pr.HeadCounted != "" && pr.HeadCounted == pr.HeadSHA && HeadVerdict(pr) == "red"
 }
 
-// BlockFixAttempt marks and reports one exhausted fix-attempt count (FixAttemptsExhausted) after a
-// settlement or a new required set, as the shipped reducer decides pr-blocked on ci-settled-red
-// alone: once per count, never again on a later red at the same count. A zero BlockedAttempts means
-// no count has been reported, because fix attempts begin at one before they can exhaust a positive
-// cap.
+// BlockFixAttempt marks and reports one exhausted fix-attempt count when the verdict that stands
+// for the head is red after a settlement or a new required set, as the shipped reducer decides
+// pr-blocked on ci-settled-red alone: once per count, never again on a later red at the same count.
+// A green head at an exhausted count is the fix that worked. A zero BlockedAttempts means no count
+// has been reported, because fix attempts begin at one before they can exhaust a positive cap. The
+// caller asks it only of a red that sent nothing back (workflow's decideChecks).
 func BlockFixAttempt(pr record.PullRequest, cap int) (record.PullRequest, bool) {
-	if !FixAttemptsExhausted(pr, cap) || pr.BlockedAttempts == pr.FixAttempts {
+	if cap <= 0 || HeadVerdict(pr) != "red" || pr.FixAttempts < cap || pr.BlockedAttempts == pr.FixAttempts {
 		return pr, false
 	}
 	pr.BlockedAttempts = pr.FixAttempts
