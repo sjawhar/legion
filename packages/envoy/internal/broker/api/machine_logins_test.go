@@ -298,6 +298,81 @@ func TestOnlyTheLoginThatEnrolledAPodDeletesItsEnrollment(t *testing.T) {
 	}
 }
 
+// TestAPodRenewsCarryingItsCurrentToken: POST /v1/enrollments/{id}/renew on a pod enrollment with
+// a body naming another pod's or account's projected token is 403 POD_IDENTITY_MISMATCH; with the
+// pod's own current token it is 200, and from then on a renewal with no body is 403
+// POD_TOKEN_REQUIRED. A pod that never sent a token (an agent-secrets renew that predates it)
+// still renews with no body. A box sending a pod token is 400 POD_TOKEN_OFF_POD.
+func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
+	ts := newTestServer(t)
+	cred, credKey := ts.mintServiceLauncherCredential(t)
+	enrollPod := func(t *testing.T) (string, string, *ecdsa.PrivateKey) {
+		t.Helper()
+		podUID, key := uuid.NewString(), newSigningKey(t)
+		status, body := ts.launcher(t, credKey, cred, http.MethodPost, "/v1/enrollments", map[string]any{
+			"kind": "pod", "runtime_id": podUID, "slot": "implementer-g1", "thumbprint": thumbprintOf(t, key),
+			"pod_token": ts.podToken(t, workerAccount, podUID),
+		})
+		if status != http.StatusCreated {
+			t.Fatalf("enroll the pod = %d %s, want 201", status, body)
+		}
+		return decode[wireEnrolled](t, body).EnrollmentID, podUID, key
+	}
+	renew := func(t *testing.T, key *ecdsa.PrivateKey, id string, body any) (int, string) {
+		t.Helper()
+		status, raw := ts.session(t, key, id, http.MethodPost, "/v1/enrollments/"+id+"/renew", body)
+		if status == http.StatusOK {
+			return status, ""
+		}
+		return status, decode[wireError](t, raw).Code
+	}
+
+	t.Run("a pod's own token renews and from then on is required", func(t *testing.T) {
+		id, podUID, key := enrollPod(t)
+		for name, token := range map[string]string{
+			"another pod's token":             ts.podToken(t, workerAccount, uuid.NewString()),
+			"another service account's token": ts.podToken(t, "system:serviceaccount:legion:other", podUID),
+		} {
+			if status, code := renew(t, key, id, map[string]any{"pod_token": token}); status != http.StatusForbidden || code != "POD_IDENTITY_MISMATCH" {
+				t.Fatalf("renew with %s = %d %s, want 403 POD_IDENTITY_MISMATCH", name, status, code)
+			}
+		}
+		if status, code := renew(t, key, id, map[string]any{"pod_token": ts.podToken(t, workerAccount, podUID)}); status != http.StatusOK {
+			t.Fatalf("renew with the pod's own token = %d %s, want 200", status, code)
+		}
+		if status, code := renew(t, key, id, nil); status != http.StatusForbidden || code != "POD_TOKEN_REQUIRED" {
+			t.Fatalf("renew with no body after renewing with the token = %d %s, want 403 POD_TOKEN_REQUIRED", status, code)
+		}
+	})
+
+	t.Run("a pod that never sent a token renews without one", func(t *testing.T) {
+		id, _, key := enrollPod(t)
+		for range 2 {
+			if status, code := renew(t, key, id, nil); status != http.StatusOK {
+				t.Fatalf("renew with no body, never renewed with a token = %d %s, want 200", status, code)
+			}
+		}
+	})
+
+	t.Run("a box sending a pod token is refused", func(t *testing.T) {
+		login, loginKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
+		key := newSigningKey(t)
+		status, body := ts.launcher(t, loginKey, login, http.MethodPost, "/v1/enrollments", map[string]any{
+			"kind": "box", "runtime_id": "box-" + uuid.NewString(), "thumbprint": thumbprintOf(t, key),
+		})
+		if status != http.StatusCreated {
+			t.Fatalf("enroll the box = %d %s, want 201", status, body)
+		}
+		id := decode[wireEnrolled](t, body).EnrollmentID
+		if status, code := renew(t, key, id, map[string]any{"pod_token": ts.podToken(t, workerAccount, uuid.NewString())}); status != http.StatusBadRequest || code != "POD_TOKEN_OFF_POD" {
+			t.Fatalf("a box's renew carrying a pod token = %d %s, want 400 POD_TOKEN_OFF_POD", status, code)
+		}
+		if status, code := renew(t, key, id, nil); status != http.StatusOK {
+			t.Fatalf("a box's renew with no body = %d %s, want 200", status, code)
+		}
+	})
+}
+
 // TestAServiceLoginWaitsInEveryonesPendingList: a pending service login, the Legion daemon's,
 // whatever person its login_hint names, is in every signed-in person's pending list, which is how
 // whoever reads its code finds it waiting; a person's pending machine login is in theirs alone.

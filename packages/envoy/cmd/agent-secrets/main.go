@@ -15,7 +15,7 @@
 //	agent-secrets grant list [--json]|revoke <grant_id>
 //	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
 //	agent-secrets identity
-//	agent-secrets renew
+//	agent-secrets renew [--pod-token-file FILE]
 //	agent-secrets request NAME... [--reason TEXT] [--json]
 //	agent-secrets status <request_id> [--json]
 //	agent-secrets cancel <request_id>
@@ -123,8 +123,8 @@ var commands = []command{
 		"Exit 0 when this process has a broker identity and 1 when it does not, asking the broker\nnothing."},
 	{"--version", "agent-secrets --version",
 		"Print the release this binary was built as."},
-	{"renew", "agent-secrets renew",
-		"Keep an agent box's enrollment lease alive, renewing it until interrupted."},
+	{"renew", "agent-secrets renew [--pod-token-file FILE]",
+		"Keep an agent box's or pod's enrollment lease alive, renewing it until interrupted. A pod\nnames its projected service-account token's file: each renewal sends the token the file holds\nthen, which the broker checks names the pod and service account the enrollment was made for."},
 	{"request", "agent-secrets request NAME... [--reason TEXT] [--json]",
 		"Request secrets and print the request's id and state, and who approves it and where while\nit waits; exit 75 while it waits for approval and 77 when it is denied."},
 	{"status", "agent-secrets status <request_id> [--json]",
@@ -676,9 +676,17 @@ func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
 // renew
 // ---------------------------------------------------------------------------
 
+// cmdRenew renews this session's enrollment until interrupted. With --pod-token-file (a pod; the
+// Legion worker shim passes the projected token file the runtime mounts) every renewal reads the
+// file again and sends its contents as pod_token, since the kubelet rotates the token in place;
+// the broker verifies it against the enrollment's pod UID and service account. Without the flag a
+// renewal has no body, a box's renewal. A broker that predates the token reads no renew body, so a
+// renewal carrying one still renews there.
 func cmdRenew(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, nil)
-	if err := newFlagSet("renew", stderr).Parse(flagArgs); err != nil {
+	flagArgs, positional := splitArgs(args, map[string]bool{"pod-token-file": true})
+	flags := newFlagSet("renew", stderr)
+	podTokenFile := flags.String("pod-token-file", "", "a pod's projected service-account token file, read again before every renewal")
+	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	if len(positional) > 0 {
@@ -691,15 +699,33 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if enrollmentID == "" {
-		fmt.Fprintln(stderr, "agent-secrets renew: a host session's lease is renewed by agent-secrets-helper; agent-secrets renew is for agent boxes")
+		fmt.Fprintln(stderr, "agent-secrets renew: a host session's lease is renewed by agent-secrets-helper; agent-secrets renew is for agent boxes and pods")
 		return 1
+	}
+	podToken := func() (string, error) { return "", nil }
+	if *podTokenFile != "" {
+		podToken = func() (string, error) {
+			raw, err := os.ReadFile(*podTokenFile)
+			if err != nil {
+				return "", fmt.Errorf("read the pod's projected token: %w", err)
+			}
+			return strings.TrimSpace(string(raw)), nil
+		}
+		if _, err := podToken(); err != nil {
+			fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
+			return exitUsageError
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	c := newClient(base)
 	backoff := 2 * time.Second
 	for {
-		expires, err := c.RenewEnrollment(ctx, signer, enrollmentID)
+		token, err := podToken()
+		var expires time.Time
+		if err == nil {
+			expires, err = c.RenewEnrollment(ctx, signer, enrollmentID, token)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return 0

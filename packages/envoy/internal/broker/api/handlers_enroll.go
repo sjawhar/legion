@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -50,6 +51,15 @@ type enrollmentResponse struct {
 type leaseResponse struct {
 	// When the renewed lease lapses.
 	LeaseExpiresAt time.Time `json:"lease_expires_at"`
+}
+
+// renewEnrollmentBody is POST /v1/enrollments/{id}/renew's optional body: no body at all is a
+// renewal carrying no token.
+type renewEnrollmentBody struct {
+	// A pod only: its current projected service-account token, which must name the pod UID and
+	// service account the enrollment was made for. Required once the enrollment has renewed with
+	// it (enroll.Service.Renew).
+	PodToken *string `json:"pod_token"`
 }
 
 // selfResponse is GET /v1/enrollments/self's answer: the calling session as the broker knows it.
@@ -153,7 +163,11 @@ func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred e
 
 // renewEnrollment renews the caller's own enrollment. The proof-verified enrollment id is
 // authoritative — a session can only ever act as itself — so a URL {id} that names a different
-// enrollment is refused rather than silently honored or silently ignored.
+// enrollment is refused rather than silently honored or silently ignored. A pod's renewal carries
+// its current projected token in the body, which enroll.Service.Renew verifies against the pod UID
+// and service account the enrollment was made for; a pod enrollment that has never renewed with
+// one still renews with no body, logged here, naming the enrollment, until the token-less path is
+// removed (Renew says when).
 func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id string) {
 	urlID, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
 	if !ok {
@@ -163,16 +177,32 @@ func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusForbidden, "NOT_YOURS", "a session may only renew its own enrollment")
 		return
 	}
-	expires, err := s.deps.Enroll.Renew(r.Context(), id)
-	if errors.Is(err, enroll.ErrNotLive) {
-		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "enrollment is not live")
+	var body renewEnrollmentBody
+	if r.ContentLength != 0 && !readJSON(w, r, &body, "INVALID_RENEWAL") {
 		return
 	}
-	if err != nil {
+	renewal, err := s.deps.Enroll.Renew(r.Context(), id, derefOr(body.PodToken, ""))
+	switch {
+	case errors.Is(err, enroll.ErrNotLive):
+		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "enrollment is not live")
+		return
+	case errors.Is(err, enroll.ErrPodIdentity):
+		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
+		return
+	case errors.Is(err, enroll.ErrPodTokenRequired):
+		writeError(w, http.StatusForbidden, "POD_TOKEN_REQUIRED", err.Error())
+		return
+	case errors.Is(err, enroll.ErrPodTokenOffPod):
+		writeError(w, http.StatusBadRequest, "POD_TOKEN_OFF_POD", err.Error())
+		return
+	case err != nil:
 		writeInternal(w, "renew enrollment", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, leaseResponse{LeaseExpiresAt: expires})
+	if renewal.WithoutPodToken {
+		slog.Warn("broker: pod enrollment renewed without its projected token", "enrollment", id, "pod_uid", renewal.RuntimeID, "slot", renewal.Slot)
+	}
+	writeJSON(w, http.StatusOK, leaseResponse{LeaseExpiresAt: renewal.LeaseExpires})
 }
 
 func (s *server) readSelf(w http.ResponseWriter, r *http.Request, id string) {

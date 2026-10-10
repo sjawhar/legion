@@ -121,10 +121,13 @@ func writeEnrollment(dir, id string) error {
 	return nil
 }
 
-// startRenewer runs `agent-secrets renew` — the lease heartbeat that proves the pod live to the
-// broker — as a child of the shim, restarted after renewRestartDelay whenever it exits, until the
-// shim ends. It reads AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR from the shim's own environment,
-// where the runtime set them. One renewer per shim: a second enrollment frame starts no second one.
+// startRenewer runs `agent-secrets renew --pod-token-file <projected token file>` — the lease
+// heartbeat that proves the pod live to the broker — as a child of the shim, restarted after
+// renewRestartDelay whenever it exits, until the shim ends. Each renewal carries the pod's current
+// projected token, which the broker checks names the pod UID and service account the enrollment was
+// made for; the shim and agent-secrets ship in one worker image, so the renewer always knows the
+// flag. It reads AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR from the shim's own environment, where
+// the runtime set them. One renewer per shim: a second enrollment frame starts no second one.
 func (s *shim) startRenewer() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -137,7 +140,7 @@ func (s *shim) startRenewer() {
 	go func() {
 		defer s.renewers.Done()
 		for s.loop.Err() == nil {
-			cmd := exec.CommandContext(s.loop, a.Binary, "renew")
+			cmd := exec.CommandContext(s.loop, a.Binary, "renew", "--pod-token-file", a.TokenFile)
 			cmd.Env = s.cfg.Env
 			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 			if err := cmd.Start(); err != nil {

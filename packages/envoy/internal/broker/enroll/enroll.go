@@ -37,6 +37,8 @@ var (
 	// ErrNotEnrollingCredential refuses a revoke of a pod enrollment by any launcher credential but
 	// the one that enrolled it (Revoke).
 	ErrNotEnrollingCredential = errors.New("only the machine login that enrolled a pod may end its enrollment")
+	ErrPodTokenRequired       = errors.New("this pod enrollment has renewed with its projected token, so every renewal must carry it")
+	ErrPodTokenOffPod         = errors.New("only a pod enrollment's renewal carries a projected token")
 )
 
 type Credential struct {
@@ -437,16 +439,80 @@ func (s *Service) endLapsedBatch(ctx context.Context) ([]LapsedEnrollment, error
 	return batch, nil
 }
 
-func (s *Service) Renew(ctx context.Context, id string) (time.Time, error) {
-	expires := time.Now().Add(s.Lease)
-	tag, err := s.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at=$2 where id=$1 and revoked_at is null and lease_expires_at > now()`, id, expires)
+// Renewal is what Renew answers: the new lease, and, for a pod enrollment renewed without its
+// projected token, which pod and slot did so (the API logs each such renewal).
+type Renewal struct {
+	LeaseExpires    time.Time
+	WithoutPodToken bool
+	RuntimeID, Slot string
+}
+
+// Renew extends a live enrollment's lease by Lease. The caller's session proof says only that it
+// holds the enrollment's key; a pod enrollment's renewal also proves the pod is still running:
+// podToken is the pod's current projected service-account token, verified as Create verifies it
+// (issuer, audience, signature, expiry) and required to name the pod UID (runtime_id) and the
+// service-account subject the enrollment recorded at Create, else ErrPodIdentity and the lease
+// stays where it was. A token copied out of a pod therefore renews nothing once it expires, and a
+// token from another pod or account never renews this one. A box or host renews on its proof
+// alone, and a pod token on its renewal is ErrPodTokenOffPod.
+//
+// Compatibility: a pod whose agent-secrets renew predates the token sends none. While a pod
+// enrollment has never renewed with its token (pod_token_renewed_at is null), a renewal without one
+// still extends the lease and answers WithoutPodToken, which the API logs, naming the enrollment;
+// its first renewal carrying the token sets pod_token_renewed_at, and every later renewal without
+// one is ErrPodTokenRequired. An older broker ignores the token a newer client sends, so client
+// and broker roll out in either order. The token-less path closes no hole for a pod whose renewer
+// never sends a token, so it is removed once every pinned worker image's agent-secrets sends one
+// and no live pod enrollment renews without it: the broker logs no "renewed without its projected
+// token" line for one full lease, and
+// `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null and created_at < now() - <BROKER_LEASE_SECONDS>`
+// answers 0.
+func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, error) {
+	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
-		return time.Time{}, err
+		return Renewal{}, err
 	}
-	if tag.RowsAffected() != 1 {
-		return time.Time{}, ErrNotLive
+	defer tx.Rollback(ctx)
+
+	var kind string
+	var subject *string
+	var tokenRenewedAt *time.Time
+	renewal := Renewal{}
+	err = tx.QueryRow(ctx, `select kind, runtime_id, slot, subject, pod_token_renewed_at from enrollments
+		where id=$1 and revoked_at is null and lease_expires_at > now() for update`, id).
+		Scan(&kind, &renewal.RuntimeID, &renewal.Slot, &subject, &tokenRenewedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Renewal{}, ErrNotLive
 	}
-	return expires, nil
+	if err != nil {
+		return Renewal{}, err
+	}
+	switch {
+	case kind != "pod" && podToken != "":
+		return Renewal{}, ErrPodTokenOffPod
+	case kind == "pod" && podToken != "":
+		if s.Pod == nil {
+			return Renewal{}, fmt.Errorf("%w: pod renewal needs BROKER_K8S_OIDC_ISSUER", ErrPodIdentity)
+		}
+		claims, err := s.Pod.Verify(ctx, podToken)
+		if err != nil || claims.PodUID != renewal.RuntimeID || subject == nil || claims.Subject != *subject {
+			return Renewal{}, ErrPodIdentity
+		}
+	case kind == "pod" && tokenRenewedAt != nil:
+		return Renewal{}, ErrPodTokenRequired
+	case kind == "pod":
+		renewal.WithoutPodToken = true
+	}
+	renewal.LeaseExpires = time.Now().Add(s.Lease)
+	if _, err := tx.Exec(ctx, `update enrollments set lease_expires_at=$2,
+		pod_token_renewed_at = case when $3 then coalesce(pod_token_renewed_at, now()) else pod_token_renewed_at end
+		where id=$1`, id, renewal.LeaseExpires, kind == "pod" && podToken != ""); err != nil {
+		return Renewal{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Renewal{}, err
+	}
+	return renewal, nil
 }
 
 // authorized reports whether cred may act on an enrollment of the given kind and operator — the

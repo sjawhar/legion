@@ -161,6 +161,25 @@
 
 ### Changed
 
+- **Breaking:** the secrets broker refuses to start when `BROKER_SERVICES` binds a namespace's
+  `default` service account (`system:serviceaccount:<namespace>:default`), naming the entry: every
+  pod in that namespace whose spec names no account runs as it and can get a token for the broker's
+  audience, so the binding proves nothing about which pods are the service's. Bind each service to
+  a dedicated account its pods set as `serviceAccountName` before taking this release.
+- A pod's renewal (`POST /v1/enrollments/{id}/renew`) carries the pod's current projected token as
+  `pod_token`, and the broker refuses it `403 POD_IDENTITY_MISMATCH` unless the token names the pod
+  UID and service account the enrollment was made for, so a token copied out of a pod no longer
+  keeps an enrollment alive past its expiry. `agent-secrets renew --pod-token-file FILE` reads the
+  file before every renewal and sends it, and Legion's worker shim passes the projected token file.
+  A pod enrollment that has never renewed with its token still renews without one, logged as
+  `broker: pod enrollment renewed without its projected token`; once it has, a renewal without one
+  is `403 POD_TOKEN_REQUIRED`. A box's renewal carrying a token is `400 POD_TOKEN_OFF_POD`. An
+  older broker reads no renew body, so the new client renews there too. Adds migration 0012.
+- Only the machine login that enrolled a pod may end its enrollment: `DELETE /v1/enrollments/{id}`
+  of a pod enrollment by any other login, another service's or a second login of the same service,
+  is `403 NOT_ENROLLING_CREDENTIAL` and ends nothing. A Legion daemon restarted under a new login
+  cannot end its earlier login's pods; each ends one lease after its pod stops renewing, or at once
+  when someone revokes that earlier login, and the daemon no longer retries that refusal.
 - **Breaking:** `agent-secrets launcher login` and `launcher login-status` are removed, with no
   alias: `agent-secrets machine login` and `machine login-status` replace them, beside
   `machine list` and `machine revoke`. A script that still calls `launcher` gets the usage and

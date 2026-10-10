@@ -2039,12 +2039,22 @@ issue's pod (every role container of it alike) and the image probe's.
   approver at all; each secret's owner and tier tags pick the approver for the pod's later
   credential requests at request time) — hands the enrollment id back to the shim, and revokes it
   wherever it lets the pod go (a death, the registration deadline, a suspension, a stop, the
-  tree's close). The daemon's login is the service `legion-daemon`'s, and its pods run as the
-  ServiceAccount `runtime.kubernetes.pod.service_account` names (`default` when unset, above). A
-  broker configured with that account for `legion-daemon`, such as
+  tree's close). The shim's renewer, `agent-secrets renew --pod-token-file <the projected token>`,
+  sends the pod's current token with every renewal, and the broker refuses a renewal whose token
+  names another pod UID or service account than the enrollment's (`POD_IDENTITY_MISMATCH`). The
+  broker ends a pod enrollment only for the machine login that made it, so a restarted daemon,
+  which logs in again with a new key, cannot revoke the enrollments its earlier login made (the
+  broker answers `NOT_ENROLLING_CREDENTIAL`, and the daemon logs
+  `supervise: agent-secrets: enrollment revocation refused; its lease ends it once its pod stops renewing`):
+  each ends one lease after its pod's renewer stops, or at once when someone revokes that earlier
+  login on Dispatch's machine-login page. The daemon's login is the service `legion-daemon`'s, and
+  its pods run as the ServiceAccount `runtime.kubernetes.pod.service_account` names (`default` when
+  unset, above). A broker configured with that account for `legion-daemon`, such as
   `BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:legion-worker` for pods running as
   `legion-worker`, gives a secret tagged `owner=legion-daemon` to every such pod at once and to no
-  other session (the broker's concepts page, "Owner and tier").
+  other session (the broker's concepts page, "Owner and tier"). The broker refuses to start with a
+  namespace's `default` account in `BROKER_SERVICES`, since every pod there that names no account
+  runs as it, so pods that receive service-owned secrets name a dedicated account.
   Without the block, pods carry none of this. An older worker image is refused at
   the image probe: the block's pod variables are daemon API contract 8. A pod's agent-secrets
   volumes are fixed when it is created, so turning the block on, or changing its `audience` or
@@ -2059,9 +2069,10 @@ issue's pod (every role container of it alike) and the image probe's.
   with no broker configured, cannot revoke it (it logs
   `supervise: agent-secrets: enrollment recorded with no broker configured; its lease ends it`).
   Anything in that role's container that knows the broker's URL can renew it, though: the role's
-  key directory is mounted into that container and no other, the broker accepts a renewal on the
-  key's proof alone, and `agent-secrets renew`, which the image ships, needs only that URL and the
-  key directory. So the enrollment can stay live until the pod is replaced, at the latest when its
+  key directory and the broker's projected token are mounted into that container and no other, the
+  broker accepts a renewal on the key's proof and that pod's current token, and
+  `agent-secrets renew`, which the image ships, needs only that URL, the key directory and the
+  token file. So the enrollment can stay live until the pod is replaced, at the latest when its
   issue closes, plus one lease (`BROKER_LEASE_SECONDS`). To end it at once, anyone signed in to
   Dispatch revokes the daemon's machine login on Dispatch's machine-login page
   (`/credentials/machine`), which ends every session it enrolled
