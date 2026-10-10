@@ -298,23 +298,31 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 
 // signLauncher signs a launcher proof with the machine credential for the operator's own machine
 // and grant commands, for a URL under this helper's broker only (Broker.URL is never a value the
-// peer supplies, as signRequest's audience is not). It is refused inside a registered session
-// (IN_SESSION): a session acts on itself alone, and the operator's machines and grants are the
-// operator's shell's to manage. Registry.Root walks /proc ancestry from pid while peer's pidfd
-// stays open, and its "no session" is trusted only once peer.PID() still names pid, the pid-reuse
-// rule sign follows (resolveDescendant), so a session process the kernel replaced mid-walk is never
-// handed a proof. With no credential it answers NO_CREDENTIAL. Beside the proof it answers the
-// credential's id (not secret: the broker lists it), so a machine revoke can tell this machine's
-// own login. The broker's answer to the call goes to the peer, not here: a refused credential is
-// dropped at the helper's own next launcher call.
+// peer supplies, as signRequest's audience is not). It is refused (IN_SESSION) to a process inside
+// a registered session's process tree, and to one whose ancestry walk cannot show it is outside
+// every such tree (Registry.RootOrUnknown), so a session's own commands cannot act as its operator.
+// A process that leaves its session's tree (a double fork or setsid, reparented to init or a
+// subreaper) is outside every check this makes, and the operator's user can stop the helper
+// anyway: the refusal guards a session's own process tree, not a boundary against code running as
+// that user. The walks run while peer's pidfd stays open, and their answer is trusted only once
+// peer.PID() still names pid, the pid-reuse rule sign follows (resolveDescendant), so a session
+// process the kernel replaced mid-walk is never handed a proof. With no credential it answers
+// NO_CREDENTIAL. Beside the proof it answers the credential's id (not secret: the broker lists it),
+// so a machine revoke can tell this machine's own login. The broker's answer to the call goes to
+// the peer, not here: a refused credential is dropped at the helper's own next launcher call.
 func (s *Server) signLauncher(peer *Peer, pid int, method, url string) Response {
 	if method == "" || url == "" {
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: "sign-launcher needs method and url"}
 	}
-	if s.Registry.Root(pid) != nil {
+	sess, unknown := s.Registry.RootOrUnknown(pid)
+	if sess != nil {
 		peer.Close()
 		return Response{Code: CodeInSession, Error: fmt.Sprintf("pid %d is inside a registered host session, which acts on itself alone; run machine and grant commands from your own shell", pid)}
+	}
+	if unknown != nil {
+		peer.Close()
+		return Response{Code: CodeInSession, Error: fmt.Sprintf("pid %d may be inside a registered host session: %v; run machine and grant commands from your own shell", pid, unknown)}
 	}
 	if peer.PID() != pid {
 		peer.Close()

@@ -5,6 +5,7 @@ package helper
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -29,6 +30,8 @@ type rig struct {
 	// callerPID is the pid PeerOf presents for the next connection; 0 means the real peer.
 	// Atomic: the server goroutine reads it while the test goroutine writes it.
 	callerPID atomic.Int64
+	// parentOf, when set, is the parent lookup the registry's ancestry walks use; unset, /proc.
+	parentOf atomic.Pointer[func(int) (int, error)]
 }
 
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
@@ -56,6 +59,12 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 		Hostname: "testhost",
 		Log:      log,
 		MinRenew: 50 * time.Millisecond,
+	}
+	r.srv.Registry.parent = func(pid int) (int, error) {
+		if parent := r.parentOf.Load(); parent != nil {
+			return (*parent)(pid)
+		}
+		return procParent(pid)
 	}
 	r.srv.PeerOf = func(conn *net.UnixConn) (*Peer, error) {
 		if pid := r.callerPID.Load(); pid != 0 {
@@ -1044,6 +1053,65 @@ func TestSignLauncherSignsOnlyForThisHelpersBroker(t *testing.T) {
 		if got := r.call(t, req); got.OK || got.Code != CodeBadRequest || got.Proof != "" {
 			t.Fatalf("%s: %+v, want BAD_REQUEST and no proof", name, got)
 		}
+	}
+}
+
+// TestSignLauncherRefusesACallerItCannotTraceOutOfEverySession: sign-launcher signs only for a
+// process it has shown to be outside every registered session, so a walk from the caller that
+// ends short of init, at a parent it cannot read, at the hop limit or in a loop, is answered
+// IN_SESSION naming why. A walk that does reach init signs, so the refusals are the walk's.
+func TestSignLauncherRefusesACallerItCannotTraceOutOfEverySession(t *testing.T) {
+	r := startRig(t, "")
+	child := sleeper(t) // a real process registered as a session root, so there is a walk to make
+	r.callerPID.Store(int64(child.Process.Pid))
+	if reg := r.call(t, Request{Op: "register"}); !reg.OK {
+		t.Fatalf("register: %+v", reg)
+	}
+	r.callerPID.Store(0) // the caller is this test process, which is not in the child's tree
+	self := os.Getpid()
+	// Every walk leaves self for pids past any kernel's pid_max, so none meets the session root.
+	const far = 10_000_000
+	url := r.srv.Broker.URL + "/v1/operator/machines"
+	for _, tc := range []struct {
+		name   string
+		parent func(int) (int, error)
+		want   string // "" signs; otherwise the reason IN_SESSION must name
+	}{
+		{"a walk that reaches init", func(pid int) (int, error) {
+			if pid == self {
+				return far, nil
+			}
+			return 1, nil
+		}, ""},
+		{"a parent it cannot read", func(pid int) (int, error) {
+			if pid == self {
+				return far, nil
+			}
+			return 0, errors.New("open /proc/10000000/stat: no such file or directory")
+		}, "reading the parent of pid 10000000: open /proc/10000000/stat: no such file or directory"},
+		{"a walk past the hop limit", func(pid int) (int, error) {
+			if pid == self {
+				return far, nil
+			}
+			return pid + 1, nil
+		}, "ancestry runs past 64 processes"},
+		{"a loop", func(pid int) (int, error) {
+			if pid == self || pid == far+1 {
+				return far, nil
+			}
+			return far + 1, nil
+		}, "ancestry loops at pid 10000000"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r.parentOf.Store(&tc.parent)
+			resp := r.call(t, Request{Op: "sign-launcher", Method: http.MethodGet, URL: url})
+			switch {
+			case tc.want == "" && (!resp.OK || resp.Proof == ""):
+				t.Fatalf("%+v, want a proof", resp)
+			case tc.want != "" && (resp.OK || resp.Code != CodeInSession || resp.Proof != "" || !strings.Contains(resp.Error, tc.want)):
+				t.Fatalf("OK=%v code=%q error=%q proof=%t, want IN_SESSION naming %q and no proof", resp.OK, resp.Code, resp.Error, resp.Proof != "", tc.want)
+			}
+		})
 	}
 }
 

@@ -123,9 +123,12 @@ const (
 	// one, so a session has no broker identity, and the operator's shell has no machine login to
 	// act as. A register reply for such a session carries it too, beside OK.
 	CodeNoCredential = "NO_CREDENTIAL"
-	// CodeInSession answers sign-launcher from a process inside a registered session: a session
-	// acts on itself alone (sign, sign-request); the operator's machines and grants are the
-	// operator's shell's to manage.
+	// CodeInSession answers sign-launcher from a process inside a registered session's process
+	// tree, or one whose ancestry the helper cannot follow to init (a parent it cannot read, a
+	// loop, or past 64 processes), so a session's own commands cannot act as its operator. A
+	// process that leaves its session's tree (a double fork or setsid, reparented to init or a
+	// subreaper) is not refused, and the operator's user can stop the helper anyway: it guards a
+	// session's own process tree, not a boundary against code running as that user.
 	CodeInSession = "IN_SESSION"
 	// CodeBadRequest answers a request that is not one JSON object per line, names an unknown op,
 	// leaves out a field its op needs, or asks sign-launcher for a URL outside this helper's broker.
