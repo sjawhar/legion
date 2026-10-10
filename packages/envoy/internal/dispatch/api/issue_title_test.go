@@ -1,9 +1,7 @@
 package api
 
 import (
-	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -65,35 +63,12 @@ func TestIssueTitlesAreCappedOnCreateAndRetitle(t *testing.T) {
 	}
 	issues := count()
 
-	for name, test := range map[string]struct {
-		title  string
-		length int
-	}{
-		"one character over": {strings.Repeat("a", contracts.IssueTitleMax+1), contracts.IssueTitleMax + 1},
-		// 501 characters outside the Basic Multilingual Plane are 1,002 UTF-16 units.
-		"counted in UTF-16 units": {strings.Repeat("😀", contracts.IssueTitleMax/2+1), contracts.IssueTitleMax + 2},
-	} {
+	for name, test := range overCapCases(contracts.IssueTitleMax) {
 		t.Run(name, func(t *testing.T) {
-			want := fmt.Sprintf("title is %d characters over the %d-character limit (%d/%d)",
-				test.length-contracts.IssueTitleMax, contracts.IssueTitleMax, test.length, contracts.IssueTitleMax)
-			for route, send := range map[string]func() *httptest.ResponseRecorder{
-				"create": func() *httptest.ResponseRecorder {
-					return dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CAP", "title": test.title, "force": true}, "alice")
-				},
-				"retitle": func() *httptest.ResponseRecorder {
-					return dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+created.Key, map[string]any{"title": test.title}, "alice")
-				},
-			} {
-				response := send()
-				body := response.Body.String()
-				refusal := decodeBody[struct {
-					Code  string `json:"code"`
-					Error string `json:"error"`
-				}](t, response)
-				if response.Code != http.StatusBadRequest || refusal.Code != "CAP_EXCEEDED" || refusal.Error != want {
-					t.Fatalf("%s: status=%d body=%.300s, want 400 CAP_EXCEEDED %q", route, response.Code, body, want)
-				}
-			}
+			creation := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": "CAP", "title": test.text, "force": true}, "alice")
+			assertCapExceeded(t, "create", creation, "title", test.length, contracts.IssueTitleMax, "")
+			retitled := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+created.Key, map[string]any{"title": test.text}, "alice")
+			assertCapExceeded(t, "retitle", retitled, "title", test.length, contracts.IssueTitleMax, "")
 			if after := count(); after != issues {
 				t.Fatalf("the refused creation left %d issues in CAP, want %d", after, issues)
 			}

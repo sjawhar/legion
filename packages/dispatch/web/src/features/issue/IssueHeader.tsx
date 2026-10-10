@@ -12,7 +12,7 @@ import {
 } from "react";
 import { Link } from "react-router-dom";
 
-import { ApiError, api, apiErrorMessage } from "../../api/client";
+import { api, apiErrorCodeIn, apiErrorMessage } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import { userStateQuery } from "../../api/queries";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
@@ -75,7 +75,6 @@ import type { IssuePriorityWrite } from "./useIssuePriority";
 const routeHint =
   "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";
 
-/** Refusals of a title save that the same title meets every time. */
 const titleRefusals = new Set(["CAP_EXCEEDED", "ISSUE_CLOSED"]);
 
 export function IssueHeader({
@@ -294,9 +293,7 @@ export function IssueHeader({
   const titleRefusal =
     updateIssue.isError &&
     updateIssue.variables?.title !== undefined &&
-    updateIssue.error instanceof ApiError &&
-    updateIssue.error.code !== undefined &&
-    titleRefusals.has(updateIssue.error.code)
+    apiErrorCodeIn(updateIssue.error, titleRefusals)
       ? updateIssue.error.message
       : null;
   const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;

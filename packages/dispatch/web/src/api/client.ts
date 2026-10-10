@@ -187,6 +187,12 @@ export function apiErrorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
 }
 
+// Whether the server refused with one of `codes`: a refusal the same request meets every time,
+// which its caller shows without a Retry.
+export function apiErrorCodeIn(error: unknown, codes: ReadonlySet<string>): error is ApiError {
+  return error instanceof ApiError && error.code !== undefined && codes.has(error.code);
+}
+
 export interface ListIssuesOptions {
   pinned?: boolean;
   project?: string;

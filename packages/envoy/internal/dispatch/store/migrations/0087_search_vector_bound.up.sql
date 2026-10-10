@@ -37,12 +37,13 @@
 create function search_vector(head text, body text) returns tsvector
 language plpgsql immutable strict as $$
 declare
+  head_vector tsvector := to_tsvector('english', head);
   kept integer := length(body);
   part text := body;
 begin
   loop
     begin
-      return to_tsvector('english', head) || to_tsvector('english', part);
+      return head_vector || to_tsvector('english', part);
     exception when program_limit_exceeded then
       if kept = 0 then
         raise;
