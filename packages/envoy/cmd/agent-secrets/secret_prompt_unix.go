@@ -26,9 +26,10 @@ import (
 // the rest of a paste can arrive in a later write than its first line.
 const pasteGapDeciseconds = 2
 
-// maxPasteDrain bounds how long the reader goes on reading, and so discarding, input that keeps
-// arriving after the line, and how long it waits for an open bracketed paste's closing mark. Tests
-// shorten it.
+// maxPasteDrain bounds how long the reader waits for an open bracketed paste's closing mark: it
+// gives the paste up once it has fallen quiet this long without closing. The drain of unbracketed
+// input after the line has no total bound; it ends after pasteGapDeciseconds of quiet. Tests
+// shorten maxPasteDrain.
 var maxPasteDrain = 10 * time.Second
 
 // The bracketed-paste sequences (xterm's mode 2004): the reader turns the mode on while it reads,

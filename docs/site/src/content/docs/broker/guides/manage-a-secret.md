@@ -72,8 +72,9 @@ since the paste began. A paste that falls quiet for 10 seconds before its closin
 given up, and the command exits 1, storing nothing; input that arrives after it is given up reaches
 your shell. Most terminal emulators and tmux support bracketed paste.
 
-Without brackets the CLI drains input until 200 ms of quiet after the line, for at most
-10 seconds. **That is a bounded drain, not a guarantee about an entire paste:** bytes arriving
+Without brackets the CLI drains input until 200 ms of quiet pass after the line, with no total
+limit, and Ctrl-C ends the drain. **That quiet window is not a guarantee about an entire paste:**
+bytes arriving
 later can reach your shell. If those bytes are a second line, the first line may already have been
 accepted as the value. Pipe multi-line values in rather than pasting them, and use
 `secret set NAME < FILE` to replace a value. The refusal names the command that pipes the value in:

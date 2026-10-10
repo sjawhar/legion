@@ -2061,11 +2061,12 @@ bracketed paste's closing mark), then drains the post-line quiet window before r
 The prompt enables bracketed paste and reads each such paste through its end, however far apart
 its writes arrive, as long as no more than `maxPasteDrain` (10 s) of quiet passes between them: the
 bound counts the quiet since the last input, restarted at each read, not the time since the paste
-began. Without brackets, it drains through 200 ms of quiet after the line; that drain feeds the
-same reader (`drainAfterTheLine`), so a paste that begins in it restarts the same bound and is read
-through its closing mark, and a signal key inside it is pasted text.
+began. Without brackets, it drains through 200 ms of quiet after the line with no total bound, and
+Ctrl-C ends it; that drain feeds the same reader (`drainAfterTheLine`), so a paste that begins in it
+restarts the same bound and is read through its closing mark, and a signal key inside it is pasted
+text.
 Anything but line endings after the first line is refused with exit 2. Bytes arriving after that
-bounded drain can reach the shell; multi-line values should be piped, not pasted.
+quiet window can reach the shell; multi-line values should be piped, not pasted.
 A terminal hang-up before the line or paste ends returns an error, never a partial value, and so
 does a bracketed paste that falls quiet for `maxPasteDrain` (10 s) before its closing mark comes,
 where the signal keys pressed meanwhile were pasted text; input arriving after it is given up

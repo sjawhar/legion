@@ -214,8 +214,8 @@ var readHidden = readHiddenAtTerminal
 var errMoreThanOneLine = errors.New("more than one line was entered at the prompt")
 
 // errPasteCutShort is readHidden's answer when the terminal hung up inside a bracketed paste,
-// before its closing mark, or when that mark had not come maxPasteDrain after the paste began: what
-// was read is not the whole value, so none of it is.
+// before its closing mark, or when the paste fell quiet for maxPasteDrain without its closing mark
+// coming: what was read is not the whole value, so none of it is.
 var errPasteCutShort = errors.New("the paste was cut short before its closing mark")
 
 // errValueCutShort is readHidden's answer when the terminal hung up outside a paste, before the
