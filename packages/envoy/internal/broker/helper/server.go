@@ -103,20 +103,20 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		peer.Close()
 		resp = s.sessions()
 	case "login":
-		// login, login-status, enroll-box and unenroll-box are pass-through broker calls, not
-		// registry-session ops: a box enrollment is not a registry session (see EnrollBox's doc
-		// comment), so none of these needs peer's pid at all.
+		// login, login-status, enroll-session-key and unenroll-session-key are pass-through broker
+		// calls, not registry-session ops: a key the helper does not hold is not a registry session
+		// (see Broker.EnrollSessionKey), so none of these needs peer's pid at all.
 		peer.Close()
 		resp = s.login(ctx)
 	case "login-status":
 		peer.Close()
 		resp = s.loginStatus()
-	case "enroll-box":
+	case "enroll-session-key":
 		peer.Close()
-		resp = s.enrollBox(ctx, req.RuntimeID, req.Thumbprint, req.SessionID)
-	case "unenroll-box":
+		resp = s.enrollSessionKey(ctx, req.RuntimeID, req.Thumbprint, req.SessionID)
+	case "unenroll-session-key":
 		peer.Close()
-		resp = s.unenrollBox(ctx, req.EnrollmentID)
+		resp = s.unenrollSessionKey(ctx, req.EnrollmentID)
 	default:
 		peer.Close()
 		resp = Response{Code: CodeBadRequest, Error: "unknown op " + req.Op}
@@ -440,15 +440,15 @@ func (s *Server) lacksCredential(err error) bool {
 	return errors.Is(err, errNoCredential) && !s.Broker.HasCredential()
 }
 
-// enrollBox registers a box's key as kind box — a pass-through broker call requiring no
-// registered session (a box enrollment is not a registry session; see Broker.EnrollBox's doc
-// comment), so unlike sign it does not check descendancy at all. An enrollment the helper cannot
-// attempt for want of a launcher credential logs cannotEnrollMsg, as a host session's does.
-func (s *Server) enrollBox(ctx context.Context, runtimeID, thumbprint string, sessionID *string) Response {
+// enrollSessionKey enrolls a key a launcher holds for a session on this machine — a pass-through
+// broker call requiring no registered session (see Broker.EnrollSessionKey), so unlike sign it
+// does not check descendancy at all. An enrollment the helper cannot attempt for want of a
+// launcher credential logs cannotEnrollMsg, as a registered session's does.
+func (s *Server) enrollSessionKey(ctx context.Context, runtimeID, thumbprint string, sessionID *string) Response {
 	if runtimeID == "" || thumbprint == "" {
-		return Response{Code: CodeBadRequest, Error: "enroll-box needs runtime_id and thumbprint"}
+		return Response{Code: CodeBadRequest, Error: "enroll-session-key needs runtime_id and thumbprint"}
 	}
-	id, lease, err := s.Broker.EnrollBox(ctx, runtimeID, thumbprint, sessionID)
+	id, lease, err := s.Broker.EnrollSessionKey(ctx, runtimeID, thumbprint, sessionID)
 	if err != nil {
 		if s.lacksCredential(err) {
 			s.Log.Error(cannotEnrollMsg, "runtime_id", runtimeID, "why", s.Broker.noCredentialReason())
@@ -458,12 +458,13 @@ func (s *Server) enrollBox(ctx context.Context, runtimeID, thumbprint string, se
 	return Response{OK: true, EnrollmentID: id, LeaseExpires: lease.UTC().Format(time.RFC3339Nano)}
 }
 
-// unenrollBox deletes a box enrollment; idempotent like Broker.Revoke (204/404 both succeed).
-func (s *Server) unenrollBox(ctx context.Context, enrollmentID string) Response {
+// unenrollSessionKey ends an enrollment enroll-session-key made; idempotent like Broker.Revoke
+// (204/404 both succeed).
+func (s *Server) unenrollSessionKey(ctx context.Context, enrollmentID string) Response {
 	if enrollmentID == "" {
-		return Response{Code: CodeBadRequest, Error: "unenroll-box needs enrollment_id"}
+		return Response{Code: CodeBadRequest, Error: "unenroll-session-key needs enrollment_id"}
 	}
-	if err := s.Broker.UnenrollBox(ctx, enrollmentID); err != nil {
+	if err := s.Broker.Revoke(ctx, enrollmentID); err != nil {
 		return Response{Code: CodeUnenrollFailed, Error: err.Error()}
 	}
 	return Response{OK: true}

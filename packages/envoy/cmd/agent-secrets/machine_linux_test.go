@@ -108,7 +108,7 @@ func TestMachineListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := laptop.EnrollBox(context.Background(), "laptop-box", thumbprint, nil); err == nil || laptop.HasCredential() {
+	if _, _, err := laptop.EnrollSessionKey(context.Background(), "laptop-box", thumbprint, nil); err == nil || laptop.HasCredential() {
 		t.Fatalf("the laptop enrolling after its login was revoked: %v, credential held %v; want the broker's refusal", err, laptop.HasCredential())
 	}
 	if stdout, _, _ := machine("list"); strings.Contains(stdout, laptopID) || !strings.Contains(stdout, own) {
@@ -150,9 +150,9 @@ func TestGrantListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtimeID := "grant-box-" + t.Name()
-	enrolled, err := helper.Call(sock, helper.Request{Op: "enroll-box", RuntimeID: runtimeID, Thumbprint: thumbprint}, 10*time.Second)
+	enrolled, err := helper.Call(sock, helper.Request{Op: "enroll-session-key", RuntimeID: runtimeID, Thumbprint: thumbprint}, 10*time.Second)
 	if err != nil || !enrolled.OK {
-		t.Fatalf("enroll-box: %+v %v", enrolled, err)
+		t.Fatalf("enroll-session-key: %+v %v", enrolled, err)
 	}
 	keyDir := writeKeyDir(t, boxKey, enrolled.EnrollmentID)
 	stdout, stderr, exit := runAgentSecrets(t, binary, rig.URL, keyDir, nil, "request", "TEST_AUTO_SECRET", "--json")

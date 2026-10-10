@@ -1175,7 +1175,7 @@ func TestEnrollHelperPrintsEnrollmentID(t *testing.T) {
 	keyDir := t.TempDir()
 	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir,
 		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock},
-		"enroll", "--helper", "--kind", "box", "--runtime-id", "box-1", "--thumbprint", "tp-box")
+		"enroll", "--helper", "--runtime-id", "box-1", "--thumbprint", "tp-box")
 	if exit != 0 {
 		t.Fatalf("enroll --helper exit = %d: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -1205,19 +1205,14 @@ func TestUnenrollHelperSucceeds(t *testing.T) {
 
 // TestEnrollHelperFlagValidation pins enroll/unenroll's remaining validation now that contract
 // v9 dropped launcher bearer tokens entirely: --helper is the only enrollment path left, so it
-// is required (not merely one of two mutually exclusive options), and enroll --helper still
-// supports only --kind box.
+// is required (not merely one of two mutually exclusive options).
 func TestEnrollHelperFlagValidation(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	keyDir := t.TempDir()
 
 	if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, nil,
-		"enroll", "--kind", "box", "--runtime-id", "box-1", "--thumbprint", "tp-box"); exit != exitUsageError {
+		"enroll", "--runtime-id", "box-1", "--thumbprint", "tp-box"); exit != exitUsageError {
 		t.Fatalf("enroll without --helper exit = %d, want a usage error: %s", exit, stderr)
-	}
-	if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, nil,
-		"enroll", "--helper", "--kind", "host", "--runtime-id", "box-1", "--thumbprint", "tp-box"); exit != exitUsageError {
-		t.Fatalf("enroll --helper --kind host exit = %d, want a usage error naming box: %s", exit, stderr)
 	}
 	if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, nil,
 		"unenroll", "--enrollment", "enr-1"); exit != exitUsageError {

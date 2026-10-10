@@ -125,6 +125,9 @@ type fakeBroker struct {
 	// it, so every later one gets lease. A test gives one enrollment a lease short enough that it
 	// renews soon, and nothing it re-enrolls can lapse under the test however the steps interleave.
 	nextLease time.Duration
+	// refuseKinds answers an enroll naming one of these kinds 400 INVALID_KIND, as a broker before
+	// the session kind refuses "session".
+	refuseKinds map[string]bool
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -161,6 +164,10 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.posts = append(f.posts, body)
+		if kind, _ := body["kind"].(string); f.refuseKinds[kind] {
+			writeJSON(w, 400, map[string]string{"code": "INVALID_KIND", "error": `kind must be "box", "host", or "pod"`})
+			return
+		}
 		tp, _ := body["thumbprint"].(string)
 		if id, ok := f.byTP[tp]; ok {
 			// The idempotent-enroll conflict path: the real broker answers with the SAME id and

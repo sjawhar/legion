@@ -9,7 +9,7 @@
 // and then ask the broker to reread what they wrote.
 //
 //	agent-secrets keygen --out <dir>
-//	agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]
+//	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
 //	agent-secrets unenroll --helper --enrollment <id>
 //	agent-secrets machine login|login-status|list [--json]|revoke <credential_id>
 //	agent-secrets grant list [--json]|revoke <grant_id>
@@ -37,9 +37,9 @@
 // where a person decides, and a pending request (request, status, the exec form's wait) name its
 // record's page beside the approver the broker names. The exec form's child keeps
 // AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, since it is the same
-// session (buildChildEnv). A host session enrolls (kind host) automatically through the helper's
-// own enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
-// enrollment path for either; only a box enrolls through it, and only via --helper (the shared
+// session (buildChildEnv). A host session enrolls (kind session) automatically through the
+// helper's own enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no
+// direct enrollment path for either; only a session key a launcher holds (a box's) enrolls through it, and only via --helper (the shared
 // broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
 // that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
@@ -62,6 +62,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -101,10 +102,10 @@ type command struct {
 var commands = []command{
 	{"keygen", "agent-secrets keygen --out <dir>",
 		"Write a new signing key to <dir>/key.pem and print its thumbprint. A box's launcher runs it\ninside the box before enrolling it."},
-	{"enroll", "agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]",
-		"Enroll a box's key through this machine's agent-secrets-helper, write the enrollment id to\nAGENT_SECRETS_KEY_DIR/enrollment, and print it."},
+	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]",
+		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper,\nwrite the enrollment id to AGENT_SECRETS_KEY_DIR/enrollment, and print it."},
 	{"unenroll", "agent-secrets unenroll --helper --enrollment <id>",
-		"Revoke a box's enrollment through this machine's agent-secrets-helper."},
+		"End an enrollment `enroll --helper` made, through this machine's agent-secrets-helper."},
 	{"machine login", "agent-secrets machine login",
 		"Log this machine in: print the confirmation code its operator types into Dispatch, then wait\nfor the decision (exit 0 once approved, 1 when denied or expired)."},
 	{"machine login-status", "agent-secrets machine login-status",
@@ -549,15 +550,16 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 }
 
 // ---------------------------------------------------------------------------
-// enroll / unenroll (box only, through the local agent-secrets-helper socket)
+// enroll / unenroll (a session key a launcher holds, through the local agent-secrets-helper)
 // ---------------------------------------------------------------------------
 
-// cmdEnroll implements "enroll --helper --kind box --runtime-id <id> --thumbprint <tp>
-// [--session-id <id>]". --helper is required: the broker's HTTP API has no launcher bearer
-// token, so this CLI has no other way to enroll anything — the host's one launcher credential
-// lives only in agent-secrets-helper's memory (a human installs it with `agent-secrets machine
-// login`), and only a box enrolls through this command at all (a host session enrolls itself
-// automatically via `agent-secrets register`; a pod's enrollment is its own launcher's job).
+// cmdEnroll implements "enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]".
+// --helper is required: the broker's HTTP API has no launcher bearer token, so this CLI has no
+// other way to enroll anything — the host's one launcher credential lives only in
+// agent-secrets-helper's memory (a human installs it with `agent-secrets machine login`). It
+// enrolls a session key a launcher keeps outside the helper's process tree (agentbox's, for a
+// box); a session the helper registers enrolls itself through `agent-secrets register`, and a
+// pod's enrollment is its own launcher's job.
 func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, map[string]bool{
 		"kind": true, "runtime-id": true, "thumbprint": true, "session-id": true,
@@ -567,11 +569,14 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	flags := newFlagSet("enroll", stderr)
-	kind := flags.String("kind", "", `"box" (the only kind --helper supports)`)
 	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
-	sessionID := flags.String("session-id", "", "the agent session the broker notifies if one of this box's pending requests expires")
+	sessionID := flags.String("session-id", "", "the agent session the broker notifies if one of this session's pending requests expires")
 	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
+	if slices.ContainsFunc(flagArgs, func(a string) bool { return a == "--kind" || a == "-kind" || strings.HasPrefix(a, "--kind=") || strings.HasPrefix(a, "-kind=") }) {
+		fmt.Fprintln(stderr, "agent-secrets enroll: --kind is gone: every session a launcher enrolls is one kind, so leave it out")
+		return exitUsageError
+	}
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
@@ -579,21 +584,15 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls only through the local agent-secrets-helper socket)")
 		return exitUsageError
 	}
-	return cmdEnrollHelper(*kind, *runtimeID, *thumbprint, *sessionID, stdout, stderr)
+	return cmdEnrollHelper(*runtimeID, *thumbprint, *sessionID, stdout, stderr)
 }
 
-// cmdEnrollHelper asks the local agent-secrets-helper daemon, over its unix socket, to enroll
-// this box's key using the machine credential `agent-secrets machine login` installed.
-// --helper supports only kind "box" today: a host session enrolls itself through
-// `agent-secrets register`, not this flag, and a pod has no local helper daemon to ask. On
-// success it writes the enrollment id into AGENT_SECRETS_KEY_DIR/enrollment (buildSigner reads
-// it back for every later session-authenticated subcommand) and prints the enrollment id alone
-// on stdout — the contract scripts/agentbox parses.
-func cmdEnrollHelper(kind, runtimeID, thumbprint, sessionID string, stdout, stderr io.Writer) int {
-	if kind != "box" {
-		fmt.Fprintln(stderr, `agent-secrets enroll: --helper supports only --kind box today`)
-		return exitUsageError
-	}
+// cmdEnrollHelper asks the local agent-secrets-helper daemon, over its unix socket, to enroll a
+// session key using the machine credential `agent-secrets machine login` installed. On success
+// it writes the enrollment id into AGENT_SECRETS_KEY_DIR/enrollment (buildSigner reads it back
+// for every later session-authenticated subcommand) and prints the enrollment id alone on stdout
+// — the contract scripts/agentbox parses.
+func cmdEnrollHelper(runtimeID, thumbprint, sessionID string, stdout, stderr io.Writer) int {
 	if runtimeID == "" || thumbprint == "" {
 		fmt.Fprintln(stderr, "agent-secrets enroll: --helper needs --runtime-id and --thumbprint")
 		return exitUsageError
@@ -608,7 +607,7 @@ func cmdEnrollHelper(kind, runtimeID, thumbprint, sessionID string, stdout, stde
 	if sessionID != "" {
 		sessionIDPtr = &sessionID
 	}
-	resp, err := helper.Call(sock, helper.Request{Op: "enroll-box", RuntimeID: runtimeID, Thumbprint: thumbprint, SessionID: sessionIDPtr}, 30*time.Second)
+	resp, err := callSessionKeyOp(sock, "enroll", helper.Request{Op: "enroll-session-key", RuntimeID: runtimeID, Thumbprint: thumbprint, SessionID: sessionIDPtr}, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
 		return 1
@@ -627,6 +626,27 @@ func cmdEnrollHelper(kind, runtimeID, thumbprint, sessionID string, stdout, stde
 	}
 	fmt.Fprintln(stdout, resp.EnrollmentID)
 	return 0
+}
+
+// legacySessionKeyOps names, for each kind-free op, the op an agent-secrets-helper from before
+// it serves the same call under: enroll-box and unenroll-box, which a helper of every release
+// before the session key answers and which enroll and revoke exactly the same enrollment. This
+// CLI ships with the helper in one release, but a helper restarts onto it only once no session
+// is registered with it, so until then this CLI meets the older helper; the map goes once no
+// helper older than this release runs.
+var legacySessionKeyOps = map[string]string{"enroll-session-key": "enroll-box", "unenroll-session-key": "unenroll-box"}
+
+// callSessionKeyOp asks the helper req, and asks it again under the op's legacy name when the
+// helper answers that it does not know the op, saying so on stderr under command's name.
+func callSessionKeyOp(sock, command string, req helper.Request, stderr io.Writer) (helper.Response, error) {
+	resp, err := helper.Call(sock, req, 30*time.Second)
+	if err != nil || resp.OK || resp.Code != helper.CodeBadRequest || resp.Error != "unknown op "+req.Op {
+		return resp, err
+	}
+	legacy := legacySessionKeyOps[req.Op]
+	fmt.Fprintf(stderr, "agent-secrets %s: this machine's agent-secrets-helper is older than this client (it has no %s op); asking its %s instead. It moves onto this release when it restarts with no session registered.\n", command, req.Op, legacy)
+	req.Op = legacy
+	return helper.Call(sock, req, 30*time.Second)
 }
 
 // cmdUnenroll implements "unenroll --helper --enrollment <id>". --helper is required for the
@@ -654,13 +674,13 @@ func cmdUnenroll(args []string, stdout, stderr io.Writer) int {
 	return cmdUnenrollHelper(*enrollmentID, stderr)
 }
 
-// cmdUnenrollHelper asks the local agent-secrets-helper daemon to revoke a box enrollment over
-// its unix socket, using the machine credential `agent-secrets machine login` installed.
-// Idempotent: the helper's UnenrollBox treats 204 and 404 as done. Prints nothing on success,
-// matching the exit-code-only unenroll contract.
+// cmdUnenrollHelper asks the local agent-secrets-helper daemon to end an enrollment
+// `enroll --helper` made, over its unix socket, using the machine credential `agent-secrets
+// machine login` installed. Idempotent: the helper treats the broker's 204 and 404 as done.
+// Prints nothing on success, matching the exit-code-only unenroll contract.
 func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
 	sock, _ := helperSocket()
-	resp, err := helper.Call(sock, helper.Request{Op: "unenroll-box", EnrollmentID: enrollmentID}, 30*time.Second)
+	resp, err := callSessionKeyOp(sock, "unenroll", helper.Request{Op: "unenroll-session-key", EnrollmentID: enrollmentID}, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets unenroll: %v\n", err)
 		return 1

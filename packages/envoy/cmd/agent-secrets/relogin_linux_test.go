@@ -70,9 +70,9 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enrolled, err := helper.Call(sock, helper.Request{Op: "enroll-box", RuntimeID: "self-box-" + t.Name(), Thumbprint: thumbprint}, 10*time.Second)
+	enrolled, err := helper.Call(sock, helper.Request{Op: "enroll-session-key", RuntimeID: "self-box-" + t.Name(), Thumbprint: thumbprint}, 10*time.Second)
 	if err != nil || !enrolled.OK {
-		t.Fatalf("enroll-box with the approved login's credential: %+v %v", enrolled, err)
+		t.Fatalf("enroll-session-key with the approved login's credential: %+v %v", enrolled, err)
 	}
 	keyDir := writeKeyDir(t, boxKey, enrolled.EnrollmentID)
 	stdout, stderr, exit := runAgentSecrets(t, binary, rig.URL, keyDir, nil, "request", "TEST_AUTO_SECRET", "--json")
@@ -194,8 +194,8 @@ func refuseTheHeldCredential(t *testing.T, rig *brokertest.Rig, srv *helper.Serv
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp, err := helper.Call(sock, helper.Request{Op: "enroll-box", RuntimeID: "box-" + t.Name(), Thumbprint: thumbprint}, 10*time.Second); err != nil || resp.OK {
-		t.Fatalf("enroll-box with an expired credential: %+v %v; want the broker's refusal", resp, err)
+	if resp, err := helper.Call(sock, helper.Request{Op: "enroll-session-key", RuntimeID: "box-" + t.Name(), Thumbprint: thumbprint}, 10*time.Second); err != nil || resp.OK {
+		t.Fatalf("enroll-session-key with an expired credential: %+v %v; want the broker's refusal", resp, err)
 	}
 	if srv.Broker.HasCredential() {
 		t.Fatal("the broker's refusal must clear the launcher credential")
