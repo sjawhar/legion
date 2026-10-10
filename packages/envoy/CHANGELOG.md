@@ -138,7 +138,12 @@
   `${BROKER_DATABASE_PASSWORD}` placeholder, naming the variable and why: on Amazon RDS it signs in
   by IAM token, and any other database's password goes in the URL itself, URL-escaped. A deployment
   that still sets either must stop before it runs this broker: put the password in the URL, or move
-  to an IAM-form URL on RDS.
+  to an IAM-form URL on RDS. Going back to the variable once a broker runs this release takes the
+  reverse order: roll the image back to a 7.x release first, and only then set the variable or the
+  placeholder again, since a broker on this release exits 1 at boot while either is set. Undoing
+  the configuration change that moved a deployment off the variable therefore brings no broker up
+  on this release. The broker's migrations only move forward, so roll back only to a release that
+  holds every migration its database has applied.
 - Anyone signed in to Dispatch decides a service's machine login, such as the Legion daemon's, not
   only the person its request names: the broker reads the service from the signed request, opens
   its record with the approver `anyone` and ignores any `login_hint` it carries, and the decision,
