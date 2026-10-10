@@ -138,9 +138,44 @@ local Postgres that trusts its clients, say) connects as given and mints nothing
   bounds. A reread counts against either limit only when both let it run, so one address flooding
   past its own limit leaves the broker-wide one to everyone else. Past either, the broker answers
   `429 RATE_LIMITED` with a `Retry-After` header naming the limit that refused.
+  `agent-secrets secret` sends one reread after each write it makes, from the person's own
+  address. When a limit refuses it, the write stands in Secrets Manager and the CLI exits 1 saying
+  so ([manage a secret](/legion/broker/guides/manage-a-secret/#what-the-broker-answers-after-a-write)).
 - Agents never see the broker's database or the secret store; whoever can write the database can
   forge a record, so its access control is part of the broker's. Whoever can tag a secret under the
   namespace decides who gets it, so the tags' write access is part of the broker's too.
+
+## People who manage secrets
+
+The broker writes no secret. A person creates, changes and deletes agent secrets with
+`agent-secrets secret` ([manage a secret](/legion/broker/guides/manage-a-secret/)), which calls
+Secrets Manager itself under that person's own AWS sign-in, so IAM in the broker's account is what
+decides who may change which secret, and with the tags, who gets it. The CLI asks the broker only
+for its settings (`GET /v1/settings`) and, after each write, for a reread. Before anything else it
+refuses a sign-in in another account than the agent-secrets key's, and for a write any sign-in but
+a person's own IAM Identity Center one; those checks are the CLI's, and IAM is the boundary. A
+person's access needs each form's permissions on the namespace's secrets, and the table says what
+each request carries that a policy's conditions can match:
+
+| Form | Permissions | What a condition can match |
+| --- | --- | --- |
+| every form | `sts:GetCallerIdentity`, which needs no permission | |
+| `list` | `secretsmanager:ListSecrets` (on `*`: it takes no resource) | |
+| `show` | `secretsmanager:DescribeSecret` | The secret's own tags (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`) |
+| `create` | `secretsmanager:CreateSecret` and `secretsmanager:TagResource`, since it tags the secret as it creates it; `kms:GenerateDataKey` and `kms:Decrypt` on the agent-secrets key | The new secret's name under the namespace (its ARN, and `secretsmanager:Name`); both request tags, `aws:RequestTag/owner` (the person's email, from `--owner me`, or `shared`) and `aws:RequestTag/tier` (`aws:TagKeys` is the two); the key, named by its ARN (`secretsmanager:KmsKeyArn`); the `TagResource` check made on the new secret sees the requested tags as its own (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`), so a policy that reserves a shared secret's tags for administrators still needs a statement that admits a shared create (request and resource owner both `shared`, the same tier). A secret created with `--owner shared` and `--tier agent` is served to every agent session without approval, so only a person whose access allows a shared create can create one. |
+| `set` | `secretsmanager:PutSecretValue`; `kms:GenerateDataKey` on the agent-secrets key | The secret's own tags (`aws:ResourceTag/owner`) |
+| `retag` | `secretsmanager:DescribeSecret` and `secretsmanager:TagResource` | Both request tags in every request, the unchanged one re-sent as the secret holds it, and the secret's own tags, so a policy can let a person tag their own secret (`aws:ResourceTag/owner` their email) to themselves or `shared`, and reserve a shared secret's tags for administrators |
+| `delete` | `secretsmanager:DeleteSecret` | The secret's own tags; `secretsmanager:RecoveryWindowInDays` is 30, and `secretsmanager:ForceDeleteWithoutRecovery` is never set |
+| `restore` | `secretsmanager:RestoreSecret` | The secret's own tags |
+
+Secrets Manager makes the KMS calls itself, on the person's behalf, so the agent-secrets key's
+policy can allow them only through Secrets Manager (`kms:ViaService` of
+`secretsmanager.<region>.amazonaws.com`, with `kms:CallerAccount`). The person's email in
+`aws:RequestTag/owner` is their Identity Center session name in lowercase, so a condition that
+compares it with a principal tag holding their email matches only where that tag is lowercase too.
+No form calls `GetSecretValue` or prints a value. `delete` and `restore` are permissions of their
+own: an access that grants a person every other form on their own secret but not these refuses
+those two with `AccessDeniedException`.
 
 ## Health and logs
 

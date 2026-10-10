@@ -4,7 +4,9 @@
 // AGENT_SECRETS_HELPER_SOCK, to sign on its behalf (helper mode). It enrolls a runtime (box
 // enrollment only, through the local helper — see cmdEnrollHelper below), requests and reads
 // back secret grants, and — in its most common shape — requests one or more secrets and execs a
-// command with them in its environment.
+// command with them in its environment. A person manages the agent secrets themselves with the
+// secret forms (secret.go), which call AWS Secrets Manager under the person's own AWS sign-in
+// and then ask the broker to reread what they wrote.
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]
@@ -21,6 +23,7 @@
 //	agent-secrets self [--json]
 //	agent-secrets whoami [--json]
 //	agent-secrets sign --method M --url U [--enrollment E]
+//	agent-secrets secret list|show|create|set|retag|delete|restore ...
 //	agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
 //
 // Environment: AGENT_SECRETS_URL (the broker's base URL) and, for every session-authenticated
@@ -39,7 +42,8 @@
 // enrollment path for either; only a box enrolls through it, and only via --helper (the shared
 // broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
-// that hold a launcher's proof-signing key).
+// that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
+// the person's AWS sign-in and need no session identity at all.
 package main
 
 import (
@@ -72,11 +76,15 @@ import (
 // these: the broker's generated error reference (cmd/broker-refgen) prints them and refuses a code
 // without a comment or a function that returns any other.
 const (
-	exitUsageError = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
-	exitPending    = 75  // the request is still waiting for a person to approve it; nothing was run
-	exitDenied     = 77  // the request was denied; nothing was run
-	exitCannotRun  = 126 // the command `register --exec` was given exists but could not be run
-	exitNotFound   = 127 // the command `register --exec` was given was not found
+	exitUsageError  = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
+	exitPending     = 75  // the request is still waiting for a person to approve it; nothing was run
+	exitDenied      = 77  // the request was denied; nothing was run
+	exitCannotRun   = 126 // the command `register --exec` was given exists but could not be run
+	exitNotFound    = 127 // the command `register --exec` was given was not found
+	exitHangup      = 129 // the value prompt received SIGHUP: the terminal is restored and the process ends by SIGHUP; nothing was written
+	exitInterrupted = 130 // `secret create` or `secret set` was interrupted (Ctrl-C) at the value prompt: the process ends by SIGINT, which a shell's $? reads as 130; nothing was written
+	exitQuit        = 131 // `secret create` or `secret set` quit (Ctrl-\) at the value prompt: the process ends by SIGQUIT, which a shell's $? reads as 131; nothing was written
+	exitTerminated  = 143 // `secret create` or `secret set` was terminated (SIGTERM) at the value prompt: the process ends by SIGTERM, which a shell's $? reads as 143; nothing was written
 )
 
 // command is one form of agent-secrets, as usage lists it and its own -h describes it.
@@ -140,9 +148,15 @@ environment:
   OMP_SESSION_ID             the agent session the broker names and notifies if a pending request
                              expires; falls back to ENVOY_SESSION_ID, then CLAUDE_CODE_SESSION_ID,
                              so a harness that sets one of those instead still names its session
+  AWS_PROFILE                the AWS profile the secret forms sign in with when --profile names
+                             none (else the AWS SDK's default credential chain); every secret
+                             form needs a sign-in in the broker's account, and a write your own
+                             Identity Center sign-in there
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
-register --exec exits 127 when COMMAND is not found and 126 when it cannot run
+register --exec exits 127 when COMMAND is not found and 126 when it cannot run;
+secret create and set end by the signal on hang-up (SIGHUP), interrupt (Ctrl-C), quit (Ctrl-\)
+or termination (SIGTERM) at the value prompt: a shell reports 129, 130, 131 or 143
 `
 
 func main() {
@@ -193,6 +207,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdSign(args[1:], stdout, stderr)
 	case "identity":
 		return cmdIdentity(args[1:], stdout, stderr)
+	case "secret":
+		return cmdSecret(args[1:], stdout, stderr)
 	default:
 		return cmdExec(args, stdout, stderr)
 	}
