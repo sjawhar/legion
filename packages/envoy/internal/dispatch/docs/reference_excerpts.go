@@ -33,19 +33,19 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 
 // recordTreeExcerpts stores the excerpt of every mention the document's version writes, cut from
 // tree, the tree the version's markdown was rendered from, so the block ids are the ones the
-// document carries. A tree that does not render as markdown is left to the reconciliation, which
-// reads the document itself.
+// document carries. A version with no tree, or whose tree does not render as its markdown, marks
+// its mentions owed (refs.ClearExcerpts) for the reconciliation, which reads the document itself.
 func (s *Service) recordTreeExcerpts(ctx context.Context, tx pgx.Tx, artifactID string, version int, markdown string, tree *pmdoc.Node) error {
 	if tree == nil {
 		slog.Warn("dispatch: a document version left its reference excerpts to the reconciliation: no tree",
 			"artifact", artifactID, "version", version)
-		return nil
+		return refs.ClearExcerpts(ctx, tx, artifactID)
 	}
 	rendered, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	if err != nil || rendered != markdown {
 		slog.Warn("dispatch: a document version left its reference excerpts to the reconciliation: its tree does not render as its markdown",
 			"artifact", artifactID, "version", version, "error", err)
-		return nil
+		return refs.ClearExcerpts(ctx, tx, artifactID)
 	}
 	blocks := make([]model.ArtifactBlock, len(offsets))
 	for index, offset := range offsets {
@@ -55,23 +55,36 @@ func (s *Service) recordTreeExcerpts(ctx context.Context, tx pgx.Tx, artifactID 
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep
-// is the wait before the next tick while a full batch says drift remains, and
-// ReferenceExcerptReconcileInterval the wait once a tick finds less than a batch.
+// is the wait before the next tick while a full batch says drift remains,
+// ReferenceExcerptReconcileInterval the wait once a tick finds less than a batch, and
+// referenceExcerptStaleWindow how long after its start the reconciliation also looks for excerpts
+// a version older than this binary left behind (refs.MarkStaleExcerpts).
 const (
 	referenceExcerptBatch             = 20
 	referenceExcerptStep              = 2 * time.Second
 	ReferenceExcerptReconcileInterval = 5 * time.Minute
+	referenceExcerptStaleWindow       = time.Hour
 )
 
-// RunReferenceExcerptReconciliation stores the excerpts of every document whose mentions hold
-// none of its latest version (refs.DriftedExcerpts): every mention indexed before migration 0090,
-// each one rebuild-refs inserts, and each a version write could not fill. One batch per tick, at
-// start, then every referenceExcerptStep while a full batch says drift remains and every
-// ReferenceExcerptReconcileInterval once none does, until ctx ends. Until a mention's excerpt is
-// stored, GET /api/v1/references answers it with the document's name.
+// RunReferenceExcerptReconciliation stores the excerpts of every document some of whose mentions
+// are owed one (refs.DriftedExcerpts): every mention indexed before migration 0090, each one
+// rebuild-refs inserts, and each a version write could not cut. One batch per tick, at start, then
+// every referenceExcerptStep while a full batch says drift remains and every
+// ReferenceExcerptReconcileInterval once none does, until ctx ends. For the first
+// referenceExcerptStaleWindow after it starts, each tick first marks owed the excerpts a version
+// written by the binary a deploy replaces left behind, while both run. Until a mention's excerpt is
+// stored, GET /api/v1/references answers it with the document's name, or with the excerpt it held.
 func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context) {
 	ctx = store.WithTransactionTracking(ctx)
+	started := time.Now()
 	for {
+		if time.Since(started) < referenceExcerptStaleWindow {
+			if marked, err := refs.MarkStaleExcerpts(ctx, s.store.Pool); err != nil && ctx.Err() == nil {
+				slog.Error("dispatch: mark stale reference excerpts", "error", err)
+			} else if marked > 0 {
+				slog.Info("dispatch: marked stale reference excerpts owed", "mentions", marked)
+			}
+		}
 		wait := ReferenceExcerptReconcileInterval
 		documents, full, err := s.ReconcileReferenceExcerpts(ctx)
 		switch {

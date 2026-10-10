@@ -103,30 +103,33 @@ func StoredExcerpts(ctx context.Context, q Queryer, toKind, toID string) (map[st
 	return excerpts, nil
 }
 
-// ExcerptDrift is a document some of whose mentions hold no excerpt of its latest version.
+// ExcerptDrift is a document some of whose mentions are owed an excerpt, with its latest version's
+// number when it was listed.
 type ExcerptDrift struct {
 	FromID  string
 	Version int
 }
 
-// DriftedExcerpts lists, in id order and at most limit, the documents some of whose mentions hold
-// an excerpt older than the document's latest version, or none: every mention indexed before
-// migration 0090, one a rebuild-refs inserted, and one a version write could not fill from the
-// tree it wrote. Each comes with that latest version's number.
-func DriftedExcerpts(ctx context.Context, q Queryer, limit int) ([]ExcerptDrift, error) {
-	rows, err := q.Query(ctx, `
-		select from_id, latest from (
-			select r.from_id, min(coalesce(r.excerpt_version, 0)) as oldest,
-			       (select coalesce(max(v.number), 0) from artifact_versions v
-			        where v.artifact_id = r.from_id::uuid) as latest
-			from refs r
-			where r.from_kind = 'artifact'
-			group by r.from_id
-		) documents
-		where oldest < latest
+// driftedExcerptsQuery lists, in id order, the documents some of whose mentions hold no excerpt
+// version (excerpt_version is null), through the partial index refs_excerpt_drift, which holds
+// exactly those rows: once the reconciliation has caught up, the index is empty and the query reads
+// nothing else.
+const driftedExcerptsQuery = `
+	select d.from_id,
+	       (select coalesce(max(v.number), 0) from artifact_versions v where v.artifact_id = d.from_id::uuid)
+	from (
+		select distinct from_id from refs
+		where from_kind = 'artifact' and excerpt_version is null
 		order by from_id
 		limit $1
-	`, limit)
+	) d
+	order by d.from_id`
+
+// DriftedExcerpts lists, in id order and at most limit, the documents some of whose mentions are
+// owed an excerpt: every mention indexed before migration 0090, each one rebuild-refs inserts, one
+// a version write could not cut (ClearExcerpts), and one MarkStaleExcerpts found behind.
+func DriftedExcerpts(ctx context.Context, q Queryer, limit int) ([]ExcerptDrift, error) {
+	rows, err := q.Query(ctx, driftedExcerptsQuery, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list drifted reference excerpts: %w", err)
 	}
@@ -143,4 +146,35 @@ func DriftedExcerpts(ctx context.Context, q Queryer, limit int) ([]ExcerptDrift,
 		return nil, fmt.Errorf("list drifted reference excerpts: %w", err)
 	}
 	return drifted, nil
+}
+
+// ClearExcerpts marks every mention the document fromID writes as owed an excerpt, keeping the
+// excerpt each holds for the route to serve until the reconciliation stores the latest: what a
+// version write that cannot cut its excerpts leaves.
+func ClearExcerpts(ctx context.Context, q Execer, fromID string) error {
+	if _, err := q.Exec(ctx, `
+		update refs set excerpt_version = null where from_kind = 'artifact' and from_id = $1
+	`, fromID); err != nil {
+		return fmt.Errorf("mark the reference excerpts of %s owed: %w", fromID, err)
+	}
+	return nil
+}
+
+// MarkStaleExcerpts marks owed every mention whose excerpt is older than its document's latest
+// version, and returns how many it marked. Every version write stores its own mentions' excerpts,
+// so only a version a binary predating migration 0090 wrote - the task a deploy replaces, while
+// both run - leaves one behind; it reads every stored excerpt, so the reconciliation runs it only
+// in the hour after its process starts.
+func MarkStaleExcerpts(ctx context.Context, q Execer) (int64, error) {
+	tag, err := q.Exec(ctx, `
+		update refs r set excerpt_version = null
+		where r.from_kind = 'artifact' and r.excerpt_version is not null
+		  and r.excerpt_version < (
+		    select coalesce(max(v.number), 0) from artifact_versions v where v.artifact_id = r.from_id::uuid
+		  )
+	`)
+	if err != nil {
+		return 0, fmt.Errorf("mark stale reference excerpts: %w", err)
+	}
+	return tag.RowsAffected(), nil
 }
