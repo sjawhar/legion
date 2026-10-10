@@ -51,8 +51,10 @@ the helper signs each call with the machine's credential, and refuses a process 
 session's process tree (`IN_SESSION`), so an agent's own commands cannot act as you. The check
 covers that process tree only. A process a session sends out of it, with `( cmd & )`, `setsid -f`
 or a tmux server the session started, passes it, and any process running as your user can stop the
-helper anyway. Such a process can list and revoke only your own machine logins and grants, never a
-service's, and reads no secret.
+helper anyway. Through these commands such a process can list and revoke your own machine logins,
+never a service's machine login, and your grants, which include grants you approved on any
+session, a service's pod among them. `agent-secrets enroll --helper` is open to any process of
+your user, so such a process can also enroll a box and read your agent secrets.
 
 ```console
 $ agent-secrets grant list

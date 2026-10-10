@@ -2266,8 +2266,11 @@ this machine's own login, its id in any case `uuid.Parse` reads. `IN_SESSION` ke
 commands from acting as its operator; it is not a boundary against code running as the operator's
 user. The check covers the session's process tree only: a process the session sends out of it
 (`( cmd & )`, `setsid -f`, a tmux server the session started) is reparented and passes, and the same
-uid can stop the helper. Such a process can list and revoke only the operator's own machine logins
-and grants, never a service's, and reads no secret. Every refusal the helper gives reaches the CLI
+uid can stop the helper. Through these routes such a process can list and revoke the operator's own
+machine logins, never a service's machine login, and the operator's grants, which include grants the
+operator approved on any session, a service's pod among them. The helper's `enroll --helper` path
+(`enroll-box`) is open to any process of the user, so the same process can enroll a box and read the
+operator's agent secrets that way. Every refusal the helper gives reaches the CLI
 as one `launcherRefusal`, printed as it stands: no credential, a helper from before the op (which
 answers `unknown op sign-launcher`, read as a helper to restart on the pinned release), or the
 helper's own code. Both lists print a table; `--json` prints the broker's body verbatim:

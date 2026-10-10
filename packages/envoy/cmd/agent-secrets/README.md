@@ -20,9 +20,11 @@ login; a service's login is revoked on Dispatch's machine-login page. The helper
 forms to a process inside a registered session's process tree (`IN_SESSION`), so an agent's own
 commands cannot act as its operator. The check covers that tree only: a process a session sends
 out of it (`( cmd & )`, `setsid -f`, a tmux server it started) passes, and the same user can stop
-the helper anyway. Such a process can list and revoke only its operator's own machine logins and
-grants, never a service's, and reads no secret. `agent-secrets --help` lists every form, and each
-form answers `-h`.
+the helper anyway. Such a process can list and revoke its operator's own machine logins, never a
+service's machine login, and its operator's grants, which include grants the operator approved on
+any session. `agent-secrets enroll --helper` is open to any process of the user, so such a process
+can also enroll a box and read the operator's agent secrets. `agent-secrets --help` lists every
+form, and each form answers `-h`.
 
 On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secrets-helper`) holds
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in

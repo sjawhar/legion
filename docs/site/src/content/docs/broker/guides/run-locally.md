@@ -131,8 +131,10 @@ agent-secrets machine list: IN_SESSION: pid 2857619 is inside a registered host 
 
 The refusal covers the session's process tree only: a process the session sends out of it (with
 `( cmd & )`, `setsid -f` or a tmux server it started) passes, and any process running as your user
-can stop the helper. Such a process can list and revoke only your own machine logins and grants,
-never a service's, and reads no secret.
+can stop the helper. Through these commands such a process can list and revoke your own machine
+logins, never a service's machine login, and your grants, which include grants you approved on any
+session. `agent-secrets enroll --helper` is open to any process of your user, so such a process can
+also enroll a box and read your agent secrets.
 
 ## Write a secret and see it served
 

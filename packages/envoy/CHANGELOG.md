@@ -22,9 +22,12 @@
   loop, or past 64 processes), so an agent's own commands cannot act as its operator. The check
   covers the session's process tree only: a process the session sends out of it (`( cmd & )`,
   `setsid -f`, a tmux server it started) passes, and the same user can stop the helper anyway. Such
-  a process can list and revoke only the operator's own machine logins and grants, never a
-  service's, and reads no secret. A revoke made this way records `launcher:<credential id>` as its
-  actor on every row it writes; a revoke from Dispatch still records `human:<email>`.
+  a process can list and revoke the operator's own machine logins, never a service's machine
+  login, and the operator's grants, which include grants the operator approved on any session. It
+  can also enroll a box through the helper (`agent-secrets enroll --helper`, open to any process of
+  the user) and read the operator's agent secrets. A revoke made this way records
+  `launcher:<credential id>` as its actor on every row it writes; a revoke from Dispatch still
+  records `human:<email>`.
   `machine list` prints the credential, host, approver, issue and expiry times and state,
   `grant list` the grant, secrets, how it was granted, approver, session, operator and expiry, and
   `--json` prints the broker's body verbatim. `machine revoke` warns on stderr when it ends this
