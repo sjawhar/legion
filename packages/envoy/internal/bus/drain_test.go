@@ -397,3 +397,56 @@ func TestDrainKeepsAConnectionThatReconnectedBeforeIt(t *testing.T) {
 		t.Fatal("Drain returned with the connection still open")
 	}
 }
+
+// A connection closed while nats.go drains it, as nats.go closes a connection whose server goes
+// away during the drain, ends the drain at once. nats.go v1.50.0 marks such a connection draining
+// again and waits 5 s for a reply on the socket it closed, so a drain that read the connection's
+// state could miss the close and wait those 5 s out. The client publishes nothing before the drain,
+// so nats.go has no request subscription to drain and marks the connection draining again as soon
+// as it sees the close; whether a reader of the state misses it is a race, so the test runs it
+// several times.
+func TestDrainEndsWhenTheConnectionClosesWhileNATSDrainsIt(t *testing.T) {
+	uri := testnats.URL(t)
+	for attempt := 1; attempt <= 10; attempt++ {
+		client, err := bus.Connect([]string{uri})
+		if err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+		conn := client.Conn
+		inHandler := make(chan struct{})
+		release := make(chan struct{})
+		if _, err := conn.Subscribe("drain.closed-while-draining", func(*natsgo.Msg) {
+			close(inHandler)
+			<-release
+		}); err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		if err := conn.Publish("drain.closed-while-draining", nil); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		select {
+		case <-inHandler:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the delivery never reached its handler")
+		}
+		drained := make(chan error, 1)
+		go func() { drained <- client.Drain(5 * time.Second) }()
+		// The delivery in its handler holds nats.go's drain of the connection's subscriptions.
+		waitFor(t, 5*time.Second, "Drain to drain the connection", conn.IsDraining)
+		closed := time.Now()
+		conn.Close()
+		close(release)
+		select {
+		case err := <-drained:
+			if err != nil {
+				t.Fatalf("attempt %d: drain: %v", attempt, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("attempt %d: Drain had not returned 2s after the connection closed while nats.go drained it", attempt)
+		}
+		if elapsed := time.Since(closed); elapsed > time.Second {
+			t.Fatalf("attempt %d: Drain returned %s after the connection closed, want at once", attempt, elapsed)
+		}
+		client.Close()
+	}
+}

@@ -370,13 +370,14 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
-- A listener that reconnects to NATS just before its shutdown drain keeps the drain within its
-  budget and lets the deliveries already in their handlers finish. nats.go can run the reconnect's
-  callback once the drain is already under way, and the callback closed the connection there: the
-  deliveries lost their connection, and nats.go v1.50.0 marks a connection closed while it drains
-  as draining again, so the drain waited out 5 s of its 10 s budget for a reply that never came. A
-  reconnect callback now closes the connection only for a reconnect that came after the drain
-  began.
+- A listener's shutdown drain no longer waits out 5 s of its 10 s budget when its NATS connection
+  closes while nats.go drains it. nats.go v1.50.0 marks a connection closed during its drain as
+  draining again and waits 5 s for a reply on the socket it closed, and the drain read the
+  connection's state, so it could miss the close; it now waits for the connection's closed event.
+  The listener's own reconnect callback was one such close: nats.go can run the callback for a
+  reconnect that came before the drain once the drain is under way, and it closed the connection
+  there, cutting off the deliveries still in their handlers. A reconnect callback now closes the
+  connection only for a reconnect that came after the drain began.
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

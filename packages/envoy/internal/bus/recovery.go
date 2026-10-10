@@ -75,10 +75,8 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 // nats.go has re-sent the subscriptions a drain is draining, and nothing will drain them now, so
 // the connection is closed rather than hand deliveries to a process that is exiting. A reconnect
 // that came before Drain stopped the client is the drain's: nats.go can run its callback only once
-// the drain is under way, and by then the drain itself is draining what nats.go re-sent. Closing
-// there would cut off the deliveries still in their handlers, and a close that lands while nats.go
-// drains the connection costs Drain its deadline, since nats.go then marks the closed connection
-// draining again (fixed after v1.50.0 by nats-io/nats.go#2163).
+// the drain is under way, and by then the drain itself is draining what nats.go re-sent, so closing
+// there would cut off the deliveries still in their handlers.
 func (c *Client) closeStopped(nc *nats.Conn) {
 	c.mu.Lock()
 	reconnectedBeforeTheDrain := nc == c.drained && nc.Stats().Reconnects == c.drainedReconnects

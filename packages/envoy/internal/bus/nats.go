@@ -581,10 +581,25 @@ func (c *Client) Drain(timeout time.Duration) error {
 			}
 		}
 	}
+	// nats.go's Drain only starts the drain, and the wait for it to close the connection takes the
+	// connection's CLOSED event rather than polling for the state: at v1.50.0 a close that lands
+	// while nats.go drains the connection (a lost server, a reconnect callback closing it) is
+	// undone, nats.go marking the closed connection draining again and waiting 5 s for a PONG on
+	// the socket it closed (fixed after v1.50.0 by nats-io/nats.go#2163), so a poll can miss the
+	// moment the connection was closed and wait out the deadline.
+	closed := conn.StatusChanged(nats.CLOSED)
+	defer conn.RemoveStatusListener(closed)
 	if err := conn.Drain(); err != nil {
 		return err
 	}
-	return waitUntil(conn.IsClosed)
+	expired := time.NewTimer(time.Until(deadline))
+	defer expired.Stop()
+	select {
+	case <-closed:
+		return nil
+	case <-expired.C:
+		return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
+	}
 }
 
 // deliveringSubscriptions returns the installed subscriptions that are still valid, those a pass
