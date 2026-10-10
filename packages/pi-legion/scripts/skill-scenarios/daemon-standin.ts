@@ -134,6 +134,7 @@ function handle(path: string, body: unknown): { response: Response; mintedGrantI
           role,
           generation: 1,
           secret: SESSION_SECRET,
+          promptAgents: [],
         }),
       };
     }

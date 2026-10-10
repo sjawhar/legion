@@ -7,6 +7,25 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Every root architect's and phase worker's session measures six live capabilities as it boots
+  and reports them with `POST /legion/v1/claims/ready` (`capabilities`, contract 19, LEGION-663),
+  which the daemon renders in `legion state`: `subagents` (`pi.agents` exposed, `task` registered,
+  and `discoverAgents` resolving every agent the registration's `promptAgents` names, none of them
+  in `task.disabledAgents`), `web-search` (`web_search` registered and one real `runSearchQuery`
+  for `jujutsu version control` answered by a provider), `mcp` (every configured MCP server
+  connected — the check connects a second, short-lived client per configured server and
+  disconnects it, since the session's own are the host's), `repository-extensions` (every
+  `.omp/extensions/` module, `.omp/skills/*/SKILL.md` and `.claude/skills/*/SKILL.md` the
+  workspace carries is among what Oh My Pi discovers), `dispatch-envoy-tools` (the ten Envoy tools
+  registered and `dispatch read --issue <issue>` answering) and `github` (`gh api user`). The six
+  checks run concurrently, each within 8 s and the whole report within 10 s; a check that fails,
+  throws or times out is a failing row with the reason, and never stops the session (the measurer
+  itself throwing costs the report, not the boot). The ready after a regained Envoy role re-sends
+  the same report; the controller's ready carries none. `src/capability-report.ts` reaches Oh My
+  Pi's own modules (`@oh-my-pi/pi-coding-agent` and its subpaths) through string-literal
+  `import()` at measurement time: they exist only inside Oh My Pi's bundle, whose loader resolves
+  them as literals alone, so they load lazily and never under `bun test` or in a session that is
+  no Legion session.
 - A resumed Legion session whose role launcher sets `LEGION_WORKSPACE_RECREATED=true` (its
   workspace was provisioned after the session was last written, LEGION-654) is told so at session
   start: one `legion-workspace-recreated` message, sent as a steer that starts no turn, is saved

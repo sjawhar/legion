@@ -1,11 +1,12 @@
 import type { LegionRole } from "@legion/contracts";
+import type { LegionCapabilityReportBody } from "@legion/contracts/legion-api";
 import { messageFor } from "@legion/envoy-client/errors";
 import type { SessionContext } from "@legion/pi-shared/pi-types";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
 import { recordBootstrappedSession } from "@legion/pi-shared/subagent-session";
 import pkg from "../package.json";
 import { requiredEnvironment, requiredSecret } from "./classify";
-import { LegionDaemonApiError, type LegionDaemonClient } from "./daemon-client";
+import { LegionDaemonApiError, type LegionDaemonClient, type ReadyInput } from "./daemon-client";
 import { exportJjSessionAttribution } from "./jj-attribution";
 
 /** The claim a session registered: its own id, the daemon's answer for tree, issue and role, and
@@ -95,13 +96,21 @@ async function callReadyWithRetry(label: string, call: () => Promise<void>): Pro
  * the capability it registered. A Legion pane boots as its own Oh My Pi process and holds exactly
  * one claim for its whole lifetime, so the capability is plain closure state, set before
  * `claims/ready`: the daemon's task can arrive the moment ready answers, and the phase-stall hook
- * reads the capability when it does.
+ * reads the capability when it does. The ready carries the session's capability report, measured
+ * from the registration's answer on, so the daemon's `legion state` shows what this session can do.
  */
 export function createClaimSession(deps: {
   readonly daemon: () => LegionDaemonClient;
   readonly persistedTranscript: (
     context: SessionContext
   ) => Promise<{ readonly sessionFile: string; readonly agentId: string }>;
+  /** Measures the six live capability rows for the claim's issue, against the task agents the
+   * registration says the role's prompts dispatch (`measureCapabilities` in
+   * `src/capability-report.ts`, behind the production host in `extensions/legion.ts`). */
+  readonly measureCapabilities: (
+    context: SessionContext,
+    input: { readonly issue: string; readonly promptAgents: readonly string[] }
+  ) => Promise<LegionCapabilityReportBody>;
   readonly exitProcess: (code: number) => never;
 }): ClaimSession {
   let capability: ClaimCapability | undefined;
@@ -125,12 +134,21 @@ export function createClaimSession(deps: {
         pluginContract: pkg.legion.daemonApiVersion,
       })
       .catch((error) => exitOnRegistrationRefusal(error, deps.exitProcess));
-    const ready = {
-      claimToken: claim.claimToken,
-      sessionId: sessionID,
-      secret: claim.secret,
-      generation: claim.generation,
-    };
+    // The six live capability rows (src/capability-report.ts), measured while the jj attribution
+    // and the Envoy role claim run, and sent with the first claims/ready and with every re-ready
+    // after a regain, so the daemon renders what this session measured. The measurer answers a
+    // failing check as a failing row and never throws by design; a rejection it still produces
+    // costs the report, never the session.
+    const measuring = Promise.resolve()
+      .then(() =>
+        deps.measureCapabilities(context, { issue: claim.issue, promptAgents: claim.promptAgents })
+      )
+      .catch((error: unknown) => {
+        console.error(
+          `[legion] capability measurement failed; ready carries no report: ${messageFor(error)}`
+        );
+        return undefined;
+      });
 
     try {
       const stateDir = requiredEnvironment(process.env, "LEGION_STATE_DIR");
@@ -146,6 +164,14 @@ export function createClaimSession(deps: {
       // notice executor, packages/daemon/internal/daemon/outbox.go): no issue topic carries one,
       // so no claim subscribes to one.
       await claimEnvoyRole(sessionID, claim.claimToken, context);
+      const capabilities = await measuring;
+      const ready: ReadyInput = {
+        claimToken: claim.claimToken,
+        sessionId: sessionID,
+        secret: claim.secret,
+        generation: claim.generation,
+        ...(capabilities === undefined ? {} : { capabilities }),
+      };
       await callReadyWithRetry("claims/ready", () => daemon.ready(ready));
       onEnvoyRoleRegained(async (role, reason) => {
         if (role !== claim.claimToken) return;
