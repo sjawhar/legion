@@ -97,7 +97,7 @@ func (c *client) do(ctx context.Context, method, url string, body []byte, header
 
 // doProof signs the request with signer.Sign against exactly this method and URL (no query
 // string appended after signing), the shape proof.Verifier.Verify compares htm/htu against.
-func (c *client) doProof(ctx context.Context, signer Signer, method, path string, body []byte) ([]byte, error) {
+func (c *client) doProof(ctx context.Context, signer proofSigner, method, path string, body []byte) ([]byte, error) {
 	url := c.baseURL + path
 	token, err := signer.Sign(method, url)
 	if err != nil {
@@ -337,7 +337,7 @@ type OperatorMachines struct {
 // OperatorMachines lists the calling machine login's operator's own machines' logins, as
 // Dispatch's machine-login page lists them but without any service's login, with the raw body
 // for --json.
-func (c *client) OperatorMachines(ctx context.Context, signer Signer) (OperatorMachines, []byte, error) {
+func (c *client) OperatorMachines(ctx context.Context, signer proofSigner) (OperatorMachines, []byte, error) {
 	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/operator/machines", nil)
 	if err != nil {
 		return OperatorMachines{}, nil, err
@@ -351,7 +351,7 @@ func (c *client) OperatorMachines(ctx context.Context, signer Signer) (OperatorM
 
 // RevokeOperatorMachine ends one of the calling machine login's operator's own machines' logins.
 // id goes into the path escaped, so whatever a person types names one path segment.
-func (c *client) RevokeOperatorMachine(ctx context.Context, signer Signer, id string) error {
+func (c *client) RevokeOperatorMachine(ctx context.Context, signer proofSigner, id string) error {
 	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/machines/"+url.PathEscape(id)+"/revoke", nil)
 	return err
 }
@@ -383,7 +383,7 @@ type OperatorGrants struct {
 
 // OperatorGrants lists the live grants of the calling machine login's operator's sessions and those
 // the operator approved, as Dispatch's Live grants page lists them, with the raw body for --json.
-func (c *client) OperatorGrants(ctx context.Context, signer Signer) (OperatorGrants, []byte, error) {
+func (c *client) OperatorGrants(ctx context.Context, signer proofSigner) (OperatorGrants, []byte, error) {
 	raw, err := c.doProof(ctx, signer, http.MethodGet, "/v1/operator/grants", nil)
 	if err != nil {
 		return OperatorGrants{}, nil, err
@@ -397,7 +397,7 @@ func (c *client) OperatorGrants(ctx context.Context, signer Signer) (OperatorGra
 
 // RevokeOperatorGrant ends grant id as the calling machine login's operator. id goes into the path
 // escaped, so whatever a person types names one path segment.
-func (c *client) RevokeOperatorGrant(ctx context.Context, signer Signer, id string) error {
+func (c *client) RevokeOperatorGrant(ctx context.Context, signer proofSigner, id string) error {
 	_, err := c.doProof(ctx, signer, http.MethodPost, "/v1/operator/grants/"+url.PathEscape(id)+"/revoke", nil)
 	return err
 }

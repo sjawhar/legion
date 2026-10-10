@@ -45,7 +45,8 @@
 // that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
 // the person's AWS sign-in and need no session identity at all. The machine and grant forms act
 // under this machine's login: the helper signs each call with its launcher credential (sign-launcher)
-// for a process outside every registered session, the operator's own shell.
+// for a process it can show is outside every registered session's process tree, the operator's
+// own shell, and only for the broker's four operator routes.
 package main
 
 import (
@@ -191,10 +192,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdEnroll(args[1:], stdout, stderr)
 	case "unenroll":
 		return cmdUnenroll(args[1:], stdout, stderr)
-	case "machine":
-		return cmdMachine(args[1:], stdout, stderr)
-	case "grant":
-		return cmdGrant(args[1:], stdout, stderr)
+	case "machine", "grant":
+		return cmdGroup(args[0], args[1:], stdout, stderr)
 	case "register":
 		return cmdRegister(args[1:], stdout, stderr)
 	case "renew":
@@ -246,6 +245,57 @@ func lookupCommand(name string) command {
 		}
 	}
 	panic(fmt.Sprintf("agent-secrets: commands has no entry %q", name))
+}
+
+// groupForms is the forms of a command group (machine, grant): the commands rows named
+// "<group> <verb>", in usage's order.
+func groupForms(group string) []command {
+	var forms []command
+	for _, c := range commands {
+		if strings.HasPrefix(c.name, group+" ") {
+			forms = append(forms, c)
+		}
+	}
+	return forms
+}
+
+// cmdGroup dispatches the forms of a command group (machine, grant). The verbs it names and the
+// help it prints come from groupForms, so usage, -h and the refusal of an unknown verb agree; a
+// commands row with no case here is refused as unknown, which TestEveryFormAnswersHelp catches.
+func cmdGroup(group string, args []string, stdout, stderr io.Writer) int {
+	forms := groupForms(group)
+	verbs := make([]string, len(forms))
+	for i, c := range forms {
+		verbs[i] = strings.TrimPrefix(c.name, group+" ")
+	}
+	if len(args) == 0 {
+		fmt.Fprintf(stderr, "agent-secrets %s: a form is required: %s\n", group, strings.Join(verbs, ", "))
+		return exitUsageError
+	}
+	switch form := group + " " + args[0]; form {
+	case group + " -h", group + " -help", group + " --help":
+		for i, c := range forms {
+			if i > 0 {
+				fmt.Fprintln(stderr)
+			}
+			writeCommandHelp(stderr, c)
+		}
+		return 0
+	case "machine login":
+		return cmdMachineLogin(args[1:], stdout, stderr)
+	case "machine login-status":
+		return cmdMachineLoginStatus(args[1:], stdout, stderr)
+	case "machine list":
+		return cmdMachineList(args[1:], stdout, stderr)
+	case "machine revoke":
+		return cmdMachineRevoke(args[1:], stdout, stderr)
+	case "grant list":
+		return cmdGrantList(args[1:], stdout, stderr)
+	case "grant revoke":
+		return cmdGrantRevoke(args[1:], stdout, stderr)
+	}
+	fmt.Fprintf(stderr, "agent-secrets %s: unknown form %q; the forms are %s\n", group, args[0], strings.Join(verbs, ", "))
+	return exitUsageError
 }
 
 // writeCommandHelp prints one form's synopsis and summary.

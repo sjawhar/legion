@@ -59,9 +59,9 @@ func loggedInElsewhere(t *testing.T, rig *brokertest.Rig, host string) (*helper.
 // shows its login and another of the operator's machines, and `--json` prints the broker's body
 // verbatim, which with no service login on the rig is exactly what Dispatch's machine-login page
 // reads for the operator. `machine revoke` ends the other machine's login, which the broker then
-// refuses, and prints `revoked <id>`. Revoking this machine's own login warns that it ends this
-// machine's access, and the broker refuses the next command, which says to log the machine in
-// again.
+// refuses, and prints `revoked <id>`. Revoking this machine's own login, its id typed in upper
+// case (the broker reads any case), warns that it ends this machine's access, and the broker
+// refuses the next command, which says to log the machine in again.
 func TestMachineListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	binary := buildAgentSecrets(t)
@@ -116,8 +116,8 @@ func TestMachineListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	}
 
 	const ownWarning = "agent-secrets machine revoke: revoking this machine's own login ends every session it enrolled, this one's broker access included\n"
-	if stdout, stderr, exit := machine("revoke", own); exit != 0 || stdout != "revoked "+own+"\n" || stderr != ownWarning {
-		t.Fatalf("machine revoke this machine's own login: exit %d, stdout %q, stderr %q; want %q", exit, stdout, stderr, ownWarning)
+	if stdout, stderr, exit := machine("revoke", strings.ToUpper(own)); exit != 0 || stdout != "revoked "+strings.ToUpper(own)+"\n" || stderr != ownWarning {
+		t.Fatalf("machine revoke this machine's own login in upper case: exit %d, stdout %q, stderr %q; want %q", exit, stdout, stderr, ownWarning)
 	}
 	const refused = "agent-secrets machine list: the launcher credential is not valid (LAUNCHER_INVALID); this machine's login is expired or revoked (run: agent-secrets machine login)\n"
 	if stdout, stderr, exit := machine("list"); exit != 1 || stdout != "" || stderr != refused {

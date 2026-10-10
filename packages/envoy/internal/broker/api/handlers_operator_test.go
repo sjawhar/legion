@@ -68,7 +68,9 @@ func (ts *testServer) approveAs(t *testing.T, req wireCreateRequestResponse, app
 	return *approved.GrantID
 }
 
-// column reads one text column of the row query selects, failing t when there is not exactly one.
+// column reads one text column of every row query selects, in the order Postgres returns them,
+// with "<null>" for a null, failing t only when the query does: a caller compares the whole
+// slice, so a row too many or too few fails there.
 func (ts *testServer) column(t *testing.T, query string, args ...any) []string {
 	t.Helper()
 	rows, err := ts.Store.Pool.Query(context.Background(), query, args...)
@@ -109,32 +111,32 @@ func machineRows(t *testing.T, body []byte, own bool) []string {
 	return rows
 }
 
+// TestOperatorListsAndRevokesTheirOwnMachines: a person's machine login lists their machine,
+// row for row as Dispatch's machine-login page lists it, and ends its own login, after which the
+// broker refuses its proofs; another person's machine login is refused it and keeps its own.
 func TestOperatorListsAndRevokesTheirOwnMachines(t *testing.T) {
 	ts := newTestServer(t)
 	credID, key := ts.mintLauncherCredential(t, testApprover, "example-host-devbox-a")
 	otherID, otherKey := ts.mintLauncherCredential(t, "mallory@example.com", "example-host-devbox-m")
-	status, body := ts.launcher(t, key, credID, http.MethodGet, "/v1/operator/machines", nil)
-	if status != http.StatusOK {
-		t.Fatalf("list: %d %s", status, body)
-	}
+	body := ts.operatorGet(t, key, credID, "/v1/operator/machines")
 	list := decode[struct {
 		Credentials []wireLauncherCredential `json:"credentials"`
 	}](t, body)
 	if len(list.Credentials) != 1 || list.Credentials[0].CredentialID != credID {
 		t.Fatalf("machines = %+v, want exactly the operator's own", list.Credentials)
 	}
-	if ui := ts.machineLogins(t, testApprover); len(ui) != len(list.Credentials) {
-		t.Fatalf("operator list (%d) must match Dispatch's page (%d)", len(list.Credentials), len(ui))
+	if got, want := machineRows(t, body, false), machineRows(t, ts.uiGet(t, "/v1/launcher-credentials", testApprover), true); !slices.Equal(got, want) {
+		t.Fatalf("operator rows = %v, want Dispatch's page's rows for the operator's machines, %v", got, want)
 	}
 	// mallory's credential cannot revoke testApprover's machine
-	if status, body = ts.launcher(t, otherKey, otherID, http.MethodPost, "/v1/operator/machines/"+credID+"/revoke", nil); status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
+	if status, body := ts.launcher(t, otherKey, otherID, http.MethodPost, "/v1/operator/machines/"+credID+"/revoke", nil); status != http.StatusForbidden || decode[wireError](t, body).Code != "NOT_APPROVER" {
 		t.Fatalf("cross-operator revoke: %d %s, want 403 NOT_APPROVER", status, body)
 	}
 	// revoking one's own ends its proofs
-	if status, body = ts.launcher(t, key, credID, http.MethodPost, "/v1/operator/machines/"+credID+"/revoke", nil); status != http.StatusOK || decode[stateBody](t, body).State != "revoked" {
+	if status, body := ts.launcher(t, key, credID, http.MethodPost, "/v1/operator/machines/"+credID+"/revoke", nil); status != http.StatusOK || decode[stateBody](t, body).State != "revoked" {
 		t.Fatalf("self revoke: %d %s, want 200 revoked", status, body)
 	}
-	if status, body = ts.launcher(t, key, credID, http.MethodGet, "/v1/operator/machines", nil); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "LAUNCHER_INVALID" {
+	if status, body := ts.launcher(t, key, credID, http.MethodGet, "/v1/operator/machines", nil); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "LAUNCHER_INVALID" {
 		t.Fatalf("after revoke: %d %s, want 401 LAUNCHER_INVALID", status, body)
 	}
 	if logins := ts.machineLogins(t, "mallory@example.com"); len(logins) != 1 || logins[0].CredentialID != otherID {

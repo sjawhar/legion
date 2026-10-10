@@ -10,7 +10,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/helper"
 )
 
-// TestMachineAndGrantUsage: each command names its verbs when given none or an unknown one, and a
+// TestMachineAndGrantUsage: each command names its forms when given none or an unknown one, and a
 // revoke takes exactly one id; none of them reaches a helper.
 func TestMachineAndGrantUsage(t *testing.T) {
 	binary := buildAgentSecrets(t)
@@ -18,10 +18,10 @@ func TestMachineAndGrantUsage(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"machine"}, "agent-secrets machine: a subcommand is required: login, login-status, list, revoke\n"},
-		{[]string{"machine", "logout"}, "agent-secrets machine: unknown subcommand \"logout\"; the subcommands are login, login-status, list, revoke\n"},
-		{[]string{"grant"}, "agent-secrets grant: a subcommand is required: list, revoke\n"},
-		{[]string{"grant", "show"}, "agent-secrets grant: unknown subcommand \"show\"; the subcommands are list, revoke\n"},
+		{[]string{"machine"}, "agent-secrets machine: a form is required: login, login-status, list, revoke\n"},
+		{[]string{"machine", "logout"}, "agent-secrets machine: unknown form \"logout\"; the forms are login, login-status, list, revoke\n"},
+		{[]string{"grant"}, "agent-secrets grant: a form is required: list, revoke\n"},
+		{[]string{"grant", "show"}, "agent-secrets grant: unknown form \"show\"; the forms are list, revoke\n"},
 		{[]string{"machine", "revoke"}, "agent-secrets machine revoke: exactly one CREDENTIAL_ID is required\n"},
 		{[]string{"machine", "revoke", "a", "b"}, "agent-secrets machine revoke: exactly one CREDENTIAL_ID is required\n"},
 		{[]string{"grant", "revoke"}, "agent-secrets grant revoke: exactly one GRANT_ID is required\n"},
@@ -81,10 +81,25 @@ func TestMachineAndGrantCommandsOnAnOlderHelper(t *testing.T) {
 	}
 }
 
-// TestLauncherSignerRequestsNoSecrets: a machine login asks the broker for no secret, so the
-// launcher signer builds no request object.
-func TestLauncherSignerRequestsNoSecrets(t *testing.T) {
-	if _, err := (&launcherSigner{sock: "unused"}).SignRequestObject("https://broker.internal.example", []string{"X"}, "why"); err == nil {
-		t.Fatal("launcherSigner signed a request object")
+// TestMachineAndGrantHelpListsEachForm: `machine -h` and `grant -h` print each form's own help,
+// in usage's order, exactly as that form's -h does.
+func TestMachineAndGrantHelpListsEachForm(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	for group, names := range map[string][]string{
+		"machine": {"machine login", "machine login-status", "machine list", "machine revoke"},
+		"grant":   {"grant list", "grant revoke"},
+	} {
+		var want strings.Builder
+		for i, name := range names {
+			if i > 0 {
+				want.WriteString("\n")
+			}
+			c := lookupCommand(name)
+			want.WriteString("usage: " + c.synopsis + "\n\n" + c.summary + "\n")
+		}
+		_, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(), nil, group, "-h")
+		if exit != 0 || stderr != want.String() {
+			t.Fatalf("%s -h: exit %d, stderr %q; want 0, %q", group, exit, stderr, want.String())
+		}
 	}
 }

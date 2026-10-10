@@ -3,7 +3,7 @@
 // "agent-secrets machine login|login-status|list|revoke": the machine login the host helper holds
 // for every session it registers, started and read through the helper, and the operator's own
 // machines' logins, listed and ended under it (the broker's operator routes, signed by the
-// helper's sign-launcher op).
+// helper's sign-launcher op). groupForms (main.go) dispatches them.
 package main
 
 import (
@@ -16,38 +16,10 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/sjawhar/envoy/internal/broker/helper"
 )
-
-// cmdMachine dispatches the machine subcommands.
-func cmdMachine(args []string, stdout, stderr io.Writer) int {
-	const verbs = "login, login-status, list, revoke"
-	if len(args) == 0 {
-		fmt.Fprintf(stderr, "agent-secrets machine: a subcommand is required: %s\n", verbs)
-		return exitUsageError
-	}
-	switch args[0] {
-	case "-h", "-help", "--help":
-		for i, name := range []string{"machine login", "machine login-status", "machine list", "machine revoke"} {
-			if i > 0 {
-				fmt.Fprintln(stderr)
-			}
-			writeCommandHelp(stderr, lookupCommand(name))
-		}
-		return 0
-	case "login":
-		return cmdMachineLogin(args[1:], stdout, stderr)
-	case "login-status":
-		return cmdMachineLoginStatus(args[1:], stdout, stderr)
-	case "list":
-		return cmdMachineList(args[1:], stdout, stderr)
-	case "revoke":
-		return cmdMachineRevoke(args[1:], stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "agent-secrets machine: unknown subcommand %q; the subcommands are %s\n", args[0], verbs)
-		return exitUsageError
-	}
-}
 
 // cmdMachineLogin implements "machine login". It asks agent-secrets-helper to start a machine
 // login, prints the broker's confirmation code for the operator to type on the Dispatch
@@ -252,8 +224,8 @@ func cmdMachineList(args []string, stdout, stderr io.Writer) int {
 
 // cmdMachineRevoke implements "machine revoke CREDENTIAL_ID": it ends one of the operator's own
 // machines' logins, as Dispatch's machine-login page does, and every session it enrolled; a
-// service's login is not found here. Revoking this machine's own login ends this machine's broker
-// access too, which it warns about on stderr.
+// service's login is not found here. Revoking this machine's own login, its id in any case the
+// broker reads, ends this machine's broker access too, which it warns about on stderr.
 func cmdMachineRevoke(args []string, stdout, stderr io.Writer) int {
 	const form = "machine revoke"
 	flagArgs, positional := splitArgs(args, nil)
@@ -273,27 +245,30 @@ func cmdMachineRevoke(args []string, stdout, stderr io.Writer) int {
 	if err := newClient(base).RevokeOperatorMachine(context.Background(), signer, id); err != nil {
 		return operatorFail(stderr, form, err)
 	}
-	if id == signer.credentialID {
+	if sameID(id, signer.credentialID) {
 		fmt.Fprintf(stderr, "agent-secrets %s: revoking this machine's own login ends every session it enrolled, this one's broker access included\n", form)
 	}
 	fmt.Fprintf(stdout, "revoked %s\n", id)
 	return 0
 }
 
-// operatorFail prints a machine or grant command's failure and answers 1. This machine holding no
-// login, and the broker refusing the one it holds, both say to log it in again; a helper from
-// before sign-launcher says to restart it on this release; and the helper's own refusal (IN_SESSION
-// from inside a session) prints as the helper said it.
+// sameID reports whether a and b are one UUID, in whatever case or form uuid.Parse reads, as the
+// broker reads the id a revoke names.
+func sameID(a, b string) bool {
+	x, errA := uuid.Parse(a)
+	y, errB := uuid.Parse(b)
+	return errA == nil && errB == nil && x == y
+}
+
+// operatorFail prints a machine or grant command's failure and answers 1. The helper's refusal to
+// sign (launcherRefusal) prints as it stands, and the broker refusing the machine's login says to
+// log it in again.
 func operatorFail(stderr io.Writer, form string, err error) int {
 	var broker *apiError
-	var helperSaid *launcherRefusal
+	var refused *launcherRefusal
 	switch {
-	case errors.Is(err, errNoMachineLogin):
-		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, errNoMachineLogin)
-	case errors.Is(err, errHelperTooOld):
-		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, errHelperTooOld)
-	case errors.As(err, &helperSaid):
-		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, helperSaid)
+	case errors.As(err, &refused):
+		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, refused)
 	case errors.As(err, &broker) && broker.Status == http.StatusUnauthorized && broker.Code == "LAUNCHER_INVALID":
 		fmt.Fprintf(stderr, "agent-secrets %s: %v; this machine's login is expired or revoked (run: agent-secrets machine login)\n", form, broker)
 	default:

@@ -3,6 +3,7 @@
 // "agent-secrets grant list|revoke": the live grants of the operator's sessions and those the
 // operator approved, listed and ended under this machine's login (the broker's operator routes,
 // signed by the helper's sign-launcher op), as Dispatch's Live grants page lists and ends them.
+// groupForms (main.go) dispatches them.
 package main
 
 import (
@@ -13,29 +14,6 @@ import (
 	"text/tabwriter"
 	"time"
 )
-
-// cmdGrant dispatches the grant subcommands.
-func cmdGrant(args []string, stdout, stderr io.Writer) int {
-	const verbs = "list, revoke"
-	if len(args) == 0 {
-		fmt.Fprintf(stderr, "agent-secrets grant: a subcommand is required: %s\n", verbs)
-		return exitUsageError
-	}
-	switch args[0] {
-	case "-h", "-help", "--help":
-		writeCommandHelp(stderr, lookupCommand("grant list"))
-		fmt.Fprintln(stderr)
-		writeCommandHelp(stderr, lookupCommand("grant revoke"))
-		return 0
-	case "list":
-		return cmdGrantList(args[1:], stdout, stderr)
-	case "revoke":
-		return cmdGrantRevoke(args[1:], stdout, stderr)
-	default:
-		fmt.Fprintf(stderr, "agent-secrets grant: unknown subcommand %q; the subcommands are %s\n", args[0], verbs)
-		return exitUsageError
-	}
-}
 
 // cmdGrantList implements "grant list": every live grant of a session the operator runs, given
 // automatically or on anyone's approval, and every grant the operator approved on anyone's

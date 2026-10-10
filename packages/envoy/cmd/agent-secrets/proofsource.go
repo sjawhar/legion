@@ -27,10 +27,16 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
-// Signer signs one broker call and returns the compact JWS for its Proof header, or builds and
-// signs a credential-request object naming the secrets a session is asking for.
-type Signer interface {
+// proofSigner signs one broker call and returns the compact JWS for its Proof header: all a call
+// that asks for no secret needs, such as the machine and grant commands' (launcherSigner).
+type proofSigner interface {
 	Sign(method, url string) (string, error)
+}
+
+// Signer is a session's proofSigner, which also builds and signs a credential-request object
+// naming the secrets the session is asking for.
+type Signer interface {
+	proofSigner
 	SignRequestObject(audience string, names []string, reason string) (string, error)
 }
 
@@ -100,26 +106,18 @@ func (h *helperSigner) SignRequestObject(audience string, names []string, reason
 	return resp.RequestObject, nil
 }
 
-// errNoMachineLogin is what the operator's own machine and grant commands get from a helper that
-// holds no launcher credential (NO_CREDENTIAL to sign-launcher): there is no machine login to act
-// as until the operator logs the machine in.
-var errNoMachineLogin = errors.New("this machine is not logged in to the secrets broker; run: agent-secrets machine login")
+// launcherRefusal is why the helper gave a machine or grant command no launcher proof, which the
+// command prints as it stands: no machine login to act as (NO_CREDENTIAL), a helper from before
+// sign-launcher (which answers it as an unknown op), or the helper's own code and message, such as
+// IN_SESSION from inside a session.
+type launcherRefusal struct{ message string }
 
-// errHelperTooOld is what a machine or grant command gets from a helper from before sign-launcher,
-// which answers it as an unknown op.
-var errHelperTooOld = errors.New("this machine's agent-secrets-helper is older than this client and cannot sign for machine and grant commands; restart it on this release")
-
-// launcherRefusal is the helper's refusal of sign-launcher, such as IN_SESSION, which a machine or
-// grant command prints as the helper said it.
-type launcherRefusal struct{ code, message string }
-
-func (e *launcherRefusal) Error() string { return e.code + ": " + e.message }
+func (e *launcherRefusal) Error() string { return e.message }
 
 // launcherSigner signs broker calls with the machine credential through the helper's
-// sign-launcher op: the key never leaves the helper, which refuses a process inside a registered
-// session (a session acts on itself alone) and signs only for its own broker. credentialID is the
-// credential the last proof named, as the helper answered it. SignRequestObject always errors: a
-// machine login requests no secrets.
+// sign-launcher op: the key never leaves the helper, which signs only the four operator routes of
+// its own broker, for a process it can show is outside every registered session's process tree.
+// credentialID is the credential the last proof named, as the helper answered it.
 type launcherSigner struct {
 	sock         string
 	credentialID string
@@ -135,15 +133,11 @@ func (l *launcherSigner) Sign(method, url string) (string, error) {
 		l.credentialID = resp.CredentialID
 		return resp.Proof, nil
 	case resp.Code == helper.CodeNoCredential:
-		return "", errNoMachineLogin
+		return "", &launcherRefusal{"this machine is not logged in to the secrets broker; run: agent-secrets machine login"}
 	case resp.Code == helper.CodeBadRequest && resp.Error == "unknown op sign-launcher":
-		return "", errHelperTooOld
+		return "", &launcherRefusal{"this machine's agent-secrets-helper is older than this client and cannot sign for machine and grant commands; restart it on this release"}
 	}
-	return "", &launcherRefusal{code: resp.Code, message: resp.Error}
-}
-
-func (l *launcherSigner) SignRequestObject(audience string, names []string, reason string) (string, error) {
-	return "", errors.New("a machine login requests no secrets; a session signs its own requests")
+	return "", &launcherRefusal{resp.Code + ": " + resp.Error}
 }
 
 // machineContext answers the broker URL and a launcher signer. Machine and grant commands run
