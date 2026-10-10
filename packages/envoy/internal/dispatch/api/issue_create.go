@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
@@ -137,6 +138,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	if !projectKeyPattern.MatchString(input.Project) || input.Title == "" {
 		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "project and title are required")
+		return
+	}
+	// Before the duplicate check, which reads the new title against every title in the project.
+	if length := len16(input.Title); length > contracts.IssueTitleMax {
+		capExceeded(w, "title", length, contracts.IssueTitleMax)
 		return
 	}
 	if usingDefaultProject {
