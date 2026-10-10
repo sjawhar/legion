@@ -159,7 +159,7 @@ func TestPaneEnvironment(t *testing.T) {
 	got := PaneEnvironment(environ, "/var/lib/legion")
 	want := map[string]string{
 		"HOME":            "/home/legion",
-		"PATH":            "/var/lib/legion/worker-bin:/var/lib/legion/bin:/usr/local/bin:/usr/bin",
+		"PATH":            "/var/lib/legion/bin:/usr/local/bin:/usr/bin",
 		"LANG":            "en_US.UTF-8",
 		"LC_ALL":          "C.UTF-8",
 		"TMUX_TMPDIR":     "/run/tmux",
@@ -177,17 +177,19 @@ func TestPaneEnvironment(t *testing.T) {
 	}
 }
 
-func TestPaneEnvironmentPutsWorkerBinAndTheLauncherFirstExactlyOnce(t *testing.T) {
+// The launcher directory leads a pane's PATH exactly once, whatever the daemon inherited: a daemon
+// started from an agent's shell carries its predecessor's bin, and every other entry stays.
+func TestPaneEnvironmentPutsTheLauncherDirectoryFirstExactlyOnce(t *testing.T) {
 	stateDir := "/var/lib/legion"
-	workerBin := filepath.Join(stateDir, "worker-bin")
+	bin := filepath.Join(stateDir, "bin")
 	env := PaneEnvironment([]string{
-		"PATH=" + workerBin + ":/usr/local/bin:" + filepath.Join(stateDir, "bin") + ":" + workerBin + ":/usr/bin",
+		"PATH=" + bin + ":/usr/local/bin:" + bin + ":/usr/bin",
 	}, stateDir)
-	if got, want := env["PATH"], workerBin+":"+filepath.Join(stateDir, "bin")+":/usr/local/bin:/usr/bin"; got != want {
+	if got, want := env["PATH"], bin+":/usr/local/bin:/usr/bin"; got != want {
 		t.Fatalf("PATH = %q, want %q", got, want)
 	}
-	if strings.Count(env["PATH"], workerBin) != 1 {
-		t.Fatalf("PATH = %q carries worker-bin more than once", env["PATH"])
+	if strings.Count(env["PATH"], bin) != 1 {
+		t.Fatalf("PATH = %q carries the launcher directory more than once", env["PATH"])
 	}
 }
 

@@ -13,7 +13,7 @@ tags:
   - jq
   - jaq
 date: 2026-09-12
-status: active
+status: superseded by LEGION-631 — the grant file, `LEGION_GRANT`, `legion gh`, `legion credential`, `legion push` (with its `pushTTL`), `legion handoff write|read|complete` and an agent's `legion state` are all gone; a pane's `gh` and `git` are plain and act as the role's App from `GH_CONFIG_DIR`, a push is plain `jj git push --bookmark legion/<KEY>`, a handoff is a file the worker writes, commits and pushes whose carrying commit the `legion` tool's `handoff_complete` finds in the pane and reports (the daemon reads no handoff file), and an issue record is read with its `read_record`, while the jj, jq/jaq, bun-test and Envoy sections stand
 module: legion
 related_issues:
   - "LEGION-9"

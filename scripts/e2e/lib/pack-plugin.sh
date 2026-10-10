@@ -3,10 +3,10 @@
 # @sjawhar/pi-legion (packages/pi-legion), exactly as the release packs it, into a tarball holding
 # what `npm pack` ships (package.json `files`: dist/ with the one bundle and the prepack's
 # dist/skills, the Legion plugin's agents/, the packed manifest). Every script that installs a
-# branch-built plugin packs through here (lib/install-plugin-profile.sh and the grant rig's branch
-# mode), so the plugins they run are the ones the release publishes. The worker image packs on its
-# own, as release.yaml does, with the same jq rewrite and `bun pm pack`; the prepack
-# (scripts/pi-plugin-prepack.sh) refuses any other omp.extensions.
+# branch-built plugin packs through here (lib/install-plugin-profile.sh, which the stage proofs and
+# the skill-scenario rig call), so the plugins they run are the ones the release publishes. The
+# worker image packs on its own, as release.yaml does, with the same jq rewrite and `bun pm pack`;
+# the prepack (scripts/pi-plugin-prepack.sh) refuses any other omp.extensions.
 #
 #   scripts/e2e/lib/pack-plugin.sh <pi-envoy|pi-legion> <out dir>
 #
@@ -80,8 +80,7 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 # A TERM once whoever reads stderr has gone would otherwise end this script with the manifest still
 # rewritten: bash writes its Terminated notice for the interrupted pack to the dead stderr, and dies
-# of SIGPIPE before the EXIT trap puts the manifest back. The grant rig calls this with no
-# transcript tee to keep its stderr open.
+# of SIGPIPE before the EXIT trap puts the manifest back.
 trap '' PIPE
 
 # Runs in one checkout take turns at the manifest: a run that started while another had it

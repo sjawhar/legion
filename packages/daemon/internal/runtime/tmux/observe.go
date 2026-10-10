@@ -20,8 +20,13 @@ import (
 // the runtime itself cannot answer (a /proc read failing for a reason other than the process being
 // gone) is reported Uncertain with the failure as its detail, and logged: the process's state is
 // exactly what nobody knows.
+//
+// Beside the sweep, and on the same lifetime, the GitHub credential refresher
+// (refreshGitHubCredentials) rewrites every watched pane's gh files as the daemon's leases turn
+// over, so a pane is refreshed exactly while it is watched.
 func (r *Runtime) Observe(ctx context.Context) (<-chan runtime.Observation, error) {
 	out := make(chan runtime.Observation)
+	go r.refreshGitHubCredentialsEvery(ctx, gitHubRefreshInterval)
 	go func() {
 		defer close(out)
 		ticker := time.NewTicker(r.probeInterval)

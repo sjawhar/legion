@@ -12,7 +12,7 @@ tags:
   - github-issues
   - acceptance-grep
 date: 2026-09-13
-status: active
+status: superseded by LEGION-631 — the `legion gh` boundary and the `worker-bin/gh` shim this note's rule rests on are gone; a pane's `gh` is the plain binary acting as the role's App from `GH_CONFIG_DIR`, nothing refuses a merge or a GitHub-issue write, and the no-GitHub-issue rule lives as prose in the prompts and skills (`dispatch_message`/`dispatch_comment` instead)
 module: packages/daemon/src/cli, skills
 problem_type: safety
 severity: high

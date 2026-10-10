@@ -180,12 +180,16 @@ func redAt(pr record.PullRequest) string {
 
 // reviewWorkflowsToAdjudicate is what a red only declared review workflows make
 // (classify.RedOnlyByReviewWorkflows) asks of the review round, after the red itself (redAt): the
-// reviewer answers each open thread the workflows' runs opened, has the daemon resolve the ones it
-// accepted (`legion threads resolve`), and re-runs each failed run, since such a workflow starts
-// only on a push; its approval ends the round once the head reads green.
+// reviewer replies on each open thread the workflows' runs opened, tells the implementer which of
+// them it accepted (an Envoy message to the implementer's role topic, or its review body), since
+// only the pull request's author's App may resolve a thread and the implementer resolves them with
+// plain gh, and re-runs each failed run once they are resolved, since such a workflow starts only
+// on a push; its approval ends the round once the head reads green.
 const reviewWorkflowsToAdjudicate = "; only declared review workflows are red, so their findings are the review round's to decide: " +
-	"the reviewer answers each of their open threads (Accepted: with its reason, or a REQUEST_CHANGES naming the defect), " +
-	"runs legion threads resolve, and re-runs each failed run (rerun-failed-jobs), and its approval of the head ends the round once the head reads green"
+	"the reviewer replies on each of their open threads (its reason, or a REQUEST_CHANGES naming the defect), " +
+	"tells the implementer which threads it accepted (Envoy to the implementer's role topic, or its review body), " +
+	"which the implementer resolves with plain gh as the pull request's author, " +
+	"and re-runs each failed run (rerun-failed-jobs) once they are resolved, and its approval of the head ends the round once the head reads green"
 
 // answerSkew bounds how far GitHub's clock, which stamps a review's submission, and the daemon's,
 // which stamps the reviewer's completion (record.PhaseRow.CompletedAt), may disagree. No ordering

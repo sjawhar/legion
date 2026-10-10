@@ -14,11 +14,11 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// pruning is store with a claim's secret files removed whenever the claim is written with no
-// process — suspended, failed, retired, or between one launch and the next. The runtime writes a
-// pane's files and never removes them; the daemon, which knows when a claim's process ends, does.
-// A launch writes its files after the claim is persisted without a locator, so a relaunch's own
-// files are never the ones removed.
+// pruning is store with a claim's secret files — and its gh directory (runtime.GHConfigDir) —
+// removed whenever the claim is written with no process — suspended, failed, retired, or between
+// one launch and the next. The runtime writes a pane's files and never removes them; the daemon,
+// which knows when a claim's process ends, does. A launch writes its files after the claim is
+// persisted without a locator, so a relaunch's own files are never the ones removed.
 func pruning(store supervise.Store, dir string, log *slog.Logger) supervise.Store {
 	return pruningStore{Store: store, dir: dir, log: log}
 }
@@ -71,8 +71,8 @@ func (s pruningStore) written(c supervise.Claim) {
 }
 
 // pruneAllBut is boot's half: every file in the secrets directory that no claim with a process
-// names goes — what a daemon killed between clearing a locator and removing its files left. The
-// daemon's own Dispatch token file outlives every claim.
+// names goes, a claim's gh directory with it — what a daemon killed between clearing a locator and
+// removing its files left. The daemon's own Dispatch token file outlives every claim.
 func pruneAllBut(dir string, claims []supervise.Claim, log *slog.Logger) {
 	removeSecretFiles(dir, log, func(name string) bool {
 		if name == runtime.DispatchTokenFileName {
@@ -93,10 +93,12 @@ func ownedBy(name string, token claim.Token) bool {
 	return name == string(token) || strings.HasPrefix(name, string(token)+"-")
 }
 
-// removeSecretFiles removes every file of dir that remove selects. A directory not made yet holds
-// nothing; a file that will not go is logged and left for the next prune, never a failed write. A
-// subdirectory is never a pane's secret file: the daemon's own provider-env directory
-// (config.ProviderEnvDir) lives here, and outlives every claim.
+// removeSecretFiles removes every file of dir that remove selects, and every directory it selects
+// whose name ends in `-gh` — a claim's directory of gh files (runtime.GHConfigDir), which goes
+// with the claim's other files, whole. A directory not made yet holds nothing; a file that will
+// not go is logged and left for the next prune, never a failed write. Every other subdirectory is
+// never a pane's: the daemon's own provider-env directory (config.ProviderEnvDir) lives here, and
+// outlives every claim.
 func removeSecretFiles(dir string, log *slog.Logger, remove func(name string) bool) {
 	entries, err := os.ReadDir(dir)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -107,10 +109,20 @@ func removeSecretFiles(dir string, log *slog.Logger, remove func(name string) bo
 		return
 	}
 	for _, entry := range entries {
-		if entry.IsDir() || !remove(entry.Name()) {
+		if !remove(entry.Name()) {
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		path := filepath.Join(dir, entry.Name())
+		if entry.IsDir() {
+			if !strings.HasSuffix(entry.Name(), "-gh") {
+				continue
+			}
+			if err := os.RemoveAll(path); err != nil {
+				log.Error("secrets: remove a pane's gh directory", "dir", entry.Name(), "error", err)
+			}
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			log.Error("secrets: remove a pane secret file", "file", entry.Name(), "error", err)
 		}
 	}

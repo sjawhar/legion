@@ -760,7 +760,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	if got := tokens.Roles(); len(got) != 2 || got[0] != appauth.Implement || got[1] != appauth.Review {
 		t.Fatalf("App token roles = %v, want implement then review", got)
 	}
-	want := []string{"prompts", "store", "config", "appauth", "worker-bin", "dispatch", "intake", "admission", "outbox", "api"}
+	want := []string{"prompts", "store", "config", "appauth", "launcher", "dispatch", "intake", "admission", "outbox", "api"}
 	var got []string
 	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
 		var entry struct {

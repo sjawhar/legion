@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -81,10 +82,14 @@ type Options struct {
 	// Trees is the store's durable tree barrier, which the operator routes open a root's tree
 	// through and reserve and finish a closed tree's cleanup through.
 	Trees TreeLifecycles
-	// GitHubGraphQL is GitHub's GraphQL endpoint, which the threads route resolves the reviewer's
-	// accepted bot threads through; empty, in production, is https://api.github.com/graphql, and a
+	// GitHubAPI is GitHub's REST root, which the handoff route reads an issue branch's head, its
+	// handoff file and READY's checks under; empty, in production, is https://api.github.com, and a
 	// test points it at a stand-in.
-	GitHubGraphQL string
+	GitHubAPI string
+	// Repository is the repository an issue's project works in (`projects.<KEY>.repo`), false for a
+	// project the configuration has no repository for; the handoff route reads the issue branch
+	// there. Nil answers no project.
+	Repository func(project string) (ghrepo.Repository, bool)
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -121,27 +126,24 @@ type server struct {
 	controllerLaunched bool
 	// controllerMu orders a capability mint against a registration and a controller grant, so a
 	// grant the replaced registration authorised is never recorded after the mint revoked them.
-	controllerMu  sync.Mutex
-	tokens        appauth.Tokens
-	githubOwner   string
-	githubGraphQL string
-	grants        *credential.Grants
-	releaser      store.TreeReleaser
-	trees         TreeLifecycles
-	pool          *pgxpool.Pool
-	handlers      []intake.Handler
-	records       record.Store
-	dispatch      dispatch.Client
-	claimReady    func(c supervise.Claim)
+	controllerMu sync.Mutex
+	tokens       appauth.Tokens
+	githubOwner  string
+	githubAPI    string
+	repository   func(project string) (ghrepo.Repository, bool)
+	grants       *credential.Grants
+	releaser     store.TreeReleaser
+	trees        TreeLifecycles
+	pool         *pgxpool.Pool
+	handlers     []intake.Handler
+	records      record.Store
+	dispatch     dispatch.Client
+	claimReady   func(c supervise.Claim)
 	// stopping and drained are Options.Stopping and Options.Drained, decisions Options.Decisions.
 	stopping  context.Context
 	drained   context.Context
 	decisions *RouteDecisions
 	log       *slog.Logger
-	// loginsWarned is when the daemon last logged that it could not read a Legion App's login
-	// (legionAppLogins), which it does at most once a minute.
-	loginsWarnedMu sync.Mutex
-	loginsWarned   time.Time
 }
 
 // NewServer builds the daemon's HTTP server on bind:port, the configured address: every interface
@@ -164,7 +166,8 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		controllerLaunched: opts.ControllerLaunched,
 		tokens:             opts.Tokens,
 		githubOwner:        opts.GitHubOwner,
-		githubGraphQL:      opts.GitHubGraphQL,
+		githubAPI:          opts.GitHubAPI,
+		repository:         opts.Repository,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
 		grants:             opts.Grants,
@@ -208,10 +211,6 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
-	mux.HandleFunc("POST /legion/v1/gh-token", s.githubToken)
-	mux.HandleFunc("POST /legion/v1/git-credential", s.gitCredential)
-	mux.HandleFunc("POST /legion/v1/provisioning-credential", s.provisioningCredential)
-	mux.HandleFunc("POST /legion/v1/threads/resolve", s.resolveThreads)
 	mux.HandleFunc("POST /legion/v1/handoff/complete", s.handoffComplete)
 	mux.HandleFunc("POST /legion/v1/issues/status", s.issueStatus)
 	mux.HandleFunc("POST /legion/v1/gates/register", s.gateRegister)

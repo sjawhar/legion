@@ -11,12 +11,10 @@ import {
   LegionErrorResponse,
   LegionEscalateRequest,
   LegionGateRegisterRequest,
-  LegionGitCredentialResponse,
-  LegionGitHubTokenResponse,
-  LegionGrantCredentialRequest,
   LegionGrantRequest,
   LegionGrantResponse,
   LegionHandoffCompleteRequest,
+  LegionHandoffCompleteResponse,
   LegionIssueStatusRequest,
   LegionOperatorClaimResponse,
   LegionOperatorClaimsResponse,
@@ -26,8 +24,6 @@ import {
   LegionRootCloseRequest,
   LegionSignOffRequest,
   LegionStateResponse,
-  LegionThreadsResolveRequest,
-  LegionThreadsResolveResponse,
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "./legion-api";
@@ -50,12 +46,7 @@ const schemas: Record<string, z.ZodType> = {
   "operator-claim.json": LegionOperatorClaimResponse,
   "operator-claims.json": LegionOperatorClaimsResponse,
   "grant.json": LegionGrantResponse,
-  "github-token.json": LegionGitHubTokenResponse,
-  "git-credential.json": LegionGitCredentialResponse,
-  "provisioning-credential.json": LegionGitHubTokenResponse,
-  "threads-resolve.json": LegionThreadsResolveResponse,
-  "threads-resolve-refused.json": LegionThreadsResolveResponse,
-  "handoff-complete.json": LegionEmptyResponse,
+  "handoff-complete.json": LegionHandoffCompleteResponse,
   "issue-status.json": LegionEmptyResponse,
   "gate-register.json": LegionEmptyResponse,
   "wave-release.json": LegionWaveReleaseResponse,
@@ -85,28 +76,6 @@ test("every Go-written fixture parses through the strict schema", () => {
     const parsed = schema?.safeParse(fixture(name));
     expect(parsed?.error?.issues ?? [], `${name} failed the schema`).toEqual([]);
   }
-});
-
-test("a thread's outcome is resolved or left open, never both or neither", () => {
-  const url = "https://github.com/acme/widgets/pull/42#discussion_r1";
-  for (const outcome of [
-    { url },
-    { url, newestBy: "legion-reviewer" },
-    {
-      url,
-      resolved: "the Legion reviewer's acceptance of a bot's thread",
-      leftOpen: "not an acceptance",
-    },
-  ]) {
-    expect(
-      LegionThreadsResolveResponse.safeParse({ threads: [outcome], withheld: 0 }).success
-    ).toBe(false);
-  }
-});
-
-test("a resolve answer always carries its withheld count", () => {
-  expect(LegionThreadsResolveResponse.safeParse({ threads: [], withheld: 0 }).success).toBe(true);
-  expect(LegionThreadsResolveResponse.safeParse({ threads: [] }).success).toBe(false);
 });
 
 test("state accepts optional fields emitted by later workflow slices", () => {
@@ -166,12 +135,6 @@ test("every workflow request has a strict schema", () => {
       "controller grant",
       LegionControllerGrantRequest,
       { sessionId: "ses_controller", secret: "s" },
-    ],
-    ["grant credential", LegionGrantCredentialRequest, { grantId: "grant-208" }],
-    [
-      "threads resolve",
-      LegionThreadsResolveRequest,
-      { grantId: "grant-208", repo: "acme/widgets", number: 42 },
     ],
     [
       "handoff complete",

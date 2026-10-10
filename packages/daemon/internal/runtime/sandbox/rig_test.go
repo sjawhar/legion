@@ -31,7 +31,9 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -78,6 +80,7 @@ func testOptions() Options {
 		ProbeInterval:    time.Hour,
 		AdoptTimeout:     time.Minute,
 		Tokens:           staticTokens{},
+		GitHubCredential: staticCredential,
 		Conns:            fake.NewConns(),
 		Log:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	}
@@ -88,6 +91,22 @@ type staticTokens struct{}
 
 func (staticTokens) Token(_ context.Context, owner string) (string, error) {
 	return "ghs_provision_" + owner, nil
+}
+
+// staticCredentialExpiry is the lease expiry every rendered test credential carries.
+var staticCredentialExpiry = time.Date(2026, 10, 8, 13, 0, 0, 0, time.UTC)
+
+// staticCredentialToken is the token staticCredential renders for role: one per App, so a review
+// role's files and an implement role's differ as the two Apps' tokens do.
+func staticCredentialToken(role claim.Role) string {
+	return "ghs_" + string(appauth.AppRoleFor(role)) + "_token"
+}
+
+// staticCredential is the runtime's GitHubCredential in every test: the role's App's token
+// (appauth.AppRoleFor) rendered as gh's files, with a fixed expiry.
+func staticCredential(_ context.Context, role claim.Role) (ghconfig.Rendered, error) {
+	app := appauth.AppRoleFor(role)
+	return ghconfig.Render(staticCredentialToken(role), string(app), staticCredentialExpiry), nil
 }
 
 // fakeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)

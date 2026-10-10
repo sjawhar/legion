@@ -103,6 +103,25 @@ secretsd refusal (timeout, denial, no terminal scope) quoted from `secrets`' std
 daemon resolves its `mise` environment); under a login shell on the shared box that is
 `~/.mise/shims/secrets`.
 
+## What a pane's `gh`, `git` and `jj` are
+
+A tmux pane's `PATH` is the daemon's own with the state directory's `bin/` (the `legion`
+launcher) put first, and nothing else of Legion's: the daemon installs no `gh` shim and pins no
+tool path on the pane, so the `gh`, `git` and `jj` a pane runs are whatever the daemon's `PATH`
+resolves. The daemon starts under a `PATH` that heads with the real `gh` and a jj of 0.38 or later
+— the jj bound the daemon itself refuses to boot below (`resolveTools`, naming `LEGION_JJ_PATH`,
+its own override for the jj it runs), and the `gh` because a pane's GitHub identity is a file that
+binary reads: the daemon writes gh's own `hosts.yml` (the role's App installation token, user
+`x-access-token`) and `config.yml` under `<state_dir>/secrets/<claim>-gh` (0700, files 0600) when
+it opens the pane, names the directory on the pane as `GH_CONFIG_DIR` with `GH_TOKEN`,
+`GITHUB_TOKEN` and `GH_HOST` set empty so nothing outranks the file, and rewrites `hosts.yml` in
+place every minute from its cached lease (the log lines `tmux runtime: github credential written`
+and `github credential refreshed`, with the claim, role, App and `expiresAt`). The shared clone's
+`credential.helper` is `!gh auth git-credential`, so a pane's `git` and `jj git push` read the same
+file through whichever `gh` the pane's `PATH` resolves. A box whose login `PATH` heads with a `gh`
+wrapper of its own, as the devbox's does, needs the real `gh` ahead of it in the shell that starts
+the daemon, or every pane's `gh` and push act as whoever the wrapper routes to.
+
 ## Rotating the App keys
 
 When a shared-box deployment rotates its keys under the human-tier boundary, rotation is pointless
@@ -123,17 +142,18 @@ while panes can still read the keys, so the order is:
    with `secrets <KEY> -- <cmd>` from the pane: on a human-tier key that command is not refused
    but queued on the operator's YubiKey under the pane's session (it blinks until tapped or 90
    seconds pass), an unwatched request a stray tap would satisfy; the status check proves the same
-   boundary without opening a request. Meanwhile `legion gh -- auth status` from that same pane
-   still succeeds because the daemon mints the token.
+   boundary without opening a request. Meanwhile `gh auth status` from that same pane
+   still succeeds, showing account `x-access-token`, because the daemon mints the token and writes
+   it to the pane's gh files.
 5. Rotate: in each GitHub App's settings, generate a new private key. Store each with
    `secrets edit-human <NAME>` under the same names (base64-encode the downloaded PEM first:
    `base64 -w0 < key.pem | secrets edit-human <NAME>`). Do not revoke anything yet.
 6. Restart the daemon from the launcher pane (the rewritten keys need a fresh grant: two taps).
-   Confirm a grant mints with the new keys: `legion gh -- auth status` from a fresh worker pane.
+   Confirm the new keys mint: `gh auth status` from a fresh worker pane shows account `x-access-token`.
 7. Only now revoke the old private keys in GitHub App settings. The order matters because the
    running daemon signs every installation-token request with the key it decoded at start-up and
-   holds in memory until it restarts — revoking first would break `legion gh`, the `jj git push`
-   credential, and identity leases in every pane until step 6 completes, with no rollback if that
+   holds in memory until it restarts — revoking first would break every pane's `gh`, its `jj git
+   push` credential, and identity leases until step 6 completes, with no rollback if that
    restart fails (an untapped request, a bad base64 paste).
 
 Record the rotation on LEGION-74 as its spec asks (dates and key fingerprints only; never key

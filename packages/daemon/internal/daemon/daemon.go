@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
@@ -45,6 +46,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 const (
@@ -233,8 +235,13 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			st.Close()
 			return err
 		}
+		if err := reconfigureCloneCredential(boot, cfg, plan.tools, log); err != nil {
+			workflow.stop()
+			st.Close()
+			return err
+		}
 		if workflow != nil {
-			log.Info("legion workflow boot stage", "stage", "worker-bin")
+			log.Info("legion workflow boot stage", "stage", "launcher")
 		}
 	}
 	if workflow != nil {
@@ -459,8 +466,8 @@ type plan struct {
 	// nil without a workflow, where every delivery holds and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
-	// tools are the gh, git, and jj boot resolved on the host, by name; nil without a repository,
-	// and under a runtime whose agents run the worker image's own.
+	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
+	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
 	project       string
 	operatorToken string
@@ -631,19 +638,24 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, log)
 	}
 	return nil
 }
 
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
-// providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
-// environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, streamAddress string, _ appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
-		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
+// providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
+// the daemon has them, are every tree pane's gh files (gitHubCredential); a daemon with no GitHub
+// Apps hands the runtime none, and its panes hold no gh files. The private server's environment is
+// scrubbed before anything is launched on it.
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) runtimeFactory {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
+		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
+		if tokens != nil {
+			opts.GitHubCredential = gitHubCredential(tokens, githubOwner(cfg))
+		}
 		rt, err := tmux.New(opts)
 		if err != nil {
 			return nil, err
@@ -660,8 +672,8 @@ func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatc
 }
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
-// stream, which boot hands the factory.
-func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) tmux.Options {
+// stream and the GitHub credential function, which boot hands the factory.
+func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
 	return tmux.Options{
 		Project:           project,
 		StateDir:          cfg.StateDir,
@@ -670,7 +682,6 @@ func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatc
 		NatsURLs:          cfg.NatsURLs,
 		DispatchURL:       cfg.DispatchURL,
 		DispatchTokenFile: dispatchTokenFile,
-		Tools:             paneTools(tools),
 		OmpInvocation:     invocation,
 		OmpLaunchPrefix:   cfg.OmpLaunchPrefix,
 		StopGrace:         cfg.WorkerStopTimeout,
@@ -679,6 +690,40 @@ func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatc
 		ProviderEnvDir:    providerEnvDir,
 		Log:               log,
 	}
+}
+
+// reconfigureCloneCredential brings the shared clone an earlier daemon provisioned under the state
+// directory to the helper every clone gets now (workspace.ConfigureRepositoryCredential): a clone
+// provisioned before each pane read GitHub from its own gh files names that daemon's `legion
+// credential` by the pane launcher's path, which answers no pane now, so its first push would
+// fail. It runs the git boot resolved (tools), as the outbox's provisioning does, and logs the one
+// clone it rewrote. A configuration with no repository, or a state directory with no clone yet, is
+// nothing to do: provisioning writes the helper into a clone it makes.
+func reconfigureCloneCredential(ctx context.Context, cfg config.Config, tools map[string]string, log *slog.Logger) error {
+	repo := cfg.Projects[cfg.Project].Repo
+	if repo.IsZero() || tools == nil {
+		return nil
+	}
+	// Location derives the clone from the repository alone; the issue names only the workspace
+	// beside it, which nothing here reads.
+	located, err := workspace.Location(cfg.StateDir, repo, cfg.Project)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(located.Clone, ".git")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read the shared clone %s: %w", located.Clone, err)
+	}
+	changed, err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), located.Clone)
+	if err != nil {
+		return fmt.Errorf("set the shared clone's git credential helper: %w", err)
+	}
+	if changed {
+		log.Info("legion daemon set the shared clone's git credential helper", "clone", located.Clone, "helper", workspace.GitHubCredentialHelper)
+	}
+	return nil
 }
 
 // supervision is everything that runs a claim: the worker stream, the runtime, and the machines,
@@ -1135,9 +1180,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var tokens appauth.Tokens
 	var grants *credential.Grants
 	var claimReady func(supervise.Claim)
+	var githubAPI string
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady = workflow.claimReady
+		githubAPI = workflow.githubAPI
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
 	// its ready. The liveness sweep runs beside it under either mode, never behind it.
@@ -1176,6 +1223,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Dispatch:           client,
 		Tokens:             tokens,
 		GitHubOwner:        githubOwner(cfg),
+		GitHubAPI:          githubAPI,
+		Repository:         projectRepository(cfg),
 		Grants:             grants,
 		Releaser:           s.supervisor.deps.Runtime,
 		Trees:              st,
@@ -1306,4 +1355,14 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 // are installed on. A Stage 2 configuration has no repository and so no owner.
 func githubOwner(cfg config.Config) string {
 	return cfg.Projects[cfg.Project].Repo.Owner()
+}
+
+// projectRepository answers the repository a project works in (`projects.<KEY>.repo`), as the
+// handoff route reads an issue branch there: what outbox.createBranch creates the branch in. A
+// project the configuration does not name, or names with no repository (Stage 2), has none.
+func projectRepository(cfg config.Config) func(project string) (ghrepo.Repository, bool) {
+	return func(project string) (ghrepo.Repository, bool) {
+		configured, ok := cfg.Projects[project]
+		return configured.Repo, ok && !configured.Repo.IsZero()
+	}
 }

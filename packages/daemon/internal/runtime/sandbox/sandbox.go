@@ -82,6 +82,7 @@ type Runtime struct {
 	probeInterval                           time.Duration
 	adoptTimeout                            time.Duration
 	tokens                                  ProvisionTokens
+	gitHubCredential                        runtime.GitHubCredential
 	store                                   Store
 	conns                                   runtime.Conns
 	launchers                               *launchers
@@ -262,6 +263,8 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
 	case opts.Tokens == nil:
 		return refuse("no provisioning token source")
+	case opts.GitHubCredential == nil:
+		return refuse("no github credential function for the roles' gh files")
 	case opts.Store == nil:
 		return refuse("no store")
 	case opts.Conns == nil:
@@ -323,7 +326,7 @@ func configure(opts Options) (*Runtime, error) {
 		sessionDSNKey: opts.SessionDSNKey,
 		bootTimeout:   opts.BootTimeout, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
-		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
+		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
 		launchers: newLaunchers(),
 	}
@@ -382,8 +385,9 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 	return nil
 }
 
-// start runs both informers, selected on the project label, until ctx ends, and waits for both
-// stores to sync.
+// start runs both informers, selected on the project label, until ctx ends, waits for both stores
+// to sync, and then runs the GitHub credential refresher (refreshGitHubCredentials) on the same
+// lifetime, so it stops with the informers whose pod store it walks.
 func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
 	r.dyn, r.kube = dyn, kube
 	sandboxes, pods := r.sandboxClient(), kube.CoreV1().Pods(r.namespace)
@@ -431,6 +435,7 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 		}
 	}
 	context.AfterFunc(ctx, stop)
+	go r.refreshGitHubCredentialsEvery(running, gitHubRefreshInterval)
 	return nil
 }
 
@@ -589,6 +594,28 @@ func ownedBy(p *corev1.Pod, uid types.UID) bool {
 
 func terminal(p *corev1.Pod) bool {
 	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
+}
+
+// imageDrift is the image a container of p — a role's or an init container — runs that is not
+// image, the one this runtime launches every container with (r.image), and whether there is one.
+// A pod is built whole from one image, so one container's drift is the pod's: it was launched by
+// another release of the daemon, and its agents call this daemon as that release — for a route it
+// no longer serves, a variable it no longer sets — until the pod is replaced. relaunch replaces
+// such a pod at the next launch of any of its roles, as it does one holding a moved address
+// (movedInPod), and ReconcileOrphans warns of each one it finds. A nil pod holds no drift: it is
+// replaced for being absent.
+func imageDrift(p *corev1.Pod, image string) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	for _, containers := range [][]corev1.Container{p.Spec.InitContainers, p.Spec.Containers} {
+		for _, c := range containers {
+			if c.Image != image {
+				return c.Image, true
+			}
+		}
+	}
+	return "", false
 }
 
 func decodeSandbox(u *unstructured.Unstructured) (*sandbox, error) {
@@ -793,7 +820,13 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // legion.dev/probe) is no claim's and never an orphan: the probe deletes it, and its shutdown time
 // has the controller delete it otherwise (probe.go). known's located claims join the watch, unless
 // it already holds a newer incarnation of the claim, and are evaluated at once. Nothing here lists
-// Secrets: each goes with its Sandbox.
+// Secrets: each goes with its Sandbox. Each Sandbox whose pod runs an image other than the
+// runtime's (imageDrift) is warned of, named with both images, at the boot reconciliation and at
+// every sweep until a relaunch of one of its roles replaces the pod (warnImageDrift): a release
+// whose daemon stops serving a route, or stops setting a variable, that the previous image's agents
+// call or read leaves such a pod's agents calling this daemon as the older release, so it is pinned
+// only once every tree is drained or every pod relaunched, and the boot log is where an operator
+// reads which pods are still to go. Only a warning: refusing the pod would stop it being observed.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
 	// controllers are the Sandboxes of the known controller claims, which the sweep keeps.
@@ -820,6 +853,7 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 		if u.GetLabels()[labelProbe] != "" || u.GetDeletionTimestamp() != nil {
 			continue
 		}
+		r.warnImageDrift(u)
 		if age := r.now().Sub(u.GetCreationTimestamp().Time); age < grace {
 			continue
 		}
@@ -828,6 +862,21 @@ func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, g
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// warnImageDrift logs, for the Sandbox u, the pod it owns in the store when a container of it runs
+// an image other than the runtime's (imageDrift): the Sandbox's name, the image found and the
+// configured one, as ReconcileOrphans says. A same-named pod u does not own is an earlier
+// Sandbox's, on its way out, and is nothing of u's to warn about.
+func (r *Runtime) warnImageDrift(u *unstructured.Unstructured) {
+	pod := r.storedPod(u.GetName())
+	if !ownedBy(pod, u.GetUID()) {
+		return
+	}
+	if other, drifted := imageDrift(pod, r.image); drifted {
+		r.log.Warn(fmt.Sprintf("sandbox runtime: %s runs image %s, the configured image is %s; its agents call this daemon as the older release until the pod is relaunched", u.GetName(), other, r.image),
+			"sandbox", u.GetName(), "pod", pod.UID)
+	}
 }
 
 // sweep deletes u, the Sandbox as the informer held it, unless something owns it

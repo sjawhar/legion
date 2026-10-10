@@ -30,8 +30,8 @@ retrospective's durable output.
    `jj diff --from <approved-sha> --to <tip-sha> --summary` in READY, and sends the READY packet
    with its completion, which refuses a head that still carries `.legion/<issue>/`; the daemon
    posts it on the Dispatch issue and publishes it to the project's merge-queue role when one is
-   configured. A human merges under the repository's GitHub branch-protection and CODEOWNERS
-   requirements; GitHub's merge queue participates only when the repository enables it.
+   configured. On READY's acceptance the merger submits the merge, and it lands under the
+   repository's rules: its required reviews and checks, and its merge queue when it enables one.
 5. After that merge, the implementer — not the reviewer or merger — verifies the change in production
    and records it on the PR and the issue: the agent that developed it is responsible for testing
    in production. The architect's sign-off waits for that record.
@@ -139,11 +139,11 @@ merger.
    empty. `pipefail` makes a failed read fail the line (without it the line exits with `tee`'s
    status and leaves two empty files), and the parentheses keep it to that line, since your
    session's shell persists and a later `cmd | head` would exit 141 under it:
-   `cd -- "$LEGION_WORKSPACE" && ( set -o pipefail && legion gh -- api repos/{owner}/{repo}/pulls/{number} --jq .body | tee <dir>/before.md <dir>/body.md ) && test -s <dir>/before.md`.
+   `cd -- "$LEGION_WORKSPACE" && ( set -o pipefail && gh api repos/{owner}/{repo}/pulls/{number} --jq .body | tee <dir>/before.md <dir>/body.md ) && test -s <dir>/before.md`.
    In `<dir>/body.md`, change the lines it carries for that content and add any it lacks where
    the instructions place them; other phases' lines stay as they wrote them.
 4. Write it back before the push:
-   `cd -- "$LEGION_WORKSPACE" && legion gh -- api --method PATCH repos/{owner}/{repo}/pulls/{number} -F body=@<dir>/body.md`.
+   `cd -- "$LEGION_WORKSPACE" && gh api --method PATCH repos/{owner}/{repo}/pulls/{number} -F body=@<dir>/body.md`.
    The checks the push starts read the body as it stands then; an edit after the push re-runs
    only a check that also starts on an edited body. Such a check re-runs now at the approved
    head, on a diff without your commits, and may fail there; READY reads the head your push makes.
@@ -153,12 +153,17 @@ When you cannot compute that content, cannot do the work a line affirms within
 nothing and do not complete: tell the architect with `envoy_publish` to its role topic, naming
 what failed.
 
-Then push both commits with one `legion push`, so one CI run covers them. When the push is
-refused after step 4 wrote the body, write `<dir>/before.md` back the same way before you report
-the refusal to the architect, so the body matches the head GitHub has. After the push, post one
+Then push both commits with one push, so one CI run covers them (`<KEY>` is your `LEGION_ISSUE`):
+`cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>`.
+It carries `docs/solutions/` and the removal of `.legion/<KEY>/`, so it is not a handoff-only
+push: its head's message never ends with `skip-checks: true` and carries none of GitHub's
+`[skip ci]`-family keywords (`skill://legion-worker`, *Every role pushes its own commits*). When
+the push is refused after step 4 wrote the body (`jj git push` refuses a branch another role
+moved; never force), write `<dir>/before.md` back the same way before you report the refusal to
+the architect with its output, so the body matches the head GitHub has. After the push, post one
 Dispatch message on
 the issue — `--issue` is your `LEGION_ISSUE`; Legion issues live on Dispatch, never on a GitHub
-issue, and the `gh` shim refuses every GitHub-issue write — naming the documents, the
+issue, so no `gh issue` write and no GitHub-issue comment — naming the documents, the
 one-to-three most useful takeaways, the two proofs you read, and the production check that
 follows the merge. The message must carry this revived implementer's structured
 attribution footer with `phase` set to `retro`; the body is capped at 2,000 characters:
@@ -185,7 +190,8 @@ The `docs/solutions/` commit, the removal of `.legion/<issue>/`, the PR body lin
 make stale, and the Dispatch message are the only retro outputs. Never write a handoff, phase
 artifact, local feedback log, or completion label, and change nothing under `.legion/` but that
 removal. Report completion with the `legion` tool's `handoff_complete` alone (its summary: two
-sentences for the architect) — no `handoff_write`.
+sentences for the architect); retro writes no handoff, so the commit it reports is the one your
+workspace stands on, the removal commit your push made, so push before you complete.
 
 ## Completion check
 

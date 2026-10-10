@@ -11,7 +11,7 @@ tags:
   - stdin
   - tty
 date: 2026-09-13
-status: active
+status: superseded by LEGION-631 — the rotation order stands, but `legion gh` is gone; confirm with plain `gh auth status` from a fresh worker pane (account x-access-token), whose gh reads the role's App token from the gh files under GH_CONFIG_DIR that the daemon writes and refreshes
 module: packages/daemon (config.ts loadGitHubApps), docs/deployment.md
 related_issues:
   - "LEGION-77"

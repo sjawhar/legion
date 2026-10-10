@@ -3,8 +3,8 @@
 `@sjawhar/pi-legion` is the Oh My Pi plugin a Legion pane loads beside `@sjawhar/pi-envoy`
 (`packages/pi-envoy`). It carries one extension entry, `extensions/legion.ts`: the Legion
 lifecycle, which boots a root architect or a phase worker from the daemon's pane environment
-(`LEGION_TREE`/`LEGION_ROLE`), registers the controller (`LEGION_CONTROLLER`), mints a credential
-grant before each tool call that redeems one, registers the `legion` tool, and holds the phase a
+(`LEGION_TREE`/`LEGION_ROLE`), registers the controller (`LEGION_CONTROLLER`), registers the
+`legion` tool, whose operations mint their own daemon grants in-process, and holds the phase a
 worker is in open until its `handoff_complete`. A session without that environment gets nothing from
 it. The Envoy messaging and Dispatch tools every session uses are `@sjawhar/pi-envoy`'s, and this
 plugin reaches them through the in-process interface that package publishes

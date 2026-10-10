@@ -256,7 +256,7 @@ func TestAKubernetesDaemonServesItsWorkerStreamOnTCPAndRunsNoHostPaneMachinery(t
 			t.Errorf("%s exists (%v): the host's pane machinery ran under kubernetes", path, err)
 		}
 	}
-	if strings.Contains(logged.String(), `"stage":"worker-bin"`) {
+	if strings.Contains(logged.String(), `"stage":"launcher"`) {
 		t.Errorf("the boot installed the pane launcher:\n%s", logged.String())
 	}
 }
@@ -718,7 +718,7 @@ func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sandboxOptions: %v", err)
 	}
-	panes := tmuxOptions(cfg, "test", "omp", "", "", nil, quietLogger())
+	panes := tmuxOptions(cfg, "test", "omp", "", "", quietLogger())
 	for _, row := range []struct {
 		option    string
 		got, want time.Duration
