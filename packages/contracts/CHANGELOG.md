@@ -14,6 +14,10 @@
   and the picture syntax; `SESSION_ID_PATTERN` and `isSessionId`, the one session-id rule the
   dashboard and envoy-client read a reference by (the server's `text.IsSessionID`), and
   `pictureCaption`, the one caption a picture line carries (LEGION-541).
+- `Version.size` is documented for document versions too: the bytes of the markdown a version
+  stores, which Dispatch now answers on every document version it lists or reads, read from the
+  stored row without rendering the document (LEGION-481). It stays optional, absent on a document
+  version from a server that predates it.
 
 ### Changed
 

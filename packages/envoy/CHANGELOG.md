@@ -4,6 +4,16 @@
 
 ### Added
 
+- Every document version now carries `size`, the bytes of the markdown it stores, as file and
+  image versions already carried theirs: on the issue and project artifact lists, the issue read,
+  an artifact's read, each version's read, the reference closure and outgoing reference reads, the
+  version an upload, a named version or an edit answers with, and the version on every
+  `artifact.created` and `artifact.version` event, settlement's and a rebuild's included. Dispatch
+  reads it from the version row's own stored length (`octet_length`), so listing a document near
+  the 1 MiB cap neither renders it nor loads its stored history, and a person or a monitor can find
+  such a document from the list alone (LEGION-481). The dashboard's issue Artifacts tab and project
+  Documents tab show each document's latest size beside its kind, and a document's version list
+  shows every version's.
 - A person lists and ends their own machines' logins and their live grants from their own shell.
   `agent-secrets machine list` and `machine revoke ID`, and `agent-secrets grant list` and
   `grant revoke ID`, call four new broker routes, `GET /v1/operator/machines`,
