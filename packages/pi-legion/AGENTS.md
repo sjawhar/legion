@@ -71,9 +71,12 @@ actions run, `src/handoff-actions.ts`), `LEGION_GENERATION` (set by the daemon, 
 nothing here), `LEGION_BOOT_TOKEN_FILE`, `LEGION_GRANT_FILE`, `LEGION_DAEMON_URL`, the Envoy
 variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/envoy-client`),
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
-when the daemon has `dispatch_url` configured — and, beside the pane, `LEGION_REMOVABLE_WORKSPACES`
-on a pod's `workspace-init provision` container, which the image's own `legion`, built from the same
-commit as this plugin, decodes strictly. A change to any of these surfaces bumps the field and the
+when the daemon has `dispatch_url` configured — and, beside the pane, the environment of a pod's
+`workspace-init provision` init container (`initEnvironment`, `internal/runtime/sandbox/manifest.go`:
+the image's `PATH`, `LEGION_EXPECT_ISSUE_VOLUME` when the issue's volume must already hold the clone
+or a retained session, `LEGION_WORKSPACE_RECOVERED_FROM` on a relaunch after that volume was lost,
+and the XDG base directories), which the image's own `legion`, built from the same commit as this
+plugin, reads. A change to any of these surfaces bumps the field and the
 daemon's `DaemonAPIVersion` (`internal/api/version.go`, whose doc comment is the contract's
 history) in the same commit: `packages/contracts/fixtures/daemon-api/version.json`, written by the
 daemon's golden test, is what `src/daemon-api-version.test.ts` pins the field to, so neither
@@ -82,12 +85,15 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 17 for contract 17's `dispatch` command instructions in every daemon role prompt
-(LEGION-588), after contract 16's `capabilities` list on `GET /legion/v1/state` (LEGION-578),
+number is 18 for contract 18's independent issue pods, each on a volume of its own (LEGION-632: the
+init container's environment is the four surfaces above and nothing of a shared disk — no
+removable-workspaces list, no lock wait, no role or generation — and its volume expectation is
+`LEGION_EXPECT_ISSUE_VOLUME`), after contract 17's `dispatch` command instructions in every daemon
+role prompt (LEGION-588), contract 16's `capabilities` list on `GET /legion/v1/state` (LEGION-578),
 contract 15's Sandbox locator in an issue's shared pod (LEGION-462), contract 14's daemon-launched
 controller pod (LEGION-592) and contract 13's `push` grant and `LEGION_REMOVABLE_WORKSPACES`
-payload (LEGION-583); the Envoy plugin's manifest carries no `legion` key, and the gate reads only
-this package's.
+payload (LEGION-583, the list contract 18 removed); the Envoy plugin's manifest carries no `legion`
+key, and the gate reads only this package's.
 
 The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves
