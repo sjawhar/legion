@@ -1,6 +1,9 @@
 package delivery
 
 import (
+	"encoding/json"
+	"os"
+	"slices"
 	"testing"
 	"time"
 )
@@ -23,12 +26,79 @@ func TestProductionApplies(t *testing.T) {
 		3: {{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base.Add(2 * time.Hour))}},
 	}
 
-	applies := ProductionApplies(runs, jobsByRun, jobName)
+	applies, _ := ProductionApplies(runs, jobsByRun, jobName)
 	if len(applies) != 1 {
 		t.Fatalf("expected 1 apply, got %d", len(applies))
 	}
 	if applies[0].RunID != 3 {
 		t.Errorf("expected apply for run 3, got run %d", applies[0].RunID)
+	}
+}
+
+// TestProductionAppliesSetsApartOnlyARunWithNoProductionJob: a successfully concluded run holding
+// no job by the configured production job name is set apart for its callers' warning, unless the
+// production job was skipped, which GitHub lists under the name of the calling job it skipped.
+// testdata/dev-only-run-jobs.json is GitHub's job list for a main run of a deploy workflow whose
+// dispatch applied dev alone: its production job, a reusable workflow's
+// (`production-apply / production-apply`), is skipped and listed as the bare `production-apply`.
+// It is decoded and mapped exactly as reconcileRun stores a run's jobs.
+func TestProductionAppliesSetsApartOnlyARunWithNoProductionJob(t *testing.T) {
+	const jobName = "production-apply / production-apply"
+	data, err := os.ReadFile("testdata/dev-only-run-jobs.json")
+	if err != nil {
+		t.Fatalf("read the recorded job list: %v", err)
+	}
+	var payload jobsPayload
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("decode the recorded job list: %v", err)
+	}
+	devOnly := make([]DeliveryRunJob, len(payload.Jobs))
+	for i, job := range payload.Jobs {
+		devOnly[i] = DeliveryRunJob{Name: job.Name, StartedAt: job.StartedAt, CompletedAt: job.CompletedAt, Conclusion: mapJobConclusion(job.Conclusion)}
+	}
+
+	base := time.Date(2026, 10, 10, 9, 0, 0, 0, time.UTC)
+	success := DeliveryRunConclusionSuccess
+	runs := make([]DeliveryRun, 5)
+	for i := range runs {
+		runs[i] = DeliveryRun{Repo: "acme/widgets", RunID: int64(i + 1), HeadCommitAt: base.Add(time.Duration(i) * time.Hour), Conclusion: &success}
+	}
+	jobsByRun := map[int64][]DeliveryRunJob{
+		// The dev-only run: its production job skipped under the caller's name. No deploy, no warning.
+		1: devOnly,
+		// A renamed job: neither spelling of the configured one.
+		2: {{Name: "prod-apply / prod-apply", Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base)}},
+		// The caller's name, but a job that ran: the configured name is not the job this run ran.
+		3: {{Name: "production-apply", Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base)}},
+		// The configured job, succeeded: a deploy.
+		4: {{Name: jobName, Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base.Add(4 * time.Hour))}},
+		// A skipped job whose name starts the configured one without ending at a " / ".
+		5: {{Name: "production", Conclusion: new(DeliveryJobConclusionSkipped)}},
+	}
+
+	applies, unmatched := ProductionApplies(runs, jobsByRun, jobName)
+	if len(applies) != 1 || applies[0].RunID != 4 {
+		t.Fatalf("applies = %+v, want run 4's alone", applies)
+	}
+	var ids []int64
+	for _, run := range unmatched {
+		ids = append(ids, run.Run.RunID)
+	}
+	if !slices.Equal(ids, []int64{2, 3, 5}) {
+		t.Fatalf("runs set apart = %v, want [2 3 5]: never the dev-only run 1 nor the deploy 4", ids)
+	}
+	if !slices.Equal(unmatched[0].JobNames, []string{"prod-apply / prod-apply"}) {
+		t.Errorf("run 2's job names = %v, want every job it holds", unmatched[0].JobNames)
+	}
+
+	// A nested reusable call GitHub skipped is listed by the names down to the skipped call, as a
+	// dispatch-only deploy run lists `dispatch-apply / staging-e2e`.
+	nested := map[int64][]DeliveryRunJob{1: {
+		{Name: "dispatch-apply / dispatch-apply", Conclusion: new(DeliveryJobConclusionSuccess), CompletedAt: new(base)},
+		{Name: "dispatch-apply / staging-e2e", Conclusion: new(DeliveryJobConclusionSkipped)},
+	}}
+	if applies, unmatched := ProductionApplies(runs[:1], nested, "dispatch-apply / staging-e2e / staging-e2e"); len(applies) != 0 || len(unmatched) != 0 {
+		t.Fatalf("a nested call skipped: applies = %+v, set apart = %+v, want neither", applies, unmatched)
 	}
 }
 

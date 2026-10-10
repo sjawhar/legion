@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -231,6 +232,9 @@ type server struct {
 	deps            Deps
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
+	// warnedUnmatchedRuns holds the deploy runs productionApplies has warned hold no production
+	// job, so a read that judges a run again does not warn about it again.
+	warnedUnmatchedRuns sync.Map
 }
 
 // queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader

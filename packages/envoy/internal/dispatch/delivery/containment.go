@@ -8,8 +8,8 @@
 package delivery
 
 import (
-	"log/slog"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -21,34 +21,44 @@ type Apply struct {
 	HeadCommitAt time.Time
 }
 
-// ProductionApplies is every successful production deploy among runs: for each run, the job named
+// UnmatchedRun is a successfully concluded run that holds no production job and whose production
+// job was not skipped, with the name of every job it holds: a misconfigured or renamed
+// production_job_name otherwise produces zero deploys forever, silently, so each caller warns
+// about it, naming every job the run actually has (the Python prototype's own
+// `successful_applies` raises for this case).
+type UnmatchedRun struct {
+	Run      DeliveryRun
+	JobNames []string
+}
+
+// ProductionApplies is every successful production deploy among runs, and every successfully
+// concluded run among them that holds no production job. For each run, the job named
 // settings.production_job_name among jobsByRun[run.RunID] must exist, have concluded with
 // Conclusion == DeliveryJobConclusionSuccess, and have a non-nil CompletedAt; a run with no such
-// job, or whose matching job did not succeed, is not an apply. A run that *concluded successfully*
-// overall but matched no job by that name is logged loudly (a misconfigured or renamed
-// production_job_name silently produces zero deploys forever otherwise -- the Python prototype's
-// own `successful_applies` raises for exactly this case, naming every job it actually saw). Both
-// callers pass deploy runs on main alone (ListRuns and ListRunsStartedIn with branch "main"), so a
-// dev-only run, which skips its production job, never reaches the warning. Sorted by CompletedAt
-// ascending.
-func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob, productionJobName string) []Apply {
+// job, or whose matching job did not succeed, is not an apply. A run that concluded successfully
+// overall but holds no job by that name is an UnmatchedRun, unless its production job was
+// skipped (skippedCaller). Applies are sorted by CompletedAt ascending; unmatched runs keep runs'
+// order.
+func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob, productionJobName string) ([]Apply, []UnmatchedRun) {
 	var applies []Apply
+	var unmatched []UnmatchedRun
 	for _, run := range runs {
 		var match *DeliveryRunJob
+		skipped := false
 		for i, job := range jobsByRun[run.RunID] {
 			if job.Name == productionJobName {
 				match = &jobsByRun[run.RunID][i]
 				break
 			}
+			skipped = skipped || skippedCaller(job, productionJobName)
 		}
 		if match == nil {
-			if run.Conclusion != nil && *run.Conclusion == DeliveryRunConclusionSuccess {
+			if !skipped && run.Conclusion != nil && *run.Conclusion == DeliveryRunConclusionSuccess {
 				names := make([]string, 0, len(jobsByRun[run.RunID]))
 				for _, job := range jobsByRun[run.RunID] {
 					names = append(names, job.Name)
 				}
-				slog.Warn("dispatch delivery: a successfully concluded run has no job matching the configured production_job_name -- it will never count as a deploy",
-					"repo", run.Repo, "run_id", run.RunID, "configured_job_name", productionJobName, "job_names_seen", names)
+				unmatched = append(unmatched, UnmatchedRun{Run: run, JobNames: names})
 			}
 			continue
 		}
@@ -68,7 +78,19 @@ func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob,
 	sort.Slice(applies, func(i, j int) bool {
 		return applies[i].CompletedAt.Before(applies[j].CompletedAt)
 	})
-	return applies
+	return applies, unmatched
+}
+
+// skippedCaller reports whether job is a skipped call of a reusable workflow that holds the
+// production job. GitHub names a reusable workflow's job `<caller> / <job>`, but when it skips the
+// calling job it runs none of the called workflow's jobs and lists the call under its caller's
+// name alone. So a production job named `production-apply / production-apply` appears in a run
+// that skipped it as a skipped `production-apply`, and one nested deeper,
+// `deploy / production / apply`, as a skipped `deploy / production` (or `deploy`, when the outer
+// call was skipped). Such a run did not deploy, and its job list says why.
+func skippedCaller(job DeliveryRunJob, productionJobName string) bool {
+	return job.Conclusion != nil && *job.Conclusion == DeliveryJobConclusionSkipped &&
+		strings.HasPrefix(productionJobName, job.Name+" / ")
 }
 
 // FirstShippingApply is the earliest-completing apply (by CompletedAt) among applies whose

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -321,7 +322,7 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	if err := reads.Wait(); err != nil {
 		return deliveryPopulation{}, err
 	}
-	applies := delivery.ProductionApplies(applyRuns, jobsByRun, settings.ProductionJobName)
+	applies := s.productionApplies(applyRuns, jobsByRun, settings.ProductionJobName)
 
 	sessionIDs := []string{}
 	issueKeys := []string{}
@@ -504,6 +505,27 @@ func deliveryProductionView(jobs []delivery.DeliveryRunJob, productionJobName st
 		}
 	}
 	return nil
+}
+
+// productionApplies is delivery.ProductionApplies for a read, which warns about each run it sets
+// apart, a successfully concluded run with no production job, once per run and configured job
+// name for the life of the process: the timeline and the measures judge the same runs on every
+// read, and a run's jobs no longer change once it has concluded.
+func (s *server) productionApplies(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, productionJobName string) []delivery.Apply {
+	applies, unmatched := delivery.ProductionApplies(runs, jobsByRun, productionJobName)
+	for _, missing := range unmatched {
+		type warnedRun struct {
+			repo    string
+			runID   int64
+			jobName string
+		}
+		if _, warned := s.warnedUnmatchedRuns.LoadOrStore(warnedRun{missing.Run.Repo, missing.Run.RunID, productionJobName}, struct{}{}); warned {
+			continue
+		}
+		slog.Warn("dispatch delivery: a successfully concluded run has no job matching the configured production_job_name -- it will never count as a deploy",
+			"repo", missing.Run.Repo, "run_id", missing.Run.RunID, "configured_job_name", productionJobName, "job_names_seen", missing.JobNames)
+	}
+	return applies
 }
 
 // deliveryIssue is what the timeline reads of one issue a pull request names: its project, title,
