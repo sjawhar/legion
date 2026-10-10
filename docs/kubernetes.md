@@ -2196,9 +2196,10 @@ every Sandbox of the layout before issue pods, naming it: remove it before enabl
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
 message to its session on the Agents page, a reply to its ask, a mention) or Envoy, and reads its
 session with `kubectl -n <namespace> logs legion-<project>-controller -c controller` (its launcher's
-log, which carries the shim's and Oh My Pi's) or its transcript on the volume. Wakes reach
-it as they reach the operator's controller: it subscribes to
-`notifications.legion.<project>.controller` once it holds the role.
+log, which carries the shim's and Oh My Pi's) or its transcript on the volume. A Send from the
+Agents page is answered in the conversation that page shows. Wakes reach it as they reach the
+operator's controller: it subscribes to `notifications.legion.<project>.controller` once it holds
+the role.
 
 **Switching back.** To hand the controller back to a person, set `controller: operator` (or drop
 the key), drop `runtime.kubernetes.resources.controller`, which the daemon refuses at boot unless

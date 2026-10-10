@@ -119,6 +119,7 @@ type RequestResult struct {
 	Secrets   []SecretDecision `json:"secrets"`
 	GrantID   *string          `json:"grant_id"`
 	RecordID  *string          `json:"record_id"`
+	Approver  *string          `json:"approver"`
 	Coalesced bool             `json:"coalesced,omitempty"`
 }
 
@@ -170,6 +171,7 @@ type RequestStatus struct {
 	State     string           `json:"state"`
 	GrantID   *string          `json:"grant_id"`
 	RecordID  *string          `json:"record_id"`
+	Approver  *string          `json:"approver"`
 	DecidedAt *time.Time       `json:"decided_at"`
 	Decision  *requestDecision `json:"decision"`
 }

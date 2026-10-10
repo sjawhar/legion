@@ -30,6 +30,16 @@ var githubPageRetryWait = time.Second
 // timeout answers up to githubPageAttempts times. Returns the last attempt's answer exactly as
 // githubapp.Client.Read would, so a caller's own status handling (a 404 that means "gone", a
 // rate limit) is unchanged.
+//
+// token is the caller's. Every read of more than two requests asks githubapp for a token before
+// each page, never once for the whole read (ListWorkflowRuns, ListWorkflowRunJobs, the merged-PR
+// search, fetchCommitMessagesWithToken): githubapp.Client.Token hands back a cached token until
+// five minutes (tokenExpirySlack) before it expires, and one page can take githubPageAttempts
+// attempts of githubapp.RequestTimeout (20 s) and the waits between them, about 63 s, so five slow
+// pages can outlast what a cached token has left; a walk whose visit reconciles between its pages
+// can outlast a fresh token's hour too. An ask the cache answers costs no GitHub call. A read of
+// one or two requests (FetchWorkflowRun, FetchPullRequest) takes one token, which lasts it: two
+// requests take at most about two minutes.
 func readGitHubPage(ctx context.Context, client *githubapp.Client, token, path string) ([]byte, int, http.Header, error) {
 	var body []byte
 	var status int

@@ -37,6 +37,7 @@ events to the right session.
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
+| Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves it as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`); `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
@@ -1016,10 +1017,13 @@ than through a transaction, so `withRoomLock` marks its context with `store.Hold
 for as long as it holds that connection and the room's advisory lock, and `Query` marks the
 caller for as long as its rows are open, so a cursor counts as the held connection it is. A
 refusal logs its stack once per call site, so a caller that trips it in a loop cannot flood the
-log; the error itself is returned every time. `store/pool_test.go` and
-`api/anchored_write_concurrency_test.go` hold the halves: the refusal on every guarded method,
-concurrent anchored writes, and two settlements queued behind one held write on a
-four-connection pool.
+log; the error itself is returned every time. A caller that runs independent reads side by side
+gives each its own mark with `store.ForConcurrentRead`, which refuses a caller already holding a
+connection: on one shared mark, one read's open cursor would refuse the others, and each read
+still takes one connection only (the delivery timeline's four reads do this). `store/pool_test.go`
+and `api/anchored_write_concurrency_test.go` hold the halves: the refusal on every guarded method,
+concurrent reads each holding one connection, concurrent anchored writes, and two settlements
+queued behind one held write on a four-connection pool.
 
 **Every pool's size is set in code.** `store.Open` fixes `MaxConns` at `store.sharedPoolSize`
 (16), so neither the task's CPU allotment nor the DSN another repository's URL builder writes
@@ -2339,9 +2343,13 @@ lives `BROKER_MAX_GRANT_SECONDS`; when every name is decided (`granted`/`denied`
 pending, the request and, if granted, its grant are written with no record; a request needing
 approval writes the request row and a `credential_requests` record together, and an identical
 concurrent request coalesces onto the same record (`coalesced: true`) instead of writing a second
-one. The enrollment lock, taken before any request or grant row, means a request racing the sweep
-or a revoke writes nothing on an enrollment that ended after `Create` first read it (`401
-PROOF_INVALID`, as for one that had ended before). A pending request leaves `pending` without a
+one. `Create` and `Get` answer that record's approver (`approver` on `POST /v1/requests` and
+`GET /v1/requests/{id}`, read from `credential_requests.approver`, the column
+`PendingForApprover` lists by, never re-evaluated from the current policy), so the asking session
+names whose list holds it; a request with no record answers null. The enrollment lock, taken
+before any request or grant row, means a request racing the sweep or a revoke writes nothing on an
+enrollment that ended after `Create` first read it (`401 PROOF_INVALID`, as for one that had ended
+before). A pending request leaves `pending` without a
 human only through `store.EndPendingRequests` (the session's cancel, the sweeper's expiry, an
 enrollment's end): one statement moves the request rows and writes each one's audit row and its
 record's terminal event.

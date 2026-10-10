@@ -256,7 +256,8 @@ same model access as the workers and a volume of its own for its session, relaun
 dies, and resumes the same session. You start nothing, and `legion controller start` against this
 daemon is refused: one controller runs per project. Nobody types into the pod: reach the controller
 through Dispatch (a message to its session on the Agents page, a reply to an ask it opened, a
-mention) and read its session with `kubectl logs <pod> -c controller`, its one container's log.
+mention) and read its session with `kubectl logs <pod> -c controller`, its one container's log. A
+Send from the Agents page is answered in the conversation that page shows.
 `legion claims list` shows its claim.
 Size its pod under `runtime.kubernetes.resources.controller`: with no requests it is the first pod
 the kubelet evicts under memory pressure.
