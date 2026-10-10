@@ -158,9 +158,12 @@
 
 ### Changed
 
-- `agent-secrets launcher login` and `launcher login-status` are now `agent-secrets machine login`
-  and `machine login-status`, beside `machine list` and `machine revoke`; `launcher` is no longer a
-  form, so a script that still calls it gets the usage and exit 2. Every message that said to run
+- **Breaking:** `agent-secrets launcher login` and `launcher login-status` are removed, with no
+  alias: `agent-secrets machine login` and `machine login-status` replace them, beside
+  `machine list` and `machine revoke`. A script that still calls `launcher` gets the usage and
+  exit 2, so a session launcher gating on `launcher login-status` reads that as no login and starts
+  its sessions with no broker identity. Move every caller to `machine login` and
+  `machine login-status` before it pins this release. Every message that said to run
   `agent-secrets launcher login`, from the CLI and from the helper, now names `machine login`.
 - The secrets broker takes no database password apart from its URL, and refuses to start while
   `BROKER_DATABASE_PASSWORD` is set or `BROKER_DATABASE_URL` names its
