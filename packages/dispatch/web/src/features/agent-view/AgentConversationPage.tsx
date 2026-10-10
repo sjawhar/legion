@@ -25,7 +25,7 @@ import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentRuntimeThread } from "./AgentRuntimeThread";
-import { currentModel } from "./conversation";
+import { currentModel, sessionCommands } from "./conversation";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
 
 /** What the live dot says about the relay, and how it reads to a screen reader. */
@@ -83,6 +83,12 @@ export function AgentConversationPage(): ReactNode {
   // the page, and a pick the session does not advertise would be refused.
   const [picked, setPicked] = useState<MessageDeliveryMode | null>(null);
   const mode = picked !== null && modes.includes(picked) ? picked : (modes[0] ?? "aside");
+  // The slash commands the composer completes (LEGION-394). The session runs typed input only
+  // from a Send or an Aside, so a BTW, a side question it answers, offers none; nor does a
+  // session that sent no list, whose host cannot run typed input.
+  const listed = sessionCommands(conversation);
+  const commands =
+    mode === "btw" || listed === undefined || listed.length === 0 ? undefined : listed;
   const [sendError, setSendError] = useState<string | null>(null);
   // The human's direct messages and the session's replies to them, as Dispatch stores them. A
   // person's Send or Aside to an Oh My Pi session becomes the session's own user turn, which the
@@ -199,10 +205,11 @@ export function AgentConversationPage(): ReactNode {
           what failed. */}
       <ErrorBoundary region="this conversation" resetKey={sessionId}>
         <AgentRuntimeThread
+          commands={commands}
           conversation={conversation}
           empty={emptyText(responding)}
           onNew={onNew}
-          placeholder={`Message ${label} — delivered as ${MODE_LABELS[mode]}…`}
+          placeholder={`Message ${label} — delivered as ${MODE_LABELS[mode]}${commands === undefined ? "" : ", / for commands"}…`}
           resetKey={sessionId}
           sessionId={sessionId}
           stored={stored.data ?? []}

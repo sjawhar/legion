@@ -122,7 +122,12 @@ function Transcript({ messages }: { messages: ThreadMessageLike[] }): ReactNode 
   });
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <AgentThread empty="Nothing yet." placeholder="Message the session…" resetKey="session-1" />
+      <AgentThread
+        commands={undefined}
+        empty="Nothing yet."
+        placeholder="Message the session…"
+        resetKey="session-1"
+      />
     </AssistantRuntimeProvider>
   );
 }

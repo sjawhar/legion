@@ -440,6 +440,82 @@ test("the live view shows an unread reply from outside the fifty most active con
   }
 });
 
+// A session that can run typed input lists its slash commands (LEGION-394); the composer completes
+// them from a leading `/`, and a pick is the text a terminal would receive, sent through the same
+// delivery as any other message.
+test("the composer completes the session's slash commands and sends a picked one as typed", async ({
+  browser,
+}) => {
+  // A session of its own: the relay's replay is process-global, and the planner's is the one
+  // other rows read.
+  const commander: FakeSession = {
+    ...planner,
+    session_id: "01a0e0c1-0000-7000-8000-0000000c0de5",
+    title: "Commander",
+  };
+  await setLiveSessions([planner, commander]);
+  await publishAgentStreamFrame(
+    commander.session_id,
+    {
+      frames: [
+        {
+          commands: [
+            {
+              description: "Start a new session",
+              name: "new",
+              source: "builtin",
+              terminalOnly: true,
+            },
+            { description: "Compact the session's context", name: "compact", source: "builtin" },
+            { name: "skill:dispatch", source: "skill" },
+          ],
+          kind: "commands",
+          seq: 1,
+          v: 1,
+        },
+      ],
+      session_id: commander.session_id,
+      v: 1,
+    },
+    "replay"
+  );
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.goto(`/agents/${commander.session_id}/live`);
+    const input = page.getByTestId("agent-composer").locator("textarea");
+    await expect(input).toHaveAttribute("placeholder", /\/ for commands/);
+
+    await input.fill("/");
+    const list = page.getByRole("listbox", { name: "Slash commands" });
+    await expect(list.getByRole("option")).toHaveText([
+      /^\/compact/,
+      /^\/skill:dispatch/,
+      /^\/new\s*terminal only/,
+    ]);
+    await input.pressSequentially("comp");
+    await expect(list.getByRole("option")).toHaveText([/^\/compact/]);
+    await input.press("Enter");
+    await expect(input).toHaveValue("/compact ");
+    await expect(list).toHaveCount(0);
+
+    await input.press("Enter");
+    await expect
+      .poll(async () =>
+        (await getSentMessages()).map((sent) => ({
+          message: sent.message,
+          payload: JSON.parse(String(sent.payload)),
+        }))
+      )
+      .toContainEqual({
+        message: "/compact",
+        payload: expect.objectContaining({ delivery: expect.objectContaining({ mode: "steer" }) }),
+      });
+  } finally {
+    await context.close();
+  }
+});
+
 test("a session that has published nothing renders as empty, not as a conversation", async ({
   browser,
 }) => {

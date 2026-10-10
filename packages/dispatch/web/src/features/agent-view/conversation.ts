@@ -1,10 +1,10 @@
 import type { ThreadMessageLike } from "@assistant-ui/react";
 import type {
+  AgentStreamCommand,
   AgentStreamFrame,
   AgentStreamMessage,
   AgentStreamToolResult,
 } from "@legion/contracts";
-
 import { dispatchMetadata } from "./dispatch-marks";
 
 /**
@@ -20,15 +20,41 @@ export interface AgentConversation {
   readonly messages: readonly AgentStreamMessage[];
   /** Tool results keyed by tool call id, which is how they find their call. */
   readonly results: Readonly<Record<string, AgentStreamToolResult>>;
-  /** The highest `seq` already applied per message id and per tool call id. */
+  /** The slash commands the session takes from Dispatch, as its newest `commands` frame lists
+   *  them; undefined until one arrives, which a session that cannot take typed input never sends. */
+  readonly commands: readonly AgentStreamCommand[] | undefined;
+  /** The highest `seq` already applied per message id, per tool call id, and to the command list. */
   readonly applied: Readonly<Record<string, number>>;
 }
 
 export const EMPTY_CONVERSATION: AgentConversation = {
   applied: {},
+  commands: undefined,
   messages: [],
   results: {},
 };
+
+/** Where a command's `source` may come from, as the contract lists them. */
+const COMMAND_SOURCES: Record<AgentStreamCommand["source"], true> = {
+  builtin: true,
+  extension: true,
+  prompt: true,
+  skill: true,
+};
+
+/** Whether one listed command has the contract's shape. The list is the bus's like any frame, and
+ *  the composer renders every field of it. */
+function isCommand(command: AgentStreamCommand | null | undefined): boolean {
+  return (
+    typeof command === "object" &&
+    command !== null &&
+    typeof command.name === "string" &&
+    (command.description === undefined || typeof command.description === "string") &&
+    typeof command.source === "string" &&
+    Object.hasOwn(COMMAND_SOURCES, command.source) &&
+    (command.terminalOnly === undefined || command.terminalOnly === true)
+  );
+}
 
 /**
  * Whether a frame is one this build can render. Frames arrive as JSON off a bus any client can
@@ -48,6 +74,11 @@ export function isRenderableFrame(frame: AgentStreamFrame): boolean {
       typeof result.output === "string" &&
       typeof result.at === "number"
     );
+  }
+  if (frame.kind === "commands") {
+    // The whole list or nothing: a list missing one entry would tell the person a command they
+    // could send does not exist.
+    return Array.isArray(frame.commands) && frame.commands.every(isCommand);
   }
   if (frame.kind !== "message") return false;
   const { message } = frame;
@@ -80,9 +111,19 @@ export function applyFrame(state: AgentConversation, frame: AgentStreamFrame): A
     const key = `t:${frame.result.toolCallId}`;
     if ((state.applied[key] ?? 0) >= frame.seq) return state;
     return {
+      ...state,
       applied: { ...state.applied, [key]: frame.seq },
-      messages: state.messages,
       results: { ...state.results, [frame.result.toolCallId]: frame.result },
+    };
+  }
+  if (frame.kind === "commands") {
+    // One list per session, last-writer-wins by `seq` like a message's snapshots.
+    const key = "commands";
+    if ((state.applied[key] ?? 0) >= frame.seq) return state;
+    return {
+      ...state,
+      applied: { ...state.applied, [key]: frame.seq },
+      commands: frame.commands,
     };
   }
   const key = `m:${frame.message.id}`;
@@ -102,9 +143,9 @@ export function applyFrame(state: AgentConversation, frame: AgentStreamFrame): A
     left.at === right.at ? left.id.localeCompare(right.id) : left.at - right.at
   );
   return {
+    ...state,
     applied: { ...state.applied, [key]: frame.seq },
     messages,
-    results: state.results,
   };
 }
 
@@ -185,6 +226,14 @@ export function currentModel(state: AgentConversation): string | undefined {
 /** Whether the session is mid-turn, which is what shows the composer a running thread. */
 export function isRunning(state: AgentConversation): boolean {
   return state.messages.some((message) => message.streaming);
+}
+
+/** The slash commands the composer completes: the session's newest list, or undefined for a
+ *  session that sent none, which is one whose host cannot run typed input. */
+export function sessionCommands(
+  state: AgentConversation
+): readonly AgentStreamCommand[] | undefined {
+  return state.commands;
 }
 
 /** One streamed user message a person's Dispatch message became: the Dispatch message it says it
