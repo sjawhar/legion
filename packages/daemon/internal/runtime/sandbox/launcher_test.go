@@ -189,7 +189,7 @@ func TestEveryRolesPrivateVolumesMountInItsContainerAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := r.podTemplate(l, false).Spec
+	pod := r.podTemplate(l).Spec
 	containers := append(slices.Clone(pod.InitContainers), pod.Containers...)
 	for _, role := range claim.Roles {
 		for _, volume := range []string{

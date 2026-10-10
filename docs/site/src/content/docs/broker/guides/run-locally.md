@@ -91,8 +91,9 @@ demo-read-token-value
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'echo "deploying with a ${#DEMO_API_KEY}-character key"'
 ```
 
-The last command waits for approval. In the third shell, list what waits on the approver and
-approve it ([approving a request](/legion/broker/guides/approve-a-request/#without-dispatch)
+The last command waits for approval, and names who approves it (`waiting for ada@example.com to
+approve it under Credential requests in their Dispatch Inbox`). In the third shell, list what waits
+on the approver and approve it ([approving a request](/legion/broker/guides/approve-a-request/#without-dispatch)
 shows the output), and the command runs:
 
 ```console
@@ -106,8 +107,10 @@ shows and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` pr
 ## Write a secret and see it served
 
 The broker reads the fake secrets file again each time it lists the secrets, describes one or
-reads a value, so an edit to the file is what a write to Secrets Manager is in production. Add a
-secret of `ada@example.com`'s to it, here with `jq`:
+reads a value, so an edit to the file is what a write to Secrets Manager is in production, where a
+person writes with `agent-secrets secret` ([manage a secret](/legion/broker/guides/manage-a-secret/));
+that CLI calls AWS itself, so it cannot write this file. Add a secret of `ada@example.com`'s to it,
+here with `jq`:
 
 ```sh
 jq '.secrets += [{"name": "example/agent-secrets/demo-new-token",
@@ -117,7 +120,7 @@ jq '.secrets += [{"name": "example/agent-secrets/demo-new-token",
 mv "$DEV_BROKER_DIR/fake-secrets.json.new" "$DEV_BROKER_DIR/fake-secrets.json"
 ```
 
-and ask the broker to reread it, as whoever writes a secret does right after the write
+and ask the broker to reread it, as `agent-secrets secret` does right after each write
 ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)). The same call
 answered `{"name":"DEMO_NEW_TOKEN","served":false,"reason":"absent"}` before the edit:
 

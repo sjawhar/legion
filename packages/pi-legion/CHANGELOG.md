@@ -25,7 +25,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- `legion.daemonApiVersion` is 18 (LEGION-631). Each Legion role's GitHub App token is now a file
+- `legion.daemonApiVersion` is 19 (LEGION-631). Each Legion role's GitHub App token is now a file
   the pane's plain `gh` and `git` read: the daemon sets `GH_CONFIG_DIR` (gh's `hosts.yml` and
   `config.yml`, rendered and refreshed by the daemon) and empties `GH_TOKEN`, `GITHUB_TOKEN` and
   `GH_HOST`; the daemon's credential routes, the `gh` shim, the `legion gh` and `legion credential`
@@ -54,8 +54,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `read_state` (the whole `GET /legion/v1/state`) and `set_status` (`POST /legion/v1/issues/status`
   under a controller grant minted with its registration secret), in place of running
   `legion state` and `legion status` from bash. The client's strict parse needs this release beside
-  a daemon at 18; the daemon's boot gate and `legion probe-image` refuse any earlier contract (the
-  8.6.0 release declares 17 and still mints a grant before every command; 8.4.1 declares 16). The
+  a daemon at 19; the daemon's boot gate and `legion probe-image` refuse any earlier contract (the
+  8.9.0 release declares 18 and the 8.6.0 release 17, each still minting a grant before every command; 8.4.1 declares 16). The
   merger submits the merge itself the moment READY is accepted, with
   `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` (a merge queue
   enqueues the pull request, a repository without one arms auto-merge, and the repository's
@@ -65,6 +65,18 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   `legion-worker` skill now say the tester runs the changed surface for real, tries to break it,
   judges whether the implementer's tests would catch what it broke and reads CI for everything
   static; the sentences that had it rerun the lint, type or unit lanes before a push are gone.
+- `legion.daemonApiVersion` is 18. Contract 18 makes each issue's Agent Sandbox pod independent,
+  on a volume of its own (LEGION-632): the pod's `workspace-init provision` container no longer
+  carries `LEGION_REMOVABLE_WORKSPACES` or `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` (the
+  removable-workspaces pass and the repository flock went with the shared tree volume), nor the
+  `LEGION_ROLE` and `LEGION_GENERATION` that seeded that pass, and `LEGION_EXPECT_TREE_VOLUME` is now
+  `LEGION_EXPECT_ISSUE_VOLUME`; each role's agent is told a state home of its own
+  (`XDG_STATE_HOME=/home/legion/.local/state/<role>`), under which the image's shim makes Oh My
+  Pi's profile directory, so the browser broker's lock is one name per container. A worker image
+  built before 18 would act on a contract the daemon no longer speaks, so the daemon's image probe
+  refuses it (the 8.4.x and 8.5.x releases declare 16 and 17, whose `workspace-init` still reads
+  the shared disk's variables); install this release with a Go `legion` and a worker image built
+  from the same commit.
 - The `legion-controller` skill no longer tells a controller the daemon launched
   (`controller: daemon`) that nobody types into its session or reads its replies, or that text
   left in its session reaches no one (LEGION-306). A plain user turn in that session other than
@@ -136,7 +148,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   itself did not move (no request, response or pane variable changed): the pre-split package's last
   release left it at 13 (LEGION-583: the `push` grant for `legion push` and the worker image's
   `LEGION_REMOVABLE_WORKSPACES` payload, described in `packages/pi-envoy/CHANGELOG.md`), and this
-  release declares 18 (LEGION-631, above; 17 since LEGION-588, 16 since LEGION-578, 15 since
+  release declares 19 (LEGION-631, above; 18 since LEGION-632, 17 since LEGION-588, 16 since LEGION-578, 15 since
   LEGION-462, 14 since LEGION-592). The Envoy messaging and Dispatch command every session uses are
   `@sjawhar/pi-envoy`'s, installed beside this package; a Legion pane needs both.
   The Legion entry claims roles, matches injected user turns and reads the bootstrapped session

@@ -73,9 +73,12 @@ variables (`GH_CONFIG_DIR`, the role's directory of gh files, with `GH_TOKEN`, `
 `GH_HOST` set empty: read by the pane's `gh` and `git`, by nothing here), the Envoy
 variables (`ENVOY_URL`, `ENVOY_NATS_URL`, `ENVOY_TOKEN_FILE`, read by `@legion/envoy-client`),
 `NATS_NKEY_SEED_FILE` when the daemon has a NATS nkey seed, and `DISPATCH_URL`/`DISPATCH_TOKEN_FILE`
-when the daemon has `dispatch_url` configured — and, beside the pane, `LEGION_REMOVABLE_WORKSPACES`
-on a pod's `workspace-init provision` container, which the image's own `legion`, built from the same
-commit as this plugin, decodes strictly. A change to any of these surfaces bumps the field and the
+when the daemon has `dispatch_url` configured — and, beside the pane, the environment of a pod's
+`workspace-init provision` init container (`initEnvironment`, `internal/runtime/sandbox/manifest.go`:
+the image's `PATH`, `LEGION_EXPECT_ISSUE_VOLUME` when the issue's volume must already hold the clone
+or a retained session, `LEGION_WORKSPACE_RECOVERED_FROM` on a relaunch after that volume was lost,
+and the XDG base directories), which the image's own `legion`, built from the same commit as this
+plugin, reads. A change to any of these surfaces bumps the field and the
 daemon's `DaemonAPIVersion` (`internal/api/version.go`, whose doc comment is the contract's
 history) in the same commit: `packages/contracts/fixtures/daemon-api/version.json`, written by the
 daemon's golden test, is what `src/daemon-api-version.test.ts` pins the field to, so neither
@@ -84,16 +87,19 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 18 for contract 18's token file (LEGION-631: the three routes that redeemed a grant for a
+number is 19 for contract 19's token file (LEGION-631: the three routes that redeemed a grant for a
 GitHub or git credential and the grant request's `push` are gone, the pane gains the GitHub
 variables above and loses the absolute-path pins of its gh, git and jj, the credential-helper
 variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/complete` takes no `commit` and answers
-`note`; `POST /legion/v1/threads/resolve` is deleted), after contract 17's `dispatch` command
-instructions in every daemon role prompt (LEGION-588), contract 16's `capabilities` list on
+`note`; `POST /legion/v1/threads/resolve` is deleted), after contract 18's independent issue pods,
+each on a volume of its own (LEGION-632: the init container's environment is the four surfaces
+above and nothing of a shared disk — no removable-workspaces list, no lock wait, no role or
+generation — and its volume expectation is `LEGION_EXPECT_ISSUE_VOLUME`), contract 17's `dispatch`
+command instructions in every daemon role prompt (LEGION-588), contract 16's `capabilities` list on
 `GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
 (LEGION-462), contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push`
-grant and `LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583); the Envoy plugin's manifest carries
-no `legion` key, and the gate reads only this package's.
+grant and `LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583, the list contract 18 removed); the
+Envoy plugin's manifest carries no `legion` key, and the gate reads only this package's.
 
 The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless the installed
 manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves
@@ -106,7 +112,7 @@ role `controller` and no tree or issue, the `/grants` controller-session form
 (`{sessionId, secret}`), and `controllerLocator` (`{runtime, external: true, sessionId,
 registeredAt}`) on `/legion/v1/state`.
 Contract 5 added `LEGION_GRANT_FILE` to the pane's environment (LEGION-262), the file the tool-call
-hook minted a grant into before a bash command that invoked `legion`; contract 18 removes it with
+hook minted a grant into before a bash command that invoked `legion`; contract 19 removes it with
 that hook. Nothing in a pane runs `legion` from bash: the `legion` tool mints each operation's grant
 in-process and posts it with the request, and `gh` and `git` read the role's GitHub App token from
 the gh files under the pane's `GH_CONFIG_DIR` (`hosts.yml` and `config.yml`, rendered and refreshed

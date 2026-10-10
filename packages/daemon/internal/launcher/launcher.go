@@ -419,7 +419,7 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 // agent: Oh My Pi starts a new session at a --resume path it finds empty. It looks where the child's
 // Oh My Pi will, by the storage the child's environment names: the session table when
 // OMP_SESSION_STORAGE is sql (the runtime's runtime.kubernetes.session_store postgres), through the
-// URL file OMP_SESSION_SQL_DSN_FILE names, and otherwise the session file on the tree volume.
+// URL file OMP_SESSION_SQL_DSN_FILE names, and otherwise the session file on the issue's volume.
 //
 // It also reports whether the workspace the child works in, LEGION_WORKSPACE, was recreated since the
 // session was last written: provisioning recorded its creation later than that write

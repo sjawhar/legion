@@ -253,6 +253,27 @@ func TestLoadServesASecretOnlyWhileAVersionIsCurrent(t *testing.T) {
 	}
 }
 
+// TestHasCurrentVersionIsTheRuleLoadServesBy pins the exported rule both the broker's load and the
+// agent-secrets CLI's VALUE column read: a secret has a value while one of its versions carries
+// AWSCURRENT, and not otherwise.
+func TestHasCurrentVersionIsTheRuleLoadServesBy(t *testing.T) {
+	for _, tc := range []struct {
+		stages map[string][]string
+		want   bool
+	}{
+		{onlyCurrent, true},
+		{map[string][]string{"v1": {"AWSPREVIOUS"}, "v2": {"AWSCURRENT"}, "v3": {"AWSPENDING"}}, true},
+		{nil, false},
+		{map[string][]string{}, false},
+		{map[string][]string{"v1": {"AWSPENDING"}}, false},
+		{map[string][]string{"v1": {"AWSPREVIOUS"}}, false},
+	} {
+		if got := policy.HasCurrentVersion(tc.stages); got != tc.want {
+			t.Fatalf("HasCurrentVersion(%v) = %v, want %v", tc.stages, got, tc.want)
+		}
+	}
+}
+
 // TestReloadServesASecretOnceItIsGivenAValue pins that a secret created and tagged without a value
 // is left out of the live policy, and that the reload after its value is put serves it, with no
 // restart. Its synctest bubble waits for the reload goroutine to return.

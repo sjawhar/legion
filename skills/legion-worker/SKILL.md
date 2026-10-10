@@ -408,8 +408,9 @@ mergeable, so the implementer forward-merges a conflicting one first (*Reintegra
 
 Before the push, inspect `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'` and run the
 identity check above: the chain carries every earlier phase's pushed commits, and pushing them
-with yours is expected. `jj git push` refuses a remote branch that moved because another role
-pushed: report the refusal to the architect with its output, never force. A handoff commit never
+with yours is expected. Your issue's roles share one clone (under tmux every issue does), so
+another role's push moves `legion/<KEY>@origin` here at once, and `jj git push` refuses a remote
+branch that moved: report the refusal to the architect with its output, never force. A handoff commit never
 sits on an implementer's unpushed chain: when the issue moves back to planning, the implementer's
 unpushed commits stay off the bookmark until the implementer returns, and the planner writes its
 handoff on the remote tip. The one sanctioned non-fast-forward move is the rewrite of a commit you

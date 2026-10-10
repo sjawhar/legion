@@ -2451,10 +2451,14 @@ export interface DeliveryRunJob {
   readonly completed_at: string | null;
 }
 
+/** A concluded job's result, as `delivery_run_jobs` stores it. */
+export type DeliveryJobConclusion = "success" | "failure" | "cancelled" | "skipped" | "timed_out";
+
 /**
  * One population pull request on `GET /api/v1/delivery/timeline` (LEGION-567): the facts LEGION-294
- * defines plus the two fields the server derives at read time from the stored facts,
- * `deployed_status` and (on `DeliveryRun`) `root_failing_job`.
+ * defines plus what the server derives at read time from the stored facts: `deployed_status`, the
+ * linked issue's title, priority and effective components (the nearest issue on its parent chain
+ * that chose, as every issue read resolves them), and (on `DeliveryRun`) `root_failing_job`.
  */
 export interface DeliveryPR {
   /** "owner/repo#N". */
@@ -2473,6 +2477,13 @@ export interface DeliveryPR {
   readonly partial: boolean;
   readonly rework: boolean;
   readonly issue: string | null;
+  /** The linked issue's title; null with no issue, or one Dispatch does not hold. */
+  readonly issue_title: string | null;
+  /** The linked issue's priority, `P0` (highest) to `P3`; null with no issue or none set. */
+  readonly priority: "P0" | "P1" | "P2" | "P3" | null;
+  /** The linked issue's effective components, each `<project>/<id>` (a key of the response's
+   *  `components`); empty with no issue or none attached. */
+  readonly components: readonly string[];
   readonly sessions: readonly string[];
   /**
    * `parent_agent` and `session` (this field's `sessions` above) resolve to the same set of
@@ -2491,9 +2502,17 @@ export interface DeliveryPR {
   readonly unfetchable_reason: string | null;
 }
 
-/** One `kind: "deploy"` run on `GET /api/v1/delivery/timeline`: a successful production deploy
- *  (size by `prs`, the PRs it shipped first) or a pipeline failure (`failed_jobs`,
- *  `root_failing_job`). */
+/** A run's production job (the configured `production_job_name`): its result and when it finished,
+ *  both null while it runs. A successful one is a production deploy, drawn at `completed_at`; a
+ *  failed one is a pipeline failure even when no other job failed. */
+export interface DeliveryRunProduction {
+  readonly conclusion: DeliveryJobConclusion | null;
+  readonly completed_at: string | null;
+}
+
+/** One run of the deploy workflow on `GET /api/v1/delivery/timeline` (the server returns deploy
+ *  runs only): a production deploy (`production` succeeded; sized by `prs`) and/or a pipeline
+ *  failure (`failed_jobs`, `root_failing_job`, or a failed `production`). */
 export interface DeliveryRun {
   readonly id: number;
   readonly url: string;
@@ -2502,23 +2521,72 @@ export interface DeliveryRun {
   readonly started_at: string;
   readonly completed_at: string | null;
   readonly conclusion: "success" | "failure" | "cancelled" | null;
+  /** Null when the run has no production job. */
+  readonly production: DeliveryRunProduction | null;
   readonly failed_jobs: readonly DeliveryRunJob[];
   /** The earliest-finishing failed job that isn't a summary/guard job, falling back to the
    *  earliest failed job overall; null on a run with no failed job. */
   readonly root_failing_job: DeliveryRunJob | null;
-  /** The PRs this run shipped first. */
-  readonly prs: readonly string[];
+  /** Every window pull request this run shipped first, whatever facets the request names. */
+  readonly prs: readonly { readonly id: string; readonly title: string }[];
+}
+
+/** The timeline's facets, as the query parameters that select them and the `facet_counts` keys
+ *  that count them. */
+export type DeliveryFacet =
+  | "repo"
+  | "parent_agent"
+  | "session"
+  | "issue"
+  | "priority"
+  | "component"
+  | "author"
+  | "rework"
+  | "deployed";
+
+/** The facets the page colours merges by, as the `color_counts` keys that count them. */
+export type DeliveryColorFacet = "repo" | "author" | "priority" | "component" | "parent_agent";
+
+/** One architecture component a pull request's issue can carry; `parent` is another key of the
+ *  response's `components`, and a component facet selection of a parent includes its children. */
+export interface DeliveryComponent {
+  readonly title: string;
+  readonly parent: string | null;
+}
+
+/** One pull request of the deploy repository that merged before the timeline's window and had
+ *  not shipped by its start, matching the request's facets and search: the waiting-to-deploy line
+ *  starts the window counting it, and stops when it ships (`deployed_at`, null while it waits). */
+export interface DeliveryWaitingPR {
+  readonly merged_at: string;
+  readonly deployed_at: string | null;
 }
 
 /**
- * `GET /api/v1/delivery/timeline?from&to&<facets>`: merges, deploys, pipeline failures and
- * waiting-to-deploy PRs within `[from, to)` and the given facets. `runs` holds `kind: "deploy"`
- * runs only; a deploy's shipped PRs are `prs[].deploy_run`.
+ * `GET /api/v1/delivery/timeline?from&to&q&<facets>`: merges, deploys, pipeline failures and
+ * waiting-to-deploy PRs within `[from, to)`, the search and the given facets. `runs` holds the
+ * deploy workflow's runs only. `waiting` holds the pull requests that merged before `from` and had
+ * not shipped by then, under the same search and facets. `facet_counts` counts, per facet, the
+ * window's pull requests by that facet's values with the search and every other facet applied and
+ * its own selection ignored, so picking a value never zeroes its own count; `color_counts` counts
+ * them by each colour-by facet's value with nothing applied, so a value keeps its colour while
+ * facets change. A pull request with no issue counts under `__no_issue__` for priority and
+ * component, an issue without either under `__no_priority__` / `__no_component__`, and a pull
+ * request naming no session under `__no_session__` for parent agent; each placeholder also
+ * selects. `components` names every component of the projects the window's issues belong to,
+ * `issue_titles` every issue its pull requests name. `measures` is what
+ * `GET /api/v1/delivery/measures` answers for the same window, search and facets, computed from the
+ * pull requests this read already holds, so a page showing both reads them once.
  */
 export interface DeliveryTimelineResponse {
   readonly window: { readonly from: string; readonly to: string };
   readonly prs: readonly DeliveryPR[];
+  readonly waiting: readonly DeliveryWaitingPR[];
   readonly runs: readonly DeliveryRun[];
+  readonly facet_counts: Readonly<Record<DeliveryFacet, Readonly<Record<string, number>>>>;
+  readonly color_counts: Readonly<Record<DeliveryColorFacet, Readonly<Record<string, number>>>>;
+  readonly components: Readonly<Record<string, DeliveryComponent>>;
+  readonly issue_titles: Readonly<Record<string, string>>;
   readonly freshness: {
     readonly last_event_at: string | null;
     readonly last_reconcile_at: string | null;
@@ -2530,6 +2598,166 @@ export interface DeliveryTimelineResponse {
      *  never retried again automatically. */
     readonly unfetchable_count: number;
   };
+  readonly measures: DeliveryMeasuresResponse;
+}
+
+/** One job of `GET /api/v1/delivery/runs/{id}`, with its result and timings. */
+export interface DeliveryRunJobDetail {
+  readonly name: string;
+  readonly started_at: string | null;
+  readonly completed_at: string | null;
+  readonly conclusion: DeliveryJobConclusion | null;
+}
+
+/** `GET /api/v1/delivery/runs/{id}`: one deploy-repository run with every job it ran, by start (a
+ *  job that never started last, then by name). */
+export interface DeliveryRunDetail {
+  readonly id: number;
+  readonly url: string;
+  readonly jobs: readonly DeliveryRunJobDetail[];
+}
+
+/** A set of durations' median, 90th percentile (linear between the two nearest ranks) and maximum,
+ *  in minutes; all three null for an empty set. */
+export interface DeliverySpread {
+  readonly median_minutes: number | null;
+  readonly p90_minutes: number | null;
+  readonly max_minutes: number | null;
+}
+
+/** One UTC day of the measures' window; `partial` when the window covers only part of it. Runs
+ *  count on the day they started, so the days sum to the window's totals. */
+export interface DeliveryDailyPoint {
+  /** `YYYY-MM-DD`, UTC. */
+  readonly day: string;
+  readonly partial: boolean;
+  /** Runs whose production job succeeded. */
+  readonly deploys: number;
+  /** Runs that concluded success or failure (a cancelled run is not a deploy attempt). */
+  readonly concluded: number;
+  /** Concluded runs whose production job succeeded. */
+  readonly reached_production: number;
+  readonly cancelled: number;
+  /** `reached_production / concluded`; null when nothing concluded. */
+  readonly run_success_rate: number | null;
+}
+
+/** Failed-change flags by state against the population: a flag counts only when its broken pull
+ *  request is in it, and only a confirmed one counts toward `rate`. */
+export interface DeliveryFlagCounts {
+  readonly confirmed: number;
+  readonly pending: number;
+  readonly rejected: number;
+  /** Confirmed flags whose fix is a revert. */
+  readonly reverts: number;
+  /** Pull requests (per PR) or successful deploys (per deploy). */
+  readonly total: number;
+  /** `confirmed / total`; 0 when `total` is 0. */
+  readonly rate: number;
+}
+
+/** The per-deploy change failure rate: each count is deploys that shipped a flagged pull request,
+ *  each deploy once. */
+export interface DeliveryDeployFlagCounts extends DeliveryFlagCounts {
+  /** Deploys with a confirmed or a pending flag. */
+  readonly confirmed_or_pending: number;
+  /** The rate if every pending flag were confirmed: `confirmed_or_pending / total`. */
+  readonly upper_bound_rate: number;
+}
+
+/** The delivery measures (LEGION-294's definitions) over one window's selected population. */
+export interface DeliveryMeasures {
+  /** Successful production deploys on main started in the window; `deploys_with_prs` those that
+   *  shipped at least one pull request merged in the window, whatever the facets. */
+  readonly deploy_frequency: {
+    readonly successful_deploys: number;
+    readonly deploys_with_prs: number;
+    readonly per_day: number;
+    readonly with_prs_per_day: number;
+  };
+  /** Merge, first commit and open to production over the deployed pull requests; open to merge
+   *  over every one. */
+  readonly lead_time: {
+    readonly merge_to_production: DeliverySpread;
+    readonly first_commit_to_production: DeliverySpread;
+    readonly opened_to_production: DeliverySpread;
+    readonly opened_to_merge: DeliverySpread;
+  };
+  readonly change_failure_rate: {
+    readonly per_pr: DeliveryFlagCounts;
+    readonly per_deploy: DeliveryDeployFlagCounts;
+  };
+  /** Median minutes from a broken pull request's deploy to its fix's, over confirmed flags whose
+   *  two pull requests both deployed; null when there is none. */
+  readonly time_to_restore: { readonly median_minutes: number | null };
+  /** Rework pull requests over all; 0 with none. */
+  readonly rework_share: number;
+  /** Deploy runs that concluded success or failure, those of them that reached production, the
+   *  cancelled runs beside them, and the rate (null when none concluded). */
+  readonly deploy_run_success: {
+    readonly concluded: number;
+    readonly reached_production: number;
+    readonly cancelled: number;
+    readonly rate: number | null;
+  };
+  /** Every UTC day of the window, oldest first. */
+  readonly daily: readonly DeliveryDailyPoint[];
+}
+
+/** Sami's engineering targets: "under" targets are met strictly below, "at least" targets at or
+ *  above. */
+export interface DeliveryTargets {
+  /** At least. */
+  readonly deploys_per_day: number;
+  /** Under, per deploy. */
+  readonly change_failure_rate: number;
+  /** Under, for every change: judged on the maximum. */
+  readonly merge_to_production_minutes: number;
+  /** Under, judged on the median. */
+  readonly opened_to_merge_median_minutes: number;
+  /** At least. */
+  readonly deploy_run_success_rate: number;
+  /** Exactly. */
+  readonly unowned_p0: number;
+}
+
+/** Whether each measure meets its target; null when the window has nothing to measure. */
+export interface DeliveryKpiStatus {
+  readonly deploys_per_day: boolean;
+  readonly change_failure_rate: boolean | null;
+  readonly change_failure_rate_upper_bound: boolean | null;
+  readonly merge_to_production_median: boolean | null;
+  /** Every change: the maximum. */
+  readonly merge_to_production: boolean | null;
+  readonly opened_to_merge: boolean | null;
+  readonly deploy_run_success: boolean | null;
+  readonly unowned_p0: boolean;
+}
+
+/** One open P0 issue with neither a claim nor a route. */
+export interface DeliveryUnownedIssue {
+  readonly key: string;
+  readonly title: string;
+}
+
+/**
+ * `GET /api/v1/delivery/measures?from&to&q&<facets>`: the delivery measures for `[from, to)` over
+ * the pull requests the timeline's search and facets select, computed on request from stored
+ * facts. Facets narrow the pull-request measures; deploys and runs follow the window alone.
+ * `flags_source` says whether stored failed-change flags fed the change failure rate and time to
+ * restore (`none`: no flags are stored, so both count nothing). `unowned_p0` spans every project
+ * and follows neither the window nor the facets; `status` judges `measures` and it against
+ * `targets`.
+ */
+export interface DeliveryMeasuresResponse {
+  readonly window: DeliveryTimelineResponse["window"];
+  readonly computed_at: string;
+  readonly measures: DeliveryMeasures;
+  readonly flags_source: "none" | "stored";
+  readonly unowned_p0: readonly DeliveryUnownedIssue[];
+  readonly targets: DeliveryTargets;
+  readonly status: DeliveryKpiStatus;
+  readonly freshness: DeliveryTimelineResponse["freshness"];
 }
 
 /**

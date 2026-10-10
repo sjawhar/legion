@@ -207,46 +207,6 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 }
 
-// PullRequestsByIssue is removableWorkspaces' own batched read (internal/daemon/removable.go):
-// one query for every candidate's pull request instead of one PullRequest call per candidate. An
-// issue with no pull request is simply absent from the map, the same as PullRequest's own nil;
-// an empty issues slice returns an empty map without a query, and an issue not asked for is never
-// in the result even when it has a pull request of its own.
-func TestPullRequestsByIssueBatchesOneQueryPerIssueIntoOne(t *testing.T) {
-	ctx := context.Background()
-	st := migratedStore(t)
-	records := NewStore()
-	withPR := issueFixture("LEGION-220")
-	withoutPR := issueFixture("LEGION-221")
-	notAsked := issueFixture("LEGION-222")
-	pr := PullRequest{
-		Issue: withPR.Key, Repo: "sjawhar/legion", Number: 1220, Branch: "legion/LEGION-220",
-		HeadSHA: "deadbeef", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC),
-		CheckedHead: "deadbeef", State: PullRequestMerged,
-		Cancelled: []string{}, CheckRuns: []AttemptRun{}, Pushes: []ClassifiedPush{},
-		Required: []string{}, Workflows: []RequiredWorkflow{},
-	}
-	inTx(t, st, func(tx pgx.Tx) {
-		must(t, records.PutIssue(ctx, tx, withPR))
-		must(t, records.PutIssue(ctx, tx, withoutPR))
-		must(t, records.PutIssue(ctx, tx, notAsked))
-		must(t, records.PutPullRequest(ctx, tx, pr))
-	})
-	inTx(t, st, func(tx pgx.Tx) {
-		got, err := records.PullRequestsByIssue(ctx, tx, []string{withPR.Key, withoutPR.Key})
-		must(t, err)
-		if len(got) != 1 {
-			t.Fatalf("pull requests by issue = %#v, want exactly one (withPR's)", got)
-		}
-		if !samePullRequest(got[withPR.Key], pr) {
-			t.Fatalf("pull requests by issue[%s] = %#v, want %#v", withPR.Key, got[withPR.Key], pr)
-		}
-		if empty, err := records.PullRequestsByIssue(ctx, tx, nil); err != nil || len(empty) != 0 {
-			t.Fatalf("pull requests of no issues = %#v, %v, want an empty map and no error", empty, err)
-		}
-	})
-}
-
 func TestStoreRoundTripsLingerStateAndRefusesHeldFromHeld(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)

@@ -452,3 +452,46 @@ func TestTheSchemaRefusesAControllerClaimOnAnIssueAndAWorkflowClaimOnNone(t *tes
 		}
 	}
 }
+
+// IssueHasSessions reads the issue's own claims: a session a role of the issue recorded counts,
+// retired roles included, and a session another issue of the same tree recorded does not, since it
+// is on that issue's own volume; nor does another project's claim on the same key.
+func TestIssueHasSessionsCountsOnlyTheIssuesOwnClaims(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	child := tmuxClaim("legion-LEGION-209-implementer")
+	root := supervise.Claim{
+		Token: "legion-LEGION-208-architect", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-208",
+		Role: claim.RoleArchitect, State: supervise.StateQueued,
+	}
+	for _, c := range []supervise.Claim{child, root} {
+		if err := store.PutClaim(ctx, c); err != nil {
+			t.Fatalf("put claim %s: %v", c.Token, err)
+		}
+	}
+	has := func(project, issue string) bool {
+		t.Helper()
+		got, err := store.IssueHasSessions(ctx, project, issue)
+		if err != nil {
+			t.Fatalf("IssueHasSessions(%s, %s): %v", project, issue, err)
+		}
+		return got
+	}
+	if !has("legion", child.Issue) {
+		t.Errorf("%s recorded session %s, yet IssueHasSessions says none", child.Issue, child.SessionFile)
+	}
+	if has("legion", root.Issue) {
+		t.Errorf("%s recorded no session, yet IssueHasSessions counts its child %s's", root.Issue, child.Issue)
+	}
+	if has("other", child.Issue) {
+		t.Errorf("another project's %s counts legion's session", child.Issue)
+	}
+
+	root.State, root.Session, root.SessionFile = supervise.StateRetired, "ses_architect", "/state/sessions/architect.jsonl"
+	if err := store.PutClaim(ctx, root); err != nil {
+		t.Fatalf("retire the root with its session: %v", err)
+	}
+	if !has("legion", root.Issue) {
+		t.Errorf("%s's retired architect recorded session %s, yet IssueHasSessions says none", root.Issue, root.SessionFile)
+	}
+}

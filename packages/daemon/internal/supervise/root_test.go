@@ -16,8 +16,8 @@ import (
 )
 
 // The registration deadline relaunches the claim, so it suspends the unregistered process and never
-// releases it: under a sandbox a release deletes the claim's objects, and a root's tree volume with
-// them.
+// releases it: under a sandbox a release deletes the claim's objects, and the root issue's volume
+// with them.
 func TestTheRegistrationDeadlineRetiresARootThroughSuspendNeverRelease(t *testing.T) {
 	h := newHarnessOf(t, rootClaim())
 	h.launch()
@@ -35,7 +35,7 @@ func TestTheRegistrationDeadlineRetiresARootThroughSuspendNeverRelease(t *testin
 
 // The tree's root claim is not retired before its tree closes: its agent's exit suspends it, so
 // the claim keeps its session and stays resumable — and known to the orphan sweep, which under a
-// sandbox would otherwise delete its Sandbox and the tree volume with it.
+// sandbox would otherwise delete its Sandbox and the issue's volume with it.
 func TestARootClaimsExitSuspendsIt(t *testing.T) {
 	for _, state := range []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle} {
 		t.Run(string(state), func(t *testing.T) {
@@ -190,8 +190,8 @@ func TestTreeCloseReleasesALiveRoot(t *testing.T) {
 }
 
 // Nothing else retires the tree's root (N-v2-4): a retired root leaves the orphan sweep's known
-// set, and under a sandbox the sweep would then delete its Sandbox and the tree volume with it,
-// every child's workspace included. A stop that is not the tree's close — the operator's — is
+// set, and under a sandbox the sweep would then delete its Sandbox and the root issue's volume with
+// it, its workspace and sessions included. A stop that is not the tree's close — the operator's — is
 // refused in every state and changes nothing. The refusal is ErrRootStop, whatever the state, and
 // says what stops the root's process where one runs: suspend, once its agent has registered. What
 // ends a tree no workflow issue backs is the operator's close, so its refusal names that too; a

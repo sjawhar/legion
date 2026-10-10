@@ -4,6 +4,15 @@
 
 ### Added
 
+- A pending secret request names whom it waits on. `POST /v1/requests` and
+  `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
+  names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than
+  the current policy, so it is the person whose Inbox lists the request even after the secret's
+  owner tag changes; null when no person decides. `agent-secrets request` and
+  `agent-secrets status` print, after a waiting request's id and state, a line naming that approver
+  and where they decide it (`waiting for ada@example.com to approve it in Dispatch: <record page>`),
+  and the exec form's wait prints the same line in place of `approve or deny it …`. `--json` prints
+  the field verbatim; exit codes are unchanged (LEGION-666).
 - The secrets broker can sign in to an Amazon RDS or Aurora database by IAM token. When
   `BROKER_DATABASE_URL` names a user and no password and its host ends in `.rds.amazonaws.com`, every
   new pooled connection, and the migration lock watch's own connection, signs in with an RDS IAM
@@ -15,8 +24,8 @@
   `sslmode=require` verifies nothing and `sslrootcert=system` holds no RDS CA. A password pgx reads
   for the URL (`PGPASSWORD`, a passfile) keeps it on that password. The Envoy image ships the RDS global CA bundle at
   `/etc/ssl/rds/global-bundle.pem`, outside the system trust store, so no binary in the image
-  trusts an RDS CA for any other connection. A URL with a password, the
-  `${BROKER_DATABASE_PASSWORD}` placeholder, or any other host connects as before (LEGION-662).
+  trusts an RDS CA for any other connection. A URL with a password, or any other host, connects as
+  before (LEGION-662).
 - `GET /api/v1/me/answers` lists a person's own answers and replies on asks, newest first,
   with whether each answer is still current. `POST /api/v1/asks/{id}/answer` takes
   `expected_answer_at` to change the current answer; the change is another `ask.answered`
@@ -118,9 +127,30 @@
   a fence or indented code counts nothing, nor does a block the edit moved or reworded. An issue
   document's edit carries it beside the issue advice; a project document's edit, which before
   carried no advice, now carries `advice` holding the count alone (LEGION-470).
+- The secrets broker logs at boot how it signs in to its database, `database sign-in
+  method=rds-iam` or `method=password`, before it reaches for AWS or the database, so an operator
+  tells a token sign-in from a password one in the log rather than the task's environment.
 
 ### Changed
 
+- The secrets broker takes no database password apart from its URL, and refuses to start while
+  `BROKER_DATABASE_PASSWORD` is set or `BROKER_DATABASE_URL` names its
+  `${BROKER_DATABASE_PASSWORD}` placeholder, naming the variable and why: on Amazon RDS it signs in
+  by IAM token, and any other database's password goes in the URL itself, URL-escaped. A deployment
+  that still sets either must stop before it runs this broker: put the password in the URL, or move
+  to an IAM-form URL on RDS. Going back to the password once a broker runs this release takes the
+  reverse order, since a broker on this release exits 1 at boot while either is set: roll the image
+  back to legion-envoy v7.6.0 or later, the 7.x releases that sign in by IAM token, which hold every
+  broker migration to date and still accept the variable. Once the Legion daemon sends no
+  `login_hint` (sjawhar/legion#1870), roll back to v7.10.0 or later instead: earlier brokers need
+  that hint on a service's machine login and answer the daemon's next fresh login with a 500. Then
+  restore the variable and the `${BROKER_DATABASE_PASSWORD}` placeholder in the URL together.
+  Undoing the configuration change that moved a deployment off the variable therefore brings no
+  broker up on this release. Before going back, check that the RDS master user does not hold
+  `rds_iam`, directly or through a role (if it does, its password sign-in is refused), and that its
+  secret's value is current. When IAM sign-in itself is what is broken, make the rollback one
+  change: the image and the variable in one task-definition revision, so no broker boots on this
+  release with the variable or on 7.x without a working sign-in.
 - Anyone signed in to Dispatch decides a service's machine login, such as the Legion daemon's, not
   only the person its request names: the broker reads the service from the signed request, opens
   its record with the approver `anyone` and ignores any `login_hint` it carries, and the decision,

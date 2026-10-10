@@ -6,11 +6,10 @@ package api
 // `packages/contracts/src/legion-api.ts`), the pane environment it reads — every variable
 // the tmux runtime sets on a pane (`internal/runtime/tmux/spawn.go`'s `panePairs`) and the Sandbox
 // runtime on a pod's worker container (`internal/runtime/sandbox/manifest.go`'s
-// `mainEnvironment`) — and `LEGION_REMOVABLE_WORKSPACES` on a pod's `workspace-init provision`
-// container (`initEnvironment`), which the image's own `legion` decodes strictly. The installed
-// plugin declares the number it was built against as `legion.daemonApiVersion` in its
-// `package.json`, and the boot gate (`internal/daemon/bootgate.go`) refuses to start unless the
-// two are equal.
+// `mainEnvironment`) — and the environment of a pod's `workspace-init provision` container
+// (`initEnvironment`), which the image's own `legion` reads. The installed plugin declares the
+// number it was built against as `legion.daemonApiVersion` in its `package.json`, and the boot
+// gate (`internal/daemon/bootgate.go`) refuses to start unless the two are equal.
 //
 // Bump rule: a change to any of these surfaces bumps this constant and the manifest field in the
 // same commit; `packages/contracts/fixtures/daemon-api/version.json`, written by this package's
@@ -73,7 +72,24 @@ package api
 // tools and puts no `dispatch` on the PATH, so a daemon at 16 would pass the gate against panes
 // that lack the command its prompts name. Renumbered, as the same note says.)
 //
-// 18: LEGION-631 -- each role's GitHub App token is a file its plain `gh` and `git` read, never a
+// 18: LEGION-632 -- each issue's pod is independent, on a volume of its own, so the pod's
+// `workspace-init provision` container no longer carries `LEGION_REMOVABLE_WORKSPACES` (the
+// removable-workspaces pass is gone with the shared tree volume), nor
+// `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` (no two provisions share a repository, so the flock
+// and its wait are gone), nor the `LEGION_ROLE` and `LEGION_GENERATION` that seeded that pass's
+// candidate rotation; and `LEGION_EXPECT_TREE_VOLUME` is now `LEGION_EXPECT_ISSUE_VOLUME`. An image
+// built before 18 acts on a contract this daemon no longer speaks: it looks for the old name and so
+// never learns the volume must already hold the clone, provisioning a lost volume afresh instead of
+// exiting 3, and runs a lock and a removal pass against variables nothing sets; the image probe
+// pairs the daemon with an image built from this contract instead. Each role's agent is told a
+// state home of its own (`XDG_STATE_HOME=/home/legion/.local/state/<role>`), which the image's
+// shim makes Oh My Pi's profile directory under, so the browser broker's lock is one name per
+// container. (This branch first took 16, then 17; LEGION-578 landed at 16 and LEGION-588 at 17
+// first, and pi-legion 8.4.1 and 8.5.0 declare those with the init container's old environment,
+// so a daemon at either would pass the gate against an image whose `workspace-init` speaks the
+// other contract. Renumbered twice, as the same learning says.)
+//
+// 19: LEGION-631 -- each role's GitHub App token is a file its plain `gh` and `git` read, never a
 // grant the plugin redeems: the three credential routes, `POST /legion/v1/gh-token`,
 // `POST /legion/v1/git-credential` and `POST /legion/v1/provisioning-credential`, and
 // `GrantRequest.push` on `POST /legion/v1/grants` are deleted. The pane and pod environment gains
@@ -93,10 +109,10 @@ package api
 // `handoff_complete` finds in the pane as `legion handoff complete` did.
 // `POST /legion/v1/threads/resolve` is deleted: the reviewer names the bot threads
 // it accepted to the implementer, who resolves them with plain `gh` as the pull request's author. A
-// plugin or image built before 18 would shim gh over a token file it never reads and mint a grant
-// before every command, against a daemon on 18 that serves none of that, so the boot gate and
-// `legion probe-image` refuse the mixed pair. (This branch first
-// took 16, then 17; LEGION-578 landed at 16 and LEGION-588 at 17 first, pi-legion 8.4.1 and 8.6.0
-// declaring them without the token file, so a daemon at either would pass the gate against them.
-// Renumbered, as the collision note says.)
-const DaemonAPIVersion = 18
+// plugin or image built before 19 would shim gh over a token file it never reads and mint a grant
+// before every command, against a daemon on 19 that serves none of that, so the boot gate and
+// `legion probe-image` refuse the mixed pair. (This branch first took 16, then 17, then 18;
+// LEGION-578 landed at 16, LEGION-588 at 17 and LEGION-632 at 18 first, pi-legion 8.4.1, 8.6.0
+// and 8.9.0 declaring them without the token file, so a daemon at any of them would pass the gate
+// against them. Renumbered three times, as the collision note says.)
+const DaemonAPIVersion = 19

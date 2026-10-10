@@ -27,8 +27,7 @@ configuration is:
 ```sh
 BROKER_LISTEN_ADDR=0.0.0.0:13380
 BROKER_PUBLIC_URL=https://secrets.internal.example
-BROKER_DATABASE_URL='postgres://broker:${BROKER_DATABASE_PASSWORD}@db.internal.example:5432/broker'
-BROKER_DATABASE_PASSWORD=<placeholder>
+BROKER_DATABASE_URL='postgres://broker:<password>@db.internal.example:5432/broker'
 BROKER_UI_TOKEN_FILE=/run/secrets/broker-ui-token
 BROKER_SECRETS_PREFIX=production/agent-secrets/
 BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:<region>:<account>:key/<key id>
@@ -43,7 +42,9 @@ error Secrets Manager: ListSecrets, failed to resolve service endpoint, endpoint
 Configuration: Missing Region"`.
 
 The broker refuses to start, naming the variable, when one is missing, malformed or out of range,
-and also while a variable it no longer reads is still set.
+and also while a variable it no longer reads is still set. `BROKER_DATABASE_URL` is the only
+database variable: a password goes in the URL itself, URL-escaped, and on Amazon RDS the broker
+needs none ([Signing in to RDS by IAM token](#signing-in-to-rds-by-iam-token)).
 
 A secret owned by a service rather than a person needs that service registered.
 `BROKER_SERVICES` lists each service with the Kubernetes service account its pods run as,
@@ -82,7 +83,12 @@ is checked only when a connection signs in, so a connection the broker holds lon
 and the next connection it opens brings a fresh token. The broker's AWS identity needs
 `rds-db:connect` on the database user,
 `arn:aws:rds-db:<region>:<account>:dbuser:<cluster resource id>/<user>`, and the database user
-must be a member of `rds_iam`. The cluster needs IAM database authentication turned on.
+must be a member of `rds_iam`. The cluster needs IAM database authentication turned on. Give the
+broker a database user of its own, and never grant `rds_iam` to the RDS master user, directly or
+through a role it belongs to: once a user holds it, IAM authentication takes precedence over that
+user's password
+([AWS's limitations of IAM database authentication](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html#UsingWithRDS.IAMDBAuth.Limitations)),
+so the master could no longer sign in with its password.
 
 A token is a password to the database until it expires, so the broker sends one only to a server
 it has verified. The URL must name that one host, with `sslmode=verify-full` and an `sslrootcert`
@@ -95,9 +101,11 @@ the image trusts it. It is the
 vendored as `packages/envoy/docker/rds-global-bundle.pem` with the date it was fetched and its
 checksum.
 
-A URL with a password, the `${BROKER_DATABASE_PASSWORD}` placeholder, a passwordless URL whose
-password libpq supplies (`PGPASSWORD` or a passfile), or a host that is not an RDS endpoint (a
-local Postgres that trusts its clients, say) connects as given and mints nothing.
+A URL with a password, a passwordless URL whose password libpq supplies (`PGPASSWORD` or a
+passfile), or a host that is not an RDS endpoint (a local Postgres that trusts its clients, say)
+connects as given and mints nothing. The broker substitutes no password into the URL: it refuses
+to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names its
+`${BROKER_DATABASE_PASSWORD}` placeholder.
 
 ## What it depends on
 
@@ -138,9 +146,44 @@ local Postgres that trusts its clients, say) connects as given and mints nothing
   bounds. A reread counts against either limit only when both let it run, so one address flooding
   past its own limit leaves the broker-wide one to everyone else. Past either, the broker answers
   `429 RATE_LIMITED` with a `Retry-After` header naming the limit that refused.
+  `agent-secrets secret` sends one reread after each write it makes, from the person's own
+  address. When a limit refuses it, the write stands in Secrets Manager and the CLI exits 1 saying
+  so ([manage a secret](/legion/broker/guides/manage-a-secret/#what-the-broker-answers-after-a-write)).
 - Agents never see the broker's database or the secret store; whoever can write the database can
   forge a record, so its access control is part of the broker's. Whoever can tag a secret under the
   namespace decides who gets it, so the tags' write access is part of the broker's too.
+
+## People who manage secrets
+
+The broker writes no secret. A person creates, changes and deletes agent secrets with
+`agent-secrets secret` ([manage a secret](/legion/broker/guides/manage-a-secret/)), which calls
+Secrets Manager itself under that person's own AWS sign-in, so IAM in the broker's account is what
+decides who may change which secret, and with the tags, who gets it. The CLI asks the broker only
+for its settings (`GET /v1/settings`) and, after each write, for a reread. Before anything else it
+refuses a sign-in in another account than the agent-secrets key's, and for a write any sign-in but
+a person's own IAM Identity Center one; those checks are the CLI's, and IAM is the boundary. A
+person's access needs each form's permissions on the namespace's secrets, and the table says what
+each request carries that a policy's conditions can match:
+
+| Form | Permissions | What a condition can match |
+| --- | --- | --- |
+| every form | `sts:GetCallerIdentity`, which needs no permission | |
+| `list` | `secretsmanager:ListSecrets` (on `*`: it takes no resource) | |
+| `show` | `secretsmanager:DescribeSecret` | The secret's own tags (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`) |
+| `create` | `secretsmanager:CreateSecret` and `secretsmanager:TagResource`, since it tags the secret as it creates it; `kms:GenerateDataKey` and `kms:Decrypt` on the agent-secrets key | The new secret's name under the namespace (its ARN, and `secretsmanager:Name`); both request tags, `aws:RequestTag/owner` (the person's email, from `--owner me`, or `shared`) and `aws:RequestTag/tier` (`aws:TagKeys` is the two); the key, named by its ARN (`secretsmanager:KmsKeyArn`); the `TagResource` check made on the new secret sees the requested tags as its own (`aws:ResourceTag/owner`, `aws:ResourceTag/tier`), so a policy that reserves a shared secret's tags for administrators still needs a statement that admits a shared create (request and resource owner both `shared`, the same tier). A secret created with `--owner shared` and `--tier agent` is served to every agent session without approval, so only a person whose access allows a shared create can create one. |
+| `set` | `secretsmanager:PutSecretValue`; `kms:GenerateDataKey` on the agent-secrets key | The secret's own tags (`aws:ResourceTag/owner`) |
+| `retag` | `secretsmanager:DescribeSecret` and `secretsmanager:TagResource` | Both request tags in every request, the unchanged one re-sent as the secret holds it, and the secret's own tags, so a policy can let a person tag their own secret (`aws:ResourceTag/owner` their email) to themselves or `shared`, and reserve a shared secret's tags for administrators |
+| `delete` | `secretsmanager:DeleteSecret` | The secret's own tags; `secretsmanager:RecoveryWindowInDays` is 30, and `secretsmanager:ForceDeleteWithoutRecovery` is never set |
+| `restore` | `secretsmanager:RestoreSecret` | The secret's own tags |
+
+Secrets Manager makes the KMS calls itself, on the person's behalf, so the agent-secrets key's
+policy can allow them only through Secrets Manager (`kms:ViaService` of
+`secretsmanager.<region>.amazonaws.com`, with `kms:CallerAccount`). The person's email in
+`aws:RequestTag/owner` is their Identity Center session name in lowercase, so a condition that
+compares it with a principal tag holding their email matches only where that tag is lowercase too.
+No form calls `GetSecretValue` or prints a value. `delete` and `restore` are permissions of their
+own: an access that grants a person every other form on their own secret but not these refuses
+those two with `AccessDeniedException`.
 
 ## Health and logs
 
@@ -151,6 +194,7 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 
 | Log line | Meaning |
 | --- | --- |
+| `database sign-in method=<method>` | At startup, before the broker reaches for AWS or its database: `rds-iam` when each connection signs in with an RDS IAM token the broker mints, `password` when it signs in as `BROKER_DATABASE_URL` and libpq's defaults say (a password in the URL, `PGPASSWORD`, a passfile, or none for a server that trusts it). |
 | `broker listening addr=<host:port>` | Startup finished: configuration, migrations and the first read of the namespace all succeeded, and the address is bound. |
 | `broker: fatal error=…` | Startup refused; the error names the variable or dependency. The process exits 1. |
 | `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every read of the namespace, once for each secret the broker leaves out, and on every reread of one secret it leaves out: `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key` or `no-current-value` (no version carries `AWSCURRENT`: the secret was created without a value; once its value is put it is served at its next reread, or within about ten minutes, as the broker rereads the namespace every five and Secrets Manager's listing can lag a change by up to five more). A secret with no value and another fault is logged for the other fault. `name` is the secret's whole Secrets Manager name. Every other secret is still served. Two things make this line more frequent than one per refused secret per five minutes, and an alarm on it has to allow for both: a refused secret that was reread in the last five minutes is logged twice by each read of the namespace, once from the listing and once from the reread of that one name the read makes; and any caller who can reach the broker writes one by asking for a reread of a refused name, at up to the rate the reread route allows (above). |

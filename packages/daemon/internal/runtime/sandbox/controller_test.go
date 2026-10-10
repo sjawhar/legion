@@ -45,8 +45,8 @@ func controllerSpec(t *testing.T) runtime.SpawnSpec {
 // volume of its own the Sandbox owns, so a relaunch resumes its session. It provisions no
 // workspace and holds no repository credential: its one init container makes the sessions
 // directory and holds a resume to its session, and its labels name the controller and no tree or
-// issue, so a tree pod's anti-affinity never counts it and it has no affinity of its own. It is
-// never enrolled with the secrets broker, even where every workflow role's launcher is.
+// issue, so no tree's cleanup takes it for one of the tree's issue pods. It is never enrolled with
+// the secrets broker, even where every workflow role's launcher is.
 func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -64,16 +64,16 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	if s.Name != "legion-legion-controller" {
 		t.Errorf("the controller's Sandbox is %s, want legion-legion-controller", s.Name)
 	}
-	if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != treeVolume {
-		t.Fatalf("the controller's Sandbox claims %+v, want its own %s volume", s.Spec.VolumeClaimTemplates, treeVolume)
+	if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != issueVolume {
+		t.Fatalf("the controller's Sandbox claims %+v, want its own %s volume", s.Spec.VolumeClaimTemplates, issueVolume)
 	}
-	for _, labels := range []map[string]string{s.Labels, r.podTemplate(l, false).Metadata.Labels} {
+	for _, labels := range []map[string]string{s.Labels, r.podTemplate(l).Metadata.Labels} {
 		if labels[labelProject] != testProject || labels[labelRole] != string(claim.RoleController) {
 			t.Errorf("labels %v, want the project and the controller role", labels)
 		}
 		for _, key := range []string{labelTree, labelIssue} {
 			if _, ok := labels[key]; ok {
-				t.Errorf("labels carry %s (%v): a tree pod's anti-affinity would take the controller for another tree", key, labels)
+				t.Errorf("labels carry %s (%v): a tree's cleanup would take the controller for one of its issue pods", key, labels)
 			}
 		}
 		if kind, err := podKindOf(labels); err != nil || kind != (controllerPod{}) {
@@ -81,10 +81,7 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 		}
 	}
 
-	pod := r.podTemplate(l, true).Spec
-	if pod.Affinity != nil {
-		t.Errorf("affinity %+v, want none: the controller shares no tree volume", pod.Affinity)
-	}
+	pod := r.podTemplate(l).Spec
 	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != initContainer {
 		t.Fatalf("init containers %v, want %s alone", pod.InitContainers, initContainer)
 	}
@@ -95,7 +92,7 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	if got := envOf(init)["LEGION_RESUME_SESSION_FILE"]; got != TreeRoot+"/"+SessionsSubPath+"/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl" {
 		t.Errorf("init LEGION_RESUME_SESSION_FILE = %q, want the session on the controller's volume", got)
 	}
-	if mounts := init.VolumeMounts; len(mounts) != 1 || mounts[0].Name != treeVolume || mounts[0].MountPath != TreeRoot {
+	if mounts := init.VolumeMounts; len(mounts) != 1 || mounts[0].Name != issueVolume || mounts[0].MountPath != TreeRoot {
 		t.Errorf("init mounts %+v, want the controller's volume at %s alone", mounts, TreeRoot)
 	}
 
@@ -142,8 +139,8 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 			t.Errorf("the controller's pod lacks its launcher's %s volume", prefix)
 		}
 	}
-	if v := volumes[treeVolume]; v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != TreeClaimName(controllerToken) {
-		t.Errorf("its volume %+v, want the claim of its own Sandbox, %s", v.VolumeSource, TreeClaimName(controllerToken))
+	if v := volumes[issueVolume]; v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != IssueClaimName(controllerToken) {
+		t.Errorf("its volume %+v, want the claim of its own Sandbox, %s", v.VolumeSource, IssueClaimName(controllerToken))
 	}
 	if secret := volumes[roleVolume("launcher", claim.RoleController)].Secret; secret == nil || secret.SecretName != roleSecretName(s.Name, claim.RoleController) {
 		t.Errorf("its launcher's token volume %+v, want the role Secret %s", secret, roleSecretName(s.Name, claim.RoleController))
@@ -165,7 +162,7 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	}
 	spec := controllerSpec(t)
 	spec.Generation, spec.ResumeSessionFile = 2, controllerSession
-	worker := workerOf(t, r, spec, false)
+	worker := workerOf(t, r, spec)
 	env := envOf(worker)
 	for name, want := range map[string]string{
 		"LEGION_CONTROLLER": "1", "LEGION_ROLE": string(claim.RoleController), "LEGION_PROJECT": testProject,
@@ -213,10 +210,10 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	}
 }
 
-// A controller launch takes no tree's launch turn and mints no provisioning token: it has no
-// repository, so a GitHub token source that would refuse every mint leaves it running. It writes
-// no provisioning Secret, only its one launcher's role Secret, and its boot token reaches its
-// launcher in the start command, as every role's does.
+// A controller launch mints no provisioning token: it has no repository, so a GitHub token source
+// that would refuse every mint leaves it running. It writes no provisioning Secret, only its one
+// launcher's role Secret, and its boot token reaches its launcher in the start command, as every
+// role's does.
 func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 	g := newRig(t, nil, withOptions(func(o *Options) { o.Tokens = refusingTokens{} }))
 	spec := controllerSpec(t)
@@ -245,20 +242,20 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 }
 
 // The controller's pod is sized by its own entry under runtime.kubernetes.resources, as a workflow
-// role's pod is by that role's: both its containers carry it, so an operator who sizes it moves it
-// out of the BestEffort class the kubelet evicts first.
+// role's pod is by that role's: both its containers carry it, the init container included, so a
+// controller the operator sized larger than the default runs at that size on every container.
 func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
 	opts := goldenOptions()
 	sized := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi")},
-		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("2Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("40Gi")},
 	}
-	opts.Resources = map[claim.Role]corev1.ResourceRequirements{claim.RoleController: sized}
+	opts.Resources[claim.RoleController] = sized
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := podOf(t, r, controllerSpec(t), false)
+	pod := podOf(t, r, controllerSpec(t))
 	if containers := slices.Concat(pod.InitContainers, pod.Containers); len(containers) != 2 {
 		t.Fatalf("the controller's pod runs %d containers, want its init container and its launcher", len(containers))
 	}
