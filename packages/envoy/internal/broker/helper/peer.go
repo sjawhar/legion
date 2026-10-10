@@ -168,10 +168,3 @@ func descendsFrom(pid, root int, parent func(int) (int, error)) (bool, error) {
 	}
 	return false, fmt.Errorf("pid %d's ancestry runs past %d processes", start, maxAncestryHops)
 }
-
-// DescendsFrom reports whether pid is root or one of root's descendants, walking /proc
-// (descendsFrom); a walk that cannot tell answers false.
-func DescendsFrom(pid, root int) bool {
-	in, _ := descendsFrom(pid, root, procParent)
-	return in
-}
