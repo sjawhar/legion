@@ -46,7 +46,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   was published without reading them, so a worker pushes before it completes; the `handoff_write`
   and `handoff_read` operations are gone with the `legion handoff` and `legion push` commands they
   shelled out beside (a handoff is written with `write`, committed and pushed with plain `jj`,
-  read with `read`), so the shell
+  read with `read`; a handoff-only push ends its head's message with two empty lines and
+  `skip-checks: true` as the last line, the one shape GitHub honours — `legion push` wrote it so,
+  and the prompt rule that replaces it does too), so the shell
   `legion handoff complete` the LEGION-634 entry below describes no longer exists; the tool
   resolves no review thread (`legion threads resolve` is gone, and the daemon serves no thread
   route: the reviewer names the bot threads it accepted to the implementer, who resolves them with

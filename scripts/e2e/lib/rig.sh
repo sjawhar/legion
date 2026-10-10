@@ -12,6 +12,13 @@
 #   timeout_hook   empty, or a function a timed-out until_true runs before it fails
 # and defines note and fail (which exits). A production guard that finds a violation writes it to
 # $evidence/pane-endpoint-violation.txt, and the next bounded wait aborts naming it.
+#
+# Under the stage scripts' pipefail, an early-exiting consumer — `head -N`, `grep -q`, a
+# `while … break` — never sits downstream of a live producer (kubectl, gh, jj): the producer's
+# SIGPIPE (141) becomes the pipeline's status the moment the consumer stops reading, and the
+# assertion dies on a correct system. Ask the producer for the bounded output (`--limit 1`, `--jq`)
+# or capture its whole output first and judge the variable; a `| head -1` is safe only inside a
+# `fail` message, guarded by `|| true`, or on a local-file grep whose few lines fit the pipe buffer.
 
 # until_true SECONDS DESCRIPTION COMMAND... — all synchronization has a bounded named wait. It
 # polls COMMAND every half second until SECONDS of wall time have passed, each poll's own run

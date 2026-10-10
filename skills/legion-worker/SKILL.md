@@ -383,13 +383,16 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY>
 ```
 
 A push whose commits touch only `.legion/` (a handoff-only push) ends its head's commit message
-with `skip-checks: true` as the last line, so GitHub starts no workflow run for it and the daemon
-carries the code head's verdict to it. Write that line with trailers off for the one describe,
-since the pane's jj overlay would otherwise append `Omp-Session:` after it and GitHub honours the
-trailer only as the last line:
+with `skip-checks: true` as the last line, preceded by two empty lines, so GitHub starts no
+workflow run for it and the daemon carries the code head's verdict to it. GitHub honours the
+trailer only in that shape — the last line, after two empty lines; one empty line is not enough,
+and GitHub then starts every workflow as if the line were not there (a planner's handoff push
+did exactly that in the first live run of this rule). jj keeps the two lines as written, where
+`git commit`'s default cleanup would collapse them. Write the line with trailers off for the one
+describe, since the pane's jj overlay would otherwise append `Omp-Session:` after it:
 
 ```bash
-jj -R "$LEGION_WORKSPACE" describe -r @- --config 'templates.commit_trailers=""' -m "$(jj -R "$LEGION_WORKSPACE" log -r @- --no-graph -T description)"$'\n\nskip-checks: true'
+jj -R "$LEGION_WORKSPACE" describe -r @- --config 'templates.commit_trailers=""' -m "$(jj -R "$LEGION_WORKSPACE" log -r @- --no-graph -T description)"$'\n\n\nskip-checks: true'
 ```
 
 Every other push — code, red tests, `docs/solutions/`, retro's removal of `.legion/<KEY>/`, a
