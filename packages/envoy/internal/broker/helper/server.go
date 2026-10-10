@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
@@ -91,6 +92,10 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		// sign-request keeps peer's pidfd open through Registry.Root's ancestry walk exactly
 		// like sign, for the same pid-reuse reason (see sign's doc comment below).
 		resp = s.signRequest(peer, pid, req.Secrets, req.Reason)
+	case "sign-launcher":
+		// sign-launcher keeps peer's pidfd open through Registry.Root's ancestry walk too, and
+		// trusts its "no session" only once peer.PID() still names pid (see signLauncher).
+		resp = s.signLauncher(peer, pid, req.Method, req.URL)
 	case "unregister":
 		resp = s.unregister(ctx, peer, pid)
 	case "sessions":
@@ -291,6 +296,44 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 	return Response{OK: true, RequestObject: compact}
 }
 
+// signLauncher signs a launcher proof with the machine credential for the operator's own machine
+// and grant commands, for a URL under this helper's broker only (Broker.URL is never a value the
+// peer supplies, as signRequest's audience is not). It is refused inside a registered session
+// (IN_SESSION): a session acts on itself alone, and the operator's machines and grants are the
+// operator's shell's to manage. Registry.Root walks /proc ancestry from pid while peer's pidfd
+// stays open, and its "no session" is trusted only once peer.PID() still names pid, the pid-reuse
+// rule sign follows (resolveDescendant), so a session process the kernel replaced mid-walk is never
+// handed a proof. With no credential it answers NO_CREDENTIAL. Beside the proof it answers the
+// credential's id (not secret: the broker lists it), so a machine revoke can tell this machine's
+// own login. The broker's answer to the call goes to the peer, not here: a refused credential is
+// dropped at the helper's own next launcher call.
+func (s *Server) signLauncher(peer *Peer, pid int, method, url string) Response {
+	if method == "" || url == "" {
+		peer.Close()
+		return Response{Code: CodeBadRequest, Error: "sign-launcher needs method and url"}
+	}
+	if s.Registry.Root(pid) != nil {
+		peer.Close()
+		return Response{Code: CodeInSession, Error: fmt.Sprintf("pid %d is inside a registered host session, which acts on itself alone; run machine and grant commands from your own shell", pid)}
+	}
+	if peer.PID() != pid {
+		peer.Close()
+		return Response{Code: CodeUnidentified, Error: "the peer no longer matches the identified pid"}
+	}
+	peer.Close()
+	if !strings.HasPrefix(url, s.Broker.URL+"/") {
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("sign-launcher signs only for this helper's broker, %s; not %s", s.Broker.URL, url)}
+	}
+	compact, cred, err := s.Broker.launcherProof(method, url)
+	if errors.Is(err, errNoCredential) {
+		return Response{Code: CodeNoCredential, Error: noCredentialMsg}
+	}
+	if err != nil {
+		return Response{Code: CodeSign, Error: err.Error()}
+	}
+	return Response{OK: true, Proof: compact, CredentialID: cred.id}
+}
+
 // unregister retires a pid resolveDescendant ties to a registered session.
 func (s *Server) unregister(ctx context.Context, peer *Peer, pid int) Response {
 	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session", pid))
@@ -338,7 +381,7 @@ func (s *Server) loginStatus() Response {
 
 // cannotEnrollMsg is the ERROR an enrollment (a host session's or a box's) logs while the helper
 // holds no launcher credential to attempt it with, beside why (noCredentialReason).
-const cannotEnrollMsg = "session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it"
+const cannotEnrollMsg = "session cannot enroll: the helper holds no launcher credential; run: agent-secrets machine login, and have a human approve it"
 
 // lacksCredential reports whether err failed for want of a launcher credential the helper still
 // lacks: errNoCredential, unless a login has installed one since the attempt failed. That login
@@ -524,7 +567,7 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 func (s *Server) revokeLapsed(ctx context.Context, sess *Session, id string) bool {
 	revoked := retryUntilStop(ctx, sess.stop, s.Broker.CredentialInstalled, 0, time.Second, time.Minute, func(attempt int, err error, delay time.Duration, retrying bool) {
 		if s.lacksCredential(err) {
-			s.Log.Error("session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets launcher login, and have a human approve it",
+			s.Log.Error("session cannot enroll: revoking its lapsed enrollment first needs a launcher credential, and the helper holds none; run: agent-secrets machine login, and have a human approve it",
 				"runtime_id", sess.RuntimeID, "enrollment_id", id, "why", s.Broker.noCredentialReason(), "in", delay)
 			return
 		}

@@ -2185,7 +2185,7 @@ or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but c
 for callers that choose between the broker and another backend. A helper holding no launcher
 credential, from every restart until the operator logs the machine in, enrolls no one: its sign
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
-with the same not-logged-in notice naming `agent-secrets launcher login`. The login that installs
+with the same not-logged-in notice naming `agent-secrets machine login`. The login that installs
 a credential wakes every registered session's enrollment retry, so those sessions reach the broker
 within about a second of it rather than when a backoff of up to a minute comes round. A session
 whose renew the broker refuses (its lease lapsed) stops counting as enrolled at once, and its
@@ -2198,12 +2198,12 @@ login, still revokes it. A session that ends first takes its record with it and 
 bounded revoke (three tries); before a login those fail, and the broker's sweeper ends the id once
 its lease lapses. A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another
 operator's launcher credential) counts as done, and the session enrolls afresh.
-`agent-secrets launcher login-status`, which the helper answers, exits 0 while the helper holds a
+`agent-secrets machine login-status`, which the helper answers, exits 0 while the helper holds a
 launcher credential and prints `issued`. A
 re-login that is denied, expires unapproved or is still pending leaves the credential an earlier
 login installed in place, and the helper keeps enrolling sessions with it, so login-status still
 exits 0 and prints `issued`, and stderr names the most recent login and its code
-(`credential_held` beside `login_state`, the most recent login's state, which `launcher login`'s
+(`credential_held` beside `login_state`, the most recent login's state, which `machine login`'s
 own poll reads). A helper from before that field reports only the most recent login, so there a
 denied re-login still reads `denied` and exits 1 until the helper restarts on a release that
 carries it. While a credential is held, login-status's last stderr line says when it expires and
@@ -2223,7 +2223,7 @@ why the helper holds no credential in the words its journal uses for the same st
 a broker refusal on a helper from before `credential_dropped` (which sets `login_refused` only for
 one), a denied login, a login that expired before anyone approved it, or no login since the
 helper started. A re-login pending at the drop reports its own outcome once it settles, so its
-`launcher login` prints `denied` for a denial. The helper logs every change of the credential:
+`machine login` prints `denied` for a denial. The helper logs every change of the credential:
 `machine login issued` (credential id, its `expires_at`, and the operator the login was signed
 with) when a login installs one, a WARN that it expires soon a day before its expiry (at once when
 less is left), and one ERROR when it drops it, `<cause>; cleared: no session can enroll until a
@@ -2251,6 +2251,21 @@ restarted on it; its login-status probe stays, since it also finds a helper that
 Against an older helper an unconditional `--wait 10` stalls every launch 10 s while no credential
 exists. With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts
 with a warning that its `agent-secrets` calls fail until the machine is logged in.
+
+`agent-secrets machine list|revoke` and `agent-secrets grant list|revoke` (`machine.go`,
+`grant.go`) are the operator routes from the person's own shell, under this machine's login: the
+CLI asks the helper for a launcher proof with the `sign-launcher` op (`launcherSigner`), whose key
+never leaves the helper, and calls `/v1/operator/*` with it. The helper refuses `IN_SESSION` to a
+process inside a registered session, which acts on itself alone, re-reading the peer's pid after
+the ancestry walk as `sign` does; signs only for a URL under its own `AGENT_SECRETS_URL`
+(`BAD_REQUEST` otherwise); answers `NO_CREDENTIAL` while it holds no credential; and returns the
+credential's id with the proof, so `machine revoke` warns when it ends this machine's own login. A
+helper from before the op answers `unknown op sign-launcher`, which the CLI reads as a helper to
+restart on the pinned release. Both lists print a table; `--json` prints the broker's body
+verbatim, byte-identical to the body Dispatch's machine-login and Live grants pages read for the
+same person (`machine_linux_test.go` drives both commands against a real helper and broker). A
+machine with no helper has no machine login to act as, so the commands refuse with exit 2 naming
+the socket they looked for.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal

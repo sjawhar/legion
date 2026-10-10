@@ -21,7 +21,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/helper"
 )
 
-const notLoggedInNotice = "agent-secrets: this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets launcher login)\n"
+const notLoggedInNotice = "agent-secrets: this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets machine login)\n"
 
 // runInSession runs `agent-secrets register --exec -- binary args...` against the helper at sock,
 // so the command runs as a freshly registered host session, and returns its exit code and output.
@@ -66,7 +66,7 @@ func TestRegisterWaitReturnsAtOnceWithoutALauncherCredential(t *testing.T) {
 	if err != nil || strings.TrimSpace(string(out)) != "ran" {
 		t.Fatalf("the command must still run: %q %v (stderr %q)", out, err, stderr.String())
 	}
-	const warning = "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets launcher login) this session's agent-secrets calls fail\n"
+	const warning = "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets machine login) this session's agent-secrets calls fail\n"
 	if stderr.String() != warning {
 		t.Fatalf("stderr %q, want the no-credential warning %q", stderr.String(), warning)
 	}
@@ -151,16 +151,16 @@ func TestLoginStatusSaysWhyTheHelperDroppedItsCredential(t *testing.T) {
 		dropped string
 		want    string
 	}{
-		{"dropped at its expiry", true, "the launcher credential reached its expiry", "the launcher credential reached its expiry; run: agent-secrets launcher login"},
-		{"refused, from a helper before credential_dropped", true, "", "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets launcher login"},
-		{"a login nobody approved", false, "", "the most recent machine login expired before anyone approved it; run: agent-secrets launcher login"},
+		{"dropped at its expiry", true, "the launcher credential reached its expiry", "the launcher credential reached its expiry; run: agent-secrets machine login"},
+		{"refused, from a helper before credential_dropped", true, "", "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); run: agent-secrets machine login"},
+		{"a login nobody approved", false, "", "the most recent machine login expired before anyone approved it; run: agent-secrets machine login"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sock := filepath.Join(t.TempDir(), "h.sock")
 			fakeHelperAt(t, sock, helper.Response{OK: true, LoginState: "expired", LoginRefused: tc.refused, CredentialDropped: tc.dropped})
 			stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(),
-				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "launcher", "login-status")
-			want := "agent-secrets launcher login-status: " + tc.want + "\n"
+				[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock}, "machine", "login-status")
+			want := "agent-secrets machine login-status: " + tc.want + "\n"
 			if exit != 1 || stdout != "expired\n" || stderr != want {
 				t.Fatalf("exit %d, stdout %q, stderr %q; want 1, %q, %q", exit, stdout, stderr, "expired\n", want)
 			}

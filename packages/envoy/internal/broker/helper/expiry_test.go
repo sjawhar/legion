@@ -60,8 +60,8 @@ func recordTime(t *testing.T, rec map[string]any) time.Time {
 }
 
 const (
-	expiresSoonMsg = "the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets launcher login, and have a human approve it"
-	expiredMsg     = dropExpired + "; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)"
+	expiresSoonMsg = "the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets machine login, and have a human approve it"
+	expiredMsg     = dropExpired + "; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets machine login)"
 )
 
 // TestTheHelperWarnsBeforeItsLauncherCredentialExpiresAndDropsItThen: the broker mints no

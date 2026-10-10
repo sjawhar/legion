@@ -29,7 +29,7 @@ import (
 // its credential (drop), because the broker refused it with 401 LAUNCHER_INVALID (clearOnInvalid)
 // or it reached the expiry the broker named (watchExpiry). It never auto-relogins; a login is a
 // human ceremony.
-const noCredentialMsg = "no machine credential; run: agent-secrets launcher login"
+const noCredentialMsg = "no machine credential; run: agent-secrets machine login"
 
 var errNoCredential = errors.New(noCredentialMsg)
 
@@ -56,7 +56,7 @@ type machineCredential struct {
 // login's was, unless that login is still pending. "expired" is the word the dotfiles launcher
 // gate matches and the one an older client prints its refusal line for, and an older client must
 // never read "issued" for a credential the helper no longer holds. A login pending at the drop
-// that then settles is recorded after it, so it reports its own outcome, which `launcher login`
+// that then settles is recorded after it, so it reports its own outcome, which `machine login`
 // prints. "expired" is otherwise a pending login nobody approved in time.
 type loginState struct {
 	Code, PendingID, State string    // the most recent login; State: pending|issued|denied|expired
@@ -350,7 +350,7 @@ func (b *Broker) watchExpiry(cred *machineCredential) {
 	}
 	select {
 	case <-time.After(time.Until(cred.expiresAt.Add(-lead))):
-		b.logger().Warn("the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets launcher login, and have a human approve it",
+		b.logger().Warn("the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets machine login, and have a human approve it",
 			"credential_id", cred.id, "expires_at", cred.expiresAt.Format(time.RFC3339), "in", time.Until(cred.expiresAt).Round(time.Second))
 	case <-cred.gone:
 		return
@@ -445,7 +445,7 @@ func (b *Broker) drop(cred *machineCredential, why string, attrs ...any) bool {
 		return false
 	}
 	close(cred.gone)
-	b.logger().Error(why+"; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)",
+	b.logger().Error(why+"; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets machine login)",
 		append([]any{"credential_id", cred.id}, attrs...)...)
 	return true
 }

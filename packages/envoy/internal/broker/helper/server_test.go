@@ -33,7 +33,7 @@ type rig struct {
 
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
 // log it in (see rig.login) before any Enroll — host session or box — can succeed, since Task
-// 1's Broker fails closed until a human has run `agent-secrets launcher login`. startRig below
+// 1's Broker fails closed until a human has run `agent-secrets machine login`. startRig below
 // is newRig plus that login, for every test that doesn't care about the pre-login state itself.
 func newRig(t *testing.T, statePath string) *rig {
 	t.Helper()
@@ -928,7 +928,7 @@ func TestLoginOverTheSocketReturnsTheCodeAndEnrollBoxWorksAfterIssue(t *testing.
 		match:        "/v1/launcher-credentials/",
 	}}
 	before := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-1", Thumbprint: "tp-1"})
-	if before.OK || before.Code != CodeEnrollFailed || !strings.Contains(before.Error, "agent-secrets launcher login") {
+	if before.OK || before.Code != CodeEnrollFailed || !strings.Contains(before.Error, "agent-secrets machine login") {
 		t.Fatalf("enroll-box before any login must name the login command: %+v", before)
 	}
 	login1 := r.call(t, Request{Op: "login"})
@@ -987,5 +987,79 @@ func TestSignStillRequiresDescendancyButEnrollBoxDoesNot(t *testing.T) {
 	enroll := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-2", Thumbprint: "tp-2"})
 	if !enroll.OK || enroll.EnrollmentID == "" {
 		t.Fatalf("a non-descendant peer must still be able to enroll-box: %+v", enroll)
+	}
+}
+
+// TestSignLauncherRefusedInsideASessionAndSignsOutside: sign-launcher answers a process inside a
+// registered session IN_SESSION, since a session acts on itself alone, and the operator's own shell
+// NO_CREDENTIAL until a login: the refusal order proves the session gate ran first.
+func TestSignLauncherRefusedInsideASessionAndSignsOutside(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "sessions.json")
+	r := newRig(t, state)
+	child := sleeper(t) // a real process registered as a session root
+	r.callerPID.Store(int64(child.Process.Pid))
+	if resp := r.call(t, Request{Op: "register"}); !resp.OK && resp.Code != CodeNoCredential {
+		t.Fatalf("register: %+v", resp)
+	}
+	if resp := r.call(t, Request{Op: "sign-launcher", Method: "GET", URL: r.srv.Broker.URL + "/v1/operator/machines"}); resp.Code != CodeInSession {
+		t.Fatalf("inside a session: %+v, want IN_SESSION", resp)
+	}
+	r.callerPID.Store(0) // the operator's own shell: not a registered session
+	resp := r.call(t, Request{Op: "sign-launcher", Method: "GET", URL: r.srv.Broker.URL + "/v1/operator/machines"})
+	if resp.Code != CodeNoCredential || resp.Error != noCredentialMsg {
+		t.Fatalf("outside: %+v, want NO_CREDENTIAL until a login", resp)
+	}
+}
+
+// TestSignLauncherSignsOnlyForThisHelpersBroker: once logged in, sign-launcher answers the
+// operator's shell a launcher proof for the held machine credential, which verifies with that
+// credential's key for exactly the method and URL asked. A URL outside the helper's broker, a host
+// that only begins like the broker's included, and a request missing its method or URL get no
+// proof.
+func TestSignLauncherSignsOnlyForThisHelpersBroker(t *testing.T) {
+	r := startRig(t, "")
+	url := r.srv.Broker.URL + "/v1/operator/grants"
+	resp := r.call(t, Request{Op: "sign-launcher", Method: "GET", URL: url})
+	if !resp.OK || resp.Proof == "" {
+		t.Fatalf("sign-launcher with a credential: %+v", resp)
+	}
+	cred := r.srv.Broker.cred.Load()
+	tp, err := proof.Thumbprint(&cred.key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := &proof.Verifier{Skew: time.Minute,
+		LookupLauncher: func(_ context.Context, id string) (string, bool, error) { return tp, id == cred.id, nil },
+		Replay:         func(context.Context, string, time.Time) (bool, error) { return true, nil }}
+	if sub, err := v.Verify(context.Background(), resp.Proof, "GET", url, time.Now()); err != nil || sub.LauncherID != cred.id || resp.CredentialID != cred.id {
+		t.Fatalf("the proof must verify as a launcher proof of the held credential %s, and the answer name it: %+v %+v %v", cred.id, resp, sub, err)
+	}
+	for name, req := range map[string]Request{
+		"another broker":                   {Op: "sign-launcher", Method: "GET", URL: "https://elsewhere.test/v1/operator/grants"},
+		"a host beginning like the broker": {Op: "sign-launcher", Method: "GET", URL: r.srv.Broker.URL + "0/v1/operator/grants"},
+		"the broker's bare origin":         {Op: "sign-launcher", Method: "GET", URL: r.srv.Broker.URL},
+		"no method":                        {Op: "sign-launcher", URL: url},
+		"no url":                           {Op: "sign-launcher", Method: "GET"},
+	} {
+		if got := r.call(t, req); got.OK || got.Code != CodeBadRequest || got.Proof != "" {
+			t.Fatalf("%s: %+v, want BAD_REQUEST and no proof", name, got)
+		}
+	}
+}
+
+// TestSignLauncherRejectsAPeerWhosePIDChangedDuringTheAncestryWalk: sign-launcher trusts the
+// ancestry walk's "not in a session" only while the peer still names the pid it walked from, as
+// sign does; otherwise a session process the kernel replaced mid-walk could be handed a launcher
+// proof.
+func TestSignLauncherRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T) {
+	r := startRig(t, "")
+	impostor := sleeper(t)
+	peer, err := PinPID(impostor.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp := r.srv.signLauncher(peer, os.Getpid(), "GET", r.srv.Broker.URL+"/v1/operator/machines")
+	if resp.OK || resp.Code != CodeUnidentified || resp.Proof != "" {
+		t.Fatalf("a peer no longer matching the walked pid must be refused a launcher proof: %+v", resp)
 	}
 }

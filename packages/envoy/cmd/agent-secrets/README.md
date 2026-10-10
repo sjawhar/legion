@@ -8,13 +8,15 @@ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
 
 It asks the broker for the named secrets, waits while a person approves them in Dispatch if the
 secret's owner and tier require it, and runs the command with each granted value in its
-environment. People and launchers use its other forms to log a machine in (`agent-secrets launcher
+environment. People and launchers use its other forms to log a machine in (`agent-secrets machine
 login`), register an agent session (`agent-secrets register --exec -- <agent>`), and inspect a
 session's grants (`agent-secrets self`). People manage the agent secrets themselves with
 `agent-secrets secret list|show|create|set|retag|delete|restore`, which calls AWS Secrets Manager
 under their own AWS sign-in and then asks the broker to reread each secret written, so the change
-is served at once; those forms need no helper and no session. `agent-secrets --help` lists every
-form, and each form answers `-h`.
+is served at once; those forms need no helper and no session. From their own shell on a machine
+that runs the helper, they list and end their machine logins and live grants with
+`agent-secrets machine list|revoke` and `agent-secrets grant list|revoke`, under that machine's
+login. `agent-secrets --help` lists every form, and each form answers `-h`.
 
 On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secrets-helper`) holds
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in
