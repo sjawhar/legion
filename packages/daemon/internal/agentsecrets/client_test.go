@@ -571,6 +571,52 @@ func TestALate401OnTheOldCredentialStartsNoLogin(t *testing.T) {
 	}
 }
 
+// TestOnlyTheCallThatClearedTheCredentialRetries: of several Enrolls answered 401 on one
+// credential, only the one whose 401 cleared it retries the login. The others, answered one at a
+// time after each retry was refused and with no wait set, find the credential already gone and
+// start none.
+func TestOnlyTheCallThatClearedTheCredentialRetries(t *testing.T) {
+	withFastPolling(t)
+	withLoginRetry(t, 0, 0)
+	broker, c, held := held401(t)
+	down := enrollAnswer{http.StatusServiceUnavailable, `{"code":"UNAVAILABLE","error":"down"}`}
+	broker.refuseLogins = []enrollAnswer{down, down, down}
+	var done []<-chan error
+	var releases []chan struct{}
+	for range 3 {
+		done = append(done, enrollAsync(context.Background(), c))
+		releases = append(releases, <-held)
+	}
+	for i, release := range releases {
+		close(release)
+		if err := <-done[i]; err == nil {
+			t.Fatal("an Enroll answered 401 succeeded")
+		}
+	}
+	if got := broker.loginAttemptCount(); got != 1 {
+		t.Fatalf("broker saw %d logins from 3 Enrolls answered 401 on one credential, one at a time, want 1: only the call that cleared it retries", got)
+	}
+}
+
+// TestLoginWithALiveCredentialStartsNone: Login while the client holds a live credential starts
+// no login, so the state never reads "failed" or "pending" beside a credential that works.
+func TestLoginWithALiveCredentialStartsNone(t *testing.T) {
+	withFastPolling(t)
+	broker, c := newIssuedClient(t)
+	broker.refuseLogins = []enrollAnswer{{http.StatusTooManyRequests, `{"code":"RATE_LIMITED","error":"too many"}`}}
+	c.login.Store(&LoginState{State: "issued", Code: "CODE-0"})
+	code, err := c.Login(context.Background())
+	if err != nil || code != "CODE-0" {
+		t.Fatalf("Login with a live credential = %q, %v; want the issued login's code CODE-0 and no error", code, err)
+	}
+	if got := broker.loginAttemptCount(); got != 0 {
+		t.Fatalf("broker saw %d logins, want none while a credential is live", got)
+	}
+	if got := c.LoginStatus(); got.State != "issued" || c.cred.Load() == nil {
+		t.Fatalf("after Login with a live credential: state %+v, credential held %v; want issued and held", got, c.cred.Load() != nil)
+	}
+}
+
 // TestConcurrentLoginStartsExactlyOnePendingLogin pins Login's "idempotent while pending"
 // invariant under real concurrency: many callers racing Login (as doProof's automatic
 // re-login-on-401 can, from concurrent Enroll/Revoke calls sharing one Client) must observe

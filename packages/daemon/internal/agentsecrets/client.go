@@ -149,8 +149,8 @@ func (c *Client) Login(ctx context.Context) (string, error) {
 	return c.loginLocked(ctx)
 }
 
-// loginLocked is Login with loginMu held. Its checks are the one guard against a second login,
-// for Login and retryLogin alike: none starts while a credential is live or a login is pending.
+// loginLocked is Login with loginMu held. It starts no login while a credential is live or a
+// login is pending, so neither Login nor retryLogin opens one beside them.
 func (c *Client) loginLocked(ctx context.Context) (string, error) {
 	if c.cred.Load() != nil {
 		return c.LoginStatus().Code, nil
