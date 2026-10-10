@@ -4,6 +4,34 @@
 
 ### Added
 
+- A person lists and ends their own machines' logins and their live grants from their own shell.
+  `agent-secrets machine list` and `machine revoke ID`, and `agent-secrets grant list` and
+  `grant revoke ID`, call four new broker routes, `GET /v1/operator/machines`,
+  `POST /v1/operator/machines/{id}/revoke`, `GET /v1/operator/grants` and
+  `POST /v1/operator/grants/{id}/revoke`, which take the machine's own login (a launcher proof)
+  rather than Dispatch's UI token and act for its operator, the person who approved the login. The
+  grant routes answer and decide as Dispatch's Live grants page does, a revoke of a grant the
+  operator's own session got without asking withholding it. The machine routes cover the person's
+  own machines' logins alone: their rows of Dispatch's machine-login page, byte for byte, while a
+  service's login, such as the Legion daemon's, is neither listed nor revocable there
+  (`404 NOT_FOUND`) and is revoked on that page. A service's login, which has no operator, is
+  refused every route, `403 SERVICE_CREDENTIAL`. The helper signs these calls with the machine's
+  credential through a new `sign-launcher` op, for those four routes under its own broker alone
+  (`BAD_REQUEST` otherwise). It refuses `IN_SESSION` to a process inside a registered session's
+  process tree, and to one whose ancestry it cannot follow to init (a parent it cannot read, a
+  loop, or past 64 processes), so an agent's own commands cannot act as its operator. The check
+  covers the session's process tree only: a process the session sends out of it (`( cmd & )`,
+  `setsid -f`, a tmux server it started) passes, and the same user can stop the helper anyway. Such
+  a process can list and revoke the operator's own machine logins, never a service's machine
+  login, and the operator's grants, which include grants the operator approved on any session. It
+  can also enroll a box through the helper (`agent-secrets enroll --helper`, open to any process of
+  the user) and read the operator's agent secrets. A revoke made this way records
+  `launcher:<credential id>` as its actor on every row it writes; a revoke from Dispatch still
+  records `human:<email>`.
+  `machine list` prints the credential, host, approver, issue and expiry times and state,
+  `grant list` the grant, secrets, how it was granted, approver, session, operator and expiry, and
+  `--json` prints the broker's body verbatim. `machine revoke` warns on stderr when it ends this
+  machine's own login, its id typed in any case.
 - A pending secret request names whom it waits on. `POST /v1/requests` and
   `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
   names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than
@@ -133,6 +161,13 @@
 
 ### Changed
 
+- **Breaking:** `agent-secrets launcher login` and `launcher login-status` are removed, with no
+  alias: `agent-secrets machine login` and `machine login-status` replace them, beside
+  `machine list` and `machine revoke`. A script that still calls `launcher` gets the usage and
+  exit 2, so a session launcher gating on `launcher login-status` reads that as no login and starts
+  its sessions with no broker identity. Move every caller to `machine login` and
+  `machine login-status` before it pins this release. Every message that said to run
+  `agent-secrets launcher login`, from the CLI and from the helper, now names `machine login`.
 - The secrets broker takes no database password apart from its URL, and refuses to start while
   `BROKER_DATABASE_PASSWORD` is set or `BROKER_DATABASE_URL` names its
   `${BROKER_DATABASE_PASSWORD}` placeholder, naming the variable and why: on Amazon RDS it signs in
@@ -378,6 +413,9 @@
   reconnect that came before the drain once the drain is under way, and it closed the connection
   there, cutting off the deliveries still in their handlers. A reconnect callback now closes the
   connection only for a reconnect that came after the drain began.
+- A document whose search vector would pass Postgres's limit on one vector (1,048,575 bytes of lexemes and positions) can be versioned. Text of words no two alike passes it well inside a document's 1 MiB, at about 700 KB of `w000001 w000002 …` or 475 KB of UUIDs, and every write of such text failed with `string is too long for tsvector`: the document's version, so every settlement of it, its upload, an issue titled with it and that title's duplicate check, and an ask block holding it. Migrations `0087`–`0088` build every search vector with `search_vector`, which indexes the whole text where its vector fits, exactly as before, and otherwise the longest of its first half, quarter, eighth, … that fits, cut between two words, so keyword search finds such a text by the whole words that open it and by no part of a word the cut would split. A body with no whitespace before its cut contributes none of its own words; an issue's key is always indexed whole (LEGION-505).
+- An issue title is at most 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after the trim), on creation and on a retitle; a longer one is `400 CAP_EXCEEDED`, named as the comment, message and ask caps name theirs, before the duplicate check reads the project's titles. Titles had no cap, so one stored title could be as long as a request allowed: every later creation in its project read it in the duplicate check, and the `409 POSSIBLE_DUPLICATE` message quoted it whole. Beside 2,000 production titles, one stored 800 KB title raised the check from about 0.1 s to 0.56 s. A new title of 20,000 distinct words (10,000 did not) beside an issue whose title shared one of them overflowed Postgres's default 2 MB stack in the duplicate check's snippet (`stack depth limit exceeded`, `500`); a title at the cap holds at most 501 lexemes. Production's longest title is 326 characters. The dashboard's create dialog and issue-header title field stop at the cap, and a retitle Dispatch refuses shows Dispatch's reason in the header instead of the generic failure line (LEGION-505).
+- The duplicate-title check no longer parses every title in the project on each creation. It read each stored title's lexemes by building them from the title as it ran, several times over for a title that shared a word with the new one, so its cost grew with every title in the project: beside 2,000 titles at the 1,000-character cap, an ordinary creation's check took 2.1–2.5 s and one at the cap 7.6 s. Migrations `0088`–`0089` store each title's own lexemes in `issues.title_lexemes`, which the issues trigger fills on every insert and retitle and `0089` fills for every issue stored before, under a table lock that no reparent deadlocks against; the check reads them, so a creation parses one title. Beside those 2,000 titles the check takes 56–95 ms, and beside 2,000 production titles 15–19 ms where it took 120–154 ms (Postgres 16, load 60–80). It answers the same candidates, in the same order. A candidate's snippet marks the words its title shares with the new title: with a parent, a word that is both the parent's and a part of a hyphenated word of the new title is no longer marked, where the snippet marked it beside parent `Legion` in `launch window legion` for the new title `legion-resolve launch window` (LEGION-505).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

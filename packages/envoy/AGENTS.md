@@ -1954,13 +1954,15 @@ its environment. Its `secret` forms are how a person manages the agent secrets t
 Secrets Manager under their own AWS sign-in (below); the broker writes no secret. The broker holds
 no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
-revoking a grant, ending a machine login — reaches the broker's UI routes from Dispatch's server,
-carrying the UI bearer and the deciding person's Dispatch login, their email, in the body's
-`approver` field. The bearer
+revoking a grant, ending a machine login — made in Dispatch reaches the broker's UI routes from
+its server, carrying the UI bearer and the deciding person's Dispatch login, their email, in the
+body's `approver` field. The bearer
 vouches for that login: Dispatch fills it from its own signed-in session, never from the browser,
 and the broker checks it against the record's approver and records it on the decision event. The
 UI bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
-agents is the deployment's job. `internal/broker/enroll` turns a launcher credential into a leased
+agents is the deployment's job; a person's own machine ends their machine logins and grants through
+the operator routes instead (below), under its machine login. `internal/broker/enroll` turns a
+launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
 service-account token). An operator credential's enrollment is its operator's, the email of the
 person who approved its machine login: a launcher may leave `operator` out of the enrollment, and
@@ -2183,7 +2185,7 @@ or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but c
 for callers that choose between the broker and another backend. A helper holding no launcher
 credential, from every restart until the operator logs the machine in, enrolls no one: its sign
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
-with the same not-logged-in notice naming `agent-secrets launcher login`. The login that installs
+with the same not-logged-in notice naming `agent-secrets machine login`. The login that installs
 a credential wakes every registered session's enrollment retry, so those sessions reach the broker
 within about a second of it rather than when a backoff of up to a minute comes round. A session
 whose renew the broker refuses (its lease lapsed) stops counting as enrolled at once, and its
@@ -2196,12 +2198,12 @@ login, still revokes it. A session that ends first takes its record with it and 
 bounded revoke (three tries); before a login those fail, and the broker's sweeper ends the id once
 its lease lapses. A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another
 operator's launcher credential) counts as done, and the session enrolls afresh.
-`agent-secrets launcher login-status`, which the helper answers, exits 0 while the helper holds a
+`agent-secrets machine login-status`, which the helper answers, exits 0 while the helper holds a
 launcher credential and prints `issued`. A
 re-login that is denied, expires unapproved or is still pending leaves the credential an earlier
 login installed in place, and the helper keeps enrolling sessions with it, so login-status still
 exits 0 and prints `issued`, and stderr names the most recent login and its code
-(`credential_held` beside `login_state`, the most recent login's state, which `launcher login`'s
+(`credential_held` beside `login_state`, the most recent login's state, which `machine login`'s
 own poll reads). A helper from before that field reports only the most recent login, so there a
 denied re-login still reads `denied` and exits 1 until the helper restarts on a release that
 carries it. While a credential is held, login-status's last stderr line says when it expires and
@@ -2221,7 +2223,7 @@ why the helper holds no credential in the words its journal uses for the same st
 a broker refusal on a helper from before `credential_dropped` (which sets `login_refused` only for
 one), a denied login, a login that expired before anyone approved it, or no login since the
 helper started. A re-login pending at the drop reports its own outcome once it settles, so its
-`launcher login` prints `denied` for a denial. The helper logs every change of the credential:
+`machine login` prints `denied` for a denial. The helper logs every change of the credential:
 `machine login issued` (credential id, its `expires_at`, and the operator the login was signed
 with) when a login installs one, a WARN that it expires soon a day before its expiry (at once when
 less is left), and one ERROR when it drops it, `<cause>; cleared: no session can enroll until a
@@ -2249,6 +2251,34 @@ restarted on it; its login-status probe stays, since it also finds a helper that
 Against an older helper an unconditional `--wait 10` stalls every launch 10 s while no credential
 exists. With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts
 with a warning that its `agent-secrets` calls fail until the machine is logged in.
+
+`agent-secrets machine list|revoke` and `agent-secrets grant list|revoke` (`machine.go`,
+`grant.go`, dispatched by `cmdGroup` from the `commands` rows) are the operator routes from the
+person's own shell, under this machine's login: the CLI asks the helper for a launcher proof with
+the `sign-launcher` op (`launcherSigner`), whose key never leaves the helper, and calls
+`/v1/operator/*` with it. The helper signs only the four operator routes under its own
+`AGENT_SECRETS_URL` (`operatorRoute`; `BAD_REQUEST` naming them otherwise); refuses `IN_SESSION` to
+a process inside a registered session's process tree, and to one whose ancestry walk cannot reach
+init (a parent it cannot read, a loop, or past 64 processes: `Registry.RootOrUnknown`), re-reading
+the peer's pid after the walk as `sign` does; answers `NO_CREDENTIAL` while it holds no
+credential; and returns the credential's id with the proof, so `machine revoke` warns when it ends
+this machine's own login, its id in any case `uuid.Parse` reads. `IN_SESSION` keeps an agent's own
+commands from acting as its operator; it is not a boundary against code running as the operator's
+user. The check covers the session's process tree only: a process the session sends out of it
+(`( cmd & )`, `setsid -f`, a tmux server the session started) is reparented and passes, and the same
+uid can stop the helper. Through these routes such a process can list and revoke the operator's own
+machine logins, never a service's machine login, and the operator's grants, which include grants the
+operator approved on any session, a service's pod among them. The helper's `enroll --helper` path
+(`enroll-box`) is open to any process of the user, so the same process can enroll a box and read the
+operator's agent secrets that way. Every refusal the helper gives reaches the CLI
+as one `launcherRefusal`, printed as it stands: no credential, a helper from before the op (which
+answers `unknown op sign-launcher`, read as a helper to restart on the pinned release), or the
+helper's own code. Both lists print a table; `--json` prints the broker's body verbatim:
+`grant list`'s is byte-identical to the body Dispatch's Live grants page reads for the same
+person, and `machine list`'s holds that person's own machines' rows of Dispatch's machine-login
+page, byte for byte, without the service logins that page also lists (`machine_linux_test.go`
+drives both commands against a real helper and broker). A machine with no helper has no machine
+login to act as, so the commands refuse with exit 2 naming the socket they looked for.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required, and the only
@@ -2340,7 +2370,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 23 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 27 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -2492,7 +2522,8 @@ scheduled for deletion, which Secrets Manager keeps until its recovery window pa
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
-on a human's Dispatch email, allowed only when that email is the grant's approver or its
+on a person's login (a Dispatch email, or the operator of the machine login calling
+`/v1/operator/grants/{id}/revoke`), allowed only when that login is the grant's approver or its
 enrollment's operator (`mayRevoke`, which also answers whether it is the operator, else
 `403 NOT_APPROVER`). When the enrollment's operator revokes, `withhold` withholds
 from the grant's session every name its request got automatically (a `withheld_secrets` row per
@@ -2526,8 +2557,14 @@ person's sessions, automatic ones included, and every grant the person approved,
 null `approver` and `record_id` for an automatic one. Audit rows never carry secret values:
 `audit()` takes only
 `kind`, `enrollment_id`, `request_id`, an optional
-`grant_id`, `actor` (`human:<login>`, `session:<enrollment id>`, `launcher:<credential id>`, or
-`broker`), and a non-secret JSON `detail`. The granted value itself is read fresh from
+`grant_id`, `actor`, and a non-secret JSON `detail`. The actor is what authenticated the change:
+`human:<login>` for one Dispatch relays from its signed-in person, `session:<enrollment id>` for a
+session's own, `launcher:<credential id>` for one a machine login's own proof made (an enrollment
+its launcher revoked, or a machine login or grant its operator ended through `/v1/operator/*`), and
+`broker` for what the broker ends on its own (a lapsed lease); `RevokeCredential` and
+`RevokeByApprover` take theirs from their caller, and record it on every row they write
+(`grants.revoked_by`, a cancelled request's `decided_by` and event, each audit row). The granted
+value itself is read fresh from
 `secrets.Reader` on release and never persisted.
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
@@ -2585,7 +2622,7 @@ no `launcher_credential` record (only `ApplyDecision` mints one, always from its
 In one transaction it sets the credential's `revoked_at`, so its launcher proofs stop
 authenticating, ends every enrollment the credential made through `endEnrollment` (a person's host
 sessions and boxes, or every pod a service's login enrolled: grants revoked, pending requests
-cancelled, actor `human:<email>`, an `enrollment.revoked` row each) and writes one
+cancelled, the caller's actor, an `enrollment.revoked` row each) and writes one
 `launcher_credential.revoked` audit row naming them, the host and any service; revoking it again
 changes nothing. It locks the credential's row before the enrollments', and `Create` holds that row
 `for share` while it inserts, so an enrollment whose launcher proof was verified just before a revoke
@@ -2599,6 +2636,26 @@ session learns it at its next enrollment, and the Legion daemon at its next pod 
 unenrollment, after which it starts a new
 machine login. Dispatch's machine-login page lists and revokes, through these two routes, the
 signed-in person's own machines' logins and every service's.
+
+The operator routes (`api/handlers_operator.go`) are the same lists and revokes for a person at
+their own machine, authenticated by that machine's launcher proof (`launcherAuth`) rather than the
+UI bearer, and acting for the calling credential's `operator`. `GET /v1/operator/grants` answers
+exactly what `GET /v1/grants` answers for that person, and `POST /v1/operator/grants/{id}/revoke`
+revokes as that person through `RevokeByApprover`, with the same refusals and the operator's
+withhold (one function each, `writeApproverGrants` and `revokeGrantAs`). The machine routes cover
+the person's own machines' logins alone: `GET /v1/operator/machines` lists them
+(`enroll.Service.OwnLiveCredentials`, the person's rows of `GET /v1/launcher-credentials`, byte for
+byte), and `POST /v1/operator/machines/{id}/revoke` ends one (`RevokeOwnCredential`, the same rule
+as `RevokeCredential` for a person's machine), while a service's login is `404 NOT_FOUND` there, as
+an unknown id is; its revoke stays on Dispatch's machine-login page, so a process a session sent
+out of its tree cannot end the Legion daemon's login. Both machine routes answer through the
+function their UI route uses (`writeLauncherCredentials`, `revokeCredentialAs`), handed the enroll
+method. Each refuses `403 NOT_APPROVER` as its UI route does. A service's login has no operator and
+is refused every one, `403 SERVICE_CREDENTIAL` (`operatorOf`). Every row an operator revoke writes
+names the calling machine login, `record.LauncherActor(<credential id>)`, whose own row names its
+operator, since no Dispatch sign-in vouched for it; a UI revoke names `record.HumanActor(<login>)`.
+Revoking the calling credential itself ends that machine's access: its next launcher proof is
+`401 LAUNCHER_INVALID`.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then
