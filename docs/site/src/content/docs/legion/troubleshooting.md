@@ -375,8 +375,9 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   `runtime.kubernetes.agent_secrets` set, the daemon logs in to the [Secrets Broker](/legion/broker/)
   at boot and waits for anyone signed in to Dispatch to approve the code on its credential page;
   pods are not enrolled until then. Denying the code does not stop new ones: while a pod needs
-  enrolling, the daemon asks again after its wait (30 s after the first denial, doubling to a cap of
-  one code every 5 minutes). To stop the codes, stop the daemon or remove its `agent_secrets` block.
+  enrolling or revoking, the daemon asks again after its wait (30 s after the first denial,
+  doubling to a cap of one code every 5 minutes). To stop the codes, stop the daemon, or remove its
+  `agent_secrets` block and restart it: the daemon reads `legion.yaml` only at start.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin
