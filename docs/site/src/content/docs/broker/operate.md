@@ -60,6 +60,15 @@ proves nothing. For the
 same reason each account is bound to one service: the broker refuses to start, naming both
 services, if `BROKER_SERVICES` binds one account to two of them.
 
+The account must be one the service's pods name. The broker refuses to start, naming the entry,
+if `BROKER_SERVICES` binds a namespace's `default` account
+(`system:serviceaccount:<namespace>:default`). Every pod in a namespace whose spec names no account
+runs as `default`, and any of those pods can get a token for the broker's audience. A `default`
+binding would therefore prove nothing about which pods are the service's: any such pod, plus a
+service login anyone signed in to Dispatch can approve, would get the service's secrets. Create a
+dedicated account, such as `legion-worker`, set it as the pods' `serviceAccountName`, and bind
+that account.
+
 While a secret's owner tag names a service the list leaves out, the broker refuses the secret as
 `owner-tag-malformed` ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)).
 
