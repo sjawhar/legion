@@ -1020,18 +1020,15 @@ func TestSignLauncherRefusedInsideASessionAndSignsOutside(t *testing.T) {
 	}
 }
 
-// TestSignLauncherSignsOnlyForThisHelpersBroker: once logged in, sign-launcher answers the
-// operator's shell a launcher proof for the held machine credential, which verifies with that
-// credential's key for exactly the method and URL asked. A URL outside the helper's broker, a host
-// that only begins like the broker's included, and a request missing its method or URL get no
-// proof.
-func TestSignLauncherSignsOnlyForThisHelpersBroker(t *testing.T) {
+// TestSignLauncherSignsOnlyTheOperatorRoutesOfThisHelpersBroker: once logged in, sign-launcher
+// answers the operator's shell a launcher proof for the held machine credential, which verifies
+// with that credential's key for exactly the method and URL asked, for each of the broker's four
+// operator routes. Every other call gets no proof: another broker, a host that only begins like
+// this broker's, another route of this broker (an enrollment, which a launcher proof also
+// authenticates), an operator route under the other method or with its id missing, split or a
+// dot segment, and a request missing its method or URL.
+func TestSignLauncherSignsOnlyTheOperatorRoutesOfThisHelpersBroker(t *testing.T) {
 	r := startRig(t, "")
-	url := r.srv.Broker.URL + "/v1/operator/grants"
-	resp := r.call(t, Request{Op: "sign-launcher", Method: "GET", URL: url})
-	if !resp.OK || resp.Proof == "" {
-		t.Fatalf("sign-launcher with a credential: %+v", resp)
-	}
 	cred := r.srv.Broker.cred.Load()
 	tp, err := proof.Thumbprint(&cred.key.PublicKey)
 	if err != nil {
@@ -1040,19 +1037,42 @@ func TestSignLauncherSignsOnlyForThisHelpersBroker(t *testing.T) {
 	v := &proof.Verifier{Skew: time.Minute,
 		LookupLauncher: func(_ context.Context, id string) (string, bool, error) { return tp, id == cred.id, nil },
 		Replay:         func(context.Context, string, time.Time) (bool, error) { return true, nil }}
-	if sub, err := v.Verify(context.Background(), resp.Proof, "GET", url, time.Now()); err != nil || sub.LauncherID != cred.id || resp.CredentialID != cred.id {
-		t.Fatalf("the proof must verify as a launcher proof of the held credential %s, and the answer name it: %+v %+v %v", cred.id, resp, sub, err)
+	broker := r.srv.Broker.URL
+	id := "0f9a6c1e-2b7d-4c3a-9e5f-8a1b2c3d4e5f"
+	for _, call := range []struct{ method, url string }{
+		{http.MethodGet, broker + "/v1/operator/machines"},
+		{http.MethodPost, broker + "/v1/operator/machines/" + id + "/revoke"},
+		{http.MethodGet, broker + "/v1/operator/grants"},
+		{http.MethodPost, broker + "/v1/operator/grants/" + id + "/revoke"},
+	} {
+		resp := r.call(t, Request{Op: "sign-launcher", Method: call.method, URL: call.url})
+		if !resp.OK || resp.Proof == "" {
+			t.Fatalf("sign-launcher %s %s with a credential: %+v", call.method, call.url, resp)
+		}
+		if sub, err := v.Verify(context.Background(), resp.Proof, call.method, call.url, time.Now()); err != nil || sub.LauncherID != cred.id || resp.CredentialID != cred.id {
+			t.Fatalf("%s %s: the proof must verify as a launcher proof of the held credential %s, and the answer name it: %+v %+v %v", call.method, call.url, cred.id, resp, sub, err)
+		}
 	}
 	for name, req := range map[string]Request{
 		"another broker":                   {Op: "sign-launcher", Method: "GET", URL: "https://elsewhere.test/v1/operator/grants"},
-		"a host beginning like the broker": {Op: "sign-launcher", Method: "GET", URL: r.srv.Broker.URL + "0/v1/operator/grants"},
-		"the broker's bare origin":         {Op: "sign-launcher", Method: "GET", URL: r.srv.Broker.URL},
-		"no method":                        {Op: "sign-launcher", URL: url},
+		"a host beginning like the broker": {Op: "sign-launcher", Method: "GET", URL: broker + "0/v1/operator/grants"},
+		"the broker's bare origin":         {Op: "sign-launcher", Method: "GET", URL: broker},
+		"an enrollment":                    {Op: "sign-launcher", Method: "POST", URL: broker + "/v1/enrollments"},
+		"an unenrollment":                  {Op: "sign-launcher", Method: "DELETE", URL: broker + "/v1/enrollments/" + id},
+		"the list under POST":              {Op: "sign-launcher", Method: "POST", URL: broker + "/v1/operator/machines"},
+		"a revoke under GET":               {Op: "sign-launcher", Method: "GET", URL: broker + "/v1/operator/grants/" + id + "/revoke"},
+		"a revoke with no id":              {Op: "sign-launcher", Method: "POST", URL: broker + "/v1/operator/machines//revoke"},
+		"a revoke of a split id":           {Op: "sign-launcher", Method: "POST", URL: broker + "/v1/operator/machines/a/b/revoke"},
+		"a revoke of a dot segment":        {Op: "sign-launcher", Method: "POST", URL: broker + "/v1/operator/machines/../revoke"},
+		"a list with a query":              {Op: "sign-launcher", Method: "GET", URL: broker + "/v1/operator/grants?approver=x"},
+		"no method":                        {Op: "sign-launcher", URL: broker + "/v1/operator/grants"},
 		"no url":                           {Op: "sign-launcher", Method: "GET"},
 	} {
-		if got := r.call(t, req); got.OK || got.Code != CodeBadRequest || got.Proof != "" {
-			t.Fatalf("%s: %+v, want BAD_REQUEST and no proof", name, got)
-		}
+		t.Run(name, func(t *testing.T) {
+			if got := r.call(t, req); got.OK || got.Code != CodeBadRequest || got.Proof != "" {
+				t.Fatalf("%+v, want BAD_REQUEST and no proof", got)
+			}
+		})
 	}
 }
 

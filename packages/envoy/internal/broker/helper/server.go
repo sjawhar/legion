@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 
@@ -297,23 +298,29 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 }
 
 // signLauncher signs a launcher proof with the machine credential for the operator's own machine
-// and grant commands, for a URL under this helper's broker only (Broker.URL is never a value the
-// peer supplies, as signRequest's audience is not). It is refused (IN_SESSION) to a process inside
-// a registered session's process tree, and to one whose ancestry walk cannot show it is outside
-// every such tree (Registry.RootOrUnknown), so a session's own commands cannot act as its operator.
-// A process that leaves its session's tree (a double fork or setsid, reparented to init or a
-// subreaper) is outside every check this makes, and the operator's user can stop the helper
-// anyway: the refusal guards a session's own process tree, not a boundary against code running as
-// that user. The walks run while peer's pidfd stays open, and their answer is trusted only once
-// peer.PID() still names pid, the pid-reuse rule sign follows (resolveDescendant), so a session
-// process the kernel replaced mid-walk is never handed a proof. With no credential it answers
-// NO_CREDENTIAL. Beside the proof it answers the credential's id (not secret: the broker lists it),
-// so a machine revoke can tell this machine's own login. The broker's answer to the call goes to
-// the peer, not here: a refused credential is dropped at the helper's own next launcher call.
+// and grant commands: the four operator routes under this helper's broker (operatorRoute; Broker.URL
+// is never a value the peer supplies, as signRequest's audience is not), and nothing else. It is
+// refused (IN_SESSION) to a process inside a registered session's process tree, and to one whose
+// ancestry walk cannot show it is outside every such tree (Registry.RootOrUnknown), so a session's
+// own commands cannot act as its operator. A process that leaves its session's tree (a double
+// fork or setsid, reparented to init or a subreaper) is outside every check this makes, and the
+// operator's user can stop the helper anyway: the refusal guards a session's own process tree, not
+// a boundary against code running as that user. The walks run while peer's pidfd stays open, and
+// their answer is trusted only once peer.PID() still names pid, the pid-reuse rule sign follows
+// (resolveDescendant), so a session process the kernel replaced mid-walk is never handed a proof.
+// With no credential it answers NO_CREDENTIAL. Beside the proof it answers the credential's id
+// (not secret: the broker lists it), so a machine revoke can tell this machine's own login. The
+// broker's answer to the call goes to the peer, not here: a refused credential is dropped at the
+// helper's own next launcher call.
 func (s *Server) signLauncher(peer *Peer, pid int, method, url string) Response {
 	if method == "" || url == "" {
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: "sign-launcher needs method and url"}
+	}
+	if !operatorRoute(s.Broker.URL, method, url) {
+		peer.Close()
+		b := s.Broker.URL
+		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("sign-launcher signs only GET %[1]s/v1/operator/machines, POST %[1]s/v1/operator/machines/{id}/revoke, GET %[1]s/v1/operator/grants and POST %[1]s/v1/operator/grants/{id}/revoke; not %[2]s %[3]s", b, method, url)}
 	}
 	sess, unknown := s.Registry.RootOrUnknown(pid)
 	if sess != nil {
@@ -329,9 +336,6 @@ func (s *Server) signLauncher(peer *Peer, pid int, method, url string) Response 
 		return Response{Code: CodeUnidentified, Error: "the peer no longer matches the identified pid"}
 	}
 	peer.Close()
-	if !strings.HasPrefix(url, s.Broker.URL+"/") {
-		return Response{Code: CodeBadRequest, Error: fmt.Sprintf("sign-launcher signs only for this helper's broker, %s; not %s", s.Broker.URL, url)}
-	}
 	compact, cred, err := s.Broker.launcherProof(method, url)
 	if errors.Is(err, errNoCredential) {
 		return Response{Code: CodeNoCredential, Error: noCredentialMsg}
@@ -340,6 +344,43 @@ func (s *Server) signLauncher(peer *Peer, pid int, method, url string) Response 
 		return Response{Code: CodeSign, Error: err.Error()}
 	}
 	return Response{OK: true, Proof: compact, CredentialID: cred.id}
+}
+
+// operatorRoute reports whether method and url are one of the broker's four operator routes
+// under broker: GET /v1/operator/machines, POST /v1/operator/machines/{id}/revoke,
+// GET /v1/operator/grants or POST /v1/operator/grants/{id}/revoke, with no query or fragment
+// (the broker binds a proof to its path alone) and {id} one path segment that does not unescape
+// to empty, ".", ".." or a "/". The id need not be a UUID: the broker's own answer names one
+// that is not.
+func operatorRoute(broker, method, url string) bool {
+	path, ok := strings.CutPrefix(url, broker)
+	if !ok {
+		return false
+	}
+	switch path {
+	case "/v1/operator/machines", "/v1/operator/grants":
+		return method == http.MethodGet
+	}
+	if method != http.MethodPost {
+		return false
+	}
+	for _, list := range []string{"/v1/operator/machines/", "/v1/operator/grants/"} {
+		if id, ok := strings.CutPrefix(path, list); ok {
+			id, ok = strings.CutSuffix(id, "/revoke")
+			return ok && pathSegment(id)
+		}
+	}
+	return false
+}
+
+// pathSegment reports whether seg is one path segment naming something: no '/', '?' or '#', and
+// an unescaped form that is not empty, ".", ".." and holds no '/'.
+func pathSegment(seg string) bool {
+	if strings.ContainsAny(seg, "/?#") {
+		return false
+	}
+	raw, err := neturl.PathUnescape(seg)
+	return err == nil && raw != "" && raw != "." && raw != ".." && !strings.Contains(raw, "/")
 }
 
 // unregister retires a pid resolveDescendant ties to a registered session.

@@ -131,7 +131,8 @@ const (
 	// session's own process tree, not a boundary against code running as that user.
 	CodeInSession = "IN_SESSION"
 	// CodeBadRequest answers a request that is not one JSON object per line, names an unknown op,
-	// leaves out a field its op needs, or asks sign-launcher for a URL outside this helper's broker.
+	// leaves out a field its op needs, or asks sign-launcher for anything but one of the four
+	// operator routes under this helper's broker.
 	CodeBadRequest = "BAD_REQUEST"
 	// CodeUnidentified answers a caller the kernel could not identify, or one whose process exited
 	// or changed while the helper was identifying it.
