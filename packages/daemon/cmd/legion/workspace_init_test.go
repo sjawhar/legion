@@ -12,12 +12,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -30,15 +32,18 @@ const winitRepo = "acme/widgets"
 // fakeJJ is the jj first on the issue volume's PATH. It records every invocation as one line,
 // "<WINIT_TAG> <argv>" without the runner's leading --config pin, and runs the real jj with that
 // pin — with WINIT_HOLD set, a clone of github.com/acme/widgets (which reaches the pod's feed)
-// first writes to the directory's `held` fifo and waits on its `release` fifo. A fresh
-// provisioning's first command is that clone, so a process held there is mid-provisioning.
+// opens the directory's `release` fifo, writes its pid to its `held` fifo, waits on `release`
+// until the test closes its end there, and exits without cloning. A fresh provisioning's first
+// command is that clone, so a process held there is mid-provisioning.
 const fakeJJ = `#!/bin/sh
 pin=
 case "$1" in --config=*) pin=$1; shift ;; esac
 printf '%s %s\n' "$WINIT_TAG" "$*" >> "$WINIT_JJ_LOG"
 if [ -n "$WINIT_HOLD" ] && [ "$1 $2 $3" = "git clone https://github.com/acme/widgets" ]; then
-	printf held > "$WINIT_HOLD/held"
-	read _ < "$WINIT_HOLD/release"
+	exec 3< "$WINIT_HOLD/release"
+	printf '%s' "$$" > "$WINIT_HOLD/held"
+	read _ <&3
+	exit 1
 fi
 PATH="${PATH#*:}" exec "$WINIT_REAL_JJ" ${pin:+"$pin"} "$@"
 `
@@ -60,8 +65,8 @@ printf '%s\n' "$*" >> "${0%/bin/codegraph}/codegraph.log"
 // fetching container's own filesystem, and, as in a pod, a jj config home that starts empty and no
 // user configuration.
 type issueVolume struct {
-	root, token, feed, jjLog, credentialLog, codegraphLog, realJJ, tmp string
-	env                                                                map[string]string
+	root, token, feed, jjLog, credentialLog, codegraphLog, realJJ, tmp, bin string
+	env                                                                     map[string]string
 }
 
 func newIssueVolume(t *testing.T) *issueVolume {
@@ -98,7 +103,7 @@ func newIssueVolume(t *testing.T) *issueVolume {
 	v := &issueVolume{
 		root: root, token: token, feed: filepath.Join(dir, "feed"), jjLog: filepath.Join(dir, "jj.log"),
 		credentialLog: filepath.Join(dir, "credential.log"), codegraphLog: filepath.Join(dir, "codegraph.log"),
-		realJJ: realJJ, tmp: tmp,
+		realJJ: realJJ, tmp: tmp, bin: bin,
 	}
 	v.env = map[string]string{
 		"PATH":                 bin + string(filepath.ListSeparator) + os.Getenv("PATH"),
@@ -692,7 +697,12 @@ func (p *initProcess) wait(t *testing.T) (code int, rest []string) {
 }
 
 // holder fills the feed, starts `provision` for LEGION-42, and returns once it is held inside its
-// first command, the clone (fakeJJ's WINIT_HOLD), where it stays until it is killed.
+// first command, the clone (fakeJJ's WINIT_HOLD), where it stays until the test ends. That jj
+// leads a process group of its own (procgroup.Configure), which no kill of workspace-init reaches,
+// so the test holds the one writing end of the jj's `release` fifo (O_RDWR opens a fifo without
+// waiting for a reader) and the hold ends when that end closes: in holder's cleanup, which runs
+// once start's has ended workspace-init and waits, where /proc shows it, until the jj has exited;
+// or as the kernel closes it, when the test binary dies first.
 func (v *issueVolume) holder(t *testing.T) *initProcess {
 	t.Helper()
 	v.fetch(t)
@@ -702,8 +712,27 @@ func (v *issueVolume) holder(t *testing.T) *initProcess {
 			t.Fatal(err)
 		}
 	}
+	release, err := os.OpenFile(filepath.Join(hold, "release"), os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jj := 0
+	t.Cleanup(func() {
+		_ = release.Close()
+		if jj == 0 {
+			return
+		}
+		script := filepath.Join(v.bin, "jj")
+		testwait.Eventually(t, "the held jj to exit", func() bool {
+			cmdline, err := os.ReadFile("/proc/" + strconv.Itoa(jj) + "/cmdline")
+			return err != nil || !strings.Contains(string(cmdline), script)
+		})
+	})
 	p := v.start(t, "first", "LEGION-42", "WINIT_HOLD="+hold)
-	fifo(t, filepath.Join(hold, "held"), os.O_RDONLY, p)
+	held := fifo(t, filepath.Join(hold, "held"), os.O_RDONLY, p)
+	if jj, err = strconv.Atoi(held); err != nil {
+		t.Fatalf("the held jj wrote %q to its held fifo, want its pid", held)
+	}
 	return p
 }
 
@@ -780,4 +809,65 @@ func holdsNoToken(t *testing.T, dir, when string) {
 	if err != nil {
 		t.Fatalf("walk %s: %v", dir, err)
 	}
+}
+
+// A held provisioning's jj runs in a process group of its own (procgroup.Configure), which neither
+// a test's kill of workspace-init nor start's kill of workspace-init's group reaches: the hold ends
+// with the test that took it, or the fake jj, its fifos gone with the test's TempDir, waits for a
+// release forever. Each scenario runs as a subtest, and once it has ended no process runs that
+// volume's fake jj.
+func TestWorkspaceInitHoldEndsWithItsTest(t *testing.T) {
+	if _, err := os.Stat("/proc/self/cmdline"); err != nil {
+		t.Skipf("no /proc to find a held jj in: %v", err)
+	}
+	for _, tc := range []struct {
+		name string
+		kill bool
+	}{{"the test kills workspace-init", true}, {"start's cleanup kills workspace-init", false}} {
+		var jj string
+		t.Run(tc.name, func(t *testing.T) {
+			v := newIssueVolume(t).withRemote(t)
+			jj = filepath.Join(v.bin, "jj")
+			first := v.holder(t)
+			if tc.kill {
+				if err := first.cmd.Process.Kill(); err != nil {
+					t.Fatal(err)
+				}
+				first.wait(t)
+			}
+		})
+		if jj == "" {
+			continue
+		}
+		if left := killProcessesRunning(t, jj); len(left) != 0 {
+			t.Errorf("%s: after its subtest ended, its fake jj still runs: %s", tc.name, strings.Join(left, "; "))
+		}
+	}
+}
+
+// killProcessesRunning is every process whose command line names path, as "pid <n>: <argv>", each
+// killed once found so a failing run leaves none behind.
+func killProcessesRunning(t *testing.T, path string) []string {
+	t.Helper()
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found []string
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil {
+			continue
+		}
+		cmdline, err := os.ReadFile("/proc/" + entry.Name() + "/cmdline")
+		if err != nil {
+			continue
+		}
+		argv := strings.ReplaceAll(strings.TrimRight(string(cmdline), "\x00"), "\x00", " ")
+		if strings.Contains(argv, path) {
+			found = append(found, "pid "+entry.Name()+": "+argv)
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+	return found
 }
