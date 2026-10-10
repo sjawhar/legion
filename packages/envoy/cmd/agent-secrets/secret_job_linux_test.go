@@ -224,6 +224,9 @@ func TestPromptJobHelper(t *testing.T) {
 		}
 		maxPasteDrain = d
 	}
+	if os.Getenv("AGENT_SECRETS_JOB_FAIL_DISCARD") != "" {
+		discardInput = func(int) error { return errors.New("TIOCFLUSH failed") }
+	}
 	reference := os.Getenv("AGENT_SECRETS_JOB_REFERENCE")
 	if reference == "" {
 		// Started in the foreground: bash has already handed it the terminal.
@@ -967,4 +970,19 @@ func TestPromptHangupRestoresAndAbortCannotDumpTheValue(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A failed input flush on the stop path is reported: Ctrl-Z discards what the terminal holds unread
+// to keep it from the shell, and when that discard fails the refused entry says so. discardInput has
+// never failed on a held terminal in practice; the helper makes it fail.
+func TestPromptJobStopDiscardFailureIsReported(t *testing.T) {
+	s := newPromptShell(t)
+	s.env = "AGENT_SECRETS_JOB_FAIL_DISCARD=1 "
+	s.start(false, false)
+	s.send("head\x1a")
+	s.wait("Stopped")
+	s.wait("PROMPT$ ")
+	s.out.Reset()
+	s.send("fg\r")
+	s.wait("RETURNED read the value at the terminal: discard the terminal's unread input")
 }

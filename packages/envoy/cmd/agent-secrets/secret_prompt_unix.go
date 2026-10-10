@@ -487,17 +487,17 @@ func (t *promptTerminal) raise(sig syscall.Signal) error {
 // kernel's own handling of a signal key would: what arrived with or before Ctrl-Z would otherwise
 // reach the shell once the stop gives it the terminal. Keys typed after the stop has taken effect
 // go to the shell. From the background a flush would stop the job (tty_check_change), so it is
-// skipped there.
-func (t *promptTerminal) flushInput() {
+// skipped there. It answers discardInput's error, which run records on the stop path, and touches no
+// watcher state, so it is safe to call before the reader has assigned t.watch.
+func (t *promptTerminal) flushInput() error {
 	held, err := t.holdsTerminal()
 	if err != nil || !held {
-		return
+		return nil
 	}
-	// A failed flush left unread value bytes for the shell; record it, as a stopBy failure is, so
-	// the refused entry says the discard failed. It has never failed on a held terminal in practice.
-	if err := discardInput(t.fd); err != nil && t.watch.stopErr == nil {
-		t.watch.stopErr = fmt.Errorf("discard the terminal's unread input: %w", err)
+	if err := discardInput(t.fd); err != nil {
+		return fmt.Errorf("discard the terminal's unread input: %w", err)
 	}
+	return nil
 }
 
 func (t *promptTerminal) read(buf []byte) (int, error) {
@@ -757,7 +757,7 @@ type promptWatch struct {
 	wake, notify *os.File
 	signals      chan os.Signal
 	done, joined chan struct{}
-	flush        func() // discards the terminal's unread input before a stop (flushInput)
+	flush        func() error // discards the terminal's unread input before a stop (flushInput)
 	stopping     sync.Mutex
 	stopErr      error // why a stop failed, written under stopping
 }
@@ -765,7 +765,7 @@ type promptWatch struct {
 // watchPromptSignals starts the watcher. SIGCONT is a wake only; SIGTTIN and SIGTTOU retain their
 // default actions, and a signal whose kernel disposition is SIG_IGN stays ignored, the terminal
 // control character of its key answered in ignored.
-func watchPromptSignals(flush func()) (*promptWatch, []int, error) {
+func watchPromptSignals(flush func() error) (*promptWatch, []int, error) {
 	watched := []os.Signal{syscall.SIGCONT}
 	var ignored []int
 	for _, sig := range []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGHUP, syscall.SIGTSTP} {
@@ -814,8 +814,12 @@ func (w *promptWatch) run() {
 			// stop, then raise SIGTTIN once bg leaves the job in the background.
 			_, _ = w.notify.Write([]byte{byte(sig)})
 			// What the terminal holds unread is the entry the stop discards; left there it
-			// would reach the shell once the stop gives it the terminal.
-			w.flush()
+			// would reach the shell once the stop gives it the terminal. A failed flush and a
+			// failed stop are both recorded here, under stopping where next reads stopErr, so
+			// the refused entry reports the first of them.
+			if err := w.flush(); err != nil && w.stopErr == nil {
+				w.stopErr = err
+			}
 			if err := stopBy(sig); err != nil && w.stopErr == nil {
 				w.stopErr = err
 			}
