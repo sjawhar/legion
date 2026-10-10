@@ -2253,19 +2253,29 @@ exists. With `--wait N --exec`, a session the helper cannot enroll for want of a
 with a warning that its `agent-secrets` calls fail until the machine is logged in.
 
 `agent-secrets machine list|revoke` and `agent-secrets grant list|revoke` (`machine.go`,
-`grant.go`) are the operator routes from the person's own shell, under this machine's login: the
-CLI asks the helper for a launcher proof with the `sign-launcher` op (`launcherSigner`), whose key
-never leaves the helper, and calls `/v1/operator/*` with it. The helper refuses `IN_SESSION` to a
-process inside a registered session, which acts on itself alone, re-reading the peer's pid after
-the ancestry walk as `sign` does; signs only for a URL under its own `AGENT_SECRETS_URL`
-(`BAD_REQUEST` otherwise); answers `NO_CREDENTIAL` while it holds no credential; and returns the
-credential's id with the proof, so `machine revoke` warns when it ends this machine's own login. A
-helper from before the op answers `unknown op sign-launcher`, which the CLI reads as a helper to
-restart on the pinned release. Both lists print a table; `--json` prints the broker's body
-verbatim, byte-identical to the body Dispatch's machine-login and Live grants pages read for the
-same person (`machine_linux_test.go` drives both commands against a real helper and broker). A
-machine with no helper has no machine login to act as, so the commands refuse with exit 2 naming
-the socket they looked for.
+`grant.go`, dispatched by `cmdGroup` from the `commands` rows) are the operator routes from the
+person's own shell, under this machine's login: the CLI asks the helper for a launcher proof with
+the `sign-launcher` op (`launcherSigner`), whose key never leaves the helper, and calls
+`/v1/operator/*` with it. The helper signs only the four operator routes under its own
+`AGENT_SECRETS_URL` (`operatorRoute`; `BAD_REQUEST` naming them otherwise); refuses `IN_SESSION` to
+a process inside a registered session's process tree, and to one whose ancestry walk cannot reach
+init (a parent it cannot read, a loop, or past 64 processes: `Registry.RootOrUnknown`), re-reading
+the peer's pid after the walk as `sign` does; answers `NO_CREDENTIAL` while it holds no
+credential; and returns the credential's id with the proof, so `machine revoke` warns when it ends
+this machine's own login, its id in any case `uuid.Parse` reads. `IN_SESSION` keeps an agent's own
+commands from acting as its operator; it is not a boundary against code running as the operator's
+user. The check covers the session's process tree only: a process the session sends out of it
+(`( cmd & )`, `setsid -f`, a tmux server the session started) is reparented and passes, and the same
+uid can stop the helper. Such a process can list and revoke only the operator's own machine logins
+and grants, never a service's, and reads no secret. Every refusal the helper gives reaches the CLI
+as one `launcherRefusal`, printed as it stands: no credential, a helper from before the op (which
+answers `unknown op sign-launcher`, read as a helper to restart on the pinned release), or the
+helper's own code. Both lists print a table; `--json` prints the broker's body verbatim:
+`grant list`'s is byte-identical to the body Dispatch's Live grants page reads for the same
+person, and `machine list`'s holds that person's own machines' rows of Dispatch's machine-login
+page, byte for byte, without the service logins that page also lists (`machine_linux_test.go`
+drives both commands against a real helper and broker). A machine with no helper has no machine
+login to act as, so the commands refuse with exit 2 naming the socket they looked for.
 
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
 `BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required, and the only
@@ -2626,17 +2636,23 @@ signed-in person's own machines' logins and every service's.
 
 The operator routes (`api/handlers_operator.go`) are the same lists and revokes for a person at
 their own machine, authenticated by that machine's launcher proof (`launcherAuth`) rather than the
-UI bearer, and acting for the calling credential's `operator`: `GET /v1/operator/machines` and
-`GET /v1/operator/grants` answer exactly what `GET /v1/launcher-credentials` and `GET /v1/grants`
-answer for that person (each pair writes through one function, `writeLauncherCredentials` and
-`writeApproverGrants`), and `POST /v1/operator/machines/{id}/revoke` and
-`POST /v1/operator/grants/{id}/revoke`, which take no body, revoke as that person through
-`RevokeCredential` and `RevokeByApprover`, with the same refusals (`403 NOT_APPROVER`,
-`404 NOT_FOUND`) and the operator's withhold. A service's login has no operator and is refused every
-one, `403 SERVICE_CREDENTIAL` (`operatorOf`). Every row an operator revoke writes names the calling
-machine login, `launcher:<credential id>`, whose own row names its operator, since no Dispatch
-sign-in vouched for it. Revoking the calling credential itself ends that machine's access: its next
-launcher proof is `401 LAUNCHER_INVALID`.
+UI bearer, and acting for the calling credential's `operator`. `GET /v1/operator/grants` answers
+exactly what `GET /v1/grants` answers for that person, and `POST /v1/operator/grants/{id}/revoke`
+revokes as that person through `RevokeByApprover`, with the same refusals and the operator's
+withhold (one function each, `writeApproverGrants` and `revokeGrantAs`). The machine routes cover
+the person's own machines' logins alone: `GET /v1/operator/machines` lists them
+(`enroll.Service.OwnLiveCredentials`, the person's rows of `GET /v1/launcher-credentials`, byte for
+byte), and `POST /v1/operator/machines/{id}/revoke` ends one (`RevokeOwnCredential`, the same rule
+as `RevokeCredential` for a person's machine), while a service's login is `404 NOT_FOUND` there, as
+an unknown id is; its revoke stays on Dispatch's machine-login page, so a process a session sent
+out of its tree cannot end the Legion daemon's login. Both machine routes answer through the
+function their UI route uses (`writeLauncherCredentials`, `revokeCredentialAs`), handed the enroll
+method. Each refuses `403 NOT_APPROVER` as its UI route does. A service's login has no operator and
+is refused every one, `403 SERVICE_CREDENTIAL` (`operatorOf`). Every row an operator revoke writes
+names the calling machine login, `record.LauncherActor(<credential id>)`, whose own row names its
+operator, since no Dispatch sign-in vouched for it; a UI revoke names `record.HumanActor(<login>)`.
+Revoking the calling credential itself ends that machine's access: its next launcher proof is
+`401 LAUNCHER_INVALID`.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then

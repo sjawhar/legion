@@ -194,9 +194,9 @@ func TestGrantListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	}
 }
 
-// TestMachineAndGrantCommandsRefusedInsideASession: a registered session acts on itself alone, so
-// the helper refuses it a launcher proof, and every machine and grant command run from inside one
-// says so and exits 1.
+// TestMachineAndGrantCommandsRefusedInsideASession: a process inside a registered session's
+// process tree gets no launcher proof from the helper, so every machine and grant command run
+// from inside one says so and exits 1.
 func TestMachineAndGrantCommandsRefusedInsideASession(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	sock := realHelper(t)

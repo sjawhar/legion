@@ -106,22 +106,33 @@ shows and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` pr
 
 ## List and revoke from your own shell
 
-In the third shell, which is outside every session, list the machine logins and the live grants as
-Dispatch's pages would, under the helper's machine login
+In the third shell, which is outside every session, list your machine logins and the live grants
+as Dispatch's pages would, under the helper's machine login
 ([revoke a session or a grant](/legion/broker/guides/revoke-a-session/#revoke-a-grant-from-your-shell)):
 
 ```console
 $ agent-secrets machine list
-CREDENTIAL_ID                         HOST                 SERVICE  APPROVED_BY      ISSUED                EXPIRES               STATE
-9ffca551-ef22-4dcc-bc8d-2ebcf2e314f4  example-host-devbox  -        ada@example.com  2026-10-10T07:10:01Z  2026-10-17T07:10:01Z  ok
+CREDENTIAL_ID                         HOST                 APPROVED_BY      ISSUED                EXPIRES               STATE
+a0324632-0cc0-4113-bb26-d4123fab9da6  example-host-devbox  ada@example.com  2026-10-10T15:01:31Z  2026-10-17T15:01:31Z  ok
 $ agent-secrets grant list
 GRANT_ID                              SECRETS          GRANTED    APPROVER  SESSION                                    OPERATOR         EXPIRES
-332314f5-b04f-4353-8def-3b8d9b394176  DEMO_READ_TOKEN  automatic  -         host/example-host-devbox:3942590:32566634  ada@example.com  2026-10-10T08:10:09Z
+8fe92a26-b355-4c28-8679-60e8ce98b1d9  DEMO_READ_TOKEN  automatic  -         host/example-host-devbox:2856922:35395441  ada@example.com  2026-10-10T16:01:37Z
 ```
 
-`agent-secrets grant revoke <grant id>` ends a grant there, and `agent-secrets machine revoke
-<credential id>` a login. Run in the session's shell, they are refused `IN_SESSION`: a session
-acts on itself alone.
+`machine list` shows your own machines' logins alone; Dispatch's machine-login page also lists
+every service's. `agent-secrets grant revoke <grant id>` ends a grant there, and
+`agent-secrets machine revoke <credential id>` one of your logins. Run in the session's shell, they
+are refused `IN_SESSION`, so the session's own commands cannot act as you:
+
+```console
+$ agent-secrets machine list
+agent-secrets machine list: IN_SESSION: pid 2857619 is inside a registered host session, which acts on itself alone; run machine and grant commands from your own shell
+```
+
+The refusal covers the session's process tree only: a process the session sends out of it (with
+`( cmd & )`, `setsid -f` or a tmux server it started) passes, and any process running as your user
+can stop the helper. Such a process can list and revoke only your own machine logins and grants,
+never a service's, and reads no secret.
 
 ## Write a secret and see it served
 

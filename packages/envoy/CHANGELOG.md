@@ -4,21 +4,31 @@
 
 ### Added
 
-- A person lists and ends their machine logins and live grants from their own shell, as Dispatch's
-  machine-login and Live grants pages do. `agent-secrets machine list` and `machine revoke ID`, and
-  `agent-secrets grant list` and `grant revoke ID`, call four new broker routes,
-  `GET /v1/operator/machines`, `POST /v1/operator/machines/{id}/revoke`, `GET /v1/operator/grants`
-  and `POST /v1/operator/grants/{id}/revoke`, which take the machine's own login (a launcher proof)
-  rather than Dispatch's UI token, answer the body each page reads and apply its rule: the operator
-  is the person who approved the login, a revoke of a grant their own session got without asking
-  withholds it, and a service's login, which has no operator, is refused `403 SERVICE_CREDENTIAL`.
-  The helper signs these calls with the machine's credential through a new `sign-launcher` op,
-  which it refuses `IN_SESSION` to a process inside a registered session, since a session acts on
-  itself alone. A revoke made this way records `launcher:<credential id>` as its actor on every row
-  it writes; a revoke from Dispatch still records `human:<email>`. `machine list` prints the
-  credential, host, service, approver, issue and expiry times and state, `grant list` the grant,
-  secrets, how it was granted, approver, session, operator and expiry, and `--json` prints the
-  broker's body verbatim. `machine revoke` warns on stderr when it ends this machine's own login.
+- A person lists and ends their own machines' logins and their live grants from their own shell.
+  `agent-secrets machine list` and `machine revoke ID`, and `agent-secrets grant list` and
+  `grant revoke ID`, call four new broker routes, `GET /v1/operator/machines`,
+  `POST /v1/operator/machines/{id}/revoke`, `GET /v1/operator/grants` and
+  `POST /v1/operator/grants/{id}/revoke`, which take the machine's own login (a launcher proof)
+  rather than Dispatch's UI token and act for its operator, the person who approved the login. The
+  grant routes answer and decide as Dispatch's Live grants page does, a revoke of a grant the
+  operator's own session got without asking withholding it. The machine routes cover the person's
+  own machines' logins alone: their rows of Dispatch's machine-login page, byte for byte, while a
+  service's login, such as the Legion daemon's, is neither listed nor revocable there
+  (`404 NOT_FOUND`) and is revoked on that page. A service's login, which has no operator, is
+  refused every route, `403 SERVICE_CREDENTIAL`. The helper signs these calls with the machine's
+  credential through a new `sign-launcher` op, for those four routes under its own broker alone
+  (`BAD_REQUEST` otherwise). It refuses `IN_SESSION` to a process inside a registered session's
+  process tree, and to one whose ancestry it cannot follow to init (a parent it cannot read, a
+  loop, or past 64 processes), so an agent's own commands cannot act as its operator. The check
+  covers the session's process tree only: a process the session sends out of it (`( cmd & )`,
+  `setsid -f`, a tmux server it started) passes, and the same user can stop the helper anyway. Such
+  a process can list and revoke only the operator's own machine logins and grants, never a
+  service's, and reads no secret. A revoke made this way records `launcher:<credential id>` as its
+  actor on every row it writes; a revoke from Dispatch still records `human:<email>`.
+  `machine list` prints the credential, host, approver, issue and expiry times and state,
+  `grant list` the grant, secrets, how it was granted, approver, session, operator and expiry, and
+  `--json` prints the broker's body verbatim. `machine revoke` warns on stderr when it ends this
+  machine's own login, its id typed in any case.
 - A pending secret request names whom it waits on. `POST /v1/requests` and
   `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
   names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than

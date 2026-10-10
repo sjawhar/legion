@@ -14,9 +14,15 @@ session's grants (`agent-secrets self`). People manage the agent secrets themsel
 `agent-secrets secret list|show|create|set|retag|delete|restore`, which calls AWS Secrets Manager
 under their own AWS sign-in and then asks the broker to reread each secret written, so the change
 is served at once; those forms need no helper and no session. From their own shell on a machine
-that runs the helper, they list and end their machine logins and live grants with
+that runs the helper, they list and end their own machines' logins and their live grants with
 `agent-secrets machine list|revoke` and `agent-secrets grant list|revoke`, under that machine's
-login. `agent-secrets --help` lists every form, and each form answers `-h`.
+login; a service's login is revoked on Dispatch's machine-login page. The helper refuses these
+forms to a process inside a registered session's process tree (`IN_SESSION`), so an agent's own
+commands cannot act as its operator. The check covers that tree only: a process a session sends
+out of it (`( cmd & )`, `setsid -f`, a tmux server it started) passes, and the same user can stop
+the helper anyway. Such a process can list and revoke only its operator's own machine logins and
+grants, never a service's, and reads no secret. `agent-secrets --help` lists every form, and each
+form answers `-h`.
 
 On a machine that runs agents directly, `agent-secrets-helper` (`../agent-secrets-helper`) holds
 each session's key and signs for it; in a container or a Kubernetes pod, the session's key lives in

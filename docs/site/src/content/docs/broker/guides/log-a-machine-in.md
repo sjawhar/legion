@@ -62,7 +62,8 @@ terminal shows. A machine login can only be selected by its code: no link approv
 the person the login names may approve a person's machine. Once you approve it, the machine is
 listed under **Machine logins** on the same page, where you can
 [revoke its login](/legion/broker/guides/revoke-a-session/#end-a-machines-login); from your own
-shell on a logged-in machine, `agent-secrets machine list` lists the same logins.
+shell on a logged-in machine, `agent-secrets machine list` lists your own machines' logins among
+them.
 
 A Legion daemon's login names its service, so anyone signed in to Dispatch may approve it: it waits
 in every signed-in person's Inbox, and whoever has the code from the daemon's log types it in. The

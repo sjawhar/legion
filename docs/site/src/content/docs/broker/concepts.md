@@ -75,11 +75,12 @@ its code, not for one named person. The broker reads the service from the machin
 so a login the daemon starts while still naming a person in it is anyone's to decide too.
 
 A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. It may be revoked from Dispatch's
-machine-login page, or from any of a person's own machines under its machine login
-(`agent-secrets machine revoke`), before or after
+machine-login page, or, for a person's own machine, from any of their machines under its machine
+login (`agent-secrets machine revoke`), before or after
 it expires, which also ends every session it enrolled
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)): a person's
-machine login by the person who approved it and no one else, a service's by anyone signed in. Its
+machine login by the person who approved it and no one else, a service's by anyone signed in, on
+the machine-login page. Its
 sessions outlive its expiry: a session renews its lease with its own key, never with the machine's
 credential, so a box keeps working after the machine's credential expires, and the page lists an
 expired login, marked as expired with sessions still running, until its last session ends. On a
