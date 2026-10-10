@@ -422,7 +422,13 @@
   leaves its document: settlement of the source retracts its ask and settles every copy, the first
   opens one ask, credited to whoever wrote the block into it, and the others name that ask, on a
   project's documents as on an issue's. Migration `0087_artifacts_project_documents` adds the
-  partial index a project document's lookups read (LEGION-651).
+  partial index a project document's lookups read. An answered or resolved ask's wording is fixed:
+  a document edit or an upload that changes its block's question, options, `multiple` or urgency
+  no longer rewords the ask and leaves its answer beside a question nobody answered; settlement
+  writes the decided wording back into the block and logs it, as `PATCH /api/v1/asks/{id}` already
+  refused such an edit (`ASK_NOT_OPEN`). Migration `0088_decided_ask_wording` gives each ask
+  reworded after its decision back the wording that decision was given on, and the document's next
+  settlement repairs its block (LEGION-651).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

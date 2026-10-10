@@ -22,22 +22,25 @@ import (
 // questions on two documents. A block is therefore a copy only of an ask on another document of
 // the same owner - the same issue, or for a project document the same project's other documents -
 // that indexes the same block id and asks exactly what the block asks (its question, options,
-// multiple and urgency, which a copy carries unchanged). The block may ask the ask's current
-// wording or an earlier one, since a copy can be taken before an edit (askHistories), but a match
-// on an earlier wording counts only while the ask is open, or when its answer or resolution was
-// given while it asked that wording (askHistory.shownBy), so a copy never shows a decision on a
-// question it does not ask. A block whose text the copy changes, or whose earlier-wording match does
-// not count, opens an ask as any new block does. An ask settlement retracted because its block left
-// its document is no source: a block cut from one document and pasted into another is the only one
-// left, and opens an ask as any new block does. Of several sources, the earliest asked is the
-// original, whichever wording it matched on, since a copy that opened asks of its own before copies
-// were recognised came after it; two unrelated asks of one owner under one id asking the same thing
-// are therefore one question to a copy, the earlier. The copy shows its source's state as of its
-// own last settlement, and an answer or a resolution of the source settles it again
-// (SettleCopiesOf). The rows are read, never locked or written: settlement holds this document's
-// owner row and room lock, and a source's answer route takes the source's ask row before its own
-// document's room. A project document's settlement also takes its project's copy lock first
-// (lockProjectCopies).
+// multiple and urgency, which a copy carries unchanged). A decided ask's current wording is the one
+// it was decided on, since settlement never takes a document's rewording of an answered or resolved
+// ask into its row (reconcileAskBlocks) and migration 0088 gave the asks reworded before that rule
+// their decided wording back, so a match on the current wording shows a decision on what the block
+// asks. The block may also ask an earlier wording, since a copy can be taken before an edit
+// (askHistories), but a match on an earlier wording counts only while the ask is open, or when its
+// answer or resolution was given while it asked that wording (askHistory.shownBy), so a copy never
+// shows a decision on a question it does not ask. A block whose text the copy changes, or whose
+// earlier-wording match does not count, opens an ask as any new block does. An ask settlement
+// retracted because its block left its document is no source: a block cut from one document and
+// pasted into another is the only one left, and opens an ask as any new block does. Of several
+// sources, the earliest asked is the original, whichever wording it matched on, since a copy that
+// opened asks of its own before copies were recognised came after it; two unrelated asks of one
+// owner under one id asking the same thing are therefore one question to a copy, the earlier. The
+// copy shows its source's state as of its own last settlement, and an answer or a resolution of the
+// source settles it again (SettleCopiesOf). The rows are read, never locked or written: settlement
+// holds this document's owner row and room lock, and a source's answer route takes the source's ask
+// row before its own document's room. A project document's settlement also takes its project's copy
+// lock first (lockProjectCopies).
 func copiedAskSources(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -334,7 +337,9 @@ type askHistory struct {
 	// wordings are each wording the ask asked, with the event that made it current (from) and the
 	// ask.edited event that retired it (until, 0 for the wording it still asks).
 	wordings []askWording
-	// answers and resolutions are the ask's ask.answered and ask.resolved events, in commit order.
+	// answers and resolutions are the ask's ask.answered and ask.resolved events, in commit order,
+	// less settlement's retractions, which record a block leaving its document rather than a
+	// decision (settlementRetraction).
 	answers     []askDecision
 	resolutions []askDecision
 }
@@ -445,7 +450,7 @@ func askHistories(ctx context.Context, tx pgx.Tx, ids []string) (map[string]askH
 				history.answers = append(history.answers, askDecision{event: event.id, at: payload.Answer.At})
 			}
 		case "ask.resolved":
-			if payload.Resolution != nil {
+			if payload.Resolution != nil && !settlementRetraction(*payload.Resolution) {
 				history.resolutions = append(history.resolutions, askDecision{event: event.id, at: payload.Resolution.At})
 			}
 		}

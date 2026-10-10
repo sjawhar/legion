@@ -158,6 +158,11 @@ answer or resolution given after the rewording decides a question the copy does 
 instead. A copy whose text you change opens a new ask. Once the original's block leaves its document, its copies share
 one new ask: the first copy to settle opens it and the others name it.
 
+An answered or resolved ask's question is fixed. Editing its block's question, options, `multiple` or urgency in the
+document, or uploading a version that changes them, does not change the ask: a few seconds later the block is written
+back to the question the answer was given on, beside its answer. To ask something new, write a new ask block with its
+own `#id`. An open ask's block is its text: edit it and the ask changes with it.
+
 A picture meant to be seen inline in a message, comment or ask is not uploaded with `dispatch artifact`: pass its local
 path with that command's `--image`, once per picture (PNG, JPEG, GIF or WebP by its bytes, at most 25 MiB each). Each is uploaded to the issue (a
 project document's project; for a reply to a direct message, your own conversation) and appended after a blank line as

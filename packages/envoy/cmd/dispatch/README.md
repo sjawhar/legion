@@ -440,6 +440,21 @@ copy of and for the copies of an ask it retracts, and so do the answer and resol
 copies of the ask they close (LEGION-651). Building it takes `SHARE` on `artifacts`; its census
 answers `0` because it refuses and rewrites no row.
 
+Migration `0088_decided_ask_wording` gives each answered or resolved ask that a document edit
+reworded after its decision back the wording that decision was given on: the `previous` wording of
+the first `ask.edited` after its latest `ask.answered` or `ask.resolved`, with no `ask.opened`
+between (LEGION-651). It reads `events` through `events_ask_payload_id` and writes only the rows
+whose wording differs, taking `ROW EXCLUSIVE` on `asks`. Its census counts those rows, so the
+pre-deploy census of the release that carries it refuses wherever one exists:
+`REFUSED 0088_decided_ask_wording.up.sql: its census counts <n> (0088_decided_ask_wording.census.sql)`.
+That refusal is expected for this release, since rewriting those rows is the migration's purpose.
+The deployer checks that the report ends `census: REFUSED (1 reason)`, so 0088's count is its only
+refusal, and then rolls the release; any other reason still stops the deploy. It marks no
+settlement owed: each block is written back to its decided wording by its document's next
+settlement, whenever that document next changes. A settlement the task being replaced runs during
+the roll still takes a reworded block's text into its decided ask, as that release does, so a
+document edited in that window can undo the migration for its asks.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

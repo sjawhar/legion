@@ -1592,12 +1592,26 @@ answer or a resolution of a block ask costs in proportion to the owner's markdow
 
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.
-The block is therefore the source of truth for an ask's **text** (question, options, `multiple`,
-`urgency`) and the row for its **lifecycle** (`state`, `answer`, `resolution`), so a route that
-changes either writes both: `PATCH /api/v1/asks/{id}` on a block ask writes the block through
-the document ledger and then takes the row's values from what the block parses back to, and
-`POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the fields it
-names: the row holds the question as plain text, so rebuilding the whole body from it would
+The block is therefore the source of truth for an open ask's **text** (question, options,
+`multiple`, `urgency`) and the row for its **lifecycle** (`state`, `answer`, `resolution`). A
+decided ask's wording is fixed: its answer or resolution decides the question it was given on, so
+where an answered or resolved ask's block asks something else - a document edit or an upload
+reworded it - settlement leaves the row as it was decided and writes the decided wording back into
+the block (`writeDecidedWording`, through the same repair as the server-owned attributes, with one
+`block.repaired` event), logging `dispatch: wrote a decided ask's wording back into its block` with
+the ask and the document. That repair keeps the parts the block already asks, and rewrites the
+rest through the markdown pipeline, as the edit route does; a block it cannot give the decided
+wording is left as it is, logged at ERROR, and the row still keeps its decided wording. A person who
+wants another question writes a new ask block; reopening the ask would put a new question in a
+person's Inbox for an edit they may not have meant as one. An ask settlement restores after a
+retraction follows the state the restoration gives it: one restored open takes its block's text,
+one restored with its answer keeps the wording that answer was given on. Migration
+`0088_decided_ask_wording` gives back to each ask reworded after its decision before this rule the
+wording its decision was given on. A route that changes an ask's text or lifecycle writes both:
+`PATCH /api/v1/asks/{id}` on a block ask (an open one; a decided one is `409 ASK_NOT_OPEN`) writes
+the block through the document ledger and then takes the row's values from what the block parses
+back to, and `POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the
+fields it names: the row holds the question as plain text, so rebuilding the whole body from it would
 flatten an untouched question's formatting and links and mint fresh ids for the paragraphs a
 comment anchors into. Naming `urgency` or `multiple` alone therefore goes through the attribute
 path and leaves every child node, mark and inner block id exactly as it was; naming `question`

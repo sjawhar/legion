@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"sync"
@@ -456,27 +457,173 @@ func TestAnAnswerOrResolutionOfACopysSourceAfterARewordingOpensTheCopysOwnAsk(t 
 	}
 }
 
-// An answer given while the source asked the copy's wording is an answer to the copy's question,
-// so a copy of that wording taken after the source was reworded still shows it and opens no ask.
-func TestAnAnswerGivenBeforeASourcesRewordingShowsOnACopyOfTheWordingItAnswered(t *testing.T) {
+// tuesdayBlock is shipBlock reworded, its question and options both changed.
+const tuesdayBlock = ":::ask{#ship urgency=\"med\" multiple=\"false\"}\nShip on Tuesday?\n\n- Tuesday: Ship it.\n- No: Later.\n:::\n"
+
+// mondayAnswered is the ship block on its source once its ask was answered Yes at mondayAnswer.
+const mondayAnswered = `:::ask{#ship urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-09T09:00:00Z" selected="[&#x22;Yes&#x22;]"}` +
+	"\nShip on Monday?\n\n- Yes: Monday.\n- No: Later.\n:::"
+
+var mondayAnswer = model.AskAnswer{User: "alice", Selected: []string{"Yes"}, At: time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)}
+
+// askEditsOf counts the ask.edited events of ask.
+func askEditsOf(t *testing.T, service *Service, ask string) int {
+	t.Helper()
+	var count int
+	if err := service.store.Pool.QueryRow(context.Background(),
+		`select count(*) from events where type = 'ask.edited' and payload->>'id' = $1`, ask).Scan(&count); err != nil {
+		t.Fatalf("count the ask's edits: %v", err)
+	}
+	return count
+}
+
+// A decided ask's wording is fixed. A document edit or an upload that rewords an answered or
+// resolved ask's block leaves its row as it was decided, appends no ask.edited, and settlement
+// writes the decided wording back into the block beside its decision, logging that it did.
+func TestADocumentEditOfADecidedAsksWordingIsWrittenBackAndLeavesItsRow(t *testing.T) {
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	writes := map[string]func(t *testing.T, service *Service, document string){
+		"live edit": func(t *testing.T, service *Service, document string) {
+			editLiveTree(t, service, document, func(tree *pmdoc.Node) *pmdoc.Node {
+				return replaceRun("Yes: Monday.", "Tuesday: Ship it.")(replaceRun("Ship on Monday?", "Ship on Tuesday?")(tree))
+			})
+		},
+		"upload": func(t *testing.T, service *Service, document string) {
+			if _, err := joinedReplaceText(service, document, "Context\n\n"+tuesdayBlock, model.Actor{Kind: "session", ID: "uploader"}); err != nil {
+				t.Fatalf("upload the reworded document: %v", err)
+			}
+		},
+	}
+	for _, closing := range []string{"answered", "resolved"} {
+		for name, write := range writes {
+			t.Run(closing+"/"+name, func(t *testing.T) {
+				service, original := newTestService(t)
+				service.settle = time.Hour
+				seedServiceText(t, service, original, "Context\n\n"+shipBlock)
+				settleCurrentGeneration(t, service, original)
+				source := blockAskOn(t, service, original, "ship")
+				var answer *model.AskAnswer
+				opener := `:::ask{#ship urgency="med" multiple="false" state="resolved"}` + "\nShip on Monday?\n\n- Yes: Monday.\n- No: Later.\n:::"
+				if closing == "answered" {
+					answer, opener = &mondayAnswer, mondayAnswered
+				}
+				if err := closeSource(context.Background(), service, original, "ship", source, answer, nil); err != nil {
+					t.Fatal(err)
+				}
+				write(t, service, original)
+				settleCurrentGeneration(t, service, original)
+
+				decided := blockAskOn(t, service, original, "ship")
+				if decided.State != closing || decided.Question != "Ship on Monday?" || len(decided.Options) != 2 || decided.Options[0].Label != "Yes" {
+					t.Fatalf("the %s ask reads %s %q %v after the document reworded it, want it as it was decided", closing, decided.State, decided.Question, decided.Options)
+				}
+				if edits := askEditsOf(t, service, source.ID); edits != 0 {
+					t.Fatalf("the %s ask has %d ask.edited events, want none", closing, edits)
+				}
+				requireCopiedStates(t, service, original, opener)
+				if line := logs.Lines(source.ID); !strings.Contains(line, "wrote a decided ask's wording back into its block") || !strings.Contains(line, original) {
+					t.Fatalf("the repair logged %q, want its line naming the ask and the document", line)
+				}
+			})
+		}
+	}
+}
+
+// A copy of a decided ask's source is a copy only of what was decided. Once its source's own
+// document rewords the answered ask, a copy of the reworded text holds a question no decision
+// answered and opens its own ask, and a copy of the wording that was answered shows the answer.
+func TestACopyOfADecidedAsksEditedTextOpensItsOwnAskAndACopyOfItsDecidedWordingShowsTheDecision(t *testing.T) {
 	service, original := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, original, "Context\n\n"+shipBlock)
 	settleCurrentGeneration(t, service, original)
 	source := blockAskOn(t, service, original, "ship")
-	answer := model.AskAnswer{User: "alice", Selected: []string{"Yes"}, At: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
-	if err := closeSource(context.Background(), service, original, "ship", source, &answer, nil); err != nil {
+	if err := closeSource(context.Background(), service, original, "ship", source, &mondayAnswer, nil); err != nil {
 		t.Fatal(err)
 	}
-	rewordShip(t, service, original)
+	editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
+		return replaceRun("Yes: Monday.", "Tuesday: Ship it.")(replaceRun("Ship on Monday?", "Ship on Tuesday?")(tree))
+	})
+	settleCurrentGeneration(t, service, original)
+
+	reworded := createIssueDocument(t, service.store, 1, "# Reworded copy")
+	seedServiceText(t, service, reworded, "Record\n\n"+tuesdayBlock)
+	settleCurrentGeneration(t, service, reworded)
+	text, err := service.Text(context.Background(), reworded)
+	if err != nil {
+		t.Fatalf("read the copy of the reworded text: %v", err)
+	}
+	if strings.Contains(text, `state="answered"`) || strings.Contains(text, "copied_from") {
+		t.Fatalf("the copy of the reworded text shows the decision on the question it replaced:\n%s", text)
+	}
+	requireCopiedStates(t, service, reworded, `:::ask{#ship urgency="med" multiple="false" state="open"}`+"\nShip on Tuesday?")
+	if blocks := openAskBlocksOn(t, service, reworded); blocks != "ship" {
+		t.Fatalf("the copy of the reworded text's open asks = %q, want its own ship", blocks)
+	}
+
+	decided := createIssueDocument(t, service.store, 1, "# Decided copy")
+	seedServiceText(t, service, decided, "Record\n\n"+shipBlock)
+	settleCurrentGeneration(t, service, decided)
+	if count := asksOn(t, service, decided); count != 0 {
+		t.Fatalf("the copy of the decided wording opened %d asks, want none", count)
+	}
+	requireCopiedStates(t, service, decided,
+		`:::ask{#ship urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-09T09:00:00Z" selected="[&#x22;Yes&#x22;]" `+copiedFrom(t, service, source.ID, original)+`}`)
+}
+
+// A copy taken while its source was open stays a copy of it across the source's retraction and
+// restoration, which reopen the wording it asked, and stops being one once the restored source
+// is reworded and the new wording answered: the copy then opens its own ask.
+func TestACopyOfARestoredSourceRewordedAndAnsweredOpensItsOwnAsk(t *testing.T) {
+	service, original := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, original, "Context\n\n"+shipBlock)
+	settleCurrentGeneration(t, service, original)
+	source := blockAskOn(t, service, original, "ship")
 	copied := createIssueDocument(t, service.store, 1, "# Copy")
 	seedServiceText(t, service, copied, "Record\n\n"+shipBlock)
 	settleCurrentGeneration(t, service, copied)
-	if count := asksOn(t, service, copied); count != 0 {
-		t.Fatalf("the copy of the answered wording opened %d asks, want none", count)
+	shown := `:::ask{#ship urgency="med" multiple="false" state="open" ` + copiedFrom(t, service, source.ID, original) + `}`
+	requireCopiedStates(t, service, copied, shown)
+
+	editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children = tree.Children[:1]
+		return tree
+	})
+	settleCurrentGeneration(t, service, original)
+	if retracted := blockAskOn(t, service, original, "ship"); !settlementRetracted(retracted) {
+		t.Fatalf("the source reads %s after its block left, want settlement's retraction", retracted.State)
 	}
-	requireCopiedStates(t, service, copied,
-		`:::ask{#ship urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-08T12:00:00Z" selected="[&#x22;Yes&#x22;]" `+copiedFrom(t, service, source.ID, original)+`}`)
+	editLiveTree(t, service, original, appendBlocks(t, shipBlock))
+	settleCurrentGeneration(t, service, original)
+	if restored := blockAskOn(t, service, original, "ship"); restored.State != "open" {
+		t.Fatalf("the source reads %s after its block came back, want it restored open", restored.State)
+	}
+	settleCurrentGeneration(t, service, copied)
+	if count := asksOn(t, service, copied); count != 0 {
+		t.Fatalf("the copy opened %d asks beside its restored source, want none", count)
+	}
+	requireCopiedStates(t, service, copied, shown)
+
+	source = rewordShip(t, service, original)
+	answer := model.AskAnswer{User: "alice", Selected: []string{"Tuesday"}, At: time.Date(2026, 10, 9, 10, 0, 0, 0, time.UTC)}
+	if err := closeSource(context.Background(), service, original, "ship", source, &answer, nil); err != nil {
+		t.Fatal(err)
+	}
+	settleCurrentGeneration(t, service, copied)
+	text, err := service.Text(context.Background(), copied)
+	if err != nil {
+		t.Fatalf("read the copy: %v", err)
+	}
+	if strings.Contains(text, `state="answered"`) || strings.Contains(text, "copied_from") {
+		t.Fatalf("the copy of the restored source's earlier wording shows the answer to its new one:\n%s", text)
+	}
+	if blocks := openAskBlocksOn(t, service, copied); blocks != "ship" {
+		t.Fatalf("the copy's open asks = %q, want its own ship", blocks)
+	}
 }
 
 // pendingSettlements counts the documents that owe a settlement no settlement has committed.
@@ -692,10 +839,7 @@ func TestACopySettlingWhileItsSourceIsAnsweredWaitsForTheAnswerAndNeitherFails(t
 	original := createProjectDocument(t, service.store, "# Original")
 	seedServiceText(t, service, original, "Context\n\n"+shared)
 	settleCurrentGeneration(t, service, original)
-	source, err := ScanAsk(service.store.Pool.QueryRow(ctx, `select `+AskColumns+` from asks a where a.block_artifact_id = $1`, original))
-	if err != nil {
-		t.Fatalf("read the source ask: %v", err)
-	}
+	source := blockAskOn(t, service, original, "shared")
 	copied := createProjectDocument(t, service.store, "# Copy")
 	seedServiceText(t, service, copied, "Kept\n\n"+shared)
 	settleCurrentGeneration(t, service, copied)
@@ -830,10 +974,7 @@ func TestACopyAndItsSourcesAnswerTakingTheCopyLockInEitherOrderBothFinish(t *tes
 			original := createProjectDocument(t, service.store, "# Original")
 			seedServiceText(t, service, original, "Context\n\n"+shared)
 			settleCurrentGeneration(t, service, original)
-			source, err := ScanAsk(service.store.Pool.QueryRow(ctx, `select `+AskColumns+` from asks a where a.block_artifact_id = $1`, original))
-			if err != nil {
-				t.Fatalf("read the source ask: %v", err)
-			}
+			source := blockAskOn(t, service, original, "shared")
 			copied := createProjectDocument(t, service.store, "# Copy")
 			seedServiceText(t, service, copied, "Kept\n\n"+shared)
 			settleCurrentGeneration(t, service, copied)

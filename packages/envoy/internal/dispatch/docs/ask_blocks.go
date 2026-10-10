@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"strings"
 	"time"
@@ -179,11 +180,14 @@ const SettlementRetractionReason = "removed from the document in version"
 // the rows loadAskBlocks reads, which is why an approval ask retracted as SettlementActor is
 // never restored.
 func settlementRetracted(ask model.Ask) bool {
-	if ask.State != "resolved" || ask.Resolution == nil || ask.Resolution.Kind != "retracted" {
-		return false
-	}
-	return ask.Resolution.Actor.SameAs(SettlementActor) ||
-		strings.HasPrefix(ask.Resolution.Reason, SettlementRetractionReason)
+	return ask.State == "resolved" && ask.Resolution != nil && settlementRetraction(*ask.Resolution)
+}
+
+// settlementRetraction reports whether resolution is a retraction settlement wrote when its ask's
+// block left the document (settlementRetracted).
+func settlementRetraction(resolution model.AskResolution) bool {
+	return resolution.Kind == "retracted" &&
+		(resolution.Actor.SameAs(SettlementActor) || strings.HasPrefix(resolution.Reason, SettlementRetractionReason))
 }
 
 // reconcileAskBlocks makes the asks rows and the ask blocks of tree, the document settlement read,
@@ -281,7 +285,24 @@ func (s *Service) reconcileAskBlocks(
 			))
 		}
 
-		if previous := model.NewAskEditPrevious(ask); !block.asks(previous) {
+		reworded := false
+		if previous := model.NewAskEditPrevious(ask); !block.asks(previous) && ask.State != "open" {
+			// A decided ask's wording is fixed, as the edit route holds it (ASK_NOT_OPEN): its
+			// answer or resolution decides the question it was given on, so the block gets that
+			// wording back rather than the row taking the block's, which would show the decision on
+			// a question nobody decided. A person who wants another question writes a new ask block.
+			changed, err := writeDecidedWording(block.node, ask)
+			switch {
+			case err != nil:
+				slog.Error("dispatch: cannot write a decided ask's wording back into its block",
+					"ask", ask.ID, "artifact", artifactID, "block", block.id, "error", err)
+			case changed:
+				reconciled.repairs = append(reconciled.repairs, askRepair{blockID: block.id, set: decidedWording(ask)})
+				reworded = true
+				slog.Info("dispatch: wrote a decided ask's wording back into its block",
+					"ask", ask.ID, "artifact", artifactID, "block", block.id, "state", ask.State)
+			}
+		} else if !block.asks(previous) {
 			options, err := json.Marshal(block.options)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("encode reconciled ask options: %w", err)
@@ -319,7 +340,15 @@ func (s *Service) reconcileAskBlocks(
 			actor,
 			model.BlockRepairedEventPayload{BlockID: block.id, DisturbedBy: actor},
 		)
-		reconciled.repairAsk(block.node, block.id, ask, "", &repaired)
+		if reworded {
+			// One block.repaired names both repairs: the wording's, and the server attributes'
+			// when they changed too, which withholdAnswers may then drop without taking the
+			// event that still names the wording's.
+			reconciled.events = append(reconciled.events, repaired)
+			reconciled.repairAsk(block.node, block.id, ask, "", nil)
+		} else {
+			reconciled.repairAsk(block.node, block.id, ask, "", &repaired)
+		}
 	}
 	reconciled.withholdAnswers(artifactID, tree, before)
 
