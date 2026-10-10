@@ -27,8 +27,7 @@ configuration is:
 ```sh
 BROKER_LISTEN_ADDR=0.0.0.0:13380
 BROKER_PUBLIC_URL=https://secrets.internal.example
-BROKER_DATABASE_URL='postgres://broker:${BROKER_DATABASE_PASSWORD}@db.internal.example:5432/broker'
-BROKER_DATABASE_PASSWORD=<placeholder>
+BROKER_DATABASE_URL='postgres://broker:<password>@db.internal.example:5432/broker'
 BROKER_UI_TOKEN_FILE=/run/secrets/broker-ui-token
 BROKER_SECRETS_PREFIX=production/agent-secrets/
 BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:<region>:<account>:key/<key id>
@@ -43,7 +42,9 @@ error Secrets Manager: ListSecrets, failed to resolve service endpoint, endpoint
 Configuration: Missing Region"`.
 
 The broker refuses to start, naming the variable, when one is missing, malformed or out of range,
-and also while a variable it no longer reads is still set.
+and also while a variable it no longer reads is still set. `BROKER_DATABASE_URL` is the only
+database variable: a password goes in the URL itself, URL-escaped, and on Amazon RDS the broker
+needs none ([Signing in to RDS by IAM token](#signing-in-to-rds-by-iam-token)).
 
 A secret owned by a service rather than a person needs that service registered.
 `BROKER_SERVICES` lists each service with the Kubernetes service account its pods run as,
@@ -82,7 +83,12 @@ is checked only when a connection signs in, so a connection the broker holds lon
 and the next connection it opens brings a fresh token. The broker's AWS identity needs
 `rds-db:connect` on the database user,
 `arn:aws:rds-db:<region>:<account>:dbuser:<cluster resource id>/<user>`, and the database user
-must be a member of `rds_iam`. The cluster needs IAM database authentication turned on.
+must be a member of `rds_iam`. The cluster needs IAM database authentication turned on. Give the
+broker a database user of its own, and never grant `rds_iam` to the RDS master user, directly or
+through a role it belongs to: once a user holds it, IAM authentication takes precedence over that
+user's password
+([AWS's limitations of IAM database authentication](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.html#UsingWithRDS.IAMDBAuth.Limitations)),
+so the master could no longer sign in with its password.
 
 A token is a password to the database until it expires, so the broker sends one only to a server
 it has verified. The URL must name that one host, with `sslmode=verify-full` and an `sslrootcert`
@@ -95,9 +101,11 @@ the image trusts it. It is the
 vendored as `packages/envoy/docker/rds-global-bundle.pem` with the date it was fetched and its
 checksum.
 
-A URL with a password, the `${BROKER_DATABASE_PASSWORD}` placeholder, a passwordless URL whose
-password libpq supplies (`PGPASSWORD` or a passfile), or a host that is not an RDS endpoint (a
-local Postgres that trusts its clients, say) connects as given and mints nothing.
+A URL with a password, a passwordless URL whose password libpq supplies (`PGPASSWORD` or a
+passfile), or a host that is not an RDS endpoint (a local Postgres that trusts its clients, say)
+connects as given and mints nothing. The broker substitutes no password into the URL: it refuses
+to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names its
+`${BROKER_DATABASE_PASSWORD}` placeholder.
 
 ## What it depends on
 
@@ -151,6 +159,7 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 
 | Log line | Meaning |
 | --- | --- |
+| `database sign-in method=<method>` | At startup, before the broker reaches for AWS or its database: `rds-iam` when each connection signs in with an RDS IAM token the broker mints, `password` when it signs in as `BROKER_DATABASE_URL` and libpq's defaults say (a password in the URL, `PGPASSWORD`, a passfile, or none for a server that trusts it). |
 | `broker listening addr=<host:port>` | Startup finished: configuration, migrations and the first read of the namespace all succeeded, and the address is bound. |
 | `broker: fatal error=…` | Startup refused; the error names the variable or dependency. The process exits 1. |
 | `agent secret policy refused name=<secret name> reason=<reason>` | At ERROR, on every read of the namespace, once for each secret the broker leaves out, and on every reread of one secret it leaves out: `owner-tag-missing`, `owner-tag-malformed`, `tier-tag-missing`, `tier-tag-malformed`, `name-malformed`, `service-owner-human-tier`, `not-on-agent-secrets-key` or `no-current-value` (no version carries `AWSCURRENT`: the secret was created without a value; once its value is put it is served at its next reread, or within about ten minutes, as the broker rereads the namespace every five and Secrets Manager's listing can lag a change by up to five more). A secret with no value and another fault is logged for the other fault. `name` is the secret's whole Secrets Manager name. Every other secret is still served. Two things make this line more frequent than one per refused secret per five minutes, and an alarm on it has to allow for both: a refused secret that was reread in the last five minutes is logged twice by each read of the namespace, once from the listing and once from the reread of that one name the read makes; and any caller who can reach the broker writes one by asking for a reread of a refused name, at up to the rate the reread route allows (above). |

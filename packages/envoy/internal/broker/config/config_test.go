@@ -227,38 +227,46 @@ func TestLoadRequiresTheNamespaceAndItsKey(t *testing.T) {
 	}
 }
 
-// TestDatabasePasswordPlaceholderSubstitutesEscaped pins the ${BROKER_DATABASE_PASSWORD}
-// substitution: the password is URL-escaped in place, so a password containing reserved URL
-// characters (@, :, /) is carried correctly rather than corrupting the URL's own structure.
-func TestDatabasePasswordPlaceholderSubstitutesEscaped(t *testing.T) {
-	e := validEnv()
-	e["BROKER_DATABASE_URL"] = "postgres://broker:${BROKER_DATABASE_PASSWORD}@db.internal:5432/agent_secrets"
-	e["BROKER_DATABASE_PASSWORD"] = "p@ss:w/rd"
-	cfg, err := Load(env(e))
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := "postgres://broker:p%40ss%3Aw%2Frd@db.internal:5432/agent_secrets"
-	if cfg.DatabaseURL != want {
-		t.Fatalf("DatabaseURL = %q, want %q", cfg.DatabaseURL, want)
-	}
-}
-
-func TestDatabasePasswordPlaceholderWithoutVariableRefused(t *testing.T) {
-	e := validEnv()
-	e["BROKER_DATABASE_URL"] = "postgres://broker:${BROKER_DATABASE_PASSWORD}@db.internal:5432/agent_secrets"
-	_, err := Load(env(e))
-	if err == nil || !strings.Contains(err.Error(), "BROKER_DATABASE_PASSWORD is not set") {
-		t.Fatalf("expected a refusal naming the missing password, got %v", err)
-	}
-}
-
-func TestDatabasePasswordVariableWithoutPlaceholderRefused(t *testing.T) {
-	e := validEnv()
-	e["BROKER_DATABASE_PASSWORD"] = "unused"
-	_, err := Load(env(e))
-	if err == nil || !strings.Contains(err.Error(), "does not name") {
-		t.Fatalf("expected a refusal naming the unused password, got %v", err)
+// TestLoadRefusesTheDatabasePassword pins that the broker substitutes no database password into
+// its URL: a deployment still setting BROKER_DATABASE_PASSWORD, one whose BROKER_DATABASE_URL still
+// names the ${BROKER_DATABASE_PASSWORD} placeholder, and one doing both refuse to start, naming the
+// variable and why (on RDS the broker signs in by IAM token, and a URL to any other database
+// carries its own password), and never print the password or the URL.
+func TestLoadRefusesTheDatabasePassword(t *testing.T) {
+	const password = "s3cret-database-password"
+	const placeholderURL = "postgres://broker:${BROKER_DATABASE_PASSWORD}@db.internal.example:5432/broker"
+	for _, tc := range []struct {
+		name, url, password, opens string
+	}{
+		{name: "the variable alone", url: "postgres://broker:" + password + "@db.internal.example:5432/broker", password: password, opens: "BROKER_DATABASE_PASSWORD is removed; "},
+		{name: "the placeholder alone", url: placeholderURL, opens: "BROKER_DATABASE_URL names the removed ${BROKER_DATABASE_PASSWORD} placeholder; "},
+		{name: "both", url: placeholderURL, password: password, opens: "BROKER_DATABASE_PASSWORD is removed; "},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := validEnv()
+			e["BROKER_DATABASE_URL"] = tc.url
+			if tc.password != "" {
+				e["BROKER_DATABASE_PASSWORD"] = tc.password
+			}
+			_, err := Load(env(e))
+			if err == nil {
+				t.Fatal("Load accepted it; want a refusal naming BROKER_DATABASE_PASSWORD and why it is gone")
+			}
+			refusal := err.Error()
+			if !strings.HasPrefix(refusal, tc.opens) {
+				t.Errorf("refusal %q does not open %q", refusal, tc.opens)
+			}
+			for _, why := range []string{"by IAM token", "https://sjawhar.github.io/legion/broker/operate/#signing-in-to-rds-by-iam-token", "goes in the URL itself"} {
+				if !strings.Contains(refusal, why) {
+					t.Errorf("refusal %q does not say %q", refusal, why)
+				}
+			}
+			for _, secret := range []string{password, "db.internal.example"} {
+				if strings.Contains(refusal, secret) {
+					t.Errorf("refusal %q prints %q, part of the password or the URL", refusal, secret)
+				}
+			}
+		})
 	}
 }
 
@@ -285,14 +293,13 @@ func isolatePostgresDefaults(t *testing.T) {
 
 // TestLoadSignsInByIAMOnlyForAPasswordlessRDSURL pins when the broker signs in to its database
 // with an IAM token: a URL naming a user and no password whose host is an Amazon RDS endpoint.
-// A password in the URL, the password placeholder, a URL naming no user, and a passwordless URL
-// to any other host (local trust auth) connect as given, with the password, if any, the URL or
-// libpq's defaults supply.
+// A password in the URL, a URL naming no user, and a passwordless URL to any other host (local
+// trust auth) connect as given, with the password, if any, the URL or libpq's defaults supply.
 func TestLoadSignsInByIAMOnlyForAPasswordlessRDSURL(t *testing.T) {
 	isolatePostgresDefaults(t)
 	for _, tc := range []struct {
-		name, url, password string
-		iam                 bool
+		name, url string
+		iam       bool
 	}{
 		{name: "an RDS endpoint, a user and no password", url: verifiedRDSURL, iam: true},
 		{name: "an RDS endpoint spelled in capitals", url: strings.Replace(verifiedRDSURL, rdsHost, strings.ToUpper(rdsHost), 1), iam: true},
@@ -300,7 +307,6 @@ func TestLoadSignsInByIAMOnlyForAPasswordlessRDSURL(t *testing.T) {
 		{name: "a password in the URL", url: "postgres://agent_secrets:secret@" + rdsHost + ":5432/agent_secrets?sslmode=require"},
 		{name: "a password as a query parameter", url: verifiedRDSURL + "&password=secret"},
 		{name: "a password with a semicolon, which net/url drops from the query and pgx reads", url: verifiedRDSURL + "&password=sec;ret"},
-		{name: "the password placeholder", url: "postgres://agent_secrets:${BROKER_DATABASE_PASSWORD}@" + rdsHost + ":5432/agent_secrets?sslmode=require", password: "p@ss"},
 		{name: "no user", url: "postgres://" + rdsHost + ":5432/agent_secrets?sslmode=require"},
 		{name: "a local passwordless URL", url: "postgres://broker@127.0.0.1:5432/broker?sslmode=disable"},
 		{name: "a host with the RDS suffix in the middle of its name", url: "postgres://broker@db.rds.amazonaws.com.example.net:5432/broker?sslmode=disable"},
@@ -308,9 +314,6 @@ func TestLoadSignsInByIAMOnlyForAPasswordlessRDSURL(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := validEnv()
 			e["BROKER_DATABASE_URL"] = tc.url
-			if tc.password != "" {
-				e["BROKER_DATABASE_PASSWORD"] = tc.password
-			}
 			cfg, err := Load(env(e))
 			if err != nil {
 				t.Fatalf("Load: %v", err)

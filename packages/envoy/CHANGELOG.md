@@ -24,8 +24,8 @@
   `sslmode=require` verifies nothing and `sslrootcert=system` holds no RDS CA. A password pgx reads
   for the URL (`PGPASSWORD`, a passfile) keeps it on that password. The Envoy image ships the RDS global CA bundle at
   `/etc/ssl/rds/global-bundle.pem`, outside the system trust store, so no binary in the image
-  trusts an RDS CA for any other connection. A URL with a password, the
-  `${BROKER_DATABASE_PASSWORD}` placeholder, or any other host connects as before (LEGION-662).
+  trusts an RDS CA for any other connection. A URL with a password, or any other host, connects as
+  before (LEGION-662).
 - `GET /api/v1/me/answers` lists a person's own answers and replies on asks, newest first,
   with whether each answer is still current. `POST /api/v1/asks/{id}/answer` takes
   `expected_answer_at` to change the current answer; the change is another `ask.answered`
@@ -127,9 +127,18 @@
   a fence or indented code counts nothing, nor does a block the edit moved or reworded. An issue
   document's edit carries it beside the issue advice; a project document's edit, which before
   carried no advice, now carries `advice` holding the count alone (LEGION-470).
+- The secrets broker logs at boot how it signs in to its database, `database sign-in
+  method=rds-iam` or `method=password`, before it reaches for AWS or the database, so an operator
+  tells a token sign-in from a password one in the log rather than the task's environment.
 
 ### Changed
 
+- The secrets broker takes no database password apart from its URL, and refuses to start while
+  `BROKER_DATABASE_PASSWORD` is set or `BROKER_DATABASE_URL` names its
+  `${BROKER_DATABASE_PASSWORD}` placeholder, naming the variable and why: on Amazon RDS it signs in
+  by IAM token, and any other database's password goes in the URL itself, URL-escaped. A deployment
+  that still sets either must stop before it runs this broker: put the password in the URL, or move
+  to an IAM-form URL on RDS.
 - Anyone signed in to Dispatch decides a service's machine login, such as the Legion daemon's, not
   only the person its request names: the broker reads the service from the signed request, opens
   its record with the approver `anyone` and ignores any `login_hint` it carries, and the decision,
