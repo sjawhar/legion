@@ -2847,10 +2847,15 @@ for absent in LEGION_GH_PATH LEGION_GIT_PATH LEGION_JJ_PATH LEGION_CREDENTIAL_HE
   ! grep -q "^$absent=" <<<"$impl_env" || fail "the implementer's Oh My Pi environment still carries $(grep "^$absent=" <<<"$impl_env")"
 done
 impl_path=$(sed -n 's/^PATH=//p' <<<"$impl_env")
-case ":$impl_path:" in
-  *worker-bin*) fail "the implementer's PATH names a worker-bin shim directory: $impl_path" ;;
+# Two subjects: the prefix is read on the PATH with one colon appended (so a PATH that is the legion
+# directory alone holds too), and worker-bin on the colon-wrapped PATH, so a `worker-bin` directory
+# anywhere in it matches without a false match inside another name.
+case "$impl_path:" in
   "/opt/legion/bin:"*) ;;
   *) fail "the implementer's PATH is $impl_path, want the image's legion directory first" ;;
+esac
+case ":$impl_path:" in
+  *worker-bin*) fail "the implementer's PATH names a worker-bin shim directory: $impl_path" ;;
 esac
 op get pod "$gh_pod" -o json >"$evidence/github-credential-pod.json"
 jq -e '["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
