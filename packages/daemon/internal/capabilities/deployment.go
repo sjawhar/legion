@@ -4,15 +4,17 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
 
 // Deployment is what the daemon knows of its deployment's capabilities: what its configuration
-// decides and sets, and what boot learned of the image, the broker and the pod's Oh My Pi. Report
-// renders every row of Table from it. A gap is reported, never refused (LEGION-578, "The check"):
-// a daemon that will not run its pods would itself keep workers from working.
+// decides and sets, what boot learned of the image, the broker and the pod's Oh My Pi, and what
+// its live sessions reported of the live rows. Report renders every row of Table from it. A gap is
+// reported, never refused (LEGION-578, "The check"): a daemon that will not run its pods would
+// itself keep workers from working.
 type Deployment struct {
 	// Decided is legion.yaml's capabilities.decided: the deployment rows the operator has decided,
 	// each with the reason, which the report shows in the gap's place.
@@ -37,15 +39,19 @@ type Deployment struct {
 	// (bootprobe.ImageReport) or the plugin gate read it under tmux, and "" when nothing has read
 	// it.
 	ModelFallback string
+	// Sessions is every session the daemon judges live — its claim ready, working or idle, and its
+	// report's incarnation its claim's current Locator's — each with its report of the live rows
+	// (LEGION-663). The daemon filters; Report renders a live row from them.
+	Sessions []Session
 }
 
 // The statuses a State carries: an image row is present or installed (as a Line is) or unchecked,
-// a live row live, a withheld row withheld, and a deployment row present, decided or open.
+// a withheld row withheld, a deployment row present, decided or open, and a live row present, open
+// or unchecked by what the live sessions reported.
 const (
 	StatusPresent   = present
 	StatusInstalled = installed
 	StatusUnchecked = "unchecked"
-	StatusLive      = live
 	StatusWithheld  = withheld
 	StatusDecided   = "decided"
 	StatusOpen      = "open"
@@ -55,8 +61,8 @@ const (
 type State struct {
 	Name   Name
 	Status string
-	// Detail is the row's evidence: what the probe checked, the live check, the ruling, or the
-	// deployment's measurement — whatever the status.
+	// Detail is the row's evidence: what the probe checked, what the live sessions reported, the
+	// ruling, or the deployment's measurement — whatever the status.
 	Detail string
 	// Decision is the operator's reason on a decided row, "" otherwise.
 	Decision string
@@ -66,17 +72,22 @@ type State struct {
 }
 
 // OpenLine is the sentence an open row is logged with (Log) and `legion start --check-config`
-// prints: the gap, and the line that records a decision on it.
+// prints: the gap and, on a deployment row, the line that records a decision. A live row has no
+// such line: a session's failing check is a fact to fix, not a gap an operator decides.
 func (s State) OpenLine() string {
+	if s.ConfigLine == "" {
+		return fmt.Sprintf("capability %s is open: %s", s.Name, s.Detail)
+	}
 	return fmt.Sprintf("capability %s is open: %s; to record a decision, add to legion.yaml: %s", s.Name, s.Detail, s.ConfigLine)
 }
 
 // Report renders every row of Table, in its order. An image row is present once the image passed
 // the probe — installed where the row awaits a pod launch that loads what the image carries, the
-// sentence that says so after the probe's — else unchecked; a live row is live, naming its check;
-// a withheld row carries its ruling (both as CheckImage renders them); a deployment row is present
-// when the deployment satisfies it, decided when legion.yaml records a decision on it, and open
-// otherwise, with the line that records one.
+// sentence that says so after the probe's — else unchecked; a live row is open when a live
+// session's check of it failed, present when none failed and one proved it, and unchecked when no
+// session has reported; a withheld row carries its ruling (as CheckImage renders it); a deployment
+// row is present when the deployment satisfies it, decided when legion.yaml records a decision on
+// it, and open otherwise, with the line that records one.
 func (d Deployment) Report() []State {
 	states := make([]State, 0, len(Table))
 	for _, row := range Table {
@@ -85,7 +96,7 @@ func (d Deployment) Report() []State {
 		case SiteImage:
 			state.Status, state.Detail = d.image(row)
 		case SiteLive:
-			state.Status, state.Detail = StatusLive, liveDetail(row)
+			state = d.live(row)
 		case SiteWithheld:
 			state.Status, state.Detail = StatusWithheld, withheldDetail(row)
 		case SiteDeployment:
@@ -96,7 +107,8 @@ func (d Deployment) Report() []State {
 	return states
 }
 
-// Open is the deployment rows whose status is open, in Table order: the gaps with no decision.
+// Open is the rows whose status is open, in Table order: the deployment gaps with no decision, and
+// the live rows a live session's check failed.
 func (d Deployment) Open() []Name {
 	var open []Name
 	for _, state := range d.openStates() {
@@ -119,19 +131,20 @@ func (d Deployment) OpenFromConfiguration() []State {
 	return open
 }
 
-// Log writes one warning per open row: the gap and the legion.yaml line that records a decision.
+// Log writes one warning per open row: the gap and, on a deployment row, the legion.yaml line that
+// records a decision; a live row's configLine is "".
 func (d Deployment) Log(log *slog.Logger) {
 	for _, state := range d.openStates() {
 		log.Warn(state.OpenLine(), "capability", string(state.Name), "detail", state.Detail, "configLine", state.ConfigLine)
 	}
 }
 
-// openStates is the open rows, in Table order: only a deployment row is ever open, and Decidable
-// names those in Table's order.
+// openStates is the open rows of Report, in Table order: a deployment row with no decision, or a
+// live row a live session's check failed; no image or withheld row is ever open.
 func (d Deployment) openStates() []State {
 	var open []State
-	for _, name := range Decidable() {
-		if state := d.deployment(name); state.Status == StatusOpen {
+	for _, state := range d.Report() {
+		if state.Status == StatusOpen {
 			open = append(open, state)
 		}
 	}
@@ -156,15 +169,76 @@ func (d Deployment) image(row Capability) (string, string) {
 	}
 }
 
-// liveDetail is a live row's detail as CheckImage renders it: the check still to run, its issue,
-// the summary. Nothing in the daemon runs a live check yet, so the row says the check is pending
-// rather than passed.
-func liveDetail(row Capability) string {
-	check := "to be proved by a live check against a running pod"
-	if row.Ruling != "" {
-		check += " (" + row.Ruling + ")"
+// live is one live row's state from the live sessions' reports. Open when any session's check of
+// it failed: each failing session, in Sessions order, as its label and the fact its check found,
+// the first three then how many more. Present when none failed and at least one proved it: how
+// many did, and the latest measurement — the greatest MeasuredAt, the first in Sessions order on
+// a tie — with its fact. Unchecked when no live session has reported: the ruling whose check
+// proves the row, and the summary.
+func (d Deployment) live(row Capability) State {
+	state := State{Name: row.Name}
+	var failing []string
+	proved, latest := 0, -1
+	for i, session := range d.Sessions {
+		measured, ok := session.row(row.Name)
+		switch {
+		case !ok:
+			continue
+		case !measured.OK:
+			failing = append(failing, session.label()+": "+measured.Detail)
+			continue
+		}
+		proved++
+		if latest < 0 || session.Report.MeasuredAt.After(d.Sessions[latest].Report.MeasuredAt) {
+			latest = i
+		}
 	}
-	return check + ": " + row.Summary
+	switch {
+	case len(failing) > 0:
+		named := failing[:min(len(failing), maxFailingNamed)]
+		state.Status, state.Detail = StatusOpen, strings.Join(named, "; ")
+		if more := len(failing) - len(named); more > 0 {
+			state.Detail += fmt.Sprintf(" +%d more", more)
+		}
+	case proved > 0:
+		session := d.Sessions[latest]
+		measured, _ := session.row(row.Name)
+		state.Status = StatusPresent
+		state.Detail = fmt.Sprintf("proved by %d live session(s); latest %s measured %s: %s",
+			proved, session.label(), session.Report.MeasuredAt.Format(time.RFC3339), measured.Detail)
+	default:
+		state.Status, state.Detail = StatusUnchecked, "no session has reported yet ("+row.Ruling+"): "+row.Summary
+	}
+	return state
+}
+
+// maxFailingNamed is how many failing sessions an open live row's detail names before it counts
+// the rest: three say what is wrong without a swarm's worth of sessions filling the line.
+const maxFailingNamed = 3
+
+// row is s's measurement of name, and whether its report carries one.
+func (s Session) row(name Name) (Row, bool) {
+	for _, row := range s.Report.Rows {
+		if row.Name == name {
+			return row, true
+		}
+	}
+	return Row{}, false
+}
+
+// label is how a live row's detail names s: its pod and container under a sandbox locator, its
+// pane under tmux — a locator naming neither, which runtime.Locator.Validate refuses, falls back
+// to the claim — then its claim's role and issue.
+func (s Session) label() string {
+	locator := s.Report.Locator
+	where := "claim " + string(s.Report.Claim)
+	switch {
+	case locator.Sandbox != nil:
+		where = "pod " + locator.Sandbox.Name + "/" + locator.Sandbox.Container
+	case locator.Tmux != nil:
+		where = "pane " + locator.Tmux.Window + ":" + locator.Tmux.Pane
+	}
+	return fmt.Sprintf("%s (%s, %s)", where, s.Role, s.Issue)
 }
 
 // withheldDetail is a withheld row's detail as CheckImage renders it: the ruling, the summary.

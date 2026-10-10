@@ -132,7 +132,7 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 		if line.Name != row.Name {
 			t.Errorf("line %d is %s, want %s: the table's order", i, line.Name, row.Name)
 		}
-		want := map[Site]string{SiteImage: present, SiteLive: live, SiteDeployment: reported, SiteWithheld: withheld}[row.Site]
+		want := map[Site]string{SiteImage: present, SiteLive: reported, SiteDeployment: reported, SiteWithheld: withheld}[row.Site]
 		if row.Awaits != "" {
 			want = installed
 		}
@@ -142,8 +142,8 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 		if row.Site == SiteWithheld && !strings.HasPrefix(line.Detail, row.Ruling+": ") {
 			t.Errorf("%s: detail %q, want the ruling %s first", line.Name, line.Detail, row.Ruling)
 		}
-		if row.Site == SiteLive && row.Ruling != "" && !strings.Contains(line.Detail, row.Ruling) {
-			t.Errorf("%s: detail %q, want it to name the live check's issue %s", line.Name, line.Detail, row.Ruling)
+		if row.Site == SiteLive && line.Detail != "each session reports it at start; `legion state` renders it: "+row.Summary {
+			t.Errorf("%s: detail %q, want it to say each session reports the row, then the summary", line.Name, line.Detail)
 		}
 	}
 	got := byName(lines)
@@ -153,7 +153,7 @@ func TestCheckImageRendersEveryRowWhenEveryImageRowIsPresent(t *testing.T) {
 		LSP:                  "on PATH: " + filepath.Join(s.bin, "gopls") + ", " + filepath.Join(s.bin, "typescript-language-server") + ", " + filepath.Join(s.bin, "pyright-langserver"),
 		CodeGraph:            filepath.Join(s.bin, "codegraph") + " on PATH; @bopstack/pi-codegraph enabled in " + s.lock(),
 		Toolchain:            "on PATH: " + filepath.Join(s.bin, "go") + ", " + filepath.Join(s.bin, "curl") + ", " + filepath.Join(s.bin, "wget") + ", " + filepath.Join(s.bin, "python3") + ", " + filepath.Join(s.bin, "node") + ", " + filepath.Join(s.bin, "bun") + ", " + filepath.Join(s.bin, "uv") + "; go version go1.26.8 linux/amd64",
-		RepositoryExtensions: "to be proved by a live check against a running pod (dispatch://LEGION-629): loads the Oh My Pi extensions the repository it works carries",
+		RepositoryExtensions: "each session reports it at start; `legion state` renders it: loads the Oh My Pi extensions the repository it works carries",
 	} {
 		if got[name].Detail != want {
 			t.Errorf("%s: detail %q, want %q", name, got[name].Detail, want)
