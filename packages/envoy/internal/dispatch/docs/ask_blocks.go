@@ -36,7 +36,8 @@ type settlementReconciliation struct {
 	events    []model.Event
 	retracted []model.Ask
 	// owedCopies are the other documents showing a copy of an ask this settlement retracts, whose
-	// settlement nameVersion marked owed; the settlement arms each once it commits.
+	// settlement reconcileAskBlocks marked owed (owedCopiesOf); the settlement arms each once it
+	// commits.
 	owedCopies []string
 	// indexedAskBlocks are the blocks with a recorded author that this settlement indexed or
 	// found indexed, whose author the room forgets once it commits (consumeAskAuthors). A copy
@@ -119,9 +120,7 @@ func (r *settlementReconciliation) writeLive(doc *crdt.Doc, origin any) (bool, e
 }
 
 // nameVersion completes the reconciliation at the version the settled document is at, writing
-// the retractions whose reason names it and stamping it into every event that carries one, and
-// marks owed the settlement of every other document showing a copy of an ask it retracts
-// (owedCopiesOf).
+// the retractions whose reason names it and stamping it into every event that carries one.
 func (r *settlementReconciliation) nameVersion(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -148,11 +147,6 @@ func (r *settlementReconciliation) nameVersion(
 			owner, artifactID, "ask.resolved", SettlementActor, model.NewAskEventPayload(retracted, model.ReferenceChanges{}),
 		))
 	}
-	copies, err := owedCopiesOf(ctx, tx, artifactID, owner, r.retracted)
-	if err != nil {
-		return err
-	}
-	r.owedCopies = copies
 	return nil
 }
 
@@ -338,13 +332,13 @@ func (s *Service) reconcileAskBlocks(
 		}
 		reconciled.retracted = append(reconciled.retracted, ask)
 	}
-	// A retraction marks the copies of what it retracts owed (nameVersion, owedCopiesOf) under the
-	// project's copy lock, which is taken here, before this settlement's repairs append its update
-	// and lock its own pending row: the copy lock comes before any pending row.
-	if len(reconciled.retracted) > 0 {
-		if err := lockProjectCopies(ctx, tx, owner); err != nil {
-			return settlementReconciliation{}, err
-		}
+	// The copies of what this settlement retracts owe a settlement of their own (owedCopiesOf),
+	// marked here, under the project's copy lock, before this settlement's repairs append its
+	// update and lock its own pending row: the copy lock and every other document's pending row
+	// come before this document's own pending row and before any event.
+	reconciled.owedCopies, err = owedCopiesOf(ctx, tx, artifactID, owner, reconciled.retracted)
+	if err != nil {
+		return settlementReconciliation{}, err
 	}
 	return reconciled, nil
 }

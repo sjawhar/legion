@@ -106,10 +106,12 @@ func locksOwnerTableForUpdate(statement string) bool {
 
 // moduleSource is one non-test Go file of the module with the tree both scans below read. The
 // file is parsed once here rather than again in each scan: the constant map and the statement
-// walk want the same trees, and parsing the module twice doubled this test's wall time.
+// walk want the same trees, and parsing the module twice doubled this test's wall time. positions
+// is the file set it was parsed into, which turns a node's position into a line.
 type moduleSource struct {
-	path string
-	file *ast.File
+	path      string
+	file      *ast.File
+	positions *token.FileSet
 }
 
 // moduleSources reads and parses every non-test Go file of the envoy module, not just the
@@ -131,7 +133,7 @@ func moduleSources(t *testing.T, root string) []moduleSource {
 		if err != nil {
 			return err
 		}
-		sources = append(sources, moduleSource{path: path, file: file})
+		sources = append(sources, moduleSource{path: path, file: file, positions: fileSet})
 		return nil
 	}); err != nil {
 		t.Fatalf("scan dispatch sources: %v", err)

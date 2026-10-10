@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 const copiedAsksDocument = "Context\n\n" +
@@ -464,6 +465,9 @@ func sharesOneAsk(t *testing.T, service *Service, copies []string, opener string
 	return true
 }
 
+// copyLockWait is the LIKE pattern of a statement waiting on a project's copy lock.
+const copyLockWait = "%" + projectCopiesLock + "%"
+
 // settlementBarrier is a settlement hook (afterSettleLock, afterSettleReconcile) that holds each
 // settlement calling it until all n have called it or wait on their project's copy lock
 // (lockProjectCopies). It runs on settlement's goroutine, so a failed read is reported with
@@ -478,11 +482,8 @@ func settlementBarrier(t *testing.T, service *Service, n int) func(string) {
 		mu.Unlock()
 		deadline := time.Now().Add(10 * time.Second)
 		for time.Now().Before(deadline) {
-			var waiting int
-			if err := service.store.Pool.QueryRow(context.Background(), `
-				select count(*) from pg_stat_activity
-				where datname = current_database() and wait_event_type = 'Lock' and query like '%copied-asks:%'
-			`).Scan(&waiting); err != nil {
+			waiting, err := storetest.CountLockWaits(context.Background(), service.store, copyLockWait)
+			if err != nil {
 				t.Errorf("count the settlements waiting on the copy lock: %v", err)
 				return
 			}

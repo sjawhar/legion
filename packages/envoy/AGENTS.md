@@ -1570,7 +1570,7 @@ bookkeeping. Every holder takes it before any `doc_settlements_pending` row and 
 commit-order lock, and a settlement deletes its own pending row before it appends its first event,
 since a route marking that document owed holds the row while it waits for the commit-order lock. A
 copy whose text is changed and an id no ask of the owner indexes open an ask as any new block does
-(LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0085), an
+(LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0087), an
 issue document's `artifacts_issue_key`, and the owed copies' latest versions `artifact_versions`'
 unique `(artifact_id, number)`; `copied_asks_plan_test.go` holds each. Finding the owed copies
 reads, with `LIKE`, the latest markdown of every other document of the owner, so a retraction, an

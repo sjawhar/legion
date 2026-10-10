@@ -361,7 +361,7 @@
   or an id no ask of the owner indexes, still opens one, and so do a source's copies once its block
   leaves its document: settlement of the source retracts its ask and settles every copy, the first
   opens one ask, credited to whoever wrote the block into it, and the others name that ask, on a
-  project's documents as on an issue's. Migration `0085_artifacts_project_documents` adds the
+  project's documents as on an issue's. Migration `0087_artifacts_project_documents` adds the
   partial index a project document's lookups read (LEGION-651).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and

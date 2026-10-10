@@ -116,27 +116,44 @@ type copiedSource struct {
 	document string
 }
 
+// projectCopiesLock is the statement lockProjectCopies takes the copy lock with: a two-key
+// transaction advisory lock, its first key copiedAsksLockNamespace and its second the project's
+// hashtext.
+const projectCopiesLock = `select pg_advisory_xact_lock($1, hashtext($2))`
+
+// copiedAsksLockNamespace is the first key of every copy lock ("COPY"). No other lock of this
+// module is taken in the two-key form.
+const copiedAsksLockNamespace int32 = 0x434F5059
+
 // lockProjectCopies serialises, for a project document, its project's copy bookkeeping: a
 // settlement's copy-source read (copiedAskSources), and the owed copies a settlement's retraction
 // or a source's answer or resolution marks (owedCopiesOf). Without it two copies of one retracted
 // ask settling at once would each find no source and each open an ask. An issue's documents need
 // no lock of their own, since every one of those transactions already holds their issue's row
 // (lockArtifactOwner, requireOpenOwner); a project document's owner row is the document itself,
-// which no sibling takes. The lock is a transaction advisory lock keyed on the project, as
-// lockProjectRankAllocation's is, so read marks, event appends and issue creation, which lock the
-// project's row, never wait on a settlement. hashtext is 32 bits wide, so two projects can share a
-// key: they then serialise their copy bookkeeping, and nothing else. Every holder takes it before
-// any doc_settlements_pending row and before the events' commit-order lock: a settlement right
-// after its owner row and room lock, an answer or a resolution after its owner row and ask row. The
-// copy-source read is the next statement, so under READ COMMITTED its snapshot holds every ask a
-// sibling's settlement committed while this one waited, and the ask createAskBlock opens commits in
-// this transaction, which holds the lock until then. A settlement whose blocks all have asks of
-// their own and that retracts none takes none.
+// which no sibling takes. The lock is a transaction advisory lock keyed on the project, so read
+// marks, event appends and issue creation, which lock the project's row, never wait on a
+// settlement.
+//
+// It takes the two-key form, whose key space Postgres keeps apart from the single-key one: every
+// other advisory lock here - a document's room (lockDocumentRoom), a project's rank allocation, an
+// agent's artifacts, the events' commit order, the migration runner's - is a single key, so a copy
+// lock never waits on one of those, whatever the project's name hashes to. Within the two-key space
+// only the copy locks take copiedAsksLockNamespace, and hashtext is 32 bits wide, so two projects
+// can still share the second key. They then take turns on their copy bookkeeping and on nothing
+// else, and cannot deadlock: a holder takes the copy lock before any doc_settlements_pending row
+// and before the events' commit-order lock (TestCopyLockComesBeforeEveryPendingRowAndEvent), so
+// the transaction waiting on it holds nothing the holder goes on to take. A settlement takes it
+// right after its owner row and room lock, an answer or a resolution after its owner row and ask
+// row. The copy-source read is the next statement, so under READ COMMITTED its snapshot holds every
+// ask a sibling's settlement committed while this one waited, and the ask createAskBlock opens
+// commits in this transaction, which holds the lock until then. A settlement whose blocks all have
+// asks of their own and that retracts none takes none.
 func lockProjectCopies(ctx context.Context, tx pgx.Tx, owner artifactOwner) error {
 	if owner.IssueKey != nil || owner.Project == "" {
 		return nil
 	}
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtext('copied-asks:' || $1))`, owner.Project); err != nil {
+	if _, err := tx.Exec(ctx, projectCopiesLock, copiedAsksLockNamespace, owner.Project); err != nil {
 		return fmt.Errorf("lock the project's copied asks: %w", err)
 	}
 	return nil
@@ -144,7 +161,7 @@ func lockProjectCopies(ctx context.Context, tx pgx.Tx, owner artifactOwner) erro
 
 // ownerDocuments is the predicate on artifacts d that selects owner's documents, and the value it
 // binds as $3: the issue's documents (artifacts_issue_key), or for a project document the
-// project's other unlinked documents (artifacts_project_documents, migration 0085); an agent
+// project's other unlinked documents (artifacts_project_documents, migration 0087); an agent
 // conversation's artifacts belong to neither.
 func ownerDocuments(owner artifactOwner) (string, string) {
 	if owner.IssueKey != nil {
