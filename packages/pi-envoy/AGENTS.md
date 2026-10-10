@@ -25,10 +25,11 @@ posts its body or error to the correlated delivery attempt; **Aside** and **Stee
 (below). A BTW side turn still running when the handler that subscribed the agent subject
 (`session_start`, a session switch, or a Legion handler re-establishing through the claim bridge)
 reaches the host's 30 s handler budget is aborted, and Dispatch gets the abort as the reply's error.
-A card or a person's turn whose text embeds Dispatch pictures (`RenderInboundResult.pictures`, the
-turn's body) carries them as image blocks after the text (`src/delivery-pictures.ts`, the same
-bounds as `dispatch read`); the host's custom-message and `sendUserMessage` content takes those
-blocks.
+A card whose text embeds Dispatch pictures (`RenderInboundResult.pictures`) carries them as image
+blocks after the text (`src/delivery-pictures.ts`, the same bounds as `dispatch read`), and so does
+a person's turn (below): `sendUserMessage` takes the blocks with the text, and `sendUserInput`, which
+takes text alone, gets them from the extension's own `input` handler when the host asks for that
+input's images (`source: "extension"`), as a picture pasted at the terminal reaches it.
 
 A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
 steer) becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate
@@ -38,9 +39,8 @@ other frame keeps its card with no call to Dispatch. For a candidate the extensi
 with its own Dispatch bearer, to accept that attempt
 (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`; its conditions are that route's row in
 `packages/envoy/cmd/dispatch/AGENTS.md`, in short a person's own fresh Send or Aside to this
-session), and only on that 200 sends the stored body the accept answers with
-`pi.sendUserMessage` (`deliverAs: "aside"` for an Aside, nothing for a Send, as the accepted
-attempt says; `turnFromAccept`), never the frame's text. Only the accept's success makes a turn;
+session), and only on that 200 runs the stored body the accept answers with (`turnFromAccept`),
+never the frame's text, in the accepted attempt's mode. Only the accept's success makes a turn;
 the extension's own checks can only keep a card. Besides the candidate filter, it never accepts an
 attempt it already delivered, as a card or as a turn: before either goes out it writes a
 transcript entry (`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), rebuilt from every
@@ -48,13 +48,58 @@ entry of the session file (`sessionManager.getEntries()`) on each restore, and a
 recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
 a Send that arrived as a card, and one forged after a restart are each a card, while a person's
 retry, a new attempt, can still be their turn. Every refusal, error and timeout (10 s), a Dispatch
-configuration that no longer resolves included, keeps the card and posts nothing. The stream tags
-the injected user message with the message id (`dispatchMessageId`, passed to
-`AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which user
-message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`: the
-first user message with the sent text, remembered under its host timestamp, forgotten at the run's
-`agent_end`; a turn the record misses shows twice, and the phase-stall section of
-`packages/pi-legion/AGENTS.md` says which turns those are and what a miss costs a phase worker).
+configuration that no longer resolves included, keeps the card and posts nothing.
+
+On a host with `pi.sendUserInput` (our Oh My Pi fork, can1357/oh-my-pi#14323) the body runs as if
+typed at the session's terminal (`runTypedInput`), with the Dispatch message id as the host's `tag`
+and `deliverAs: "aside"` for an Aside: a built-in the host runs headless, an extension or custom
+command, a markdown file command or prompt template (expanded into the user message), `/skill:<name>`
+(the host's `skill-prompt` custom message), and any other text, a slash text no command names
+included, as a prompt. The call is never awaited, since on an idle session the host answers only
+once the run it started ends, and the pump must keep taking the person's next Send. The attempt is
+already accepted, so what the host answers is the session's reply to it on Dispatch
+(`typedInputReply`, posted with `POST /api/v1/messages/{id}/reply`), never a failed delivery: what a
+built-in printed (`/session`'s `Session:`, `Title:` and `CWD:` lines; `/compact`'s
+`Compaction complete. …`), that a built-in only the terminal runs (`/new`, `/resume`) runs only in
+the session's own terminal and nothing was sent, that a host mode which does not wire the method
+(an SDK embedder, a guest in a shared session) did not run it and nothing was sent, or why the host
+failed it; a prompt or skill the model now works on, and a command that printed nothing, get no
+reply. On a host without `sendUserInput` a body that starts with `/` is not sent, since the host
+would hand it to the model as words, and the reply names the host's Oh My Pi version and says
+nothing was sent; any other body goes through `pi.sendUserMessage` as before.
+
+The stream tags the person's message with its Dispatch id (`dispatchMessageId`, passed to
+`AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which
+message it is comes from one process-wide record keyed by session (`matchInjectedUserTurn`,
+`@legion/pi-shared/injected-user-turns`). A typed turn is found by the tag the host keeps on every
+message the input submits, a user message or a `skill-prompt` custom message, and by nothing else; it
+stays in the record past the run's `agent_end` until that message arrives, and goes when the host
+answers that the input submitted no message. A `sendUserMessage` turn is found by its text: the
+first user message that equals it, forgotten at the run's `agent_end`, so on such a host a Send or
+an Aside the host runs as a turn of its own after that run matches nothing. What the record answers
+for a message is remembered under its host timestamp until the run ends, and the phase-stall section
+of `packages/pi-legion/AGENTS.md` says what a miss costs a phase worker. Which turns the page shows
+twice: one the record missed, which the stream carries untagged; and a prompt template or file
+command, whose streamed user message is the expanded text while Dispatch stores what the person
+typed, and the page takes the stored copy away only when the two texts are equal
+(`AgentRuntimeThread.tsx`, a guard against a forged tag on an open bus). A `/skill:` shows once:
+the stream carries no custom message, so the page shows Dispatch's stored copy alone.
+
+The stream also lists the slash commands a viewer can send (`kind: "commands"`, the last frame of
+every replay and published whenever the list changes), read again at every watch and replay ping
+(`refreshAgentStreamCommands`), in the session's terminal picker's order: the host's built-ins
+(`listUserInputBuiltinCommands`, our fork's export, loaded through a dynamic import so a host
+without the module still loads the extension), each marked `terminalOnly` when only the terminal
+runs it; the extension, custom and skill commands (`pi.getCommands`); then the markdown file commands
+and prompt templates the live session expands, read from the host's own `AgentSession`
+(`slashCommands`, `promptTemplates`) by finding, in `AgentRegistry.global().list()`, the ref whose
+live session id is this session's. The ref is looked up at every ping, since the host keeps one
+`AgentSession` across `/new`, `/resume` and a fork and changes its id; a host without the registry
+export, or one listing no session under this id, lists none of those two and publishes the rest.
+Every built-in's name and aliases are reserved before anything else is listed, since the host runs a
+built-in by either before `prompt()`; among the rest a repeated name keeps its first source, which
+is the one the host runs. A host without `sendUserInput` publishes no list, and its viewer offers no
+completion.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
 (every authenticated caller's event stream carries it, and Dispatch publishes it before its own

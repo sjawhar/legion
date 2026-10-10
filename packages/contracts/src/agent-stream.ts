@@ -116,10 +116,13 @@ export interface AgentStreamToolResult {
 
 /**
  * One slash command a person can send the session from Dispatch (LEGION-394). The session runs a
- * Send or Aside that starts with `/name` as typed input, as its own terminal would: a built-in its
- * headless host can run, an extension command, a file command or prompt template (`prompt`), or a
- * skill (`skill:<name>`). A built-in only the terminal's own interface runs (`/new`, `/resume`) is
- * listed with `terminalOnly`, and sending it gets the session's reply that it did not run.
+ * Send or Aside that starts with `/name` as typed input, as its own terminal would, and lists what
+ * its terminal picker offers, in that picker's order, each name once: `builtin`, a built-in its
+ * host can run headless, or one only the terminal's own interface runs (`/new`, `/resume`), listed
+ * with `terminalOnly`, which gets the session's reply that it did not run; `extension`, a command
+ * an extension registered; `prompt`, a TypeScript custom command, an MCP prompt, a markdown file
+ * command (`commands/*.md`) or a prompt template (`prompts/*.md`), each expanded into the person's
+ * user message; and `skill`, a skill (`skill:<name>`).
  */
 export interface AgentStreamCommand {
   /** The command without its slash: `compact`, `skill:dispatch`. */

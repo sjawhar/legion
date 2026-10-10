@@ -32,9 +32,17 @@ session with no issue (`POST /api/v1/agents/{session_id}/messages`) stays human-
 A human can also message you directly from the **Agents** page, with no issue at all. On Oh My
 Pi, a person's **Send** or **Aside** arrives as their own user message, exactly as if they had
 typed it at your terminal: your Envoy plugin takes it only once Dispatch accepts it as a person's
-own fresh message to you, and injects the text Dispatch stored. Answer it in the conversation as
+own fresh message to you, and runs the text Dispatch stored. Answer it in the conversation as
 you would anything typed, with no `dispatch message`; the Agents page shows your conversation
 live, so they read your answer there.
+
+A Send or Aside that starts with `/` runs as the command it names, as it would at your terminal:
+a prompt template or command file arrives as the user message it expands to, a `/skill:<name>`
+as that skill's prompt, and slash text that names no command as the words themselves; answer each
+as you would typed. A command that runs without reaching you (`/session`, `/compact`), or that
+did not run (one only your own terminal runs, such as `/new`), is answered on Dispatch by your
+plugin, as your reply to that message: what the command printed, or why it did not run. You
+receive nothing for it and write nothing for it.
 
 Everything else still arrives as a Dispatch frame: a **BTW**, a broadcast, a direct message on a
 host that takes no user turn from its plugin (Claude Code), and one Dispatch did not accept.

@@ -14,6 +14,14 @@
   and the picture syntax; `SESSION_ID_PATTERN` and `isSessionId`, the one session-id rule the
   dashboard and envoy-client read a reference by (the server's `text.IsSessionID`), and
   `pictureCaption`, the one caption a picture line carries (LEGION-541).
+- Added the agent stream's `commands` frame (`AgentStreamFrame` of `kind: "commands"`, holding
+  `AgentStreamCommand[]`), the slash commands a person can send the session from Dispatch, the
+  whole list each time it changes and the last frame of a replay, with
+  `AGENT_STREAM_LIMITS.commands`, `commandNameChars` and `commandDescriptionChars`, the caps the
+  publisher applies before the frame leaves the session. Each command names its `source`
+  (`builtin`, `extension`, `prompt` for a custom command, MCP prompt, file command or prompt
+  template, `skill`), and a built-in only the session's own terminal runs carries `terminalOnly`
+  (LEGION-394). A viewer older than the frame ignores it.
 
 ### Changed
 

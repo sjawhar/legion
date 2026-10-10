@@ -24,6 +24,22 @@
   `/resume`, a restart) counts the pictures that transcript already shows: those a `dispatch read`
   or `dispatch doc-read` result or a card names as shown, and a person's own turn whose every
   picture was shown beside it. The session id the extension leaves or shuts down is forgotten.
+- A person's Send or Aside from Dispatch's Agents page runs as if typed at the session's terminal
+  (LEGION-394), on an Oh My Pi with `pi.sendUserInput` (our fork): `/compact`, `/session` and the
+  other built-ins the host runs headless, extension and custom commands, file commands and prompt
+  templates, and `/skill:<name>` run as they would there, and any other text, an unknown `/foo`
+  included, reaches the model as the person's message, carrying its Dispatch id as the host's
+  `tag`. What a command printed, or why it did not run (a built-in only the terminal runs, such as
+  `/new`, or a host mode that cannot run typed input), is the session's reply to that message on
+  Dispatch. On a host without the method a message starting with `/` is not sent, and the reply
+  names the host's Oh My Pi version; other text arrives as before. The pictures a message embeds
+  reach the host through the extension's `input` handler.
+- The live agent conversation stream lists the slash commands a person can send the session (a
+  `commands` frame, the last of every replay): the host's built-ins, `/new` and the others only the
+  terminal runs marked as such; extension, custom and skill commands; and the file commands and
+  prompt templates the live session expands. Each name is listed once, in the terminal picker's
+  order, so a name a built-in answers to by name or alias, or an earlier source already takes, is
+  not offered again (LEGION-394). A host without `pi.sendUserInput` lists none.
 - The live agent conversation stream names the `provider/model` that produced each assistant turn
   (LEGION-548), read off the host's own assistant message: the Dispatch live view shows it next to
   the session's title and on the turn itself, and it switches within one turn of `/model`. Absent
@@ -47,6 +63,13 @@
   reference (`references/brainstorming.md`) is gone; its process is in the new skill.
 
 ### Changed
+
+- `@legion/pi-shared`'s plugin interface is at version 2 (LEGION-394): a turn sent as typed input
+  is found by its tag alone, a `/skill:`'s tagged `skill-prompt` message counts as the person's
+  turn in a Legion phase worker, and such a turn is still found after the run's `agent_end` (the
+  Send the host runs as a turn of its own no longer shows twice or counts as the daemon's
+  assignment). Install this release together with the `@sjawhar/pi-legion` built from the same
+  commit: the daemon's boot gate and the Legion entry refuse a pair at different versions.
 
 - `@sjawhar/pi-envoy` now bundles the `dispatch` command (LEGION-588) instead of registering
   native Dispatch tools. Its sibling `@sjawhar/pi-legion` declares daemon API contract 17, which

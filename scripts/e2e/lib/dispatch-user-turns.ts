@@ -12,12 +12,16 @@
 //     many times the thread shows each <body> as a message, {"<body>": n, ...}, and every user
 //     message in the replay the session's stream serves the page that pi-envoy tagged with the
 //     Dispatch message it delivered, [{"id","text"}].
-//   bun scripts/e2e/lib/dispatch-user-turns.ts complete <dispatch-url> <login> <session> <typed> <pick> <shot.png>
+//   bun scripts/e2e/lib/dispatch-user-turns.ts complete <dispatch-url> <login> <session> <typed> <pick> <shot.png> [rest]
 //     opens the same page on Send, types <typed> (a `/` and part of a command's name), waits for
-//     the composer's slash-command list, picks the command named <pick> from it, presses Send, and
-//     waits until the thread shows it. Prints {"offered","terminalOnly","composed"}: every command
-//     the list offered for <typed> by name, those it marked terminal only, and what the pick wrote
-//     into the message.
+//     the composer's slash-command list, picks the command named <pick> from it, types <rest> after
+//     it when given (the command's arguments), presses Enter, and waits until the thread shows it.
+//     Prints {"offered","terminalOnly","composed"}: every command the list offered for <typed> by
+//     name, those it marked terminal only, and what the message held when it was sent.
+//   bun scripts/e2e/lib/dispatch-user-turns.ts list <dispatch-url> <login> <session> <shot.png> <typed>...
+//     opens the same page on Send and, for each <typed>, types it key by key, waits for the
+//     composer's slash-command list and reads it, then empties the message; sends nothing. Prints
+//     {"<typed>": {"offered","terminalOnly"}, ...}.
 //   bun scripts/e2e/lib/dispatch-user-turns.ts envelope <nats-url> <session> <message-id> <seconds>
 //     prints the envelope Dispatch published on notifications.agent.<session> for Dispatch message
 //     <message-id>, as the notification stream holds it; exits 1 when it holds none.
@@ -132,10 +136,28 @@ async function send(): Promise<void> {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
+/** The composer's slash-command list as it stands: every command it offers, by name, and those it
+ *  marks terminal only. */
+async function offeredCommands(
+  page: PageLike
+): Promise<{ offered: string[]; terminalOnly: string[] }> {
+  const list = page.getByRole("listbox", { name: "Slash commands" });
+  await list.waitFor({ timeout: 30_000 });
+  const offered: string[] = [];
+  const terminalOnly: string[] = [];
+  for (const option of await list.locator('[role="option"]').all()) {
+    const id = (await option.getAttribute("id")) ?? "";
+    const name = id.slice(id.indexOf("-option-") + "-option-".length);
+    offered.push(name);
+    if ((await option.textContent())?.includes("terminal only")) terminalOnly.push(name);
+  }
+  return { offered, terminalOnly };
+}
+
 async function complete(): Promise<void> {
-  const [base, login, session, typed, pick, shot] = args;
+  const [base, login, session, typed, pick, shot, rest = ""] = args;
   if (!base || !login || !session || !typed || !pick || !shot) {
-    refuse("usage: complete <dispatch-url> <login> <session> <typed> <pick> <shot.png>");
+    refuse("usage: complete <dispatch-url> <login> <session> <typed> <pick> <shot.png> [rest]");
   }
   const result = await withPage(base, login, session, async (page) => {
     const picker = page.getByRole("combobox", { name: "Delivery mode" });
@@ -144,17 +166,12 @@ async function complete(): Promise<void> {
     const input = page.getByTestId("agent-composer").locator("textarea");
     // Typed key by key, as a person does, so the composer sees each keystroke's caret.
     await input.pressSequentially(typed);
-    const list = page.getByRole("listbox", { name: "Slash commands" });
-    await list.waitFor({ timeout: 30_000 });
-    const offered: string[] = [];
-    const terminalOnly: string[] = [];
-    for (const option of await list.locator('[role="option"]').all()) {
-      const id = (await option.getAttribute("id")) ?? "";
-      const name = id.slice(id.indexOf("-option-") + "-option-".length);
-      offered.push(name);
-      if ((await option.textContent())?.includes("terminal only")) terminalOnly.push(name);
-    }
-    await list.locator(`[role="option"][id$="-option-${pick}"]`).click();
+    const { offered, terminalOnly } = await offeredCommands(page);
+    await page
+      .getByRole("listbox", { name: "Slash commands" })
+      .locator(`[role="option"][id$="-option-${pick}"]`)
+      .click();
+    if (rest !== "") await input.pressSequentially(rest);
     const composed = await input.inputValue();
     await input.press("Enter");
     const sent = composed.trimEnd();
@@ -165,6 +182,28 @@ async function complete(): Promise<void> {
     }
     await page.screenshot({ fullPage: true, path: shot });
     return { composed, offered, terminalOnly };
+  });
+  process.stdout.write(`${JSON.stringify(result)}\n`);
+}
+
+async function list(): Promise<void> {
+  const [base, login, session, shot, ...prefixes] = args;
+  if (!base || !login || !session || !shot || prefixes.length === 0) {
+    refuse("usage: list <dispatch-url> <login> <session> <shot.png> <typed>...");
+  }
+  const result = await withPage(base, login, session, async (page) => {
+    const picker = page.getByRole("combobox", { name: "Delivery mode" });
+    await picker.waitFor({ timeout: 30_000 });
+    await picker.selectOption("steer");
+    const input = page.getByTestId("agent-composer").locator("textarea");
+    const lists: Record<string, { offered: string[]; terminalOnly: string[] }> = {};
+    for (const typed of prefixes) {
+      await input.pressSequentially(typed);
+      lists[typed] = await offeredCommands(page);
+      await page.screenshot({ fullPage: true, path: shot });
+      await input.fill("");
+    }
+    return lists;
   });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
@@ -304,7 +343,11 @@ async function publish(): Promise<void> {
 
 if (command === "send") await send();
 else if (command === "complete") await complete();
+else if (command === "list") await list();
 else if (command === "count") await count();
 else if (command === "envelope") await envelope();
 else if (command === "publish") await publish();
-else refuse(`unknown command ${command ?? "(none)"}: send, complete, count, envelope or publish`);
+else
+  refuse(
+    `unknown command ${command ?? "(none)"}: send, complete, list, count, envelope or publish`
+  );

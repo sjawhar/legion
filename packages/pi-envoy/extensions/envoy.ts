@@ -63,9 +63,11 @@ import {
   mergeInterestSources,
 } from "@legion/envoy-client/transport";
 import {
+  dropInjectedUserTurn,
   endInjectedUserTurns,
   matchInjectedUserTurn,
   noteInjectedUserTurn,
+  noteTypedUserTurn,
 } from "@legion/pi-shared/injected-user-turns";
 import { LOCAL_ENVOY_NOTICE, publishEnvoyPluginInterface } from "@legion/pi-shared/interface";
 import type {
@@ -90,6 +92,7 @@ import {
   subagentSessionCheck,
 } from "@legion/pi-shared/subagent-session";
 import { toolFailure, toolSuccess } from "@legion/pi-shared/tool-result";
+import * as host from "@oh-my-pi/pi-coding-agent";
 import type { HostBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
 import { logger, procmgr, VERSION } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
@@ -674,7 +677,9 @@ export default function envoyExtension(pi: PiApi): void {
   // command, a skill, a template, or a prompt. Never awaited here: on an idle session the host
   // answers only once the run it starts ends, and the pump that called `deliver` must keep taking
   // frames meanwhile, the person's next Send included. What a command printed, or why it did not
-  // run, is the session's reply on Dispatch, which the conversation shows.
+  // run, is the session's reply on Dispatch, which the conversation shows. The turn is noted under
+  // its tag before the send, and dropped once the host answers that the input submitted no message
+  // (a command, a terminal-only built-in, a refusal, a failure): no message will carry its tag.
   const runTypedInput = (
     sendUserInput: NonNullable<PiApi["sendUserInput"]>,
     delivery: DispatchDelivery,
@@ -686,13 +691,23 @@ export default function envoyExtension(pi: PiApi): void {
         ? []
         : content.filter((block): block is ImageContent => block.type === "image");
     if (images.length > 0) pendingInputImages.set(turn.body, images);
+    const noted = sessionID;
+    noteTypedUserTurn(noted, turn.messageId);
     void sendUserInput(turn.body, {
       ...(turn.mode === "aside" && { deliverAs: "aside" as const }),
       tag: turn.messageId,
     })
       .then(
-        (result) => typedInputReply(turn.body, result),
-        (error: unknown) => typedInputReply(turn.body, { error: messageFor(error) })
+        (result) => {
+          const submitted =
+            result.handled === "prompt" || result.handled === "skill" || result.agentInvoked;
+          if (submitted !== true) dropInjectedUserTurn(noted, turn.messageId);
+          return typedInputReply(turn.body, result);
+        },
+        (error: unknown) => {
+          dropInjectedUserTurn(noted, turn.messageId);
+          return typedInputReply(turn.body, { error: messageFor(error) });
+        }
       )
       .then(async (reply) => {
         pendingInputImages.delete(turn.body);
@@ -890,18 +905,17 @@ export default function envoyExtension(pi: PiApi): void {
             if (untyped !== undefined) {
               // A host that cannot run typed input would hand the command to the model as words.
               await postDispatchReply(accepted.delivery, { body: untyped });
-            } else {
+            } else if (sendUserInput === undefined) {
               // Noted right before the send, after the pictures load: a run that ends while they
               // load clears every note (endInjectedUserTurns), and this turn must still be found.
               noteInjectedUserTurn(sessionID, turn.body, turn.messageId);
-              if (sendUserInput === undefined) {
-                pi.sendUserMessage(
-                  delivery.content,
-                  turn.mode === "aside" ? { deliverAs: "aside" } : undefined
-                );
-              } else {
-                runTypedInput(sendUserInput, accepted.delivery, turn, delivery.content);
-              }
+              pi.sendUserMessage(
+                delivery.content,
+                turn.mode === "aside" ? { deliverAs: "aside" } : undefined
+              );
+              markPicturesShown(shown, delivery.shown);
+            } else {
+              runTypedInput(sendUserInput, accepted.delivery, turn, delivery.content);
               markPicturesShown(shown, delivery.shown);
             }
           }
@@ -1023,22 +1037,40 @@ export default function envoyExtension(pi: PiApi): void {
   let agentStreamControl: Subscription | undefined;
   let agentStreamControlSession = "";
 
-  // The slash commands a viewer can send this session: its extension, custom and skill commands
-  // (`pi.getCommands`) and the host's built-ins, each built-in marked when only the terminal runs
-  // it. Only a host that can run typed input from an extension offers any; one that cannot sends
-  // no list, and its viewer offers no completion.
+  // The slash commands a viewer can send this session, in its terminal picker's order
+  // (`#rebuildSlashCommandAutocomplete` in the host's `modes/interactive-mode.ts`): the host's
+  // built-ins, each marked when only the terminal runs it; its extension, custom and skill commands
+  // (`pi.getCommands`); then the file commands and prompt templates the live session expands in
+  // `prompt()`, read from the host's own `AgentSession` (`slashCommands`, `promptTemplates`). That
+  // session is found in the host's roster (`AgentRegistry`) by `session`, its live id, at every
+  // call, since the host keeps one `AgentSession` across `/new`, `/resume` and a fork and changes its
+  // id; a host without the registry export, or listing no live session under that id, lists none of
+  // the two. The host runs a built-in by its name or any alias before anything else, so those names
+  // are reserved first; a name repeated among the rest runs its first source, and the publisher
+  // keeps the first. Only a host that can run typed input from an extension offers any; one that
+  // cannot sends no list, and its viewer offers no completion.
   const refreshAgentStreamCommands = (session: string): void => {
     if (typeof pi.sendUserInput !== "function") return;
-    const commands: AgentStreamCommand[] = [];
-    for (const builtin of hostBuiltinCommands?.() ?? []) {
-      commands.push({
-        description: builtin.description,
-        name: builtin.name,
-        source: "builtin",
-        ...(builtin.terminalOnly && { terminalOnly: true as const }),
-      });
-    }
-    for (const command of pi.getCommands?.() ?? []) {
+    const builtins = hostBuiltinCommands?.() ?? [];
+    const reserved = new Set(builtins.flatMap((builtin) => [builtin.name, ...builtin.aliases]));
+    const live = host.AgentRegistry?.global()
+      .list()
+      .find((ref) => ref.session?.sessionManager.getSessionId() === session)?.session;
+    const commands: AgentStreamCommand[] = builtins.map((builtin) => ({
+      description: builtin.description,
+      name: builtin.name,
+      source: "builtin",
+      ...(builtin.terminalOnly && { terminalOnly: true as const }),
+    }));
+    for (const command of [
+      ...(pi.getCommands?.() ?? []),
+      ...[...(live?.slashCommands ?? []), ...(live?.promptTemplates ?? [])].map((file) => ({
+        description: file.description,
+        name: file.name,
+        source: "prompt" as const,
+      })),
+    ]) {
+      if (reserved.has(command.name)) continue;
       commands.push({
         description: command.description,
         name: command.name,
@@ -1863,8 +1895,10 @@ export default function envoyExtension(pi: PiApi): void {
   // next-turn context instead of a turn of its own, consumed when the user next prompts.
   pi.on("agent_end", async (event, context) => {
     const id = context.sessionManager.getSessionId();
-    // A person's direct message not yet seen as a user message by the end of the run is not
-    // looked for again (`@legion/pi-shared/injected-user-turns`). The record is kept under this instance's own
+    // A person's direct message sent through `pi.sendUserMessage` and not yet seen as a user
+    // message by the end of the run is not looked for again; one sent as typed input is, by its tag,
+    // since the host can run it as a turn of its own after this run
+    // (`@legion/pi-shared/injected-user-turns`). The record is kept under this instance's own
     // `sessionID`, where `deliver` notes a turn and the stream recorder matches it, and not under
     // the host's live id, which a fresh terminal's differs from until the heartbeat heals it.
     endInjectedUserTurns(sessionID);

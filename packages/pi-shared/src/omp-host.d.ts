@@ -3,11 +3,22 @@ declare module "@oh-my-pi/pi-coding-agent" {
 
   /** The host's process-wide roster of agent sessions (`packages/coding-agent/src/registry/agent-registry.ts`). */
   export type AgentKind = "main" | "sub" | "advisor";
+  /** A file command (`slashCommands`) or prompt template (`promptTemplates`) the live session
+   *  expands in `prompt()`; the host's own entries carry more fields than these. */
+  export interface SessionPromptCommand {
+    readonly name: string;
+    readonly description?: string;
+  }
   export interface AgentRef {
     readonly id: string;
     readonly kind: AgentKind;
-    /** Null exactly when parked or aborted. */
-    readonly session: { readonly sessionManager: { getSessionId(): string } } | null;
+    /** Null exactly when parked or aborted. The two lists are `AgentSession`'s getters
+     *  (`session/agent-session.ts`), absent on a build older than them. */
+    readonly session: {
+      readonly sessionManager: { getSessionId(): string };
+      readonly slashCommands?: readonly SessionPromptCommand[];
+      readonly promptTemplates?: readonly SessionPromptCommand[];
+    } | null;
     readonly sessionFile: string | null;
   }
   export class AgentRegistry {
@@ -34,6 +45,8 @@ declare module "@oh-my-pi/pi-coding-agent" {
 declare module "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler" {
   export interface HostBuiltinCommand {
     readonly name: string;
+    /** The other names the host runs it by (`/models` for `/model`). */
+    readonly aliases: readonly string[];
     readonly description: string;
     /** True when only the interactive terminal runs it, so `sendUserInput` answers `terminal-only`. */
     readonly terminalOnly: boolean;

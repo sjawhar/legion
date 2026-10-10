@@ -6,10 +6,22 @@
  * mock won, the subagent check (`registeredSubagent`) reads the roster the running test filled.
  */
 
+/** A file command or prompt template as the host's `AgentSession` getters list it. */
+export interface TestSessionCommand {
+  readonly name: string;
+  readonly description?: string;
+}
+
 export interface TestAgentRef {
   readonly id: string;
   readonly kind: "main" | "sub" | "advisor";
-  readonly session: { readonly sessionManager: { getSessionId(): string } } | null;
+  readonly session: {
+    readonly sessionManager: { getSessionId(): string };
+    /** The live session's `slashCommands` and `promptTemplates`, which pi-envoy's commands
+     *  frame lists. */
+    readonly slashCommands?: readonly TestSessionCommand[];
+    readonly promptTemplates?: readonly TestSessionCommand[];
+  } | null;
   readonly sessionFile: string | null;
 }
 

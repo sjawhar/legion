@@ -30,6 +30,7 @@ import type {
 } from "@legion/pi-shared/pi-types";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
+import type { HostBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
@@ -259,6 +260,14 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
   },
   ...hostAgentRegistryMock,
 }));
+// The host's built-in slash commands, which our fork lists beside `sendUserInput`
+// (`listUserInputBuiltinCommands`): a test fills this list, and `afterEach` empties it. No package
+// in this workspace provides the module, so without this stand-in the extension lists no
+// built-ins, as on a host without the method.
+const hostBuiltins: HostBuiltinCommand[] = [];
+mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler", () => ({
+  listUserInputBuiltinCommands: () => hostBuiltins,
+}));
 // Reads the host package, so it loads only after the mock above is in place.
 const { recordBootstrappedSession } = await import("@legion/pi-shared/subagent-session");
 
@@ -348,6 +357,7 @@ afterEach(async () => {
   natsState.failConnects = 0;
   natsState.drainHangs = false;
   natsState.drainStarted = false;
+  hostBuiltins.length = 0;
 });
 
 function createPi(options: { readonly clipboardError?: Error; readonly zod?: typeof z } = {}) {
@@ -5339,6 +5349,79 @@ describe("envoy OMP extension", () => {
           { data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" },
         ]);
       });
+
+      // A typed command that submits nothing (`/compact`, `/session`) is answered by the host with
+      // no message. A user message that comes next with the same words (the daemon's next
+      // assignment, text typed at the terminal) is not the person's: the stream must tag it with no
+      // Dispatch message, or the page hides it as that person's turn, and Legion's phase-stall check,
+      // which reads the same record, counts the daemon's assignment as a person's message.
+      test("a command that submitted nothing leaves no turn a later message with its words takes", async () => {
+        const { agent, context, delivered, fixture, replied } = await bootDirectSession(
+          "typed-input-submits-nothing",
+          {
+            accept: () => ({ accepted: true, body: "/compact" }),
+            sendUserInput: async () => ({ handled: "command", output: "Compaction complete." }),
+          }
+        );
+        natsState.controls
+          .get("agentstream.ses_delivery.control")
+          ?.push(JSON.stringify({ type: "watch", v: 1 }));
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-submits-nothing"));
+        await delivered(1);
+        await replied(1);
+        const message = {
+          content: [{ text: "/compact", type: "text" }],
+          role: "user",
+          timestamp: 10,
+        };
+        await fixture.handlers.get("message_start")?.({ message }, context);
+
+        const frames = natsState.published
+          .filter((published) => published.subject === "agentstream.ses_delivery.frames")
+          .map((published) => JSON.parse(new TextDecoder().decode(published.data)))
+          .filter((frame) => frame.kind === "message");
+        expect(frames.map((frame) => [frame.message.id, frame.message.dispatchMessageId])).toEqual([
+          ["u10", undefined],
+        ]);
+        expect(matchInjectedUserTurn("ses_delivery", message)).toBeUndefined();
+      });
+
+      // A Send that lands after the run's last steer poll is run by the host as a turn of its own,
+      // after that run's `agent_end`. Its streamed user message must still name the Dispatch
+      // message, or the page shows the person's Send twice; a prompt template's expansion is a text
+      // nothing but the tag can tie back to it.
+      test("tags the user message a Send became even when it starts after the run's end", async () => {
+        const { agent, context, delivered, fixture } = await bootDirectSession(
+          "typed-input-after-run-end",
+          {
+            accept: () => ({ accepted: true, body: "/sdd plan" }),
+            sendUserInput: async () => ({ handled: "prompt" }),
+          }
+        );
+        natsState.controls
+          .get("agentstream.ses_delivery.control")
+          ?.push(JSON.stringify({ type: "watch", v: 1 }));
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-after-run-end"));
+        await delivered(1);
+        await fixture.handlers.get("agent_end")?.({ messages: [] }, context);
+        const message = {
+          content: [{ text: "Run the plan for: plan", type: "text" }],
+          role: "user",
+          tag: DIRECT_MESSAGE_ID,
+          timestamp: 10,
+        };
+        await fixture.handlers.get("message_start")?.({ message }, context);
+
+        const frames = natsState.published
+          .filter((published) => published.subject === "agentstream.ses_delivery.frames")
+          .map((published) => JSON.parse(new TextDecoder().decode(published.data)))
+          .filter((frame) => frame.kind === "message");
+        expect(frames.map((frame) => [frame.message.id, frame.message.dispatchMessageId])).toEqual([
+          ["u10", DIRECT_MESSAGE_ID],
+        ]);
+      });
     });
 
     // A host without `pi.sendUserInput` would hand a command to the model as words, so the
@@ -5360,6 +5443,113 @@ describe("envoy OMP extension", () => {
             /^\/compact was not run: this session's Oh My Pi \S+ cannot run commands sent from Dispatch; nothing was sent\.$/
           ),
         },
+      ]);
+    });
+  });
+
+  // The composer on Dispatch's conversation page completes what the session's last `commands` frame
+  // lists, the last frame of every replay. It lists what the session's own terminal picker offers,
+  // in that picker's order (built-ins; extension, custom and skill commands; file commands; prompt
+  // templates), each name once: a name a built-in answers to by name or alias runs the built-in, and
+  // a name an earlier source has runs that source, so offering it again would offer what never runs.
+  describe("the slash commands the session's stream lists", () => {
+    /** The command list the session's stream ends its replay with, read as the Dispatch relay asks
+     *  for it: a watch, then a replay answered on `inbox`. */
+    const replayedCommands = async (inbox: string): Promise<unknown> => {
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+      const answered = Promise.withResolvers<void>();
+      natsState.onPublish = (subject) => {
+        if (subject === inbox) answered.resolve();
+      };
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      control.push(JSON.stringify({ type: "replay", v: 1 }), inbox);
+      await answered.promise;
+      const published = natsState.published.findLast((each) => each.subject === inbox);
+      const replay: { readonly frames: readonly { readonly kind: string }[] } = JSON.parse(
+        new TextDecoder().decode(published?.data)
+      );
+      const last = replay.frames.at(-1);
+      return last?.kind === "commands" && "commands" in last ? last.commands : undefined;
+    };
+    const builtins: HostBuiltinCommand[] = [
+      { aliases: [], description: "Compact the context", name: "compact", terminalOnly: false },
+      { aliases: ["models"], description: "Pick a model", name: "model", terminalOnly: false },
+      { aliases: [], description: "Start a new session", name: "new", terminalOnly: true },
+    ];
+    const extensionAndSkills: readonly HostSlashCommand[] = [
+      { description: "Review with the extension", name: "review", source: "extension" },
+      { description: "A custom command the model alias hides", name: "models", source: "prompt" },
+      { description: "Dispatch", name: "skill:dispatch", source: "skill" },
+    ];
+
+    test("lists the live session's file commands and prompt templates after its other commands, each name once", async () => {
+      hostBuiltins.push(...builtins);
+      testAgentRoster().push({
+        id: "Main",
+        kind: "main",
+        session: {
+          sessionManager: { getSessionId: () => "ses_delivery" },
+          slashCommands: [
+            { description: "Deploy the branch", name: "deploy" },
+            { description: "A file command the extension's review hides", name: "review" },
+            { description: "A file command the model alias hides", name: "models" },
+          ],
+          promptTemplates: [
+            { description: "Run the plan (user)", name: "sdd" },
+            { description: "A template the deploy file command hides", name: "deploy" },
+            { description: "A template the compact built-in hides", name: "compact" },
+          ],
+        },
+        sessionFile: null,
+      });
+      await bootDirectSession("commands-frame-picker-order", {
+        getCommands: () => extensionAndSkills,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      expect(await replayedCommands("inbox-picker-order")).toEqual([
+        { description: "Compact the context", name: "compact", source: "builtin" },
+        { description: "Pick a model", name: "model", source: "builtin" },
+        { description: "Start a new session", name: "new", source: "builtin", terminalOnly: true },
+        { description: "Review with the extension", name: "review", source: "extension" },
+        { description: "Dispatch", name: "skill:dispatch", source: "skill" },
+        { description: "Deploy the branch", name: "deploy", source: "prompt" },
+        { description: "Run the plan (user)", name: "sdd", source: "prompt" },
+      ]);
+    });
+
+    // The host keeps one `AgentSession` object and changes its id (`/new`, `/resume`, a fork), so
+    // the live session is looked up by its id at every ping rather than kept.
+    test("lists the rest while the host lists no session under this id, and the file commands once it does", async () => {
+      hostBuiltins.push(...builtins);
+      let liveID = "ses_before_the_switch";
+      testAgentRoster().push({
+        id: "Main",
+        kind: "main",
+        session: {
+          sessionManager: { getSessionId: () => liveID },
+          promptTemplates: [{ description: "Run the plan (user)", name: "sdd" }],
+        },
+        sessionFile: null,
+      });
+      await bootDirectSession("commands-frame-no-live-session", {
+        getCommands: () => extensionAndSkills,
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+      const others = [
+        { description: "Compact the context", name: "compact", source: "builtin" },
+        { description: "Pick a model", name: "model", source: "builtin" },
+        { description: "Start a new session", name: "new", source: "builtin", terminalOnly: true },
+        { description: "Review with the extension", name: "review", source: "extension" },
+        { description: "Dispatch", name: "skill:dispatch", source: "skill" },
+      ];
+
+      expect(await replayedCommands("inbox-unlisted")).toEqual(others);
+      liveID = "ses_delivery";
+      expect(await replayedCommands("inbox-listed")).toEqual([
+        ...others,
+        { description: "Run the plan (user)", name: "sdd", source: "prompt" },
       ]);
     });
   });
