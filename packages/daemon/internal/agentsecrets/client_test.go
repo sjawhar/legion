@@ -31,6 +31,7 @@ type fakeBroker struct {
 	refuseLogins  []enrollAnswer     // answered, in order, to the next logins instead of accepting them; status 0 drops the connection
 	hangLogins    chan struct{}      // when set, every login waits for it to close (or its request to end) before answering
 	holdEnrolls   chan chan struct{} // when set, every enrollment-route request sends a channel here and answers once the test closes it
+	holdAnswers   chan struct{}      // when set, every login the broker accepts is recorded (its code exists) and then answered only once this closes, or not at all if its request ends first
 
 	// enrollment-route behavior: answered in order, the last entry repeating once exhausted.
 	enrollAnswers []enrollAnswer
@@ -133,7 +134,15 @@ func (b *fakeBroker) handleLoginRequest(w http.ResponseWriter, r *http.Request) 
 		service:   fmt.Sprint(detail["service"]),
 	})
 	b.pending[pendingID] = pendingState{state: "pending"}
+	holdAnswer := b.holdAnswers
 	b.mu.Unlock()
+	if holdAnswer != nil {
+		select {
+		case <-holdAnswer:
+		case <-r.Context().Done():
+			return
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
@@ -508,7 +517,10 @@ func TestConcurrent401sStartOneLogin(t *testing.T) {
 
 // TestA401DuringAnotherLoginPOSTReturnsWithinItsDeadline: an Enroll answered 401 on a credential
 // another call already cleared, while that call's fresh login POST hangs, answers
-// NO_MACHINE_CREDENTIAL within its 100 ms deadline instead of waiting behind that POST.
+// NO_MACHINE_CREDENTIAL within its 100 ms deadline instead of waiting behind that POST. This Enroll
+// loses the CompareAndSwap, so it pins the CAS gate and retryLogin's TryLock together: it fails
+// only with both gone. Each alone has a test of its own
+// (TestOnlyTheCallThatClearedTheCredentialRetries, TestAnEnrollDuringALoginPOSTReturnsWithinItsDeadline).
 func TestA401DuringAnotherLoginPOSTReturnsWithinItsDeadline(t *testing.T) {
 	withFastPolling(t)
 	withLoginRetry(t, 0, 0)
@@ -977,6 +989,64 @@ func TestEnrollmentsDuringAPendingLoginStartNoSecondLogin(t *testing.T) {
 	}
 	broker.setPending(1, "issued", "cred-1")
 	eventually(t, func() bool { return c.LoginStatus().State == "issued" }, "the login to become issued")
+}
+
+// TestALoginWhoseCallerEndsMidPOSTStillCollectsItsCode: an Enroll's retry login runs past that
+// Enroll's own deadline. The broker commits the code, the caller's context ends before the answer
+// arrives, and the login still collects that code, records it pending and, once approved, holds
+// its credential. Exactly one code results: the next enrollment starts no second one.
+func TestALoginWhoseCallerEndsMidPOSTStillCollectsItsCode(t *testing.T) {
+	withFastPolling(t)
+	withLoginRetry(t, 0, 0)
+	broker, server := newFakeBroker(t)
+	answer := make(chan struct{})
+	broker.holdAnswers = answer
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(answer) }) })
+	c := &Client{URL: server.URL, HTTP: server.Client()}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	enrolled := make(chan error, 1)
+	go func() { enrolled <- enrollNoCredential(ctx, c) }()
+	select {
+	case err := <-enrolled:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Enroll had not returned 2s after its 100ms deadline: it waited for the login's answer")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Enroll took %v, want it to answer within its 100ms deadline", elapsed)
+	}
+	eventually(t, func() bool { return broker.loginCount() == 1 }, "the broker to commit the retry's code")
+	<-ctx.Done()
+	release.Do(func() { close(answer) })
+	eventually(t, func() bool { return c.LoginStatus().State == "pending" }, "the login to collect its code after its caller's deadline")
+	if got := c.LoginStatus(); got.Code != "CODE-1" {
+		t.Fatalf("LoginStatus = %+v, want pending with the committed code CODE-1", got)
+	}
+	if err := enrollNoCredential(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	if got := broker.loginAttemptCount(); got != 1 {
+		t.Fatalf("broker saw %d logins, want exactly one code for the one retry", got)
+	}
+	broker.setPending(1, "issued", "cred-1")
+	eventually(t, func() bool { return c.LoginStatus().State == "issued" && c.cred.Load() != nil }, "the committed code, once approved, to give the client its credential")
+}
+
+// enrollNoCredential enrolls the pod and answers an error unless the call is refused with
+// NO_MACHINE_CREDENTIAL.
+func enrollNoCredential(ctx context.Context, c *Client) error {
+	_, err := c.Enroll(ctx, podEnrollment)
+	var api *APIError
+	if !errors.As(err, &api) || api.Code != "NO_MACHINE_CREDENTIAL" {
+		return fmt.Errorf("Enroll = %v, want NO_MACHINE_CREDENTIAL", err)
+	}
+	return nil
 }
 
 // TestAnEnrollDuringALoginPOSTReturnsWithinItsDeadline: while a login's POST hangs (the boot

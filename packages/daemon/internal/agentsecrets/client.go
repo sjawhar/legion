@@ -371,16 +371,30 @@ func (c *Client) doProof(ctx context.Context, method, path string, body any) (in
 // pending login's code instead of starting another, settle records how the new login ends, and
 // noCredentialError reports it. A held loginMu means a login is already opening or settling, so
 // retryLogin returns at once rather than hold its caller (an Enroll or Revoke, under its claim's
-// machine lock) behind that login's POST.
+// machine lock) behind that login's POST. The login it starts runs in a goroutine on ctx's values
+// but not its deadline, bounded by HTTP's own timeout (30 s for the daemon's client), and holds
+// loginMu until it settles. retryLogin waits for it only until ctx ends: a quick answer names the
+// fresh code in the caller's refusal, and a deadline that ends mid-POST returns the caller then
+// while the login goes on to collect the code the broker committed, so no code is left that the
+// client never holds.
 func (c *Client) retryLogin(ctx context.Context) {
 	if !c.loginMu.TryLock() {
 		return
 	}
-	defer c.loginMu.Unlock()
 	if c.cred.Load() != nil || time.Now().Before(c.nextLogin) {
+		c.loginMu.Unlock()
 		return
 	}
-	_, _ = c.loginLocked(ctx)
+	settled := make(chan struct{})
+	go func() {
+		defer close(settled)
+		defer c.loginMu.Unlock()
+		_, _ = c.loginLocked(context.WithoutCancel(ctx))
+	}()
+	select {
+	case <-settled:
+	case <-ctx.Done():
+	}
 }
 
 // loginRetryWait is the wait after failed consecutive logins that ended without a credential:
