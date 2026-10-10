@@ -45,6 +45,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
 const (
@@ -381,6 +382,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 				"claims", s.supervisor.count(),
 				"boot", bootID,
 			)
+			reportStranded(starting, st, projectRecords{Store: record.NewStore(), project: cfg.Project}, s.supervisor, cfg.Project, log)
 			if workflow != nil {
 				log.Info("legion workflow boot stage", "stage", "api")
 			}
@@ -1314,10 +1316,16 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	state, err := projection.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, s.project, claims)
+	records := projectRecords{Store: s.records, project: s.project}
+	state, err := projection.Project(ctx, tx, records, s.project, claims)
 	if err != nil {
 		return api.State{}, err
 	}
+	stranded, err := workflow.Stranded(ctx, tx, records, claims)
+	if err != nil {
+		return api.State{}, err
+	}
+	state.StrandedClaims = api.StrandedClaimsOf(stranded)
 	state.Daemon = api.DaemonInfo{
 		Project:       s.project,
 		SchemaVersion: version,

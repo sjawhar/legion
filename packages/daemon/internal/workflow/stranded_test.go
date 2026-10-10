@@ -1,0 +1,143 @@
+package workflow
+
+import (
+	"context"
+	"reflect"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
+)
+
+// strandedStore is the issue record and the queued supervise rows Stranded reads; every claim's
+// stored row is the one its role run reads back.
+type strandedStore struct {
+	record.Store
+	issues []record.Issue
+	queued map[claim.Token][]record.QueuedSupervise
+	claims map[claim.Token]supervise.Claim
+}
+
+func (s strandedStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) { return s.issues, nil }
+
+func (s strandedStore) RoleRun(_ context.Context, _ pgx.Tx, token claim.Token, _ string, _ claim.Role, _ uint64) (record.RoleRun, error) {
+	run := record.RoleRun{Queued: s.queued[token]}
+	if c, ok := s.claims[token]; ok {
+		run.Claim = &record.RoleClaim{State: c.State, LastStartRow: c.LastStartRow}
+	}
+	return run, nil
+}
+
+func strandedClaim(t *testing.T, tree, issue string, role claim.Role, state supervise.ClaimState) supervise.Claim {
+	t.Helper()
+	token, err := claim.NewToken("legion", issue, role)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return supervise.Claim{Token: token, Project: "legion", Tree: tree, Issue: issue, Role: role, Generation: 1, State: state}
+}
+
+func strandedIssue(key, tree string, p phase.Phase) record.Issue {
+	issue := record.Issue{Key: key, Tree: tree, Project: "LEGION", Phase: p, Generation: 2, Status: "in_progress"}
+	if key != tree {
+		issue.Parent = &tree
+	}
+	return issue
+}
+
+// Each claim nothing will wake is named, and every claim something will still wake, or that
+// waits correctly, is not.
+func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
+	until := time.Now().Add(time.Hour)
+	held := strandedIssue("LEGION-3", "LEGION-3", phase.Held)
+	held.Hold = &record.Hold{From: phase.Reviewing}
+	lingering := strandedIssue("LEGION-7", "LEGION-7", phase.Done)
+	lingering.LingerUntil = &until
+	issues := []record.Issue{
+		strandedIssue("LEGION-1", "LEGION-1", phase.Implementing),
+		strandedIssue("LEGION-2", "LEGION-1", phase.Retro),
+		held,
+		strandedIssue("LEGION-4", "LEGION-4", phase.Testing),
+		strandedIssue("LEGION-5", "LEGION-5", phase.Merging),
+		strandedIssue("LEGION-6", "LEGION-6", phase.Planning),
+		lingering,
+		strandedIssue("LEGION-8", "LEGION-7", phase.ProductionCheck),
+		strandedIssue("LEGION-9", "LEGION-404", phase.Planning),
+	}
+
+	implementer := strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleImplementer, supervise.StateSuspended)
+	retro := strandedClaim(t, "LEGION-1", "LEGION-2", claim.RoleImplementer, supervise.StateSuspended)
+	failedReviewer := strandedClaim(t, "LEGION-3", "LEGION-3", claim.RoleReviewer, supervise.StateFailed)
+	failedArchitect := strandedClaim(t, "LEGION-6", "LEGION-6", claim.RoleArchitect, supervise.StateFailed)
+	// A notice to a suspended tree architect waits for it, and nothing in the daemon resumes it.
+	suspendedArchitect := strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleArchitect, supervise.StateSuspended)
+	// The tester's start for testing is queued and will resume it.
+	startQueued := strandedClaim(t, "LEGION-4", "LEGION-4", claim.RoleTester, supervise.StateSuspended)
+	startQueued.LastStartRow = 10
+	// The architect's admission start, which names no phase, is queued and will resume it.
+	architectStartQueued := strandedClaim(t, "LEGION-4", "LEGION-4", claim.RoleArchitect, supervise.StateSuspended)
+	// The merger's start is queued, but a suspend written after it still acts and undoes it.
+	startUndone := strandedClaim(t, "LEGION-5", "LEGION-5", claim.RoleMerger, supervise.StateSuspended)
+	startUndone.LastStartRow = 10
+	claims := []supervise.Claim{
+		failedArchitect,
+		implementer,
+		// A finished phase's worker is started again only when its phase comes.
+		strandedClaim(t, "LEGION-1", "LEGION-1", claim.RolePlanner, supervise.StateSuspended),
+		suspendedArchitect,
+		// A failed sub-architect the operator started.
+		strandedClaim(t, "LEGION-1", "LEGION-2", claim.RoleArchitect, supervise.StateFailed),
+		retro,
+		failedReviewer,
+		startQueued,
+		architectStartQueued,
+		startUndone,
+		// A tree that lingers holds its members, and its re-admission starts them again.
+		strandedClaim(t, "LEGION-7", "LEGION-7", claim.RoleArchitect, supervise.StateFailed),
+		strandedClaim(t, "LEGION-7", "LEGION-8", claim.RoleImplementer, supervise.StateSuspended),
+		// An issue whose tree root is not recorded, and an issue not recorded at all.
+		strandedClaim(t, "LEGION-404", "LEGION-9", claim.RolePlanner, supervise.StateSuspended),
+		strandedClaim(t, "S2-1", "S2-1", claim.RoleImplementer, supervise.StateSuspended),
+		// A worker of its issue's phase that runs, or is launching, is not stranded.
+		strandedClaim(t, "LEGION-6", "LEGION-6", claim.RolePlanner, supervise.StateIdle),
+	}
+	stored := map[claim.Token]supervise.Claim{}
+	for _, c := range claims {
+		stored[c.Token] = c
+	}
+	s := strandedStore{
+		issues: issues,
+		claims: stored,
+		queued: map[claim.Token][]record.QueuedSupervise{
+			startQueued.Token:          {{ID: 11, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-4", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
+			architectStartQueued.Token: {{ID: 13, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-4", Role: claim.RoleArchitect, Generation: 2}}},
+			startUndone.Token: {
+				{ID: 11, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleMerger, Generation: 2, Phase: phase.Merging}},
+				{ID: 12, Request: record.SuperviseRequest{Op: "suspend", Tree: "LEGION-5", Role: claim.RoleMerger, Generation: 2}},
+			},
+		},
+	}
+
+	got, err := Stranded(context.Background(), nil, s, claims)
+	if err != nil {
+		t.Fatalf("Stranded: %v", err)
+	}
+
+	want := []supervise.Claim{suspendedArchitect, implementer, retro, failedReviewer, startUndone, failedArchitect}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stranded = %v, want %v", names(got), names(want))
+	}
+}
+
+func names(claims []supervise.Claim) []string {
+	out := make([]string, len(claims))
+	for i, c := range claims {
+		out[i] = c.Issue + " " + string(c.Role) + " " + string(c.State)
+	}
+	return out
+}

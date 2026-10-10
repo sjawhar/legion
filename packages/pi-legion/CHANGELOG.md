@@ -25,6 +25,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- `legion.daemonApiVersion` is 19. Contract 19 adds `strandedClaims` to `GET /legion/v1/state`
+  (LEGION-670): every claim nothing will wake — a suspended or failed worker of its issue's phase
+  that no queued start will wake, or a suspended or failed tree architect, in a tree that runs —
+  each named by its issue, role and state. The list is never absent, so a plugin built before 19
+  refuses the state; install this release with a Go `legion` and a worker image built from the
+  same commit.
 - `legion.daemonApiVersion` is 18. Contract 18 makes each issue's Agent Sandbox pod independent,
   on a volume of its own (LEGION-632): the pod's `workspace-init provision` container no longer
   carries `LEGION_REMOVABLE_WORKSPACES` or `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` (the

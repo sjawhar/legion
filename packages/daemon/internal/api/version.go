@@ -88,4 +88,9 @@ package api
 // first, and pi-legion 8.4.1 and 8.5.0 declare those with the init container's old environment,
 // so a daemon at either would pass the gate against an image whose `workspace-init` speaks the
 // other contract. Renumbered twice, as the same learning says.)
-const DaemonAPIVersion = 18
+//
+// 19: LEGION-670 -- api.State gains `strandedClaims`, every claim nothing will wake
+// (workflow.Stranded): a suspended or failed worker of its issue's phase, or tree architect, in a
+// tree that runs, each named by its issue, role and state. Never null, so a plugin built before it
+// refuses the state, and the bump is why the two never meet.
+const DaemonAPIVersion = 19

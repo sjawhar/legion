@@ -630,10 +630,7 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers || issue.Phase == phase.Done {
 		return intake.Result{}, err
 	}
-	working := issue.Phase
-	if issue.Hold != nil {
-		working = issue.Hold.From
-	}
+	working := workingPhase(*issue)
 	if RoleFor(working) != fact.Role {
 		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: issue.Phase,
 			Reason: fmt.Sprintf("the %s does not work %s's phase %s; nothing is held", fact.Role, issue.Key, working)})

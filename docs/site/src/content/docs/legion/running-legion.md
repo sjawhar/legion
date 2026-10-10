@@ -383,13 +383,15 @@ Closing the terminal leaves the project without one, and the daemon logs
   legion WIDGETS on http://192.0.2.10:13370 — schema 12, boot 7 started 2026-10-03T09:12:40Z (first boot 2026-09-20T15:02:11Z)
   admission: 3 active, 1 waiting, cap 4; 9 issues
   pending Dispatch status writes: none
+  claims nothing will wake: none
   ```
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `holdReason`, `architect` and `workers` (each
   claim's `state`), `pullRequest` (`head`, `checksVerdict`, `fixAttempts`) and `designGate`
-  (`currentVersion`, `approvedVersion`), the `controllerLocator`, `pendingStatusWrites`, and
-  `agentSecretsLogin` when the broker is configured:
+  (`currentVersion`, `approvedVersion`), the `controllerLocator`, `pendingStatusWrites`,
+  `strandedClaims` ([A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)),
+  and `agentSecretsLogin` when the broker is configured:
 
   ```sh
   legion state --config legion.yaml --json | jq '.issues["WIDGETS-12"] | {phase, status, holdReason, pullRequest, designGate}'
