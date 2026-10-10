@@ -117,7 +117,7 @@ run() {
 }
 field() { sed -n "s/^  $2: //p" "$state/created/$1.yaml"; }
 expect_pod() {
-  local pod=$1 volume=$2 tree=$3 node_selector=$4 tolerations=$5 priority=$6 account=$7
+  local pod=$1 volume=$2 tree=$3 node_selector=$4 tolerations=$5 priority=$6
   local manifest="$state/created/$pod.yaml"
   [[ -f $manifest ]] || { fail "no pod $pod was created"; return; }
   grep -qF "claimName: \"$volume\"" "$manifest" || fail "$pod mounts $(grep -o 'claimName: "[^"]*"' "$manifest"), want $volume"
@@ -125,7 +125,11 @@ expect_pod() {
   [[ $(field "$pod" nodeSelector | jq -cS .) == "$(jq -cS . <<<"$node_selector")" ]] || fail "$pod nodeSelector $(field "$pod" nodeSelector), want $node_selector"
   [[ $(field "$pod" tolerations | jq -cS .) == "$(jq -cS . <<<"$tolerations")" ]] || fail "$pod tolerations $(field "$pod" tolerations), want $tolerations"
   [[ $(field "$pod" priorityClassName | jq -r .) == "$priority" ]] || fail "$pod priorityClassName $(field "$pod" priorityClassName), want \"$priority\""
-  [[ $(field "$pod" serviceAccountName | jq -r .) == "$account" ]] || fail "$pod serviceAccountName $(field "$pod" serviceAccountName), want \"$account\""
+  # It runs as the namespace's default ServiceAccount with no token, whatever the root Sandbox's
+  # pods ran as: a namespace admission policy may let only the agent-sandbox controller create pods
+  # as the worker ServiceAccount.
+  [[ -z $(field "$pod" serviceAccountName) ]] || fail "$pod serviceAccountName $(field "$pod" serviceAccountName), want none"
+  [[ $(field "$pod" automountServiceAccountToken) == false ]] || fail "$pod automountServiceAccountToken $(field "$pod" automountServiceAccountToken), want false"
 }
 
 # Every tree: each pod mounts the volume its root's labels find, whatever the name, scheduled as
@@ -135,8 +139,8 @@ v10_state
 run
 ((code == 0)) || fail "every tree: exit $code, want 0; stderr: $(<"$temporary_dir/err")"
 expect_pod legion-sessions-import-infra-1234 tree-legion-acmewidgets-infra-1234-archite-59acf6b9 INFRA-1234 \
-  '{"legion.dev/pool":"legion","example.internal/zone":"a"}' "[$pool,$dedicated]" legion-high legion-worker
-expect_pod legion-sessions-import-acme-7 tree-legion-acmewidgets-acme-7-architect ACME-7 '{"legion.dev/pool":"legion"}' "[$pool]" "" ""
+  '{"legion.dev/pool":"legion","example.internal/zone":"a"}' "[$pool,$dedicated]" legion-high
+expect_pod legion-sessions-import-acme-7 tree-legion-acmewidgets-acme-7-architect ACME-7 '{"legion.dev/pool":"legion"}' "[$pool]" ""
 grep -qF "delete pod legion-sessions-import-acme-7 --ignore-not-found --wait" "$state/calls" || fail "a leftover import pod was not deleted first"
 grep -qF "delete configmap legion-sessions-import-claims --ignore-not-found" "$state/calls" || fail "a leftover ConfigMap was not deleted first"
 grep -qF "create configmap legion-sessions-import-claims" "$state/calls" || fail "the claims were not created as a ConfigMap"

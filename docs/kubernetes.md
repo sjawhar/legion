@@ -516,8 +516,11 @@ launches starts a fresh session.
    and the URL key, printing the import's lines, then deleted. It finds each tree's volume and root
    Sandbox by `legion-v10.0.0`'s labels (`legion.dev/project`, `legion.dev/role=architect`,
    `legion.dev/tree` and `legion.dev/issue`), not by name, and schedules the pod as the root
-   Sandbox's pods were: its pod template's node selector, tolerations, priority class and service
-   account. Before anything it refuses a project whose Sandboxes are issue pods (a later release),
+   Sandbox's pods were: its pod template's node selector, tolerations and priority class. The pod
+   runs as the namespace's `default` ServiceAccount with no token
+   (`automountServiceAccountToken: false`), never as the Sandbox's: it needs no identity, and a
+   namespace admission policy may let only the agent-sandbox controller create pods as the worker
+   ServiceAccount. Before anything it refuses a project whose Sandboxes are issue pods (a later release),
    one with a Sandbox not `Suspended`, whose pod could still start, and one with a pod that has not
    ended (any phase but `Succeeded` or `Failed`): each would be a writer the copy misses. It deletes
    a pod an interrupted run left before creating one, reports a pod that fails at once, exits 1
