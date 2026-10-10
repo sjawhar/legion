@@ -1,0 +1,72 @@
+{
+  "census": "the six entries' searches re-run at 9558a291: hits and dispositions unchanged (tree_volume only in the refusal, its test, the cutover text and the two TypeScript-daemon blocks; the init variables only in contract history, the TypeScript-daemon anatomy and retro's new learning; contract 18 on version.go, pi-legion package.json 8.7.1 and the contracts fixture against main's 17; mount_path only in the shipped example, the operator route and the loader)",
+  "codeHead": "3366e9775040 (the forward merge of main 76cf1456; product code 611e14df's)",
+  "completed": "2026-10-10T00:28:57.95778827Z",
+  "critical": 0,
+  "important": 0,
+  "issue": "LEGION-632",
+  "keyFindings": [
+    {
+      "description": "The image probe pod carries the controller's reservation, so the daemon's boot depends on pool room; the bound formula omits the probe and the controller: daemon pod.",
+      "file": "packages/daemon/internal/daemon/kubernetes.go:122-130; docs/kubernetes.md 'The bound'",
+      "severity": "medium (risk, recorded; fast-follow)"
+    },
+    {
+      "description": "bb12c138: the six readers of the implementer's round after ci-red-takeover (0→1, 1→2 ×5) match the engine's rule since #1850 (every move back, the daemon's ChecksRed move included, counts a round); the proof-round labels stay. Its proof is the coordinator's stage 4b rerun at the merged head.",
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:2814,2866-2867,2876-2877,2883",
+      "severity": "minor (harness, verified)"
+    },
+    {
+      "description": "Options.Resources doc states the cpu-and-memory-only contract; checkReservation also requires ephemeral-storage request \u003c= limit.",
+      "file": "packages/daemon/internal/runtime/sandbox/types.go:80-86",
+      "severity": "minor (fast-follow)"
+    },
+    {
+      "description": "expectVolume computed twice; one launch method.",
+      "file": "packages/daemon/internal/runtime/sandbox/podkind.go:87,184,244",
+      "severity": "minor (fast-follow)"
+    },
+    {
+      "description": "deleteSandbox and deleteFenced are two fenced foreground deletes whose names no longer tell the policies apart.",
+      "file": "packages/daemon/internal/runtime/sandbox/cleanup.go:73; sandbox.go:908",
+      "severity": "minor (fast-follow)"
+    },
+    {
+      "description": "implementer/tester memory default 4Gi vs the tester's lane trend; raise to 6Gi; the production check measures the real lanes.",
+      "file": "packages/daemon/internal/config/kubernetes.go defaultResources",
+      "severity": "minor (fast-follow, architect's first item)"
+    },
+    {
+      "description": "pool room counted in cpu and memory only while every pod now requests 6Gi ephemeral storage.",
+      "file": "scripts/e2e/lib/stage4b-room.jq:14-64",
+      "severity": "minor (fast-follow)"
+    },
+    {
+      "description": "the probe pod runs Oh My Pi with no state home; EnsureStateHome checks the port against itself; resource.MustParse panics rather than refuses for a role without a defaults entry.",
+      "file": "packages/daemon/cmd/legion/probe_image.go; internal/podsafety/podsafety.go:146; internal/config/kubernetes.go resolveKubernetes",
+      "severity": "minor (fast-follow)"
+    },
+    {
+      "description": "PI_CODING_AGENT_DIR not in podVariables.",
+      "file": "packages/daemon/internal/runtime/sandbox/operatorpod.go:37-71",
+      "severity": "minor (fast-follow)"
+    }
+  ],
+  "minor": 9,
+  "notProven": [
+    "the full stage 4b at the merged head (queued, the coordinator's): tree-reviewed onward — close, node-release, re-admission, operator-close, pod-shape (with the disk bound), pod-watch-verdict, done, full-agent — unreached at any head; a FAIL routes to the implementer",
+    "the disk bound's enforcement (an eviction under gVisor) is exercised by no checkpoint; census entry 4 on a live namespace",
+    "4Gi lane-role default vs the tester's lane trend (go test summed RSS 1.6→2.5 GiB over the day's merges; under gVisor the pod sum binds)",
+    "the probe pod's reservation makes the boot depend on pool room; the bound formula omits the probe and controller pods",
+    "the probe pod runs Oh My Pi without a state home and the shim's self-check is the port against itself; a repository .env setting XDG_STATE_HOME would move the state root past the shim's check"
+  ],
+  "phase": "review",
+  "planDepartures": "the four departures in plan.json honoured; spec v5's per-role state home implemented; the architect's rulings (ephemeral storage as a 1Gi request under a per-role limit; deleteFenced foreground; the harness correction landing in this branch) implemented and recorded; acceptance criteria 1-5 bind, with 1, 3's first half and 4's stage 4b half proven live at 611e14df through ci-red-takeover and 3's second half and the post-tree-reviewed checkpoints awaiting the rerun",
+  "reviewedHead": "9558a2917ba9be162833acf5b12fcbf0413e0388",
+  "round": "the second GitHub review of #1842, after the daemon's conflict move at bb12c138 (main's #1871/#1872/#1868): the previous approval 5475235946 at c7b450fb; the branch's diff against main differs from that head's in scripts/e2e/stage4b-sandbox-tree.sh's six round arguments alone (fingerprint 32e890b3… → 4bccd546…, every other file byte-identical), so this is a new round by the fingerprint rule with the pair's verdict at 611e14df standing for the unchanged runtime code",
+  "schemaVersion": 1,
+  "security": "Security: sandbox — one ReadWriteOnce PVC per issue labelled by project and issue; per-role XDG_STATE_HOME; no pod affinity, pods of unrelated trees share a node bounded by cpu/memory request==limit and an ephemeral-storage limit per container (checkReservation, roleRequirements); the probe pod competes for pool room; role containers keep a writable root filesystem bounded by the disk limit. secret — the session DSN reaches a pod as a mounted file (#1860's refusals kept); no token or grant lifetime changed; #1871 changes image sources to mirror.gcr.io, same tags and digests. untrusted-input — the relabel JSON patch escapes its pointer; names and labels derived from issue keys bounded. agent-def — AGENTS.md, skills/legion-worker/SKILL.md, packages/pi-legion/AGENTS.md edits describe the per-issue volume, contract 18 and the state home; none steers a reviewer. Hardening (Minor): PI_CODING_AGENT_DIR not in CheckPod's podVariables; harmless while OMP_PROFILE is image-owned.",
+  "thermo": "pair run once at the code head 611e14df (no High; Medium: the probe pod's reservation makes the boot depend on pool room and 'The bound' omits the probe and controller pods; Lows fixed in the body; Minor stage4b-room.jq; code quality: no product defect, five fast-follow items); not re-run at 9558a291 because the branch's runtime diff is byte-identical to the audited one (the fingerprint-diff between c7b450fb and 9558a291 is the stage 4b script's six round arguments and one comment), and the #1871/#1872/#1868 merge's one conflict is pi-legion/CHANGELOG.md with both entries kept",
+  "verdict": "approved",
+  "verifiedOnGitHub": "mergeable MERGEABLE/BLOCKED at base 76cf1456, and clean by git merge-tree against main@origin bff9f310 (#1869, no overlapping file); required checks lint, typecheck, test (Tests 38008011356, through #1871's mirror.gcr.io pulls) and pr-title (38008011233) success at the implementer's handoff head 3326231c, carried to the skip-checks tester head 9558a291; the reviewer's handoff on top runs CI in full and the approval waits for green there; 5 review threads, all resolved with the reviewer's own Accepted: as the newest comment; both E2E lines present with surface, command/run, observation, head and negative control; stage 4a PASS at b7a78b5b (code 611e14df) on sha256:73ee14fc…; stage 4b at 611e14df PASS through ci-red-takeover (issue-independence, child-release, the relaunch trio at a head with the PVC-by-issue labels, contract 18, the disk bound and #1860's store), FAIL at tree-reviewed on the harness's round key, corrected in bb12c138 (read against engine.go movesBack/recordRound and table.go's ChecksRed row; lib/workflow.sh handoff_fact_commit/assert_round_handoff); the rerun at the merged head is the coordinator's, queued"
+}
