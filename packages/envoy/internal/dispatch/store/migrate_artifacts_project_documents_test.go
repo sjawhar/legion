@@ -7,7 +7,7 @@ import (
 
 // artifactsProjectDocumentsVersion is the migration that adds artifacts_project_documents, the
 // partial index of a project's unlinked documents a copied ask block's lookups read (LEGION-651).
-const artifactsProjectDocumentsVersion = 87
+const artifactsProjectDocumentsVersion = 90
 
 // TestMigrationIndexesAProjectsUnlinkedDocuments runs the shipped migration files, never a constant
 // copy of them: a database at the version before, holding an issue's spec, a project document and

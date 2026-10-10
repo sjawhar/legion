@@ -1,4 +1,4 @@
--- 0088_decided_ask_wording.up.sql
+-- 0091_decided_ask_wording.up.sql
 -- LEGION-651: a decided ask's wording is fixed. Settlement used to write a document's edit of an
 -- answered or resolved block ask's question, options, multiple or urgency into its row, so the row
 -- held a wording nobody decided on beside the decision made on the one before it. Each such ask

@@ -1584,7 +1584,7 @@ it before it appends an event too: an upload's or a seed's document write marks 
 the edit source touches a row the transaction already holds
 (`TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents`). A
 copy whose text is changed and an id no ask of the owner indexes open an ask as any new block does
-(LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0087), an
+(LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0090), an
 issue document's `artifacts_issue_key`, and the owed copies' latest versions `artifact_versions`'
 unique `(artifact_id, number)`; `copied_asks_plan_test.go` holds each. Finding the owed copies
 reads, with `LIKE`, the latest markdown of every other document of the owner, so a retraction, an
@@ -1606,7 +1606,7 @@ wants another question writes a new ask block; reopening the ask would put a new
 person's Inbox for an edit they may not have meant as one. An ask settlement restores after a
 retraction follows the state the restoration gives it: one restored open takes its block's text,
 one restored with its answer keeps the wording that answer was given on. Migration
-`0088_decided_ask_wording` gives back to each ask reworded after its decision before this rule the
+`0091_decided_ask_wording` gives back to each ask reworded after its decision before this rule the
 wording its decision was given on. A route that changes an ask's text or lifecycle writes both:
 `PATCH /api/v1/asks/{id}` on a block ask (an open one; a decided one is `409 ASK_NOT_OPEN`) writes
 the block through the document ledger and then takes the row's values from what the block parses

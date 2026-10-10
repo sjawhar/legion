@@ -24,7 +24,7 @@ import (
 // that indexes the same block id and asks exactly what the block asks (its question, options,
 // multiple and urgency, which a copy carries unchanged). A decided ask's current wording is the one
 // it was decided on, since settlement never takes a document's rewording of an answered or resolved
-// ask into its row (reconcileAskBlocks) and migration 0088 gave the asks reworded before that rule
+// ask into its row (reconcileAskBlocks) and migration 0091 gave the asks reworded before that rule
 // their decided wording back, so a match on the current wording shows a decision on what the block
 // asks. The block may also ask an earlier wording, since a copy can be taken before an edit
 // (askHistories), but a match on an earlier wording counts only while the ask is open, or when its
@@ -170,7 +170,7 @@ func lockProjectCopies(ctx context.Context, tx pgx.Tx, owner artifactOwner) erro
 
 // ownerDocuments is the predicate on artifacts d that selects owner's documents, and the value it
 // binds as $3: the issue's documents (artifacts_issue_key), or for a project document the
-// project's other unlinked documents (artifacts_project_documents, migration 0087); an agent
+// project's other unlinked documents (artifacts_project_documents, migration 0090); an agent
 // conversation's artifacts belong to neither.
 func ownerDocuments(owner artifactOwner) (string, string) {
 	if owner.IssueKey != nil {

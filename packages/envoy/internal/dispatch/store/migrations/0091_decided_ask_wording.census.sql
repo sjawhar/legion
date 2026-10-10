@@ -1,4 +1,4 @@
--- The decided asks 0088 gives back the wording their decision was given on: each answered or
+-- The decided asks 0091 gives back the wording their decision was given on: each answered or
 -- resolved, with an ask.edited after its latest decision and no reopening between, whose wording
 -- differs from that edit's previous one.
 with decided as (

@@ -9,7 +9,7 @@ import (
 
 // decidedAskWordingVersion is the migration that gives each ask reworded after its decision back
 // the wording it was decided on (LEGION-651).
-const decidedAskWordingVersion = 88
+const decidedAskWordingVersion = 91
 
 // TestMigrationGivesADecidedAskBackItsDecidedWording runs the shipped migration and its census,
 // never a constant copy of them, over five asks stored at the version before: one answered and
@@ -90,7 +90,7 @@ func TestMigrationGivesADecidedAskBackItsDecidedWording(t *testing.T) {
 	answered(unchanged)
 	edited(unchanged)
 
-	census, err := os.ReadFile(filepath.Join("migrations", "0088_decided_ask_wording.census.sql"))
+	census, err := os.ReadFile(filepath.Join("migrations", "0091_decided_ask_wording.census.sql"))
 	if err != nil {
 		t.Fatalf("read the census: %v", err)
 	}
