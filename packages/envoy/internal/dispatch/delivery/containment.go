@@ -24,13 +24,13 @@ type Apply struct {
 // ProductionApplies is every successful production deploy among runs: for each run, the job named
 // settings.production_job_name among jobsByRun[run.RunID] must exist, have concluded with
 // Conclusion == DeliveryJobConclusionSuccess, and have a non-nil CompletedAt; a run with no such
-// job, or whose matching job did not succeed, is not an apply. A run on main that *concluded
-// successfully* overall but matched no job by that name is logged loudly (a misconfigured or
-// renamed production_job_name silently produces zero deploys forever otherwise -- the Python
-// prototype's own `successful_applies` raises for exactly this case, naming every job it actually
-// saw). A run on any other branch, or one whose branch is not recorded yet, is not: a dev-only run
-// skips its production job, and GitHub names a skipped reusable-workflow job after the calling job
-// alone, so it matches no name and is no deploy, routinely. Sorted by CompletedAt ascending.
+// job, or whose matching job did not succeed, is not an apply. A run that *concluded successfully*
+// overall but matched no job by that name is logged loudly (a misconfigured or renamed
+// production_job_name silently produces zero deploys forever otherwise -- the Python prototype's
+// own `successful_applies` raises for exactly this case, naming every job it actually saw). Both
+// callers pass deploy runs on main alone (ListRuns and ListRunsStartedIn with branch "main"), so a
+// dev-only run, which skips its production job, never reaches the warning. Sorted by CompletedAt
+// ascending.
 func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob, productionJobName string) []Apply {
 	var applies []Apply
 	for _, run := range runs {
@@ -42,7 +42,7 @@ func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob,
 			}
 		}
 		if match == nil {
-			if run.Conclusion != nil && *run.Conclusion == DeliveryRunConclusionSuccess && run.HeadBranch != nil && *run.HeadBranch == "main" {
+			if run.Conclusion != nil && *run.Conclusion == DeliveryRunConclusionSuccess {
 				names := make([]string, 0, len(jobsByRun[run.RunID]))
 				for _, job := range jobsByRun[run.RunID] {
 					names = append(names, job.Name)

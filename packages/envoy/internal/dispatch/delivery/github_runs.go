@@ -144,11 +144,8 @@ func nonEmpty(s string) *string {
 // how much work one window is, and so how much a failed pass redoes. Every completed run costs
 // its own jobs request, so a window is far more work than its listing pages alone.
 //
-// Each page asks for its installation token (fetchWorkflowRunsPage) rather than the walk taking
-// one at its start: a walk over a busy repository, with every window's jobs and writes between its
-// pages, can outlast a token's hour, and GitHub answers the next page 401 Bad credentials.
-// githubapp.Client.Token hands back its cached token until it is near expiry, so this mints only
-// when one is due.
+// Each page asks for its own installation token (fetchWorkflowRunsPage), as every read of more
+// than one page does: readGitHubPage states the rule.
 func ListWorkflowRuns(ctx context.Context, client *githubapp.Client, owner, repo, workflowPath string, since, until time.Time, maxRuns int, visit func(windowUntil time.Time, runs []FetchedRun) error) error {
 	scope := fmt.Sprintf("%s workflow runs for %s/%s", workflowPath, owner, repo)
 	newFetcher := func(since, until time.Time) func() ([]FetchedRun, int, error) {
@@ -230,7 +227,7 @@ type jobItem struct {
 // ListWorkflowRunJobs lists every job of one run's latest attempt via GET
 // /repos/{owner}/{repo}/actions/runs/{run_id}/jobs?filter=latest, paginated fully. Named
 // distinctly from store.go's ListRunJobs (a Postgres read of already-stored jobs): this is the
-// GitHub fetch that feeds it. Each page asks for its token, as ListWorkflowRuns' pages do.
+// GitHub fetch that feeds it. Each page asks for its own token, by readGitHubPage's rule.
 func ListWorkflowRunJobs(ctx context.Context, client *githubapp.Client, owner, repo string, runID int64) ([]FetchedJob, error) {
 	var jobs []FetchedJob
 	total := -1

@@ -1,8 +1,6 @@
 package delivery
 
 import (
-	"fmt"
-	"strings"
 	"testing"
 	"time"
 )
@@ -31,38 +29,6 @@ func TestProductionApplies(t *testing.T) {
 	}
 	if applies[0].RunID != 3 {
 		t.Errorf("expected apply for run 3, got run %d", applies[0].RunID)
-	}
-}
-
-// TestProductionAppliesWarnsOnlyForARunOnMain: a successful run with no job named
-// production_job_name is logged only on main, where a missing production job means the
-// configured name is wrong. A run on another branch can skip its production job (a dev-only run,
-// whose skipped job GitHub names after the calling job alone), and a run whose branch is not yet
-// recorded is not known to be on main, so neither is logged. None of the three is a deploy.
-func TestProductionAppliesWarnsOnlyForARunOnMain(t *testing.T) {
-	const jobName = "production-apply / production-apply"
-	logs := captureLogs(t)
-	success := DeliveryRunConclusionSuccess
-	runs := []DeliveryRun{
-		{Repo: "acme/widgets", RunID: 1, HeadBranch: new("test/dev-only"), Conclusion: &success},
-		{Repo: "acme/widgets", RunID: 2, Conclusion: &success},
-		{Repo: "acme/widgets", RunID: 3, HeadBranch: new("main"), Conclusion: &success},
-	}
-	skipped := map[int64][]DeliveryRunJob{}
-	for _, run := range runs {
-		skipped[run.RunID] = []DeliveryRunJob{{Repo: run.Repo, RunID: run.RunID, Name: "production-apply", Conclusion: new(DeliveryJobConclusionSkipped)}}
-	}
-	if applies := ProductionApplies(runs, skipped, jobName); len(applies) != 0 {
-		t.Fatalf("applies = %+v, want none: a skipped production job is no deploy", applies)
-	}
-	var warned []any
-	for _, record := range logs() {
-		if record["level"] == "WARN" && strings.Contains(fmt.Sprint(record["msg"]), "no job matching the configured production_job_name") {
-			warned = append(warned, record["run_id"])
-		}
-	}
-	if len(warned) != 1 || warned[0] != float64(3) {
-		t.Fatalf("warned for runs %v, want only run 3 (on main)", warned)
 	}
 }
 

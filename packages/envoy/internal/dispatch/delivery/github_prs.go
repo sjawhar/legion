@@ -172,7 +172,8 @@ func fetchPullRequestPayload(ctx context.Context, client *githubapp.Client, toke
 // answers how many calls it made, a failed one included (retries inside readGitHubPage aside),
 // for the backfill's call budget.
 func fetchAttributionFacts(ctx context.Context, client *githubapp.Client, owner, repo, repoFull string, number int) (attributionFacts, int, error) {
-	token, err := client.RepositoryToken(ctx, owner, repo)
+	tokenSource := func() (string, error) { return client.RepositoryToken(ctx, owner, repo) }
+	token, err := tokenSource()
 	if err != nil {
 		return attributionFacts{}, 0, fmt.Errorf("mint installation token for %s PR #%d: %w", repoFull, number, err)
 	}
@@ -180,7 +181,7 @@ func fetchAttributionFacts(ctx context.Context, client *githubapp.Client, owner,
 	if err != nil {
 		return attributionFacts{}, 1, err
 	}
-	messages, pages, err := fetchCommitMessagesWithToken(ctx, client, token, owner, repo, number)
+	messages, pages, err := fetchCommitMessagesWithToken(ctx, client, tokenSource, owner, repo, number)
 	if err != nil {
 		return attributionFacts{}, 1 + pages, err
 	}
@@ -434,9 +435,8 @@ const searchMergedPullRequestsWindow = githubResultCap
 // (windowed.go), handing each completed window to visit. newFetcher builds a fresh query string
 // and a fresh (nil) cursor for every window walkWindowed asks for -- the original call and each
 // recursive half -- so GitHub's own cursor, not a REST page number, is this fetcher's only
-// pagination state. Each page asks token for its installation token: visit reconciles each
-// window's pull requests between pages, so a long backfill outlasts a token's hour, and
-// githubapp.Client.Token hands back its cached token until it is near expiry.
+// pagination state. Each page asks token for its own installation token, by readGitHubPage's
+// rule; walkWindowed's error names the scope and the window, and each page's names its cursor.
 func searchMergedPullRequests(ctx context.Context, client *githubapp.Client, token func() (string, error), repos, authors []string, since, until time.Time, visit func(time.Time, []FetchedPullRequest) error) error {
 	scope := searchScopeLabel(repos)
 	newFetcher := func(since, until time.Time) func() ([]FetchedPullRequest, int, error) {
@@ -445,7 +445,7 @@ func searchMergedPullRequests(ctx context.Context, client *githubapp.Client, tok
 		return func() ([]FetchedPullRequest, int, error) {
 			current, err := token()
 			if err != nil {
-				return nil, 0, fmt.Errorf("mint installation token: %w", err)
+				return nil, 0, fmt.Errorf("page after %q: mint installation token: %w", cursor, err)
 			}
 			result, err := fetchSearchPage(ctx, client, current, query, cursor)
 			if err != nil {

@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"slices"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -500,6 +503,70 @@ func TestGetDeliveryRunListsEveryJob(t *testing.T) {
 		if response := dispatchRequest(t, handler, http.MethodGet, target, nil, "alice"); response.Code != want {
 			t.Errorf("GET %s: status = %d, body = %s, want %d", target, response.Code, response.Body.String(), want)
 		}
+	}
+}
+
+// TestDeliveryReadsLogNoProductionJobWarningForARunOffMain: a dev-only deploy run, on a branch
+// other than main with its production job skipped (GitHub names a skipped reusable-workflow job
+// after the calling job alone), is no deploy, and both reads that judge deploy runs, the timeline
+// and the measures, read the runs on main alone, so neither logs ProductionApplies' WARN about a
+// missing production job for it. The same run on main is logged, which shows the capture sees
+// the WARN when one is written.
+func TestDeliveryReadsLogNoProductionJobWarningForARunOffMain(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	ctx := t.Context()
+	if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
+		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
+		ProductionJobName: "widgets-release / widgets-release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		PopulationAuthors: []string{"octocat"},
+	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	start := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	success := delivery.DeliveryRunConclusionSuccess
+	const offMain, onMain = int64(501), int64(502)
+	for _, run := range []struct {
+		id     int64
+		branch string
+	}{{offMain, "test/dev-only"}, {onMain, "main"}} {
+		id := strconv.FormatInt(run.id, 10)
+		if err := delivery.UpsertRun(ctx, database.Pool, delivery.DeliveryRun{
+			Repo: "acme/widgets", RunID: run.id, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha" + id,
+			HeadCommitAt: start, StartedAt: start, CompletedAt: new(start.Add(time.Hour)), Conclusion: &success,
+			URL: "https://github.com/acme/widgets/actions/runs/" + id, HeadBranch: new(run.branch), Event: new("workflow_dispatch"),
+		}); err != nil {
+			t.Fatalf("seed run %d: %v", run.id, err)
+		}
+		if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", run.id, []delivery.DeliveryRunJob{
+			{Repo: "acme/widgets", RunID: run.id, Name: "widgets-release", Conclusion: new(delivery.DeliveryJobConclusionSkipped)},
+		}); err != nil {
+			t.Fatalf("seed run %d's job: %v", run.id, err)
+		}
+	}
+
+	previous := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	const window = "from=2024-01-01T00:00:00Z&to=2024-01-02T00:00:00Z"
+	getDeliveryTimeline(t, handler, window)
+	getDeliveryMeasures(t, handler, window)
+
+	warned := map[string]int{}
+	for _, line := range strings.Split(logs.String(), "\n") {
+		if !strings.Contains(line, "no job matching the configured production_job_name") {
+			continue
+		}
+		for _, field := range strings.Fields(line) {
+			if id, ok := strings.CutPrefix(field, "run_id="); ok {
+				warned[id]++
+			}
+		}
+	}
+	if warned[strconv.FormatInt(offMain, 10)] != 0 || warned[strconv.FormatInt(onMain, 10)] == 0 {
+		t.Fatalf("missing-production-job WARNs by run = %v, want none for the run off main (%d) and some for the run on main (%d)",
+			warned, offMain, onMain)
 	}
 }
 

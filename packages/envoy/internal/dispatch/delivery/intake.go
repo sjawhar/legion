@@ -141,70 +141,81 @@ func (in *Intake) Run(ctx context.Context) {
 // operator restarting the server. A var so a test can shrink it.
 var settingsPollInterval = 30 * time.Second
 
-// route dispatches one envelope payload to the PR or workflow handler by its kind field, and to
-// the right workflow kind (deploy or PR-checks) by comparing the payload's own repository and
-// workflow path against the configured ones. It is the whole filter: the durable is handed every
-// GitHub notification on the bus (githubIntakeSubject), CI settlements and comments among them,
-// so everything this slice does not want is discarded here, before any GitHub call or database
-// write. It reads the kind alone first, and the whole payload, as the flat string map a handler
-// reads, only for a kind it handles: another kind's payload can hold anything (a CI settlement's
-// holds arrays, cistore.Summary). handled reports whether the kind is one it handles, whatever its
-// handler then decided. A payload whose kind cannot be read, or a handled kind's payload that is
-// not that map, is a malformedPayloadError.
+// route dispatches one envelope payload by its kind field: a pull request to
+// handlePullRequestEnvelope, a workflow run to routeWorkflowEnvelope, any other kind nowhere. It is
+// the whole filter: the durable is handed every GitHub notification on the bus
+// (githubIntakeSubject), CI settlements, comments and the events Envoy builds no payload for among
+// them. The payload is decoded once, into its fields. An empty payload, or one of a kind route does
+// not handle, is discarded before any GitHub call or write, whatever its other fields hold (a CI
+// settlement's hold arrays, cistore.Summary); only a pull request's or a workflow run's fields are
+// read as the flat string map its handler takes. handled reports whether the kind is one route
+// hands to a handler, whatever that handler then decides, so deliver records the event's time for
+// a pull request that was not merged or another repository's run as well. A payload that is not a
+// JSON object, a kind that is not a string, and a handled kind's payload holding anything but
+// strings are errMalformedPayload.
 func (in *Intake) route(ctx context.Context, settings DeliverySettings, raw string) (handled bool, err error) {
-	var head struct {
-		Kind string `json:"kind"`
+	if raw == "" {
+		return false, nil
 	}
-	if err := json.Unmarshal([]byte(raw), &head); err != nil {
-		return false, malformedPayloadError{err}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &fields); err != nil {
+		return false, fmt.Errorf("%w: %w", errMalformedPayload, err)
 	}
-	switch head.Kind {
+	var kind string
+	if field, ok := fields["kind"]; ok {
+		if err := json.Unmarshal(field, &kind); err != nil {
+			return false, fmt.Errorf("%w: kind: %w", errMalformedPayload, err)
+		}
+	}
+	var handle func(context.Context, DeliverySettings, map[string]string) error
+	switch kind {
 	case "pr":
-		payload, err := flatPayload(raw)
-		if err != nil {
-			return true, err
-		}
-		// Every repository's pull requests: the population spans any repository the configured
-		// authors merge into, not the deploy repository alone, and handlePullRequestEnvelope
-		// decides from the pull request itself.
-		return true, in.handlePullRequestEnvelope(ctx, settings, payload)
+		handle = in.handlePullRequestEnvelope
 	case "workflow":
-		payload, err := flatPayload(raw)
-		if err != nil {
-			return true, err
-		}
-		// The workflow runs this slice records are the deploy repository's own. Another
-		// repository's run of a file with the same path is not one of them, and routing it would
-		// fetch a run this slice never stores.
-		if payload["repo"] != settings.DeployRepo {
-			return true, nil
-		}
-		switch payload["path"] {
-		case settings.DeployWorkflowPath:
-			return true, in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindDeploy, payload)
-		case settings.PRChecksWorkflowPath:
-			return true, in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindPRChecks, payload)
-		default:
-			return true, nil
-		}
+		handle = in.routeWorkflowEnvelope
 	default:
 		return false, nil
 	}
+	payload, err := flatPayload(fields)
+	if err == nil {
+		err = handle(ctx, settings, payload)
+	}
+	return true, err
 }
 
-// malformedPayloadError is a payload route cannot read: its kind is not a string field of a JSON
-// object, or a pull request's or workflow run's payload is not the flat string map its handler
-// reads. Its text is the decoder's own.
-type malformedPayloadError struct{ err error }
+// routeWorkflowEnvelope hands a workflow run to handleWorkflowEnvelope as the run kind its file is
+// configured as. The runs this slice records are the deploy repository's own: another repository's
+// run of a file with the same path is not one of them, and routing it would fetch a run this slice
+// never stores. A run of a file neither setting names is not fetched either.
+func (in *Intake) routeWorkflowEnvelope(ctx context.Context, settings DeliverySettings, payload map[string]string) error {
+	if payload["repo"] != settings.DeployRepo {
+		return nil
+	}
+	switch payload["path"] {
+	case settings.DeployWorkflowPath:
+		return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindDeploy, payload)
+	case settings.PRChecksWorkflowPath:
+		return in.handleWorkflowEnvelope(ctx, settings, DeliveryRunKindPRChecks, payload)
+	default:
+		return nil
+	}
+}
 
-func (e malformedPayloadError) Error() string { return e.err.Error() }
-func (e malformedPayloadError) Unwrap() error { return e.err }
+// errMalformedPayload is an envelope payload route cannot read: not a JSON object, a kind that is
+// not a string, or a pull request's or workflow run's payload holding anything but strings.
+var errMalformedPayload = errors.New("malformed envelope payload")
 
-// flatPayload decodes a payload as the flat string map the pull-request and workflow handlers read.
-func flatPayload(raw string) (map[string]string, error) {
-	var payload map[string]string
-	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
-		return nil, malformedPayloadError{err}
+// flatPayload is a pull request's or workflow run's fields as the flat string map its handler
+// reads, or errMalformedPayload when a field is not a string. The field's name is left out of the
+// error, since an envelope's keys are its publisher's to choose.
+func flatPayload(fields map[string]json.RawMessage) (map[string]string, error) {
+	payload := make(map[string]string, len(fields))
+	for name, field := range fields {
+		var value string
+		if err := json.Unmarshal(field, &value); err != nil {
+			return nil, fmt.Errorf("%w: %w", errMalformedPayload, err)
+		}
+		payload[name] = value
 	}
 	return payload, nil
 }
@@ -216,8 +227,8 @@ func flatPayload(raw string) (map[string]string, error) {
 const deliveryConsumerName = "delivery-events"
 
 // githubIntakeSubject is the durable's one filter subject: every GitHub event Envoy relays. The
-// handler decides what to do with each (route), and discards the ones this slice does not want,
-// which costs one decode of the payload's kind per envelope.
+// handler decides what to do with each (route), and fetches nothing for the ones this slice does
+// not want, which costs one decode of the payload per envelope.
 //
 // One subject rather than the set this once carried -- the wildcard pull-request subject
 // notifications.github.*.*.pr.* beside one notifications.github.<owner>.<repo>.workflow.<file>.>
@@ -344,9 +355,10 @@ func (in *Intake) bind(handle func(context.Context, string) (bool, error)) (*nat
 // error (a failed GitHub call, or that deadline passing) is caught up by the next reconcile pass
 // rather than by NATS redelivery -- see the package doc comment. The deadline is what makes
 // intakeAckWait a bound rather than a hope: without it one stuck GitHub call could hold an
-// in-flight slot past the ack wait and have the message redelivered underneath it. An envelope of
-// a kind route does not handle is acknowledged and nothing else: no log line, and no freshness
-// write, since it is no event this package processes.
+// in-flight slot past the ack wait and have the message redelivered underneath it. An envelope
+// handle reports it does not handle (an empty payload, or a kind route sends to no handler) is
+// acknowledged and nothing else: no log line and no freshness write. One it handles records the
+// event's time, whatever its handler decided.
 func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, string) (bool, error)) {
 	defer func() {
 		err := msg.Ack()
@@ -371,9 +383,8 @@ func (in *Intake) deliver(msg *natsgo.Msg, handle func(context.Context, string) 
 		return
 	}
 	handled, err := handle(ctx, envelope.Payload)
-	var malformed malformedPayloadError
 	switch {
-	case errors.As(err, &malformed):
+	case errors.Is(err, errMalformedPayload):
 		slog.Error("dispatch delivery: decode envelope payload", "subject", msg.Subject, "error", err)
 		return
 	case err != nil:
@@ -560,22 +571,24 @@ const maxCommitPages = 5
 // UpsertPullRequest doc comment on why a partial row is never allowed to regress a complete one's
 // attribution). On an error it answers the messages of the pages it read.
 func fetchCommitMessages(ctx context.Context, client *githubapp.Client, owner, repo string, number int) ([]string, error) {
-	token, err := client.RepositoryToken(ctx, owner, repo)
-	if err != nil {
-		return nil, fmt.Errorf("mint installation token for %s/%s PR #%d: %w", owner, repo, number, err)
-	}
+	token := func() (string, error) { return client.RepositoryToken(ctx, owner, repo) }
 	messages, _, err := fetchCommitMessagesWithToken(ctx, client, token, owner, repo, number)
 	return messages, err
 }
 
-// fetchCommitMessagesWithToken is fetchCommitMessages under a token the caller already holds. It
-// also answers how many commit pages it asked GitHub for, the failed one included, so a caller
-// can count what a read cost (reconcileAttributionInputs' call budget).
-func fetchCommitMessagesWithToken(ctx context.Context, client *githubapp.Client, token, owner, repo string, number int) ([]string, int, error) {
+// fetchCommitMessagesWithToken is fetchCommitMessages asking token for each page's installation
+// token, by readGitHubPage's rule. It also answers how many commit pages it asked GitHub for, the
+// failed one included, so a caller can count what a read cost (reconcileAttributionInputs' call
+// budget).
+func fetchCommitMessagesWithToken(ctx context.Context, client *githubapp.Client, token func() (string, error), owner, repo string, number int) ([]string, int, error) {
 	var messages []string
 	for page := 1; page <= maxCommitPages; page++ {
+		current, err := token()
+		if err != nil {
+			return messages, page - 1, fmt.Errorf("mint installation token for %s/%s PR #%d commits page %d: %w", owner, repo, number, page, err)
+		}
 		commitsPath := fmt.Sprintf("/repos/%s/%s/pulls/%d/commits?per_page=100&page=%d", url.PathEscape(owner), url.PathEscape(repo), number, page)
-		body, status, header, err := readGitHubPage(ctx, client, token, commitsPath)
+		body, status, header, err := readGitHubPage(ctx, client, current, commitsPath)
 		if err != nil {
 			return messages, page, fmt.Errorf("fetch commits of PR #%d page %d: %w", number, page, err)
 		}

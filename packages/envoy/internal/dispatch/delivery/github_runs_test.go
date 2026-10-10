@@ -204,6 +204,10 @@ func TestListWorkflowRunsPaginatesAcrossPages(t *testing.T) {
 	if len(pagesSeen) != 2 || pagesSeen[0] != "1" || pagesSeen[1] != "2" {
 		t.Fatalf("pages fetched = %v, want [1 2]", pagesSeen)
 	}
+	// Each page asks for its token; under GitHub's hour the cached one answers the second ask.
+	if mints := fake.tokenMints.Load(); mints != 1 {
+		t.Fatalf("minted %d installation tokens over two pages, want 1", mints)
+	}
 }
 
 func repeatRunItems(n int, startID int64) []map[string]any {
@@ -357,6 +361,9 @@ func TestListWorkflowRunJobsPaginatesAcrossPages(t *testing.T) {
 	}
 	if len(pagesSeen) != 2 || pagesSeen[0] != "1" || pagesSeen[1] != "2" {
 		t.Fatalf("pages fetched = %v, want [1 2]", pagesSeen)
+	}
+	if mints := fake.tokenMints.Load(); mints != 1 {
+		t.Fatalf("minted %d installation tokens over two pages, want 1", mints)
 	}
 }
 
