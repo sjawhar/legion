@@ -189,6 +189,19 @@ run
 grep -qF "legion-v10.1.0 or later; this script copies only from legion-v10.0.0" "$temporary_dir/err" || fail "the release was not refused by name: $(<"$temporary_dir/err")"
 compgen -G "$state/created/*.yaml" >/dev/null && fail "a pod was created for an issue-pod release"
 
+# Too few arguments print the whole usage block and exit 2: the usage line first, then each
+# argument's own line through the last, `<kubectl args>`, and none of the header's prose.
+set +e
+PATH="$bin:$PATH" KUBECTL_STATE="$state" bash "$script" "$state/claims.json" legion >/dev/null 2>"$temporary_dir/err"
+code=$?
+set -e
+((code == 2)) || fail "too few arguments: exit $code, want 2"
+[[ $(head -n 1 "$temporary_dir/err") == "# usage: "* ]] || fail "the usage text does not start at its usage line: $(<"$temporary_dir/err")"
+for name in '<claims.json>' '<project>' '<url secret>' '<kubectl args>'; do
+  grep -qE "^#   $name +[a-z(]" "$temporary_dir/err" || fail "the usage text has no line describing $name: $(<"$temporary_dir/err")"
+done
+[[ $(tail -n 1 "$temporary_dir/err") == "#   <kubectl args> "* ]] || fail "the usage text does not end at its <kubectl args> line: $(<"$temporary_dir/err")"
+
 if ((failures > 0)); then
   printf '%d failure(s)\n' "$failures" >&2
   exit 1

@@ -26,8 +26,10 @@
 #   <kubectl args> passed to every kubectl call, e.g. --context <restricted context>
 set -euo pipefail
 
+# Prints the header's usage block, from its `# usage:` line through its `<kubectl args>` line, so a
+# header edit above or within it never shifts what is printed.
 usage() {
-  sed -n '17,22p' "$0" >&2
+  sed -n '/^# usage: /,/^#   <kubectl args>/p' "$0" >&2
   exit 2
 }
 
