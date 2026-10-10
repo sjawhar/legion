@@ -1,5 +1,6 @@
 // Package ratelimit is the broker's token buckets: per key (a source address, the person a machine
-// login names, the one bucket every service's login shares), so a flood under one key never
+// login names, the one bucket every service's login shares, an enrollment whose requests name
+// secrets the policy does not serve and so cost a policy reread), so a flood under one key never
 // spends another's, and one every caller shares.
 package ratelimit
 
