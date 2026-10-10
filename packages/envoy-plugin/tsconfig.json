@@ -16,5 +16,5 @@
     "jsx": "preserve",
     "types": ["bun"]
   },
-  "include": ["bin/**/*.ts", "src/**/*.ts", "src/**/*.tsx"]
+  "include": ["bin/**/*.ts", "scripts/**/*.ts", "src/**/*.ts", "src/**/*.tsx"]
 }

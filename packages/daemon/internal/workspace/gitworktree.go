@@ -192,7 +192,7 @@ func restoreGitWorktree(ctx context.Context, run Runner, workspace Workspace, lo
 	if filepath.Dir(target) != worktrees {
 		return fmt.Errorf("workspace %s's .git, which a tree agent can write, names %s outside the shared clone's %s; provisioning refuses to create or write it. Remove the workspace so the next provisioning adds it again", workspace.Dir, target, worktrees)
 	}
-	parents, err := RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `parents.map(|c| c.commit_id()).join("\n")`}, nil, workspace.Dir)
+	parents, err := RunCheckedIn(ctx, run, workspace, []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `parents.map(|c| c.commit_id()).join("\n")`})
 	if err != nil {
 		return err
 	}

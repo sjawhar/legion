@@ -47,11 +47,12 @@ const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smok
 
 // manifestCases are the Sandboxes the goldens pin: the root, which owns the tree volume; a worker
 // placed beside a scheduled pod of its tree, and one placed with none; a resume; a relaunch
-// whose workspace is recovered after its volume was lost; and the root enrolled with the secrets
-// broker. colocate is whether another pod of the tree is scheduled when the launch runs, and
-// agentSecrets, set for root-enrolled alone, is the runtime's enrollment for that one case
-// (TestManifestGoldens, TestManifestMatchesTheSandboxCRD apply it to the shared runtime before
-// building that case's manifest, and restore nil after — every other case runs unenrolled).
+// whose workspace is recovered after its volume was lost; the root enrolled with the secrets
+// broker; and the project controller's pod, launched fresh and resuming. colocate is
+// whether another pod of the tree is scheduled when the launch runs, and agentSecrets, set for
+// root-enrolled alone, is the runtime's enrollment for that one case (TestManifestGoldens,
+// TestManifestMatchesTheSandboxCRD apply it to the shared runtime before building that case's
+// manifest, and restore nil after — every other case runs unenrolled).
 func manifestCases(t *testing.T) map[string]struct {
 	spec         runtime.SpawnSpec
 	colocate     bool
@@ -61,6 +62,9 @@ func manifestCases(t *testing.T) map[string]struct {
 	resume.Generation, resume.BootToken, resume.ResumeSessionFile = 2, "boot-g2", resumeSession
 	recovered := workerSpec(t)
 	recovered.WorkspaceRecoveredFrom = "legion/LEGION-208"
+	controllerResume := controllerSpec(t)
+	controllerResume.Generation, controllerResume.BootToken = 2, "boot-g2"
+	controllerResume.ResumeSessionFile = controllerSession
 	return map[string]struct {
 		spec         runtime.SpawnSpec
 		colocate     bool
@@ -71,6 +75,8 @@ func manifestCases(t *testing.T) map[string]struct {
 		"worker-no-affinity": {workerSpec(t), false, nil},
 		"resume":             {resume, true, nil},
 		"recovered":          {recovered, true, nil},
+		"controller":         {controllerSpec(t), false, nil},
+		"controller-resume":  {controllerResume, false, nil},
 		"root-enrolled": {rootSpec(t), false, &AgentSecrets{
 			URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour,
 		}},
@@ -186,6 +192,29 @@ func podOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool) core
 	return r.podTemplate(l, affinity).Spec
 }
 
+// workerContainer is the role container of workerSpec, the tester.
+const workerContainer = string(claim.RoleTester)
+
+// workerOf is the worker-shim process a launch of spec starts: its role container as the pod runs
+// it (mounts, kubelet-resolved environment), with the launcher start command's argv as Command and
+// its plain environment appended. That is the process's whole environment: the launcher passes its
+// own on, then the start command's.
+func workerOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool) corev1.Container {
+	t.Helper()
+	l, err := r.prepare(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := containerNamed(t, r.podTemplate(l, affinity).Spec, string(spec.Role))
+	start := launcherCommand(l, r)
+	c.Command = start.Argv
+	for _, entry := range start.Env {
+		name, value, _ := strings.Cut(entry, "=")
+		c.Env = append(c.Env, corev1.EnvVar{Name: name, Value: value})
+	}
+	return c
+}
+
 func envOf(container corev1.Container) map[string]string {
 	env := map[string]string{}
 	for _, v := range container.Env {
@@ -226,7 +255,7 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := envOf(podOf(t, r, workerSpec(t), false).Containers[0])
+	env := envOf(workerOf(t, r, workerSpec(t), false))
 	got := kubeExpand(env["PI_SHELL_PREFIX"], env)
 	want := shellprefix.For("/legion/worker-bin", "/opt/legion/bin")
 	if got != want {
@@ -272,7 +301,7 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	pod := podOf(t, r, workerSpec(t), false)
-	init, main := containerNamed(t, pod, initContainer), containerNamed(t, pod, mainContainer)
+	init, main := containerNamed(t, pod, initContainer), workerOf(t, r, workerSpec(t), false)
 	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
 		if envOf(init)[name] == "" || envOf(init)[name] != envOf(main)[name] {
 			t.Errorf("%s: init %q, main %q; the two containers must agree", name, envOf(init)[name], envOf(main)[name])
@@ -316,8 +345,7 @@ func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := podOf(t, r, workerSpec(t), false)
-	main := containerNamed(t, pod, mainContainer)
+	main := workerOf(t, r, workerSpec(t), false)
 	cacheHome := envOf(main)["XDG_CACHE_HOME"]
 	if cacheHome == "" {
 		t.Fatal("the main container carries no XDG_CACHE_HOME")
@@ -348,7 +376,7 @@ func TestUvKeepsItsPythonsAndCacheOnTheTreeVolume(t *testing.T) {
 	}
 	var envs []map[string]string
 	for _, spec := range []runtime.SpawnSpec{rootSpec(t), workerSpec(t), testSpec(t, child, claim.RoleImplementer, "LEGION-209")} {
-		main := containerNamed(t, podOf(t, r, spec, false), mainContainer)
+		main := workerOf(t, r, spec, false)
 		env := envOf(main)
 		for _, name := range []string{"UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
 			dir := env[name]
@@ -386,7 +414,7 @@ func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
 	}
 	spec := workerSpec(t)
 	pod := podOf(t, r, spec, false)
-	main := pod.Containers[0]
+	main := workerOf(t, r, spec, false)
 	want := StateDir + "/secrets/" + string(spec.Claim) + "-grant"
 	if got := envOf(main)["LEGION_GRANT_FILE"]; got != want {
 		t.Fatalf("the worker container's LEGION_GRANT_FILE = %q, want %q", got, want)
@@ -411,7 +439,8 @@ func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
 // A pod's own IP changes on every restart, so a daemon that runs as a pod hands pods a stable
 // address instead, a Kubernetes Service's DNS name: StreamURL is advertise_host at the worker
 // stream's port (shimAddress, internal/daemon/daemon.go) and DaemonURL is daemon_url. Neither
-// Options field needs an IP: the manifest carries each exactly as configured.
+// Options field needs an IP: the manifest carries each exactly as configured, on every role
+// launcher's --connect and in the worker process the start command runs.
 func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 	opts := goldenOptions()
 	opts.StreamURL = "tcp://legion-daemon-widgets.legion.svc:13371"
@@ -420,11 +449,16 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	main := containerNamed(t, podOf(t, r, workerSpec(t), false), mainContainer)
-	if !slices.Contains(main.Command, "tcp://legion-daemon-widgets.legion.svc:13371") {
-		t.Errorf("the shim's argv = %v, want it to dial tcp://legion-daemon-widgets.legion.svc:13371", main.Command)
+	for _, c := range podOf(t, r, workerSpec(t), false).Containers {
+		if !slices.Contains(c.Command, "tcp://legion-daemon-widgets.legion.svc:13371") {
+			t.Errorf("the %s launcher's argv = %v, want it to dial tcp://legion-daemon-widgets.legion.svc:13371", c.Name, c.Command)
+		}
 	}
-	if got := envOf(main)["LEGION_DAEMON_URL"]; got != "http://legion-daemon-widgets.legion.svc:13370" {
+	worker := workerOf(t, r, workerSpec(t), false)
+	if !slices.Contains(worker.Command, "tcp://legion-daemon-widgets.legion.svc:13371") {
+		t.Errorf("the shim's argv = %v, want it to dial tcp://legion-daemon-widgets.legion.svc:13371", worker.Command)
+	}
+	if got := envOf(worker)["LEGION_DAEMON_URL"]; got != "http://legion-daemon-widgets.legion.svc:13370" {
 		t.Errorf("LEGION_DAEMON_URL = %q, want http://legion-daemon-widgets.legion.svc:13370", got)
 	}
 }
@@ -435,7 +469,8 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 // fills is read-only in workspace-init, and its TMPDIR, where its one-shot credential goes, is an
 // in-memory volume no other container mounts. So workspace-fetch mounts neither the tree volume
 // nor the config home. Every pod's manifest holds to it, by every route Kubernetes offers into a
-// Secret, the worker's container included.
+// Secret, the worker's container included; the controller's pod has no workspace-fetch, so none of
+// its containers reaches the token at all.
 func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -447,7 +482,8 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			pod := r.podTemplate(l, tc.colocate).Spec
+			template := r.podTemplate(l, tc.colocate)
+			pod := template.Spec
 			claimSecret := secretName(l.name)
 			volumes := map[string]corev1.Volume{}
 			for _, volume := range pod.Volumes {
@@ -491,6 +527,16 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 				if holds := c.Name == fetchContainer; (len(routes) > 0) != holds || pointed != holds {
 					t.Errorf("%s reaches the provisioning token by %v, pointed at %t; want %t for both", c.Name, routes, pointed, holds)
 				}
+			}
+			kind, err := podKindOf(template.Metadata.Labels)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if kind == (controllerPod{}) {
+				if slices.ContainsFunc(containers, func(c corev1.Container) bool { return c.Name == fetchContainer }) {
+					t.Errorf("the controller's pod runs %s", fetchContainer)
+				}
+				return
 			}
 			fetch := containerNamed(t, pod, fetchContainer)
 			for _, mount := range fetch.VolumeMounts {
@@ -582,27 +628,82 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	}
 }
 
-// runtimeOwned is exactly what the worker container is told by the runtime itself: every name
-// mainEnvironment sets with Env empty and no secret of the spec's, every optional value configured.
-// A name added to the environment and not to runtimeOwned is one a spec could override; a name left
-// in runtimeOwned that the environment no longer sets is one a spec is refused for nothing.
+// runtimeOwned is exactly what the worker container is told by the runtime itself, a tree agent's
+// and the controller's together: every name mainEnvironment sets with Env empty and no secret of the
+// spec's, every optional value configured. A name added to the environment and not to runtimeOwned
+// is one a spec could override; a name left in runtimeOwned that the environment no longer sets is
+// one a spec is refused for nothing.
 func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
+	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.SessionDSNKey = "SESSION_DSN"
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	told := map[string]bool{}
+	for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
+		spec.Env, spec.Secrets = nil, nil
+		for name := range envOf(workerOf(t, r, spec, false)) {
+			told[name] = true
+		}
+	}
+	if !maps.Equal(told, runtimeOwned) {
+		t.Errorf("the worker container is told %v by the runtime, and runtimeOwned is %v",
+			slices.Sorted(maps.Keys(told)), slices.Sorted(maps.Keys(runtimeOwned)))
+	}
+}
+
+// handedAddresses is exactly the addresses a role process launched now carries, every optional
+// address configured: each address-valued argument of every launcher's command and of the
+// generation's worker-shim argv (the words before `--`), by its flag, and each address-valued
+// variable the runtime itself sets in the generation's environment, an address being a value with a
+// scheme. An address added to a launch and not to handedAddresses is one the daemon could move
+// without any role it re-adopts being relaunched (evaluate). A workflow role and the controller,
+// which never enrolls with the secrets broker, are each held to their own list.
+func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
+	opts := testOptions()
+	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal.example", "dispatch-bearer"
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := workerSpec(t)
-	spec.Env, spec.Secrets = nil, nil
-	told := map[string]bool{}
-	for name := range envOf(podOf(t, r, spec, false).Containers[0]) {
-		told[name] = true
-	}
-	if !maps.Equal(told, runtimeOwned) {
-		t.Errorf("the worker container is told %v by the runtime, and runtimeOwned is %v",
-			slices.Sorted(maps.Keys(told)), slices.Sorted(maps.Keys(runtimeOwned)))
+	for name, spec := range map[string]runtime.SpawnSpec{"a workflow role": workerSpec(t), "the controller": controllerSpec(t)} {
+		t.Run(name, func(t *testing.T) {
+			l, err := r.prepare(spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			start := launcherCommand(l, r)
+			carried := map[string]string{}
+			words := [][]string{start.Argv[:slices.Index(start.Argv, "--")]}
+			for _, c := range podOf(t, r, spec, false).Containers {
+				words = append(words, c.Command)
+			}
+			for _, command := range words {
+				for i := 1; i < len(command); i++ {
+					if strings.Contains(command[i], "://") {
+						carried[command[i-1]] = command[i]
+					}
+				}
+			}
+			for _, pair := range start.Env {
+				if name, value, _ := strings.Cut(pair, "="); runtimeOwned[name] && strings.Contains(value, "://") {
+					carried[name] = value
+				}
+			}
+			handed := map[string]string{}
+			for _, a := range r.handedAddresses(spec.Role) {
+				if a.value != "" {
+					handed[a.name] = a.value
+				}
+			}
+			if !maps.Equal(carried, handed) {
+				t.Errorf("a role launched now carries the addresses %v, and handedAddresses is %v", carried, handed)
+			}
+		})
 	}
 }
 
@@ -627,13 +728,13 @@ func TestTheDispatchBearerIsARuntimeOption(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pointer, pointed := envOf(r.podTemplate(l, false).Spec.Containers[0])["DISPATCH_TOKEN_FILE"]
+			pointer, pointed := envOf(workerOf(t, r, workerSpec(t), false))["DISPATCH_TOKEN_FILE"]
 			if got := l.secrets[dispatchTokenKey]; got != tc.bearer || pointed != (tc.bearer != "") {
 				t.Fatalf("the claim's Secret carries %q as %s and DISPATCH_TOKEN_FILE is %q (set: %t), want %q",
 					got, dispatchTokenKey, pointer, pointed, tc.bearer)
 			}
-			if pointed && pointer != BootDir+"/"+dispatchTokenKey {
-				t.Fatalf("DISPATCH_TOKEN_FILE = %q, want the boot projection's %s", pointer, BootDir+"/"+dispatchTokenKey)
+			if want := generationDir(workerSpec(t).Generation) + "/" + dispatchTokenKey; pointed && pointer != want {
+				t.Fatalf("DISPATCH_TOKEN_FILE = %q, want the generation's private %s", pointer, want)
 			}
 		})
 	}
@@ -662,9 +763,88 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 			if got != tc.want || set != (tc.want != "") {
 				t.Errorf("the init container's LEGION_WORKSPACE_RECOVERED_FROM = %q (set: %t), want %q", got, set, tc.want)
 			}
-			for _, name := range []string{fetchContainer, mainContainer} {
+			for _, name := range []string{fetchContainer, workerContainer} {
 				if _, set := envOf(containerNamed(t, pod, name))["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
 					t.Errorf("%s carries LEGION_WORKSPACE_RECOVERED_FROM", name)
+				}
+			}
+		})
+	}
+}
+
+// LEGION_GENERATION reaches workspace-init's init container too, not only the worker process
+// (mainEnvironment's own, carried by the launcher's start command): workspace-init provision's own
+// candidate-rotation seed (cmd/legion/workspace_init.go's rotateCandidates) reads it from its own
+// container's environment, and a value only the worker process carries would never reach it. The
+// fetch container, which never rotates anything, carries neither.
+func TestLegionGenerationReachesTheInitContainerToo(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := workerSpec(t)
+	spec.Generation = 7
+	pod := podOf(t, r, spec, false)
+	for name, c := range map[string]corev1.Container{
+		initContainer: containerNamed(t, pod, initContainer), "the worker process": workerOf(t, r, spec, false),
+	} {
+		got, set := envOf(c)["LEGION_GENERATION"]
+		if !set || got != "7" {
+			t.Errorf("%s's LEGION_GENERATION = %q (set: %t), want \"7\"", name, got, set)
+		}
+	}
+	if _, set := envOf(containerNamed(t, pod, fetchContainer))["LEGION_GENERATION"]; set {
+		t.Errorf("%s carries LEGION_GENERATION", fetchContainer)
+	}
+}
+
+// The daemon's removable-workspace candidates (dispatch://LEGION-583) reach the workspace-init
+// container alone, as one JSON object carrying both the list and its notAfter together, never
+// the agent; a launch with none names none. relaunch is what calls setRemovable in production,
+// after the tree's launch turn is held; this reaches directly for podTemplate's own contract,
+// that it reads removableWorkspacesJSON off the launch, not spec.
+func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	notAfter := time.Now().Add(time.Hour)
+	wantCandidates, err := json.Marshal(runtime.RemovableWorkspacesPayload{
+		NotAfter:   notAfter,
+		Workspaces: []runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range map[string]struct {
+		candidates []runtime.RemovableWorkspace
+		want       string
+	}{
+		"candidates": {[]runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}}, string(wantCandidates)},
+		"none":       {nil, ""},
+	} {
+		t.Run(name, func(t *testing.T) {
+			l, err := r.prepare(workerSpec(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := l.setRemovable(tc.candidates, notAfter); err != nil {
+				t.Fatal(err)
+			}
+			pod := r.podTemplate(l, false).Spec
+			env := envOf(containerNamed(t, pod, initContainer))
+			got, set := env["LEGION_REMOVABLE_WORKSPACES"]
+			if got != tc.want || set != (tc.want != "") {
+				t.Errorf("the init container's LEGION_REMOVABLE_WORKSPACES = %q (set: %t), want %q", got, set, tc.want)
+			}
+			for _, c := range slices.Concat([]corev1.Container{containerNamed(t, pod, fetchContainer)}, pod.Containers) {
+				if _, set := envOf(c)["LEGION_REMOVABLE_WORKSPACES"]; set {
+					t.Errorf("%s carries LEGION_REMOVABLE_WORKSPACES", c.Name)
+				}
+			}
+			for _, entry := range launcherCommand(l, r).Env {
+				if strings.HasPrefix(entry, "LEGION_REMOVABLE_WORKSPACES=") {
+					t.Errorf("the worker process's start command carries LEGION_REMOVABLE_WORKSPACES")
 				}
 			}
 		})
@@ -707,7 +887,9 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 					tokens = append(tokens, v)
 				}
 			}
-			worker := spec.Containers[0]
+			role := manifestCases(t)["root"].spec.Role
+			worker := workerOf(t, r, manifestCases(t)["root"].spec, false)
+			keyVolume := roleVolume(agentSecretsKeyVolume, role)
 			env := map[string]string{}
 			for _, e := range worker.Env {
 				env[e.Name] = e.Value
@@ -732,16 +914,16 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 			if m := mounts[agentSecretsTokenVolume]; m.MountPath != AgentSecretsTokenDir || !m.ReadOnly {
 				t.Fatalf("token mount %+v, want read-only at %s", m, AgentSecretsTokenDir)
 			}
-			if m := mounts[agentSecretsKeyVolume]; m.MountPath != AgentSecretsKeyDir || m.ReadOnly {
+			if m := mounts[keyVolume]; m.MountPath != AgentSecretsKeyDir || m.ReadOnly {
 				t.Fatalf("key mount %+v, want writable at %s", m, AgentSecretsKeyDir)
 			}
-			key := slices.IndexFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == agentSecretsKeyVolume })
+			key := slices.IndexFunc(spec.Volumes, func(v corev1.Volume) bool { return v.Name == keyVolume })
 			if key < 0 || spec.Volumes[key].EmptyDir == nil || spec.Volumes[key].EmptyDir.Medium != corev1.StorageMediumMemory {
 				t.Fatalf("key volume %+v, want a memory-backed emptyDir", spec.Volumes[key])
 			}
 			for _, init := range spec.InitContainers {
 				for _, m := range init.VolumeMounts {
-					if m.Name == agentSecretsTokenVolume || m.Name == agentSecretsKeyVolume {
+					if m.Name == agentSecretsTokenVolume || strings.HasPrefix(m.Name, agentSecretsKeyVolume) {
 						t.Fatalf("init container %s mounts %s", init.Name, m.Name)
 					}
 				}
@@ -756,11 +938,36 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 			}
 			probe := r.probeManifest("legion-probe-test", ImageProbe{Contract: 7}, time.Now().Add(time.Hour)).Spec.PodTemplate.Spec
 			for _, v := range probe.Volumes {
-				if v.Name == agentSecretsTokenVolume || v.Name == agentSecretsKeyVolume {
+				if v.Name == agentSecretsTokenVolume || strings.HasPrefix(v.Name, agentSecretsKeyVolume) {
 					t.Fatalf("the probe pod carries %s", v.Name)
 				}
 			}
 		})
+	}
+}
+
+// A tree role's shim is told --warm-codegraph, before `--`, and the LEGION_WORKSPACE the flag
+// needs: once its Oh My Pi has started, the shim builds that workspace's CodeGraph index behind
+// the launch (cmd/legion/worker_shim.go). The controller's shim, whose pod has no workspace, is
+// not (TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree).
+func TestATreeRolesShimIsToldToWarmTheWorkspacesCodegraphIndex(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := workerOf(t, r, workerSpec(t), false)
+	shim := worker.Command[:slices.Index(worker.Command, "--")]
+	if !slices.Contains(shim, "--warm-codegraph") {
+		t.Fatalf("the shim runs as %v, want --warm-codegraph before --", worker.Command)
+	}
+	if envOf(worker)["LEGION_WORKSPACE"] == "" {
+		t.Fatalf("the shim is told --warm-codegraph with no LEGION_WORKSPACE to warm; env %v", worker.Env)
+	}
+	// The shim's wait for that warm-up on its way out is bounded by the stop grace its launcher
+	// kills it at, so the shim is told the same TerminationGrace the launcher runs with.
+	at := slices.Index(shim, "--stop-grace")
+	if at < 0 || at+1 >= len(shim) || shim[at+1] != r.terminationGrace.String() {
+		t.Fatalf("the shim runs as %v, want --stop-grace %s, the launcher's own", shim, r.terminationGrace)
 	}
 }
 
@@ -830,14 +1037,15 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	probeSpec := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
 	for _, tc := range []struct {
 		name  string
 		pod   corev1.PodSpec
-		agent string
+		agent corev1.Container
 	}{
-		{"root", podOf(t, r, rootSpec(t), false), mainContainer},
-		{"worker", podOf(t, r, workerSpec(t), true), mainContainer},
-		{"probe", r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec, probeContainer},
+		{"root", podOf(t, r, rootSpec(t), false), workerOf(t, r, rootSpec(t), false)},
+		{"worker", podOf(t, r, workerSpec(t), true), workerOf(t, r, workerSpec(t), true)},
+		{"probe", probeSpec, containerNamed(t, probeSpec, probeContainer)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.pod.ServiceAccountName != opts.Pod.ServiceAccount {
@@ -854,14 +1062,14 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 					t.Errorf("the pod's volumes named %s are %+v, want exactly %+v", want.Name, got, want)
 				}
 			}
-			agent := containerNamed(t, tc.pod, tc.agent)
+			agent := tc.agent
 			for _, want := range opts.Pod.VolumeMounts {
 				if !slices.ContainsFunc(agent.VolumeMounts, func(m corev1.VolumeMount) bool { return reflect.DeepEqual(m, want) }) {
-					t.Errorf("%s mounts %+v, want %+v among them", tc.agent, agent.VolumeMounts, want)
+					t.Errorf("%s mounts %+v, want %+v among them", agent.Name, agent.VolumeMounts, want)
 				}
 			}
 			if got := envOf(agent)["PI_CONFIG_FILES"]; got != opts.Pod.Env["PI_CONFIG_FILES"] {
-				t.Errorf("%s's PI_CONFIG_FILES = %q, want the operator's %q", tc.agent, got, opts.Pod.Env["PI_CONFIG_FILES"])
+				t.Errorf("%s's PI_CONFIG_FILES = %q, want the operator's %q", agent.Name, got, opts.Pod.Env["PI_CONFIG_FILES"])
 			}
 			for _, init := range tc.pod.InitContainers {
 				for _, mount := range init.VolumeMounts {
@@ -927,16 +1135,18 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 			}
 			worker := r.podTemplate(l, false).Spec
 			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
+			workerProcess := workerOf(t, r, spec, false)
 			for _, pod := range []struct {
 				spec      corev1.PodSpec
 				container string
-			}{{worker, mainContainer}, {probe, probeContainer}} {
+				agent     corev1.Container
+			}{{worker, workerContainer, workerProcess}, {probe, probeContainer, containerNamed(t, probe, probeContainer)}} {
 				var volumes []corev1.Volume
 				for _, volume := range pod.spec.Volumes {
 					if volume.Secret != nil && volume.Secret.SecretName == providersSecret {
 						volumes = append(volumes, volume)
 					}
-					if volume.Name == bootVolume {
+					if volume.Secret != nil && strings.HasPrefix(volume.Secret.SecretName, SandboxName(workerToken)) {
 						for _, item := range volume.Secret.Items {
 							if item.Key == "NATS_NKEY_SEED" {
 								t.Errorf("%s's boot projection carries NATS_NKEY_SEED", pod.container)
@@ -953,7 +1163,7 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 					}
 					return mounts
 				}
-				agent := containerNamed(t, pod.spec, pod.container)
+				agent := pod.agent
 				for _, init := range pod.spec.InitContainers {
 					if got := mounted(init); len(got) != 0 {
 						t.Errorf("%s mounts the providers Secret: %+v", init.Name, got)
@@ -986,7 +1196,7 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 					t.Errorf("%s sets NATS_NKEY_SEED", pod.container)
 				}
 			}
-			main := containerNamed(t, worker, mainContainer)
+			main := workerProcess
 			shim := main.Command[:slices.Index(main.Command, "--")]
 			at := slices.Index(shim, "--provider-env-dir")
 			switch {
@@ -1021,6 +1231,7 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
+	opts.SessionDSNKey = "SESSION_DSN"
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -1041,7 +1252,7 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 		spec := tc.spec
 		spec.Env, spec.Secrets = nil, nil
 		pod := podOf(t, r, spec, tc.colocate)
-		carry(pod, containerNamed(t, pod, mainContainer))
+		carry(pod, workerOf(t, r, spec, tc.colocate))
 	}
 	probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
 	carry(probe, containerNamed(t, probe, probeContainer))
@@ -1065,12 +1276,12 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 }
 
 // imageOwnedPaths covers every path in the image a pod runs or loads from, which an operator's
-// mount there would hide: Oh My Pi, the Legion plugin the agent loads, the Go legion every
-// container runs, the profile's installed plugins, and the databases Oh My Pi keeps in the
+// mount there would hide: Oh My Pi, the Envoy and Legion plugins the agent loads, the Go legion
+// every container runs, the profile's installed plugins, and the databases Oh My Pi keeps in the
 // profile's agent directory.
 func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
 	for _, used := range []string{
-		defaultAgent, legionPlugin, testOptions().Tools.Legion,
+		defaultAgent, envoyPlugin, legionPlugin, testOptions().Tools.Legion,
 		ompProfileDir + "/plugins/node_modules", ompAgentDir + "/agent.db", ompAgentDir + "/models.db",
 	} {
 		if !slices.ContainsFunc(imageOwnedPaths(), func(owned string) bool {
@@ -1147,9 +1358,11 @@ func kubeExpand(input string, env map[string]string) string {
 	return out.String()
 }
 
-// Whatever text a launch carries reaches the process as written, although the kubelet expands
-// `$(NAME)` and `$$` in a container's command and env values: the inlined system prompt, an
-// operator's instructions, and a spec's env values mean what they say in a pod as in a pane.
+// Whatever text a launch carries reaches the process as written: the worker's argv and plain
+// environment travel in the launcher's start command, which no kubelet expands, so `$(NAME)` and
+// `$$` in the inlined system prompt, an operator's instructions, and a spec's env values mean
+// what they say in a pod as in a pane. The role container's own command and env, which the kubelet
+// does expand, still survive it.
 func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -1165,20 +1378,28 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	main := r.podTemplate(l, false).Spec.Containers[0]
-	env := envOf(main)
+	start := launcherCommand(l, r)
 	argv := l.agentArgv(r.agent)
-	for i, arg := range main.Command[len(main.Command)-len(argv):] {
-		if got := kubeExpand(arg, env); got != argv[i] {
-			t.Errorf("the agent's argument #%d reaches it as %q, want %q", i, got, argv[i])
-		}
+	if got := start.Argv[len(start.Argv)-len(argv):]; !slices.Equal(got, argv) {
+		t.Errorf("the agent's argv reaches the launcher as %q, want %q", got, argv)
+	}
+	env := map[string]string{}
+	for _, entry := range start.Env {
+		name, value, _ := strings.Cut(entry, "=")
+		env[name] = value
 	}
 	for name, want := range map[string]string{
 		"LEGION_E2E_NOTE": literal,
 		"PI_SHELL_PREFIX": shellprefix.For(workerBin, filepath.Dir(r.tools.Legion)),
 	} {
-		if got := kubeExpand(env[name], env); got != want {
+		if got := env[name]; got != want {
 			t.Errorf("%s reaches the agent as %q, want %q", name, got, want)
+		}
+	}
+	role := containerNamed(t, r.podTemplate(l, false).Spec, string(spec.Role))
+	for _, arg := range role.Command {
+		if expanded := kubeExpand(arg, envOf(role)); strings.ReplaceAll(arg, "$$", "$") != expanded {
+			t.Errorf("the launcher's argument %q reaches it as %q", arg, expanded)
 		}
 	}
 	if !strings.Contains(l.prompt, literal) {

@@ -490,18 +490,18 @@ describe("executeDispatchTool", () => {
     expect(replying).toBeInstanceOf(ToolInputError);
     if (!(replying instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(replying.problems).toEqual([
-      "body is required (string)",
-      'unknown field "message"; allowed: issue, body, in_reply_to, images',
+      "--body is required (string)",
+      "unknown flag --message",
       "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
     ]);
     expect(replying.message).toBe(
       [
-        "dispatch_message was not called: 3 problems",
-        "- body is required (string)",
-        '- unknown field "message"; allowed: issue, body, in_reply_to, images',
+        "dispatch message was not called: 3 problems",
+        "- --body is required (string)",
+        "- unknown flag --message",
         "- in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
-        "- Allowed keys: issue, body, in_reply_to, images",
-        '- Example: dispatch_message({"issue":"DSP-1","body":"Implementation started."})',
+        "- Allowed flags: --issue, --issue-file, --body, --body-file, --in-reply-to, --in-reply-to-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch message --issue DSP-1 --body 'Implementation started.'",
       ].join("\n")
     );
 
@@ -511,8 +511,8 @@ describe("executeDispatchTool", () => {
     if (!(posting instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(posting.problems).toEqual([
       "issue is required; supply issue or set LEGION_ISSUE",
-      "body is required (string)",
-      'unknown field "message"; allowed: issue, body, in_reply_to, images',
+      "--body is required (string)",
+      "unknown flag --message",
     ]);
   });
 
@@ -530,9 +530,9 @@ describe("executeDispatchTool", () => {
     );
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
-      "options.0 must be an object {label, description?}, not a string",
-      "options.1 must be an object {label, description?}, not a string",
-      'unknown field "custom"; allowed: issue, project, artifact, ref, question, options, multiple, urgency, anchor, images',
+      "--option[0] must be an object {label, description?}, not a string",
+      "--option[1] must be an object {label, description?}, not a string",
+      "unknown flag --custom",
     ]);
   });
 
@@ -562,7 +562,7 @@ describe("executeDispatchTool", () => {
     );
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
-      "body is 1 characters over the 2000-character limit (2001/2000)",
+      "--body is 1 characters over the 2000-character limit (2001/2000)",
       "artifact is required when quote is supplied",
       "reply_to and reply_to_ask cannot both be set",
     ]);
@@ -892,7 +892,7 @@ describe("executeDispatchTool", () => {
     expect(reply.details).toMatchObject({ message: "reply-1", in_reply_to: parent, posted: true });
     expect(reply.text).toBe(
       `Replied to message ${parent} with message reply-1. ` +
-        `dispatch_read({message: "${parent}"}) reads the conversation back.`
+        `dispatch read --message ${parent} reads the conversation back.`
     );
     expect(onIssue.details).toMatchObject({ issue: "LEGION-3", message: "message-9" });
     expect(byRef.details).toMatchObject({ issue: "LEGION-3", message: "message-9" });
@@ -935,7 +935,7 @@ describe("executeDispatchTool", () => {
     });
     expect(result.text).toBe(
       `Replied to message ${parent} with message reply-2, a follow-up threaded under your ` +
-        `reply reply-1. dispatch_read({message: "${parent}"}) reads the conversation back.`
+        `reply reply-1. dispatch read --message ${parent} reads the conversation back.`
     );
   });
 
@@ -1393,7 +1393,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      `- query is ${length - SEARCH_QUERY_MAX} characters over the ${SEARCH_QUERY_MAX}-character limit (${length}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage\n`
+      `- --query is ${length - SEARCH_QUERY_MAX} characters over the ${SEARCH_QUERY_MAX}-character limit (${length}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage\n`
     );
     expect(requests).toBe(0);
   });
@@ -1493,7 +1493,7 @@ describe("executeDispatchTool", () => {
         asks: [
           {
             id: "ask-1",
-            ref: "/issues/LEGION-1?ask=ask-1",
+            ref: "/issues/LEGION-1/asks/ask-1",
             question: releaseQuestion,
             kind: "question",
             urgency: "high",
@@ -1543,7 +1543,7 @@ describe("executeDispatchTool", () => {
         "2 unanswered asks you authored on active issues and project documents.",
         "",
         "Waiting on human (1):",
-        `- 1m 5s · P0 · LEGION-1: Reminder · ${releaseQuestion} · http://dispatch.test/issues/LEGION-1?ask=ask-1`,
+        `- 1m 5s · P0 · LEGION-1: Reminder · ${releaseQuestion} · http://dispatch.test/issues/LEGION-1/asks/ask-1`,
         "",
         "Waiting on agent (1):",
         "- 2h · OPS / Runbook · Which region? · http://dispatch.test/projects/OPS/documents/runbook?ask=ask-2",
@@ -2273,7 +2273,7 @@ describe("executeDispatchTool", () => {
       text: [
         'Not created: "Global search across issues and documents" looks like a duplicate.',
         "LEGION-12 [triage] Global search across issues and documents → http://dispatch.test/issues/LEGION-12",
-        "Reference the existing issue, or call dispatch_issue again with force: true after reading it.",
+        "Reference the existing issue, or run dispatch issue again with --force after reading it.",
       ].join("\n"),
       details: { duplicates: candidates },
     });
@@ -3580,7 +3580,7 @@ describe("executeDispatchTool", () => {
     expect(result).toEqual({
       text:
         "chart.png is an uploaded image/png file (version 1, 6 bytes) that is not UTF-8 text, so " +
-        "dispatch_doc_read cannot show it. GET /api/v1/artifacts/image-8/versions/1 serves its bytes.",
+        "dispatch doc-read cannot show it. GET /api/v1/artifacts/image-8/versions/1 serves its bytes.",
       details: { issue: "DSP-42" },
     });
     expect(requests).toEqual(["/api/v1/issues/DSP-42", "/api/v1/artifacts/image-8/versions/1"]);
@@ -3694,7 +3694,7 @@ describe("executeDispatchTool", () => {
         "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " +
         "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " +
         "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
-        "for dispatch_doc_read)"
+        "for dispatch doc-read)"
     );
   });
 
@@ -3837,7 +3837,8 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a live sync in place of the nightly export."'
     );
-    expect(result.text).toContain("`plan-gap-analyst`");
+    expect(result.text).toContain('`task(agent="scout")`');
+    expect(result.text).toContain("Legion plugin's `plan-gap-analyst`");
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
     expect(result.details).toMatchObject({ follows: { ask: "ask-9" } });
     expect(result.details).not.toHaveProperty("topic");
@@ -4047,11 +4048,11 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 5)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
+        "dispatch request-approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
         "- block b-2, whose ask Dispatch has not opened yet",
         "- block b-3, which version 4 does not hold yet",
-        '- "Question of b-4?" (block b-4, ask ask-b-4), answered but still open in version 4: fold the answer into the text with dispatch_doc_edit, which writes a version that carries it',
+        '- "Question of b-4?" (block b-4, ask ask-b-4), answered but still open in version 4: fold the answer into the text with dispatch doc-edit, which writes a version that carries it',
       ]);
       expect(refusal).toContain("even when a human asked for it");
       expect(refusal).toContain("ask them to answer it or to waive it");
@@ -4070,7 +4071,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n")[1]).toBe(
-        '- "Question of b-1?" (block b-1, ask ask-b-1), resolved but still open in version 4: write the decision into the text with dispatch_doc_edit, which writes a version that carries it'
+        '- "Question of b-1?" (block b-1, ask ask-b-1), resolved but still open in version 4: write the decision into the text with dispatch doc-edit, which writes a version that carries it'
       );
       expect(posts).toEqual([]);
     });
@@ -4089,7 +4090,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 2)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
+        "dispatch request-approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
       ]);
       expect(posts).toEqual([]);
@@ -4204,9 +4205,9 @@ describe("executeDispatchTool", () => {
       ]) {
         const { outcome, reads, edits } = edit(ops);
         expect((await outcome).split("\n")).toEqual([
-          "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
+          "dispatch doc-edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
-          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
+          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch edit-ask if you asked it; each keeps it.",
         ]);
         expect(reads).toEqual([
           "/api/v1/artifacts/artifact-42/blocks",
@@ -4228,15 +4229,15 @@ describe("executeDispatchTool", () => {
           { op: "insert", after: "block:p-1", markdown },
         ]);
         expect((await outcome).split("\n")).toEqual([
-          "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
+          "dispatch doc-edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
-          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
+          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch edit-ask if you asked it; each keeps it.",
         ]);
         expect(edits).toEqual([]);
       }
     });
 
-    test("names dispatch_edit_ask for the urgency, multiple and options replace and move cannot change", async () => {
+    test("names dispatch edit-ask for the urgency, multiple and options replace and move cannot change", async () => {
       // Changing those attributes requires editing the ask; replace and move cannot change them.
       const { outcome, edits } = edit([
         { op: "delete", block: "b-1" },
@@ -4247,7 +4248,7 @@ describe("executeDispatchTool", () => {
         },
       ]);
       const guidance = (await outcome).split("\n").at(-1);
-      expect(guidance).toContain("dispatch_edit_ask");
+      expect(guidance).toContain("dispatch edit-ask");
       expect(edits).toEqual([]);
     });
 
@@ -5566,7 +5567,9 @@ describe("executeDispatchTool", () => {
           exec: repoExec("owner/repo"),
           fetchImpl: fetchImpl as typeof fetch,
         })
-      ).rejects.toThrow('dispatch_issue({ external: "owner/repo#999", ... })');
+      ).rejects.toThrow(
+        "create it first with dispatch issue --external 'owner/repo#999' --project <key> --title <title>"
+      );
       expect(
         requests.filter(
           (request) =>
@@ -5706,6 +5709,20 @@ describe("executeDispatchTool", () => {
               created_at: "2026-09-08T23:59:00Z",
             },
           ],
+          answers: [
+            {
+              user: "sami",
+              selected: ["MCP API"],
+              text: null,
+              at: "2026-09-08T23:58:00Z",
+            },
+            {
+              user: "sami",
+              selected: ["JSON"],
+              text: "Ship JSON.",
+              at: "2026-09-09T00:00:00Z",
+            },
+          ],
         });
       }
       if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
@@ -5770,6 +5787,8 @@ describe("executeDispatchTool", () => {
         "- By: sami",
         "- Selected: JSON",
         "- Text: Ship JSON.",
+        "Earlier answers:",
+        "- 2026-09-08T23:58:00Z · sami · MCP API",
         "Replies:",
         "comment-1 · user sami",
         "Body: JSON, please.",
@@ -6118,7 +6137,7 @@ describe("executeDispatchTool", () => {
           throw new Error("network must not be called");
         }) as unknown as typeof fetch,
       })
-    ).rejects.toThrow("host session id is required for dispatch_follow");
+    ).rejects.toThrow("host session id is required for dispatch follow");
   });
 
   test("rejects a comment reply that names both reply_to and reply_to_ask", async () => {
@@ -6315,6 +6334,7 @@ describe("executeDispatchTool", () => {
             created_at: "2026-09-09T00:00:00Z",
           },
           replies: [],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
@@ -6397,6 +6417,7 @@ describe("executeDispatchTool", () => {
             created_at: "2026-09-09T00:00:00Z",
           },
           replies: [],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("node"));
@@ -6656,6 +6677,7 @@ describe("executeDispatchTool", () => {
               created_at: "2026-09-08T23:59:00Z",
             },
           ],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
@@ -7072,6 +7094,7 @@ describe("executeDispatchTool", () => {
             payload: {
               question: releaseQuestion,
               answer: { selected: ["Keep the limits"], text: "No, trim the asks." },
+              previous_answer: { selected: ["Trim the asks"], text: null },
             },
           },
           {
@@ -7124,7 +7147,7 @@ describe("executeDispatchTool", () => {
         "Events:",
         `- #2 comment.created · user sami · 2026-09-09T00:02:00Z · Looks good. ${"x".repeat(108)}…`,
         `- #3 ask.opened · session s1 · 2026-09-09T00:03:00Z · ${releaseQuestion}`,
-        `- #4 ask.answered · user sami · 2026-09-09T00:04:00Z · ${releaseQuestion} -> Keep the limits - No, trim the asks.`,
+        `- #4 ask.answered · user sami · 2026-09-09T00:04:00Z · ${releaseQuestion} -> Keep the limits - No, trim the asks. (was: Trim the asks)`,
         "- #5 artifact.version · session s1 · 2026-09-09T00:05:00Z · spec.md v3: Record D1",
         "- #6 issue.updated · user sami · 2026-09-09T00:06:00Z · status in_progress",
         "- #7 comment.anchor_refreshed · user sami · 2026-09-09T00:07:00Z · Anchor moved after the document edit.",
@@ -7301,6 +7324,7 @@ describe("executeDispatchTool", () => {
           },
           replies: [],
           edits: [],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));

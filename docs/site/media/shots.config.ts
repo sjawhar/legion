@@ -195,6 +195,19 @@ const dispatch: ShotSet<DispatchWorkspace> = {
         await expect(page.getByRole("article", { name: "Urgency: Blocking" })).toBeVisible();
       },
     },
+    {
+      id: "delivery-measures",
+      alt: "The Delivery page's measures panel: six target cards over a strip of headline numbers.",
+      route: "/delivery?mode=list&from=2026-08-30T00%3A00%3A00Z&to=2026-09-27T20%3A00%3A00Z",
+      viewport: "desktop",
+      theme: "light",
+      ready: async (page) => {
+        const kpis = page.getByLabel("KPI targets");
+        await expect(kpis).toBeVisible();
+        await expect(kpis.locator('[data-kpi="Deploys a day"]')).toContainText("5 deploys");
+      },
+      element: (page) => page.getByLabel("KPI targets").locator(".."),
+    },
   ],
 };
 

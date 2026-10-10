@@ -18,28 +18,45 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 )
 
-// manifestAt is where the tests' plugin manifest goes under a plugins root.
+// manifestAt is where the tests' pi-legion manifest goes under a plugins root, and envoyManifestAt
+// the pi-envoy manifest beside it, as `omp plugin install` lays both out.
 func manifestAt(root string) string {
-	return filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json")
+	return filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-legion", "package.json")
 }
 
-// writeManifest writes a pi-legion-envoy manifest at path; legion is the raw JSON of its `legion`
+func envoyManifestAt(root string) string {
+	return filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-envoy", "package.json")
+}
+
+// writeManifest writes a pi-legion manifest at path; legion is the raw JSON of its `legion`
 // member, or empty for a manifest without one.
 func writeManifest(t *testing.T, path, legion string) {
 	t.Helper()
-	body := `{"name":"@sjawhar/pi-legion-envoy","version":"1.57.0"`
+	body := `{"name":"@sjawhar/pi-legion","version":"1.57.0"`
 	if legion != "" {
 		body += `,"legion":` + legion
 	}
-	body += "}\n"
+	writeManifestFile(t, path, body+"}\n")
+}
+
+// writeEnvoyManifest writes a pi-envoy manifest at path: a name and a version, since the gate
+// holds pi-envoy to no contract, only to a manifest of its name.
+func writeEnvoyManifest(t *testing.T, path string) {
+	t.Helper()
+	writeManifestFile(t, path, `{"name":"@sjawhar/pi-envoy","version":"1.57.0"}`+"\n")
+}
+
+func writeManifestFile(t *testing.T, path, body string) {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("create the manifest directory: %v", err)
+		t.Fatalf("create %s's directory: %v", path, err)
 	}
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
-		t.Fatalf("write the manifest: %v", err)
+		t.Fatalf("write %s: %v", path, err)
 	}
 }
 
@@ -47,6 +64,16 @@ func mkdir(t *testing.T, path string) {
 	t.Helper()
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		t.Fatalf("create %s: %v", path, err)
+	}
+}
+
+// link installs the unpacked plugin at unpacked into a profile as `omp plugin install` does: the
+// profile's package directory a link to it.
+func link(t *testing.T, unpacked, installed string) {
+	t.Helper()
+	mkdir(t, filepath.Dir(installed))
+	if err := os.Symlink(unpacked, installed); err != nil {
+		t.Fatalf("link the plugin into the profile: %v", err)
 	}
 }
 
@@ -261,16 +288,26 @@ env >"$dir/env.$n"
 cp "$3" "$dir/probe.$n"
 step=$(sed -n "${n}p" "$dir/plan")
 [ -n "$step" ] || step=$(tail -n 1 "$dir/plan")
-# Where a real Oh My Pi reports the plugin loaded from: the real path of the legion.js the profile
-# links, as import.meta.url renders it (symlinks resolved, a cache-busting query appended).
+# Where a real Oh My Pi reports each plugin loaded from: the real path of the legion.js or envoy.js
+# the profile links, as import.meta.url renders it (symlinks resolved, a cache-busting query
+# appended). Every yes-* step loads pi-legion from the profile speaking interface 1; what it says
+# of pi-envoy, and of the pre-split package, is the step's own.
 root="$HOME/.omp"
 [ -n "${OMP_PROFILE:-}" ] && root="$root/profiles/$OMP_PROFILE"
-installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion-envoy" 2>/dev/null && pwd -P)
+installed=$(cd "$root/plugins/node_modules/@sjawhar/pi-legion" 2>/dev/null && pwd -P)
+envoy=$(cd "$root/plugins/node_modules/@sjawhar/pi-envoy" 2>/dev/null && pwd -P)
+legion="LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://$installed/dist/legion.js?mtime=1\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n"
+with_envoy="LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\n"
 case "$step" in
-yes) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js?mtime=1\n' "$installed" >&2; exit 0 ;;
-yes-then-linger) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/dist/legion.js?mtime=1\n' "$installed" >&2; sleep 3 & echo $! >"$dir/lingering.pid"; exit 0 ;;
-yes-elsewhere) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/elsewhere/dist/legion.js?mtime=1\n' "$HOME" >&2; exit 0 ;;
-yes-unowned) printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://%s/unowned/legion.js\n' "$HOME" >&2; exit 0 ;;
+yes) printf "$legion$with_envoy" >&2; exit 0 ;;
+yes-then-linger) printf "$legion$with_envoy" >&2; sleep 3 & echo $! >"$dir/lingering.pid"; exit 0 ;;
+yes-elsewhere) printf "LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://$HOME/elsewhere/dist/legion.js?mtime=1\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n$with_envoy" >&2; exit 0 ;;
+yes-unowned) printf "LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=file://$HOME/unowned/legion.js\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n$with_envoy" >&2; exit 0 ;;
+# No pi-envoy; a skill asked for is missing too, so a test can see which refusal wins.
+yes-no-envoy) printf "${legion}LEGION_ENVOY_INTERFACE=none\n" >&2; [ -z "${LEGION_PROMPT_SKILLS:-}" ] || echo "LEGION_PROMPT_SKILLS_MISSING=$LEGION_PROMPT_SKILLS" >&2; exit 0 ;;
+yes-envoy-mismatch) printf "${legion}LEGION_ENVOY_INTERFACE=2\nLEGION_ENVOY_LOADED_FROM=file://$envoy/dist/envoy.js?mtime=1\n" >&2; exit 0 ;;
+yes-legacy) printf "$legion${with_envoy}LEGION_LEGACY_PLUGIN_LOADED_FROM=file://$HOME/legacy/dist/legion.js?mtime=1\n" >&2; exit 0 ;;
+yes-envoy-elsewhere) printf "${legion}LEGION_ENVOY_INTERFACE=1\nLEGION_ENVOY_LOADED_FROM=file://$HOME/envoy-elsewhere/dist/envoy.js?mtime=1\n" >&2; exit 0 ;;
 yes-then-die) echo LEGION_PLUGIN_LOADED=yes >&2; echo "database is locked" >&2; exit 1 ;;
 no) echo LEGION_PLUGIN_LOADED=no >&2; exit 0 ;;
 silent) exit 0 ;;
@@ -315,22 +352,22 @@ func (f fakeOmp) read(t *testing.T, name string) string {
 	return string(raw)
 }
 
-// gateUnder is a gate over a pane environment whose HOME holds a manifest declaring legion (raw
-// JSON), installed as `omp plugin install` installs it — the profile's package directory a link to
-// the unpacked plugin — run through f with f's launch prefix, and a log that records what it said.
-// Its attempt budget is long enough for the fake to answer on a loaded box — a budget that expires
-// before the fake has counted its attempt would shift its plan — and short enough that a hang
-// costs little.
+// gateUnder is a gate over a pane environment whose HOME holds a pi-legion manifest declaring
+// legion (raw JSON) and a pi-envoy manifest beside it, each installed as `omp plugin install`
+// installs it — the profile's package directory a link to the unpacked plugin — run through f with
+// f's launch prefix, and a log that records what it said. Its attempt budget is long enough for the
+// fake to answer on a loaded box — a budget that expires before the fake has counted its attempt
+// would shift its plan — and short enough that a hang costs little.
 func gateUnder(t *testing.T, f fakeOmp, legion string) (pluginGate, *bytes.Buffer) {
 	t.Helper()
 	home := t.TempDir()
+	profile := filepath.Join(home, ".omp", "profiles", "gate")
 	unpacked := filepath.Join(home, "unpacked-plugin")
 	writeManifest(t, filepath.Join(unpacked, "package.json"), legion)
-	installed := filepath.Dir(manifestAt(filepath.Join(home, ".omp", "profiles", "gate")))
-	mkdir(t, filepath.Dir(installed))
-	if err := os.Symlink(unpacked, installed); err != nil {
-		t.Fatalf("link the plugin into the profile: %v", err)
-	}
+	link(t, unpacked, filepath.Dir(manifestAt(profile)))
+	unpackedEnvoy := filepath.Join(home, "unpacked-envoy")
+	writeEnvoyManifest(t, filepath.Join(unpackedEnvoy, "package.json"))
+	link(t, unpackedEnvoy, filepath.Dir(envoyManifestAt(profile)))
 	var logged bytes.Buffer
 	return pluginGate{
 		env: map[string]string{
@@ -419,7 +456,7 @@ func TestTheGateRefusesAManifestItCannotRead(t *testing.T) {
 	for name, env := range map[string]string{"absent": missing, "gate": manifest} {
 		gate.env["OMP_PROFILE"] = name
 		err := gate.verify(context.Background())
-		if err == nil || !strings.Contains(err.Error(), "pi-legion-envoy manifest at "+env+" could not be read") {
+		if err == nil || !strings.Contains(err.Error(), "pi-legion manifest at "+env+" could not be read") {
 			t.Errorf("profile %s: err = %v, want the unreadable-manifest refusal naming %s", name, err, env)
 		}
 	}
@@ -429,14 +466,25 @@ func TestTheGateRefusesAManifestItCannotRead(t *testing.T) {
 }
 
 // The load probe is the embedded probe extension handed to `omp models`, through the launch
-// prefix, under the pane's environment and nothing of the daemon's own.
+// prefix, under the pane's environment and nothing of the daemon's own. A pass is logged in the
+// words the e2e stages grep for, naming the Envoy plugin's interface and where it loaded from.
 func TestTheLoadProbeRunsWhatAPaneRunsAndPassesOnTheLoadedMarker(t *testing.T) {
 	f := newFakeOmp(t, "yes")
-	gate, _ := gateUnder(t, f, contractCurrent)
+	gate, logged := gateUnder(t, f, contractCurrent)
 	t.Setenv("LEGION_DAEMON_ONLY_SECRET", "the daemon's own")
 
 	if err := gate.verify(context.Background()); err != nil {
 		t.Fatalf("the gate refused a loaded plugin of its contract: %v", err)
+	}
+
+	envoy, _ := filepath.EvalSymlinks(filepath.Dir(envoyManifestAt(filepath.Join(gate.env["HOME"], ".omp", "profiles", "gate"))))
+	for _, want := range []string{
+		`msg="boot gate: pi-legion speaks this daemon's contract and loads with pi-envoy"`,
+		"daemonApiVersion=3", "envoyInterface=1", `envoyFrom="file://` + envoy + `/dist/envoy.js?mtime=1"`,
+	} {
+		if !strings.Contains(logged.String(), want) {
+			t.Errorf("the gate's log lacks %q:\n%s", want, logged.String())
+		}
 	}
 
 	if n := f.attempts(t); n != 1 {
@@ -516,11 +564,11 @@ func TestTheLoadProbeRefusesAPluginLoadedFromAnotherRoot(t *testing.T) {
 		want []string
 	}{
 		{"yes-elsewhere", []string{
-			"pi-legion-envoy loads in a pane from ", filepath.Join("elsewhere", "package.json"),
+			"pi-legion loads in a pane from ", filepath.Join("elsewhere", "package.json"),
 			"but the manifest this gate held to daemon API contract 3 is ",
 			"OMP profile gate", "launch prefix",
 		}},
-		{"yes-unowned", []string{"no @sjawhar/pi-legion-envoy package.json above", filepath.Join("unowned", "legion.js")}},
+		{"yes-unowned", []string{"no @sjawhar/pi-legion package.json above", filepath.Join("unowned", "legion.js")}},
 	} {
 		t.Run(testCase.step, func(t *testing.T) {
 			f := newFakeOmp(t, testCase.step)
@@ -554,7 +602,7 @@ func TestTheLoadProbeRefusesAPluginOhMyPiDidNotLoad(t *testing.T) {
 
 			err := gate.verify(context.Background())
 
-			want := "pi-legion-envoy 1.57.0 is installed but not loaded by omp (disabled or unregistered): run OMP_PROFILE=gate omp plugin list"
+			want := "pi-legion 1.57.0 is installed but not loaded by omp (disabled or unregistered): run OMP_PROFILE=gate omp plugin list"
 			if err == nil || err.Error() != want {
 				t.Fatalf("err = %v, want %q", err, want)
 			}
@@ -562,6 +610,113 @@ func TestTheLoadProbeRefusesAPluginOhMyPiDidNotLoad(t *testing.T) {
 				t.Errorf("Oh My Pi ran %d times for a definitive answer, want once", n)
 			}
 		})
+	}
+}
+
+// A pi-legion loaded with no pi-envoy has nothing to claim its role through: the gate refuses,
+// naming the pi-envoy release to install into the pane's profile.
+func TestTheLoadProbeRefusesAPluginWithoutTheEnvoyPlugin(t *testing.T) {
+	f := newFakeOmp(t, "yes-no-envoy")
+	gate, _ := gateUnder(t, f, contractCurrent)
+
+	err := gate.verify(context.Background())
+
+	want := "pi-legion 1.57.0 is loaded in a pane of OMP profile gate, but no pi-envoy is: install the @sjawhar/pi-envoy release built from this daemon's commit into OMP profile gate"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	if n := f.attempts(t); n != 1 {
+		t.Errorf("Oh My Pi ran %d times for a definitive answer, want once", n)
+	}
+}
+
+// A pi-envoy publishing another interface version than the pi-legion speaks is a pair released
+// from different commits: the gate refuses, naming both versions, where pi-envoy loaded from, and
+// the remedy of installing both releases.
+func TestTheLoadProbeRefusesAPluginAtAnotherEnvoyInterface(t *testing.T) {
+	f := newFakeOmp(t, "yes-envoy-mismatch")
+	gate, _ := gateUnder(t, f, contractCurrent)
+
+	err := gate.verify(context.Background())
+
+	envoy, _ := filepath.EvalSymlinks(filepath.Dir(envoyManifestAt(filepath.Join(gate.env["HOME"], ".omp", "profiles", "gate"))))
+	want := "pi-envoy at file://" + envoy + "/dist/envoy.js?mtime=1 publishes plugin interface 2; pi-legion speaks 1: install both releases built from this daemon's commit into OMP profile gate"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	if n := f.attempts(t); n != 1 {
+		t.Errorf("Oh My Pi ran %d times for a definitive answer, want once", n)
+	}
+}
+
+// A pane that still loads the pre-split @sjawhar/pi-legion-envoy beside pi-legion would run two
+// Legion entries against the same pane: the gate refuses, naming the uninstall under the pane's
+// profile, before any word on pi-envoy.
+func TestTheLoadProbeRefusesAPluginBesideTheOldPackage(t *testing.T) {
+	f := newFakeOmp(t, "yes-legacy")
+	gate, _ := gateUnder(t, f, contractCurrent)
+
+	err := gate.verify(context.Background())
+
+	want := "a pane of OMP profile gate still loads @sjawhar/pi-legion-envoy from file://" + gate.env["HOME"] + "/legacy/dist/legion.js?mtime=1: run `OMP_PROFILE=gate omp plugin uninstall @sjawhar/pi-legion-envoy`"
+	if err == nil || err.Error() != want {
+		t.Fatalf("err = %v, want %q", err, want)
+	}
+	if n := f.attempts(t); n != 1 {
+		t.Errorf("Oh My Pi ran %d times for a definitive answer, want once", n)
+	}
+}
+
+// The pi-envoy a pane loads is held to a manifest of its name, wherever that is: a pane's lane
+// reads no pi-envoy manifest of its own to hold it to, so one loaded from another root passes,
+// and one no @sjawhar/pi-envoy manifest owns is refused.
+func TestTheLoadProbeHoldsTheEnvoyPluginToAManifestOfItsName(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		owned bool
+		want  string
+	}{
+		{"an owning manifest elsewhere", true, ""},
+		{"no owning manifest", false, "no @sjawhar/pi-envoy package.json above"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			f := newFakeOmp(t, "yes-envoy-elsewhere")
+			gate, _ := gateUnder(t, f, contractCurrent)
+			if testCase.owned {
+				writeEnvoyManifest(t, filepath.Join(gate.env["HOME"], "envoy-elsewhere", "package.json"))
+			}
+
+			err := gate.verify(context.Background())
+
+			if testCase.want == "" && err != nil {
+				t.Fatalf("the gate refused a pi-envoy an @sjawhar/pi-envoy manifest owns: %v", err)
+			}
+			if testCase.want != "" && (err == nil || !strings.Contains(err.Error(), testCase.want) || !strings.Contains(err.Error(), filepath.Join("envoy-elsewhere", "dist", "envoy.js"))) {
+				t.Fatalf("err = %v, want it to say %q and name the file", err, testCase.want)
+			}
+		})
+	}
+}
+
+// The refusals come in an order that sends the operator to the first remedy: with no pi-envoy
+// loaded, the skills it ships are missing too, and the gate names the missing plugin, never the
+// missing skill.
+func TestTheGateRefusesAMissingEnvoyBeforeTheMissingSkills(t *testing.T) {
+	f := newFakeOmp(t, "yes-no-envoy")
+	gate, _ := gateUnder(t, f, contractCurrent)
+	gate.roleReferences = promptrefs.New()
+	gate.roleReferences.Text("roles/implementer.md", []byte("Read skill://dispatch before you file anything.\n"))
+
+	err := gate.verify(context.Background())
+
+	if err == nil || !strings.Contains(err.Error(), "but no pi-envoy is: install the @sjawhar/pi-envoy release") {
+		t.Fatalf("err = %v, want the missing-pi-envoy refusal", err)
+	}
+	if strings.Contains(err.Error(), "dispatch") {
+		t.Errorf("err = %v, which names the skill dispatch, a remedy behind the missing plugin's", err)
+	}
+	if skills := f.read(t, "env.1"); !strings.Contains(skills, "LEGION_PROMPT_SKILLS=dispatch\n") {
+		t.Errorf("the load probe was not asked for the skill dispatch:\n%s", skills)
 	}
 }
 

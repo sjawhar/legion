@@ -21,6 +21,7 @@ function renderPage() {
  *  resolved with empty fixtures so the page settles past its own loading states. */
 function stubUnrelatedQueries() {
   return {
+    getDeliverySettings: spyOn(api, "getDeliverySettings").mockResolvedValue(null),
     listAgentTokens: spyOn(api, "listAgentTokens").mockResolvedValue([]),
     listArchitectureSources: spyOn(api, "listArchitectureSources").mockResolvedValue([]),
     listProjects: spyOn(api, "listProjects").mockResolvedValue([]),

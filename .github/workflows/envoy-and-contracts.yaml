@@ -6,19 +6,24 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
-      # Every skill: pi-envoy ships them, and its skills-guard test checks their sizes and links.
+      # Every skill: the two Oh My Pi plugins ship them between them, and each one's skills-guard
+      # test checks the sizes and links of its partition.
       - "skills/**"
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/claude-envoy/**"
       - "packages/pi-envoy/**"
+      - "packages/pi-legion/**"
+      - "packages/pi-shared/**"
+      # The plugins' shared prepack, which their pack steps and pi-shared's partition test run.
+      - "scripts/pi-plugin-prepack.sh"
       - "packages/dispatch/**"
       - "packages/proof-editor/**"
       - "patches/**"
       - "package.json"
       - "bun.lock"
-      # The Go module: envoy-smoke compiles in workspace mode, pi-envoy's grant rig runs its code,
-      # and the worker image's Dockerfile pins the jj the pi-envoy tests drive. The Go daemon's own
+      # The Go module: envoy-smoke compiles in workspace mode, pi-legion's grant rig runs its code,
+      # and the worker image's Dockerfile pins the jj the pi-legion tests drive. The Go daemon's own
       # suite is the Tests workflow's (pr-and-main.yaml), on every pull request.
       - "packages/daemon/**"
       - ".github/actions/install-jj/**"
@@ -42,12 +47,16 @@ on:
     paths:
       - "packages/envoy/**"
       - "packages/contracts/**"
-      # Every skill: pi-envoy ships them, and its skills-guard test checks their sizes and links.
+      # Every skill: the two Oh My Pi plugins ship them between them, and each one's skills-guard
+      # test checks the sizes and links of its partition.
       - "skills/**"
       - "packages/envoy-client/**"
       - "packages/envoy-plugin/**"
       - "packages/claude-envoy/**"
       - "packages/pi-envoy/**"
+      - "packages/pi-legion/**"
+      - "packages/pi-shared/**"
+      - "scripts/pi-plugin-prepack.sh"
       - "packages/dispatch/**"
       - "packages/proof-editor/**"
       - "patches/**"
@@ -95,7 +104,9 @@ jobs:
       envoy_image: ${{ steps.filter.outputs.envoy_image }}
       plugin: ${{ steps.filter.outputs.plugin }}
       claude_plugin: ${{ steps.filter.outputs.claude_plugin }}
+      pi_shared: ${{ steps.filter.outputs.pi_shared }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
+      pi_legion: ${{ steps.filter.outputs.pi_legion }}
       dispatch: ${{ steps.filter.outputs.dispatch }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -145,6 +156,8 @@ jobs:
               - 'patches/**'
               - 'packages/envoy-client/package.json'
               - 'packages/pi-envoy/package.json'
+              - 'packages/pi-legion/package.json'
+              - 'packages/pi-shared/package.json'
               - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/package.json'
               - 'docs/site/package.json'
@@ -188,23 +201,68 @@ jobs:
               - 'bun.lock'
               # check-dist rebuilds the committed dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
+            # The private workspace package both Oh My Pi plugins import. Its tests stage each
+            # plugin's skills through the prepack script and hold the two lists to a partition of
+            # skills/ (test/skills-partition.test.ts).
+            pi_shared:
+              - 'packages/pi-shared/**'
+              - 'packages/envoy-client/**'
+              - 'packages/contracts/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'skills/**'
+              - 'scripts/pi-plugin-prepack.sh'
+            # The Envoy plugin: its own sources, the workspace packages its bundle inlines, the
+            # four skills it ships (src/skills-guard.test.ts checks them; scripts/prepack.test.ts
+            # stages them through the prepack script, which its pack step runs), and the Oh My Pi
+            # pin its real-binary test runs (extensions/dispatch-first-omp.test.ts), installed
+            # through the mise install-jj leaves.
             pi_envoy:
               - 'packages/pi-envoy/**'
+              - 'packages/pi-shared/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
               # Its pack step writes dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
-              # The skills pi-envoy ships, which src/skills-guard.test.ts checks.
-              - 'skills/**'
-              # The Oh My Pi pin the real-binary tests run (extensions/legion-phase-stall-omp.test.ts,
-              # extensions/dispatch-first-omp.test.ts).
+              - 'scripts/pi-plugin-prepack.sh'
+              - 'skills/dispatch/**'
+              - 'skills/dispatch-first/**'
+              - 'skills/dispatch-brainstorming/**'
+              - 'skills/envoy/**'
               - '.omp-pin'
               - '.github/actions/install-omp/**'
-              # The rigs' scripts/grant-rig/run.test.ts runs daemon-pane.go inside the daemon
-              # module, so a change to the daemon (or to the worker image's jj, whose version its
-              # Dockerfile there pins for the tests) runs it.
+              - '.github/actions/install-jj/**'
+            # The Legion plugin: the same shape over its eight skills, the Oh My Pi pin its
+            # real-binary test runs (extensions/legion-phase-stall-omp.test.ts), and the daemon: the
+            # rigs' scripts/grant-rig/run.test.ts runs daemon-pane.go inside the daemon module, so a
+            # change to the daemon (or to the worker image's jj, whose version its Dockerfile there
+            # pins for the tests) runs it.
+            pi_legion:
+              - 'packages/pi-legion/**'
+              - 'packages/pi-shared/**'
+              - 'packages/envoy-client/**'
+              - 'packages/contracts/**'
+              - 'package.json'
+              - 'bun.lock'
+              - 'scripts/third-party-notices.ts'
+              - 'scripts/pi-plugin-prepack.sh'
+              - 'skills/legion-architect/**'
+              - 'skills/legion-controller/**'
+              - 'skills/legion-oracle/**'
+              - 'skills/legion-retro/**'
+              - 'skills/legion-worker/**'
+              - 'skills/ce-simplify-code/**'
+              - 'skills/thermonuclear-code-quality/**'
+              - 'skills/thermonuclear-deep-review/**'
+              # The Legion skills link into skills/dispatch/SKILL.md by heading
+              # (`skill://dispatch/SKILL.md#…`), and src/skills-guard.test.ts is the one check that
+              # those anchors resolve: a heading rename there must run it on its own pull request,
+              # not merge green and fail the next unrelated pi-legion change.
+              - 'skills/dispatch/**'
+              - '.omp-pin'
+              - '.github/actions/install-omp/**'
               - 'packages/daemon/**'
               - 'go.work'
               - 'go.work.sum'
@@ -303,7 +361,7 @@ jobs:
         run: bun run typecheck
         working-directory: packages/envoy-client
       - name: Pre-pull the NATS image the credential tests run
-        run: docker pull nats:2.10
+        run: docker pull mirror.gcr.io/library/nats:2.10
       - name: Test Envoy client
         run: bun run test
         working-directory: packages/envoy-client
@@ -312,6 +370,28 @@ jobs:
       - name: Build Envoy client
         run: bun run build
         working-directory: packages/envoy-client
+
+  pi-shared:
+    needs: changes
+    if: needs.changes.outputs.pi_shared == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - run: bun install --frozen-lockfile
+      - name: Lint pi-shared
+        run: bun run lint
+        working-directory: packages/pi-shared
+      - name: Typecheck pi-shared
+        run: bun run typecheck
+        working-directory: packages/pi-shared
+      # test/skills-partition.test.ts stages each plugin's skills with scripts/pi-plugin-prepack.sh
+      # --stage-skills and holds the two lists to a partition of skills/.
+      - name: Test pi-shared
+        run: bun run test
+        working-directory: packages/pi-shared
 
   pi-envoy:
     needs: changes
@@ -322,17 +402,13 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
+      # Only for the mise it leaves at ~/.local/bin/mise, which install-omp installs the pin through:
+      # nothing in this package drives jj.
       - uses: ./.github/actions/install-jj
-      # extensions/legion-phase-stall-omp.test.ts and extensions/dispatch-first-omp.test.ts run the
-      # pinned Oh My Pi against stand-ins (extensions/test-omp-harness.ts) and refuse on GitHub Actions
-      # without one. The pin is read from .omp-pin, the repository's one copy of it, installed
-      # through the mise install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
+      # extensions/dispatch-first-omp.test.ts runs the pinned Oh My Pi against stand-ins
+      # (packages/pi-shared/test/omp-harness.ts) and refuses on GitHub Actions without one. The pin
+      # is read from .omp-pin, the repository's one copy of it (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
-      # scripts/grant-rig/run.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version-file: packages/daemon/go.mod
-          cache-dependency-path: packages/daemon/go.sum
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy
         run: bun run build
@@ -346,20 +422,93 @@ jobs:
       - name: Test pi-envoy
         run: bun run test
         working-directory: packages/pi-envoy
-      # The release's pack (release.yaml's pi_envoy job), which is also this job's build: the manifest
-      # pointed at the bundles, then prepack.sh, which bundles both extensions, writes
-      # dist/THIRD_PARTY_NOTICES and fails the pack on a bundled package whose license cannot be
-      # determined; the listing shows the tarball ships it.
+      # The release's pack (release.yaml's pi_envoy job), which is also this job's build: the
+      # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
+      # envoy.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
+      # license cannot be determined) and stages this plugin's four skills. The listing shows the
+      # tarball ships those and nothing of the Legion plugin's: no legion.js, no agents/, none of
+      # its skills.
       - name: Pack pi-envoy
         run: |
-          jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' package.json > "$RUNNER_TEMP/package.json"
+          jq '.omp.extensions = ["dist/envoy.js"]' package.json > "$RUNNER_TEMP/package.json"
           mv "$RUNNER_TEMP/package.json" package.json
           bun pm pack --destination ../../out/pr-artifacts
-          tar tzf ../../out/pr-artifacts/*.tgz | grep -x package/dist/THIRD_PARTY_NOTICES
+          listing=$RUNNER_TEMP/pi-envoy-listing
+          tar tzf ../../out/pr-artifacts/*.tgz > "$listing"
+          for shipped in package/dist/envoy.js package/dist/THIRD_PARTY_NOTICES package/dist/skills/dispatch/SKILL.md; do
+            grep -qxF "$shipped" "$listing" || { echo "::error::the pi-envoy tarball does not ship $shipped"; exit 1; }
+          done
+          for legion in package/dist/legion.js package/agents/ package/dist/skills/legion-worker/; do
+            if grep -qF "$legion" "$listing"; then
+              echo "::error::the pi-envoy tarball ships $legion, which is the Legion plugin's"
+              exit 1
+            fi
+          done
         working-directory: packages/pi-envoy
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: pi-legion-envoy-pr
+          name: pi-envoy-pr
+          path: out/pr-artifacts/*.tgz
+
+  pi-legion:
+    needs: changes
+    if: needs.changes.outputs.pi_legion == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-bun
+      - uses: ./.github/actions/install-jj
+      # extensions/legion-phase-stall-omp.test.ts runs the pinned Oh My Pi against stand-ins
+      # (packages/pi-shared/test/omp-harness.ts) and refuses on GitHub Actions without one. The pin
+      # is read from .omp-pin, the repository's one copy of it, installed through the mise
+      # install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
+      - uses: ./.github/actions/install-omp
+      # scripts/grant-rig/run.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: packages/daemon/go.mod
+          cache-dependency-path: packages/daemon/go.sum
+      - run: bun install --frozen-lockfile
+      - name: Build contracts for pi-legion
+        run: bun run build
+        working-directory: packages/contracts
+      - name: Lint pi-legion
+        run: bun run lint
+        working-directory: packages/pi-legion
+      - name: Typecheck pi-legion
+        run: bun run typecheck
+        working-directory: packages/pi-legion
+      - name: Test pi-legion
+        run: bun run test
+        working-directory: packages/pi-legion
+      # The release's pack (release.yaml's pi_legion job), which is also this job's build: the
+      # manifest pointed at the one bundle, then scripts/pi-plugin-prepack.sh, which bundles
+      # legion.ts, writes dist/THIRD_PARTY_NOTICES (failing the pack on a bundled package whose
+      # license cannot be determined) and stages this plugin's eight skills. The listing shows the
+      # tarball ships those, its agents/, and nothing of the Envoy plugin's: no envoy.js, none of
+      # its skills.
+      - name: Pack pi-legion
+        run: |
+          jq '.omp.extensions = ["dist/legion.js"]' package.json > "$RUNNER_TEMP/package.json"
+          mv "$RUNNER_TEMP/package.json" package.json
+          bun pm pack --destination ../../out/pr-artifacts
+          listing=$RUNNER_TEMP/pi-legion-listing
+          tar tzf ../../out/pr-artifacts/*.tgz > "$listing"
+          for shipped in package/dist/legion.js package/dist/THIRD_PARTY_NOTICES package/dist/skills/legion-worker/SKILL.md package/agents/deep-worker.md; do
+            grep -qxF "$shipped" "$listing" || { echo "::error::the pi-legion tarball does not ship $shipped"; exit 1; }
+          done
+          for envoy in package/dist/envoy.js package/dist/skills/dispatch/; do
+            if grep -qF "$envoy" "$listing"; then
+              echo "::error::the pi-legion tarball ships $envoy, which is the Envoy plugin's"
+              exit 1
+            fi
+          done
+        working-directory: packages/pi-legion
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pi-legion-pr
           path: out/pr-artifacts/*.tgz
 
   dispatch:
@@ -368,7 +517,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -505,7 +654,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -598,16 +747,21 @@ jobs:
             out/pr-artifacts/legion-envoy-amd64.tar.gz
             out/pr-artifacts/legion-envoy-arm64.tar.gz
 
-  # The document service and the API that drives it, and pmdoc (LEGION-571: its own flakes under
+  # The document service and the API that drives it, pmdoc (LEGION-571: its own flakes under
   # -race and load, not a race in production code, cost three review rounds because nothing ran
-  # this package under -race before a PR claimed it), all under the race detector. A read that
-  # walks a live document without its lock races the room's peers, which no ordinary run shows: the
-  # unit-test step above runs without -race (LEGION-499). Its own job beside envoy-go because -race
-  # runs these packages several times slower, and with its own package deadline, since go test's
-  # ten-minute default is a whole package's. pmdoc's tests shell out to the generated TypeScript
-  # fixtures under internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to
-  # date" step), so this job needs Bun installed and its workspace linked the same way, though not
-  # that freshness check itself - a stale fixture is envoy-go's failure to catch, not a race.
+  # this package under -race before a PR claimed it), delivery (its intake handler reads the
+  # routing settings the poll loop publishes, from NATS's delivery goroutine), and store (the
+  # pool's one-connection guard, and the hold mark of its own each concurrent read takes),
+  # all under the race detector. A read that walks a live document without its lock races the
+  # room's peers, which no ordinary run shows: the unit-test step above runs without -race
+  # (LEGION-499). Its own job beside envoy-go because -race runs these packages several times
+  # slower, and with its own package deadline, since go test's ten-minute default is a whole
+  # package's. pmdoc's tests shell out to the generated TypeScript fixtures under
+  # internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to date" step), so
+  # this job needs Bun installed and its workspace linked the same way, though not that freshness
+  # check itself - a stale fixture is envoy-go's failure to catch, not a race. delivery's tests
+  # start a NATS container, so the job takes envoy-go's Ryuk setting and pulls that image first,
+  # for the reason envoy-go's own pull step gives.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -615,7 +769,7 @@ jobs:
     timeout-minutes: 45
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -626,6 +780,7 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -635,8 +790,18 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: packages/envoy/go.mod
-      - name: Race-test the document service, its API, and pmdoc
-        run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/...
+      - name: Pull the NATS test container image
+        run: |
+          nats_image=$(sed -n 's/^const Image = "\(.*\)"$/\1/p' internal/testnats/nats.go)
+          [ -n "$nats_image" ] || { echo "::error::no const Image in internal/testnats/nats.go"; exit 1; }
+          for attempt in 1 2 3; do
+            docker pull "$nats_image" && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 10
+          done
+        working-directory: packages/envoy
+      - name: Race-test the document service, its API, pmdoc, delivery, and the store
+        run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/...
         working-directory: packages/envoy
 
   # The real-process memory tests (packages/envoy/cmd/dispatch/memory_test.go, LEGION-481): each
@@ -651,7 +816,7 @@ jobs:
     timeout-minutes: 75
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -787,7 +952,7 @@ jobs:
       # the script's own implicit pull would fail the run for a reason outside it.
       - name: Pull the NATS image the script starts
         run: |
-          nats_image=$(sed -n 's/^docker run .* \(nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)
+          nats_image=$(sed -n 's/^docker run .* \([^ ]*nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)
           [ -n "$nats_image" ] || { echo "::error::no nats image on the docker run line of scripts/e2e-local.sh"; exit 1; }
           for attempt in 1 2 3; do
             docker pull "$nats_image" && break

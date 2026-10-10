@@ -271,9 +271,16 @@ func (r *Runtime) Socket() string { return r.socket }
 // state directory before the launch.
 func (r *Runtime) ProvisionsWorkspaces() bool { return false }
 
+// SessionsOnVolume is false: a pane's session is a file on the daemon's own host, wherever its tree.
+func (r *Runtime) SessionsOnVolume() bool { return false }
+
 // ProvisionBound is zero: a pane starts the agent at once, with no init phase to provision
 // first.
 func (r *Runtime) ProvisionBound() time.Duration { return 0 }
+
+// CleanupTree holds nothing per tree: each pane is one claim's process, ended by its Release, and
+// each workspace is the outbox's to remove (workspace_remove).
+func (r *Runtime) CleanupTree(context.Context, string) error { return nil }
 
 // result is one tmux invocation's outcome. timedOut is the budget the client was killed at, zero
 // when it returned on its own.

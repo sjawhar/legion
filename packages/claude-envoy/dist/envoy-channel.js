@@ -18319,11 +18319,11 @@ var require_resolve = __commonJS((exports) => {
         }
         return ref;
       }
-      function addAnchor(anchor2) {
-        if (typeof anchor2 == "string") {
-          if (!ANCHOR.test(anchor2))
-            throw new Error(`invalid anchor "${anchor2}"`);
-          addRef.call(this, `#${anchor2}`);
+      function addAnchor(anchor) {
+        if (typeof anchor == "string") {
+          if (!ANCHOR.test(anchor))
+            throw new Error(`invalid anchor "${anchor}"`);
+          addRef.call(this, `#${anchor}`);
         }
       }
     });
@@ -36284,6 +36284,12 @@ var askEventPayloadFields = {
   question: exports_external.string().optional(),
   options: exports_external.array(exports_external.object({ label: exports_external.string().optional() })).optional(),
   answer: exports_external.object({ selected: exports_external.array(exports_external.string()).nullish(), text: exports_external.string().nullish() }).nullish(),
+  previous_answer: exports_external.object({
+    user: exports_external.string().optional(),
+    selected: exports_external.array(exports_external.string()).nullish(),
+    text: exports_external.string().nullish(),
+    at: exports_external.string().optional()
+  }).nullish(),
   anchor: exports_external.object({
     quote: exports_external.string().optional(),
     mark_id: exports_external.string().optional(),
@@ -36588,7 +36594,7 @@ function dispatchToolSchema(spec, z2, opts) {
   const schemaOptions = strict === undefined ? undefined : { strict };
   return spec.validation === undefined ? z2.object(shape, schemaOptions) : z2.refineObject(shape, spec.validation.check, spec.validation.message, schemaOptions);
 }
-var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch_issue with external creates a native issue.";
+var ISSUE_REFERENCE = "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 var OWNER_REFERENCE = "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 var ASK_QUESTION_CONTRACT = "The question carries the problem the reader recognises and why it matters now, what constrains " + "the answer, and the recommendation with its reason. It asks how to solve the problem or which " + "outcome is wanted; never enumerate choices in the question.";
 var ASK_OPTIONS_CONTRACT = "Options carry the genuinely different approaches. Each option has a label, and its description " + "says what that approach costs.";
@@ -36689,7 +36695,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issue",
     example: { project: "DSP", title: "Native workspace" },
-    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch_search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless force is true after reading them. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
+    description: "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " + "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " + `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       project: z2.string().describe("Project key for the new issue."),
       title: z2.string().describe("Concise issue title."),
@@ -36736,7 +36742,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_claim",
     example: { issue: "DSP-1" },
-    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or release: true to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch_read, and dispatch_issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, so also move the issue to in_progress with " + "dispatch_issue_update when you start. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
+    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, so also move the issue to in_progress with " + "dispatch issue-update when you start. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       release: z2.boolean().describe("Give up your claim instead of taking it; the issue's status does not change.").optional()
@@ -36759,7 +36765,7 @@ var dispatchToolSpecs = [
         }
       ]
     },
-    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch_doc_edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch_request_approval. Do not use this tool for a status " + "update or discussion; use dispatch_message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
+    description: "Open a to-do or permission only a human can give, or a decision that has no document to " + "live in. A question about the design an issue's document records is not this tool: write " + "it into that document as a decision block (dispatch doc-edit inserting an ask block at the " + "end of the section it concerns), at every phase, approved spec or not; the block reaches " + "the Inbox and its answer lands next to its context. Never give an ask an Approve option: a " + "document is approved through dispatch request-approval. Do not use this tool for a status " + "update or discussion; use dispatch message instead. " + ASK_QUESTION_CONTRACT + " " + ASK_OPTIONS_CONTRACT + " For an action only a human can perform, state what it changes and risks as constraints. " + "Anything that requires a human to do, including a credential or grant renewal, is an ask, " + "never a message. " + "Anchor a to-do about a document passage, thread reply_to/reply_to_ask, or cite a dispatch:// " + `reference \u2014 it must be answerable from its own text and anchor alone, never "see above". ` + `A quote anchor is pinned to its block. Question is at most ${ASK_QUESTION_MAX} characters, ` + `the lines images appends included, and has at most 8 options. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36833,7 +36839,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_resolve_comment",
     example: { comment: "01234567-0000-4000-8000-000000000001" },
-    description: "Resolve a review comment thread once it has been addressed - typically your own comment " + "after the document was fixed. Any session or human may resolve any open comment on an " + "open issue or project document; reopening a resolved comment is human-only (the dashboard). " + "Not for asks: use dispatch_resolve_ask.",
+    description: "Resolve a review comment thread once it has been addressed - typically your own comment " + "after the document was fixed. Any session or human may resolve any open comment on an " + "open issue or project document; reopening a resolved comment is human-only (the dashboard). " + "Not for asks: use dispatch resolve-ask.",
     arguments: (z2) => ({
       comment: z2.string().describe("Comment id (uuid), or a dispatch://KEY/comment/<id> or " + "dispatch://PROJECT/artifact/<slug>/comment/<id> reference; a reference accepts an " + "8+ character id prefix that is unique on its owner.")
     }),
@@ -36852,7 +36858,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_comment",
     example: { issue: "DSP-1", body: "Looks good." },
-    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch_ask. " + "Do not use it for an exact replacement; use " + `dispatch_suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters, the lines images appends included. ${OWNER_REFERENCE}`,
+    description: "Add review feedback to an issue or project document quote, or reply to a question asked with dispatch ask. " + "Do not use it for an exact replacement; use " + `dispatch suggest instead. A quote anchor is pinned to its block. Body is at most 2,000 characters, the lines images appends included. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36876,7 +36882,7 @@ var dispatchToolSpecs = [
       quote: "old wording",
       replace_with: "new wording"
     },
-    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch_comment instead. Optional explanation is at most 2,000 characters. ${OWNER_REFERENCE}`,
+    description: "Propose an exact replacement for quoted document text. Do not use it for general feedback; use " + `dispatch comment instead. Optional explanation is at most 2,000 characters. ${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36892,7 +36898,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_message",
     example: { issue: "DSP-1", body: "Implementation started." },
-    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch_ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch_comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch_read({message}) reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters, the lines images appends included. ${ISSUE_REFERENCE}`,
+    description: "Post a note humans must read now: a reply to a human's message or a deliverable that landed. A to-do only a human can " + "complete is an ask (dispatch ask), so it reaches their inbox. Never progress or status updates - Dispatch is a high-signal " + "record, not a log. Not a design decision (write it as a decision block in the document) or document feedback (dispatch comment). " + "To answer a human's direct message to this session - one sent from the Agents page, which names no issue - pass that message's bare id as " + "in_reply_to and no issue; the reply lands in that conversation. Another call with the same in_reply_to and new text posts a follow-up, " + "threaded under this session's first reply; the same text again posts nothing. dispatch read --message <id> reads " + "that conversation back. Every other message names its issue. " + `Body is at most 2,000 characters, the lines images appends included. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(`${ISSUE_REFERENCE} Omit it only when in_reply_to answers a human's direct message to this session.`).optional(),
       body: z2.string({ max: DISPATCH_BODY_MAX }).describe("Update text, at most 2,000 characters."),
@@ -36909,7 +36915,7 @@ var dispatchToolSpecs = [
       ops: [{ op: "delete_column", block: "table-123", index: 1 }],
       precondition: { blocks: [{ id: "table-123", token: "sha256:current-table-token" }] }
     },
-    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch_comment, dispatch_suggest, or dispatch_doc_read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + 'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch_doc_read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch_doc_read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
+    description: "Apply deterministic document edits: replace or delete quoted text, insert markdown at an anchor, retype an identified paragraph or typed block into a schema-declared typed block, delete or move a whole block by its id, or delete a table row or column in place. " + "Do not use it for review feedback or for reading; use dispatch comment, dispatch suggest, or dispatch doc-read instead. " + `For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, \`code\`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find="## Old", with="## New") gives '## New', and a different level applies only when find named the heading's actual level (find "## Old" with "### New" makes it an h3), since '# ' selects a heading without naming its level. A task item (\`- [ ]\` / \`- [x]\`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find="Write it", with="[x] Write it") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. ` + "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " + "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " + 'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' + "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " + "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " + "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " + "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " + `The spec (or any document) holds requirements, design, and decisions - never progress, status, or timestamps. ${OWNER_REFERENCE} ${SPEC_WRITING_POINTER}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36929,7 +36935,7 @@ var dispatchToolSpecs = [
         attributes: z2.unknown().describe("Typed block attributes for retype; a CR LF or a lone carriage return in a string value is written as a line feed.").optional()
       }, { strict: true })).describe("Flat tagged edits; an operation takes only the keys below, a misspelled one is refused rather than ignored, and the server validates the fields its op requires."),
       precondition: z2.object({
-        document: z2.string({ min: 1 }).describe("Token for the exact canonical document returned by dispatch_doc_read.").optional(),
+        document: z2.string({ min: 1 }).describe("Token for the exact canonical document returned by dispatch doc-read.").optional(),
         blocks: z2.array(z2.object({
           id: z2.string({ min: 1 }).describe("Stable block id from GET /api/v1/artifacts/{id}/blocks."),
           token: z2.string({ min: 1 }).describe("That block's full-state token, including inline marks.")
@@ -36942,7 +36948,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_doc_read",
     example: { issue: "DSP-1" },
-    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch_read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch_doc_edit precondition; use /blocks for per-block tokens. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
+    description: "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " + "Do not use it for issue status, asks, or events; " + "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " + "A live read returns its document token for an optional dispatch doc-edit precondition; use /blocks for per-block tokens. " + "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " + "any other file that is not UTF-8 text is described, with the route that serves its bytes. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36955,7 +36961,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
-    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch_doc_read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes after it: request approval again once that " + "revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ". A new version of a Legion root spec closes its armed design gate until a human approves " + "it. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
+    description: "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " + "Request changes) in the human's Inbox whose question names the document and version, " + "followed by the summary; the answer pins a review to that version and arrives as " + "artifact.approved or artifact.changes_requested. An open request follows the document: a " + "later version moves it to that version and leaves it waiting on you, as a human's reply in " + "its thread does. Only the first move since the request was opened or handed back sends an " + "event, and never to the session whose version made it; dispatch doc-read shows whom it " + "waits on. Once the revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ", call this again to hand that same Inbox row back. The request carries nothing new. A " + "call while it already waits on the human hands nothing back: the same summary changes " + "nothing, and a different one is refused, since it would rewrite the card the human is " + "reading. Approve and Request changes each close the request, so the next call opens a new " + "one. Call it once per revision, when the revision is complete, never after each edit. An " + "approval goes stale when the document changes after it: request approval again once that " + "revision is complete and " + HUMAN_AGREED_TO_DOCUMENT + ". A new version of a Legion root spec closes its armed design gate until a human approves " + "it. " + "Refused, with nothing sent, while the document holds an open decision block, even when a " + "human asked for approval: the refusal names each block; ask the human to answer or waive " + "it first. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -36968,7 +36974,7 @@ var dispatchToolSpecs = [
     name: "dispatch_artifact",
     example: { issue: "DSP-1", name: "design.md", content: `# Design
 ` },
-    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch_doc_edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
+    description: "Attach a local file or inline text as an issue artifact or project document. Do not use it to edit a live document; use " + "dispatch doc-edit instead. Exactly one of path or content is required; a markdown document is at most 1 MiB and any other file at most 25 MiB. " + "Markdown is also refused with 413 CAP_EXCEEDED when it makes more than 65,536 elements (a block weighs 3, and an empty list item, quote, footnote definition or typed block 3 more for the empty paragraph it holds; a table cell 4, a hard line break 3, an image 3, a piece of inline HTML 2, an autolink 2, a footnote reference 2; inline syntax, marks, lines of text and backslash escapes or character references 1 each), or when a new version would leave the document's stored markdown (what its text reads back as) longer than 1 MiB or making more than 65,536 elements, and longer or heavier than before; shorten it or split it across documents. " + "Markdown holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK; a new version of a document is held to it only for the asks it writes or changes. " + `${OWNER_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key for an unlinked document.").optional(),
@@ -36988,7 +36994,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_read",
     example: { issue: "DSP-1" },
-    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch_doc_read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch_doc_read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch_doc_read shows it again. " + OWNER_REFERENCE,
+    description: "Read an issue or project-document summary, targeted ask, or targeted comment reply chain, or the conversation " + "a message belongs to. Do not use it for document contents; use dispatch doc-read instead. Supply ref, issue, " + "or project plus artifact; or message alone, which reads a human's direct message to this session and every " + "reply to it (they belong to no issue). " + "An anchored comment or ask also says where its quote sits, as `Position:`: the block's path from the top, " + "and in a table the row (0 is the header), the cells before the anchored one, and the column's header; " + "`Position: unavailable (<code>)` when Dispatch could not read the document: `DOC_SERVICE_UNAVAILABLE` " + "(try again shortly), `DOC_SCHEMA` (the document needs repair), `DOCUMENT_UNLOADABLE` (the document " + "needs a rebuild) or `INTERNAL`. " + "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " + "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " + "when it has any (`Progress: none` otherwise). " + "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " + "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " + "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " + "and 10 MiB of them per read, each a PNG, JPEG, GIF or WebP of at most 3,750,000 bytes (5 MB of base64); a `Pictures:` section names each " + "one shown, in order, and the rest by reference, for dispatch doc-read. A picture this session was already shown is named, not sent again " + "(every request carries the session's history, and the provider refuses one over 32 MB); dispatch doc-read shows it again. " + OWNER_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
@@ -37023,7 +37029,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_issues",
     example: { project: "PROJ", limit: 250, offset: 250 },
-    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch_search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
+    description: "List a project's issues for a roadmap or backlog pass: every issue in one project, each carrying " + "its status, priority, parent, labels, open-ask count, progress (its spec's task-list items and " + "its direct children, each done of total, as `tasks 3/7 \xB7 children 2/5`, each only when it has " + "any), and route with whether it reaches anyone, " + "so you can see backlog shape without opening every issue. Optionally filter by status, parent, " + "label, priority, route status, or how recently it changed; priority takes one or more of 0-3 " + "(P0-P3) and null for an issue with no priority, so an owner's P0/P1 audit is priority [0, 1]. " + 'route_status "no_holder" lists every open issue whose route names a role nobody holds or a ' + "session that is not running at the moment of the read, whatever its priority. A restarting " + "session is absent for minutes, so an issue is unowned only when a read ten minutes later agrees. " + "Do not use it to search by keyword or phrase; dispatch search remains the keyword surface. " + "Dispatch pages the list: limit sets the page size (default " + `${DEFAULT_ISSUE_PAGE_LIMIT}, max ${MAX_ISSUE_PAGE_LIMIT}) and offset selects where it starts ` + "(default 0), and the answer names how many issues match, so repeat with the next offset to " + "walk every matching issue. A walk is exact only while the list does not change: an issue " + "that enters or leaves what the filters match, or whose status or rank changes, between two " + "pages shifts rows across a page boundary, so one issue can come back twice and another never.",
     arguments: (z2) => ({
       project: z2.string().describe("Project key to list issues from."),
       status: z2.enum(ISSUE_STATUSES).describe("Optional lifecycle status filter.").optional(),
@@ -37748,6 +37754,443 @@ function askAnswerText(answer) {
   return `${selected} - ${text}`;
 }
 
+// ../envoy-client/src/errors.ts
+function messageFor(error48) {
+  return error48 instanceof Error ? error48.message : String(error48);
+}
+function hasErrnoCode(error48, code) {
+  return error48 instanceof Error && "code" in error48 && error48.code === code;
+}
+
+// ../envoy-client/src/dispatch-command.ts
+var STDIN = "-";
+var BARE_WORD = /^[A-Za-z0-9_./:@%+=,-]+$/;
+var OPTION_SEPARATOR = ": ";
+function commandName(tool) {
+  return tool.replace(/^dispatch_/, "").replaceAll("_", "-");
+}
+function flagName(field) {
+  return field.replaceAll("_", "-");
+}
+var toolsByCommand = new Map(dispatchToolSpecs.map((spec) => [commandName(spec.name), spec.name]));
+function toolForCommand(command) {
+  return toolsByCommand.get(command);
+}
+function commandFlags(tool) {
+  return [...surfaceFor(tool).flags.keys()];
+}
+function fieldFlag(tool, field) {
+  for (const [flag, entry] of surfaceFor(tool).flags) {
+    if (entry.field === field)
+      return flag;
+  }
+  return `--${flagName(field)}`;
+}
+function commandFlagTable(tool) {
+  return [...surfaceFor(tool).flags].map(([flag, entry]) => ({
+    flag: entry.value === undefined ? flag : `${flag} ${entry.value}`,
+    text: entry.text
+  }));
+}
+var surfaces = new Map;
+function surfaceFor(tool) {
+  const cached2 = surfaces.get(tool);
+  if (cached2 !== undefined)
+    return cached2;
+  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
+  if (spec === undefined)
+    throw new Error(`Unknown Dispatch tool: ${tool}`);
+  const fields = fieldKinds(spec);
+  const surface = {
+    spec,
+    command: commandName(spec.name),
+    fields,
+    flags: flagTable(spec.name, fields)
+  };
+  surfaces.set(tool, surface);
+  return surface;
+}
+function fieldKinds(spec) {
+  const schema = exports_external.toJSONSchema(dispatchToolSchema(spec, zodSchemaApi(exports_external)));
+  const required2 = new Set(schema.required ?? []);
+  const fields = new Map;
+  for (const [field, node] of Object.entries(schema.properties ?? {})) {
+    const nonNull = (node.anyOf ?? [node]).filter((member) => member.type !== "null");
+    const nullable2 = node.anyOf !== undefined && nonNull.length < node.anyOf.length;
+    const inner = nonNull.length === 1 ? nonNull[0] : undefined;
+    const kind = inner === undefined ? "json" : kindOf(field, inner);
+    const values = inner?.enum?.map(String);
+    const description = node.description ?? inner?.description;
+    fields.set(field, {
+      kind,
+      nullable: nullable2,
+      required: required2.has(field),
+      ...description === undefined ? {} : { description },
+      ...values === undefined ? {} : { values }
+    });
+  }
+  return fields;
+}
+function kindOf(field, node) {
+  switch (node.type) {
+    case "string":
+      return "string";
+    case "integer":
+    case "number":
+      return "number";
+    case "boolean":
+      return "boolean";
+    case "array": {
+      const item = node.items;
+      if (item === undefined)
+        return "json";
+      if (field === "options" && item.type === "object")
+        return "options";
+      if (item.type === "string")
+        return { array: "string" };
+      if (item.type === "integer" || item.type === "number")
+        return { array: "number" };
+      const members = item.anyOf ?? [];
+      const numeric = members.filter((m) => m.type === "integer" || m.type === "number");
+      if (members.length === 2 && numeric.length === 1 && members.some((member) => member.type === "null")) {
+        return { array: "number-or-null" };
+      }
+      return "json";
+    }
+    default:
+      return "json";
+  }
+}
+function singular(field) {
+  return field.endsWith("s") ? field.slice(0, -1) : field;
+}
+function placeholder(info) {
+  if (info.values !== undefined)
+    return `<${info.values.join("|")}>`;
+  if (info.kind === "number")
+    return "<n>";
+  if (typeof info.kind === "object")
+    return info.kind.array === "string" ? "<text>" : "<n>";
+  return "<text>";
+}
+function flagTable(tool, fields) {
+  const flags = new Map;
+  const add = (flag, entry) => {
+    if (flags.has(flag))
+      throw new Error(`${tool}: two fields claim the flag ${flag}`);
+    flags.set(flag, entry);
+  };
+  for (const [field, info] of fields) {
+    const name = flagName(field);
+    const about = [info.description, info.required ? "Required." : undefined].filter((part) => part !== undefined).join(" ");
+    const { kind } = info;
+    if (kind === "string") {
+      add(`--${name}`, { field, action: "set", value: placeholder(info), text: about });
+      add(`--${name}-file`, {
+        field,
+        action: "file",
+        value: "<path>",
+        text: `--${name} read from a file; - reads stdin.`
+      });
+    } else if (kind === "number") {
+      add(`--${name}`, { field, action: "set", value: "<n>", text: about });
+    } else if (kind === "boolean") {
+      add(`--${name}`, { field, action: "true", text: about });
+      add(`--no-${name}`, { field, action: "false", text: `Sends ${field} as false.` });
+    } else if (kind === "options") {
+      add(`--${singular(name)}`, {
+        field,
+        action: "append",
+        value: '"<label>: <description>"',
+        text: `${about} One option per flag, repeated; split at the first ": " (without one, the whole value is the label). A label that holds ": " goes in --${name}-json.`.trim()
+      });
+      add(`--${name}-json`, {
+        field,
+        action: "json",
+        value: "<json>",
+        text: `Every option as a JSON list of {label, description?}, in place of --${singular(name)}.`
+      });
+    } else if (kind === "json") {
+      add(`--${name}-json`, { field, action: "json", value: "<json>", text: about });
+      add(`--${name}-json-file`, {
+        field,
+        action: "json-file",
+        value: "<path>",
+        text: `--${name}-json read from a file; - reads stdin.`
+      });
+    } else {
+      const none = kind.array === "number-or-null" ? " none is null." : "";
+      add(`--${singular(name)}`, {
+        field,
+        action: "append",
+        value: placeholder(info),
+        text: `${about} One item per flag, repeated.${none}`.trim()
+      });
+    }
+    if (info.nullable || typeof kind === "object" || kind === "options") {
+      add(`--clear-${name}`, {
+        field,
+        action: "clear",
+        text: info.nullable ? `Sends ${field} as null.` : `Sends ${field} as an empty list.`
+      });
+    }
+  }
+  add("--help", { action: "help", text: "Prints this help." });
+  add("--dry-run", { action: "dry-run", text: "Prints the arguments as JSON and sends nothing." });
+  return flags;
+}
+function parseCommand(argv, io) {
+  const [command, ...rest] = argv;
+  if (command === undefined || command === "--help")
+    return { kind: "help" };
+  const tool = toolForCommand(command);
+  if (tool === undefined) {
+    const commands = [...toolsByCommand.keys()].join(", ");
+    return {
+      kind: "refused",
+      problems: [`unknown command ${quoteWord(command)}; the commands are: ${commands}`]
+    };
+  }
+  const surface = surfaceFor(tool);
+  const args = {};
+  const setBy = new Map;
+  const problems = [];
+  let help = false;
+  let dryRun = false;
+  let stdinFlag;
+  const read = (flag, path) => {
+    if (path === STDIN) {
+      if (stdinFlag !== undefined) {
+        problems.push(`${stdinFlag} and ${flag} both read stdin (-); only one flag can`);
+        return;
+      }
+      stdinFlag = flag;
+    }
+    try {
+      return io.readText(path);
+    } catch (error48) {
+      problems.push(`${flag} could not read ${path === STDIN ? "stdin" : path}: ${messageFor(error48)}`);
+      return;
+    }
+  };
+  const claim = (field, flag, repeatable) => {
+    const earlier = setBy.get(field);
+    if (earlier === undefined || repeatable && earlier === flag) {
+      setBy.set(field, flag);
+      return true;
+    }
+    problems.push(earlier === flag ? `${flag} is given twice` : `${earlier} and ${flag} both set ${field}`);
+    return false;
+  };
+  const number4 = (flag, value) => {
+    const parsed = Number(value);
+    if (value.trim() === "" || !Number.isFinite(parsed)) {
+      problems.push(`${flag} must be a number, not ${JSON.stringify(value)}`);
+      return;
+    }
+    return parsed;
+  };
+  const json2 = (flag, text) => {
+    try {
+      return { value: JSON.parse(text) };
+    } catch (error48) {
+      problems.push(`${flag} is not JSON: ${messageFor(error48)}`);
+      return;
+    }
+  };
+  for (let index = 0;index < rest.length; index++) {
+    const token = rest[index];
+    if (!token.startsWith("--")) {
+      problems.push(`unexpected argument ${quoteWord(token)}: every value follows its flag`);
+      continue;
+    }
+    const eq = token.indexOf("=");
+    const flag = eq === -1 ? token : token.slice(0, eq);
+    const inline = eq === -1 ? undefined : token.slice(eq + 1);
+    const entry = surface.flags.get(flag);
+    if (entry === undefined) {
+      problems.push(`unknown flag ${flag}`);
+      const next = rest[index + 1];
+      if (inline === undefined && next !== undefined && !next.startsWith("--"))
+        index++;
+      continue;
+    }
+    const { field, action } = entry;
+    if (action === "help" || action === "dry-run" || action === "true" || action === "false") {
+      if (inline !== undefined) {
+        problems.push(`${flag} takes no value`);
+        continue;
+      }
+      if (action === "help")
+        help = true;
+      else if (action === "dry-run")
+        dryRun = true;
+      else if (field !== undefined && claim(field, flag, false))
+        args[field] = action === "true";
+      continue;
+    }
+    if (field === undefined)
+      continue;
+    const info = surface.fields.get(field);
+    if (action === "clear") {
+      if (inline !== undefined)
+        problems.push(`${flag} takes no value`);
+      else if (claim(field, flag, false))
+        args[field] = info.nullable ? null : [];
+      continue;
+    }
+    let value = inline;
+    if (value === undefined) {
+      const next = rest[index + 1];
+      if (next === undefined || next.startsWith("--")) {
+        problems.push(`${flag} needs a value`);
+        continue;
+      }
+      value = next;
+      index++;
+    }
+    switch (action) {
+      case "set": {
+        const claimed = claim(field, flag, false);
+        const parsed = info.kind === "number" ? number4(flag, value) : value;
+        if (claimed && parsed !== undefined)
+          args[field] = parsed;
+        break;
+      }
+      case "file": {
+        const text = read(flag, value);
+        if (text !== undefined && claim(field, flag, false))
+          args[field] = text;
+        break;
+      }
+      case "json":
+      case "json-file": {
+        const text = action === "json" ? value : read(flag, value);
+        const parsed = text === undefined ? undefined : json2(flag, text);
+        if (parsed !== undefined && claim(field, flag, false))
+          args[field] = parsed.value;
+        break;
+      }
+      case "append": {
+        if (!claim(field, flag, true))
+          break;
+        const item = appendedItem(info.kind, flag, value, number4);
+        if (item === undefined)
+          break;
+        const list = args[field] ?? [];
+        list.push(item.value);
+        args[field] = list;
+        break;
+      }
+    }
+  }
+  if (help)
+    return { kind: "help", tool };
+  if (problems.length > 0)
+    return { kind: "refused", tool, problems };
+  return { kind: "call", tool, args, dryRun };
+}
+function appendedItem(kind, flag, value, number4) {
+  if (kind === "options") {
+    const at = value.indexOf(OPTION_SEPARATOR);
+    return {
+      value: at === -1 ? { label: value } : { label: value.slice(0, at), description: value.slice(at + OPTION_SEPARATOR.length) }
+    };
+  }
+  if (typeof kind !== "object" || kind.array === "string")
+    return { value };
+  if (kind.array === "number-or-null" && value === "none")
+    return { value: null };
+  const parsed = number4(flag, value);
+  return parsed === undefined ? undefined : { value: parsed };
+}
+function quoteWord(value) {
+  return BARE_WORD.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+}
+function flagWithValue(flag, value) {
+  return value.startsWith("--") ? [`${flag}=${quoteWord(value)}`] : [flag, quoteWord(value)];
+}
+function scalarText(value) {
+  return typeof value === "string" ? value : JSON.stringify(value);
+}
+function fieldWords(field, info, value) {
+  const name = flagName(field);
+  const { kind } = info;
+  if (value === null && info.nullable)
+    return [`--clear-${name}`];
+  if (kind === "boolean" && typeof value === "boolean") {
+    return [value ? `--${name}` : `--no-${name}`];
+  }
+  if (kind === "json")
+    return flagWithValue(`--${name}-json`, JSON.stringify(value));
+  if (Array.isArray(value) && (kind === "options" || typeof kind === "object")) {
+    if (value.length === 0)
+      return [`--clear-${name}`];
+    if (kind === "options") {
+      const texts = value.map(optionText);
+      if (texts.includes(undefined))
+        return flagWithValue(`--${name}-json`, JSON.stringify(value));
+      return texts.flatMap((text) => flagWithValue(`--${singular(name)}`, text ?? ""));
+    }
+    const flag = `--${singular(name)}`;
+    return value.flatMap((item) => flagWithValue(flag, item === null ? "none" : scalarText(item)));
+  }
+  return flagWithValue(`--${name}`, scalarText(value));
+}
+function optionText(option) {
+  if (typeof option !== "object" || option === null || !("label" in option)) {
+    return scalarText(option);
+  }
+  const label = scalarText(option.label);
+  if (label.includes(OPTION_SEPARATOR))
+    return;
+  return "description" in option && option.description !== undefined ? `${label}${OPTION_SEPARATOR}${scalarText(option.description)}` : label;
+}
+function commandLine(tool, args) {
+  const surface = surfaceFor(tool);
+  const words = ["dispatch", surface.command];
+  for (const [field, info] of surface.fields) {
+    const value = args[field];
+    if (value !== undefined)
+      words.push(...fieldWords(field, info, value));
+  }
+  for (const [field, value] of Object.entries(args)) {
+    if (value !== undefined && !surface.fields.has(field)) {
+      words.push(...flagWithValue(`--${flagName(field)}`, scalarText(value)));
+    }
+  }
+  return words.join(" ");
+}
+function commandHelp(tool) {
+  const surface = surfaceFor(tool);
+  return [
+    `Usage: dispatch ${surface.command} [flags]`,
+    "",
+    surface.spec.description,
+    "",
+    "Flags:",
+    ...commandFlagTable(tool).flatMap((row) => row.text === "" ? [`  ${row.flag}`] : [`  ${row.flag}`, `      ${row.text}`]),
+    "",
+    `Example: ${commandLine(tool, surface.spec.example)}`,
+    ""
+  ].join(`
+`);
+}
+function commandsHelp() {
+  const width = Math.max(...[...toolsByCommand.keys()].map((command) => command.length));
+  return [
+    "Usage: dispatch <command> [flags]",
+    ...dispatchToolSpecs.map((spec) => {
+      const sentence = /^.*?[.!?](?=\s|$)/s.exec(spec.description)?.[0] ?? spec.description;
+      return `  ${commandName(spec.name).padEnd(width)}  ${sentence}`;
+    }),
+    "",
+    "Run dispatch <command> --help for its flags and an example; --dry-run prints the arguments a command would send.",
+    ""
+  ].join(`
+`);
+}
+
 // ../envoy-client/src/dispatch-owner.ts
 function documentLabel(project, slug) {
   return `${project}/${slug}`;
@@ -37855,9 +38298,6 @@ function toolImage(bytes) {
   if (mimeType === undefined || bytes.length > PICTURE_SHOWN_MAX_BYTES)
     return;
   return { data: Buffer.from(bytes).toString("base64"), mimeType };
-}
-function imageBlocks(images) {
-  return images.map(({ data, mimeType }) => ({ type: "image", data, mimeType }));
 }
 function pictureLine(name, address) {
   return `![${pictureCaption(name)}](${address})`;
@@ -38123,8 +38563,11 @@ function dispatchCommentReplyWith(event, topic, comment) {
   const threadID = thread === "reply_to" ? comment.id : String(reply);
   if (event.issue_key !== null) {
     return {
-      tool: "dispatch_comment",
-      args: { issue: event.issue_key, [thread]: threadID, body: "..." }
+      command: commandLine("dispatch_comment", {
+        issue: event.issue_key,
+        [thread]: threadID,
+        body: "..."
+      })
     };
   }
   let project = comment.project_key;
@@ -38135,8 +38578,12 @@ function dispatchCommentReplyWith(event, topic, comment) {
   if (project === undefined || project === "" || artifact === undefined || artifact === "")
     return;
   return {
-    tool: "dispatch_comment",
-    args: { project, artifact, [thread]: threadID, body: "..." }
+    command: commandLine("dispatch_comment", {
+      project,
+      artifact,
+      [thread]: threadID,
+      body: "..."
+    })
   };
 }
 function askResolutionText(resolution) {
@@ -38184,9 +38631,15 @@ function dispatchCompact(event, comment) {
       };
       break;
     }
-    case "ask.answered":
-      record2 = { ...record2, answer: askAnswerText(ask.data.answer) };
+    case "ask.answered": {
+      const previousAnswer = ask.data.previous_answer;
+      record2 = {
+        ...record2,
+        answer: askAnswerText(ask.data.answer),
+        ...previousAnswer === null || previousAnswer === undefined ? {} : { previous_answer: askAnswerText(previousAnswer) }
+      };
       break;
+    }
     case "ask.resolved": {
       const resolved = askResolutionText(ask.data.resolution);
       record2 = resolved === undefined ? record2 : { ...record2, resolved };
@@ -38376,7 +38829,7 @@ function renderInbound(raw, sessionID, subject2) {
           const ask = follower.data.ask_id ?? "?";
           return {
             skip: false,
-            content: frame.event.type === "ask.follower_added" ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; dispatch_follow unfollow to stop.` : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
+            content: frame.event.type === "ask.follower_added" ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; ${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop.` : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
             envelope: envelope2
           };
         }
@@ -38409,12 +38862,11 @@ function renderInbound(raw, sessionID, subject2) {
               ...typeof message2.data.broadcast_id === "string" ? { broadcastId: message2.data.broadcast_id } : {}
             };
             dispatchReply = {
-              tool: "dispatch_message",
-              args: {
+              command: commandLine("dispatch_message", {
                 ...frame.event.issue_key === null ? {} : { issue: frame.event.issue_key },
                 in_reply_to: message2.data.id,
                 body: "..."
-              }
+              })
             };
           }
         } else if (frame.event.type === "comment.created") {
@@ -38524,11 +38976,6 @@ function renderInbound(raw, sessionID, subject2) {
 import { readFileSync as readFileSync2 } from "fs";
 import { homedir } from "os";
 import * as path from "path";
-
-// ../envoy-client/src/errors.ts
-function messageFor(error48) {
-  return error48 instanceof Error ? error48.message : String(error48);
-}
 
 // ../envoy-client/src/secret-file.ts
 import { readFileSync } from "fs";
@@ -38659,13 +39106,68 @@ function resolveDispatchConfig(env, options = {}) {
   }
   return { enabled: true, url: url2.url, token, error: null };
 }
+function activeDispatchConfig(env, options = {}) {
+  const config2 = resolveDispatchConfig(env, options);
+  if (config2.error !== null)
+    throw new Error(`dispatch config: ${config2.error}`);
+  const { url: url2, token } = config2;
+  if (!config2.enabled || url2 === null || token === null)
+    return null;
+  return { ...config2, url: url2, token };
+}
 
-// ../envoy-client/src/dispatch-execute.ts
-import { resolve as resolvePath2 } from "path";
-
-// ../envoy-client/src/dispatch-cwd.ts
-import { execFile } from "child_process";
-import { promisify } from "util";
+// ../envoy-client/src/dispatch-subscribe.ts
+function dispatchFollowNotice(details) {
+  if (typeof details !== "object" || details === null)
+    return null;
+  const { follows, issue: issue2, document } = details;
+  if (typeof follows !== "object" || follows === null)
+    return null;
+  const { ask } = follows;
+  if (typeof ask !== "string" || ask === "")
+    return null;
+  let owner;
+  if (typeof issue2 === "string" && issue2 !== "") {
+    owner = issueTopic(issue2);
+  } else if (typeof document === "string") {
+    const [project, slug] = document.split("/", 2);
+    if (!project || !slug)
+      return null;
+    owner = { label: document, topic: documentTopicOf(project, slug).topic };
+  } else {
+    return null;
+  }
+  return {
+    ask,
+    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
+  };
+}
+function subscriptionRemovedTopics(raw, sessionID) {
+  let envelope2;
+  try {
+    envelope2 = JSON.parse(raw);
+  } catch {
+    return;
+  }
+  if (typeof envelope2 !== "object" || envelope2 === null)
+    return;
+  const { source, payload } = envelope2;
+  if (source !== "dispatch" || typeof payload !== "string")
+    return;
+  let event;
+  try {
+    event = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  const parsedEvent = DispatchEventSchema.safeParse(event);
+  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
+    return;
+  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
+  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
+    return;
+  return parsedPayload.data.topics ?? [];
+}
 
 // ../envoy-client/src/machine.ts
 import { hostname as hostname3 } from "os";
@@ -38673,542 +39175,38 @@ function machineID() {
   return process.env["ENVOY_MACHINE_ID"] || hostname3();
 }
 
-// ../envoy-client/src/dispatch-cwd.ts
-var execFileAsync = promisify(execFile);
-var defaultExec = (file2, args, options) => execFileAsync(file2, args, { cwd: options.cwd, timeout: 5000 });
-async function tryExec(exec, file2, args, cwd) {
-  try {
-    const { stdout } = await exec(file2, args, { cwd });
-    return stdout;
-  } catch {
-    return null;
-  }
-}
-function parseRemoteList(stdout) {
-  const remotes = new Map;
-  for (const line of stdout.split(`
-`)) {
-    const trimmed = line.trim();
-    if (!trimmed)
-      continue;
-    const match = trimmed.match(/^(\S+)\s+(\S+)/);
-    const [, name, url2] = match ?? [];
-    if (name && url2)
-      remotes.set(name, url2);
-  }
-  return remotes;
-}
-function selectRemoteUrl(remotes) {
-  const origin = remotes.get("origin");
-  if (origin)
-    return origin;
-  const candidates = [...remotes.entries()].filter(([name]) => name !== "upstream");
-  return candidates.length === 1 ? candidates[0]?.[1] ?? null : null;
-}
-var GITHUB_REMOTE_PATTERNS = [
-  /^https:\/\/(?:[^@/\s]+@)?github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i,
-  /^git@github\.com:([^/]+)\/([^/]+?)(?:\.git)?\/?$/i,
-  /^ssh:\/\/git@github\.com\/([^/]+)\/([^/]+?)(?:\.git)?\/?$/i
-];
-function parseGitHubRemoteUrl(url2) {
-  const trimmed = url2.trim();
-  for (const pattern of GITHUB_REMOTE_PATTERNS) {
-    const match = trimmed.match(pattern);
-    if (match)
-      return canonicalRepo(match[1] ?? "", match[2] ?? "");
-  }
-  return null;
-}
-async function resolveCwdRepo(cwd, exec) {
-  const jjOutput = await tryExec(exec, "jj", ["git", "remote", "list"], cwd);
-  if (jjOutput !== null) {
-    const url2 = selectRemoteUrl(parseRemoteList(jjOutput));
-    return url2 ? parseGitHubRemoteUrl(url2) : null;
-  }
-  const originUrl = await tryExec(exec, "git", ["remote", "get-url", "origin"], cwd);
-  return originUrl ? parseGitHubRemoteUrl(originUrl) : null;
-}
-async function resolveOrigin(env, exec, cwd) {
-  const origin = {
-    cwd,
-    machine: machineID()
-  };
-  const pane = env.TMUX_PANE;
-  if (pane) {
-    const output = await tryExec(exec, "tmux", ["display-message", "-p", "-t", pane, "#S:#I.#P #{pane_id}"], cwd);
-    const [target, paneId] = output?.trim().split(" ") ?? [];
-    if (target)
-      origin.tmux = target;
-    if (paneId)
-      origin.pane = paneId;
-  }
-  return origin;
-}
-
-// ../envoy-client/src/dispatch-http.ts
-class DispatchServiceError extends Error {
-  code;
-  status;
-  candidates;
-  current;
-  mismatches;
-  name = "DispatchServiceError";
-  fromDispatch = true;
-  constructor(code, status, message, candidates, current, mismatches) {
-    super(message);
-    this.code = code;
-    this.status = status;
-    this.candidates = candidates;
-    this.current = current;
-    this.mismatches = mismatches;
-  }
-}
-
-class DispatchGatewayError extends DispatchServiceError {
-  answer;
-  advice;
-  fromDispatch = false;
-  transient;
-  mayHaveReachedDispatch;
-  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
-    super(`HTTP_${status}`, status, message);
-    this.answer = answer;
-    this.advice = advice;
-    this.transient = transientStatus(status);
-    this.mayHaveReachedDispatch = reachesDispatch(status);
-  }
-}
-function asErrorShape(value) {
-  return typeof value === "object" && value !== null ? value : {};
-}
-function isJson(response) {
-  return response.headers.get("content-type")?.includes("application/json") ?? false;
-}
-var DISPATCH_TOOL_DEADLINE_MS = 60000;
-function requestSignal(signal) {
-  const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
-  return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
-}
-function whyNotAPage(answer) {
-  if (typeof answer === "string") {
-    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
-  }
-  let what;
-  if (Array.isArray(answer)) {
-    what = `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
-  } else if (answer === null || typeof answer !== "object") {
-    what = answer === null ? "null" : `a ${typeof answer}`;
+// ../envoy-client/src/nats-auth.ts
+var import_nats = __toESM(require_mod4(), 1);
+var seedKeys = import_nats.nkeys;
+function natsAuthOptions(env) {
+  const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
+  let seed;
+  let source;
+  if (file2 !== undefined) {
+    if (file2 === "")
+      throw new Error("NATS_NKEY_SEED_FILE is set but empty");
+    seed = readSecretFile("NATS_NKEY_SEED_FILE", file2);
+    source = `NATS_NKEY_SEED_FILE (${file2})`;
+  } else if (plain !== undefined) {
+    seed = plain.trim();
+    if (seed.length === 0)
+      throw new Error("NATS_NKEY_SEED is set but empty");
+    source = "NATS_NKEY_SEED";
   } else {
-    const fields = answer;
-    const lacking = [
-      ...Array.isArray(fields.issues) ? [] : ["an issues array"],
-      ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
-    ];
-    if (lacking.length === 0)
-      return;
-    what = `an object without ${lacking.join(" or ")}`;
+    return {};
   }
-  return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
+  const bytes = new TextEncoder().encode(seed);
+  let publicKey;
+  try {
+    publicKey = seedKeys.fromSeed(bytes).getPublicKey();
+  } catch (error48) {
+    throw new Error(`${source} does not hold a valid nkey seed: ${messageFor(error48)}`);
+  }
+  if (!publicKey.startsWith("U")) {
+    throw new Error(`${source} holds an nkey seed that is not a user's (public key ${publicKey})`);
+  }
+  return { authenticator: import_nats.nkeyAuthenticator(bytes) };
 }
-var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
-function gatewayAdvice(method, status) {
-  if (!transientStatus(status)) {
-    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
-  }
-  if (method === "GET")
-    return "a retry may succeed";
-  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
-}
-function transientStatus(status) {
-  return status >= 500 || status === 408 || status === 429;
-}
-function reachesDispatch(status) {
-  return status >= 500;
-}
-var REDACTED = "[redacted]";
-var EXCERPT_SCAN_LIMIT = 64 * 1024;
-var BEARER_PIECE = 8;
-function redactBearer(text, bearer) {
-  if (bearer === "")
-    return text.slice(0, EXCERPT_SCAN_LIMIT);
-  const length = Math.min(BEARER_PIECE, bearer.length);
-  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
-  const covered = new Uint8Array(scanned.length);
-  const pieces = new Set;
-  for (let at = 0;at + length <= bearer.length; at++)
-    pieces.add(bearer.slice(at, at + length));
-  for (const piece of pieces) {
-    let found = scanned.indexOf(piece);
-    while (found !== -1) {
-      covered.fill(1, found, found + length);
-      found = scanned.indexOf(piece, found + 1);
-    }
-  }
-  let redacted = "";
-  let kept = 0;
-  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
-    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
-    const end = covered.indexOf(0, start);
-    kept = end === -1 ? scanned.length : end;
-  }
-  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
-}
-function excerpt(text, token) {
-  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
-  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
-}
-
-class DispatchClient {
-  token;
-  fetchImpl;
-  #baseUrl;
-  #resolvedIssues = new Map;
-  #signal;
-  constructor(baseUrl, token, fetchImpl = fetch, signal) {
-    this.token = token;
-    this.fetchImpl = fetchImpl;
-    this.#baseUrl = baseUrl.replace(/\/+$/, "");
-    this.#signal = requestSignal(signal);
-  }
-  async issue(input) {
-    return this.#json("POST", ["api", "v1", "issues"], input);
-  }
-  async resolveIssue(issueReference) {
-    return this.#resolveIssue(issueReference);
-  }
-  async listIssuePage(options, page) {
-    const path2 = ["api", "v1", "issues"];
-    const query = { ...options, limit: page.limit, offset: page.offset };
-    const answer = await this.#json("GET", path2, undefined, query);
-    const refusal = whyNotAPage(answer);
-    if (refusal === undefined)
-      return answer;
-    throw new Error(`GET ${this.#url(path2, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
-  }
-  async listProjectArtifacts(project, unlinked = false) {
-    return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
-  }
-  async projectArtifact(project, input) {
-    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
-  }
-  async getProjectArtifact(project, slug) {
-    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
-  }
-  async agentArtifact(sessionId, input) {
-    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
-  }
-  async getAgentArtifact(sessionId, slug) {
-    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
-  }
-  async getIssueArtifact(issue2, slug) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue2),
-      "artifacts",
-      slug
-    ]);
-  }
-  async search(query, options = {}) {
-    return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
-  }
-  async getIssue(issue2) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2)]);
-  }
-  async updateIssue(issue2, input) {
-    return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue2)], input);
-  }
-  async claimIssue(issue2, input = {}) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "claim"], input);
-  }
-  async releaseIssueClaim(issue2, input = {}) {
-    return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue2), "claim"], input);
-  }
-  async getIssueEvents(issue2, after = 0, limit = 200) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "events"], undefined, { after, limit });
-  }
-  async read(issueReference) {
-    const issueKey = await this.#resolveIssue(issueReference);
-    const issue2 = await this.getIssue(issueKey);
-    const events = await this.getIssueEvents(issueKey, Math.max(0, issue2.last_seq - 10), 10);
-    return { issue: issue2, events };
-  }
-  async ask(issue2, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "asks"], input);
-  }
-  async openAsks(sessionID, since) {
-    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, {
-      author_session: sessionID,
-      ...since === undefined ? {} : { since }
-    });
-  }
-  async openAsksForProject(project) {
-    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
-  }
-  async listAgents() {
-    return this.#json("GET", ["api", "v1", "agents"]);
-  }
-  async whoami() {
-    return this.#json("GET", ["api", "v1", "whoami"]);
-  }
-  async syncArchitectureSource(project) {
-    return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
-  }
-  async getArchitectureSource(project) {
-    try {
-      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
-    } catch (error48) {
-      if (error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "SOURCE_NOT_FOUND") {
-        return null;
-      }
-      throw error48;
-    }
-  }
-  async resolveAsk(id, input) {
-    return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
-  }
-  async requestApproval(artifactID, input) {
-    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
-    return { ...answer.payload, recorded: answer.status === 201 };
-  }
-  async editAsk(id, input) {
-    return this.#json("PATCH", ["api", "v1", "asks", id], input);
-  }
-  async comment(issue2, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], input);
-  }
-  async listIssueAsks(issue2, state) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "asks"], undefined, state === undefined ? undefined : { state });
-  }
-  async getArtifactAsks(id, state) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "asks"], undefined, state === undefined ? undefined : { state });
-  }
-  async artifactAsk(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
-  }
-  async suggest(issue2, input) {
-    const { replace_with, ...comment } = input;
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], {
-      ...comment,
-      suggestion: { replace_with }
-    });
-  }
-  async getArtifactComments(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
-  }
-  async artifactComment(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
-  }
-  async artifactSuggest(id, input) {
-    const { replace_with, ...comment } = input;
-    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
-      ...comment,
-      suggestion: { replace_with }
-    });
-  }
-  async message(issue2, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "messages"], input);
-  }
-  async messageReply(id, input, options = {}) {
-    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
-  }
-  async getMessage(issue2, id) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue2),
-      "messages",
-      id
-    ]);
-  }
-  async getMessageThread(id, session) {
-    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
-  }
-  async acceptMessageDelivery(id, attempt, input) {
-    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
-  }
-  async artifact(issue2, input) {
-    return this.#upload(["api", "v1", "issues", await this.#resolveIssue(issue2), "artifacts"], input);
-  }
-  async getArtifact(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id]);
-  }
-  async docRead(id, version2) {
-    return version2 === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version2)]);
-  }
-  async fileVersion(id, version2) {
-    const url2 = this.#url(["api", "v1", "artifacts", id, "versions", String(version2)]);
-    const response = await this.fetchImpl(url2, {
-      method: "GET",
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal
-    });
-    if (!response.ok)
-      return this.#response("GET", url2, response);
-    return {
-      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
-      bytes: new Uint8Array(await response.arrayBuffer())
-    };
-  }
-  async artifactBlocks(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
-  }
-  async docEdit(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
-  }
-  async nameArtifactVersion(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
-  }
-  async getArtifactEvents(id, after = 0, limit = 200) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "events"], undefined, { after, limit });
-  }
-  async getArtifactReferences(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
-  }
-  async getAsk(id) {
-    return this.#json("GET", ["api", "v1", "asks", id]);
-  }
-  async followAsk(id, sessionId, actor) {
-    await this.#json("PUT", ["api", "v1", "asks", id, "followers", sessionId], { actor });
-  }
-  async unfollowAsk(id, sessionId, actor) {
-    await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
-  }
-  async getComment(id) {
-    return this.#json("GET", ["api", "v1", "comments", id]);
-  }
-  async resolveComment(id, actor) {
-    return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
-  }
-  async getComments(issue2, artifact) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], undefined, artifact ? { artifact } : undefined);
-  }
-  async getIssueReferences(issue2) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue2),
-      "references"
-    ]);
-  }
-  async getReferences(query) {
-    return this.#json("GET", ["api", "v1", "references"], undefined, {
-      ..."to" in query ? { to: query.to } : { from: query.from },
-      ...query.kind === undefined || query.kind.length === 0 ? {} : { kind: query.kind.join(",") },
-      ...query.since === undefined ? {} : { since: query.since }
-    });
-  }
-  async#resolveIssue(issueReference) {
-    if (!issueReference.includes("#"))
-      return issueReference;
-    let resolved = this.#resolvedIssues.get(issueReference);
-    if (!resolved) {
-      resolved = this.#json("GET", ["api", "v1", "issues", "resolve"], undefined, {
-        ref: issueReference
-      }).then((resolution) => resolution.key);
-      this.#resolvedIssues.set(issueReference, resolved);
-    }
-    try {
-      return await resolved;
-    } catch (error48) {
-      this.#resolvedIssues.delete(issueReference);
-      throw error48;
-    }
-  }
-  async#json(method, path2, body, query) {
-    return (await this.#jsonAnswer(method, path2, body, query)).payload;
-  }
-  async#jsonAnswer(method, path2, body, query) {
-    const headers = {
-      Accept: "application/json",
-      Authorization: `Bearer ${this.token}`
-    };
-    if (body !== undefined)
-      headers["Content-Type"] = "application/json";
-    const url2 = this.#url(path2, query);
-    const response = await this.fetchImpl(url2, {
-      method,
-      headers,
-      signal: this.#signal,
-      ...body === undefined ? {} : { body: JSON.stringify(body) }
-    });
-    return { status: response.status, payload: await this.#response(method, url2, response) };
-  }
-  async#upload(path2, input) {
-    if ("content" in input)
-      return this.#json("POST", path2, input);
-    const form = new FormData;
-    form.set("name", input.name);
-    if (input.summary !== undefined)
-      form.set("summary", input.summary);
-    if (input.actor !== undefined)
-      form.set("actor", JSON.stringify(input.actor));
-    form.set("file", input.file, input.name);
-    return this.#form("POST", path2, form);
-  }
-  async#form(method, path2, body) {
-    const url2 = this.#url(path2);
-    const response = await this.fetchImpl(url2, {
-      method,
-      headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body,
-      signal: this.#signal
-    });
-    return this.#response(method, url2, response);
-  }
-  #url(path2, query) {
-    const url2 = new URL(`${path2.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
-    if (query) {
-      for (const [name, value] of Object.entries(query)) {
-        if (typeof value === "string" || typeof value === "number") {
-          url2.searchParams.set(name, String(value));
-        } else if (Array.isArray(value)) {
-          for (const item of value)
-            url2.searchParams.append(name, String(item));
-        }
-      }
-    }
-    return url2.toString();
-  }
-  async#response(method, url2, response) {
-    const text = await response.text();
-    let payload = text;
-    if (text && isJson(response)) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = text;
-      }
-    }
-    if (!response.ok) {
-      const error48 = asErrorShape(payload);
-      if (typeof error48.error === "string") {
-        throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
-      }
-      const quoted = excerpt(text, this.token);
-      let body;
-      if (quoted !== "") {
-        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
-      } else if (text === "") {
-        body = "an empty body";
-      } else {
-        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
-        const size = Buffer.byteLength(text).toLocaleString("en-US");
-        body = `a body of ${size} bytes and no readable text${within}`;
-      }
-      const reasonPhrase = excerpt(response.statusText, this.token);
-      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
-      throw new DispatchGatewayError(response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
-    }
-    return payload;
-  }
-}
-
-// ../envoy-client/src/dispatch-picture-tools.ts
-import { basename, resolve as resolvePath } from "path";
 
 // ../envoy-client/src/tool-input-errors.ts
 class ToolInputError extends Error {
@@ -39216,11 +39214,15 @@ class ToolInputError extends Error {
   problems;
   constructor(tool, problems) {
     const count = problems.length;
-    const help = dispatchInputHelp(tool);
+    const cli = isDispatchTool(tool);
+    const help = cli ? [
+      `Allowed flags: ${commandFlags(tool).join(", ")}`,
+      `Example: ${commandLine(tool, exampleFor(tool))}`
+    ] : [];
     super([
-      `${tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
+      `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
       ...problems.map((problem) => `- ${problem}`),
-      ...help === undefined ? [] : help.map((line) => `- ${line}`)
+      ...help.map((line) => `- ${line}`)
     ].join(`
 `));
     this.name = "ToolInputError";
@@ -39228,13 +39230,12 @@ class ToolInputError extends Error {
     this.problems = problems;
   }
 }
-function dispatchInputHelp(tool) {
+function isDispatchTool(tool) {
+  return dispatchToolSpecs.some((spec) => spec.name === tool);
+}
+function exampleFor(tool) {
   const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
-  if (spec === undefined)
-    return;
-  const schema = dispatchToolSchema(spec, zodSchemaApi(exports_external), { strict: true });
-  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ") || "none";
-  return [`Allowed keys: ${allowed}`, `Example: ${tool}(${JSON.stringify(spec.example)})`];
+  return { ...spec?.example };
 }
 function unwrap(schema) {
   let current = schema;
@@ -39302,16 +39303,32 @@ function describeExpected(expected, schema) {
       return `a ${expected}`;
   }
 }
-function formatZodIssues(issues, schema) {
+function pathText(path2, cliTool) {
+  const [head, ...rest] = path2.map(String);
+  if (cliTool === undefined || head === undefined)
+    return path2.map(String).join(".");
+  let flag = fieldFlag(cliTool, head);
+  let index = 0;
+  for (;index < rest.length && /^\d+$/.test(rest[index]); index++) {
+    flag += `[${rest[index]}]`;
+  }
+  const tail = rest.slice(index).map((segment) => /^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`).join("").replace(/^\./, "");
+  return tail === "" ? flag : `${flag} ${tail}`;
+}
+function formatZodIssues(issues, schema, tool) {
+  const cliTool = isDispatchTool(tool) ? tool : undefined;
   const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
   return issues.flatMap((issue2) => {
-    const path2 = issue2.path.map(String).join(".");
+    const path2 = pathText(issue2.path, cliTool);
     switch (issue2.code) {
       case "invalid_type":
         return issue2.input === undefined ? [`${path2} is required (${issue2.expected})`] : [
           `${path2} must be ${describeExpected(issue2.expected, schemaAt(schema, issue2.path))}, not ${describeInput(issue2.input)}`
         ];
       case "unrecognized_keys": {
+        if (cliTool !== undefined && issue2.path.length === 0) {
+          return issue2.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
+        }
         const here = Object.keys(shapeOf(schemaAt(schema, issue2.path)) ?? {}).join(", ") || allowed;
         const where = path2 === "" ? "" : ` in ${path2}`;
         return issue2.keys.map((key) => `unknown field "${key}"${where}; allowed: ${here}`);
@@ -39331,2464 +39348,6 @@ function formatZodIssues(issues, schema) {
         return [path2 === "" ? issue2.message : `${path2}: ${issue2.message}`];
     }
   });
-}
-
-// ../envoy-client/src/dispatch-picture-tools.ts
-var PICTURE_TYPE_NAMES = "a PNG, JPEG, GIF or WebP";
-async function localPictures(images, cwd, problems) {
-  if (!Array.isArray(images))
-    return [];
-  const checked = await Promise.all(images.map((path2) => localPicture(path2, cwd)));
-  const pictures = [];
-  for (const outcome of checked) {
-    if (typeof outcome === "string")
-      problems.push(outcome);
-    else if (outcome !== undefined)
-      pictures.push(outcome);
-  }
-  return pictures;
-}
-async function localPicture(path2, cwd) {
-  if (typeof path2 !== "string" || path2 === "")
-    return;
-  const absolute = resolvePath(cwd, path2);
-  const file2 = Bun.file(absolute);
-  let size;
-  let head;
-  try {
-    const stats = await file2.stat();
-    if (!stats.isFile())
-      return `images: ${path2} is not a file`;
-    size = stats.size;
-    head = new Uint8Array(await file2.slice(0, PICTURE_SNIFF_BYTES).arrayBuffer());
-  } catch (error48) {
-    return `images: ${path2} cannot be read: ${messageFor(error48)}`;
-  }
-  if (size > PICTURE_UPLOAD_MAX_BYTES) {
-    return `images: ${path2} is ${size.toLocaleString("en-US")} bytes, over the ${PICTURE_UPLOAD_MAX_BYTES / 1024 / 1024} MiB one Dispatch upload takes`;
-  }
-  const type = sniffPictureType(head);
-  if (type === undefined) {
-    return `images: ${path2} is not ${PICTURE_TYPE_NAMES} picture (judged by its bytes, not its name)`;
-  }
-  return { path: path2, name: basename(absolute), file: Bun.file(absolute, { type }) };
-}
-function uploadSlug(name) {
-  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-  return slug === "" ? "artifact" : slug;
-}
-async function textWithPictures(tool, text, pictures, limit, owner, upload, actor) {
-  if (pictures.length === 0)
-    return text;
-  const counted = `${limit.text} plus ${pictures.length} ${pictures.length === 1 ? "picture" : "pictures"}`;
-  const fix = `${limit.shorten} or send fewer pictures`;
-  const predicted = withPictureLines(text, pictures.map((picture) => pictureLine(picture.name, `dispatch://${owner}/artifact/${uploadSlug(picture.name)}@v1`)));
-  if (predicted.length > limit.cap) {
-    throw new ToolInputError(tool, [
-      `${counted} ${overCapMessage(predicted.length, limit.cap)}; ${fix}`
-    ]);
-  }
-  const lines = [];
-  const addresses = [];
-  for (const picture of pictures) {
-    let uploaded;
-    try {
-      uploaded = await upload({ name: picture.name, file: picture.file, actor });
-    } catch (error48) {
-      const earlier = addresses.length === 0 ? "" : `; the pictures before it are uploaded (${addresses.join(", ")})`;
-      throw new Error(`images: ${picture.path} was not uploaded: ${messageFor(error48)}. Nothing was posted${earlier}.`);
-    }
-    const address = `dispatch://${owner}/artifact/${uploaded.artifact.slug}@v${uploaded.version.number}`;
-    addresses.push(address);
-    lines.push(pictureLine(picture.name, address));
-  }
-  const posted = withPictureLines(text, lines);
-  if (posted.length > limit.cap) {
-    throw new Error(`${counted} ${overCapMessage(posted.length, limit.cap)} with the addresses Dispatch gave ` + `the uploads (${addresses.join(", ")}), so nothing was posted; ${fix}.`);
-  }
-  return posted;
-}
-var AGENT_ARTIFACT_REF = new RegExp(`^dispatch://agent/(${SESSION_ID_PATTERN})/artifact/([^/@]+)(?:@v(\\d+))?$`, "u");
-function parseAgentArtifactRef(ref) {
-  const match = ref.match(AGENT_ARTIFACT_REF);
-  if (match === null)
-    return null;
-  const [, session, slug, version2] = match;
-  if (session === undefined || slug === undefined || version2 !== undefined && Number(version2) < 1) {
-    return null;
-  }
-  return { session, slug, ...version2 === undefined ? {} : { version: Number(version2) } };
-}
-function datedBodies(records) {
-  return records.map((record2) => ({ text: record2.body, at: record2.created_at }));
-}
-function askTexts({ ask, replies }) {
-  return [
-    { text: ask.question, at: ask.created_at },
-    ...ask.answer?.text ? [{ text: ask.answer.text, at: ask.answer.at }] : [],
-    ...ask.resolution === undefined ? [] : [{ text: ask.resolution.reason, at: ask.resolution.at }],
-    ...datedBodies(replies)
-  ];
-}
-function eventTexts(event) {
-  let texts;
-  switch (event.type) {
-    case "ask.opened":
-    case "ask.anchor_refreshed":
-    case "ask.edited":
-    case "ask.handed_back":
-    case "ask.answered":
-    case "ask.resolved":
-      texts = [
-        event.payload.question,
-        event.payload.answer?.text,
-        event.payload.resolution?.reason
-      ];
-      break;
-    case "comment.created":
-    case "comment.answered":
-    case "comment.anchor_refreshed":
-    case "comment.edited":
-    case "comment.resolved":
-    case "comment.reopened":
-    case "suggestion.accepted":
-    case "suggestion.rejected":
-    case "message.created":
-    case "message.answered":
-      texts = [event.payload.body];
-      break;
-    default:
-      texts = [];
-  }
-  return texts.filter((text) => typeof text === "string" && text !== "").map((text) => ({ text, at: event.created_at }));
-}
-function shownPictureLine(index, address, name, mimeType, bytes) {
-  return `- image ${index}: ${address} (${name}, ${mimeType}, ${bytes.toLocaleString("en-US")} bytes)`;
-}
-function pictureTarget(address) {
-  const agent = parseAgentArtifactRef(address);
-  if (agent !== null) {
-    if (agent.version === undefined)
-      return;
-    return {
-      key: `agent/${agent.session}/${agent.slug}`,
-      read: (client) => client.getAgentArtifact(agent.session, agent.slug),
-      version: agent.version
-    };
-  }
-  const ref = parseDispatchRef(address);
-  if (ref?.kind !== "artifact" || ref.version === undefined)
-    return;
-  const { owner, id: slug } = ref;
-  return owner.kind === "issue" ? {
-    key: `${owner.issue}/${slug}`,
-    read: (client) => client.getIssueArtifact(owner.issue, slug),
-    version: ref.version
-  } : {
-    key: `${owner.project}/${slug}`,
-    read: (client) => client.getProjectArtifact(owner.project, slug),
-    version: ref.version
-  };
-}
-var SESSIONS_SHOWN_MAX = 64;
-var picturesShown = new Map;
-function shownPictures(sessionId) {
-  const shown = picturesShown.get(sessionId) ?? new Set;
-  picturesShown.delete(sessionId);
-  picturesShown.set(sessionId, shown);
-  const oldest = picturesShown.keys().next();
-  if (picturesShown.size > SESSIONS_SHOWN_MAX && oldest.done !== true) {
-    picturesShown.delete(oldest.value);
-  }
-  return shown;
-}
-function forgetShownPictures(sessionId) {
-  picturesShown.delete(sessionId);
-}
-async function readPictures(client, addresses, shown) {
-  if (addresses.length === 0)
-    return { lines: [], images: [], shown: [] };
-  const artifacts = new Map;
-  const images = [];
-  const showing = [];
-  const lines = ["Pictures:"];
-  let shownBytes = 0;
-  const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch_doc_read shows it`;
-  for (const address of addresses) {
-    const skip = (reason) => lines.push(`- not shown: ${address} (${reason})`);
-    if (shown?.has(address)) {
-      skip("shown earlier this session; dispatch_doc_read shows it again");
-      continue;
-    }
-    if (images.length === PICTURES_SHOWN_MAX) {
-      skip(`past this read's ${PICTURES_SHOWN_MAX} pictures; dispatch_doc_read shows it`);
-      continue;
-    }
-    const target = pictureTarget(address);
-    if (target === undefined) {
-      skip("names no versioned Dispatch artifact");
-      continue;
-    }
-    try {
-      let read = artifacts.get(target.key);
-      if (read === undefined) {
-        read = target.read(client);
-        artifacts.set(target.key, read);
-      }
-      const artifact = await read;
-      const version2 = artifact.versions.find((candidate) => candidate.number === target.version);
-      if (version2 === undefined) {
-        skip(`${artifact.name} has no version ${target.version}`);
-        continue;
-      }
-      if (artifact.kind !== "image") {
-        skip(`${artifact.name} is a ${artifact.kind}, not a picture`);
-        continue;
-      }
-      const mime = version2.mime?.split(";")[0]?.trim();
-      if (mime !== undefined && !isPictureType(mime)) {
-        skip(`${artifact.name} is ${mime}, not ${PICTURE_TYPE_NAMES} a model is shown`);
-        continue;
-      }
-      if (version2.size !== undefined && version2.size > PICTURE_SHOWN_MAX_BYTES) {
-        skip(oversizePictureText(artifact.name, version2.size));
-        continue;
-      }
-      if (version2.size !== undefined && shownBytes + version2.size > PICTURES_SHOWN_MAX_BYTES) {
-        skip(overBudget);
-        continue;
-      }
-      const file2 = await client.fileVersion(artifact.id, target.version);
-      const image = toolImage(file2.bytes);
-      if (image === undefined) {
-        skip(sniffPictureType(file2.bytes) === undefined ? `${artifact.name} is not ${PICTURE_TYPE_NAMES} a model is shown` : oversizePictureText(artifact.name, file2.bytes.length));
-        continue;
-      }
-      if (shownBytes + file2.bytes.length > PICTURES_SHOWN_MAX_BYTES) {
-        skip(overBudget);
-        continue;
-      }
-      shownBytes += file2.bytes.length;
-      images.push(image);
-      showing.push(address);
-      lines.push(shownPictureLine(images.length, address, artifact.name, image.mimeType, file2.bytes.length));
-    } catch (error48) {
-      skip(`unavailable: ${messageFor(error48)}`);
-    }
-  }
-  return { lines, images, shown: showing };
-}
-
-// ../envoy-client/src/search-answer.ts
-function pageSummaryText(offset, count, total) {
-  return `showing ${offset + 1}-${offset + count} of ${total}`;
-}
-function searchResultLine(result, baseUrl) {
-  const href = new URL(result.href, baseUrl).toString();
-  const { owner } = result;
-  if (owner.kind === "document") {
-    const reference = dispatchDocumentRef(owner.project, owner.slug);
-    return `${reference} [document] ${owner.name} - ${result.kind}: ${snippetText(result.snippet)} -> ${href}`;
-  }
-  const artifactName = result.artifact ? ` ${result.artifact.name}` : "";
-  const label = `${owner.key} [${owner.status}] ${owner.title} - ${result.kind}${artifactName}`;
-  return `${label}: ${snippetText(result.snippet)} -> ${href}`;
-}
-function searchAnswer(search, query, offset, configUrl) {
-  const results = search.results;
-  const count = results.length;
-  const lines = results.map((result) => searchResultLine(result, configUrl));
-  const noun = count === 1 ? "result" : "results";
-  const noResults = `No results for "${query}".`;
-  const degraded = search.degraded === SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE ? "Searched by keyword only: meaning search was unavailable for this request." : undefined;
-  if (typeof search.total !== "number") {
-    if (offset !== undefined && offset > 0) {
-      throw new Error(`Dispatch answered without a total: it predates search paging and ignored offset ${offset}, so this would be its first page again.`);
-    }
-    return {
-      text: count === 0 ? [noResults, ...degraded === undefined ? [] : [degraded]].join(`
-`) : [
-        `${count} ${noun} for "${query}" (${search.took_ms} ms)`,
-        ...degraded === undefined ? [] : [degraded],
-        ...lines
-      ].join(`
-`),
-      details: { query, results, ...degraded === undefined ? {} : { degraded: search.degraded } }
-    };
-  }
-  const { total, reachable, offset: pageOffset } = search;
-  const end = pageOffset + count;
-  const cut = reachable < total ? `Each kind lists only its best ${SEARCH_KIND_DEPTH} matches, so ${reachable} of the ${total} can be paged to; narrow the query or name a project to reach the rest.` : undefined;
-  const details = {
-    query,
-    results,
-    total,
-    reachable,
-    offset: pageOffset,
-    limit: search.limit,
-    ...degraded === undefined ? {} : { degraded: search.degraded }
-  };
-  if (count === 0) {
-    return {
-      text: total === 0 ? [noResults, ...degraded === undefined ? [] : [degraded]].join(`
-`) : [
-        `No results for "${query}" at offset ${pageOffset}: it matches ${total}, and the pages reach the first ${reachable}.`,
-        ...degraded === undefined ? [] : [degraded],
-        ...cut === undefined ? [] : [cut]
-      ].join(`
-`),
-      details
-    };
-  }
-  const showing = pageOffset === 0 && count === total ? "" : `${pageSummaryText(pageOffset, count, total)}, `;
-  return {
-    text: [
-      `${count} ${noun} for "${query}" (${showing}${search.took_ms} ms)`,
-      ...degraded === undefined ? [] : [degraded],
-      ...cut === undefined ? [] : [cut],
-      ...lines,
-      ...end < reachable ? [`Next page: offset ${end}.`] : []
-    ].join(`
-`),
-    details
-  };
-}
-
-// ../envoy-client/src/dispatch-execute.ts
-function documentTopic(artifact) {
-  return documentTopicOf(artifact.project, artifact.slug);
-}
-function resolvedTopic(resolved) {
-  if (resolved.owner.kind === "project")
-    return documentTopic(resolved.artifact);
-  if (resolved.issue === undefined)
-    throw new Error("issue document is missing its issue");
-  return issueTopic(resolved.issue.key);
-}
-function notSubscribed(owner) {
-  return `(not subscribed to ${owner.label}; envoy_subscribe ${owner.topic} for every event on it)`;
-}
-function followsAsk(owner) {
-  return `You follow this ask: its answer and replies reach you directly. For every event on ${owner.label}: envoy_subscribe ${owner.topic}`;
-}
-var triageAdviceShown = new Set;
-var SPEC_CHECK_REMINDER = 'Has a fresh reader checked this spec? Each claim about how a system works today should trace to code read or a command run, and each requirement to the human\'s words or a cited fact. If not, have a fresh read-only subagent (`plan-gap-analyst` on Oh My Pi) check it now and fix what it finds. See the `dispatch-first` skill, "Design in the spec".';
-function renderAdvice(tool, key, advice, opts) {
-  if (advice === undefined)
-    return [];
-  const hasIssueAdvice = advice.issue_status !== undefined;
-  const openAsks = advice.your_open_asks;
-  const writesSinceHuman = advice.session_writes_since_human;
-  const lines = [];
-  const unparsed = advice.unparsed_openers;
-  if (unparsed !== undefined && unparsed.count > 0 && (tool === "dispatch_issue" || tool === "dispatch_artifact")) {
-    const quoted = unparsed.examples.map((example) => JSON.stringify(example)).join(", ");
-    const subject2 = unparsed.count === 1 ? "1 typed-block opening in this document is text, not a block" : `${unparsed.count} typed-block openings in this document are text, not blocks`;
-    lines.push(`${subject2}: ${quoted}. An opening like \`:::ask{\u2026}\` makes a block only as a line of its own, so as text it asks nobody. Mentioning the syntax on purpose? Put it in code. See the \`dispatch\` skill, "Decision blocks".`);
-  }
-  if (advice.decision_blocks === 0 && opts.isPrimarySpec === true && (tool === "dispatch_issue" || tool === "dispatch_artifact")) {
-    lines.push('This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".');
-  }
-  if (hasIssueAdvice && writesSinceHuman !== undefined && writesSinceHuman >= 3 && (tool === "dispatch_message" || tool === "dispatch_ask" || tool === "dispatch_comment" && opts.isAskReply !== true)) {
-    const middle = writesSinceHuman >= 6 ? "Stop posting here until a human replies." : "Progress ledger or scratchpad? If so, stop.";
-    lines.push(`You've sent ${writesSinceHuman} messages on ${key} with no human response. ${middle} See the \`dispatch\` skill, "Structure over stream".`);
-  }
-  if (advice.issue_status === "triage" && tool !== "dispatch_issue" && !(tool === "dispatch_issue_update" && opts.setsStatus === true) && !triageAdviceShown.has(key)) {
-    triageAdviceShown.add(key);
-    lines.push(`${key} is still in triage \u2014 nobody can see its development status. See the \`dispatch\` skill, "Issue status is yours to move".`);
-  }
-  if (hasIssueAdvice && openAsks !== undefined && openAsks.length > 0 && (tool === "dispatch_message" || tool === "dispatch_doc_edit" || tool === "dispatch_issue_update" || tool === "dispatch_comment" && opts.replyToOwnAsk !== true)) {
-    const askCount = Math.min(openAsks.length, 2);
-    for (let index = 0;index < askCount; index += 1) {
-      const ask = openAsks[index];
-      if (ask === undefined)
-        break;
-      lines.push(`You still have an open ask on ${key}: "${ask.question.slice(0, 80)}" (${ask.id}). Still needed? See the \`dispatch\` skill, "Close what you opened".`);
-    }
-  }
-  return lines;
-}
-function renderSuggestions(suggestions, configUrl) {
-  if (suggestions === undefined)
-    return [];
-  if (suggestions.missing !== undefined) {
-    return [`Related-item search was skipped: ${suggestions.missing}.`];
-  }
-  const lines = [];
-  if (suggestions.related.length > 0) {
-    lines.push("Possibly related, found by search:");
-    for (const item of suggestions.related) {
-      lines.push(`- ${suggestionLabel(item)} \u2192 ${new URL(item.href, configUrl).toString()}`);
-    }
-  }
-  if (suggestions.decision !== undefined) {
-    const item = suggestions.decision;
-    const when = item.answered_at === undefined ? "" : ` on ${item.answered_at}`;
-    lines.push(`A past decision may already answer this: ${suggestionLabel(item)}, answered by ${item.answered_by}${when} \u2192 ${new URL(item.href, configUrl).toString()}`);
-  }
-  return lines;
-}
-function suggestionLabel(item) {
-  if (item.owner.kind === "issue") {
-    return `${item.owner.key} [${item.owner.status}] ${item.owner.title}`;
-  }
-  return `${item.owner.name} (${item.owner.project}/${item.owner.slug})`;
-}
-function documentResultDetails(artifact) {
-  return {
-    project: artifact.project,
-    artifact: artifact.id,
-    document: documentLabel(artifact.project, artifact.slug)
-  };
-}
-function writeResultDetails(resolved, fields) {
-  if (resolved.owner.kind === "project") {
-    return { ...documentResultDetails(resolved.artifact), ...fields };
-  }
-  if (resolved.issue === undefined)
-    throw new Error("issue document is missing its issue");
-  return { issue: resolved.issue.key, ...fields };
-}
-async function askOwnerDetails(client, ask, artifact) {
-  if (ask.issue_key !== null) {
-    return { issue: ask.issue_key, ask: ask.id };
-  }
-  if (ask.artifact_id === undefined || ask.artifact_id === null) {
-    throw new Error("document ask is missing its artifact ID");
-  }
-  const owner = artifact ?? await client.getArtifact(ask.artifact_id);
-  return { ...documentResultDetails(owner), ask: ask.id };
-}
-async function commentOwnerResult(client, comment, artifact) {
-  if (comment.issue_key !== null) {
-    return { label: comment.issue_key, details: { issue: comment.issue_key, comment: comment.id } };
-  }
-  if (comment.artifact_id === undefined || comment.artifact_id === null) {
-    throw new Error("document comment is missing its artifact ID");
-  }
-  const owner = artifact ?? await client.getArtifact(comment.artifact_id);
-  return {
-    label: documentLabel(owner.project, owner.slug),
-    details: { ...documentResultDetails(owner), comment: comment.id }
-  };
-}
-async function followedAskDetails(client, ask, artifact) {
-  return { ...await askOwnerDetails(client, ask, artifact), follows: { ask: ask.id } };
-}
-var nativeIssueKeyPattern = /^[A-Z][A-Z0-9]{1,9}-[0-9]+$/;
-var externalIssueRefPattern = /^([^/\s]+)\/([^/\s#]+)#([1-9][0-9]*)$/;
-var bareIssueNumberPattern = /^[1-9][0-9]*$/;
-var issueFreeTools = {
-  dispatch_issue: true,
-  dispatch_edit_ask: true,
-  dispatch_resolve_ask: true,
-  dispatch_resolve_comment: true,
-  dispatch_follow: true,
-  dispatch_search: true,
-  dispatch_issues: true,
-  dispatch_open_asks: true,
-  dispatch_whoami: true,
-  dispatch_architecture_sync: true
-};
-function canonicalExternalIssueRef(value) {
-  const match = value.trim().match(externalIssueRefPattern);
-  return match ? `${canonicalRepo(match[1] ?? "", match[2] ?? "")}#${match[3]}` : value;
-}
-function stringArg(args, name) {
-  const value = args[name];
-  if (typeof value !== "string")
-    throw new Error(`${name} is required`);
-  return value;
-}
-function optionalString(args, name) {
-  const value = args[name];
-  return typeof value === "string" ? value : undefined;
-}
-function optionalBoolean(args, name) {
-  const value = args[name];
-  return typeof value === "boolean" ? value : undefined;
-}
-function optionalNumber(args, name) {
-  const value = args[name];
-  return typeof value === "number" ? value : undefined;
-}
-function optionalPriority(args, name) {
-  const value = args[name];
-  if (value === null)
-    return null;
-  return typeof value === "number" ? value : undefined;
-}
-function optionalPriorityFilter(args, name) {
-  const value = args[name];
-  return Array.isArray(value) ? value.map((item) => item ?? "none") : undefined;
-}
-function optionalComponents(args, name) {
-  const value = args[name];
-  if (typeof value !== "object" || value === null)
-    return;
-  const input = value;
-  return {
-    mode: input.mode,
-    ...input.ids === undefined ? {} : { ids: input.ids },
-    ...input.reason === undefined ? {} : { reason: input.reason }
-  };
-}
-function componentsChange(input, after) {
-  switch (input.mode) {
-    case "explicit":
-      return `components -> explicit [${after.ids.join(", ")}]`;
-    case "none":
-      return `components -> none (${after.reason ?? input.reason ?? ""})`;
-    case "inherit":
-      return "components -> inherit";
-  }
-}
-var architectureComponentsAction = 'Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
-async function architectureGuidance(client, project, components) {
-  if (components.mode === "none" || components.ids.length > 0)
-    return;
-  try {
-    if (await client.getArchitectureSource(project) === null) {
-      return;
-    }
-    return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
-  } catch (error48) {
-    return `Could not check whether project ${project} has an architecture model: ${messageFor(error48)}. ${architectureComponentsAction}`;
-  }
-}
-function isDuplicateCandidate(value) {
-  if (typeof value !== "object" || value === null)
-    return false;
-  const candidate = value;
-  return typeof candidate.key === "string" && typeof candidate.title === "string" && typeof candidate.status === "string" && typeof candidate.snippet === "string" && typeof candidate.shared_terms === "number" && typeof candidate.href === "string";
-}
-function duplicateCandidates(error48) {
-  if (error48.candidates === undefined || !error48.candidates.every(isDuplicateCandidate))
-    throw error48;
-  return error48.candidates;
-}
-function askUrgency(args) {
-  const value = args.urgency;
-  return ASK_URGENCIES.find((urgency) => urgency === value);
-}
-function questionWithRef(question, ref) {
-  return ref === undefined || question.includes(ref) ? question : `${question}
-
-Ref: ${ref}`;
-}
-function askQuestionWithRef(args) {
-  return questionWithRef(stringArg(args, "question"), optionalString(args, "ref"));
-}
-function askQuestionProblem(withRef) {
-  return withRef.length > ASK_QUESTION_MAX ? `question plus ref ${overCapMessage(withRef.length, ASK_QUESTION_MAX)}; shorten the question or drop the ref` : undefined;
-}
-var pictureSendingTools = {
-  dispatch_ask: true,
-  dispatch_comment: true,
-  dispatch_message: true
-};
-function refTarget(ref, kind, id) {
-  const ownerRef = ref.owner.kind === "issue" ? dispatchIssueRef(ref.owner.issue) : dispatchDocumentRef(ref.owner.project, `${ref.artifact}`);
-  return dispatchChildRef(ownerRef, kind, id);
-}
-var canonicalUUIDPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-var compactUUIDPattern = /^[0-9a-f]{32}$/i;
-function normalizeUUID(value) {
-  let compact = value;
-  if (value.slice(0, 9).toLowerCase() === "urn:uuid:") {
-    compact = value.slice(9);
-  } else if (value.length === 38 && value.startsWith("{") && value.endsWith("}")) {
-    compact = value.slice(1, -1);
-  }
-  if (canonicalUUIDPattern.test(compact))
-    compact = compact.replaceAll("-", "");
-  if (!compactUUIDPattern.test(compact))
-    return;
-  return `${compact.slice(0, 8)}-${compact.slice(8, 12)}-${compact.slice(12, 16)}-${compact.slice(16, 20)}-${compact.slice(20)}`.toLowerCase();
-}
-var askIdProblem = "ask must be a bare ask id or a dispatch://.../ask/<id> reference";
-var commentIdProblem = "comment must be a bare comment id or a dispatch://.../comment/<id> reference";
-var messageIdProblem = "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference";
-function askId(args) {
-  const ask = stringArg(args, "ask");
-  return ask.startsWith("dispatch://") ? parseDispatchRef(ask)?.id ?? ask : ask;
-}
-function messageIdOf(value) {
-  const id = value.startsWith("dispatch://") ? (() => {
-    const reference = parseDispatchRef(value);
-    return reference?.kind === "message" ? reference.id : undefined;
-  })() : value;
-  return id === undefined ? undefined : normalizeUUID(id);
-}
-var idPrefixPattern = /^[0-9a-f][0-9a-f-]{7,}$/i;
-function refOwnerName(ref) {
-  return ref.owner.kind === "issue" ? ref.owner.issue : `${ref.owner.project}/${ref.artifact}`;
-}
-async function resolveIdPrefix(tool, kind, id, ownerName, list) {
-  const fullID = normalizeUUID(id);
-  if (fullID !== undefined)
-    return fullID;
-  if (!idPrefixPattern.test(id)) {
-    throw new ToolInputError(tool, [
-      `${kind} id ${id} must be a full uuid or a prefix of at least 8 hex characters`
-    ]);
-  }
-  const prefix = id.toLowerCase();
-  const matches = (await list()).filter((item) => item.id.toLowerCase().startsWith(prefix));
-  if (matches.length === 1 && matches[0] !== undefined)
-    return matches[0].id;
-  throw new ToolInputError(tool, [
-    matches.length === 0 ? `${kind} id ${id} matches none of the ${kind}s on ${ownerName}; use the full id` : `${kind} id ${id} matches ${matches.length} ${kind}s on ${ownerName}; use the full id`
-  ]);
-}
-var askIdShapeProblem = "ask ids are uuids (a prefix of at least 8 hex characters works)";
-async function sessionOpenAsks(client, sessionId) {
-  const session = sessionId?.trim();
-  if (!session)
-    throw new Error("host session id is required to read this session's open asks");
-  return (await client.openAsks(session)).asks;
-}
-function openAskHints(asks) {
-  if (asks.length === 0)
-    return "you have no open asks";
-  const hints = asks.slice(0, askHintLimit).map((ask) => `${ask.id.slice(0, 8)} \u2014 ${textHead(ask.question)}`);
-  return `your open asks: ${hints.join("; ")}`;
-}
-async function resolveAskArgument(tool, args, client, sessionId) {
-  const id = askId(args);
-  if (normalizeUUID(id) === undefined && !idPrefixPattern.test(id)) {
-    const asks = await sessionOpenAsks(client, sessionId).catch(() => {
-      return;
-    });
-    throw new ToolInputError(tool, [
-      asks === undefined ? askIdShapeProblem : `${askIdShapeProblem}; ${openAskHints(asks)}`
-    ]);
-  }
-  return resolveIdPrefix(tool, "ask", id, "this session", () => sessionOpenAsks(client, sessionId));
-}
-function messageInReplyTo(args) {
-  const inReplyTo = optionalString(args, "in_reply_to");
-  return inReplyTo === undefined ? undefined : messageIdOf(inReplyTo);
-}
-function argumentProblems(tool, args) {
-  const problems = [];
-  switch (tool) {
-    case "dispatch_ask": {
-      const question = optionalString(args, "question");
-      const ref = optionalString(args, "ref");
-      if (question !== undefined && ref !== undefined && question.length <= ASK_QUESTION_MAX) {
-        const problem = askQuestionProblem(questionWithRef(question, ref));
-        if (problem !== undefined)
-          problems.push(problem);
-      }
-      break;
-    }
-    case "dispatch_edit_ask":
-    case "dispatch_resolve_ask":
-    case "dispatch_follow": {
-      const ask = optionalString(args, "ask");
-      if (ask?.startsWith("dispatch://") && parseDispatchRef(ask)?.kind !== "ask") {
-        problems.push(askIdProblem);
-      }
-      break;
-    }
-    case "dispatch_resolve_comment": {
-      const comment = optionalString(args, "comment");
-      if (comment?.startsWith("dispatch://") && parseDispatchRef(comment)?.kind !== "comment") {
-        problems.push(commentIdProblem);
-      }
-      break;
-    }
-    case "dispatch_comment": {
-      if (optionalString(args, "quote") !== undefined && optionalString(args, "artifact") === undefined) {
-        problems.push("artifact is required when quote is supplied");
-      }
-      if (optionalString(args, "reply_to") !== undefined && optionalString(args, "reply_to_ask") !== undefined) {
-        problems.push("reply_to and reply_to_ask cannot both be set");
-      }
-      break;
-    }
-    case "dispatch_message": {
-      const inReplyTo = optionalString(args, "in_reply_to");
-      if (inReplyTo !== undefined && messageIdOf(inReplyTo) === undefined) {
-        problems.push(messageIdProblem);
-      }
-      break;
-    }
-    case "dispatch_read": {
-      const message = optionalString(args, "message");
-      if (message !== undefined && messageIdOf(message) === undefined) {
-        problems.push("message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference");
-      }
-      break;
-    }
-  }
-  return problems;
-}
-function dispatchRefFromUrl(value, serverUrl) {
-  let url2;
-  let origin;
-  try {
-    url2 = new URL(value);
-    origin = new URL(serverUrl).origin;
-  } catch {
-    return;
-  }
-  if (url2.origin !== origin)
-    return;
-  const versionOf = (name) => {
-    const value2 = url2.searchParams.get(name);
-    return value2 !== null && /^[1-9][0-9]*$/.test(value2) ? `@v${value2}` : "";
-  };
-  const issuePage = url2.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
-  if (issuePage) {
-    const [, key, page, artifact, ask, comment, message] = issuePage;
-    const version2 = versionOf("v");
-    if (page === "spec" || artifact !== undefined) {
-      const item2 = itemFromSearch(url2.search);
-      if (item2 === null)
-        return;
-      if (item2 !== undefined)
-        return `dispatch://${key}/${item2.kind}/${item2.id}`;
-    }
-    if (page === "spec" && version2 !== "")
-      return `dispatch://${key}/artifact/spec${version2}`;
-    if (page !== undefined)
-      return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
-    if (artifact !== undefined) {
-      return `dispatch://${key}/artifact/${decodeURIComponent(artifact)}${version2}`;
-    }
-    if (ask !== undefined)
-      return `dispatch://${key}/ask/${ask}`;
-    if (comment !== undefined)
-      return `dispatch://${key}/comment/${comment}`;
-    if (message !== undefined)
-      return `dispatch://${key}/message/${message}`;
-    return `dispatch://${key}`;
-  }
-  const agentArtifactPage = url2.pathname.match(/^\/agents\/([^/]+)\/artifacts\/([^/]+)\/?$/);
-  if (agentArtifactPage) {
-    const [, session, slug2] = agentArtifactPage;
-    try {
-      return `dispatch://agent/${decodeURIComponent(session ?? "")}/artifact/${decodeURIComponent(slug2 ?? "")}${versionOf("v")}`;
-    } catch {
-      return;
-    }
-  }
-  const documentPage = url2.pathname.match(/^\/projects\/([A-Z][A-Z0-9]{1,9})\/documents\/([^/]+)\/?$/);
-  if (!documentPage)
-    return;
-  const [, project, slug] = documentPage;
-  const document = `dispatch://${project}/artifact/${decodeURIComponent(slug ?? "")}${versionOf("version")}`;
-  const item = itemFromSearch(url2.search);
-  if (item === null)
-    return;
-  return item === undefined ? document : `${document}/${item.kind}/${item.id}`;
-}
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch_doc_read); a dashboard URL on this Dispatch server is accepted too";
-var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
-var toolSchemas = new Map;
-function toolSchema(tool) {
-  const cached2 = toolSchemas.get(tool);
-  if (cached2 !== undefined)
-    return cached2;
-  const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
-  if (!spec)
-    throw new Error(`Unknown Dispatch tool: ${tool}`);
-  const schema = dispatchToolSchema(spec, zodSchemaApi(exports_external), { strict: true });
-  toolSchemas.set(tool, schema);
-  return schema;
-}
-async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, problems) {
-  if (issueFreeTools[tool] === true)
-    return { args: input, ref: null, owner: null };
-  const refArgument = input.ref;
-  let ref = null;
-  let args = input;
-  if (typeof refArgument === "string") {
-    const refText = dispatchRefFromUrl(refArgument, serverUrl) ?? refArgument;
-    if (refText !== refArgument)
-      args = { ...input, ref: refText };
-    const agentArtifact = parseAgentArtifactRef(refText);
-    if (agentArtifact !== null) {
-      if (tool !== "dispatch_doc_read") {
-        problems.push(`ref ${refText} names a picture in a conversation on the Agents page; only dispatch_doc_read reads one`);
-      }
-      if (args.issue !== undefined || args.project !== undefined || args.artifact !== undefined) {
-        problems.push("a dispatch://agent/... ref names its upload alone: name no issue, project, or artifact with it");
-      }
-      return { args, ref: null, owner: null, agentArtifact };
-    }
-    ref = parseDispatchRef(refText);
-    if (ref === null) {
-      problems.push(tool === "dispatch_ask" && !refText.startsWith("dispatch://") ? "ref must be a dispatch:// reference" : refGrammarProblem);
-    }
-  }
-  const issueArgument = args.issue;
-  const projectArgument = args.project;
-  const artifactArgument = args.artifact;
-  const versionArgument = args.version;
-  if (issueArgument !== undefined && projectArgument !== undefined) {
-    problems.push("exactly one of issue and project is required");
-  }
-  if (typeof projectArgument === "string") {
-    if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
-      problems.push("project must be a project key such as CORE");
-    }
-    const refDocument = ref?.owner.kind === "project" ? ref.artifact ?? ref.id : undefined;
-    if (ref?.owner.kind === "project" && (ref.owner.project !== projectArgument || artifactArgument !== undefined && artifactArgument !== refDocument)) {
-      problems.push("project and ref must name the same document");
-    }
-    return {
-      args: {
-        ...args,
-        ...artifactArgument === undefined && refDocument !== undefined ? { artifact: refDocument } : {},
-        ...versionArgument === undefined && ref?.version !== undefined ? { version: ref.version } : {}
-      },
-      ref,
-      owner: { kind: "project", project: projectArgument }
-    };
-  }
-  if (ref?.owner.kind === "project") {
-    return {
-      args: {
-        ...args,
-        project: ref.owner.project,
-        ...artifactArgument === undefined ? { artifact: ref.artifact ?? ref.id } : {},
-        ...versionArgument === undefined && ref.version !== undefined ? { version: ref.version } : {}
-      },
-      ref,
-      owner: ref.owner
-    };
-  }
-  if (issueArgument !== undefined || ref !== null) {
-    const issue3 = typeof issueArgument === "string" ? canonicalExternalIssueRef(issueArgument) : ref?.owner.kind === "issue" ? ref.owner.issue : undefined;
-    return {
-      args: {
-        ...args,
-        ...issue3 === undefined ? {} : { issue: issue3 },
-        ...artifactArgument === undefined && (ref?.kind === "spec" || ref?.kind === "artifact") ? { artifact: ref.id } : {},
-        ...versionArgument === undefined && ref?.version !== undefined ? { version: ref.version } : {}
-      },
-      ref,
-      owner: issue3 === undefined ? null : { kind: "issue", issue: issue3 }
-    };
-  }
-  const replyTarget = args.in_reply_to;
-  if (tool === "dispatch_message" && typeof replyTarget === "string" && !replyTarget.startsWith("dispatch://")) {
-    return { args, ref, owner: null };
-  }
-  if (tool === "dispatch_read" && typeof args.message === "string") {
-    return { args, ref, owner: null };
-  }
-  const legionIssue = env.LEGION_ISSUE;
-  if (!legionIssue) {
-    problems.push(ownerRequiredProblem);
-    return { args, ref, owner: null };
-  }
-  if (nativeIssueKeyPattern.test(legionIssue) || externalIssueRefPattern.test(legionIssue)) {
-    const issue3 = canonicalExternalIssueRef(legionIssue);
-    return { args: { ...args, issue: issue3 }, ref, owner: { kind: "issue", issue: issue3 } };
-  }
-  if (!bareIssueNumberPattern.test(legionIssue)) {
-    problems.push("LEGION_ISSUE must be a native issue key (e.g. LEGION-3), an external owner/repo#n reference, or a bare positive issue number");
-    return { args, ref, owner: null };
-  }
-  const repo2 = await resolveCwdRepo(cwd, exec);
-  if (!repo2) {
-    problems.push("issue is required; LEGION_ISSUE needs a GitHub repository in cwd");
-    return { args, ref, owner: null };
-  }
-  const issue2 = `${repo2}#${legionIssue}`;
-  return { args: { ...args, issue: issue2 }, ref, owner: { kind: "issue", issue: issue2 } };
-}
-function artifactByReference(artifacts, artifactReference, owner, canonical) {
-  const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
-  if (canonical && bySlug !== undefined)
-    return bySlug;
-  const byId = artifacts.find((candidate) => candidate.id === artifactReference);
-  if (byId !== undefined)
-    return byId;
-  const byName = artifacts.filter((candidate) => candidate.name === artifactReference);
-  if (bySlug !== undefined) {
-    const named = byName.filter((candidate) => candidate.id !== bySlug.id && candidate.kind === "doc");
-    if (named.length > 0) {
-      throw new Error(documentReferenceProblem(artifactReference, [bySlug, ...named], owner, "id"));
-    }
-    return bySlug;
-  }
-  if (byName.length > 1) {
-    throw new Error(documentReferenceProblem(artifactReference, byName, owner, "slug"));
-  }
-  const [artifact] = byName;
-  if (artifact === undefined) {
-    throw new Error(documentReferenceProblem(artifactReference, artifacts, owner));
-  }
-  return artifact;
-}
-async function resolveArtifact(client, owner, artifactReference, { canonical = false } = {}) {
-  if (owner.kind === "project") {
-    if (artifactReference === undefined) {
-      throw new Error("artifact is required for a project document");
-    }
-    const routed = await client.getProjectArtifact(owner.project, artifactReference).catch((error48) => {
-      if (!dispatchAnswered(error48, 404))
-        throw error48;
-      return;
-    });
-    if (canonical && routed !== undefined)
-      return { owner, artifact: routed };
-    const unlinked = await client.listProjectArtifacts(owner.project, true);
-    const artifacts = routed === undefined ? unlinked : [routed, ...unlinked.filter((candidate) => candidate.id !== routed.id)];
-    return {
-      owner,
-      artifact: artifactByReference(artifacts, artifactReference, "project", canonical)
-    };
-  }
-  const issue2 = await client.getIssue(owner.issue);
-  let artifact;
-  if (artifactReference === undefined || artifactReference === "spec") {
-    artifact = issue2.artifacts.find((candidate) => candidate.primary || candidate.id === issue2.primary_artifact_id);
-  } else {
-    artifact = artifactByReference(issue2.artifacts, artifactReference, "issue", canonical);
-  }
-  if (!artifact) {
-    throw new Error(documentReferenceProblem(artifactReference ?? "spec", issue2.artifacts, "issue"));
-  }
-  return { owner, issue: issue2, artifact };
-}
-var documentHintLimit = 8;
-function documentReferenceProblem(reference, documents, owner, use) {
-  const hints = documents.slice(0, documentHintLimit).map((document) => use === "id" ? `${document.id} (${document.slug}, ${document.name})` : `${document.slug} (${document.name})`);
-  const list = hints.length === 0 ? "none" : hints.join(", ");
-  return use === undefined ? `document "${reference}" not found by slug; this ${owner}'s documents: ${list}` : `"${reference}" names ${documents.length} documents on this ${owner}; use ${use === "id" ? "the id" : "a slug"}: ${list}`;
-}
-var askHintLimit = 8;
-function askIDInputProblem(asks, scope) {
-  const hints = asks.slice(0, askHintLimit).map((ask) => `${ask.id.slice(0, 8)}\u2026 ${textHead(ask.question)}`);
-  return `ask IDs are UUIDs; use the full ask ID; ${scope} open asks: ${hints.length === 0 ? "none" : hints.join(", ")}`;
-}
-async function invalidReplyToAskProblem(client, owner, resolved) {
-  if (owner.kind === "issue") {
-    const issue2 = resolved?.issue ?? await client.getIssue(owner.issue);
-    return askIDInputProblem(issue2.open_asks, "this issue's");
-  }
-  if (resolved === undefined)
-    throw new Error("project document is missing its resolved artifact");
-  return askIDInputProblem(await client.getArtifactAsks(resolved.artifact.id, "open"), "this document's");
-}
-function anchor(artifact, args) {
-  const quote = optionalString(args, "quote");
-  if (quote === undefined)
-    return;
-  const occurrence = optionalNumber(args, "occurrence");
-  return { artifact: artifact.id, quote, ...occurrence === undefined ? {} : { occurrence } };
-}
-function toolActor(origin, input) {
-  return {
-    kind: "session",
-    id: input.sessionId ?? "unknown",
-    origin: {
-      ...origin,
-      host: input.host,
-      ...input.sessionTitle === undefined ? {} : { session_title: input.sessionTitle }
-    }
-  };
-}
-function approvalLine(artifact) {
-  const approval = artifact.approval;
-  if (approval === undefined || approval.state === "draft")
-    return;
-  switch (approval.state) {
-    case "awaiting": {
-      const turn = approval.waiting_on === undefined ? "" : `, waiting on ${approval.waiting_on}`;
-      return `Approval: awaiting${turn} (requested by ${approval.requested_by?.id ?? "unknown"}, ask ${approval.ask_id ?? "?"})`;
-    }
-    case "approved":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}`;
-    case "stale":
-      return `Approval: approved v${approval.version} by ${approval.by?.id ?? "unknown"}, edited since (now v${approval.latest_version}) - request approval again once the human has agreed to every point in this version`;
-    case "changes_requested":
-      return `Approval: changes requested on v${approval.version} by ${approval.by?.id ?? "unknown"}: ${approval.reason ?? ""}`;
-  }
-}
-function componentsLine(components) {
-  const inherited = components.inherited_from === null ? "" : ` (inherited from ${components.inherited_from})`;
-  const retired = components.unknown.length === 0 ? "" : ` (retired: ${components.unknown.join(", ")})`;
-  switch (components.mode) {
-    case "explicit":
-      return `Components: ${components.ids.length === 0 ? "none live" : components.ids.join(", ")}${inherited}${retired}`;
-    case "none":
-      return `Components: none \u2014 ${components.reason ?? ""}${inherited}`;
-    case "inherit":
-      return "Components: unassigned";
-  }
-}
-function claimText(claim, titles) {
-  const holding = claimHolds(claim, titles);
-  const marker = holding === "unknown" ? " \xB7 liveness unknown" : holding === "lapsed" ? " \xB7 not running" : "";
-  return `${actorLabel(claim.actor, titles)} since ${claim.at}${marker}`;
-}
-async function liveSessionTitles(client, needed) {
-  if (!needed) {
-    return;
-  }
-  try {
-    const agents = await client.listAgents();
-    return new Map(agents.map((agent) => [agent.session_id, agent.title]));
-  } catch {
-    return;
-  }
-}
-function holdsSession(claim) {
-  return claim?.actor.kind === "session";
-}
-function routeHeldBySession(issue2) {
-  return issue2.route_status === "live" && issue2.route?.startsWith("role:") === true;
-}
-function routeText(issue2, titles) {
-  if (issue2.route === null)
-    return "none";
-  const holder = issue2.route_holder ?? null;
-  const reach = {
-    live: routeHeldBySession(issue2) && holder !== null ? ` (held by ${titles?.get(holder) ?? holder})` : "",
-    no_holder: issue2.route.startsWith("role:") ? " (nobody holds it right now)" : " (that session is not running right now)",
-    unknown: " (the Envoy listener did not answer, so whether it reaches anyone is unknown)"
-  };
-  return issue2.route + (issue2.route_status == null ? "" : reach[issue2.route_status]);
-}
-function progressText(progress, sep) {
-  if (progress === undefined)
-    return "";
-  const parts = [];
-  if (progress.tasks !== null)
-    parts.push(`tasks ${progress.tasks.done}/${progress.tasks.total}`);
-  if (progress.children !== null) {
-    parts.push(`children ${progress.children.done}/${progress.children.total}`);
-  }
-  return parts.join(sep);
-}
-function issueSummary(issue2, events, references, graph, titles) {
-  const asks = issue2.open_asks;
-  const spec = issue2.artifacts?.find((artifact) => artifact.primary);
-  const specApproval = spec === undefined ? undefined : approvalLine(spec);
-  if (issue2.priority === undefined)
-    throw new Error("Dispatch issue is missing priority");
-  if (issue2.assignee === undefined)
-    throw new Error("Dispatch issue is missing assignee");
-  if (issue2.components === undefined)
-    throw new Error("Dispatch issue is missing components");
-  if (issue2.claim === undefined)
-    throw new Error("Dispatch issue is missing claim");
-  if (issue2.external_links === undefined) {
-    throw new Error("Dispatch issue is missing external_links");
-  }
-  return [
-    `Title: ${issue2.title}`,
-    `Key: ${issue2.key}`,
-    `Status: ${issue2.status}`,
-    `Assignee: ${issue2.assignee ?? "unassigned"}`,
-    `Claimed by: ${issue2.claim === null ? "nobody" : claimText(issue2.claim, titles)}`,
-    ...issue2.priority === null ? [] : [`Priority: P${issue2.priority}`],
-    `Labels: ${issue2.labels.length === 0 ? "none" : issue2.labels.join(", ")}`,
-    componentsLine(issue2.components),
-    `Route: ${routeText(issue2, titles)}`,
-    `Progress: ${progressText(issue2.progress, ", ") || "none"}`,
-    ...specApproval === undefined ? [] : [`Spec ${specApproval.replace(/^Approval/, "approval")}`],
-    "External links:",
-    ...issue2.external_links.length === 0 ? ["- none"] : issue2.external_links.map((link) => `- ${link.url}${link.kind === undefined ? "" : ` (${link.kind})`}`),
-    "Open asks:",
-    ...asks.length === 0 ? ["- none"] : asks.map((ask) => `- ${ask.id}: ${ask.question}`),
-    "References:",
-    ...typeof references === "string" ? [`- ${references}`] : references.members.length === 0 ? ["- none"] : references.members.map(({ artifact, depth, via }) => `- ${artifact.project}/${artifact.slug} \xB7 depth ${depth} via ${via.kind} ${via.id}`),
-    ...typeof references === "string" || !references.truncated ? [] : ["- more references beyond 8 hops"],
-    "Events:",
-    ...events.length === 0 ? ["- none"] : events.map(eventLine),
-    ...graph
-  ].join(`
-`);
-}
-function referenceLines(edges) {
-  if (typeof edges === "string")
-    return [`- ${edges}`];
-  if (edges.length === 0)
-    return ["- none"];
-  return edges.map((edge) => {
-    const excerpt2 = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt2}${edge.created_at})`;
-  });
-}
-function unavailableReason(error48) {
-  return dispatchAnswered(error48, 404) ? "unavailable" : `unavailable: ${messageFor(error48)}`;
-}
-async function graphEdges(client, query) {
-  try {
-    return (await client.getReferences(query)).edges;
-  } catch (error48) {
-    return unavailableReason(error48);
-  }
-}
-async function issueReferencesOrUnavailable(client, key) {
-  try {
-    return await client.getIssueReferences(key);
-  } catch (error48) {
-    return unavailableReason(error48);
-  }
-}
-async function graphSections(client, ref) {
-  const [incoming, outgoing] = await Promise.all([
-    graphEdges(client, { to: ref }),
-    graphEdges(client, { from: ref })
-  ]);
-  return ["Referenced by:", ...referenceLines(incoming), "Links:", ...referenceLines(outgoing)];
-}
-function logSummary(issue2, events) {
-  return [
-    `Key: ${issue2.key}`,
-    "Events:",
-    ...events.length === 0 ? ["- none"] : events.map(eventLine)
-  ].join(`
-`);
-}
-function eventHead(event) {
-  switch (event.type) {
-    case "ask.opened":
-    case "ask.anchor_refreshed":
-    case "ask.edited":
-    case "ask.handed_back":
-    case "ask.resolved":
-      return textHead(event.payload.question);
-    case "ask.answered":
-      return `${textHead(event.payload.question)} -> ${textHead(askAnswerText(event.payload.answer))}`;
-    case "comment.created":
-    case "comment.answered":
-    case "comment.anchor_refreshed":
-    case "comment.edited":
-    case "comment.resolved":
-    case "comment.reopened":
-    case "suggestion.accepted":
-    case "suggestion.rejected":
-    case "message.created":
-    case "message.answered":
-      return textHead(event.payload.body);
-    case "artifact.version":
-      return textHead(`${event.payload.name} v${event.payload.version.number}${event.payload.version.summary ? `: ${event.payload.version.summary}` : ""}`);
-    case "issue.created":
-    case "issue.updated":
-    case "issue.closed":
-      return `status ${event.payload.status}`;
-    default:
-      return;
-  }
-}
-function actorText(actor) {
-  const service = actor.kind === "session" ? actor.service : undefined;
-  if (service === undefined) {
-    return `${actor.kind} ${actor.id}`;
-  }
-  return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
-}
-function eventLine(event) {
-  const head = eventHead(event);
-  return `- #${event.seq} ${event.type} \xB7 ${actorText(event.actor)} \xB7 ${event.created_at}${head === undefined || head === "" ? "" : ` \xB7 ${head}`}`;
-}
-function childrenSummary(issue2) {
-  return [
-    `Key: ${issue2.key}`,
-    "Children:",
-    ...issue2.children.length === 0 ? ["- none"] : issue2.children.map((child) => `- ${child.key}: ${child.title} (${child.status})`)
-  ].join(`
-`);
-}
-function askSummary({ ask, replies }, graph) {
-  const answer = ask.answer;
-  const chain = replies.flatMap((reply) => [
-    `${reply.id} \xB7 ${actorText(reply.author)}`,
-    `Body: ${reply.body}`
-  ]);
-  return [
-    `Question: ${ask.question}`,
-    ...anchorLines(ask),
-    "Options:",
-    ...ask.options.length === 0 ? ["- none"] : ask.options.map((option) => `- ${option.label}${option.description ? ` \u2014 ${option.description}` : ""}`),
-    `State: ${ask.state}`,
-    "Answer:",
-    ...answer === null ? ["- none"] : [
-      `- By: ${answer.user}`,
-      `- Selected: ${answer.selected.length === 0 ? "none" : answer.selected.join(", ")}`,
-      ...answer.text === null ? [] : [`- Text: ${answer.text}`]
-    ],
-    ...ask.resolution === undefined ? [] : [
-      "Resolution:",
-      `- By: ${ask.resolution.actor.id}`,
-      `- Kind: ${ask.resolution.kind}`,
-      `- Reason: ${ask.resolution.reason}`
-    ],
-    "Replies:",
-    ...chain.length === 0 ? ["- none"] : chain,
-    ...graph
-  ].join(`
-`);
-}
-function openAskAge(ageSeconds) {
-  const seconds = Math.max(0, Math.floor(ageSeconds));
-  if (seconds < 60)
-    return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60)
-    return `${minutes}m${seconds % 60 === 0 ? "" : ` ${seconds % 60}s`}`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24)
-    return `${hours}h${minutes % 60 === 0 ? "" : ` ${minutes % 60}m`}`;
-  const days = Math.floor(hours / 24);
-  return `${days}d${hours % 24 === 0 ? "" : ` ${hours % 24}h`}`;
-}
-function openAskOwner(ask) {
-  return "issue" in ask.owner ? `${ask.owner.issue.key}: ${ask.owner.issue.title}` : `${ask.owner.document.project} / ${ask.owner.document.name}`;
-}
-function openAskLine(ask, baseUrl) {
-  const priority = ask.priority === null ? "" : `P${ask.priority} \xB7 `;
-  return `- ${openAskAge(ask.age_seconds)} \xB7 ${priority}${openAskOwner(ask)} \xB7 ${ask.question} \xB7 ${new URL(ask.ref, baseUrl).toString()}`;
-}
-function formatOpenAsksSummary(response, baseUrl) {
-  const scope = "active open asks you authored on open issues and project documents";
-  if (response.count === 0) {
-    return ["There are no unanswered asks for this session.", `Scope: ${scope}.`].join(`
-`);
-  }
-  const waitingOnHuman = response.asks.filter((ask) => ask.waiting_on === "human");
-  const waitingOnAgent = response.asks.filter((ask) => ask.waiting_on === "agent");
-  return [
-    `${response.count} unanswered ${response.count === 1 ? "ask" : "asks"} you authored on active issues and project documents.`,
-    "",
-    `Waiting on human (${waitingOnHuman.length}):`,
-    ...waitingOnHuman.map((ask) => openAskLine(ask, baseUrl)),
-    "",
-    `Waiting on agent (${waitingOnAgent.length}):`,
-    ...waitingOnAgent.map((ask) => openAskLine(ask, baseUrl))
-  ].join(`
-`);
-}
-function commentSummary({ comment, replies }, graph) {
-  const root = [
-    `${comment.id} \xB7 ${actorText(comment.author)}`,
-    ...anchorLines(comment),
-    `Body: ${comment.body}`
-  ];
-  const chain = replies.flatMap((reply) => [
-    `${reply.id} \xB7 ${actorText(reply.author)}`,
-    ...anchorLines(reply),
-    `Body: ${reply.body}`
-  ]);
-  return [
-    "Comment:",
-    ...root,
-    "Reply chain:",
-    ...chain.length === 0 ? ["- none"] : chain,
-    ...graph
-  ].join(`
-`);
-}
-function anchorLines(record2) {
-  return [
-    ...record2.anchor?.quote === undefined ? [] : [`> ${record2.anchor.quote}`],
-    ...record2.anchor_block === undefined ? [] : [`Position: ${positionText(record2.anchor_block)}`],
-    ...record2.anchor_block_error === undefined ? [] : [`Position: unavailable (${record2.anchor_block_error})`]
-  ];
-}
-function positionText(block) {
-  const { table, path: path2 } = block;
-  const segments = path2.map((entry) => `${entry.type}[${entry.index}]`);
-  if (table === undefined || table.row === null)
-    return segments.join(" \u203A ");
-  const tableAt = path2.findIndex((entry) => entry.type === "table");
-  const cells = table.cells ?? [];
-  const label = (table.column === null ? cells : cells.slice(0, table.column)).map((cell) => cell.trim()).filter((cell) => cell !== "" && !/^\d+$/.test(cell)).join(" \xB7 ");
-  const row = label === "" ? `row ${table.row}` : `row ${table.row} (${label})`;
-  const header = table.header === null || table.header === "" ? String(table.column) : table.header;
-  return [
-    ...segments.slice(0, tableAt + 1),
-    table.column === null ? row : `${row}, column ${header}`
-  ].join(" \u203A ");
-}
-function messageSummary({ message, replies }, graph) {
-  const root = [`${message.id} \xB7 ${actorText(message.author)}`, `Body: ${message.body}`];
-  const chain = replies.flatMap((reply) => [
-    `${reply.id} \xB7 ${actorText(reply.author)}`,
-    `Body: ${reply.body}`
-  ]);
-  return [
-    "Message:",
-    ...root,
-    "Reply chain:",
-    ...chain.length === 0 ? ["- none"] : chain,
-    ...graph
-  ].join(`
-`);
-}
-async function openArtifactMarks(client, resolved) {
-  const asksPromise = resolved.owner.kind === "project" ? client.getArtifactAsks(resolved.artifact.id) : Promise.resolve(resolved.issue?.open_asks ?? []);
-  const commentsPromise = resolved.owner.kind === "project" ? client.getArtifactComments(resolved.artifact.id) : client.getComments(resolved.issue?.key ?? "", resolved.artifact.id);
-  const commentsResultPromise = commentsPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
-  const asks = await asksPromise;
-  const marks = asks.filter((ask) => ask.state === "open" && ask.anchor?.artifact_id === resolved.artifact.id).map((ask) => `ask ${ask.id}`);
-  const commentsResult = await commentsResultPromise;
-  if (commentsResult.status === "rejected") {
-    if (dispatchAnswered(commentsResult.reason, 404))
-      return marks;
-    throw commentsResult.reason;
-  }
-  return [
-    ...marks,
-    ...commentsResult.value.filter((comment) => !comment.resolved && comment.anchor?.artifact_id === resolved.artifact.id).map((comment) => `comment ${comment.id}`)
-  ];
-}
-async function blockAsks(client, resolved, state) {
-  const asks = await (resolved.issue === undefined ? client.getArtifactAsks(resolved.artifact.id, state) : client.listIssueAsks(resolved.issue.key, state));
-  return asks.filter((ask) => typeof ask.block_id === "string" && ask.block_artifact?.id === resolved.artifact.id);
-}
-async function readUploadedFile(client, artifact, details, requested, owner, shown) {
-  const latest = Math.max(0, ...artifact.versions.map((version2) => version2.number));
-  const number4 = requested ?? latest;
-  const of = number4 === latest ? "" : ` of ${latest}`;
-  const bytesRoute = `GET /api/v1/artifacts/${artifact.id}/versions/${number4} serves its bytes.`;
-  const tooLarge = (mime, bytes) => ({
-    text: `${oversizePictureText(artifact.name, bytes)}, so dispatch_doc_read cannot show this ` + `uploaded ${mime} picture (version ${number4}${of}). ${bytesRoute}`,
-    details
-  });
-  const stated = artifact.versions.find((version2) => version2.number === number4);
-  if (artifact.kind === "image" && stated?.size !== undefined && stated.size > PICTURE_SHOWN_MAX_BYTES) {
-    return tooLarge(stated.mime ?? "image", stated.size);
-  }
-  const file2 = await client.fileVersion(artifact.id, number4);
-  const size = `${file2.bytes.length.toLocaleString("en-US")} bytes`;
-  if (artifact.kind === "image") {
-    const image = toolImage(file2.bytes);
-    if (image !== undefined) {
-      const address = `dispatch://${owner}/artifact/${artifact.slug}@v${number4}`;
-      shown?.add(address);
-      return {
-        text: `Picture ${artifact.name}: ${image.mimeType}, version ${number4}${of}, ${size}.
-` + shownPictureLine(1, address, artifact.name, image.mimeType, file2.bytes.length),
-        details,
-        images: [image]
-      };
-    }
-    if (sniffPictureType(file2.bytes) !== undefined)
-      return tooLarge(file2.mime, file2.bytes.length);
-  }
-  let text;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(file2.bytes);
-  } catch {
-    return {
-      text: `${artifact.name} is an uploaded ${file2.mime} file (version ${number4}${of}, ${size}) that is not ` + `UTF-8 text, so dispatch_doc_read cannot show it. ${bytesRoute}`,
-      details
-    };
-  }
-  return {
-    text: `File ${artifact.name}: ${file2.mime}, version ${number4}${of}, ${size}.
-
-${text}`,
-    details
-  };
-}
-async function refuseOpenDecisionBlocks(client, tool, resolved) {
-  const artifact = resolved.artifact;
-  const latest = artifact.approval?.latest_version;
-  if (latest === undefined || latest < 1 || artifact.approval?.state === "approved")
-    return;
-  const blocks = (await client.artifactBlocks(artifact.id)).filter((block) => block.type === "ask");
-  if (blocks.length === 0)
-    return;
-  const [documentAsks, version2] = await Promise.all([
-    blockAsks(client, resolved),
-    client.docRead(artifact.id, latest)
-  ]);
-  const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
-  const lines = version2.markdown.split(`
-`);
-  const open = blocks.flatMap((block) => {
-    const ask = asks.get(block.id);
-    const named = ask === undefined ? `block ${block.id}` : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
-    const states = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)).map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
-    if (states.length === 0)
-      return [`${named}, which version ${latest} does not hold yet`];
-    if (!states.includes("open") && states.some((state) => state !== undefined))
-      return [];
-    if (ask === undefined)
-      return [`${named}, whose ask Dispatch has not opened yet`];
-    if (ask.state === "open")
-      return [named];
-    const next = ask.state === "answered" ? "fold the answer into the text" : "write the decision into the text";
-    return [
-      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch_doc_edit, which writes a version that carries it`
-    ];
-  });
-  if (open.length === 0)
-    return;
-  const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
-  throw new Error([
-    `${tool} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
-    ...open.map((line) => `- ${line}`),
-    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch_doc_edit. If they waive it, close the block with dispatch_resolve_ask (kind resolved, their words as the reason) and write their decision into the text with dispatch_doc_edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human."
-  ].join(`
-`));
-}
-async function refuseRemovingOpenDecisionBlocks(client, tool, resolved, ops) {
-  const removing = ops.filter((operation) => operation.block !== undefined && (operation.op === "delete" || operation.op === "retype" && operation.type !== "ask"));
-  if (removing.length === 0)
-    return;
-  const artifact = resolved.artifact;
-  const blocks = await client.artifactBlocks(artifact.id);
-  const askBlocks = blocks.filter((block) => block.type === "ask");
-  const removed = new Set;
-  for (const operation of removing) {
-    const target = blocks.find((block) => block.id === operation.block);
-    if (target === undefined)
-      continue;
-    for (const block of askBlocks) {
-      if (block.id === target.id || operation.op === "delete" && block.from >= target.from && block.to <= target.to) {
-        removed.add(block.id);
-      }
-    }
-  }
-  if (removed.size === 0)
-    return;
-  const asks = await blockAsks(client, resolved, "open");
-  const open = asks.filter((ask) => removed.has(ask.block_id));
-  if (open.length === 0)
-    return;
-  const [what, question] = open.length === 1 ? ["a decision block whose ask is", "question"] : [`${open.length} decision blocks whose asks are`, "questions"];
-  throw new Error([
-    `${tool} was not called: it would remove ${what} still open, and the human's ${question} would leave their Inbox unanswered.`,
-    ...open.map((ask) => `- ${JSON.stringify(ask.question)} (block ${ask.block_id}, ask ${ask.id})`),
-    "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it."
-  ].join(`
-`));
-}
-function refusalWithCode(error48, ...clauses) {
-  const suffix = clauses.filter((clause) => clause !== "").join("; ");
-  const joined = suffix === "" ? "" : `; ${suffix}`;
-  if (error48 instanceof DispatchGatewayError) {
-    let told = error48.message;
-    if (joined !== "") {
-      told = error48.mayHaveReachedDispatch ? `${error48.answer}${joined}` : `${error48.answer}, so ${error48.advice}${joined}`;
-    }
-    return new DispatchGatewayError(error48.status, error48.answer, error48.advice, `${error48.code}: ${told}`);
-  }
-  if (!(error48 instanceof DispatchServiceError))
-    return error48;
-  return new DispatchServiceError(error48.code, error48.status, `${error48.code}: ${error48.message}${joined}`, error48.candidates, error48.current, error48.mismatches);
-}
-function dispatchAnswered(error48, status) {
-  return error48 instanceof DispatchServiceError && error48.fromDispatch && error48.status === status;
-}
-function writeMayHaveLanded(error48) {
-  if (error48 instanceof DispatchGatewayError)
-    return error48.mayHaveReachedDispatch;
-  return !(error48 instanceof DispatchServiceError) || error48.status >= 500;
-}
-function withAccount(error48, account) {
-  const message = messageFor(error48);
-  const told = /[.!?]$/.test(message) ? `${message} ${account.charAt(0).toUpperCase()}${account.slice(1)}` : `${message}; ${account}`;
-  return new Error(told, { cause: error48 });
-}
-async function executeDispatchTool(input) {
-  const configUrl = input.config.url;
-  const configToken = input.config.token;
-  if (!input.config.enabled || !configUrl || !configToken) {
-    throw new Error("Dispatch is disabled; resolve both DISPATCH_URL and DISPATCH_TOKEN");
-  }
-  const baseFetch = input.fetchImpl ?? fetch;
-  const fetchImpl = Object.assign(async (...args2) => {
-    try {
-      return await baseFetch(...args2);
-    } catch (error48) {
-      if (error48 instanceof TypeError) {
-        throw new Error(`Dispatch at ${configUrl} is unreachable: ${error48.message}. If the Dispatch URL changed, restart this agent process so it picks up the new configuration.`);
-      }
-      throw error48;
-    }
-  }, { preconnect: baseFetch.preconnect });
-  const env = input.env ?? process.env;
-  const exec = input.exec ?? defaultExec;
-  const problems = [];
-  const ownerArguments = await resolveOwnerArguments(input.tool, input.args, input.cwd, env, exec, configUrl, problems);
-  const ownerMissing = issueFreeTools[input.tool] !== true && ownerArguments.owner === null;
-  const schema = toolSchema(input.tool);
-  const parsed = schema.safeParse(ownerArguments.args, { reportInput: true });
-  if (!parsed.success) {
-    const issues = parsed.error.issues.filter((issue3) => !ownerMissing || !(issue3.code === "invalid_type" && issue3.path.length === 1 && issue3.path[0] === "issue" && issue3.input === undefined || issue3.code === "custom" && issue3.path.length === 0 && (issue3.message.startsWith("Exactly one of issue and project is required") || issue3.message.startsWith("issue is required unless in_reply_to"))));
-    problems.push(...formatZodIssues(issues, schema));
-  }
-  problems.push(...argumentProblems(input.tool, ownerArguments.args));
-  const pictures = pictureSendingTools[input.tool] === true ? await localPictures(ownerArguments.args.images, input.cwd, problems) : [];
-  if (problems.length > 0)
-    throw new ToolInputError(input.tool, problems);
-  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
-  if (input.tool === "dispatch_open_asks") {
-    const client2 = dispatchClient();
-    const project = optionalString(ownerArguments.args, "project");
-    if (project !== undefined) {
-      const response2 = await client2.openAsksForProject(project);
-      return { text: formatOpenAsksSummary(response2, configUrl), details: { ...response2 } };
-    }
-    const sessionId = input.sessionId?.trim();
-    if (!sessionId)
-      throw new Error("host session id is required for dispatch_open_asks");
-    const response = await client2.openAsks(sessionId);
-    return { text: formatOpenAsksSummary(response, configUrl), details: { ...response } };
-  }
-  if (input.tool === "dispatch_whoami") {
-    const sessionId = input.sessionId?.trim();
-    if (!sessionId)
-      throw new Error("host session id is required for dispatch_whoami");
-    const client2 = dispatchClient();
-    const identity = await client2.whoami();
-    const owner2 = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
-    const service = identity.kind === "agent" ? identity.service ?? null : null;
-    const unowned = "no owner, so issues you create without an assignee are unassigned (or inherit their parent's).";
-    return {
-      text: owner2 !== null ? `Session ${sessionId} acts for ${owner2}: issues you create without an assignee are assigned to ${owner2}.` : service !== null ? `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}` : `Session ${sessionId} runs under the shared token: ${unowned}`,
-      details: { session: sessionId, owner: owner2, service }
-    };
-  }
-  const args = parsed.success ? parsed.data : ownerArguments.args;
-  const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
-  const client = dispatchClient();
-  const refDocument = ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
-  const resolveDocument = (documentOwner2, reference) => resolveArtifact(client, documentOwner2, reference, {
-    canonical: reference !== undefined && reference === refDocument
-  });
-  const owner = ownerArguments.owner?.kind === "issue" ? {
-    kind: "issue",
-    issue: await resolveExistingIssue(client, ownerArguments.owner.issue)
-  } : ownerArguments.owner;
-  const issue2 = () => {
-    if (owner?.kind !== "issue")
-      throw new Error("issue is required");
-    return owner.issue;
-  };
-  const documentOwner = () => {
-    if (owner === null)
-      throw new Error("issue or project is required");
-    return owner;
-  };
-  const postWithPictures = (text, limit, owner2, upload) => textWithPictures(input.tool, text, pictures, limit, owner2, upload, actor);
-  const writePictures = (resolved, text, limit) => {
-    if (resolved?.owner.kind === "project") {
-      const { project } = resolved.owner;
-      return postWithPictures(text, limit, project, (upload) => client.projectArtifact(project, upload));
-    }
-    const issueKey = issue2();
-    return postWithPictures(text, limit, issueKey, (upload) => client.artifact(issueKey, upload));
-  };
-  const hostSession = input.sessionId?.trim();
-  const shown = hostSession ? shownPictures(hostSession) : undefined;
-  switch (input.tool) {
-    case "dispatch_issue": {
-      const project = stringArg(args, "project");
-      const title = stringArg(args, "title");
-      const parent = optionalString(args, "parent");
-      const external2 = optionalString(args, "external");
-      const force = optionalBoolean(args, "force");
-      const spec = optionalString(args, "spec");
-      const priority = optionalPriority(args, "priority");
-      const assignee = optionalString(args, "assignee");
-      const components = optionalComponents(args, "components");
-      const labels = args.labels;
-      try {
-        const created = await client.issue({
-          project,
-          title,
-          ...parent === undefined ? {} : { parent },
-          ...external2 === undefined ? {} : { external: external2 },
-          ...force === undefined ? {} : { force },
-          ...spec === undefined ? {} : { spec },
-          ...priority === undefined ? {} : { priority },
-          ...assignee === undefined ? {} : { assignee },
-          ...components === undefined ? {} : { components },
-          ...Array.isArray(labels) ? { labels } : {},
-          actor
-        });
-        const componentGuidance = await architectureGuidance(client, created.project, created.components);
-        const adviceLines = [
-          ...renderAdvice(input.tool, created.key, created.advice, {
-            isPrimarySpec: spec !== undefined
-          }),
-          ...componentGuidance === undefined ? [] : [componentGuidance],
-          ...renderSuggestions(created.advice?.suggestions, configUrl)
-        ];
-        return {
-          text: [
-            `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
-            ...spec === undefined ? [] : [SPEC_CHECK_REMINDER],
-            ...adviceLines
-          ].join(`
-`),
-          details: {
-            issue: created.key,
-            ...created.advice === undefined ? {} : { advice: created.advice }
-          }
-        };
-      } catch (error48) {
-        if (!(error48 instanceof DispatchServiceError) || error48.code !== "POSSIBLE_DUPLICATE") {
-          throw error48;
-        }
-        const candidates = duplicateCandidates(error48);
-        return {
-          text: [
-            `Not created: "${title}" looks like a duplicate.`,
-            ...candidates.map((candidate) => {
-              const href = new URL(candidate.href, configUrl).toString();
-              return `${candidate.key} [${candidate.status}] ${candidate.title} \u2192 ${href}`;
-            }),
-            "Reference the existing issue, or call dispatch_issue again with force: true after reading it."
-          ].join(`
-`),
-          details: { duplicates: candidates }
-        };
-      }
-    }
-    case "dispatch_issue_update": {
-      const issueKey = issue2();
-      const status = optionalString(args, "status");
-      const reason = optionalString(args, "reason");
-      const title = optionalString(args, "title");
-      const route = optionalString(args, "route");
-      const parent = optionalString(args, "parent");
-      const components = optionalComponents(args, "components");
-      const priority = optionalPriority(args, "priority");
-      const labels = Array.isArray(args.labels) ? args.labels : undefined;
-      const requestedLinks = Array.isArray(args.external_links) ? [...new Set(args.external_links)] : undefined;
-      let before;
-      try {
-        before = await client.getIssue(issueKey);
-      } catch (error48) {
-        throw refusalWithCode(error48);
-      }
-      let closingNote;
-      if (reason !== undefined) {
-        try {
-          const message = await client.message(issueKey, { body: reason, actor });
-          closingNote = {
-            id: message.id,
-            ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
-          };
-        } catch (error48) {
-          const told = writeMayHaveLanded(error48) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
-          if (error48 instanceof DispatchServiceError)
-            throw refusalWithCode(error48, told);
-          throw withAccount(error48, told);
-        }
-      }
-      const linked = before.external_links.map((link) => link.url);
-      const newLinks = requestedLinks?.filter((url2) => !linked.includes(url2)) ?? [];
-      let after;
-      try {
-        after = await client.updateIssue(issueKey, {
-          ...status === undefined ? {} : { status },
-          ...title === undefined ? {} : { title },
-          ...labels === undefined ? {} : { labels },
-          ...priority === undefined ? {} : { priority },
-          ...route === undefined ? {} : { route },
-          ...parent === undefined ? {} : { parent: parent === "" ? null : parent },
-          ...components === undefined ? {} : { components },
-          ...requestedLinks === undefined ? {} : { external_links: [...before.external_links, ...newLinks.map((url2) => ({ url: url2 }))] },
-          actor
-        });
-      } catch (error48) {
-        const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
-        if (closingNote === undefined)
-          throw refusalWithCode(error48, taken);
-        const posted = `the reason already landed as message ${closingNote.id} (${closingNote.ref})`;
-        const fix = error48 instanceof DispatchGatewayError && error48.transient ? "" : "fix what refused the close, then ";
-        const landed = writeMayHaveLanded(error48) ? `${posted}, and the close may or may not have taken effect. Read the issue's status before retrying: done means it closed; otherwise retry with a reason that points at message ${closingNote.id}, since retrying this call posts its reason again` : `${posted} but the issue did not close. Retrying this call posts its reason again, so ${fix}retry with a reason that points at message ${closingNote.id}`;
-        if (error48 instanceof DispatchServiceError)
-          throw refusalWithCode(error48, taken, landed);
-        throw withAccount(error48, landed);
-      }
-      const linkCount = `(${after.external_links.length} ${after.external_links.length === 1 ? "link" : "links"})`;
-      const changes = [
-        ...closingNote === undefined ? [] : [`reason posted as message ${closingNote.id} (${closingNote.ref})`],
-        ...status === undefined ? [] : [`status ${before.status} -> ${after.status}`],
-        ...title === undefined ? [] : [`title "${after.title}"`],
-        ...labels === undefined ? [] : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`],
-        ...priority === undefined ? [] : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`],
-        ...requestedLinks === undefined ? [] : [
-          newLinks.length === 0 ? `already linked ${requestedLinks.join(", ")} ${linkCount}` : `linked ${newLinks.join(", ")} ${linkCount}`
-        ],
-        ...route === undefined ? [] : [after.route === null ? "route cleared" : `route ${after.route}`],
-        ...parent === undefined ? [] : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`],
-        ...components === undefined ? [] : [componentsChange(components, after.components)]
-      ];
-      const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
-        setsStatus: status !== undefined
-      });
-      return {
-        text: [
-          `${after.key}: ${changes.join("; ")} ${notSubscribed(issueTopic(after.key))}`,
-          ...adviceLines
-        ].join(`
-`),
-        details: {
-          issue: after.key,
-          status: after.status,
-          external_links: after.external_links.map((link) => link.url),
-          ...closingNote === undefined ? {} : { message: closingNote.id },
-          ...after.advice === undefined ? {} : { advice: after.advice }
-        }
-      };
-    }
-    case "dispatch_claim": {
-      const issueKey = issue2();
-      const release = optionalBoolean(args, "release") ?? false;
-      let after;
-      try {
-        after = release ? await client.releaseIssueClaim(issueKey, { actor }) : await client.claimIssue(issueKey, { actor });
-      } catch (error48) {
-        throw refusalWithCode(error48);
-      }
-      const held = after.claim;
-      let text;
-      if (release) {
-        text = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status} \u2014 move it yourself if that is no longer where the work is.`;
-      } else {
-        if (held === null) {
-          throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
-        }
-        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch_issue_update when you start, and release the claim when you stop.`;
-      }
-      return {
-        text: [text, notSubscribed(issueTopic(issueKey))].join(`
-`),
-        details: { issue: issueKey, status: after.status, claim: held }
-      };
-    }
-    case "dispatch_search": {
-      const query = stringArg(args, "query");
-      const project = optionalString(args, "project");
-      const limit = optionalNumber(args, "limit");
-      const offset = optionalNumber(args, "offset");
-      const search = await client.search(query, {
-        ...project === undefined ? {} : { project },
-        ...limit === undefined ? {} : { limit },
-        ...offset === undefined ? {} : { offset }
-      });
-      return searchAnswer(search, query, offset, configUrl);
-    }
-    case "dispatch_issues": {
-      const project = stringArg(args, "project");
-      const status = optionalString(args, "status");
-      const parent = optionalString(args, "parent");
-      const label = optionalString(args, "label");
-      const priority = optionalPriorityFilter(args, "priority");
-      const updatedSince = optionalString(args, "updated_since");
-      const routeStatus = optionalString(args, "route_status");
-      const page = await client.listIssuePage({
-        project,
-        ...status === undefined ? {} : { status },
-        ...parent === undefined ? {} : { parent },
-        ...label === undefined ? {} : { label },
-        ...priority === undefined ? {} : { priority },
-        ...updatedSince === undefined ? {} : { updated_since: updatedSince },
-        ...routeStatus === undefined ? {} : { route_status: routeStatus }
-      }, {
-        limit: optionalNumber(args, "limit") ?? DEFAULT_ISSUE_PAGE_LIMIT,
-        offset: optionalNumber(args, "offset") ?? 0
-      });
-      const { total, limit, offset } = page;
-      const rows = page.issues.map((row) => ({
-        key: row.key,
-        title: row.title,
-        status: row.status,
-        priority: row.priority,
-        parent: row.parent,
-        labels: row.labels ?? [],
-        open_asks: row.open_asks,
-        claim: row.claim ?? null,
-        route: row.route ?? null,
-        route_status: row.route_status ?? null,
-        route_holder: row.route_holder ?? null,
-        updated_at: row.updated_at,
-        progress: row.progress
-      }));
-      const titles = await liveSessionTitles(client, rows.some((row) => holdsSession(row.claim)));
-      const isPartial = offset !== 0 || rows.length !== total;
-      const showing = !isPartial ? "" : rows.length === 0 ? `showing 0-0 of ${total}` : pageSummaryText(offset, rows.length, total);
-      return {
-        text: rows.length === 0 ? `No issues in ${project}.${isPartial ? ` (${showing})` : ""}` : [
-          `${rows.length} ${rows.length === 1 ? "issue" : "issues"} in ${project}` + (isPartial ? ` (${showing})` : ""),
-          ...rows.map((row) => {
-            const progress = progressText(row.progress, " \xB7 ");
-            return `${row.key} [${row.status}]${row.priority === null ? "" : ` P${row.priority}`} ${row.title}` + (row.open_asks === 0 ? "" : ` \xB7 ${row.open_asks} open ${row.open_asks === 1 ? "ask" : "asks"}`) + (row.claim === null ? "" : ` \xB7 claimed by ${claimText(row.claim, titles)}`) + (progress === "" ? "" : ` \xB7 ${progress}`) + (row.route === null || row.route_status === "live" || row.route_status === null ? "" : ` \xB7 route ${routeText(row)}`);
-          })
-        ].join(`
-`),
-        details: { issues: rows, total, offset, limit }
-      };
-    }
-    case "dispatch_architecture_sync": {
-      const project = stringArg(args, "project");
-      const source = await client.syncArchitectureSource(project);
-      const at = source.last_sync_at ?? "unknown time";
-      return {
-        text: source.last_error === null ? `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${at}).` : [
-          `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
-          source.last_commit === null ? "No model has ever imported for this project." : `The previous model stays up (commit ${source.last_commit}).`
-        ].join(`
-`),
-        details: {
-          project,
-          repo: source.repo,
-          branch: source.branch,
-          commit: source.last_commit,
-          error: source.last_error
-        }
-      };
-    }
-    case "dispatch_resolve_ask": {
-      const kind = stringArg(args, "kind");
-      const id = await resolveAskArgument(input.tool, args, client, input.sessionId);
-      const ask = await client.resolveAsk(id, {
-        kind,
-        reason: stringArg(args, "reason"),
-        actor
-      });
-      if (ask.resolution === undefined)
-        throw new Error("resolved ask is missing its resolution");
-      return {
-        text: `${kind === "retracted" ? "Retracted" : "Resolved"} ask ${ask.id}: ${ask.resolution.reason}`,
-        details: await askOwnerDetails(client, ask)
-      };
-    }
-    case "dispatch_resolve_comment": {
-      const reference = stringArg(args, "comment");
-      const ref = reference.startsWith("dispatch://") ? parseDispatchRef(reference) : null;
-      let id = reference;
-      let document;
-      if (ref?.owner.kind === "issue") {
-        const issueKey = ref.owner.issue;
-        id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => client.getComments(issueKey));
-      } else if (ref !== null) {
-        const artifact = (await resolveArtifact(client, ref.owner, ref.artifact, { canonical: true })).artifact;
-        document = artifact;
-        id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), () => client.getArtifactComments(artifact.id));
-      }
-      const comment = await client.resolveComment(id, actor);
-      const { label, details } = await commentOwnerResult(client, comment, document);
-      return { text: `Resolved comment ${comment.id} on ${label}.`, details };
-    }
-    case "dispatch_ask": {
-      const anchorArgs = asObject(args.anchor);
-      const owner2 = documentOwner();
-      const artifactReference = optionalString(args, "artifact") ?? (anchorArgs === null ? undefined : optionalString(anchorArgs, "artifact"));
-      const resolved = owner2.kind === "project" || artifactReference === undefined ? owner2.kind === "project" ? await resolveDocument(owner2, artifactReference) : undefined : await resolveDocument(owner2, artifactReference);
-      const options = args.options;
-      const multiple = optionalBoolean(args, "multiple");
-      const urgency = askUrgency(args);
-      const anchored = anchorArgs && resolved ? anchor(resolved.artifact, anchorArgs) : undefined;
-      const withRef = askQuestionWithRef(args);
-      const refAppended = withRef !== stringArg(args, "question");
-      const question = await writePictures(resolved, withRef, {
-        cap: ASK_QUESTION_MAX,
-        text: refAppended ? "question plus ref" : "question",
-        shorten: refAppended ? "shorten the question, drop the ref" : "shorten the question"
-      });
-      const askInput = {
-        question,
-        ...Array.isArray(options) ? { options } : {},
-        ...multiple === undefined ? {} : { multiple },
-        ...urgency === undefined ? {} : { urgency },
-        ...anchored === undefined ? {} : { anchor: anchored },
-        actor
-      };
-      const ask = resolved?.owner.kind === "project" ? await client.artifactAsk(resolved.artifact.id, askInput) : await client.ask(issue2(), askInput);
-      const askOwner = ask.issue_key !== null ? issueTopic(ask.issue_key) : resolved === undefined ? issueTopic(issue2()) : documentTopic(resolved.artifact);
-      const adviceLines = [
-        ...renderAdvice(input.tool, askOwner.label, ask.advice, {}),
-        ...renderSuggestions(ask.advice?.suggestions, configUrl)
-      ];
-      return {
-        text: [
-          `Asked ${ask.id} on ${askOwner.label} (urgency ${ask.urgency}): ${ask.question}
-${followsAsk(askOwner)}`,
-          ...adviceLines
-        ].join(`
-`),
-        details: {
-          ...await followedAskDetails(client, ask, resolved?.artifact),
-          ...ask.advice === undefined ? {} : { advice: ask.advice }
-        }
-      };
-    }
-    case "dispatch_edit_ask": {
-      const question = optionalString(args, "question");
-      const options = args.options;
-      const multiple = optionalBoolean(args, "multiple");
-      const urgency = askUrgency(args);
-      const id = await resolveAskArgument(input.tool, args, client, input.sessionId);
-      const ask = await client.editAsk(id, {
-        ...question === undefined ? {} : { question },
-        ...Array.isArray(options) ? { options } : {},
-        ...multiple === undefined ? {} : { multiple },
-        ...urgency === undefined ? {} : { urgency },
-        actor
-      });
-      return {
-        text: `Ask edited: ${ask.question}`,
-        details: await askOwnerDetails(client, ask)
-      };
-    }
-    case "dispatch_comment": {
-      const artifactReference = optionalString(args, "artifact");
-      const owner2 = documentOwner();
-      const resolved = owner2.kind === "project" || artifactReference === undefined ? owner2.kind === "project" ? await resolveDocument(owner2, artifactReference) : undefined : await resolveDocument(owner2, artifactReference);
-      const anchored = resolved ? anchor(resolved.artifact, args) : undefined;
-      const replyTo = optionalString(args, "reply_to");
-      const replyToAskReference = optionalString(args, "reply_to_ask");
-      const replyToAsk = replyToAskReference === undefined ? undefined : normalizeUUID(replyToAskReference);
-      if (replyToAskReference !== undefined && replyToAsk === undefined) {
-        throw new ToolInputError(input.tool, [
-          await invalidReplyToAskProblem(client, owner2, resolved)
-        ]);
-      }
-      const requestedTurn = optionalString(args, "turn");
-      const body = await writePictures(resolved, stringArg(args, "body"), {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body"
-      });
-      const commentInput = {
-        body,
-        ...anchored === undefined ? {} : { anchor: anchored },
-        ...replyTo === undefined ? {} : { reply_to: replyTo },
-        ...replyToAsk === undefined ? {} : { ask_id: replyToAsk },
-        ...requestedTurn === undefined ? {} : { turn: requestedTurn },
-        actor
-      };
-      const comment = resolved?.owner.kind === "project" ? await client.artifactComment(resolved.artifact.id, commentInput) : await client.comment(issue2(), commentInput);
-      const commentOwner2 = resolved === undefined ? issueTopic(issue2()) : resolvedTopic(resolved);
-      const commentDetails = resolved === undefined ? { issue: comment.issue_key, comment: comment.id } : writeResultDetails(resolved, { comment: comment.id });
-      const adviceLines = renderAdvice(input.tool, commentOwner2.label, comment.advice, {
-        isAskReply: replyToAsk !== undefined,
-        replyToOwnAsk: replyToAsk !== undefined && (comment.advice?.your_open_asks?.some((ask) => ask.id === replyToAsk) ?? false)
-      });
-      if (replyToAsk !== undefined) {
-        const askState = comment.ask_waiting_on === undefined ? "" : `; ask now waiting on ${comment.ask_waiting_on}`;
-        return {
-          text: [
-            `Replied on ask ${replyToAsk} (comment ${comment.id}${askState}). ${followsAsk(commentOwner2)}`,
-            ...adviceLines
-          ].join(`
-`),
-          details: {
-            ...commentDetails,
-            ask: replyToAsk,
-            follows: { ask: replyToAsk },
-            ...comment.ask_waiting_on === undefined ? {} : { ask_waiting_on: comment.ask_waiting_on },
-            ...comment.advice === undefined ? {} : { advice: comment.advice }
-          }
-        };
-      }
-      return {
-        text: [`Posted comment ${comment.id} ${notSubscribed(commentOwner2)}`, ...adviceLines].join(`
-`),
-        details: {
-          ...commentDetails,
-          ...comment.advice === undefined ? {} : { advice: comment.advice }
-        }
-      };
-    }
-    case "dispatch_suggest": {
-      const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
-      const anchored = anchor(resolved.artifact, args);
-      if (anchored === undefined)
-        throw new Error("quote is required");
-      const body = optionalString(args, "body");
-      const suggestionInput = {
-        ...body === undefined ? {} : { body },
-        anchor: anchored,
-        replace_with: stringArg(args, "replace_with"),
-        actor
-      };
-      const comment = resolved.owner.kind === "project" ? await client.artifactSuggest(resolved.artifact.id, suggestionInput) : await client.suggest(issue2(), suggestionInput);
-      return {
-        text: `Posted suggestion ${comment.id} ${notSubscribed(resolvedTopic(resolved))}`,
-        details: writeResultDetails(resolved, { comment: comment.id })
-      };
-    }
-    case "dispatch_message": {
-      const inReplyTo = messageInReplyTo(args);
-      const written = stringArg(args, "body");
-      const bodyLimit = {
-        cap: DISPATCH_BODY_MAX,
-        text: "body",
-        shorten: "shorten the body"
-      };
-      if (owner === null && inReplyTo !== undefined) {
-        let body2 = written;
-        if (pictures.length > 0) {
-          const sessionId = input.sessionId?.trim();
-          if (!sessionId) {
-            throw new Error("host session id is required to send pictures in a direct-message reply");
-          }
-          body2 = await postWithPictures(written, bodyLimit, `agent/${sessionId}`, (upload) => client.agentArtifact(sessionId, upload));
-        }
-        const reply = await client.messageReply(inReplyTo, { body: body2, attempt: 1, actor }, { followUp: true });
-        if (reply.duplicate === true && reply.body === body2) {
-          return {
-            text: `Dispatch already has this exact text in the conversation (message ${reply.id}); ` + "nothing new was posted. Send different text if you have more to say.",
-            details: { message: reply.id, in_reply_to: inReplyTo, posted: false, duplicate: true }
-          };
-        }
-        if (reply.body !== body2) {
-          return {
-            text: `Message ${inReplyTo} was already answered by message ${reply.id}; Dispatch kept ` + "that reply and posted nothing. Wait for their next message rather than answering " + "this one again.",
-            details: { message: reply.id, in_reply_to: inReplyTo, posted: false }
-          };
-        }
-        const readBack = `dispatch_read({message: "${inReplyTo}"}) reads the conversation back.`;
-        const parent = reply.in_reply_to ?? undefined;
-        const follows = parent === inReplyTo ? undefined : parent;
-        return {
-          text: follows === undefined ? `Replied to message ${inReplyTo} with message ${reply.id}. ${readBack}` : `Replied to message ${inReplyTo} with message ${reply.id}, a follow-up threaded ` + `under your reply ${follows}. ${readBack}`,
-          details: {
-            message: reply.id,
-            in_reply_to: inReplyTo,
-            posted: true,
-            ...follows === undefined ? {} : { follows }
-          }
-        };
-      }
-      const issueKey = issue2();
-      const body = await postWithPictures(written, bodyLimit, issueKey, (upload) => client.artifact(issueKey, upload));
-      const message = await client.message(issueKey, {
-        body,
-        ...inReplyTo === undefined ? {} : { in_reply_to: inReplyTo },
-        actor
-      });
-      const messageRef = dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id);
-      const adviceLines = renderAdvice(input.tool, issueKey, message.advice, {});
-      return {
-        text: [
-          `Posted message ${message.id} (${messageRef}) ${notSubscribed(issueTopic(issueKey))}`,
-          ...adviceLines
-        ].join(`
-`),
-        details: {
-          issue: issueKey,
-          message: message.id,
-          ...message.advice === undefined ? {} : { advice: message.advice }
-        }
-      };
-    }
-    case "dispatch_doc_edit": {
-      const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
-      const ops = args.ops;
-      const summary = optionalString(args, "summary");
-      const { precondition: rawPrecondition } = args;
-      const precondition = rawPrecondition;
-      await refuseRemovingOpenDecisionBlocks(client, input.tool, resolved, ops);
-      const edited = await client.docEdit(resolved.artifact.id, {
-        ops,
-        ...summary === undefined ? {} : { summary },
-        ...precondition === undefined ? {} : { precondition },
-        actor
-      });
-      const retyped = ops.filter((operation) => operation.op === "retype").length;
-      const versionText = edited.version === null ? "no new version" : `version ${edited.version.number}`;
-      const retypedText = retyped === 0 ? "" : `; retyped ${retyped} block${retyped === 1 ? "" : "s"}`;
-      const nothingChanged = edited.changed === false;
-      const head = nothingChanged ? `Applied ${edited.applied} ops${retypedText}; nothing changed (${versionText})` : `Applied ${edited.applied} ops${retypedText} (${versionText})`;
-      const unchangedOps = edited.unchanged_ops ?? [];
-      const unchangedText = unchangedOps.length === 0 ? "" : `; ${unchangedOps.length === 1 ? "operation" : "operations"} ${unchangedOps.join(", ")} changed nothing`;
-      const lostOps = edited.lost_ops;
-      const lostText = lostOps === undefined || lostOps !== null && lostOps.length === 0 ? "" : lostOps === null ? "; could not confirm this edit survived, because the live document is being reloaded or holds a tree too deep to read \u2014 re-read it" : `; ${versionText} carries text the live document no longer has: a concurrent change removed what ${lostOps.length === 1 ? "operation" : "operations"} ${lostOps.join(", ")} wrote \u2014 re-read the document`;
-      const applied = `${head}${unchangedText}${lostText}`;
-      const adviceLines = renderAdvice(input.tool, resolvedTopic(resolved).label, edited.advice, {});
-      const tokenTrailer = edited.token === undefined ? [] : [`Document token: ${edited.token}`];
-      return {
-        text: [
-          `${applied} ${notSubscribed(resolvedTopic(resolved))}`,
-          ...tokenTrailer,
-          ...adviceLines
-        ].join(`
-`),
-        details: writeResultDetails(resolved, {
-          applied: edited.applied,
-          ...edited.version === null ? {} : { version: edited.version.number },
-          ...nothingChanged ? { changed: false } : {},
-          ...lostOps === undefined ? {} : { lost_ops: lostOps },
-          ...edited.token === undefined ? {} : { token: edited.token },
-          ...edited.advice === undefined ? {} : { advice: edited.advice }
-        })
-      };
-    }
-    case "dispatch_doc_read": {
-      const { agentArtifact } = ownerArguments;
-      if (agentArtifact !== undefined) {
-        const artifact = await client.getAgentArtifact(agentArtifact.session, agentArtifact.slug);
-        return readUploadedFile(client, artifact, { session: agentArtifact.session, artifact: artifact.slug }, optionalNumber(args, "version") ?? agentArtifact.version, `agent/${agentArtifact.session}`, shown);
-      }
-      const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
-      const resolved = await resolveDocument(documentOwner(), artifactReference);
-      const version2 = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
-      if (resolved.artifact.kind === "file" || resolved.artifact.kind === "image") {
-        const { artifact } = resolved;
-        return readUploadedFile(client, artifact, resolved.owner.kind === "project" ? {
-          project: artifact.project,
-          document: documentLabel(artifact.project, artifact.slug)
-        } : { issue: resolved.issue?.key }, version2, resolved.owner.kind === "project" ? resolved.owner.project : resolved.owner.issue, shown);
-      }
-      const documentPromise = client.docRead(resolved.artifact.id, version2);
-      const marksPromise = openArtifactMarks(client, resolved);
-      const marksResultPromise = marksPromise.then((value) => ({ status: "fulfilled", value }), (reason) => ({ status: "rejected", reason }));
-      const document = await documentPromise;
-      const marksResult = await marksResultPromise;
-      if (marksResult.status === "rejected")
-        throw marksResult.reason;
-      const marks = marksResult.value;
-      const approval = approvalLine(resolved.artifact);
-      const trailer = [
-        ..."token" in document && document.token !== undefined ? [`Document token: ${document.token}`] : [],
-        ...marks.length === 0 ? [] : [`Open anchored asks/comments: ${marks.join(", ")}`],
-        ...approval === undefined ? [] : [approval]
-      ];
-      return {
-        text: trailer.length === 0 ? document.markdown : `${document.markdown}
-
-${trailer.join(`
-`)}`,
-        details: resolved.owner.kind === "project" ? {
-          project: resolved.artifact.project,
-          document: `${resolved.artifact.project}/${resolved.artifact.slug}`
-        } : { issue: resolved.issue?.key }
-      };
-    }
-    case "dispatch_request_approval": {
-      const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
-      const resolved = await resolveDocument(documentOwner(), artifactReference);
-      await refuseOpenDecisionBlocks(client, input.tool, resolved);
-      const result = await client.requestApproval(resolved.artifact.id, {
-        actor,
-        summary: stringArg(args, "summary")
-      });
-      if (result.ask === null) {
-        return {
-          text: `${resolved.artifact.name} (document id ${resolved.artifact.id}) is already approved at version ${result.version} by ${result.approval.by?.id ?? "unknown"}; no new request was opened. An edit after approval makes it stale, so request again only for a new version, once the human has agreed to every point in it.`,
-          details: {
-            ...resolved.owner.kind === "project" ? documentResultDetails(resolved.artifact) : { issue: resolved.issue?.key },
-            artifact: resolved.artifact.id,
-            version: result.version
-          }
-        };
-      }
-      const details = await followedAskDetails(client, result.ask, resolved.artifact);
-      const outcome = result.recorded ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).` : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
-      return {
-        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.${result.recorded ? `
-${SPEC_CHECK_REMINDER}` : ""}`,
-        details: { ...details, artifact: resolved.artifact.id, version: result.version }
-      };
-    }
-    case "dispatch_artifact": {
-      const summary = optionalString(args, "summary");
-      const name = stringArg(args, "name");
-      const content = optionalString(args, "content");
-      const artifactInput = content === undefined ? {
-        name,
-        file: Bun.file(resolvePath2(input.cwd, stringArg(args, "path"))),
-        ...summary === undefined ? {} : { summary },
-        actor
-      } : {
-        name,
-        content,
-        ...summary === undefined ? {} : { summary },
-        actor
-      };
-      const artifactOwner = documentOwner();
-      const result = artifactOwner.kind === "project" ? await client.projectArtifact(artifactOwner.project, artifactInput) : await client.artifact(issue2(), artifactInput);
-      const artifactRef = dispatchDocumentRef(artifactOwner.kind === "project" ? artifactOwner.project : issue2(), result.artifact.slug);
-      const uploadOwner = artifactOwner.kind === "project" ? documentTopic(result.artifact) : issueTopic(issue2());
-      const adviceLines = renderAdvice(input.tool, uploadOwner.label, result.advice, {
-        isPrimarySpec: result.artifact.primary || result.artifact.name === "spec.md"
-      });
-      return {
-        text: [
-          `Uploaded ${result.artifact.name} as version ${result.version.number} (artifact slug ${result.artifact.slug}; ${artifactRef}) ${notSubscribed(uploadOwner)}`,
-          ...adviceLines
-        ].join(`
-`),
-        details: artifactOwner.kind === "project" ? {
-          ...documentResultDetails(result.artifact),
-          version: result.version.number,
-          ...result.advice === undefined ? {} : { advice: result.advice }
-        } : {
-          issue: issue2(),
-          artifact: result.artifact.id,
-          version: result.version.number,
-          ...result.advice === undefined ? {} : { advice: result.advice }
-        }
-      };
-    }
-    case "dispatch_follow": {
-      const sessionId = input.sessionId?.trim();
-      if (!sessionId)
-        throw new Error("host session id is required for dispatch_follow");
-      const ask = await resolveAskArgument(input.tool, args, client, sessionId);
-      const action = stringArg(args, "action");
-      if (action === "unfollow") {
-        await client.unfollowAsk(ask, sessionId, actor);
-        return { text: `Unfollowed ask ${ask}.`, details: { ask } };
-      }
-      const read = await client.getAsk(ask);
-      await client.followAsk(ask, sessionId, actor);
-      return {
-        text: `Following ask ${ask}: its answer and replies reach this session directly.`,
-        details: await followedAskDetails(client, read.ask)
-      };
-    }
-    case "dispatch_read": {
-      const message = optionalString(args, "message");
-      const picturesOf = (texts) => readPictures(client, picturesNewestFirst(texts), shown);
-      const showImages = (pictures3) => {
-        for (const address of pictures3.shown)
-          shown?.add(address);
-        return pictures3.images.length === 0 ? {} : { images: pictures3.images };
-      };
-      if (message !== undefined) {
-        const sessionId = input.sessionId?.trim();
-        if (!sessionId)
-          throw new Error("host session id is required for dispatch_read({message})");
-        const thread = await client.getMessageThread(messageIdOf(message), sessionId);
-        const issueKey2 = thread.message.issue_key;
-        const [pictures3, graph2] = await Promise.all([
-          picturesOf(datedBodies([thread.message, ...thread.replies])),
-          issueKey2 === null ? [] : graphSections(client, dispatchChildRef(dispatchIssueRef(issueKey2), "message", thread.message.id))
-        ]);
-        return {
-          text: messageSummary(thread, [...pictures3.lines, ...graph2]),
-          details: {
-            message: thread.message.id,
-            ...issueKey2 === null ? {} : { issue: issueKey2 }
-          },
-          ...showImages(pictures3)
-        };
-      }
-      if (ownerArguments.ref?.kind === "ask") {
-        const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "ask", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.listIssueAsks(ref.owner.issue) : client.getArtifactAsks((await resolveDocument(ref.owner, ref.artifact)).artifact.id, "all"));
-        const askRead = await client.getAsk(id);
-        const askRef = refTarget(ref, "ask", id);
-        const [pictures3, graph2] = await Promise.all([
-          picturesOf(askTexts(askRead)),
-          graphSections(client, askRef)
-        ]);
-        return {
-          text: askSummary(askRead, [...pictures3.lines, ...graph2]),
-          details: ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
-          ...showImages(pictures3)
-        };
-      }
-      if (ownerArguments.ref?.kind === "comment") {
-        const ref = ownerArguments.ref;
-        const id = await resolveIdPrefix(input.tool, "comment", ref.id, refOwnerName(ref), async () => ref.owner.kind === "issue" ? client.getComments(ref.owner.issue) : client.getArtifactComments((await resolveDocument(ref.owner, ref.artifact)).artifact.id));
-        const comment = await client.getComment(id);
-        const commentRef = refTarget(ref, "comment", id);
-        const [pictures3, graph2] = await Promise.all([
-          picturesOf(datedBodies([comment.comment, ...comment.replies])),
-          graphSections(client, commentRef)
-        ]);
-        return {
-          text: commentSummary(comment, [...pictures3.lines, ...graph2]),
-          details: ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: comment.comment.issue_key },
-          ...showImages(pictures3)
-        };
-      }
-      if (ownerArguments.ref?.kind === "message") {
-        if (ownerArguments.ref.owner.kind !== "issue") {
-          throw new Error("message references are issue-scoped");
-        }
-        const messageRead = await client.getMessage(ownerArguments.ref.owner.issue, ownerArguments.ref.id);
-        const messageRef = dispatchChildRef(dispatchIssueRef(ownerArguments.ref.owner.issue), "message", ownerArguments.ref.id);
-        const [pictures3, graph2] = await Promise.all([
-          picturesOf(datedBodies([messageRead.message, ...messageRead.replies])),
-          graphSections(client, messageRef)
-        ]);
-        return {
-          text: messageSummary(messageRead, [...pictures3.lines, ...graph2]),
-          details: { issue: messageRead.message.issue_key },
-          ...showImages(pictures3)
-        };
-      }
-      if (documentOwner().kind === "project") {
-        const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
-        const documentRef = dispatchDocumentRef(resolved.artifact.project, resolved.artifact.slug);
-        return {
-          text: [
-            `Document: ${resolved.artifact.project} / ${resolved.artifact.name}`,
-            `Reference: ${documentRef}`,
-            `Versions: ${resolved.artifact.versions.length}`,
-            ...approvalLine(resolved.artifact) === undefined ? [] : [approvalLine(resolved.artifact)],
-            ...await graphSections(client, documentRef)
-          ].join(`
-`),
-          details: {
-            project: resolved.artifact.project,
-            document: documentLabel(resolved.artifact.project, resolved.artifact.slug)
-          }
-        };
-      }
-      const issueKey = issue2();
-      if (ownerArguments.ref?.kind === "log") {
-        const read2 = await client.read(issueKey);
-        const pictures3 = await picturesOf(read2.events.flatMap(eventTexts));
-        return {
-          text: [logSummary(read2.issue, read2.events), ...pictures3.lines].join(`
-`),
-          details: { issue: read2.issue.key },
-          ...showImages(pictures3)
-        };
-      }
-      if (ownerArguments.ref?.kind === "children") {
-        const read2 = await client.read(issueKey);
-        return {
-          text: childrenSummary(read2.issue),
-          details: { issue: read2.issue.key }
-        };
-      }
-      const readPromise = client.read(issueKey);
-      const referencesPromise = issueReferencesOrUnavailable(client, issueKey);
-      const read = await readPromise;
-      const [references, graph, titles, pictures2] = await Promise.all([
-        referencesPromise,
-        graphSections(client, dispatchIssueRef(read.issue.key)),
-        liveSessionTitles(client, holdsSession(read.issue.claim) || routeHeldBySession(read.issue)),
-        picturesOf([
-          ...read.issue.open_asks.map((ask) => ({ text: ask.question, at: ask.created_at })),
-          ...read.events.flatMap(eventTexts)
-        ])
-      ]);
-      return {
-        text: issueSummary(read.issue, read.events, references, [...pictures2.lines, ...graph], titles),
-        details: { issue: read.issue.key },
-        ...showImages(pictures2)
-      };
-    }
-    default:
-      throw new Error(`Unknown Dispatch tool: ${input.tool}`);
-  }
-}
-async function resolveExistingIssue(client, issueReference) {
-  try {
-    return await client.resolveIssue(issueReference);
-  } catch (error48) {
-    if (dispatchAnswered(error48, 404)) {
-      throw new Error(`no Dispatch issue is linked to ${issueReference}; create it first with ` + `dispatch_issue({ external: "${issueReference}", ... })`);
-    }
-    throw error48;
-  }
-}
-function asObject(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value) ? value : null;
-}
-
-// ../envoy-client/src/dispatch-subscribe.ts
-function dispatchFollowNotice(details) {
-  if (typeof details !== "object" || details === null)
-    return null;
-  const { follows, issue: issue2, document } = details;
-  if (typeof follows !== "object" || follows === null)
-    return null;
-  const { ask } = follows;
-  if (typeof ask !== "string" || ask === "")
-    return null;
-  let owner;
-  if (typeof issue2 === "string" && issue2 !== "") {
-    owner = issueTopic(issue2);
-  } else if (typeof document === "string") {
-    const [project, slug] = document.split("/", 2);
-    if (!project || !slug)
-      return null;
-    owner = { label: document, topic: documentTopicOf(project, slug).topic };
-  } else {
-    return null;
-  }
-  return {
-    ask,
-    text: `Following ask ${ask} on ${owner.label}: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on ${owner.label}: envoy_subscribe ${owner.topic}.`
-  };
-}
-function createFollowAnnouncer(emit) {
-  const announced = new Set;
-  return (details) => {
-    const notice = dispatchFollowNotice(details);
-    if (notice === null || announced.has(notice.ask))
-      return;
-    announced.add(notice.ask);
-    return emit(notice.text);
-  };
-}
-function subscriptionRemovedTopics(raw, sessionID) {
-  let envelope2;
-  try {
-    envelope2 = JSON.parse(raw);
-  } catch {
-    return;
-  }
-  if (typeof envelope2 !== "object" || envelope2 === null)
-    return;
-  const { source, payload } = envelope2;
-  if (source !== "dispatch" || typeof payload !== "string")
-    return;
-  let event;
-  try {
-    event = JSON.parse(payload);
-  } catch {
-    return;
-  }
-  const parsedEvent = DispatchEventSchema.safeParse(event);
-  if (!parsedEvent.success || parsedEvent.data.type !== "subscription.removed")
-    return;
-  const parsedPayload = SubscriptionRemovedEventPayloadSchema.safeParse(parsedEvent.data.payload);
-  if (!parsedPayload.success || parsedPayload.data.session_id !== sessionID)
-    return;
-  return parsedPayload.data.topics ?? [];
-}
-
-// ../envoy-client/src/nats-auth.ts
-var import_nats = __toESM(require_mod4(), 1);
-var seedKeys = import_nats.nkeys;
-function natsAuthOptions(env) {
-  const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
-  let seed;
-  let source;
-  if (file2 !== undefined) {
-    if (file2 === "")
-      throw new Error("NATS_NKEY_SEED_FILE is set but empty");
-    seed = readSecretFile("NATS_NKEY_SEED_FILE", file2);
-    source = `NATS_NKEY_SEED_FILE (${file2})`;
-  } else if (plain !== undefined) {
-    seed = plain.trim();
-    if (seed.length === 0)
-      throw new Error("NATS_NKEY_SEED is set but empty");
-    source = "NATS_NKEY_SEED";
-  } else {
-    return {};
-  }
-  const bytes = new TextEncoder().encode(seed);
-  let publicKey;
-  try {
-    publicKey = seedKeys.fromSeed(bytes).getPublicKey();
-  } catch (error48) {
-    throw new Error(`${source} does not hold a valid nkey seed: ${messageFor(error48)}`);
-  }
-  if (!publicKey.startsWith("U")) {
-    throw new Error(`${source} holds an nkey seed that is not a user's (public key ${publicKey})`);
-  }
-  return { authenticator: import_nats.nkeyAuthenticator(bytes) };
 }
 
 // ../envoy-client/src/tool-contract.ts
@@ -41837,29 +39396,25 @@ var envoyToolSpecs = [
     arguments: (schema) => ({
       topics: schema.array(schema.string()).describe("NATS-style topic patterns to subscribe to.")
     }),
-    operation: EnvoyToolOperation.subscribe,
-    requiresSubscriptionCapability: true
+    operation: EnvoyToolOperation.subscribe
   },
   {
     name: "envoy_unsubscribe",
     description: "Unsubscribe this session from Envoy topics, or remove all current subscriptions if topics are omitted.",
     arguments: (schema) => ({ topics: schema.array(schema.string()).optional() }),
-    operation: EnvoyToolOperation.unsubscribe,
-    requiresSubscriptionCapability: true
+    operation: EnvoyToolOperation.unsubscribe
   },
   {
     name: "envoy_list",
     description: "List the current Envoy topic subscriptions for this session so you can confirm the exact topic shapes that are active.",
     arguments: () => ({}),
-    operation: EnvoyToolOperation.listInterests,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.listInterests
   },
   {
     name: "envoy_inbox",
     description: "List this Pi session's 50 most recent rendered Envoy deliveries, newest first.",
     arguments: () => ({}),
-    operation: EnvoyToolOperation.inbox,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.inbox
   },
   {
     name: "envoy_send",
@@ -41868,36 +39423,31 @@ var envoyToolSpecs = [
       session_id: schema.string().describe("Target session ID; find it with envoy_sessions or envoy_whoami."),
       ...messageArguments(schema)
     }),
-    operation: EnvoyToolOperation.send,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.send
   },
   {
     name: "envoy_publish",
     description: `Publish an Envoy message to any topic. ${DELIVERY_CONTRACT}`,
     arguments: (schema) => ({ topic: schema.string(), ...messageArguments(schema) }),
-    operation: EnvoyToolOperation.publish,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.publish
   },
   {
     name: "envoy_role_set",
     description: "Set the current session as the holder of a named role. Messages published to notifications.role.<role> route to this session.",
     arguments: (schema) => ({ role: schema.string() }),
-    operation: EnvoyToolOperation.setRole,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.setRole
   },
   {
     name: "envoy_role_get",
     description: "Get the live holder of a named Envoy role.",
     arguments: (schema) => ({ role: schema.string() }),
-    operation: EnvoyToolOperation.getRole,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.getRole
   },
   {
     name: "envoy_whoami",
     description: "Returns this session's Envoy identity: session ID, machine ID, port, and directory. session_id is the address a reply reaches. Where a host runs a task subagent inside its parent's process, such a subagent registers no Envoy session of its own, so its session_id is the parent session that spawned it and the result says so.",
     arguments: () => ({}),
-    operation: EnvoyToolOperation.whoami,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.whoami
   },
   {
     name: "envoy_sessions",
@@ -41907,8 +39457,7 @@ var envoyToolSpecs = [
       dir: schema.string().optional(),
       title: schema.string().optional()
     }),
-    operation: EnvoyToolOperation.listSessions,
-    requiresSubscriptionCapability: false
+    operation: EnvoyToolOperation.listSessions
   }
 ];
 function sendConfirmationText(result) {
@@ -44513,7 +42062,7 @@ class StdioServerTransport {
 // src/envoy-channel-server.ts
 var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
-var version2 = "0.6.7";
+var version2 = "1.0.0";
 
 // src/channel-forwarder.ts
 var DeliveryIdentity = DedupeIdentitySchema.extend({
@@ -44639,7 +42188,6 @@ function claudeProjectDirectory(environment, fallback) {
 // src/session-identity.ts
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
 import { dirname, join as join2 } from "path";
-
 class SessionIdentity {
   directory;
   #id;
@@ -44662,9 +42210,6 @@ function sessionHandoffFile(stateDirectory, claudePid) {
 }
 function roleStateFile(stateDirectory, sessionId) {
   return join2(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`);
-}
-function hasErrnoCode(error48, code) {
-  return error48 instanceof Error && "code" in error48 && error48.code === code;
 }
 async function writeAtomicStateFile(file2, contents) {
   await mkdir(dirname(file2), { recursive: true, mode: 448 });
@@ -44745,21 +42290,7 @@ function argumentsSchema(spec) {
 function parseArguments(spec, input) {
   return argumentsSchema(spec).parse(input);
 }
-function isToolImage(value) {
-  return typeof value === "object" && value !== null && "data" in value && typeof value.data === "string" && "mimeType" in value && typeof value.mimeType === "string" && isPictureType(value.mimeType);
-}
 function mcpResult(value) {
-  if (typeof value === "object" && value !== null && "images" in value) {
-    const { images, ...rest } = value;
-    if (Array.isArray(images)) {
-      return {
-        content: [
-          { type: "text", text: JSON.stringify(rest) },
-          ...imageBlocks(images.filter(isToolImage))
-        ]
-      };
-    }
-  }
   return { content: [{ type: "text", text: JSON.stringify(value) }] };
 }
 function projectDirectory() {
@@ -44768,19 +42299,12 @@ function projectDirectory() {
 function currentDispatchConfig(directory = projectDirectory()) {
   return resolveDispatchConfig(process.env, { cwd: directory });
 }
-function channelToolDefinitions(dispatchEnabled) {
-  return [
-    ...envoyToolSpecs.map((spec) => ({
-      name: spec.name,
-      description: spec.description,
-      inputSchema: exports_external.toJSONSchema(argumentsSchema(spec))
-    })),
-    ...dispatchEnabled ? dispatchToolSpecs.map((spec) => ({
-      name: spec.name,
-      description: spec.description,
-      inputSchema: exports_external.toJSONSchema(dispatchToolSchema(spec, zodSchemaApi(exports_external)))
-    })) : []
-  ];
+function channelToolDefinitions() {
+  return envoyToolSpecs.map((spec) => ({
+    name: spec.name,
+    description: spec.description,
+    inputSchema: exports_external.toJSONSchema(argumentsSchema(spec))
+  }));
 }
 
 class UnsupportedEnvoyToolError extends Error {
@@ -44817,10 +42341,6 @@ function createChannelDelivery(input) {
     });
     return queued;
   };
-  const announce = createFollowAnnouncer((text) => queue({
-    method: CHANNEL_NOTIFICATION_METHOD,
-    params: { content: text, meta: { producer: "dispatch" } }
-  }));
   return {
     enqueue({ subject: subject2, raw }) {
       const rendered = renderInbound(raw, input.identity.id, subject2);
@@ -44871,9 +42391,6 @@ function createChannelDelivery(input) {
         }
       });
       return queued.then(() => true);
-    },
-    announceFollow(details) {
-      return announce(details) ?? tail;
     },
     inbox() {
       return [...inbox];
@@ -45021,7 +42538,6 @@ async function startChannelSession(options) {
     }
     identity.set(next);
     directSubject = nextSubject;
-    forgetShownPictures(previous);
     forwarder.unfollow([previousSubject]);
     roleTransferFrom ??= previous;
     await register();
@@ -45161,23 +42677,6 @@ async function startChannelSession(options) {
 }
 async function executeEnvoyTool(runtime, name, input) {
   const { identity } = runtime;
-  const dispatchSpec = dispatchToolSpecs.find((candidate) => candidate.name === name);
-  if (dispatchSpec !== undefined) {
-    const config2 = currentDispatchConfig(identity.directory);
-    if (!config2.enabled)
-      throw new UnsupportedEnvoyToolError(name);
-    const result = await executeDispatchTool({
-      tool: dispatchSpec.name,
-      args: input,
-      cwd: identity.directory,
-      host: "claude",
-      sessionId: identity.id,
-      config: config2,
-      env: process.env
-    });
-    await runtime.session.delivery.announceFollow(result.details);
-    return result;
-  }
   const spec = envoyToolSpecs.find((candidate) => candidate.name === name);
   if (spec === undefined)
     throw new UnsupportedEnvoyToolError(name);
@@ -45266,7 +42765,7 @@ async function runEnvoyChannelServer() {
   const directory = projectDirectory();
   const dispatchConfig = currentDispatchConfig(directory);
   if (!dispatchConfig.enabled) {
-    process.stderr.write(`envoy-channel: Dispatch tools disabled \u2014 ${dispatchConfig.error ?? "no Dispatch URL configured"}
+    process.stderr.write(`envoy-channel: Dispatch disabled \u2014 ${dispatchConfig.error ?? "no Dispatch URL configured"}
 `);
   }
   const overrideSessionId = process.env["ENVOY_SESSION_ID"];
@@ -45281,11 +42780,11 @@ async function runEnvoyChannelServer() {
   const stateDirectory = pluginStateDirectory();
   const server = new Server(MCP_SERVER_INFO, {
     capabilities: { tools: {}, experimental: { "claude/channel": {} } },
-    instructions: "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the shared Envoy and Dispatch tools for actions. Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
+    instructions: "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay."
   });
   const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch: globalThis.fetch });
   let runtime;
-  const toolDefinitions = channelToolDefinitions(dispatchConfig.enabled);
+  const toolDefinitions = channelToolDefinitions();
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (runtime === undefined)

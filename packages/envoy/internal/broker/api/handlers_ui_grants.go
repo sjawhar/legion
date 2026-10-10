@@ -78,7 +78,8 @@ func (s *server) writeApproverGrants(w http.ResponseWriter, r *http.Request, app
 // its own session.
 type revokeByApproverBody struct {
 	// The Dispatch login of the person revoking: for a grant, its approver or its session's
-	// operator; for a machine login, the person who approved it.
+	// operator; for a person's machine login, the person who approved it; for a service's machine
+	// login, anyone signed in.
 	Approver string `json:"approver"`
 }
 

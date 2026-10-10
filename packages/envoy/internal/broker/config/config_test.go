@@ -2,7 +2,9 @@
 package config
 
 import (
+	"maps"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -111,6 +113,68 @@ func TestLoadReadsTrustedProxyHeaderOptionally(t *testing.T) {
 	}
 }
 
+// TestLoadReadsTheRegisteredServices pins BROKER_SERVICES: whitespace-separated
+// name=<service-account subject> entries, none when unset. A name is one a machine login's service
+// can take ([a-z0-9-]{1,64}) and not the owner tag's own "shared"; a subject is a Kubernetes
+// service account's (system:serviceaccount:<namespace>:<name>), the only subject a pod's projected
+// token can carry. An entry with no "=", an empty side, an invalid name or subject, or a name given
+// twice refuses to start naming the entry, since the broker could never serve that service a secret
+// or would have to pick one of two subjects.
+func TestLoadReadsTheRegisteredServices(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServiceAccounts != nil {
+		t.Fatalf("ServiceAccounts = %v, want nil when BROKER_SERVICES is unset", cfg.ServiceAccounts)
+	}
+
+	e := validEnv()
+	e["BROKER_SERVICES"] = " example-service=system:serviceaccount:example:example-sa\tother-service=system:serviceaccount:other:other-sa\n"
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"example-service": "system:serviceaccount:example:example-sa",
+		"other-service":   "system:serviceaccount:other:other-sa",
+	}
+	if !maps.Equal(cfg.ServiceAccounts, want) {
+		t.Fatalf("ServiceAccounts = %v, want %v", cfg.ServiceAccounts, want)
+	}
+
+	for _, bad := range []string{
+		"other-service",
+		"=system:serviceaccount:other:other-sa",
+		"other-service=",
+		"Other-Service=system:serviceaccount:other:other-sa",
+		"other_service=system:serviceaccount:other:other-sa",
+		"ada@example.com=system:serviceaccount:other:other-sa",
+		"shared=system:serviceaccount:other:other-sa",
+		strings.Repeat("a", 65) + "=system:serviceaccount:other:other-sa",
+		"other-service=other-sa",
+		"other-service=system:serviceaccount:other",
+		"other-service=system:serviceaccount:Other:other-sa",
+		"example-service=system:serviceaccount:example:another-sa",
+	} {
+		e := validEnv()
+		e["BROKER_SERVICES"] = "example-service=system:serviceaccount:example:example-sa " + bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") || !strings.Contains(err.Error(), strconv.Quote(bad)) {
+			t.Errorf("BROKER_SERVICES with %q: err = %v, want a refusal naming BROKER_SERVICES and the entry", bad, err)
+		}
+	}
+
+	// One service account bound to two names would make a pod on it whichever service its login
+	// claims, and a login's service name is the machine's own claim, so each account proves one
+	// service only.
+	e = validEnv()
+	e["BROKER_SERVICES"] = "a=system:serviceaccount:x:y b=system:serviceaccount:x:y"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") ||
+		!strings.Contains(err.Error(), "system:serviceaccount:x:y") || !strings.Contains(err.Error(), `"a"`) || !strings.Contains(err.Error(), `"b"`) {
+		t.Errorf("BROKER_SERVICES binding one account to two names: err = %v, want a refusal naming the account and both names", err)
+	}
+}
+
 // TestLoadRefusesTheRulesFileVariables pins that a deployment still configured for the rules file
 // refuses to start naming the variable, rather than running with its rules silently ignored.
 func TestLoadRefusesTheRulesFileVariables(t *testing.T) {
@@ -195,5 +259,150 @@ func TestDatabasePasswordVariableWithoutPlaceholderRefused(t *testing.T) {
 	_, err := Load(env(e))
 	if err == nil || !strings.Contains(err.Error(), "does not name") {
 		t.Fatalf("expected a refusal naming the unused password, got %v", err)
+	}
+}
+
+// rdsHost is an Amazon RDS cluster endpoint of the form the deployment's URL names.
+const rdsHost = "example-cluster.cluster-abcdefghijkl.us-west-2.rds.amazonaws.com"
+
+// rdsBundle is the RDS CA bundle the broker image ships, as the repository vendors it.
+const rdsBundle = "../../../docker/rds-global-bundle.pem"
+
+// verifiedRDSURL is an IAM-form URL that verifies the server: a user, no password, an RDS host,
+// sslmode=verify-full and the bundle as sslrootcert.
+const verifiedRDSURL = "postgres://agent_secrets_broker@" + rdsHost + ":5432/agent_secrets?sslmode=verify-full&sslrootcert=" + rdsBundle
+
+// isolatePostgresDefaults keeps the process's libpq defaults out of a test: pgx reads PG*
+// variables and ~/.postgresql/root.crt beneath what the URL says, so a developer's own would
+// change what a URL verifies.
+func isolatePostgresDefaults(t *testing.T) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	for _, name := range []string{"PGHOST", "PGPORT", "PGUSER", "PGPASSWORD", "PGPASSFILE", "PGSSLMODE", "PGSSLROOTCERT", "PGSERVICE", "PGSERVICEFILE"} {
+		t.Setenv(name, "")
+	}
+}
+
+// TestLoadSignsInByIAMOnlyForAPasswordlessRDSURL pins when the broker signs in to its database
+// with an IAM token: a URL naming a user and no password whose host is an Amazon RDS endpoint.
+// A password in the URL, the password placeholder, a URL naming no user, and a passwordless URL
+// to any other host (local trust auth) connect as given, with the password, if any, the URL or
+// libpq's defaults supply.
+func TestLoadSignsInByIAMOnlyForAPasswordlessRDSURL(t *testing.T) {
+	isolatePostgresDefaults(t)
+	for _, tc := range []struct {
+		name, url, password string
+		iam                 bool
+	}{
+		{name: "an RDS endpoint, a user and no password", url: verifiedRDSURL, iam: true},
+		{name: "an RDS endpoint spelled in capitals", url: strings.Replace(verifiedRDSURL, rdsHost, strings.ToUpper(rdsHost), 1), iam: true},
+		{name: "the user as a query parameter", url: "postgres://" + rdsHost + ":5432/agent_secrets?user=agent_secrets_broker&sslmode=verify-full&sslrootcert=" + rdsBundle, iam: true},
+		{name: "a password in the URL", url: "postgres://agent_secrets:secret@" + rdsHost + ":5432/agent_secrets?sslmode=require"},
+		{name: "a password as a query parameter", url: verifiedRDSURL + "&password=secret"},
+		{name: "a password with a semicolon, which net/url drops from the query and pgx reads", url: verifiedRDSURL + "&password=sec;ret"},
+		{name: "the password placeholder", url: "postgres://agent_secrets:${BROKER_DATABASE_PASSWORD}@" + rdsHost + ":5432/agent_secrets?sslmode=require", password: "p@ss"},
+		{name: "no user", url: "postgres://" + rdsHost + ":5432/agent_secrets?sslmode=require"},
+		{name: "a local passwordless URL", url: "postgres://broker@127.0.0.1:5432/broker?sslmode=disable"},
+		{name: "a host with the RDS suffix in the middle of its name", url: "postgres://broker@db.rds.amazonaws.com.example.net:5432/broker?sslmode=disable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := validEnv()
+			e["BROKER_DATABASE_URL"] = tc.url
+			if tc.password != "" {
+				e["BROKER_DATABASE_PASSWORD"] = tc.password
+			}
+			cfg, err := Load(env(e))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.DatabaseIAM != tc.iam {
+				t.Fatalf("DatabaseIAM = %v for %s, want %v", cfg.DatabaseIAM, tc.url, tc.iam)
+			}
+		})
+	}
+}
+
+// TestLoadLeavesAPasswordLibpqSuppliesToSignIn pins that a passwordless RDS URL whose password
+// comes from libpq's defaults, PGPASSWORD or a passfile, which pgx reads beneath the URL, signs in
+// with that password rather than a token.
+func TestLoadLeavesAPasswordLibpqSuppliesToSignIn(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T){
+		"PGPASSWORD": func(t *testing.T) { t.Setenv("PGPASSWORD", "from-the-environment") },
+		"a passfile": func(t *testing.T) {
+			passfile := t.TempDir() + "/pgpass"
+			if err := os.WriteFile(passfile, []byte("*:*:*:agent_secrets_broker:from-the-passfile\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PGPASSFILE", passfile)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			isolatePostgresDefaults(t)
+			setup(t)
+			e := validEnv()
+			e["BROKER_DATABASE_URL"] = verifiedRDSURL
+			cfg, err := Load(env(e))
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.DatabaseIAM {
+				t.Fatalf("DatabaseIAM = true with a password from %s; pgx would sign in with that password", name)
+			}
+		})
+	}
+}
+
+// TestLoadRefusesPGSSLROOTCERTSystemForAnIAMURL pins that the system pool named through
+// PGSSLROOTCERT, which pgx reads beneath the URL, is refused as the URL's own sslrootcert=system
+// is: it holds no RDS CA, so every sign-in would fail its TLS handshake after a clean boot.
+func TestLoadRefusesPGSSLROOTCERTSystemForAnIAMURL(t *testing.T) {
+	isolatePostgresDefaults(t)
+	t.Setenv("PGSSLROOTCERT", "system")
+	e := validEnv()
+	e["BROKER_DATABASE_URL"] = "postgres://agent_secrets_broker@" + rdsHost + ":5432/agent_secrets?sslmode=verify-full"
+	_, err := Load(env(e))
+	if err == nil || !strings.Contains(err.Error(), rdsHost) || !strings.Contains(err.Error(), "sslrootcert=system") {
+		t.Fatalf("Load with PGSSLROOTCERT=system = %v, want a refusal naming the host and sslrootcert=system", err)
+	}
+}
+
+// TestLoadRefusesAnIAMURLThatDoesNotVerifyTheServer pins that an IAM token, a password good for
+// 15 minutes, never goes over a link that has not verified the server: an IAM-form URL that pgx
+// would not read as one host with sslmode=verify-full and a root certificate pool from
+// sslrootcert refuses to start, naming the host and not the URL. sslmode=require encrypts and
+// verifies nothing, and a repeated sslmode takes its last value, as libpq does.
+func TestLoadRefusesAnIAMURLThatDoesNotVerifyTheServer(t *testing.T) {
+	isolatePostgresDefaults(t)
+	base := "postgres://agent_secrets_broker@" + rdsHost + ":5432/agent_secrets"
+	for name, tc := range map[string]struct{ url, reason string }{
+		"sslmode=require":                          {base + "?sslmode=require", "its sslmode is not verify-full"},
+		"sslmode=require with sslrootcert":         {base + "?sslmode=require&sslrootcert=" + rdsBundle, "its sslmode is not verify-full"},
+		"no sslmode":                               {base + "?sslrootcert=" + rdsBundle, "its sslmode is not verify-full"},
+		"sslmode=disable":                          {base + "?sslmode=disable", "its sslmode is not verify-full"},
+		"sslmode=verify-ca":                        {base + "?sslmode=verify-ca&sslrootcert=" + rdsBundle, "its sslmode is not verify-full"},
+		"verify-full without sslrootcert":          {base + "?sslmode=verify-full", "it names no sslrootcert"},
+		"a later sslmode undoing verify-full":      {verifiedRDSURL + "&sslmode=require", "its sslmode is not verify-full"},
+		"a second host":                            {"postgres://agent_secrets_broker@" + rdsHost + ":5432,other.example.net:5432/agent_secrets?sslmode=verify-full&sslrootcert=" + rdsBundle, "it names another host too"},
+		"an sslrootcert that names no file":        {base + "?sslmode=verify-full&sslrootcert=/nonexistent/rds-bundle.pem", "unable to read CA file"},
+		"an sslrootcert that holds no certificate": {base + "?sslmode=verify-full&sslrootcert=config_test.go", "unable to add CA to cert pool"},
+		"sslrootcert=system":                       {base + "?sslmode=verify-full&sslrootcert=system", "sslrootcert=system"},
+		"sslrootcert=system under sslmode=require": {base + "?sslmode=require&sslrootcert=system", "sslrootcert=system"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			e := validEnv()
+			e["BROKER_DATABASE_URL"] = tc.url
+			cfg, err := Load(env(e))
+			if err == nil {
+				t.Fatalf("Load accepted %s (DatabaseIAM %v); want a refusal naming the host", tc.url, cfg.DatabaseIAM)
+			}
+			for _, want := range []string{"BROKER_DATABASE_URL", rdsHost, tc.reason} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("refusal %q does not say %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "postgres://") {
+				t.Errorf("refusal %q quotes the URL; it should name the host alone", err)
+			}
+		})
 	}
 }

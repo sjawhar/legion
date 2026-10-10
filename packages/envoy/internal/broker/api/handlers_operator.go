@@ -23,9 +23,9 @@ func operatorOf(w http.ResponseWriter, cred enroll.Credential) (string, bool) {
 	return record.CanonicalLogin(*cred.Operator), true
 }
 
-// listOperatorMachines lists the machine logins the calling credential's operator approved, as
-// GET /v1/launcher-credentials lists them for that person: their own machines' and any service's
-// they approved, not revoked, and unexpired or expired with a session still running.
+// listOperatorMachines lists the machine logins the calling credential's operator may revoke, as
+// GET /v1/launcher-credentials lists them for that person: their own machines' and every
+// service's, not revoked, and unexpired or expired with a session still running.
 func (s *server) listOperatorMachines(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	operator, ok := operatorOf(w, cred)
 	if !ok {
@@ -34,10 +34,10 @@ func (s *server) listOperatorMachines(w http.ResponseWriter, r *http.Request, cr
 	s.writeLauncherCredentials(w, r, operator)
 }
 
-// revokeOperatorMachine ends a machine login the calling credential's operator approved, as
-// POST /v1/launcher-credentials/{id}/revoke-by-approver ends it for that person, recording the
-// calling machine login as the actor. Revoking the calling credential itself ends this machine's
-// own access.
+// revokeOperatorMachine ends a machine login the calling credential's operator may revoke (one of
+// their own machines', or any service's), as POST /v1/launcher-credentials/{id}/revoke-by-approver
+// ends it for that person, recording the calling machine login as the actor. Revoking the calling
+// credential itself ends this machine's own access.
 func (s *server) revokeOperatorMachine(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	operator, ok := operatorOf(w, cred)
 	if !ok {

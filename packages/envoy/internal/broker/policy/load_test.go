@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -252,25 +253,48 @@ func TestLoadServesASecretOnlyWhileAVersionIsCurrent(t *testing.T) {
 	}
 }
 
+// TestHasCurrentVersionIsTheRuleLoadServesBy pins the exported rule both the broker's load and the
+// agent-secrets CLI's VALUE column read: a secret has a value while one of its versions carries
+// AWSCURRENT, and not otherwise.
+func TestHasCurrentVersionIsTheRuleLoadServesBy(t *testing.T) {
+	for _, tc := range []struct {
+		stages map[string][]string
+		want   bool
+	}{
+		{onlyCurrent, true},
+		{map[string][]string{"v1": {"AWSPREVIOUS"}, "v2": {"AWSCURRENT"}, "v3": {"AWSPENDING"}}, true},
+		{nil, false},
+		{map[string][]string{}, false},
+		{map[string][]string{"v1": {"AWSPENDING"}}, false},
+		{map[string][]string{"v1": {"AWSPREVIOUS"}}, false},
+	} {
+		if got := policy.HasCurrentVersion(tc.stages); got != tc.want {
+			t.Fatalf("HasCurrentVersion(%v) = %v, want %v", tc.stages, got, tc.want)
+		}
+	}
+}
+
 // TestReloadServesASecretOnceItIsGivenAValue pins that a secret created and tagged without a value
 // is left out of the live policy, and that the reload after its value is put serves it, with no
-// restart.
+// restart. Its synctest bubble waits for the reload goroutine to return.
 func TestReloadServesASecretOnceItIsGivenAValue(t *testing.T) {
-	store := secrets.NewLocal(policytest.Secret("SEEDED_LATER", owner, policy.TierHuman, ""))
-	logged := policytest.CaptureLog(t)
-	cur, err := policy.NewCurrent(t.Context(), policytest.Loader(store), 10*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewCurrent: %v", err)
-	}
-	if _, served := cur.Get().Secrets["SEEDED_LATER"]; served {
-		t.Fatalf("served SEEDED_LATER before it had a value: %+v", cur.Get().Secrets)
-	}
-	if want := refusedLine("SEEDED_LATER", policy.ReasonNoCurrentValue); !strings.HasPrefix(logged.String(), want) {
-		t.Fatalf("logged:\n%s\nwant it to open with %q", logged, want)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		store := secrets.NewLocal(policytest.Secret("SEEDED_LATER", owner, policy.TierHuman, ""))
+		logged := policytest.CaptureLog(t)
+		cur, err := policy.NewCurrent(t.Context(), policytest.Loader(store), 10*time.Millisecond)
+		if err != nil {
+			t.Fatalf("NewCurrent: %v", err)
+		}
+		if _, served := cur.Get().Secrets["SEEDED_LATER"]; served {
+			t.Fatalf("served SEEDED_LATER before it had a value: %+v", cur.Get().Secrets)
+		}
+		if want := refusedLine("SEEDED_LATER", policy.ReasonNoCurrentValue); !strings.HasPrefix(logged.String(), want) {
+			t.Fatalf("logged:\n%s\nwant it to open with %q", logged, want)
+		}
 
-	store.Put(policytest.Secret("SEEDED_LATER", owner, policy.TierHuman, "seeded-v1"))
-	await(t, func() bool { return cur.Get().Secrets["SEEDED_LATER"].Name == "SEEDED_LATER" })
+		store.Put(policytest.Secret("SEEDED_LATER", owner, policy.TierHuman, "seeded-v1"))
+		await(t, func() bool { return cur.Get().Secrets["SEEDED_LATER"].Name == "SEEDED_LATER" })
+	})
 }
 
 // failingSecrets fails ListSecrets once failing is set.
@@ -293,36 +317,39 @@ func (f *failingSecrets) ListSecrets(ctx context.Context, in *secretsmanager.Lis
 // TestReloadKeepsThePolicyWhenSecretsManagerFails pins the live policy across reloads: a tag edit
 // takes effect on the next tick, a reload that cannot reach Secrets Manager logs the exact line
 // the deployment's alarm filters on and keeps the previous policy, and a first load that fails
-// fails the broker's boot.
+// fails the broker's boot. Its synctest bubble waits for the reload goroutine to return, so no
+// failed reload logs into a later test's capture.
 func TestReloadKeepsThePolicyWhenSecretsManagerFails(t *testing.T) {
-	store := &failingSecrets{Local: secrets.NewLocal(policytest.Secret("DEEL_API_KEY", owner, policy.TierAgent, "v"))}
-	loader := policy.Loader{Secrets: store, Aliases: store, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
-	logged := policytest.CaptureLog(t)
-	cur, err := policy.NewCurrent(t.Context(), loader, 10*time.Millisecond)
-	if err != nil {
-		t.Fatalf("NewCurrent: %v", err)
-	}
-	first := cur.Get()
+	synctest.Test(t, func(t *testing.T) {
+		store := &failingSecrets{Local: secrets.NewLocal(policytest.Secret("DEEL_API_KEY", owner, policy.TierAgent, "v"))}
+		loader := policy.Loader{Secrets: store, Aliases: store, Prefix: policytest.Prefix, KeyARN: policytest.KeyARN}
+		logged := policytest.CaptureLog(t)
+		cur, err := policy.NewCurrent(t.Context(), loader, 10*time.Millisecond)
+		if err != nil {
+			t.Fatalf("NewCurrent: %v", err)
+		}
+		first := cur.Get()
 
-	store.Put(policytest.Secret("DEEL_API_KEY", owner, policy.TierHuman, "v"))
-	await(t, func() bool { return cur.Get().Secrets["DEEL_API_KEY"].Tier == policy.TierHuman })
-	if cur.Get().Version == first.Version {
-		t.Fatalf("a tag edit left the version at %s", first.Version)
-	}
+		store.Put(policytest.Secret("DEEL_API_KEY", owner, policy.TierHuman, "v"))
+		await(t, func() bool { return cur.Get().Secrets["DEEL_API_KEY"].Tier == policy.TierHuman })
+		if cur.Get().Version == first.Version {
+			t.Fatalf("a tag edit left the version at %s", first.Version)
+		}
 
-	edited := cur.Get()
-	store.mu.Lock()
-	store.failing = true
-	store.mu.Unlock()
-	const failed = "ERROR agent secret policy load failed; previous policy kept error=\"list secrets under " + policytest.Prefix + ": ThrottlingException: Rate exceeded\"\n"
-	await(t, func() bool { return strings.Contains(logged.String(), failed) })
-	if cur.Get() != edited {
-		t.Fatalf("a failed reload replaced the policy: %+v", cur.Get())
-	}
+		edited := cur.Get()
+		store.mu.Lock()
+		store.failing = true
+		store.mu.Unlock()
+		const failed = "ERROR agent secret policy load failed; previous policy kept error=\"list secrets under " + policytest.Prefix + ": ThrottlingException: Rate exceeded\"\n"
+		await(t, func() bool { return strings.Contains(logged.String(), failed) })
+		if cur.Get() != edited {
+			t.Fatalf("a failed reload replaced the policy: %+v", cur.Get())
+		}
 
-	if _, err := policy.NewCurrent(t.Context(), loader, time.Hour); err == nil {
-		t.Fatal("NewCurrent with Secrets Manager failing = nil error, want the first load's failure")
-	}
+		if _, err := policy.NewCurrent(t.Context(), loader, time.Hour); err == nil {
+			t.Fatal("NewCurrent with Secrets Manager failing = nil error, want the first load's failure")
+		}
+	})
 }
 
 func await(t *testing.T, done func() bool) {

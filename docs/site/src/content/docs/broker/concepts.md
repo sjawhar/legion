@@ -36,7 +36,7 @@ has one of three kinds:
 An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session runs: the helper
 renews host sessions, `agent-secrets renew` renews a box, and Legion's pod shim renews a pod. An
 enrollment has **ended** once its launcher revokes it (the helper does as soon as a host session's
-process exits), the person who approved its machine login revokes that login
+process exits), whoever may revoke its machine login revokes that login
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its
 lease lapses. From the moment the lease lapses, the session's calls are refused `PROOF_INVALID`; the
 broker's sweep, which runs every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run
@@ -48,39 +48,50 @@ land on a session that is gone
 Every `host` and `box` enrollment records an **operator**: the person whose machine it runs on. The
 operator is the person who approved the machine login that enrolled it, never a value the launcher
 chooses. A `pod` enrollment records none, since the Legion daemon logs in as a service rather than
-as a person.
+as a person; it records the service account the pod's projected token proved instead.
 
 ## Machine login
 
 A launcher (a machine's helper, or the Legion daemon) cannot enroll anything until a person has
 approved a **machine login** for it. The login works like a device code:
 
-1. The machine generates a fresh key and asks the broker to log in, naming the person who should
-   approve it (the helper reads that person's Dispatch login from `AGENT_SECRETS_OPERATOR_FILE`).
+1. The machine generates a fresh key and asks the broker to log in. A person's machine names the
+   person who should approve it (the helper reads that person's Dispatch login from
+   `AGENT_SECRETS_OPERATOR_FILE`); a service's login, such as the Legion daemon's, names its service
+   instead.
 2. The broker answers with an eight-character confirmation code, `XXXX-XXXX`, which the machine
    prints.
-3. That person types the code into Dispatch, sees which machine is asking, and approves or denies
-   it. Only the typed code selects a machine login: no link can approve one.
+3. A person types the code into Dispatch, sees which machine is asking, and approves or denies it.
+   Only the typed code selects a machine login: no link can approve one.
 4. On approval the broker mints a **launcher credential** bound to the machine's key. It is never a
    token: the machine uses it by signing with that key.
 
-A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. The person who approved it may
-revoke it from Dispatch's machine-login page, or from any of their own machines under its machine
-login, before or after it expires, which also ends every session it enrolled
-([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)); no one
-else may. Its sessions outlive its expiry: a session renews its lease with its own key, never with
-the machine's credential, so a box keeps working after the machine's credential expires, and the
-page lists an expired login, marked as expired with sessions still running, until its last session
-ends. On a person's own machine, whoever approved its login is its operator. The Legion daemon's
-login has no operator, since it enrolls pods, so it is listed for whoever approved it, and their
-revoke ends every pod it enrolled. The helper keeps its key in memory only, so a helper restart,
-like an expired or revoked credential, means logging the machine in again. A
+Who decides a machine login depends on what it logs in as. A person's machine login is decided
+only by the person it names, since its sessions act as them: anyone else is refused
+`NOT_APPROVER`. A service's login is decided by anyone signed in to Dispatch, since its credential
+enrolls the service's pods and acts as no person: the Legion daemon's login waits for whoever reads
+its code, not for one named person. The broker reads the service from the machine's signed request,
+so a login the daemon starts while still naming a person in it is anyone's to decide too.
+
+A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. It may be revoked from Dispatch's
+machine-login page, or from any of a person's own machines under its machine login, before or after
+it expires, which also ends every session it enrolled
+([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)): a person's
+machine login by the person who approved it and no one else, a service's by anyone signed in. Its
+sessions outlive its expiry: a session renews its lease with its own key, never with the machine's
+credential, so a box keeps working after the machine's credential expires, and the page lists an
+expired login, marked as expired with sessions still running, until its last session ends. On a
+person's own machine, whoever approved its login is its operator. The Legion daemon's login has no
+operator, since it enrolls pods, so it is listed for everyone signed in, with who approved it, and
+anyone's revoke ends every pod it enrolled. The helper keeps its key in memory only, so a helper
+restart, like an expired or revoked credential, means logging the machine in again. A
 machine login nobody decides expires after 15 minutes, a fixed time rather than a setting
 (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`).
 
 A credential enrolls sessions only for its own operator: an enrollment naming anyone else is refused
 `OPERATOR_MISMATCH`. The broker's rate limiter caps how often anyone can start a machine login, per
-source address and per named operator.
+source address and per login: per named person for a person's machine, and one limit shared by
+every service's login, whatever service it names.
 
 ## Owner and tier: who may have which secret
 
@@ -92,23 +103,40 @@ one KMS key, `BROKER_SECRETS_KMS_KEY_ARN`, and tagged with its owner and its tie
 - **Its name** under the prefix is the name a session asks for, in lowercase with each underscore a
   hyphen: `production/agent-secrets/deel-api-key` is `DEEL_API_KEY`. It is lowercase letters, digits
   and single hyphens, starting with a letter.
-- **`owner`** is `shared`, or a person's email in lowercase, the email they sign in to Dispatch with.
+- **`owner`** is `shared`, a person's email in lowercase, the email they sign in to Dispatch with,
+  or a service the broker is configured with (`BROKER_SERVICES`).
 - **`tier`** is `agent` or `human`.
+
+People write the secrets and their tags, not the broker: `agent-secrets secret` creates and
+changes them under the person's own AWS sign-in
+([manage a secret](/legion/broker/guides/manage-a-secret/)).
 
 Who gets a secret follows from those two tags alone:
 
-| The secret | Its owner's own session | Another person's session, or a pod |
+| The secret | Its owner's own session | Any other session or pod |
 | --- | --- | --- |
 | A person's, `tier=agent` | Granted at once. | Sent to the owner for approval. |
 | A person's, `tier=human` | Sent to the owner for approval. | Sent to the owner for approval. |
 | `owner=shared`, `tier=agent` | Granted at once. | Granted at once. |
 | `owner=shared`, `tier=human` | Approved by anyone signed in to Dispatch. | Approved by anyone signed in to Dispatch. |
+| A service's, `tier=agent` | Granted at once. | Denied; no one can approve it. |
 
 A session is its owner's own when its operator is the owner: the owner approved the machine login
 it enrolled under. A pod has no operator, so a pod asking for a person's agent-tier secret sends it
-to that person for approval. An owner may also be a service, whose secrets go only to that
-service's own sessions; the broker has no way yet to register a service, so it refuses a secret
-whose owner tag names one.
+to that person for approval.
+
+An owner may also be a service the broker is configured with. `BROKER_SERVICES` binds each
+service's name to the Kubernetes service account its pods run as, for example
+`legion-daemon=system:serviceaccount:legion:legion-worker`. A service's own sessions are the pods
+that a launcher logged in as that service enrolled, and whose projected token proved that service
+account: the Legion daemon's worker pods, for `legion-daemon`. A machine login's service name is
+the machine's own claim, which anyone signed in may approve, so the service account the cluster
+vouches for is what proves the service.
+
+A service's secrets go to its own sessions and to no one else. That includes a person's own
+session, and a pod run under another service account even when a launcher logged in as the service
+enrolled it. A service's secret is agent tier, since no person approves it: the broker refuses one
+tagged `tier=human`, and one whose owner names a service it is not configured with.
 
 One thing besides the tags changes what a session gets at once: a session's own person, its
 operator, who revokes a grant the session got without asking **withholds** its secrets from that
@@ -124,11 +152,12 @@ the person's own included, still get the secrets at once.
 The broker reads the namespace when it starts, and refuses to start when it cannot, then again every
 five minutes, a fixed time rather than a setting (`policyRefresh` in
 `packages/envoy/cmd/broker/main.go`). A change is served at once when something asks the broker to
-reread it: `POST /v1/secrets/{name}/reread`, which any caller may send right after writing a
-secret, and a request naming a secret the broker does not serve yet, which makes it reread that one
-name before refusing it (up to ten such rereads at once per session, refilled one every ten
-seconds: `DefaultMissRereads` in `packages/envoy/internal/broker/requests/machine_state.go`), so a
-secret created a moment ago is served on its first request. A reread reads the one secret from
+reread it: `POST /v1/secrets/{name}/reread`, which `agent-secrets secret` sends after each write it
+makes and any caller may send right after writing a secret, and a request naming a secret the
+broker does not serve yet, which makes it reread that one name before refusing it (up to ten such
+rereads at once per session, refilled one every ten seconds: `DefaultMissRereads` in
+`packages/envoy/internal/broker/requests/machine_state.go`), so a secret created a moment ago is
+served on its first request. A reread reads the one secret from
 Secrets Manager (`DescribeSecret`, which shows a write at once) and serves it, or stops serving it,
 as it finds it; a read of the whole namespace in the five minutes after reads that secret again
 alone, so a listing that has not caught up never undoes it (`Current.Refresh` in
@@ -169,7 +198,10 @@ reason of at most 400 characters. The broker evaluates every name
 - When every name is automatic, the request is granted at once.
 - Otherwise it is **pending**, and the broker writes a credential-request record for the approver to
   decide. An identical request from the same session while one is pending joins it rather than
-  asking twice.
+  asking twice. The broker's answer names the approver the record names, and `agent-secrets`
+  prints it, so the agent can tell that person. The record fixes its approver when the request is
+  made, and the request stays in that person's Inbox after the secret's tags change, though they
+  may then be unable to approve it ([what an owner change does](#approvals)).
 
 A granted request yields a **grant**: the session's right to read those values until the grant
 expires. A grant lives `BROKER_MAX_GRANT_SECONDS`, counted from the moment it is granted, unless its

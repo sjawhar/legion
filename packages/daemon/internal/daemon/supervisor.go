@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -40,6 +42,10 @@ type supervisor struct {
 	machines map[claim.Token]*member
 	stopped  bool
 	feeding  sync.WaitGroup
+	// all is every machine, in the order they were added. Machines are never removed: add, under
+	// mu, replaces the slice with a longer copy, and the stop's log lines read it without mu, which
+	// Create holds through a store write.
+	all atomic.Pointer[[]*supervise.Machine]
 }
 
 // member is one claim's machine, the queue its events wait in, and the tree the claim is of.
@@ -100,9 +106,11 @@ func (s *supervisor) Create(ctx context.Context, c supervise.Claim, rolePrompt s
 			return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
 		}
 	}
-	if err := s.deps.Store.PutClaim(ctx, c); err != nil {
+	bound, err := s.deps.Store.AdmitClaim(ctx, c)
+	if err != nil {
 		return nil, false, err
 	}
+	c = bound
 	m, err := supervise.NewMachine(s.ctx, s.deps, c)
 	if err != nil {
 		return nil, false, err
@@ -121,13 +129,14 @@ func (s *supervisor) Claims(ctx context.Context) ([]supervise.Claim, error) {
 }
 
 // restore builds the machine of every claim the store held at boot, and reports the claims whose
-// launch the last daemon persisted and never finished: launching with no locator, the process —
-// if one opened at all — never recorded. Each is put back to queued, which is what it is: nothing
-// the daemon knows of runs for it.
+// launch the last daemon began and never finished: launching with no locator, the process — if
+// one opened at all — never recorded; or a launch it released at boot and stopped before the
+// relaunch wrote its next generation (supervise.Claim.ReleasedLaunch). Each is put back to
+// launch_uncertain, which is what it is: the daemon cannot yet say whether a process runs for it.
 func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]claim.Token, error) {
 	var unfinished []claim.Token
 	for _, c := range claims {
-		if c.State == supervise.StateLaunching && c.Locator == nil {
+		if (c.State == supervise.StateLaunching && c.Locator == nil) || c.ReleasedLaunch() {
 			c.State = supervise.StateLaunchUncertain
 			if err := s.deps.Store.PutClaim(ctx, c); err != nil {
 				return nil, err
@@ -152,6 +161,8 @@ func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 	m.OnTerminal(s.terminal)
 	queue := newInbox()
 	s.machines[token] = &member{machine: m, inbox: queue, tree: m.Claim().Tree}
+	all := append(slices.Clip(s.supervised()), m)
+	s.all.Store(&all)
 	s.feeding.Add(1)
 	go func() {
 		defer s.feeding.Done()
@@ -161,10 +172,37 @@ func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 				return
 			}
 			if err := m.Handle(s.ctx, ev); err != nil {
-				s.log.Error("supervise: an event failed", "claim", token, "event", fmt.Sprintf("%T", ev), "error", err)
+				s.decisionFailed(token, fmt.Sprintf("%T", ev), err, "supervise: an event failed")
 			}
 		}
 	}()
+}
+
+// decisionFailed logs err, a decision on token's claim failing (what names it: the event its
+// machine handled, or the release of an uncertain launch), as failed says: at Error, unless the
+// daemon's stop ended it, which is no fault, since the next boot takes the claim up. It reports
+// whether the failure is a fault.
+func (s *supervisor) decisionFailed(token claim.Token, what string, err error, failed string) bool {
+	if s.ctx.Err() != nil {
+		s.log.Info("supervise: the daemon's stop ended a decision; the next boot takes the claim up",
+			"claim", token, "event", what, "error", err)
+		return false
+	}
+	s.log.Error(failed, "claim", token, "event", what, "error", err)
+	return true
+}
+
+// inDecision is every claim whose machine is deciding an event now, whoever handed it the event,
+// as "<claim> (<event type>)", in claim order. It waits on no decision and no lock a decision holds.
+func (s *supervisor) inDecision() []string {
+	busy := []string{}
+	for _, m := range s.supervised() {
+		if ev := m.Deciding(); ev != nil {
+			busy = append(busy, fmt.Sprintf("%s (%T)", m.View().Token, ev))
+		}
+	}
+	slices.Sort(busy)
+	return busy
 }
 
 // post queues ev for the claim's machine. An event for a claim the daemon does not supervise, or
@@ -184,6 +222,21 @@ func (s *supervisor) post(token claim.Token, ev supervise.Event) {
 	m.inbox.put(ev)
 }
 
+// retree re-points m's claim to tree (supervise.Machine.Retree) and then the tree kept beside it,
+// which volumeLost reads. The machine is asked first, under its own lock alone: a machine calls
+// volumeLost under its lock, so taking mu around the machine's lock would invert that order.
+func (s *supervisor) retree(ctx context.Context, token claim.Token, m *supervise.Machine, tree string) error {
+	if err := m.Retree(ctx, tree); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if member, ok := s.machines[token]; ok {
+		member.tree = tree
+	}
+	return nil
+}
+
 // volumeLost tells every other claim of c's tree that the tree volume was lost (TreeVolumeLost):
 // the sessions they recorded were on it. It is the machines' VolumeLost, called by c's machine
 // under its own lock, so it reads no machine — the tree of each is kept beside it — and only queues.
@@ -200,21 +253,32 @@ func (s *supervisor) volumeLost(c supervise.Claim) {
 	}
 }
 
-// count is how many claims the daemon supervises.
+// count is how many claims the daemon supervises. It waits on no lock a decision holds.
 func (s *supervisor) count() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.machines)
+	return len(s.supervised())
 }
 
-// stop feeds no machine another event and waits for every event being handled to finish.
-func (s *supervisor) stop() {
+// supervised is every machine the daemon supervises, read without mu (all).
+func (s *supervisor) supervised() []*supervise.Machine {
+	if held := s.all.Load(); held != nil {
+		return *held
+	}
+	return nil
+}
+
+// halt feeds no machine another event, and waits for nothing.
+func (s *supervisor) halt() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.stopped = true
 	for _, m := range s.machines {
 		m.inbox.close()
 	}
-	s.mu.Unlock()
+}
+
+// stop feeds no machine another event and waits for every event being handled to finish.
+func (s *supervisor) stop() {
+	s.halt()
 	s.feeding.Wait()
 }
 
@@ -250,35 +314,34 @@ func (s *supervisor) wait() {
 // are only ever as fresh as the moment they were read. Judging the hold by that first result would
 // accept an old generation's shim after its claim has already relaunched, taking the stream slot
 // the new generation's own hello then finds "already bound to a live stream".
+//
+// A store that fails either read answers the hello with that error, never as an unknown token: the
+// failure says nothing about the token, and the listener closes the connection unrefused for the
+// shim to redial (stream.HelloResolver).
 func (s *supervisor) helloResolver(tokens *api.BootTokens, timeout time.Duration) stream.HelloResolver {
-	resolve := func(bootToken string) (api.BootToken, bool) {
+	resolve := func(bootToken string) (api.BootToken, bool, error) {
 		ctx, cancel := context.WithTimeout(s.ctx, timeout)
 		defer cancel()
-		launch, known, err := tokens.Resolve(ctx, bootToken)
-		if err != nil {
-			s.log.Error("worker stream: resolve a hello's boot token", "error", err)
-			return api.BootToken{}, false
-		}
-		return launch, known
+		return tokens.Resolve(ctx, bootToken)
 	}
-	return func(bootToken string) (claim.Token, uint64, bool, bool) {
-		if _, known := resolve(bootToken); !known {
-			return "", 0, false, false
+	return func(bootToken string) (claim.Token, uint64, bool, bool, error) {
+		if _, known, err := resolve(bootToken); err != nil || !known {
+			return "", 0, false, false, err
 		}
 		select {
 		case <-s.restored:
 		case <-s.ctx.Done():
 			s.log.Info("worker stream: a hello's boot token was real, but the boot never became ready", "error", s.ctx.Err())
-			return "", 0, false, false
+			return "", 0, false, false, nil
 		}
-		launch, known := resolve(bootToken)
-		if !known {
-			return "", 0, false, false
+		launch, known, err := resolve(bootToken)
+		if err != nil || !known {
+			return "", 0, false, false, err
 		}
 		if _, supervised := s.Machine(launch.Claim); !supervised {
-			return "", 0, false, false
+			return "", 0, false, false, nil
 		}
-		return launch.Claim, launch.Generation, launch.Stale, true
+		return launch.Claim, launch.Generation, launch.Stale, true, nil
 	}
 }
 

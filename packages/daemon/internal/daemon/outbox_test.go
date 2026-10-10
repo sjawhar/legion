@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -25,8 +26,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -185,7 +188,7 @@ func TestOutboxControllerNoticeGoesToTheControllerTopicAlone(t *testing.T) {
 	if got := publisher.keys(); fmt.Sprint(got) != "[legion-outbox:57]" {
 		t.Fatalf("controller notice keys = %v, want the row's own key", got)
 	}
-	if got, want := publisher.payloads()[0], (record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}); got != want {
+	if got, want := publisher.payloads()[0], (record.Notice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("controller notice payload = %+v, want the notice %+v", got, want)
 	}
 }
@@ -362,7 +365,7 @@ func TestOutboxSuperviseStartsResumesSuspendsStopsAndDeduplicatesDelivery(t *tes
 	provisioned := 0
 	runner := &outbox{log: quietLogger(),
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			provisioned++
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
@@ -715,7 +718,7 @@ func TestALingerExpiryRowAfterReadmissionActsOnNothing(t *testing.T) {
 	putOutboxIssue(t, pool, records, issue)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
 	removals := 0
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			return workspace.Workspace{Dir: t.TempDir(), Bookmark: "legion/LEGION-208"}, nil
 		},
@@ -769,7 +772,7 @@ func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
 		t.Fatal(err)
 	}
 	removals := 0
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
 	}
 	closeOf := func(linger uint64) record.OutboxRow {
@@ -798,9 +801,11 @@ func TestAnEarlierLingersRowsActOnNothingInALaterLinger(t *testing.T) {
 }
 
 // A linger's workspace removal waits until the close has retired every claim of the issue. A
-// worker whose release the runtime refused still runs in that workspace, and if the tree is
-// re-admitted before its close lands, it goes on there: the removal then finishes without acting,
-// so no worker is left on a removed workspace.
+// worker whose release the runtime refused still runs in that workspace. The close reserved the
+// tree's cleanup before its release failed, so the tree's re-admission waits for that cleanup: the
+// removal of the ended linger then finishes without acting, and the retried close retires the
+// worker and confirms the cleanup, after which the tree's next run relaunches the retired worker
+// and provisions its workspace again.
 func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -825,7 +830,8 @@ func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 	}
 	rt.FailReleaseOf(token, errors.New("the pane did not exit"))
 	removals := 0
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+	trees := outboxTreeStore(t, pool, root.Key)
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: trees, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		remove: func(context.Context, workspace.Workspace) error { removals++; return nil },
 	}
 	closeRow := mustOutboxRow(t, child.Key, record.SuperviseRequest{Op: "tree_close", Tree: root.Key, Role: claim.RoleTester, Generation: 1, Linger: 3}, time.Now())
@@ -839,23 +845,31 @@ func TestAWorkspaceIsRemovedOnlyOnceTheCloseRetiredEveryClaim(t *testing.T) {
 	}
 	root.Generation, root.Phase, root.Status, root.LingerUntil = 4, phase.Admitted, "in_progress", nil
 	putOutboxIssue(t, pool, records, root)
-	rt.FailReleaseOf(token, nil)
-	for _, row := range []record.OutboxRow{removal, closeRow} {
-		if err := runner.execute(ctx, row); err != nil {
-			t.Fatalf("the ended linger's %s row after re-admission = %v, want it finished without acting", row.Kind, err)
-		}
+	if _, err := trees.OpenTreeLifecycle(ctx, "legion", root.Key, treelifecycle.AuthorityWorkflow); !errors.Is(err, treelifecycle.ErrCleanupReserved) {
+		t.Fatalf("re-admission while the close's cleanup is reserved = %v, want the reservation's wait", err)
 	}
-	if got := machine.Claim().State; got != supervise.StateLaunching || removals != 0 {
-		t.Fatalf("after re-admission: tester %s, %d removals; want it still launching in its workspace", got, removals)
+	if err := runner.execute(ctx, removal); err != nil || removals != 0 {
+		t.Fatalf("the ended linger's removal = %v after %d removals, want it finished without acting", err, removals)
+	}
+	rt.FailReleaseOf(token, nil)
+	if err := runner.execute(ctx, closeRow); err != nil {
+		t.Fatalf("the reserved close retried after re-admission: %v", err)
+	}
+	if got := machine.Claim().State; got != supervise.StateRetired {
+		t.Fatalf("tester after the reserved close's retry = %s, want retired", got)
+	}
+	if opened, err := trees.OpenTreeLifecycle(ctx, "legion", root.Key, treelifecycle.AuthorityWorkflow); err != nil || opened.Epoch != 2 {
+		t.Fatalf("re-admission once the cleanup confirmed = %+v, %v; want the tree's epoch 2", opened, err)
 	}
 }
 
 // The architect's retry of a held phase writes a start carrying the retry task. The relaunched
 // claim still holds the task it was started with, so the retry task waits behind it and its row
 // is retried until that task's turn is over. That turn can finish the phase: the implementer
-// completes, and the transition suspends it and starts the tester. The waiting start was written
-// for a phase the issue has left, and it neither relaunches the implementer nor hands it that
-// phase, which would have it push to the pull request its tester is testing.
+// completes, the transition starts the tester, and the implementer stays live, idle once its turn
+// ends. The waiting start was written for a phase the issue has left, and it neither relaunches the
+// implementer nor hands it that phase, which would have it push to the pull request its tester is
+// testing.
 func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -942,17 +956,17 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 		}
 		return n
 	}
-	launches := implementerLaunches()
+	launches, suspends := implementerLaunches(), len(rt.CallsOf("Suspend"))
 	prompts := len(conn.Prompts())
 
-	// The transition's effects run first — the implementer is suspended and the tester started —
+	// The transition's effects run first — the tester is started, and the implementer stays live —
 	// and then every row still waiting comes due.
 	clock = time.Now().Add(10 * time.Second)
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatalf("run the transition's effects: %v", err)
 	}
-	if got := machine.Claim().State; got != supervise.StateSuspended {
-		t.Fatalf("after the move to testing the implementer is %s, want suspended", got)
+	if got := machine.Claim().State; got != supervise.StateIdle {
+		t.Fatalf("after the move to testing the implementer is %s, want idle on its process", got)
 	}
 	clock = time.Now().Add(time.Hour)
 	if err := runner.RunOnce(ctx); err != nil {
@@ -960,8 +974,10 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 	}
 
 	got := machine.Claim()
-	if relaunched := implementerLaunches() - launches; relaunched != 0 || got.State != supervise.StateSuspended {
-		t.Fatalf("after its phase ended the implementer was launched %d more times and is %s, want no launch and suspended", relaunched, got.State)
+	stopped := len(rt.CallsOf("Suspend")) - suspends
+	if relaunched := implementerLaunches() - launches; relaunched != 0 || got.State != supervise.StateIdle || stopped != 0 {
+		t.Fatalf("after its phase ended the implementer was launched %d more times, suspended %d times, and is %s, want no launch, no stop, and idle",
+			relaunched, stopped, got.State)
 	}
 	if got.Pending != nil || len(conn.Prompts()) != prompts {
 		t.Fatalf("after its phase ended the implementer holds %+v and was prompted %d more times, want no task", got.Pending, len(conn.Prompts())-prompts)
@@ -973,12 +989,13 @@ func TestOutboxRetryStartForAPhaseTheIssueLeftRelaunchesNothing(t *testing.T) {
 
 // A task handed to a claim waits as its pending delivery until a turn confirms it. An agent that
 // refuses the prompt after acknowledging it — it was already in the turn a human's steer started —
-// has the delivery taken back, and it can finish the phase inside that turn: the transition's
-// suspension, held until that turn ends, then finds the task still pending. The suspension retires
-// that task, so the claim's next start, for the issue's next phase or round, resumes it with the
-// new start's own task rather than the finished phase's — for the next round, or for retro, never
-// "Phase: implementing" again.
-func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *testing.T) {
+// has the delivery taken back, and it can finish the phase inside that turn. The worker stays live,
+// so when that turn ends the task is still pending on a claim that can be prompted: it was queued
+// for a phase the issue has left, so it is dropped rather than sent (PhaseHolds), and the claim's
+// next start, for the issue's next phase or round, hands the live worker the new start's own task
+// rather than the finished phase's — for the next round, or for retro, never "Phase: implementing"
+// again — without relaunching it.
+func TestAResidentWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		review intake.PullRequestReview
@@ -1001,6 +1018,7 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 				t.Fatalf("put the pull request: %v", err)
 			}
 			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+			sup.deps.PhaseHolds = (&workflowRuntime{pool: pool, records: records}).phaseHolds // exactly what the daemon wires
 			const reviewApp = "legion-reviewer[bot]"
 			engine := workflow.New(records, workflow.Config{Project: "legion", ReviewRoundCap: 10, ReviewAppLogin: reviewApp}, quietLogger())
 			clock := time.Now()
@@ -1077,15 +1095,16 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 				t.Fatalf("refuse the acknowledged prompt: %v", err)
 			}
 
-			// Inside that turn the implementer finishes round 2, and the transition's suspension runs
-			// once the turn ends.
+			// Inside that turn the implementer finishes round 2, and its turn ends after the issue
+			// moved to testing: the round-2 task still pending is the finished phase's, and is dropped.
 			apply("handoff:implementer:implementing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleImplementer, Claim: implementer, Commit: "impl-round-2"})
 			due("the move to testing")
 			if err := machine.Handle(ctx, supervise.StreamTurnEnd{Claim: implementer}); err != nil {
 				t.Fatalf("end the steer's turn: %v", err)
 			}
-			if got := machine.Claim().State; got != supervise.StateSuspended {
-				t.Fatalf("after round 2's turn the implementer is %s, want suspended", got)
+			if got := machine.Claim(); got.State != supervise.StateIdle || got.Pending != nil || len(rt.CallsOf("Suspend")) != 0 {
+				t.Fatalf("after round 2's turn the implementer is %s holding %+v with %d suspensions, want idle, holding nothing, never stopped",
+					got.State, got.Pending, len(rt.CallsOf("Suspend")))
 			}
 
 			// The tester passes, and the reviewer decides.
@@ -1096,23 +1115,31 @@ func TestAResumedWorkerIsHandedItsNewPhaseNotATaskLeftPendingFromTheLast(t *test
 			apply("review:after-round-2", review)
 			apply("handoff:reviewer:reviewing:2", intake.HandoffComplete{Generation: 1, Issue: issue.Key, Role: claim.RoleReviewer,
 				Claim: "reviewer", Commit: "review-round-2"})
-			resumes := len(rt.CallsOf("Resume"))
+			implementerLaunches := func() int {
+				n := 0
+				for _, call := range rt.Calls() {
+					if (call.Method == "Spawn" || call.Method == "Resume") && call.Spec.Claim == implementer {
+						n++
+					}
+				}
+				return n
+			}
+			launches := implementerLaunches()
 			prompted := len(conn.Prompts())
 			due("the implementer's next start")
-			if got := len(rt.CallsOf("Resume")) - resumes; got != 1 {
-				t.Fatalf("the implementer's next start resumed it %d times, want once", got)
+			if got := implementerLaunches() - launches; got != 0 {
+				t.Fatalf("the implementer's next start launched it %d times, want none: the implementer is still live", got)
 			}
-			ready()
 			due("the rows still waiting")
-			testwait.Eventually(t, "the resumed implementer to be handed a task", func() bool { return len(conn.Prompts()) > prompted })
+			testwait.Eventually(t, "the resident implementer to be handed a task", func() bool { return len(conn.Prompts()) > prompted })
 
 			handed := conn.Prompts()[prompted:]
 			if !strings.Contains(handed[0].Message, tc.want) {
-				t.Fatalf("resumed for its next start, the implementer was first handed %q, want the task naming %q", handed[0].Message, tc.want)
+				t.Fatalf("for its next start, the implementer was first handed %q, want the task naming %q", handed[0].Message, tc.want)
 			}
 			for _, p := range handed {
 				if strings.Contains(p.Message, "round 2") {
-					t.Fatalf("resumed for its next start, the implementer was handed the finished round's task %q", p.Message)
+					t.Fatalf("for its next start, the implementer was handed the finished round's task %q", p.Message)
 				}
 			}
 		})
@@ -1232,6 +1259,32 @@ func TestTerminalReplayAppliesPersistedReadyFactOnce(t *testing.T) {
 	}
 }
 
+// The daemon's controller holds a claim on no issue, so its ready and its failure are no workflow
+// facts: neither a live terminal nor a replayed one reaches the workflow, which would otherwise look
+// for an issue record no controller has and stop the daemon on the error. Its relaunch is the
+// controller keeper's (controllerKeeper).
+func TestTheControllersTerminalStatesNeverReachTheWorkflow(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	handler := &outboxFactHandler{}
+	w := &workflowRuntime{pool: pool, handlers: []intake.Handler{handler}, log: quietLogger(), failed: make(chan error, 1)}
+	controller := supervise.Claim{Token: claim.ControllerToken("legion"), Project: "legion", Role: claim.RoleController, Generation: 2}
+	for _, state := range []supervise.ClaimState{supervise.StateReady, supervise.StateFailed} {
+		controller.State = state
+		if err := w.replayTerminal(context.Background(), []supervise.Claim{controller}); err != nil {
+			t.Fatalf("replay the controller's %s: %v", state, err)
+		}
+		w.terminal(controller, state)
+	}
+	if got := handler.facts(); len(got) != 0 {
+		t.Fatalf("workflow facts = %#v, want none for the controller", got)
+	}
+	select {
+	case err := <-w.failed:
+		t.Fatalf("the workflow failed on the controller's terminal state: %v", err)
+	default:
+	}
+}
+
 // The answer supervise asks for before it sends a queued task: is the issue still in the phase
 // the task was queued for. The role is not what is compared — one role runs several phases — and
 // a task of no phase never reaches this answer at all, which is supervise's own rule.
@@ -1290,6 +1343,25 @@ func putOutboxIssue(t *testing.T, pool *pgxpool.Pool, records record.Store, issu
 	}); err != nil {
 		t.Fatalf("put workflow issue: %v", err)
 	}
+}
+
+// outboxTreeStore is the daemon's store on pool, the outbox's tree barrier as production wires it
+// (newOutbox's trees), with each root's tree lifecycle opened as admission opens it: every workflow
+// tree the daemon runs was admitted, and a close of a tree that never was is an error.
+func outboxTreeStore(t *testing.T, pool *pgxpool.Pool, roots ...string) *store.Store {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, pool.Config().ConnString())
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	for _, root := range roots {
+		if _, err := st.OpenTreeLifecycle(ctx, "legion", root, treelifecycle.AuthorityWorkflow); err != nil {
+			t.Fatalf("admit the tree of %s: %v", root, err)
+		}
+	}
+	return st
 }
 
 type outboxPublisher struct {
@@ -1393,6 +1465,12 @@ func (s *outboxClaimStore) PutClaim(_ context.Context, c supervise.Claim) error 
 	return nil
 }
 
+func (s *outboxClaimStore) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Claim, error) {
+	return c, s.PutClaim(ctx, c)
+}
+
+func (s *outboxClaimStore) CheckLaunch(context.Context, supervise.Claim) error { return nil }
+
 func (s *outboxClaimStore) PutDelivery(_ context.Context, token claim.Token, delivery supervise.Delivery) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1449,7 +1527,7 @@ func TestAClosedTreeSetBackToTodoRelaunchesItsArchitect(t *testing.T) {
 	admission := admit.New(records, engine, 2, "legion", quietLogger())
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		githubAPI: newBranchGitHub(t, nil, branchExists).url,
 		dispatch:  &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return time.Now().Add(time.Hour) }, log: quietLogger(),
@@ -1527,7 +1605,7 @@ func TestAnEarlierGenerationsWorkspaceRemovalLeavesTheReadmittedTreesWorkspace(t
 	removals, busy := 0, true
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, root.Key), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"),
 		dispatch: &outboxDispatch{issue: dispatch.Issue{Key: root.Key, Status: "todo"}}, handlers: []intake.Handler{engine, admission},
 		now: func() time.Time { return clock }, log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
@@ -1592,7 +1670,7 @@ func TestARuntimeThatProvisionsInItsPodsLeavesTheHostWithoutWorkspaces(t *testin
 	provisions, removals := 0, 0
 	runner := &outbox{
 		dispatchProject: "LEGION",
-		pool:            pool, records: records, supervisor: sup, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), log: quietLogger(),
+		pool:            pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets"), log: quietLogger(),
 		provision: func(context.Context, workspace.Request) (workspace.Workspace, error) {
 			provisions++
 			return workspace.Workspace{}, nil

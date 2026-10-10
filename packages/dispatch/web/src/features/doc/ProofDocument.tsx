@@ -10,7 +10,12 @@ import {
 } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import { api, isDocumentSchemaError, isDocumentUnloadable } from "../../api/client";
+import {
+  api,
+  isArtifactNotFound,
+  isDocumentSchemaError,
+  isDocumentUnloadable,
+} from "../../api/client";
 import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
 import { copyText } from "../../lib/clipboard";
@@ -37,11 +42,13 @@ import {
   buildReferencePath,
   parseDispatchReference,
 } from "../refs/routes";
+import { importWhenOnline } from "../shell/DeploymentResilience";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
-import { bindRemoteMarks, type EditorHandle } from "./editor";
+import type { EditorHandle } from "./editor";
+import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
 import {
   blockOffsets,
@@ -51,6 +58,7 @@ import {
   selectionBarKindFor,
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
+import type { PendingState } from "./pending-sync";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
 import { VersionDiff } from "./VersionDiff";
@@ -95,6 +103,7 @@ const SCHEMA_REFUSAL_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000] as const;
  * Spec tab row. Project document pages retain their artifact-header toolbar. */
 export interface DocumentToolbar {
   connection: ConnectionState;
+  pending: PendingState | undefined;
   isNamingVersion: boolean;
   requestNamedVersion(): void;
   copyBlockLink(): Promise<boolean>;
@@ -176,6 +185,7 @@ export function ProofDocument({
   const userRef = useRef(user);
   const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [pending, setPending] = useState<PendingState | undefined>(undefined);
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
@@ -310,6 +320,7 @@ export function ProofDocument({
   useEffect(() => {
     onToolbarChange?.({
       connection,
+      pending,
       copyBlockLink,
       isNamingVersion: nameVersion.isPending,
       requestNamedVersion,
@@ -317,6 +328,7 @@ export function ProofDocument({
     });
   }, [
     connection,
+    pending,
     copyBlockLink,
     nameVersion.isPending,
     onToolbarChange,
@@ -350,6 +362,7 @@ export function ProofDocument({
     let refusals = 0;
     let refusalTimer: number | undefined;
     setConnection("connecting");
+    setPending(undefined);
     setLoadError(undefined);
     setAdmission(undefined);
     schemaReadOnlyRef.current = false;
@@ -453,7 +466,22 @@ export function ProofDocument({
         .fetchQuery({ ...liveTextQueryOptions(artifact.id), staleTime: 0 })
         .then(
           () => undefined,
-          (error: unknown) => admissionBlock(error)
+          async (error: unknown) => {
+            if (isArtifactNotFound(error)) {
+              try {
+                const { deletePendingEdits } = await importWhenOnline(
+                  () => import("./pending-edits")
+                );
+                await deletePendingEdits(artifact.id);
+              } catch (deleteError) {
+                console.error(
+                  "Could not delete pending browser edits for a removed document",
+                  deleteError
+                );
+              }
+            }
+            return admissionBlock(error);
+          }
         );
       void Promise.all([textRead, loadTransport()])
         .then(([block, connect]) => {
@@ -500,6 +528,11 @@ export function ProofDocument({
             onStatus: (status) => {
               if (!failed) {
                 setConnection(status);
+              }
+            },
+            onPending: (state) => {
+              if (mounted) {
+                setPending(state);
               }
             },
             onSynced: () => {

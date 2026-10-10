@@ -29,7 +29,7 @@ func TestUvCacheSharesNoInodeWithAVenv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	linkMode := envOf(containerNamed(t, podOf(t, r, workerSpec(t), false), mainContainer))["UV_LINK_MODE"]
+	linkMode := envOf(workerOf(t, r, workerSpec(t), false))["UV_LINK_MODE"]
 	wheel := writeWheel(t)
 	if shared := uvSharedInodes(t, uv, wheel, linkMode); len(shared) != 0 {
 		t.Errorf("installed with the worker container's UV_LINK_MODE %q, these .venv files are inodes the cache holds: %v", linkMode, shared)

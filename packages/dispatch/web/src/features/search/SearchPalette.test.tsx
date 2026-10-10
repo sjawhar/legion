@@ -95,6 +95,9 @@ test("renders grouped results with marked snippets and dims a done issue", async
 
   try {
     await searchFor("astrolabe");
+    await waitFor(() =>
+      expect(screen.getAllByText("astrolabe", { selector: "mark" }).length).toBeGreaterThan(0)
+    );
 
     // The owner rows name their groups and are `aria-hidden`, so a reader hears each owner
     // once; they are found by their label attribute rather than by role.

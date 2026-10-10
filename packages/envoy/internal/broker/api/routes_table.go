@@ -106,13 +106,13 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/credential-requests/{record}/deny", uiAuth((*server).denyRecord)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", uiAuth((*server).lookupMachineLogin)},
-		// List the machine logins the named person approved, their own machines' and any
-		// service's, such as the Legion daemon's, that are not revoked and are unexpired or expired
-		// with a session still running.
+		// List the machine logins the named person may revoke, every service's, such as the Legion
+		// daemon's, whoever approved it, and the person's own machines', that are not revoked and
+		// are unexpired or expired with a session still running, each naming who approved it.
 		{http.MethodGet, "/v1/launcher-credentials", uiAuth((*server).listLauncherCredentials)},
-		// End a machine login, expired or not, as the person who approved it: its launcher proofs
-		// stop authenticating and every session it enrolled, pods included, ends with its grants and
-		// pending requests.
+		// End a machine login, expired or not: a service's as anyone signed in, a person's machine's
+		// as the person who approved it. Its launcher proofs stop authenticating and every session
+		// it enrolled, pods included, ends with its grants and pending requests.
 		{http.MethodPost, "/v1/launcher-credentials/{id}/revoke-by-approver", uiAuth((*server).revokeLauncherCredential)},
 		// List the live grants of the named person's sessions, automatic or approved, and those the
 		// person approved.
@@ -122,8 +122,8 @@ func routes() []apiRoute {
 		// the grant had already ended: its other grants that got them automatically end too, and it
 		// asks before it gets them again.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", uiAuth((*server).revokeByApprover)},
-		// List the machine logins of the calling credential's operator — the machines they logged in and
-		// the service logins they approved — exactly as Dispatch's machine-logins page lists them.
+		// List the machine logins the calling credential's operator may revoke — the machines they
+		// logged in and every service's login — exactly as Dispatch's machine-logins page lists them.
 		{http.MethodGet, "/v1/operator/machines", launcherAuth((*server).listOperatorMachines)},
 		// End one of the operator's machine logins: no proof signed with it authenticates again and every
 		// session it enrolled ends. Revoking the calling machine's own login ends this machine's access.

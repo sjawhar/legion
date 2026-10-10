@@ -43,10 +43,13 @@
             "locator": {
               "runtime": "sandbox",
               "claim": "legion-legion-legion-208-implementer",
-              "incarnation": "c41a8d3e-5b62-4f18-9d07-1e3a6c94b2f5",
+              "incarnation": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
               "sandbox": {
                 "namespace": "legion",
-                "name": "legion-legion-legion-208-implementer"
+                "name": "legion-legion-legion-208",
+                "podUid": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+                "container": "implementer",
+                "generation": 5
               }
             }
           },
@@ -59,10 +62,13 @@
             "locator": {
               "runtime": "sandbox",
               "claim": "legion-legion-legion-208-planner",
-              "incarnation": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+              "incarnation": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/2",
               "sandbox": {
                 "namespace": "legion",
-                "name": "legion-legion-legion-208-planner"
+                "name": "legion-legion-legion-208",
+                "podUid": "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11",
+                "container": "planner",
+                "generation": 2
               }
             }
           },
@@ -106,5 +112,104 @@
   "agentSecretsLogin": {
     "state": "pending",
     "code": "WXYZ-1234"
-  }
+  },
+  "capabilities": [
+    {
+      "name": "subagents",
+      "status": "live",
+      "detail": "to be proved by a live check against a running pod: dispatches task subagents, each on the model its role configures"
+    },
+    {
+      "name": "eval-js",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
+      "name": "eval-python",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
+      "name": "browser",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
+      "name": "lsp",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
+      "name": "codegraph",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
+      "name": "web-search",
+      "status": "live",
+      "detail": "to be proved by a live check against a running pod: searches the web through the web-search tool"
+    },
+    {
+      "name": "skills",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
+      "name": "mcp",
+      "status": "live",
+      "detail": "to be proved by a live check against a running pod: reaches the MCP servers the deployment configures"
+    },
+    {
+      "name": "repository-extensions",
+      "status": "live",
+      "detail": "to be proved by a live check against a running pod (dispatch://LEGION-629): loads the Oh My Pi extensions the repository it works carries"
+    },
+    {
+      "name": "dispatch-envoy-tools",
+      "status": "live",
+      "detail": "to be proved by a live check against a running pod: reaches Dispatch and Envoy through the pi-envoy tools"
+    },
+    {
+      "name": "github",
+      "status": "live",
+      "detail": "to be proved by a live check against a running pod (dispatch://LEGION-631): reads and writes GitHub through `legion gh` on its role's App"
+    },
+    {
+      "name": "secrets",
+      "status": "decided",
+      "detail": "runtime.kubernetes.agent_secrets is not configured",
+      "decision": "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"
+    },
+    {
+      "name": "model-fallback",
+      "status": "present",
+      "detail": "retry.modelFallback is true under the pod's Oh My Pi settings (read by the probe)"
+    },
+    {
+      "name": "toolchain",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
+      "name": "resource-limits",
+      "status": "open",
+      "detail": "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester",
+      "configLine": "capabilities.decided.resource-limits: \"\u003creason\u003e\""
+    },
+    {
+      "name": "network",
+      "status": "withheld",
+      "detail": "dispatch://LEGION-5: reaches beyond the pod's own network: the pod is the boundary"
+    },
+    {
+      "name": "operator-setup",
+      "status": "withheld",
+      "detail": "dispatch://LEGION-200: installs or configures its own dependencies in the pod: Legion owns its dependencies"
+    },
+    {
+      "name": "production-identities",
+      "status": "withheld",
+      "detail": "dispatch://LEGION-551, dispatch://LEGION-205: acts under a production identity of its own"
+    }
+  ]
 }

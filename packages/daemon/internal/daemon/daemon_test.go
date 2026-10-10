@@ -36,6 +36,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/store"
+	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
@@ -108,6 +109,7 @@ func testConfig(t *testing.T) config.Config {
 		PromptRetireLimit:                       2,
 		OperatorTokenFile:                       tokenFile,
 		EnvoyURL:                                "http://127.0.0.1:9020",
+		ControllerLaunch:                        config.ControllerLaunchOperator,
 	}
 }
 
@@ -259,22 +261,23 @@ type stopped struct{}
 func (stopped) Stop() bool { return true }
 
 // built is what the daemon handed the runtime it built: the connection directory, the address
-// every pane's shim dials, and the workflow's App tokens.
+// every pane's shim dials, the workflow's App tokens, and the store it reads.
 type built struct {
 	mu      sync.Mutex
 	conns   runtime.Conns
 	address string
 	apps    appauth.Tokens
+	store   *store.Store
 }
 
-// fakeRuntime is a daemon whose runtime is rt: the real stream listener, store, and machines,
-// with nothing launched for real.
-func fakeRuntime(rt *fake.Runtime, record *built) overrides {
+// fakeRuntime is a daemon whose runtime is rt — the fake, or a test's runtime built over it: the
+// real stream listener, store, and machines, with nothing launched for real.
+func fakeRuntime(rt runtime.Runtime, record *built) overrides {
 	return overrides{
-		runtime: func(_ context.Context, conns runtime.Conns, address string, apps appauth.Tokens) (runtime.Runtime, error) {
+		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
 			record.mu.Lock()
 			defer record.mu.Unlock()
-			record.conns, record.address, record.apps = conns, address, apps
+			record.conns, record.address, record.apps, record.store = listener, address, apps, st
 			return rt, nil
 		},
 		clock:  stillClock{},
@@ -484,6 +487,12 @@ type daemon struct {
 // startDaemon runs the daemon until the test stops it, and returns once it answers /healthz.
 func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 	t.Helper()
+	return startDaemonLogging(t, cfg, o, quietLogger())
+}
+
+// startDaemonLogging is startDaemon writing the daemon's log to log.
+func startDaemonLogging(t *testing.T, cfg config.Config, o overrides, log *slog.Logger) *daemon {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	// One transport for every request, so the test can close its own connections before it asks
 	// the daemon to stop: net/http gives an idle connection five seconds before a Shutdown may
@@ -494,7 +503,7 @@ func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 		client: &http.Client{Transport: transport, Timeout: 10 * time.Second},
 		base:   "http://127.0.0.1:" + strconv.Itoa(cfg.Port),
 	}
-	go func() { d.done <- run(ctx, cfg, quietLogger(), o) }()
+	go func() { d.done <- run(ctx, cfg, log, o) }()
 	t.Cleanup(d.stop)
 	deadline := time.Now().Add(10 * time.Second)
 	for {

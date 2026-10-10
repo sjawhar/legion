@@ -26,9 +26,9 @@ type createRequestBody struct {
 }
 
 // createRequestResponse is POST /v1/requests's exact wire shape: request_id, state, secrets,
-// grant_id, record_id, coalesced — nothing else. requests.Request itself carries additional
-// fields (decided_at, decided_by, detail) this route's contract does not define, so the handler
-// below builds this dedicated response rather than marshaling the Request it gets back from
+// grant_id, record_id, approver, coalesced — nothing else. requests.Request itself carries
+// additional fields (decided_at, decided_by, detail) this route's contract does not define, so the
+// handler below builds this dedicated response rather than marshaling the Request it gets back from
 // Machine.Create directly.
 type createRequestResponse struct {
 	// The request's id, which GET /v1/requests/{id} and its cancel route take.
@@ -41,6 +41,11 @@ type createRequestResponse struct {
 	GrantID *string `json:"grant_id"`
 	// The credential-request record the approver decides; null when nobody needs to.
 	RecordID *string `json:"record_id"`
+	// Who decides it, as its record names them: a person's Dispatch login (their lowercase
+	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. While
+	// it is pending it waits in that person's Dispatch Inbox, or in everyone's for "anyone". Null
+	// when the policy decided it at once, so no record names one.
+	Approver *string `json:"approver"`
 	// True when the request joined an identical one this session already had pending.
 	Coalesced bool `json:"coalesced,omitempty"`
 }
@@ -83,6 +88,7 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 		Secrets:   req.Secrets,
 		GrantID:   req.GrantID,
 		RecordID:  req.RecordID,
+		Approver:  req.Approver,
 		Coalesced: req.Coalesced,
 	})
 }
@@ -106,6 +112,12 @@ type requestStatusResponse struct {
 	GrantID *string `json:"grant_id"`
 	// The credential-request record the approver decides; null when nobody needs to.
 	RecordID *string `json:"record_id"`
+	// Who decides it, as its record names them: a person's Dispatch login (their lowercase
+	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. The
+	// record fixes it when the request is made, so a later change to the secret's owner does not
+	// move it, and it stays once the request is decided. Null when the policy decided it at once,
+	// so no record names one.
+	Approver *string `json:"approver"`
 	// When it left "pending"; null while pending.
 	DecidedAt *time.Time `json:"decided_at"`
 	// Who decided it and when; null while pending, when the policy decided it at once, and when it
@@ -146,7 +158,7 @@ func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentI
 		writeInternal(w, "read request", err)
 		return
 	}
-	resp := requestStatusResponse{State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, DecidedAt: req.DecidedAt}
+	resp := requestStatusResponse{State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, Approver: req.Approver, DecidedAt: req.DecidedAt}
 	if req.DecidedBy != nil && req.DecidedAt != nil {
 		resp.Decision = &requestDecision{By: *req.DecidedBy, At: *req.DecidedAt}
 	}

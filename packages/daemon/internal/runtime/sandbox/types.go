@@ -51,11 +51,24 @@ type ProvisionTokens interface {
 	Token(ctx context.Context, owner string) (string, error)
 }
 
+// Store is the durable state the runtime reads: the daemon's store (store.Store), or a test's
+// fake.
+type Store interface {
+	// TreeHasSessions is whether any stored claim of tree, retired ones included, recorded a
+	// session: the tree volume must then already hold the tree's clone.
+	TreeHasSessions(ctx context.Context, project, tree string) (bool, error)
+	// TreeLive is whether tree's lifecycle is open, or its cleanup reserved and unconfirmed: the
+	// tree's issue Sandboxes are then its cleanup's alone, never the orphan sweep's.
+	TreeLive(ctx context.Context, project, tree string) (bool, error)
+}
+
 // Options is what a Runtime is built from. Every field without a stated default is required.
 type Options struct {
 	// Namespace is where every Sandbox, pod, and Secret of the runtime lives; Project is the
 	// value of the legion.dev/project label on every one of them, and the informers select on it.
 	Namespace, Project string
+	// Store is the durable state the runtime reads.
+	Store Store
 	// Image is the worker image, pinned by digest: New refuses one without "@sha256:".
 	Image string
 	// StorageClass is the tree volume's class. Required: production has no default class.
@@ -103,8 +116,17 @@ type Options struct {
 	// seed of this same user (bootprobe.NATSUser), so a providers Secret holding a blank, invalid,
 	// or other seed refuses boot instead of every agent's connection.
 	NATSUser string
+	// SessionDSNKey is the providers Secret's key that holds the postgres:// URL of the database
+	// every role's Oh My Pi keeps its session in (runtime.kubernetes.session_store postgres); ""
+	// keeps each session a file in the tree volume's sessions directory. With one, every pod and the
+	// image probe mount that key at ProvidersDir/OMP_SESSION_SQL_DSN, and every generation is
+	// started with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming that file
+	// (mainEnvironment), which the shim, seeing the pointer, never exports; a resume is held to the
+	// session table rather than the volume (the role launcher's check, internal/launcher), and no
+	// launch expects the tree volume to hold a session.
+	SessionDSNKey string
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
-	// (`--no-extensions --extension <plugin>`, `--resume`, `--mode rpc`,
+	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
 	// BootTimeout bounds each wait of a relaunch, and is how long a pod may stay unscheduled
@@ -129,6 +151,15 @@ type Options struct {
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.
 	Log *slog.Logger
+	// Removable computes a tree's removable-workspace candidates (dispatch://LEGION-583):
+	// removableWorkspaces (internal/daemon/removable.go) states the candidate rule from the
+	// daemon's own claim store; relaunch also drops any candidate that still has a live pod of
+	// the tree, a second guarantee on different evidence (withoutLiveTreePods). relaunch calls
+	// this itself, after the tree's launch turn is held and its other pods have finished
+	// initializing, so the list a pod's manifest carries is as fresh as this launch can make it —
+	// never computed this far ahead that a relaunch's own waits could leave it stale.
+	// nil removes nothing (a narrow test that does not exercise it).
+	Removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
 }
 
 // AgentSecrets is the secrets broker the runtime enrolls every pod with: the URL the

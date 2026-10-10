@@ -372,7 +372,7 @@ func (r round) stuckAs(other round) bool {
 // the decision it posted on GitHub, recorded on the round. Either may arrive second, and an
 // approval also waits for the head's checks to settle green. A red at a code head sends the work
 // back first. A round whose reviewer never completes is not ended by the decision alone: the
-// reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-envoy's
+// reviewer's pane gets one follow-up turn when a turn ends with its phase open (pi-legion's
 // phase-stall check), and past that the issue stays in reviewing, as a tester's that never completes
 // stays in testing. A completed round that nothing on its way would end is stuck, its reason naming
 // the head, since the decision it needs is of the head. An approved round under a red only declared
@@ -474,7 +474,7 @@ func pendingAt(pr record.PullRequest) []string {
 
 // settleRound acts on what issue's review round comes to (reviewRound, with row its reviewer's and
 // pr its pull request as the fact left them), and says whether it moved the issue. An ended round
-// moves on, its request for changes counting a round; a red code head sends the work back to
+// moves on, its request for changes back to implementing; a red code head sends the work back to
 // implementing; a stuck round is told to the architect, in a notice whose summary is by, the fact
 // that wrote it - unless the round was already stuck the same way (stuckAs) before that fact,
 // which is before. The reviewer's completion and answer pass an empty before, so each that leaves
@@ -486,9 +486,6 @@ func (e *Engine) settleRound(ctx context.Context, tx pgx.Tx, issue record.Issue,
 	switch r.outcome {
 	case roundRejected:
 		if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
-			return false, err
-		}
-		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
 			return false, err
 		}
 		return true, e.transition(ctx, tx, issue, TriggerReviewRejected, "", row, pr, row.Decision.Body)

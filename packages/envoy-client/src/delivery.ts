@@ -28,6 +28,7 @@ import {
 import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
+import { commandLine } from "./dispatch-command";
 import { dispatchChildRef, dispatchDocumentRef, dispatchIssueRef } from "./dispatch-owner";
 import { pictureAddresses } from "./dispatch-pictures";
 
@@ -399,13 +400,12 @@ export function senderLabel(envelope: DeliveryEnvelope): string {
 }
 
 /**
- * A ready-to-issue tool call any host can act on (OMP devices and claude-envoy's MCP tools share
- * these names).
+ * A ready-to-issue reply any host can act on: an Envoy tool call (OMP devices and claude-envoy's
+ * MCP tools share these names), or the `dispatch` command line that answers a Dispatch event.
  */
-export interface ReplyHint {
-  readonly tool: string;
-  readonly args: Readonly<Record<string, string>>;
-}
+export type ReplyHint =
+  | { readonly tool: string; readonly args: Readonly<Record<string, string>> }
+  | { readonly command: string };
 
 export function replyWith(envelope: DeliveryEnvelope): ReplyHint | undefined {
   if (envelope.source !== "agent" || envelope.source_session === undefined) return undefined;
@@ -486,8 +486,11 @@ function dispatchCommentReplyWith(
   const threadID = thread === "reply_to" ? comment.id : String(reply);
   if (event.issue_key !== null) {
     return {
-      tool: "dispatch_comment",
-      args: { issue: event.issue_key, [thread]: threadID, body: "..." },
+      command: commandLine("dispatch_comment", {
+        issue: event.issue_key,
+        [thread]: threadID,
+        body: "...",
+      }),
     };
   }
 
@@ -499,15 +502,19 @@ function dispatchCommentReplyWith(
   if (project === undefined || project === "" || artifact === undefined || artifact === "")
     return undefined;
   return {
-    tool: "dispatch_comment",
-    args: { project, artifact, [thread]: threadID, body: "..." },
+    command: commandLine("dispatch_comment", {
+      project,
+      artifact,
+      [thread]: threadID,
+      body: "...",
+    }),
   };
 }
 
 // A decision's events are a conversation between an agent and a human, and the agent has the
 // ask (it wrote it, or a reference names it), so the frame carries what moved — never the ask
 // row again. `question` is the head only: enough to recognise the ask, the full text is one
-// dispatch_read away. Every other event type keeps its validated payload (`dispatchPayload`).
+// `dispatch read` away. Every other event type keeps its validated payload (`dispatchPayload`).
 // `askId` lets the caller add the ask's ref when the envelope carries no `in_reply_to` (the
 // producer correlates answers and replies, not openings or edits).
 type CompactDispatchRecord = Readonly<Record<string, string | readonly string[]>>;
@@ -577,9 +584,17 @@ function dispatchCompact(
       };
       break;
     }
-    case "ask.answered":
-      record = { ...record, answer: askAnswerText(ask.data.answer) };
+    case "ask.answered": {
+      const previousAnswer = ask.data.previous_answer;
+      record = {
+        ...record,
+        answer: askAnswerText(ask.data.answer),
+        ...(previousAnswer === null || previousAnswer === undefined
+          ? {}
+          : { previous_answer: askAnswerText(previousAnswer) }),
+      };
       break;
+    }
     case "ask.resolved": {
       const resolved = askResolutionText(ask.data.resolution);
       record = resolved === undefined ? record : { ...record, resolved };
@@ -825,7 +840,7 @@ export function renderInbound(
             skip: false,
             content:
               frame.event.type === "ask.follower_added"
-                ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; dispatch_follow unfollow to stop.`
+                ? `Now following ask ${ask} on ${owner} (added by ${who}): its answer and replies reach you directly; ${commandLine("dispatch_follow", { ask, action: "unfollow" })} to stop.`
                 : `No longer following ask ${ask} on ${owner} (removed by ${who}).`,
             envelope,
           };
@@ -864,15 +879,14 @@ export function renderInbound(
                 : {}),
             };
             // A human's direct message to this session carries no issue key, and
-            // `dispatch_message` answers it with `in_reply_to` alone; every other targeted
+            // `dispatch message` answers it with `--in-reply-to` alone; every other targeted
             // message names the issue the reply posts into.
             dispatchReply = {
-              tool: "dispatch_message",
-              args: {
+              command: commandLine("dispatch_message", {
                 ...(frame.event.issue_key === null ? {} : { issue: frame.event.issue_key }),
                 in_reply_to: message.data.id,
                 body: "...",
-              },
+              }),
             };
           }
         } else if (frame.event.type === "comment.created") {

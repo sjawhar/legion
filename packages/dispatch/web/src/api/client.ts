@@ -38,6 +38,10 @@ import type {
   CredentialGrantsResponse,
   CredentialPendingResponse,
   CredentialRecord,
+  DeliveryMeasuresResponse,
+  DeliveryRunDetail,
+  DeliverySettings,
+  DeliverySettingsInput,
   DeliveryTimelineResponse,
   DispatchUser,
   EditCommentInput,
@@ -53,6 +57,7 @@ import type {
   Message,
   MessageDelivery,
   MessageRead,
+  MyAnswersResponse,
   Project,
   RepoProject,
   SearchResponse,
@@ -125,12 +130,26 @@ export function isSourceNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
 }
 
+// A document that no longer exists cannot be restored, so its browser-held edits are discarded
+// when the admission read confirms this exact server response. Other 404s remain retryable.
+export function isArtifactNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && error.code === "ARTIFACT_NOT_FOUND";
+}
+
 // A Dispatch with no secrets broker configured (no DISPATCH_AGENT_SECRETS_URL) answers every
 // credential route but the pending list with this 404 — the same class as the architecture-source
 // 404 above it: retrying changes nothing. The pending list, which every page reads, answers `null`
 // instead (`getCredentialPending`).
 export function isCredentialFeatureOff(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "FEATURE_OFF";
+}
+
+// The delivery timeline answers this 404 until someone sets its configuration: definitive like the
+// two above, since retrying changes nothing until the settings form is saved.
+export function isDeliveryNotConfigured(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status === 404 && error.code === "DELIVERY_NOT_CONFIGURED"
+  );
 }
 
 // A stored document outside the Proof schema is a repairable state, not a transient failure:
@@ -146,15 +165,16 @@ export function isDocumentUnloadable(error: unknown): boolean {
 }
 
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture
-// source, an unconfigured credential broker, a stored document outside Proof's schema, or a
-// stored history that cannot load is definitive and retrying it changes nothing; any other failure
-// (dropped connection, 5xx) is worth a couple of automatic attempts before surfacing a Retry
-// affordance to the user.
+// source, an unconfigured credential broker or delivery timeline, a stored document outside
+// Proof's schema, or a stored history that cannot load is definitive and retrying it changes
+// nothing; any other failure (dropped connection, 5xx) is worth a couple of automatic attempts
+// before surfacing a Retry affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
     !isSourceNotFound(error) &&
     !isCredentialFeatureOff(error) &&
+    !isDeliveryNotConfigured(error) &&
     !isDocumentSchemaError(error) &&
     !isDocumentUnloadable(error)
   );
@@ -194,11 +214,12 @@ export interface CreateArtifactReviewInput {
   reason?: string;
 }
 
-/** `GET /api/v1/delivery/timeline?from&to&<facets>`'s query: the window plus the same
- *  repeatable facets the delivery page's URL carries (LEGION-567's plan, "API"). */
+/** `GET /api/v1/delivery/timeline?from&to&q&<facets>`'s query: the window, the search, plus the
+ *  same repeatable facets the delivery page's URL carries (LEGION-567's plan, "API"). */
 export interface DeliveryTimelineOptions {
   from: string;
   to: string;
+  q?: string;
   repo?: readonly string[];
   parent_agent?: readonly string[];
   session?: readonly string[];
@@ -457,6 +478,12 @@ export class DispatchApiClient {
     return this.json<AskRead>(`/api/v1/asks/${pathSegment(id)}`);
   }
 
+  /** `GET /api/v1/me/answers`: the signed-in person's answers and ask replies, newest first,
+   *  one page at a time. Human-only. */
+  listMyAnswers(page: { limit: number; offset: number }): Promise<MyAnswersResponse> {
+    return this.json<MyAnswersResponse>(pathWithQuery("/api/v1/me/answers", page));
+  }
+
   async removeAskFollower(id: string, sessionId: string): Promise<void> {
     await this.response(`/api/v1/asks/${pathSegment(id)}/followers/${pathSegment(sessionId)}`, {
       method: "DELETE",
@@ -671,9 +698,31 @@ export class DispatchApiClient {
   }
 
   /** The delivery timeline's one read: merges, deploys, pipeline failures and waiting-to-deploy
-   *  PRs within `[from, to)` and the given facets, all applied server-side. */
+   *  PRs within `[from, to)`, the search and the given facets, all applied server-side. */
   getDeliveryTimeline(options: DeliveryTimelineOptions): Promise<DeliveryTimelineResponse> {
     return this.json<DeliveryTimelineResponse>(pathWithQuery("/api/v1/delivery/timeline", options));
+  }
+
+  /** The delivery measures and their targets for `[from, to)`: the same query the timeline takes,
+   *  so the search and facets narrow the pull-request measures exactly as they narrow its PRs. */
+  getDeliveryMeasures(options: DeliveryTimelineOptions): Promise<DeliveryMeasuresResponse> {
+    return this.json<DeliveryMeasuresResponse>(pathWithQuery("/api/v1/delivery/measures", options));
+  }
+
+  /** One deploy-repository run with every job it ran, for the drill-down's job lists. */
+  getDeliveryRun(id: number): Promise<DeliveryRunDetail> {
+    return this.json<DeliveryRunDetail>(`/api/v1/delivery/runs/${id}`);
+  }
+
+  /** The delivery timeline's configuration record, or `null` until someone sets it. */
+  getDeliverySettings(): Promise<DeliverySettings | null> {
+    return this.json<DeliverySettings | null>("/api/v1/settings/delivery");
+  }
+
+  /** Replaces the delivery timeline's configuration (human callers only). The server first proves
+   *  the GitHub App can read `deploy_repo`, answering `409 DELIVERY_SETTINGS_ACCESS` when not. */
+  putDeliverySettings(input: DeliverySettingsInput): Promise<DeliverySettings> {
+    return this.send<DeliverySettings>("PUT", "/api/v1/settings/delivery", input);
   }
 
   getIssueSubscribers(key: string): Promise<Subscriber[]> {
@@ -784,14 +833,16 @@ export class DispatchApiClient {
     });
   }
 
-  /** `GET /api/v1/machine-logins`: the machine logins the viewer approved, their own machines'
-   *  and any service's, that are unexpired or expired with a session still running. */
+  /** `GET /api/v1/machine-logins`: the machine logins the viewer may revoke, their own machines'
+   *  and every service's, whoever approved it, that are unexpired or expired with a session still
+   *  running. */
   getMachineLogins(): Promise<MachineLoginsResponse> {
     return this.json<MachineLoginsResponse>("/api/v1/machine-logins");
   }
 
-  /** Revoke a machine login the viewer approved, expired or not: Dispatch names the viewer as the
-   *  person revoking, and every session the login enrolled ends with it. */
+  /** Revoke a machine login, expired or not: a service's, or one of the viewer's machines'.
+   *  Dispatch names the viewer as the person revoking, and every session the login enrolled ends
+   *  with it. */
   async revokeMachineLogin(credentialId: string): Promise<void> {
     await this.response(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {
       body: JSON.stringify({}),

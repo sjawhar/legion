@@ -1,14 +1,22 @@
 package daemon
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"errors"
+	"log/slog"
+	"net"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -51,8 +59,8 @@ func TestHelloResolverRejectsAnUnknownTokenAtOnceDuringTheBootWait(t *testing.T)
 // A boot token a real claim minted — ClaimByBootTokenHash finds it — is held until restoration,
 // not rejected: a live pane reconnecting while the boot's readiness gate still waits out an
 // unreachable NATS or Dispatch (daemon.go's run, LEGION-580) waits on s.restored alone, with no
-// deadline of its own, and is judged only once restoration closes it (as it does in daemon.go's
-// run(), right after "legion daemon started" is logged).
+// deadline of its own, and is judged only once restoration closes it (supervision.start, once every
+// stored claim has its machine and the boot's unfinished launches have been relaunched).
 func TestHelloResolverHoldsAKnownTokenUntilRestoredRatherThanRejectingItAfterTheTimeout(t *testing.T) {
 	sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
 	const resolveTimeout = 20 * time.Millisecond
@@ -114,6 +122,74 @@ func TestHelloResolverReleasesAKnownTokenWhenTheBootGivesUpRatherThanBecomingRea
 	}
 }
 
+// flakyClaimStore fails its first read and answers every later read with its claim.
+type flakyClaimStore struct {
+	mu    sync.Mutex
+	reads int
+	claim supervise.Claim
+}
+
+func (s *flakyClaimStore) ClaimByBootTokenHash(context.Context, []byte) (supervise.Claim, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reads++
+	if s.reads == 1 {
+		return supervise.Claim{}, false, errors.New("read claim: context deadline exceeded")
+	}
+	return s.claim, true, nil
+}
+
+// A store that fails to read a hello's claim says nothing about the boot token, so the hello is not
+// refused as an unknown one: the daemon closes the connection unacked and logs the failed read,
+// and the shim's redial, which follows any hello it gets no ack for, is accepted once the store
+// answers. The listener and the resolver are the daemon's own; the two dials are the shim's.
+func TestAHelloWhoseClaimReadFailsOnceIsAcceptedOnTheRedialWithNoRefusal(t *testing.T) {
+	const token = claim.Token("legion-test-legion-1-implementer")
+	const bootToken = "the-pane-boot-token"
+	sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
+	sup.machines[token] = &member{}
+	close(sup.restored)
+	store := &flakyClaimStore{claim: supervise.Claim{Token: token, Generation: 1}}
+
+	logs := &syncBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	listener, err := stream.Listen(ctx, "unix://"+filepath.Join(shortTempDir(t), "worker-stream.sock"),
+		sup.helloResolver(api.NewBootTokens(store), time.Second),
+		stream.Options{RPCTimeout: time.Second, Log: slog.New(slog.NewTextHandler(logs, nil))})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+
+	conn, err := net.Dial("unix", strings.TrimPrefix(listener.Addr(), "unix://"))
+	if err != nil {
+		t.Fatalf("dial the worker stream: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	first := &shim{t: t, conn: conn, lines: bufio.NewReader(conn), writer: shimwire.NewWriter(conn)}
+	first.send(shimwire.Hello2{BootToken: bootToken})
+	first.closed()
+
+	dialShim(t, listener.Addr(), bootToken)
+	select {
+	case event := <-listener.Events():
+		if event != (stream.Hello{Claim: token, Generation: 1}) {
+			t.Fatalf("the listener reported %#v, want the redial's hello", event)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the redial's hello never reached the listener's events")
+	}
+
+	logged := logs.String()
+	if strings.Contains(logged, "rejected hello") {
+		t.Fatalf("a hello the store could not resolve was refused:\n%s", logged)
+	}
+	if n := strings.Count(logged, "worker-stream: could not resolve a hello's boot token"); n != 1 ||
+		!strings.Contains(logged, "read claim: context deadline exceeded") {
+		t.Fatalf("the listener logged the failed read %d times, want once with the store's error:\n%s", n, logged)
+	}
+}
+
 // relaunchingStore is a supervise.Store/api.BootTokenStore fake whose current row remembers only
 // its latest PutClaim, exactly as a real claim row does: ClaimByBootTokenHash finds the hash of
 // whichever generation was written last, never an earlier one.
@@ -140,6 +216,12 @@ func (s *relaunchingStore) PutClaim(_ context.Context, c supervise.Claim) error 
 	return nil
 }
 
+func (s *relaunchingStore) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Claim, error) {
+	return c, s.PutClaim(ctx, c)
+}
+
+func (s *relaunchingStore) CheckLaunch(context.Context, supervise.Claim) error { return nil }
+
 func (s *relaunchingStore) PutDelivery(context.Context, claim.Token, supervise.Delivery) error {
 	return nil
 }
@@ -158,38 +240,39 @@ func (s *relaunchingStore) RetireDelivery(ctx context.Context, c supervise.Claim
 // hold by the first resolve alone would accept the old generation after its claim has already
 // moved on, taking the stream slot the real generation-2 shim's own hello then finds "already
 // bound to a live stream". The fix resolves the token again once restoration ends and judges
-// generation 1's hello by that second resolve, which comes back Stale either way a claim reaches
-// this restart: supervisor.restore rewrites a claim it finds StateLaunching with no locator to
-// StateLaunchUncertain through the Recording-wrapped store, and launchUnfinished's
-// ReleaseUncertainLaunch — the one path a StateLaunchUncertain claim is actually relaunched
-// through — persists it again, still holding generation 1's hash, through that same store before
-// the relaunch mints generation 2's. Both writes record generation 1's hash in this process's own
-// BootTokens even though neither minted it, so the second resolve always comes back Stale,
-// refused as "stale worker generation", and generation 2's own, freshly minted hello is accepted.
+// generation 1's hello by that second resolve. This process writes generation 1's claim before
+// generation 2's however the claim reaches the restart: supervisor.restore rewrites one stored
+// launching, or queued after a release, to StateLaunchUncertain, and one already stored
+// StateLaunchUncertain is written by its release (supervise's ReleaseUncertainLaunch), before the
+// launch writes generation 2. Every write goes through the Recording-wrapped store, which records
+// generation 1's hash in this process's own BootTokens though it never minted it, so the second
+// resolve comes back Stale, refused as "stale worker generation", and generation 2's own, freshly
+// minted hello is accepted.
 func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNotMissed(t *testing.T) {
 	type result struct {
 		stale bool
 		known bool
+		err   error
+	}
+	rewrite := func(ctx context.Context, recording supervise.Store, c supervise.Claim) error {
+		c.State = supervise.StateLaunchUncertain
+		return recording.PutClaim(ctx, c)
+	}
+	release := func(ctx context.Context, recording supervise.Store, c supervise.Claim) error {
+		c.State = supervise.StateQueued
+		return recording.PutClaim(ctx, c)
 	}
 
 	for _, tc := range []struct {
-		name            string
-		seeded          supervise.ClaimState
-		rewritten       supervise.ClaimState
-		staleFailureWhy string
+		name   string
+		seeded supervise.ClaimState
+		// first is this process's first write of generation 1's claim, through the Recording store,
+		// before generation 2's.
+		first func(ctx context.Context, recording supervise.Store, c supervise.Claim) error
 	}{
-		{
-			name:            "generation 1 stored as StateLaunching: restore's own rewrite records it, so the second resolve comes back Stale",
-			seeded:          supervise.StateLaunching,
-			rewritten:       supervise.StateLaunchUncertain,
-			staleFailureWhy: "restore's rewrite of a StateLaunching claim to StateLaunchUncertain runs through the Recording store too, so this process records generation 1's hash even without minting it itself",
-		},
-		{
-			name:            "generation 1 stored as StateLaunchUncertain: launchUnfinished's ReleaseUncertainLaunch records it before relaunching, so the second resolve also comes back Stale",
-			seeded:          supervise.StateLaunchUncertain,
-			rewritten:       supervise.StateQueued,
-			staleFailureWhy: "ReleaseUncertainLaunch's own persist runs through the Recording store too, still holding generation 1's hash, so this process records it even without minting it itself",
-		},
+		{name: "generation 1 stored launching: restore's rewrite records it", seeded: supervise.StateLaunching, first: rewrite},
+		{name: "generation 1 stored queued after a release: restore's rewrite records it", seeded: supervise.StateQueued, first: rewrite},
+		{name: "generation 1 stored launch_uncertain: its release records it", seeded: supervise.StateLaunchUncertain, first: release},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			store := &relaunchingStore{}
@@ -198,14 +281,14 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 			const boot1, boot2 = "generation-1-token", "generation-2-token"
 			ctx := context.Background()
-			// A previous daemon's own row, or a still-earlier restore's rewrite: either way this
-			// process has done no write for it yet, so its BootTokens has recorded nothing. Seeded
-			// through the bare store, bypassing Recording, so the rewrite below is the only write
-			// that can record the hash.
-			if err := store.PutClaim(ctx, supervise.Claim{
+			// A previous daemon's own row: this process has done no write for it yet, so its
+			// BootTokens has recorded nothing. Seeded through the bare store, bypassing Recording,
+			// so the write below is the only one that can record the hash.
+			generation1 := supervise.Claim{
 				Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
 				State: tc.seeded,
-			}); err != nil {
+			}
+			if err := store.PutClaim(ctx, generation1); err != nil {
 				t.Fatalf("write generation 1's claim: %v", err)
 			}
 
@@ -216,8 +299,8 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 			done := make(chan result, 1)
 			go func() {
-				_, _, stale, known := resolve(boot1)
-				done <- result{stale, known}
+				_, _, stale, known, err := resolve(boot1)
+				done <- result{stale, known, err}
 			}()
 
 			select {
@@ -226,16 +309,11 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 			case <-time.After(10 * resolveTimeout):
 			}
 
-			// restore's own rewrite to StateLaunchUncertain, or launchUnfinished's
-			// ReleaseUncertainLaunch moving the claim to StateQueued — generation 1's hash
-			// unchanged either way — runs through the Recording-wrapped store before the relaunch
-			// that follows mints generation 2's own fresh token before the held hello is ever
-			// judged.
-			if err := recording.PutClaim(ctx, supervise.Claim{
-				Token: claim.Token("a-claim"), Generation: 1, BootTokenHash: supervise.HashBootToken(boot1),
-				State: tc.rewritten,
-			}); err != nil {
-				t.Fatalf("write generation 1's claim as %s: %v", tc.rewritten, err)
+			// This process's first write of generation 1's claim runs through the Recording-wrapped
+			// store with generation 1's hash unchanged; then the relaunch writes generation 2's own
+			// fresh token, before the held hello is ever judged.
+			if err := tc.first(ctx, recording, generation1); err != nil {
+				t.Fatalf("write generation 1's claim: %v", err)
 			}
 			if err := recording.PutClaim(ctx, supervise.Claim{
 				Token: claim.Token("a-claim"), Generation: 2, BootTokenHash: supervise.HashBootToken(boot2),
@@ -246,11 +324,9 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 			select {
 			case got := <-done:
-				if !got.known {
-					t.Fatalf("resolve(%q) known = false, want true", boot1)
-				}
-				if !got.stale {
-					t.Fatalf("resolve(%q) stale = false, want true: %s", boot1, tc.staleFailureWhy)
+				if got.err != nil || !got.known || !got.stale {
+					t.Fatalf("resolve(%q) = known %t, stale %t, err %v; want known and stale, no error",
+						boot1, got.known, got.stale, got.err)
 				}
 			case <-time.After(time.Second):
 				t.Fatal("the resolver never returned after restoration closed")
@@ -258,9 +334,9 @@ func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNot
 
 			// Generation 2's own, freshly minted hello is accepted once restoration has already
 			// closed.
-			launched, generation, stale, known := resolve(boot2)
-			if !known || stale || generation != 2 || launched != claim.Token("a-claim") {
-				t.Fatalf("resolve(%q) = (%q, %d, stale=%t, known=%t), want (a-claim, 2, false, true)", boot2, launched, generation, stale, known)
+			launched, generation, stale, known, err := resolve(boot2)
+			if err != nil || !known || stale || generation != 2 || launched != claim.Token("a-claim") {
+				t.Fatalf("resolve(%q) = (%q, %d, stale=%t, known=%t, %v), want (a-claim, 2, false, true, nil)", boot2, launched, generation, stale, known, err)
 			}
 		})
 	}

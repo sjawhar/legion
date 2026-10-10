@@ -2,8 +2,32 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The `dispatch` command keeps its output whole when the session's own state fails (LEGION-588).
+  Under Claude Code the whole output, every line the CLI adds counted, stays under 25,000
+  characters: past it the result text and picture lines are written whole to a file the output
+  names, the text is cut first, then picture lines are dropped from the end with a line saying how
+  many, and the follow notice and the CLI's own lines are kept. A `state.json` that is not JSON
+  exits 2 naming the file before any request; a picture, ledger or memory write that fails after
+  Dispatch took the call prints the result and one line saying so. `readResultsSince` names a
+  ledger line that is not JSON, with its file and line number, to the callback it now takes, and
+  reads past it. An ask option whose label holds `: ` is written `--options-json`, so every option
+  list round-trips through `commandLine`. A single-value flag given twice is refused as given twice
+  whether or not its first value parsed.
+- `hasErrnoCode` is exported from `errors`, where claude-envoy now imports it.
+- A refusal names a Dispatch tool by its `dispatch` command and flags always; `ToolInputError`
+  and `formatZodIssues` no longer take a `syntax` option.
+
+### Removed
+
+- `requiresSubscriptionCapability` on every Envoy tool spec: nothing read it.
+
 ### Added
 
+- A delivered `ask.answered` that changes an earlier answer renders `previous_answer`, an issue
+  log names the answer it replaced, and `dispatch_read` of an ask lists its earlier answers
+  (LEGION-622).
 - Pictures in Dispatch (LEGION-541). `dispatch_message`, `dispatch_comment` and `dispatch_ask` take
   `images`, local paths of PNG, JPEG, GIF or WebP files (by their bytes) of at most 25 MiB: each is
   uploaded to the issue, the project document's project, or, for a reply to a direct message, the
@@ -145,6 +169,9 @@
 
 ### Fixed
 
+- `dispatch_open_asks` links an issue ask by its item route, `/issues/<KEY>/asks/<id>`, which
+  `dispatchRefFromUrl` reads back as the ask; the link it printed before named the issue alone
+  (LEGION-622).
 - `dispatch_doc_read` of an uploaded file or image returns the file's text at its latest or named
   version, after a line naming its type, version and size, where it failed with Dispatch's
   `artifact is not a document`: it asked `/text`, which answers a file 400 `NOT_DOCUMENT`. A file

@@ -79,7 +79,7 @@ func checkOperatorConfig(cfg config.Config, lookup func(string) (string, bool)) 
 		return nil
 	}
 	return sandbox.CheckPod(sandbox.Pod(cfg.Runtime.Kubernetes.Pod), providerSecretKeys(cfg.ProviderKeys),
-		workerImageTools, names, providersSecrets(cfg, lookup))
+		workerImageTools, names, providersSecrets(cfg, lookup), cfg.Runtime.Kubernetes.SessionDSNSecret)
 }
 
 // environLookup is os.LookupEnv over environ, the daemon's environment or a test's.

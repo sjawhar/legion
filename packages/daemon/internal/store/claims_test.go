@@ -381,9 +381,9 @@ func TestAClaimsEnrollmentRoundTrips(t *testing.T) {
 	c := supervise.Claim{
 		Token: "legion-LEGION-209-implementer", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
 		Role: claim.RoleImplementer, Generation: 3, State: supervise.StateRegistered,
-		Locator: &runtime.Locator{Runtime: runtime.RuntimeSandbox, Claim: "legion-LEGION-209-implementer", Incarnation: "pod-uid-3",
-			Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209-implementer"}},
-		Enrollment: &supervise.Enrollment{ID: "enr-1", Incarnation: "pod-uid-3"},
+		Locator: &runtime.Locator{Runtime: runtime.RuntimeSandbox, Claim: "legion-LEGION-209-implementer", Incarnation: "pod-uid-3/3",
+			Sandbox: &runtime.SandboxLocator{Namespace: "legion", Name: "legion-legion-209", PodUID: "pod-uid-3", Container: "implementer", Generation: 3}},
+		Enrollment: &supervise.Enrollment{ID: "enr-1", Incarnation: "pod-uid-3/3"},
 	}
 	if err := s.PutClaim(ctx, c); err != nil {
 		t.Fatal(err)
@@ -411,5 +411,44 @@ func TestAnEnrollmentWithoutAnIncarnationIsRefusedByTheSchema(t *testing.T) {
 		Role: claim.RoleTester, State: supervise.StateQueued, Enrollment: &supervise.Enrollment{ID: "enr-1"}}
 	if err := s.PutClaim(context.Background(), c); err == nil {
 		t.Fatal("an enrollment naming no incarnation was stored")
+	}
+}
+
+// The project controller's claim, which the daemon launches under `controller: daemon`, is a row
+// like any claim's: on the role `controller`, with no issue and no tree, so its boot token resolves
+// a shim's hello and a registration as any launch's does.
+func TestTheControllersClaimRoundTripsWithNoIssueAndNoTree(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	want := supervise.Claim{
+		Token:         claim.ControllerToken("legion"),
+		Project:       "legion",
+		Role:          claim.RoleController,
+		Generation:    2,
+		State:         supervise.StateLaunching,
+		BootTokenHash: []byte("boot-token-hash"),
+	}
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put the controller's claim: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+	found, ok, err := store.ClaimByBootTokenHash(ctx, []byte("boot-token-hash"))
+	if err != nil || !ok || found.Token != want.Token {
+		t.Fatalf("ClaimByBootTokenHash = %+v, %t, %v; want the controller's claim", found, ok, err)
+	}
+}
+
+// The schema holds the controller's shape both ways: the controller role on no issue and no tree,
+// and no other role there, so neither a controller claim on an issue nor a worker claim with no
+// issue is ever stored.
+func TestTheSchemaRefusesAControllerClaimOnAnIssueAndAWorkflowClaimOnNone(t *testing.T) {
+	s := migratedStore(t)
+	for _, c := range []supervise.Claim{
+		{Token: "legion-legion-controller", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-208", Role: claim.RoleController, State: supervise.StateQueued},
+		{Token: "legion-legion-architect", Project: "legion", Role: claim.RoleArchitect, State: supervise.StateQueued},
+	} {
+		if err := s.PutClaim(context.Background(), c); err == nil {
+			t.Errorf("stored %s on role %s with issue %q and tree %q", c.Token, c.Role, c.Issue, c.Tree)
+		}
 	}
 }

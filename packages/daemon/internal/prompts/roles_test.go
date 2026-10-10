@@ -205,7 +205,7 @@ func TestEveryTaskAgentARolePromptDispatchesIsShipped(t *testing.T) {
 		}
 	}
 	for agent, files := range agents {
-		if _, err := os.Stat(filepath.Join("..", "..", "..", "pi-envoy", "agents", agent+".md")); err != nil {
+		if _, err := os.Stat(filepath.Join("..", "..", "..", "pi-legion", "agents", agent+".md")); err != nil {
 			t.Errorf("task agent %s, dispatched by %q, is not shipped in the plugin's agents/: %v", agent, files, err)
 		}
 	}

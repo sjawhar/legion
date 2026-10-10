@@ -934,10 +934,9 @@ test("a pending credential request naming a running session links to it, in the 
   }
 });
 
-// LEGION-587's review (round 2): the common host-session case - only the request's own override
-// is set, no enrollment session_id at all - must still label the session, since the broker never
-// verifies that id.
-test("a pending credential request naming only the request's session id labels it, in the Inbox and on its record page", async ({
+// The common host-session case - only the request's own override is set, no enrollment session_id
+// at all - shows the request's session with no preamble.
+test("a pending credential request naming only the request's session id shows it with no preamble, in the Inbox and on its record page", async ({
   browser,
 }) => {
   const alice = await asUser(browser, "alice");
@@ -988,7 +987,7 @@ test("a pending credential request naming only the request's session id labels i
 
     await page.goto("/");
     const requests = page.getByRole("region", { name: "Credential requests" });
-    await expect(requests.getByText(/The session the request says it came from:/)).toBeVisible();
+    await expect(requests.getByText(/says it came from/)).toHaveCount(0);
     const inboxSessionLink = requests.getByRole("link", {
       name: "Reviewing LEGION-587 request-only",
     });
@@ -996,7 +995,7 @@ test("a pending credential request naming only the request's session id labels i
 
     await requests.getByRole("link", { name: /SESSION_REQUEST_ONLY_KEY/ }).click();
     await expect(page).toHaveURL(/\/credentials\/record-request-only-587$/);
-    await expect(page.getByText(/The session the request says it came from:/)).toBeVisible();
+    await expect(page.getByText(/says it came from/)).toHaveCount(0);
     const recordSessionLink = page.getByRole("link", { name: "Reviewing LEGION-587 request-only" });
     await expect(recordSessionLink).toHaveAttribute("href", "/agents/sess-request-only-587/live");
   } finally {

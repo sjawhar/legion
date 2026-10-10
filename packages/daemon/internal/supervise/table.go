@@ -82,8 +82,8 @@ type TimerKind string
 const (
 	// TimerBoot is the boot observation interval: an unregistered process is probed.
 	TimerBoot TimerKind = "boot"
-	// TimerRegistration is the registration deadline: a live process that never registered is
-	// retired.
+	// TimerRegistration is the registration deadline, which runs until the agent is ready: a live
+	// process whose agent never registered, or registered and never said it was ready, is retired.
 	TimerRegistration TimerKind = "registration"
 	// TimerTurn is the wait for the turn an acknowledged prompt should start.
 	TimerTurn TimerKind = "turn"
@@ -353,6 +353,15 @@ func LiveStates() []ClaimState {
 	return slices.Clone(live)
 }
 
+// GoneStates are the states of a claim whose process is not coming back on its own: suspended,
+// failed, or retired. It is a copy, so no caller changes the table's own set. Exported so a caller
+// outside this package (internal/daemon's removableWorkspaces) names this table's own terminal
+// states instead of re-declaring the same three-state literal independently, where a future
+// terminal state added here would not propagate to it.
+func GoneStates() []ClaimState {
+	return slices.Clone(gone)
+}
+
 const (
 	noProcess     = "no process of this claim is running"
 	noSend        = "no prompt is sent in this state"
@@ -420,11 +429,12 @@ func fillTable(t *builder) {
 	// Timers.
 	t.row(onBootTimer, "the boot interval: probe the unregistered process", bootInterval,
 		[]ClaimState{StateLaunching, StateFailed}, booting...)
-	t.ignore(onBootTimer, "the agent registered, so the boot watch is over", StateRegistered, StateReady, StateWorking, StateIdle)
+	t.ignore(onBootTimer, "the agent registered, so its process is no longer probed each interval", StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onBootTimer, "no boot is being watched", processless...)
 
-	t.row(onDeadline, "the registration deadline", registrationDeadline, []ClaimState{StateLaunching, StateFailed}, booting...)
-	t.ignore(onDeadline, "the agent registered, so the boot watch is over", StateRegistered, StateReady, StateWorking, StateIdle)
+	t.row(onDeadline, "the registration deadline: the agent never registered, or never said it was ready", registrationDeadline,
+		[]ClaimState{StateLaunching, StateFailed}, StateLaunching, StateShimConnected, StateRegistered)
+	t.ignore(onDeadline, "the agent is ready, so the boot watch is over", StateReady, StateWorking, StateIdle)
 	t.ignore(onDeadline, "no boot is being watched", processless...)
 
 	t.row(onTurnTimer, "an acknowledged prompt started no turn", noTurn, []ClaimState{StateLaunching, StateFailed}, prompted...)
@@ -788,10 +798,12 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 
 // turnEnded is the turn over: the delivery it confirmed retires, and one queued meanwhile goes —
 // unless a suspension is held for this turn (holdSuspension), which runs instead; a stop the
-// runtime refuses leaves the claim idle, still holding it. The agent just said where it is, so
+// runtime refuses leaves the claim idle, still holding it. A turn interrupted for a start that takes
+// over the issue's phase lets that start go on (Quiesce). The agent just said where it is, so
 // nothing is left to ask it after a restart.
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
+	m.interruptOver()
 	if m.held != nil {
 		if err := m.suspendHeld(ctx); err != nil {
 			if m.held == nil {
@@ -821,18 +833,23 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 	}, TimerBoot, m.deps.Timeouts.Boot)
 }
 
-// registrationDeadline is a process that has had its boot intervals and whose agent never
-// registered: alive, it is retired — suspended, since the claim is relaunched — and counted, the
-// third meaning of a missing worker; dead, it is counted. A suspension that fails leaves everything
-// and tries again at the next probe interval.
+// registrationDeadline is a process that has had its boot intervals and whose agent never became
+// ready — it never registered, or registered and never said it was ready: alive, it is retired —
+// suspended, since the claim is relaunched — and counted, the third meaning of a missing worker;
+// dead, it is counted. A suspension that fails leaves everything and tries again at the next probe
+// interval.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
+	never := "never registered"
+	if m.claim.State == StateRegistered {
+		never = "registered and never said it was ready"
+	}
 	return m.probe(ctx, func(ctx context.Context) error {
 		incarnation := m.claim.Locator.Incarnation
 		if err := m.suspendProcess(ctx); err != nil {
 			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
-			return fmt.Errorf("retire %s, whose agent never registered: suspend: %w", m.claim.Token, err)
+			return fmt.Errorf("retire %s, whose agent %s: suspend: %w", m.claim.Token, never, err)
 		}
-		m.log.Warn("supervise: the agent never registered; retired its process", "incarnation", incarnation)
+		m.log.Warn("supervise: the agent "+never+"; retired its process", "incarnation", incarnation)
 		return m.relaunchAfterFailure(ctx)
 	}, TimerRegistration, m.deps.Timeouts.Probe)
 }
@@ -843,7 +860,7 @@ func noTurn(m *Machine, ctx context.Context, _ Event) error {
 	return m.promptFailed(ctx, fmt.Sprintf("acknowledged, and no turn started within %s", m.deps.Timeouts.RPC), taskRead)
 }
 
-func spawn(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
+func spawn(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
 
 // sessionLost is another claim of the tree finding the tree volume lost: the session this claim
 // recorded was on it, so the claim drops it and its next launch is a fresh session that recreates
@@ -860,20 +877,26 @@ func sessionLost(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // register records the session the agent became; a claim whose workspace was lost has its fresh
-// agent now, whose session is on the recreated volume, so the loss is over.
+// agent now, whose session is on the recreated volume, so the loss is over. The boot intervals end
+// with the registration, but not the deadline: it is armed again at its base bound, and only the
+// agent's ready ends it. A registration whose answer never reached its agent leaves a claim no
+// ready will ever come for, and from here that looks exactly like an agent slow to boot.
 func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = r.Session, r.SessionFile, false
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
 	m.claim.State = StateRegistered
 	m.disarm(TimerBoot)
-	m.disarm(TimerRegistration)
+	m.armRegistration()
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
 	return m.ensureEnrolled(ctx)
 }
 
+// reregister is the recorded session registering again: it is issued a new secret, and the
+// deadline stays where the first registration set it, so an agent that keeps registering and never
+// says it is ready is still relaunched.
 func reregister(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.SessionFile = r.SessionFile
@@ -884,6 +907,13 @@ func reregister(m *Machine, ctx context.Context, ev Event) error {
 func ready(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateReady
 	m.claim.Budgets.LaunchFailures = 0
+	m.disarm(TimerRegistration)
+	return finishReady(m, ctx)
+}
+
+// finishReady persists the current claim before publishing ready or delivering work. reready may
+// reach it while the claim is idle or working, so it must not rewrite the state to ready.
+func finishReady(m *Machine, ctx context.Context) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
@@ -891,16 +921,19 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 	return m.sendPending(ctx)
 }
 
-func reready(m *Machine, ctx context.Context, _ Event) error { return m.sendPending(ctx) }
+// reready persists the in-memory ready state before answering an agent retry: a prior ready's
+// claim write may have failed after the machine made the transition, and a restart must not restore
+// the older registered row and treat a ready agent as one that never became ready.
+func reready(m *Machine, ctx context.Context, _ Event) error { return finishReady(m, ctx) }
 
-func resume(m *Machine, ctx context.Context, _ Event) error { return m.launch(ctx) }
+func resume(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
 
 // retry is a failed or retired claim given another run: its budgets start over, and its session,
 // when it has one, is relaunched after the process the claim last ran is gone. A pending delivery
 // the claim kept goes once the agent is ready.
 func retry(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.Budgets = Budgets{}
-	return m.launch(ctx)
+	return m.revive(ctx)
 }
 
 // stop ends one claim: the runtime releases it, and it retires. A release that fails changes
@@ -1017,7 +1050,7 @@ func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.queue(ctx, ev.(RequestDeliver)); err != nil {
 		return err
 	}
-	return m.launch(ctx)
+	return m.revive(ctx)
 }
 
 // exit is the agent reporting its own end. A worker's or sub-architect's claim ends with it and is
@@ -1030,7 +1063,7 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 	m.log.Info("supervise: the agent reported its exit", "reason", ev.(RequestExit).Reason)
 	if m.claim.treeRoot() {
 		incarnation := m.claim.Locator.Incarnation
-		if err := m.suspendProcess(ctx); err != nil {
+		if err := m.endProcess(ctx); err != nil {
 			m.log.Error("supervise: could not suspend the exited root's process; suspending its claim anyway",
 				"incarnation", incarnation, "error", err)
 		}

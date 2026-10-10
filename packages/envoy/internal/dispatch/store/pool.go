@@ -90,6 +90,21 @@ func holdsConnection(ctx context.Context) bool {
 	return ok && state.connection.Load()
 }
 
+// ForConcurrentRead returns a context for one of a caller's reads that run side by side: ctx's
+// deadline, cancellation and values, with a hold mark of its own, so that read takes one
+// connection and the pool still refuses it a second. Reads sharing one mark would refuse each
+// other, since one read's open cursor marks the context they share. A caller already holding a
+// connection (its transaction, a cursor, an acquired connection) is refused with
+// ErrNestedAcquire, because each of its reads would be a second connection taken while it holds
+// one.
+func ForConcurrentRead(ctx context.Context) (context.Context, error) {
+	if holdsConnection(ctx) {
+		logRefusal()
+		return nil, ErrNestedAcquire
+	}
+	return context.WithValue(ctx, holdingKey{}, &holding{}), nil
+}
+
 // loggedSites remembers the call sites that have already logged a refusal, so a caller that
 // trips the guard in a loop reports its stack once instead of flooding the log. The error
 // itself is returned to every caller, every time.

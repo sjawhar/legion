@@ -2,7 +2,7 @@
 title: Running Dispatch
 description: What the Dispatch server needs, how to run it, its health check, and its migrations.
 sidebar:
-  order: 7
+  order: 8
 ---
 
 Dispatch is one Go program. It serves the web app, the HTTP API, live documents, and Google
@@ -87,6 +87,10 @@ Sign in, then open **Settings**:
   `DISPATCH_DEFAULT_PROJECT` catches repositories with no mapping; that project must already exist.
 - **Architecture sources**: point a project at a repository branch holding its architecture
   model. Saving checks that the GitHub App can read it.
+- **Delivery timeline**: name the repository that deploys, its deploy and pull-request-check
+  workflows, the job whose success is a production deploy, and whose merged pull requests count.
+  Saving checks that the GitHub App can read the repository. Until it is set, the
+  [Delivery](/legion/dispatch/delivery/) page shows the same form.
 - **Agent tokens**: make a token for each agent you run.
   [Dispatch for agents](/legion/dispatch/for-agents/#connecting-an-agent) covers the rest.
 

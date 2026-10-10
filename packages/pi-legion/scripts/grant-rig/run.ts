@@ -1,0 +1,1087 @@
+#!/usr/bin/env bun
+/**
+ * Drives a headless phase worker (`omp --mode rpc`) through 30+ shell commands against the
+ * stand-in daemon (`daemon-standin.ts`) and checks, per shell command, how the one-time
+ * credential reached the shell — through the 0600 file the pane's `LEGION_GRANT_FILE` names,
+ * written by the extension before the command runs, and never through the command text or the
+ * bash tool's `env` argument:
+ *
+ *   A. transcript — the model-visible `arguments.command` of every bash tool call holds no
+ *      `LEGION_GRANT` mention, and no call needed an `env` argument;
+ *   B. stand-in log — exactly one `/legion/v1/grants` mint per bash call, and every
+ *      `/git-credential` and `/gh-token` redemption answered 200 with a minted id;
+ *   C. `seen-grants.log` — the grant file each `record-grant` command read held the grant minted
+ *      for that command, mode 0600;
+ *   D. tool results — `which gh` resolves to the worker shim, `gh --version` prints a version,
+ *      the `legion …` commands print `exit=0` and never `Unable to redeem`;
+ *   E. OMP log — one `extension instance loaded` per session instance, and exactly one
+ *      `legion tool_call hook` line per bash tool call;
+ *   F. no minted id appears anywhere in the transcript or the OMP log (the stand-in log is the
+ *      oracle and is exempt);
+ *   G. the environment probe shows the pane's static credential environment: no GH_CONFIG_DIR,
+ *      GH_TOKEN, GITHUB_TOKEN or GH_HOST, and worker-bin first on PATH exactly once.
+ *
+ * The same `analyze` subcommand scores a transcript produced by the interactive (tmux) leg, so
+ * both legs share one counting script. See README.md for the layout `setup.sh` creates.
+ *
+ * Subcommands:
+ *   bun run.ts prompt  [--short]
+ *   bun run.ts drive   --rig <dir> --port <n> --omp <binary> [--profile l12rig] [--short]
+ *                      [--label <name>] [--no-secrets] [--prompt-file <path>]
+ *   bun run.ts tui     (same options; interactive `omp` under `tmux -L l12rig`)
+ *   bun run.ts analyze --rig <dir> --transcript <file> --standin-log <file> --omp-log <file>
+ *                      [--label <name>]
+ */
+import { randomUUID } from "node:crypto";
+import { appendFile, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { parseArgs } from "node:util";
+import type { LegionRole } from "@legion/contracts";
+import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { DAEMON_MODULE, type DaemonPane, daemonPane } from "./daemon-pane";
+
+const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+/** One credential line as the unfixed hook wrote it (single-quoted), or as a model imitation
+ * might (double-quoted, bare, or a literal placeholder). Used to classify the ids; verdict A
+ * itself fails on any occurrence of the variable's name in the command text, whatever its form. */
+const GRANT_TEXT_LINE = /^export LEGION_GRANT=(?:'([^']*)'|"([^"]*)"|(\S*))/gm;
+const GRANT_NAME = "LEGION_GRANT";
+const RUN_DEADLINE_MS = 20 * 60_000;
+const EXIT_GRACE_MS = 15_000;
+
+interface Step {
+  readonly n: number;
+  readonly kind: "bash" | "task";
+  readonly command?: string;
+}
+
+function recordStep(n: number): Step {
+  return { n, kind: "bash", command: `record-grant; echo step-${n}` };
+}
+
+/** The pane's static credential environment, as the shell sees it. Names no credential variable:
+ * the four GitHub variables are absent on a Legion pane (`legion gh` gives its own gh child the
+ * token and the config directory), so each prints empty. */
+const PROBE_COMMAND =
+  'printf \'GH_CONFIG_DIR=%s GH_TOKEN=%s GITHUB_TOKEN=%s GH_HOST=%s\\n\' "$GH_CONFIG_DIR" "$GH_TOKEN" "$GITHUB_TOKEN" "$GH_HOST"; echo "PATH=$PATH"';
+const PROBE_NEEDLE = "GH_CONFIG_DIR=%s";
+
+/** The full headless leg: 33 bash calls and 3 `task` spawns. `short` is the terminal leg: 8
+ * bash calls and 1 spawn. Neither prompt names the credential variable or the word `export`, nor
+ * `legion handoff complete`: a phase ends through the `legion` tool's `handoff_complete`. The
+ * credential step writes to stdout on purpose: a `> file` redirection trips the profile's bash
+ * interceptor ("use the write tool"), and the stand-in's token is a placeholder anyway. */
+function buildSteps(short: boolean): Step[] {
+  const credential = (n: number): Step => ({
+    n,
+    kind: "bash",
+    command: `printf 'protocol=https\\nhost=github.com\\n' | legion credential get; echo exit=$?`,
+  });
+  const probe = (n: number): Step => ({ n, kind: "bash", command: PROBE_COMMAND });
+  if (short) {
+    return [
+      recordStep(1),
+      recordStep(2),
+      probe(3),
+      recordStep(4),
+      recordStep(5),
+      { n: 6, kind: "task" },
+      recordStep(7),
+      recordStep(8),
+      credential(9),
+    ];
+  }
+  const steps: Step[] = [];
+  for (let n = 1; n <= 5; n++) steps.push(recordStep(n));
+  steps.push({ n: 6, kind: "task" });
+  for (let n = 7; n <= 15; n++) steps.push(recordStep(n));
+  steps.push({ n: 16, kind: "task" });
+  steps.push({ n: 17, kind: "bash", command: "which gh" });
+  steps.push({ n: 18, kind: "bash", command: "gh --version" });
+  steps.push(probe(19));
+  for (let n = 20; n <= 28; n++) steps.push(recordStep(n));
+  steps.push({ n: 29, kind: "task" });
+  for (let n = 30; n <= 32; n++) steps.push(recordStep(n));
+  // Bash calls 30-32 (the three task steps are not bash calls): every `legion` probe runs on the
+  // 30th or later command, the point at which the 1.17.0 imitation had become routine.
+  steps.push(credential(33));
+  steps.push({ n: 34, kind: "bash", command: "legion gh -- --version; echo exit=$?" });
+  steps.push(credential(35));
+  steps.push(recordStep(36));
+  return steps;
+}
+
+function buildPrompt(steps: Step[]): string {
+  const lines = steps.map((step) =>
+    step.kind === "task" ? `${step.n}. TASK` : `${step.n}. ${step.command}`
+  );
+  return [
+    'You are a test worker. Run the following numbered commands, one per bash tool call, in order, each copied exactly as written with nothing added before or after it. Where a step says TASK, use the task tool with agent scout and the instruction "Reply with the single word ok.", wait for it, then continue. Use no other tools. After the last step reply with the single word done.',
+    "",
+    ...lines,
+  ].join("\n");
+}
+
+// ---------------------------------------------------------------------------------------------
+// RPC driving
+// ---------------------------------------------------------------------------------------------
+
+interface RpcChunkSequence {
+  readonly chunkId: string;
+  readonly count: number;
+  readonly chunks: Buffer[];
+}
+
+/** Reassembles protocol v2 `rpc_chunk` lines into one logical frame; anything else parses as
+ * is. Validation is the worker shim's job — a rig only needs the payload. */
+function createFrameReader(onFrame: (frame: Record<string, unknown>) => void): {
+  readonly push: (chunk: Uint8Array) => void;
+} {
+  const decoder = new TextDecoder();
+  let buffered = "";
+  let pending: RpcChunkSequence | undefined;
+  const handleLine = (line: string): void => {
+    if (line.trim().length === 0) return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      return;
+    }
+    if (typeof parsed !== "object" || parsed === null) return;
+    const frame = parsed as Record<string, unknown>;
+    if (frame.type !== "rpc_chunk") {
+      onFrame(frame);
+      return;
+    }
+    const { chunkId, index, count, data } = frame;
+    if (typeof chunkId !== "string" || typeof index !== "number" || typeof count !== "number") {
+      return;
+    }
+    if (!pending || pending.chunkId !== chunkId) pending = { chunkId, count, chunks: [] };
+    pending.chunks[index] = Buffer.from(String(data), "base64");
+    if (pending.chunks.filter((chunk) => chunk !== undefined).length < count) return;
+    const whole = Buffer.concat(pending.chunks).toString("utf8");
+    pending = undefined;
+    try {
+      const reassembled = JSON.parse(whole);
+      if (typeof reassembled === "object" && reassembled !== null) {
+        onFrame(reassembled as Record<string, unknown>);
+      }
+    } catch {
+      // A rig tolerates a malformed oversized frame: the transcript file is the source of truth.
+    }
+  };
+  return {
+    push(chunk) {
+      buffered += decoder.decode(chunk, { stream: true });
+      let newline = buffered.indexOf("\n");
+      while (newline !== -1) {
+        handleLine(buffered.slice(0, newline));
+        buffered = buffered.slice(newline + 1);
+        newline = buffered.indexOf("\n");
+      }
+    },
+  };
+}
+
+interface WorkerLaunch {
+  readonly rig: string;
+  readonly port: number;
+  readonly omp: string;
+  readonly profile: string;
+  readonly useSecrets: boolean;
+}
+
+/** The claim a worker pane is launched for: its project, issue and role. */
+export interface WorkerClaim {
+  readonly project: string;
+  readonly issue: string;
+  readonly role: LegionRole;
+}
+
+/** The grant rig's own worker, whose role token collides with no live issue's. */
+const RIG_CLAIM: WorkerClaim = { project: "l12rig", issue: "RIG-1", role: "implementer" };
+
+/** Where a pane's daemon is read from: a checkout's daemon module (`daemon-pane.ts`), whose
+ * embedded role prompts compose the pane's system prompt when `systemPrompt` is set. */
+export interface PaneSource {
+  readonly daemonModule: string;
+  readonly systemPrompt?: boolean;
+}
+
+/** The pane the Legion daemon's tmux runtime gives a phase worker for `claim`, pointed at the
+ * scratch state directory and the stand-in daemon, over the caller's own environment. Everything
+ * the daemon tells the pane comes from the daemon's own functions in `source`'s module
+ * (`daemon-pane.go`): the claim's identity, the daemon URL, the state directory and workspace,
+ * Envoy (the listener and NATS the pane's own extension reaches from the caller's environment,
+ * `envoyDefaultsFromEnvironment`), the gh, git and jj the daemon resolves on the caller's PATH,
+ * `PI_SHELL_PREFIX`, `LEGION_GRANT_FILE`, the four XDG base directories, the
+ * boot token pointer (`<state>/secrets/boot`, the file the stand-in checks), and PATH with
+ * worker-bin then bin first; and, with `systemPrompt`, the system prompt argument. An inherited
+ * `ANTHROPIC_API_KEY`, every `LEGION_*` and `DISPATCH_*` value and the GitHub variables no Legion
+ * pane carries are dropped first. The profile's agent directory is under the inherited `HOME`. The
+ * skill scenario rig (`../skill-scenarios/worker-pane.ts`) builds its tester pane with it too.
+ */
+export function workerPane(
+  launch: Pick<WorkerLaunch, "rig" | "port" | "profile">,
+  inherited: NodeJS.ProcessEnv = process.env,
+  claim: WorkerClaim = RIG_CLAIM,
+  source: PaneSource = { daemonModule: DAEMON_MODULE }
+): DaemonPane {
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(inherited)) {
+    if (value === undefined) continue;
+    if (key === "ANTHROPIC_API_KEY" || key.startsWith("LEGION_") || key.startsWith("DISPATCH_"))
+      continue;
+    if (["GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"].includes(key)) continue;
+    if (key === "OMP_SESSION_ID" || key === "TMUX" || key === "TMUX_PANE") continue;
+    env[key] = value;
+  }
+  const home = env.HOME ?? os.homedir();
+  const stateDir = path.join(launch.rig, "state");
+  const envoy = envoyDefaultsFromEnvironment(env);
+  const pane = daemonPane(source.daemonModule, {
+    ...claim,
+    stateDir,
+    workspace: path.join(launch.rig, "ws"),
+    daemonUrl: `http://127.0.0.1:${launch.port}`,
+    envoyUrl: envoy.envoyUrl,
+    natsUrls: envoy.natsUrls,
+    bootTokenFile: path.join(stateDir, "secrets", "boot"),
+    path: env.PATH ?? "",
+    systemPrompt: source.systemPrompt,
+  });
+  return {
+    ...pane,
+    env: {
+      ...env,
+      OMP_PROFILE: launch.profile,
+      PI_PROFILE: launch.profile,
+      PI_CODING_AGENT_DIR: path.join(home, ".omp", "profiles", launch.profile, "agent"),
+      PI_NOTIFICATIONS: "off",
+      PI_NO_TITLE: "1",
+      ...pane.env,
+    },
+  };
+}
+
+/** The headless leg runs `omp --mode rpc`; the terminal leg runs the interactive `omp`. With
+ * secrets, `secrets` fetches the provider keys under the caller's own secretsd configuration (the
+ * pane's `XDG_CONFIG_HOME`, under the daemon's state directory, holds none), and Oh My Pi then runs
+ * under the pane's `XDG_CONFIG_HOME` again. */
+export function launchArgv(
+  launch: WorkerLaunch,
+  mode: "rpc" | "tui",
+  paneEnv: Readonly<Record<string, string>>
+): string[] {
+  const omp = mode === "rpc" ? [launch.omp, "--mode", "rpc"] : [launch.omp];
+  if (!launch.useSecrets) return omp;
+  const configHome = paneEnv.XDG_CONFIG_HOME;
+  if (configHome === undefined) throw new Error("the pane environment names no XDG_CONFIG_HOME");
+  return [
+    ...["env", "-u", "XDG_CONFIG_HOME", "secrets", "GEMINI_API_KEY", "OPENAI_API_KEY", "--"],
+    ...["env", `XDG_CONFIG_HOME=${configHome}`, ...omp],
+  ];
+}
+
+interface DriveResult {
+  readonly runDir: string;
+  readonly pid: number;
+  readonly sessionFile: string | undefined;
+  readonly exitCode: number | null;
+  readonly endedBy: "agent_end" | "deadline" | "exit";
+}
+
+async function drive(launch: WorkerLaunch, prompt: string, label: string): Promise<DriveResult> {
+  const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
+  const runDir = path.join(launch.rig, "runs", `${label}-${stamp}`);
+  await mkdir(runDir, { recursive: true });
+  const eventsFile = path.join(runDir, "events.jsonl");
+  const stderrFile = path.join(runDir, "stderr.log");
+  await writeFile(path.join(runDir, "prompt.txt"), `${prompt}\n`);
+
+  const env = workerPane(launch).env;
+  const child = Bun.spawn(launchArgv(launch, "rpc", env), {
+    cwd: path.join(launch.rig, "ws"),
+    env,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: Bun.file(stderrFile),
+  });
+  const pid = child.pid;
+  console.log(`[rig] omp pid ${pid}; events -> ${eventsFile}`);
+
+  const write = (frame: Record<string, unknown>): void => {
+    child.stdin.write(`${JSON.stringify(frame)}\n`);
+    child.stdin.flush();
+  };
+
+  const negotiateId = randomUUID();
+  const promptId = randomUUID();
+  const stateId = randomUUID();
+  const agentEnd = Promise.withResolvers<void>();
+  const stateAnswer = Promise.withResolvers<Record<string, unknown> | undefined>();
+  let sessionFile: string | undefined;
+  let bashCalls = 0;
+
+  const reader = createFrameReader((frame) => {
+    void appendFile(eventsFile, `${JSON.stringify(frame)}\n`);
+    switch (frame.type) {
+      case "ready":
+        write({ id: negotiateId, type: "negotiate_protocol", protocolVersion: 2 });
+        return;
+      case "response":
+        if (frame.id === negotiateId) {
+          if (frame.success !== true) {
+            console.error("[rig] protocol negotiation failed", frame);
+            agentEnd.resolve();
+            return;
+          }
+          write({ id: promptId, type: "prompt", message: prompt });
+          return;
+        }
+        if (frame.id === promptId && frame.success !== true) {
+          console.error("[rig] prompt rejected", frame);
+          agentEnd.resolve();
+          return;
+        }
+        if (frame.id === stateId) {
+          const data = typeof frame.data === "object" && frame.data !== null ? frame.data : {};
+          const file = (data as Record<string, unknown>).sessionFile;
+          if (typeof file === "string") sessionFile = file;
+          stateAnswer.resolve(data as Record<string, unknown>);
+        }
+        return;
+      case "tool_execution_start":
+        if (frame.toolName === "bash") {
+          bashCalls++;
+          console.log(`[rig] bash call ${bashCalls}`);
+        }
+        return;
+      case "extension_ui_request": {
+        // A worker pane runs its tools unprompted; answer any confirm the same way and cancel
+        // everything else so the run never blocks on a dialog.
+        const id = frame.id;
+        if (typeof id !== "string") return;
+        if (frame.method === "confirm")
+          write({ type: "extension_ui_response", id, confirmed: true });
+        else if (frame.method === "select" || frame.method === "input" || frame.method === "editor")
+          write({ type: "extension_ui_response", id, cancelled: true });
+        return;
+      }
+      case "agent_end":
+        agentEnd.resolve();
+        return;
+      default:
+        return;
+    }
+  });
+
+  const pump = (async () => {
+    for await (const chunk of child.stdout as ReadableStream<Uint8Array>) reader.push(chunk);
+  })();
+
+  let endedBy: DriveResult["endedBy"] = "agent_end";
+  // A cleared timer, not `Bun.sleep`: a pending 20-minute sleep would keep this process alive
+  // long after the report is printed.
+  const deadline = Promise.withResolvers<"deadline">();
+  const deadlineTimer = setTimeout(() => deadline.resolve("deadline"), RUN_DEADLINE_MS);
+  const exited = child.exited.then(() => "exit" as const);
+  const outcome = await Promise.race([
+    agentEnd.promise.then(() => "agent_end" as const),
+    deadline.promise,
+    exited,
+  ]);
+  clearTimeout(deadlineTimer);
+  endedBy = outcome;
+  if (outcome === "deadline") console.error("[rig] run deadline reached; stopping the worker");
+
+  if (outcome !== "exit") {
+    write({ id: stateId, type: "get_state" });
+    await Promise.race([stateAnswer.promise, Bun.sleep(5_000)]);
+    // No shutdown command exists on OMP's stdio RPC: closing stdin ends the process.
+    await child.stdin.end();
+    const closed = await Promise.race([
+      child.exited,
+      Bun.sleep(EXIT_GRACE_MS).then(() => undefined),
+    ]);
+    if (closed === undefined) {
+      console.error("[rig] worker did not exit after stdin closed; killing it");
+      child.kill();
+      await child.exited;
+    }
+  }
+  await pump.catch(() => undefined);
+  return { runDir, pid, sessionFile, exitCode: child.exitCode, endedBy };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Analysis
+// ---------------------------------------------------------------------------------------------
+
+interface BashCall {
+  readonly id: string;
+  readonly command: string;
+  /** Informational: `arguments.env.LEGION_GRANT`, if the model supplied one (nothing reads it). */
+  readonly envGrant: string | undefined;
+  /** Every key of `arguments.env` the model supplied; a fresh session should supply none. */
+  readonly envKeys: string[];
+  readonly textIds: string[];
+  result?: { readonly isError: boolean; readonly text: string };
+}
+
+interface StandinLine {
+  readonly at: string;
+  readonly path: string;
+  readonly status: number;
+  readonly grantId?: string;
+  readonly mintedGrantId?: string;
+}
+
+interface HookLine {
+  readonly instance: string;
+  readonly toolCallId: string;
+  readonly toolName: string;
+}
+
+async function readJsonLines(file: string): Promise<Record<string, unknown>[]> {
+  const text = await Bun.file(file).text();
+  const lines: Record<string, unknown>[] = [];
+  for (const line of text.split("\n")) {
+    if (line.trim().length === 0) continue;
+    try {
+      const parsed = JSON.parse(line);
+      if (typeof parsed === "object" && parsed !== null) lines.push(parsed);
+    } catch {
+      // A transcript can hold a partial trailing line while the session is still writing.
+    }
+  }
+  return lines;
+}
+
+function textIdsIn(command: string): string[] {
+  const ids: string[] = [];
+  for (const match of command.matchAll(GRANT_TEXT_LINE))
+    ids.push(match[1] ?? match[2] ?? match[3] ?? "");
+  return ids;
+}
+
+async function readTranscript(file: string): Promise<BashCall[]> {
+  const calls: BashCall[] = [];
+  const byId = new Map<string, BashCall>();
+  for (const entry of await readJsonLines(file)) {
+    if (entry.type !== "message") continue;
+    const message = entry.message as Record<string, unknown> | undefined;
+    if (!message) continue;
+    if (message.role === "assistant" && Array.isArray(message.content)) {
+      for (const part of message.content as Record<string, unknown>[]) {
+        if (part.type !== "toolCall" || part.name !== "bash") continue;
+        const args = (part.arguments ?? {}) as Record<string, unknown>;
+        const command = typeof args.command === "string" ? args.command : "";
+        const env =
+          typeof args.env === "object" && args.env !== null
+            ? (args.env as Record<string, unknown>)
+            : undefined;
+        const call: BashCall = {
+          id: String(part.id),
+          command,
+          envGrant: typeof env?.LEGION_GRANT === "string" ? env.LEGION_GRANT : undefined,
+          envKeys: env ? Object.keys(env) : [],
+          textIds: textIdsIn(command),
+        };
+        calls.push(call);
+        byId.set(call.id, call);
+      }
+    } else if (message.role === "toolResult") {
+      const call = byId.get(String(message.toolCallId));
+      if (!call) continue;
+      const content = Array.isArray(message.content)
+        ? (message.content as Record<string, unknown>[])
+        : [];
+      call.result = {
+        isError: message.isError === true,
+        text: content
+          .map((part) => (typeof part.text === "string" ? part.text : ""))
+          .join("\n")
+          .trim(),
+      };
+    }
+  }
+  return calls;
+}
+
+async function readOmpLog(
+  file: string
+): Promise<{ readonly instances: Set<string>; readonly hooks: HookLine[] }> {
+  const instances = new Set<string>();
+  const hooks: HookLine[] = [];
+  for (const entry of await readJsonLines(file)) {
+    if (entry.message === "extension instance loaded" && typeof entry.instance === "string") {
+      instances.add(entry.instance);
+    } else if (entry.message === "legion tool_call hook") {
+      hooks.push({
+        instance: String(entry.instance),
+        toolCallId: String(entry.toolCallId),
+        toolName: String(entry.toolName),
+      });
+    }
+  }
+  return { instances, hooks };
+}
+
+interface Analysis {
+  readonly label: string;
+  readonly bashCalls: number;
+  readonly mints: number;
+  readonly rows: string[];
+  readonly redemptions: string[];
+  readonly executed: string[];
+  readonly results: string[];
+  readonly envNotes: string[];
+  readonly instances: number;
+  readonly hookIssues: string[];
+  readonly verdict: string[];
+}
+
+function classifyExtra(
+  id: string,
+  earlier: Set<string>,
+  minted: Set<string>,
+  ownMint: string | undefined
+): string {
+  if (id === ownMint) return "own-mint";
+  if (!UUID_V4.test(id)) return "non-v4";
+  if (earlier.has(id)) return "copy";
+  if (minted.has(id)) return "earlier-mint";
+  return "unminted";
+}
+
+/** One `record-grant` line: what the command found in its grant file (`-` when none), the file's
+ * mode, and the plain variable (text delivery on the 1.17.0 build; `-` otherwise). */
+interface SeenGrant {
+  readonly fileGrant: string;
+  readonly mode: string;
+  readonly envGrant: string;
+}
+
+function parseSeenGrant(line: string): SeenGrant {
+  const [fileGrant = "-", mode = "-", envGrant = "-"] = line.split(" ");
+  return { fileGrant, mode, envGrant };
+}
+
+/** Verdict G: the probe's output shows the daemon's static credential environment, with
+ * `workerBin`, the gh shim's directory, first on PATH and nowhere else. */
+function probeShowsPaneEnvironment(text: string, workerBin: string): boolean {
+  const pathLine = text.split("\n").find((line) => line.startsWith("PATH="));
+  if (!pathLine) return false;
+  const entries = pathLine.slice("PATH=".length).split(path.delimiter);
+  return (
+    text.includes("GH_CONFIG_DIR= GH_TOKEN= GITHUB_TOKEN= GH_HOST=") &&
+    entries[0] === workerBin &&
+    entries.filter((entry) => entry === workerBin).length === 1
+  );
+}
+
+async function analyze(input: {
+  readonly label: string;
+  readonly rig: string;
+  readonly transcript: string;
+  readonly standinLog: string;
+  readonly ompLog: string;
+}): Promise<Analysis> {
+  const calls = await readTranscript(input.transcript);
+  const standin = (await readJsonLines(input.standinLog)) as unknown as StandinLine[];
+  const { instances, hooks } = await readOmpLog(input.ompLog);
+  const seenGrants = (
+    await Bun.file(path.join(input.rig, "seen-grants.log"))
+      .text()
+      .catch(() => "")
+  )
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map(parseSeenGrant);
+  // Verdict F reads both files raw: a minted id anywhere in them — a command, a tool result, a
+  // log line — is a leak, whatever the shape.
+  const transcriptText = await Bun.file(input.transcript).text();
+  const ompLogText = await Bun.file(input.ompLog).text();
+
+  const mintedInOrder = standin
+    .filter((line) => line.path === "/legion/v1/grants" && line.status === 200)
+    .map((line) => line.mintedGrantId ?? "");
+  const minted = new Set(mintedInOrder);
+  const oneToOne = mintedInOrder.length === calls.length;
+
+  const hooksByCall = new Map<string, HookLine[]>();
+  for (const hook of hooks) {
+    const list = hooksByCall.get(hook.toolCallId) ?? [];
+    list.push(hook);
+    hooksByCall.set(hook.toolCallId, list);
+  }
+
+  const rows: string[] = [];
+  const executed: string[] = [];
+  const results: string[] = [];
+  const envNotes: string[] = [];
+  const hookIssues: string[] = [];
+  const earlier = new Set<string>();
+  let seenIndex = 0;
+  let textFree = true;
+  let envGrantFree = true;
+  let executedAll = true;
+  let hooksOne = true;
+  let probeResult: string | undefined;
+  const parentInstances = new Set<string>();
+
+  calls.forEach((call, k) => {
+    const ownMint = oneToOne ? mintedInOrder[k] : undefined;
+    const callHooks = hooksByCall.get(call.id) ?? [];
+    const H = callHooks.length;
+    const distinct = new Set(callHooks.map((hook) => hook.instance));
+    for (const instance of distinct) parentInstances.add(instance);
+    if (H !== 1) {
+      hooksOne = false;
+      hookIssues.push(
+        `call ${k + 1} (${call.id}): ${H} hook lines, instances ${[...distinct].join(",")}`
+      );
+    }
+    const T = call.textIds.length;
+    // The claim verdict A prints is "free of credential lines": any mention of the variable in the
+    // model-visible text — an export, an inline `LEGION_GRANT=… legion gh`, a bare echo — is a
+    // failure, not only the exact line shape the 1.17.0 hook used to write.
+    const mentions = call.command.split(GRANT_NAME).length - 1;
+    if (T > 0 || mentions > 0) textFree = false;
+    // Nothing reads the bash tool's env; a LEGION_GRANT key there is model imitation of
+    // the 1.17.1 shape (informational, since the command still runs under the file's grant).
+    if (call.envGrant !== undefined) {
+      envGrantFree = false;
+      envNotes.push(
+        `call ${k + 1}: env carried LEGION_GRANT=${classifyExtra(call.envGrant, earlier, minted, ownMint)}`
+      );
+    }
+    const envState = call.envKeys.length > 0 ? `env=[${call.envKeys.join(",")}]` : "";
+    const extras = call.textIds.map((id, i) =>
+      i === 0 && id === ownMint ? "hook" : classifyExtra(id, earlier, minted, ownMint)
+    );
+
+    let fileState = "";
+    if (call.command.includes("record-grant;")) {
+      const seen = seenGrants[seenIndex++];
+      const grant = seen?.fileGrant ?? "-";
+      const ok = ownMint !== undefined && grant === ownMint && seen?.mode === "600";
+      if (!ok) executedAll = false;
+      fileState =
+        grant === "-"
+          ? "file=-"
+          : ok
+            ? "file=own-mint"
+            : `file=${classifyExtra(grant, earlier, minted, ownMint)}${seen?.mode === "600" ? "" : `(mode ${seen?.mode ?? "?"})`}`;
+      executed.push(
+        `call ${k + 1}: file held ${grant} mode ${seen?.mode ?? "-"}${seen && seen.envGrant !== "-" ? ` (text-delivered variable ${seen.envGrant})` : ""} ${ok ? "== minted, 0600" : `!= minted ${ownMint ?? "?"}`}`
+      );
+    }
+    rows.push(
+      `${String(k + 1).padStart(2)}  H=${H}/${distinct.size}  G=${oneToOne ? 1 : "?"}  T=${T}${mentions > T ? ` (+${mentions - T} other mention${mentions - T === 1 ? "" : "s"} of ${GRANT_NAME})` : ""}  ${fileState}  ${envState}  ${extras.length > 0 ? `X=[${extras.join(",")}]` : ""}`
+        .replaceAll(/ {2,}/g, "  ")
+        .trimEnd()
+    );
+    for (const id of call.textIds) earlier.add(id);
+
+    const probe = [
+      "which gh",
+      "gh --version",
+      PROBE_NEEDLE,
+      "legion credential get",
+      "legion gh --",
+    ].find((needle) => call.command.includes(needle));
+    if (probe) {
+      const text = call.result?.text ?? "(no result)";
+      if (probe === PROBE_NEEDLE) probeResult = call.result?.text;
+      results.push(
+        `call ${k + 1} [${probe}] isError=${call.result?.isError ?? "?"}: ${text.replaceAll("\n", " | ").slice(0, 300)}`
+      );
+    }
+  });
+
+  const redemptionLines = standin.filter((line) =>
+    ["/legion/v1/git-credential", "/legion/v1/gh-token"].includes(line.path)
+  );
+  const redemptions = redemptionLines.map(
+    (line) =>
+      `${line.at} ${line.path} -> ${line.status} grant ${line.grantId ?? "?"} ${
+        line.grantId !== undefined && minted.has(line.grantId) ? "(minted)" : "(never minted)"
+      }`
+  );
+  const redemptionsAll200 =
+    redemptionLines.length > 0 && redemptionLines.every((line) => line.status === 200);
+  const probeCalls = calls.filter((call) => /legion (credential get|gh --)/.test(call.command));
+  const resultsClean =
+    probeCalls.length > 0 &&
+    probeCalls.every(
+      (call) =>
+        call.result?.text.includes("exit=0") && !call.result.text.includes("Unable to redeem")
+    );
+  const leakedIds = mintedInOrder.filter(
+    (id) => id.length > 0 && (transcriptText.includes(id) || ompLogText.includes(id))
+  );
+  // The directory setup.sh installed the gh shim in, as the daemon does at boot; a rig prepared by
+  // an older setup.sh names none.
+  const rigMode = (await Bun.file(path.join(input.rig, "rig-mode.json"))
+    .json()
+    .catch(() => ({}))) as { readonly workerBin?: unknown };
+  const workerBin = typeof rigMode.workerBin === "string" ? rigMode.workerBin : undefined;
+  const probeOk =
+    probeResult !== undefined &&
+    workerBin !== undefined &&
+    probeShowsPaneEnvironment(probeResult, workerBin);
+  // A run with no bash calls proves nothing: every verdict below needs calls to judge.
+  const ran = calls.length > 0;
+  const recorded = executed.length > 0;
+
+  if (parentInstances.size > 1) {
+    hookIssues.push(
+      `parent bash calls logged under ${parentInstances.size} instances: ${[...parentInstances].join(",")}`
+    );
+  }
+
+  const verdict = [
+    `A. command text never mentions ${GRANT_NAME} (no credential line, no inline assignment, nothing): ${ran && textFree ? "PASS" : "FAIL"}; no call needed an env argument (every record-grant ran under the file's grant and no env carried ${GRANT_NAME}): ${ran && recorded && executedAll && envGrantFree ? "PASS" : "FAIL"}`,
+    `B. one mint per bash call: ${ran && oneToOne ? "PASS" : `FAIL (${mintedInOrder.length} mints, ${calls.length} calls)`}; redemptions all 200: ${redemptionsAll200 ? "PASS" : "FAIL"}`,
+    `C. every record-grant ran under its own mint from a 0600 file: ${recorded && executedAll ? "PASS" : "FAIL"}`,
+    `D. legion commands exit=0 and never 'Unable to redeem': ${resultsClean ? "PASS" : "FAIL"}`,
+    `E. exactly one hook line per bash call, one parent instance: ${hooksOne && parentInstances.size === 1 ? "PASS" : "FAIL"} (${instances.size} legion extension instances: the parent plus one per task spawn)`,
+    `F. no minted id appears in the transcript or the OMP log: ${ran && mintedInOrder.length > 0 && leakedIds.length === 0 ? "PASS" : `FAIL (${leakedIds.length} of ${mintedInOrder.length} minted ids found)`}`,
+    `G. environment probe shows no GH_CONFIG_DIR/GH_TOKEN/GITHUB_TOKEN/GH_HOST, worker-bin first on PATH exactly once: ${probeOk ? "PASS" : probeResult === undefined ? "FAIL (no probe result)" : workerBin === undefined ? "FAIL (rig-mode.json names no workerBin; rerun setup.sh)" : "FAIL"}`,
+  ];
+
+  return {
+    label: input.label,
+    bashCalls: calls.length,
+    mints: mintedInOrder.length,
+    rows,
+    redemptions,
+    executed,
+    results,
+    envNotes,
+    instances: instances.size,
+    hookIssues,
+    verdict,
+  };
+}
+
+function renderAnalysis(analysis: Analysis): string {
+  return [
+    `== grant rig: ${analysis.label} ==`,
+    `bash calls: ${analysis.bashCalls}; grant mints: ${analysis.mints}; legion extension instances (parent + task spawns): ${analysis.instances}`,
+    "",
+    "per call  H=hook lines/distinct instances  G=mints  T=credential lines in command text  file=grant file vs mint (record-grant calls)  env=keys the model put in arguments.env  X=classification of text ids",
+    ...analysis.rows,
+    "",
+    "redemptions (stand-in log):",
+    ...(analysis.redemptions.length > 0 ? analysis.redemptions : ["(none)"]),
+    "",
+    "executed grant (seen-grants.log: grant file contents and mode vs mint for that call):",
+    ...(analysis.executed.length > 0 ? analysis.executed : ["(none)"]),
+    "",
+    "tool results for the probe commands:",
+    ...(analysis.results.length > 0 ? analysis.results : ["(none)"]),
+    "",
+    ...(analysis.envNotes.length > 0
+      ? ["env argument notes (informational; nothing reads it):", ...analysis.envNotes, ""]
+      : []),
+    ...(analysis.hookIssues.length > 0 ? ["hook issues:", ...analysis.hookIssues, ""] : []),
+    "verdict:",
+    ...analysis.verdict,
+  ].join("\n");
+}
+
+async function newestFile(directory: string, pattern: RegExp): Promise<string | undefined> {
+  let best: { readonly file: string; readonly mtime: number } | undefined;
+  const walk = async (dir: string): Promise<void> => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) await walk(full);
+      else if (pattern.test(entry.name)) {
+        const mtime = (await Bun.file(full).stat()).mtimeMs;
+        if (!best || mtime > best.mtime) best = { file: full, mtime };
+      }
+    }
+  };
+  await walk(directory);
+  return best?.file;
+}
+
+/** A session's own transcript, `<ISO time>_<session id>.jsonl` directly in its working
+ * directory's folder under `sessions/`. A `task` subagent's or the advisor's transcript sits one
+ * level deeper, in the folder named after its parent's, and is never the worker's. */
+const TOP_LEVEL_TRANSCRIPT = /^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_[0-9a-f-]+\.jsonl$/;
+
+/** The newest top-level session transcript under `sessionsDir`. */
+async function newestTranscript(sessionsDir: string): Promise<string | undefined> {
+  let best: { readonly file: string; readonly mtime: number } | undefined;
+  for (const folder of await readdir(sessionsDir, { withFileTypes: true })) {
+    if (!folder.isDirectory()) continue;
+    const dir = path.join(sessionsDir, folder.name);
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      if (!entry.isFile() || !TOP_LEVEL_TRANSCRIPT.test(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      const mtime = (await Bun.file(full).stat()).mtimeMs;
+      if (!best || mtime > best.mtime) best = { file: full, mtime };
+    }
+  }
+  return best?.file;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Terminal leg: the same worker environment in an interactive `omp` under a private tmux server
+// ---------------------------------------------------------------------------------------------
+
+const TMUX = ["tmux", "-L", "l12rig"];
+
+async function tmux(...args: string[]): Promise<string> {
+  const child = Bun.spawn([...TMUX, ...args], { stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr] = await Promise.all([
+    new Response(child.stdout as ReadableStream<Uint8Array>).text(),
+    new Response(child.stderr as ReadableStream<Uint8Array>).text(),
+  ]);
+  if ((await child.exited) !== 0) throw new Error(`tmux ${args.join(" ")} failed: ${stderr}`);
+  return stdout;
+}
+
+/** True once the transcript's newest assistant message is a plain reply (no tool call), which
+ * the prompt asks for only after the last step. */
+async function turnFinished(transcript: string): Promise<boolean> {
+  const entries = await readJsonLines(transcript);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const entry = entries[i];
+    if (entry?.type !== "message") continue;
+    const message = entry.message as Record<string, unknown>;
+    if (message.role !== "assistant") return false;
+    const content = Array.isArray(message.content)
+      ? (message.content as Record<string, unknown>[])
+      : [];
+    if (content.some((part) => part.type === "toolCall")) return false;
+    return content.some((part) => typeof part.text === "string" && /\bdone\b/i.test(part.text));
+  }
+  return false;
+}
+
+async function driveTui(launch: WorkerLaunch, prompt: string, label: string): Promise<DriveResult> {
+  const stamp = new Date().toISOString().replaceAll(/[:.]/g, "-");
+  const runDir = path.join(launch.rig, "runs", `${label}-${stamp}`);
+  await mkdir(runDir, { recursive: true });
+  const promptFile = path.join(runDir, "prompt.txt");
+  await writeFile(promptFile, prompt);
+  const startedAt = Date.now();
+  const standinLog = path.join(launch.rig, "standin.log");
+  const sessionsDir = path.join(
+    os.homedir(),
+    ".omp",
+    "profiles",
+    launch.profile,
+    "agent",
+    "sessions"
+  );
+
+  await Bun.spawn([...TMUX, "kill-server"], { stdout: "ignore", stderr: "ignore" }).exited;
+  // A fresh private server inherits this spawn's environment, so the pane gets exactly the
+  // headless leg's `workerPane` environment.
+  const env = workerPane(launch).env;
+  const server = Bun.spawn(
+    [
+      ...TMUX,
+      "new-session",
+      "-d",
+      "-s",
+      "l12rig",
+      "-x",
+      "200",
+      "-y",
+      "50",
+      "-c",
+      path.join(launch.rig, "ws"),
+      ...launchArgv(launch, "tui", env),
+    ],
+    { env, stdout: "pipe", stderr: "pipe" }
+  );
+  if ((await server.exited) !== 0) {
+    throw new Error(
+      `tmux new-session failed: ${await new Response(server.stderr as ReadableStream<Uint8Array>).text()}`
+    );
+  }
+
+  // Boot is complete when the stand-in has answered `/claims/ready` for this run.
+  const bootDeadline = Date.now() + 120_000;
+  for (;;) {
+    const ready = ((await readJsonLines(standinLog)) as unknown as StandinLine[]).some(
+      (line) =>
+        line.path === "/legion/v1/claims/ready" &&
+        line.status === 204 &&
+        Date.parse(line.at) >= startedAt
+    );
+    if (ready) break;
+    if (Date.now() > bootDeadline)
+      throw new Error("the interactive worker never reached /claims/ready");
+    await Bun.sleep(2_000);
+  }
+  await Bun.sleep(5_000);
+  // Bracketed paste keeps a multi-line prompt in the composer until Enter.
+  await tmux("load-buffer", promptFile);
+  await tmux("paste-buffer", "-p", "-t", "l12rig");
+  await Bun.sleep(1_000);
+  await tmux("send-keys", "-t", "l12rig", "Enter");
+  console.log(`[rig] prompt sent to tmux -L l12rig; attach with: tmux -L l12rig attach -t l12rig`);
+
+  let endedBy: DriveResult["endedBy"] = "agent_end";
+  let transcript: string | undefined;
+  const deadline = Date.now() + RUN_DEADLINE_MS;
+  for (;;) {
+    transcript = await newestTranscript(sessionsDir);
+    if (
+      transcript &&
+      (await Bun.file(transcript).stat()).mtimeMs >= startedAt &&
+      (await turnFinished(transcript))
+    )
+      break;
+    if (Date.now() > deadline) {
+      endedBy = "deadline";
+      console.error("[rig] run deadline reached; stopping the interactive worker");
+      break;
+    }
+    await Bun.sleep(5_000);
+  }
+  await writeFile(
+    path.join(runDir, "pane.txt"),
+    await tmux("capture-pane", "-p", "-t", "l12rig", "-S", "-200")
+  );
+  await tmux("kill-server");
+  return { runDir, pid: 0, sessionFile: transcript, exitCode: null, endedBy };
+}
+
+async function report(
+  launch: WorkerLaunch,
+  result: DriveResult,
+  label: string,
+  since: number
+): Promise<void> {
+  console.log(
+    `[rig] worker ended by ${result.endedBy}; exit code ${result.exitCode}; session file ${result.sessionFile ?? "(unknown)"}`
+  );
+  const sessionsDir = path.join(
+    os.homedir(),
+    ".omp",
+    "profiles",
+    launch.profile,
+    "agent",
+    "sessions"
+  );
+  const transcript = result.sessionFile ?? (await newestTranscript(sessionsDir));
+  const logsDir = path.join(os.homedir(), ".omp", "profiles", launch.profile, "logs");
+  const ompLog =
+    result.pid > 0
+      ? await newestFile(logsDir, new RegExp(`^omp\\..*\\.${result.pid}\\.log$`))
+      : await newestFile(logsDir, /^omp\..*\.log$/);
+  if (!transcript || !ompLog || (await Bun.file(ompLog).stat()).mtimeMs < since) {
+    console.error(`[rig] missing transcript (${transcript}) or omp log (${ompLog})`);
+    process.exit(1);
+  }
+  const analysis = await analyze({
+    label,
+    rig: launch.rig,
+    transcript,
+    standinLog: path.join(launch.rig, "standin.log"),
+    ompLog,
+  });
+  const rendered = renderAnalysis(analysis);
+  const table = path.join(result.runDir, "table.txt");
+  await writeFile(table, `${rendered}\n`);
+  // What setup.sh laid out for this run (plugin mode, Legion build, checkout commit); absent on a
+  // rig prepared by an older setup.sh.
+  const rigMode: unknown = await Bun.file(path.join(launch.rig, "rig-mode.json"))
+    .json()
+    .catch(() => undefined);
+  await writeFile(
+    path.join(result.runDir, "report.json"),
+    `${JSON.stringify({ ...result, omp: launch.omp, rigMode, transcript, ompLog, analysis }, null, 2)}\n`
+  );
+  console.log(rendered);
+  console.log(`[rig] transcript ${transcript}\n[rig] omp log ${ompLog}\n[rig] table ${table}`);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Entry
+// ---------------------------------------------------------------------------------------------
+
+if (import.meta.main) {
+  const { positionals, values } = parseArgs({
+    args: Bun.argv.slice(2),
+    allowPositionals: true,
+    options: {
+      rig: { type: "string" },
+      port: { type: "string" },
+      omp: { type: "string" },
+      profile: { type: "string", default: "l12rig" },
+      label: { type: "string", default: "run" },
+      short: { type: "boolean", default: false },
+      "no-secrets": { type: "boolean", default: false },
+      transcript: { type: "string" },
+      "standin-log": { type: "string" },
+      "omp-log": { type: "string" },
+      "prompt-file": { type: "string" },
+    },
+  });
+
+  function required(name: keyof typeof values): string {
+    const value = values[name];
+    if (typeof value !== "string" || value.length === 0) {
+      console.error(`--${name} is required`);
+      process.exit(2);
+    }
+    return value;
+  }
+
+  const subcommand = positionals[0];
+  switch (subcommand) {
+    case "prompt": {
+      console.log(buildPrompt(buildSteps(values.short)));
+      break;
+    }
+    case "drive":
+    case "tui": {
+      const rig = required("rig");
+      const launch: WorkerLaunch = {
+        rig,
+        port: Number(required("port")),
+        omp: required("omp"),
+        profile: values.profile,
+        useSecrets: !values["no-secrets"],
+      };
+      const since = Date.now();
+      const prompt =
+        values["prompt-file"] === undefined
+          ? buildPrompt(buildSteps(values.short))
+          : await readFile(values["prompt-file"], "utf8");
+      const result =
+        subcommand === "drive"
+          ? await drive(launch, prompt, values.label)
+          : await driveTui(launch, prompt, values.label);
+      await report(launch, result, values.label, since);
+      break;
+    }
+    case "analyze": {
+      const analysis = await analyze({
+        label: values.label,
+        rig: required("rig"),
+        transcript: required("transcript"),
+        standinLog: required("standin-log"),
+        ompLog: required("omp-log"),
+      });
+      console.log(renderAnalysis(analysis));
+      break;
+    }
+    default:
+      console.error("usage: bun run.ts <prompt|drive|tui|analyze> [options]");
+      process.exit(2);
+  }
+}

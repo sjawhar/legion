@@ -62,6 +62,11 @@ var slugPattern = regexp.MustCompile(`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`)
 // emailPattern is an owner tag naming a person: their lowercase email, as their sign-in names them.
 var emailPattern = regexp.MustCompile(`^[a-z0-9._%+'-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$`)
 
+// ValidPersonOwner reports whether an owner tag names a person by lowercase email.
+func ValidPersonOwner(owner string) bool {
+	return emailPattern.MatchString(owner)
+}
+
 // keyARNPattern is a KMS key's ARN, whose last segment is the key id.
 var keyARNPattern = regexp.MustCompile(`^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/[A-Za-z0-9-]+$`)
 
@@ -87,8 +92,8 @@ type Loader struct {
 	Prefix string
 	// KeyARN is the agent-secrets key's ARN; a secret encrypted with any other key is refused.
 	KeyARN string
-	// Services are the registered services a secret's owner tag may name. None is registered yet,
-	// so an owner tag naming a service is refused as malformed.
+	// Services are the registered services a secret's owner tag may name: the broker's
+	// BROKER_SERVICES. An owner tag naming any other service is refused as malformed.
 	Services []string
 	// Describer reads one secret's tags, key and version stages for LoadOne. DescribeSecret is
 	// read-after-write consistent where ListSecrets may lag a change by minutes.
@@ -249,7 +254,7 @@ func (l Loader) secret(ctx context.Context, slug string, ls listing, keys *keyId
 	switch {
 	case s.Owner == OwnerShared:
 		s.kind = ownerShared
-	case emailPattern.MatchString(s.Owner):
+	case ValidPersonOwner(s.Owner):
 		s.kind = ownerPerson
 	case slices.Contains(l.Services, s.Owner):
 		s.kind = ownerService
@@ -272,15 +277,17 @@ func (l Loader) secret(ctx context.Context, slug string, ls listing, keys *keyId
 	if !onKey {
 		return Secret{}, ReasonNotOnAgentSecretsKey, nil
 	}
-	if !hasCurrentVersion(ls.versions) {
+	if !HasCurrentVersion(ls.versions) {
 		return Secret{}, ReasonNoCurrentValue, nil
 	}
 	return s, "", nil
 }
 
-// hasCurrentVersion reports whether a secret's version stages (ListSecrets'
-// SecretVersionsToStages, DescribeSecret's VersionIdsToStages) name a version labelled AWSCURRENT.
-func hasCurrentVersion(versionsToStages map[string][]string) bool {
+// HasCurrentVersion reports whether a secret's version stages (ListSecrets'
+// SecretVersionsToStages, DescribeSecret's VersionIdsToStages) name a version labelled AWSCURRENT,
+// the one GetSecretValue reads: the broker serves a secret only then, and the agent-secrets CLI
+// shows it as having a value only then.
+func HasCurrentVersion(versionsToStages map[string][]string) bool {
 	for _, stages := range versionsToStages {
 		if slices.Contains(stages, currentStage) {
 			return true
