@@ -280,8 +280,7 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	// retry puts it back there with the reviewer's work kept. A review outside the round decides
 	// nothing and counts no round. An approval is judged against the head it names when the
 	// review ends (classify.ApprovalStands).
-	held := issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.Reviewing
-	if issue.Phase != phase.Reviewing && !held {
+	if !ReviewRoundOpen(*issue) {
 		return intake.Result{}, nil
 	}
 	reviewer.Decision = &record.ReviewDecision{State: state, Body: fact.Body, Head: fact.CommitID}
@@ -290,6 +289,13 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	}
 	_, err = e.settleRound(ctx, tx, *issue, reviewer, pr, before, by)
 	return intake.Result{}, err
+}
+
+// ReviewRoundOpen says whether issue's review round is open, so a deciding review can still decide
+// it (review): the issue is in reviewing, or held from reviewing, since the retry puts it back there
+// with the reviewer's work kept.
+func ReviewRoundOpen(issue record.Issue) bool {
+	return issue.Phase == phase.Reviewing || issue.Phase == phase.Held && issue.Hold != nil && issue.Hold.From == phase.Reviewing
 }
 
 // The fact that wrote a review-stuck notice, its summary. The architect prompt

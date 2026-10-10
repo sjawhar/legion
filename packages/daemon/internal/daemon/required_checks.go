@@ -23,23 +23,27 @@ import (
 // daemon, and the listener does not carry a pull request's workflow runs at all, so reading again
 // is how the daemon notices either: a change reaches the verdict within one interval. A pass reads
 // each open pull request once, each base branch at least twice (its rulesets, a page per hundred
-// rules, and its protection), and, when the base requires a workflow, each pull request's workflow
-// runs once more, on the implement App's installation, whose hourly limit every pane's gh shares:
-// about ninety reads an hour for a pull request on a base of its own, thirty for each more on the
-// same base, and thirty more for each pull request whose base requires a workflow. Two minutes also
-// gives a newly opened pull request its set well before its first CI settles.
+// rules, and its protection), when the base requires a workflow, each pull request's workflow runs
+// once more, and, while its issue's review round is open, each pull request's reviews once more, a
+// page per hundred reviews (readReviews), all on the implement App's installation, whose hourly
+// limit every pane's gh shares: about ninety reads an hour for a pull request on a base of its own,
+// thirty for each more on the same base, thirty more for each pull request whose base requires a
+// workflow, and thirty more for each pull request in review. Two minutes also gives a newly opened
+// pull request its set well before its first CI settles, and bounds how long a review decision
+// whose webhook never arrived stays unread.
 const requiredChecksInterval = 2 * time.Minute
 
-// requiredChecksRead bounds one pull request's reads in a pass: its base branch, then that branch's
-// rulesets and protection, then its workflow runs, each a single GitHub answer that comes in well
-// under a second.
+// requiredChecksRead bounds one pull request's reads in a pass: its base branch, its reviews while
+// its round is open, then that branch's rulesets and protection, then its workflow runs, each a
+// single GitHub answer that comes in well under a second.
 const requiredChecksRead = 30 * time.Second
 
 // watchRequiredChecks reads the checks each open pull request's base branch requires
 // (readRequiredChecks) as the runtime starts and every requiredChecksInterval after, until ctx
 // ends. The first pass is the boot's resync: a pull request whose set was never read - every one
 // recorded before the daemon read sets at all - has no checks verdict until it runs, and the round
-// a red the base branch never required left stuck is decided by it, with no new push.
+// a red the base branch never required left stuck is decided by it, with no new push, as is a
+// round whose decision's webhook never arrived.
 func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 	w.readRequiredChecks(ctx)
 	ticker := time.NewTicker(requiredChecksInterval)
@@ -59,7 +63,9 @@ func (w *workflowRuntime) watchRequiredChecks(ctx context.Context) {
 // an intake.PullRequestMergeability fact whenever that read is CONFLICTING or differs from the one
 // recorded - workflow's mergeability decides a CONFLICTING read every time, even one that only
 // confirms the stored value, so a conflict the poll recorded before the issue reached
-// awaiting_merge is still acted on once it gets there. It then reads what the base branch requires
+// awaiting_merge is still acted on once it gets there. While the pull request's issue has its review
+// round open, it then reads the pull request's reviews and applies a deciding one the daemon has not
+// recorded, whose webhook never arrived (readReviews). It then reads what the base branch requires
 // with the implement App's installation token, the credential the daemon reads GitHub with for its
 // own work (requiredchecks.Required, the reader READY uses), and, when that includes a workflow,
 // each required workflow's latest run on the head whose settlement stands for the pull request's
@@ -102,6 +108,10 @@ func (w *workflowRuntime) readRequiredChecks(ctx context.Context) {
 			if _, err := intake.ApplyFact(ctx, w.pool, "github", eventID, fact, w.handlers...); err != nil {
 				w.log.Warn("apply whether a pull request's head can be merged into its base", "repo", pr.Repo, "pullRequest", pr.Number, "error", err)
 			}
+		}
+		if w.readReviews(ctx, prCtx, github, pr) {
+			cancel()
+			return
 		}
 		checks, err := w.requiredFor(prCtx, github, pr, base, read)
 		cancel()
