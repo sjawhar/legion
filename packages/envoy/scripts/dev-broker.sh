@@ -2,7 +2,7 @@
 # packages/envoy/scripts/dev-broker.sh
 #
 # The local dev surface a human can drive without AWS or Dispatch. Boots Postgres
-# (dev-postgres.sh, made idempotent here since that script has no guard of its own), builds the
+# (the dispatch-pg container dev-postgres.sh creates, started here when stopped), builds the
 # broker and its three clients (agent-secrets, agent-secrets-helper and agent-secrets-devrelay),
 # writes a fake secrets file standing in for Secrets Manager (DEMO_READ_TOKEN, tagged
 # owner=APPROVER_LOGIN tier=agent, so APPROVER_LOGIN's sessions get it without asking, and
@@ -98,7 +98,7 @@ trap cleanup EXIT
 echo "dev-broker: workdir $WORK_DIR" >&2
 
 if [ -z "${DEV_BROKER_POSTGRES_URL:-}" ]; then
-  # --- Postgres: dev-postgres.sh has no idempotency guard of its own, so check first. ---
+  # --- Postgres: start an existing dispatch-pg, or have dev-postgres.sh create it. ---
   if docker ps -a --format '{{.Names}}' | grep -qx "$POSTGRES_CONTAINER"; then
     if ! docker ps --format '{{.Names}}' | grep -qx "$POSTGRES_CONTAINER"; then
       echo "dev-broker: starting existing $POSTGRES_CONTAINER container..." >&2
