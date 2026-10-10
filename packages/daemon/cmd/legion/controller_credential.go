@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -90,11 +91,13 @@ func controllerGHDir(stateDir string) string { return filepath.Join(stateDir, "g
 // secret file: success writes the controller's gh files under controllerGHDir(stateDir) and
 // starts the refresh loop, logging to stateDir/github-credential.log; a daemon with no GitHub App
 // for this project (GITHUB_TOKEN_SOURCE_UNAVAILABLE or GITHUB_OWNER_UNCONFIGURED) is not a
-// refusal, since nothing is wrong — it just has nothing to act as — so an empty 0700 gh directory
-// is enough and no loop runs; any other failure is this function's error, which controllerStart
-// treats as every other post-mint failure (exit 1, Oh My Pi never started, the secret file left
-// as it is). It answers a function that stops the loop — a no-op when none started — for
-// controllerStart to defer.
+// refusal, since nothing is wrong — it just has nothing to act as — so this removes any hosts.yml
+// and config.yml an earlier run left in the gh directory, leaving it empty 0700 and no loop
+// running, so a token an earlier run minted against a daemon that had an App never outlives a
+// start that says gh acts as nobody; any other failure is this function's error, which
+// controllerStart treats as every other post-mint failure (exit 1, Oh My Pi never started, the
+// secret file left as it is). It answers a function that stops the loop — a no-op when none
+// started — for controllerStart to defer.
 func controllerStartGitHubCredential(ctx context.Context, daemonURL, secret, stateDir string, stderr io.Writer) (func(), error) {
 	ghDir := controllerGHDir(stateDir)
 	noop := func() {}
@@ -109,6 +112,12 @@ func controllerStartGitHubCredential(ctx context.Context, daemonURL, secret, sta
 		}
 		if err := os.Chmod(ghDir, 0o700); err != nil {
 			return noop, fmt.Errorf("chmod %s: %w", ghDir, err)
+		}
+		for _, name := range []string{ghconfig.HostsFile, ghconfig.ConfigFile} {
+			path := filepath.Join(ghDir, name)
+			if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return noop, fmt.Errorf("remove %s: %w", path, err)
+			}
 		}
 		fmt.Fprintln(stderr, "[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody")
 		return noop, nil
@@ -129,8 +138,9 @@ func controllerStartGitHubCredential(ctx context.Context, daemonURL, secret, sta
 // while Oh My Pi runs: a goroutine that re-fetches the controller's GitHub credential every
 // controllerGitHubRefreshInterval and rewrites dir (ghconfig.Write), which rewrites hosts.yml only
 // when it differs. The loop writes nothing to stderr or stdout once Oh My Pi owns the terminal: it
-// appends one slog text line per change, per failed fetch or write, and per stop to logPath,
-// opened append-only 0600 before Oh My Pi starts, and never logs the token or the hosts text. A
+// appends one slog text line per change, per failed fetch or write, and per stop the daemon's
+// refusal causes to logPath, opened append-only 0600 before Oh My Pi starts, and never logs the
+// token or the hosts text; Oh My Pi's exit ends the loop silently, with no line for it. A
 // failed fetch or write keeps the last files and tries again at the next tick; a superseded
 // capability (controllerCredentialSuperseded) ends the loop, since the file then lasts until its
 // token's expiry. Its lifetime is Oh My Pi's, not the command's signal context: a Ctrl-C in the
