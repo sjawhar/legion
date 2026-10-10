@@ -109,10 +109,10 @@ jobs:
       pi_legion: ${{ steps.filter.outputs.pi_legion }}
       dispatch: ${{ steps.filter.outputs.dispatch }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           filters: |
@@ -292,7 +292,7 @@ jobs:
     if: needs.changes.outputs.contracts == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
@@ -315,7 +315,7 @@ jobs:
     if: needs.changes.outputs.plugin == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
@@ -336,7 +336,7 @@ jobs:
           bun pm pack --destination ../../out/pr-artifacts
           tar tzf ../../out/pr-artifacts/*.tgz | grep -x package/dist/THIRD_PARTY_NOTICES
         working-directory: packages/envoy-plugin
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: opencode-legion-envoy-plugin-pr
           path: out/pr-artifacts/*.tgz
@@ -346,7 +346,7 @@ jobs:
     if: needs.changes.outputs.envoy_client == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
@@ -376,7 +376,7 @@ jobs:
     if: needs.changes.outputs.pi_shared == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
@@ -398,7 +398,7 @@ jobs:
     if: needs.changes.outputs.pi_envoy == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
@@ -445,7 +445,7 @@ jobs:
             fi
           done
         working-directory: packages/pi-envoy
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pi-envoy-pr
           path: out/pr-artifacts/*.tgz
@@ -455,7 +455,7 @@ jobs:
     if: needs.changes.outputs.pi_legion == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
@@ -466,7 +466,7 @@ jobs:
       # install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       # scripts/grant-rig/run.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/daemon/go.mod
           cache-dependency-path: packages/daemon/go.sum
@@ -506,7 +506,7 @@ jobs:
             fi
           done
         working-directory: packages/pi-legion
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: pi-legion-pr
           path: out/pr-artifacts/*.tgz
@@ -529,10 +529,10 @@ jobs:
     env:
       DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
       - uses: ./.github/actions/setup-bun
@@ -612,7 +612,7 @@ jobs:
         # unconsumed consumer, the `window.__dispatchDocument` inspection probe).
         run: bunx playwright test --config e2e/playwright.config.ts
         working-directory: packages/dispatch
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: dispatch-e2e-test-results-${{ github.run_attempt }}
@@ -623,7 +623,7 @@ jobs:
     if: needs.changes.outputs.claude_plugin == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
@@ -643,7 +643,7 @@ jobs:
       - name: Pack Claude Envoy plugin
         run: bun pm pack --destination ../../out/pr-artifacts
         working-directory: packages/claude-envoy
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: claude-envoy-pr
           path: out/pr-artifacts/*.tgz
@@ -671,12 +671,12 @@ jobs:
       TESTCONTAINERS_RYUK_DISABLED: "true"
       # (The smoke test and the image it runs live in the envoy-smoke job below.)
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
       - name: Check Go formatting
@@ -740,7 +740,7 @@ jobs:
             tar tzvf "../../out/pr-artifacts/legion-envoy-$arch.tar.gz"
           done
         working-directory: packages/envoy
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: legion-envoy-binaries-pr
           path: |
@@ -782,12 +782,12 @@ jobs:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
       - name: Pull the NATS test container image
@@ -828,10 +828,10 @@ jobs:
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
       - name: Memory tests of the Dispatch server
@@ -857,10 +857,10 @@ jobs:
       # The listener image the smoke test runs against, built by its own step below.
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
       # Testcontainers pulls a missing image when a test first asks for it, and the Docker daemon
@@ -898,7 +898,7 @@ jobs:
       # publishes no image to match. The pull step above put the base images in the daemon's
       # store, which the default `docker` driver reads.
       - name: Build the listener image the smoke test runs against
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         env:
           # This build never pushes, and its Metadata log is confirmed empty of both an
           # attestation and this job's pull_request payload today (no docker/setup-buildx-action
@@ -939,12 +939,12 @@ jobs:
     env:
       E2E_NATS_CONTAINER: envoy-e2e-nats-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/setup-bun
       - run: bun install --frozen-lockfile
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
           cache-dependency-path: packages/envoy/go.sum
@@ -963,7 +963,7 @@ jobs:
       - name: Local end-to-end acceptance
         run: bash scripts/e2e-local.sh
         working-directory: packages/envoy
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: envoy-e2e-local-evidence-${{ github.run_attempt }}
