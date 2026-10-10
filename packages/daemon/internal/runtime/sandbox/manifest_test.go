@@ -15,9 +15,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -25,37 +25,112 @@ import (
 
 var updateGolden = flag.Bool("update", false, "rewrite the manifest goldens this package pins")
 
-// goldenOptions are production's settings: the budgets a golden's lock wait and grace are read
-// from, a role's resources, and the Legion priority class.
+// goldenOptions are production's settings: the budgets a golden's grace is read from and the
+// Legion priority class, over testOptions' reservations at the daemon's defaults.
 func goldenOptions() Options {
 	opts := testOptions()
 	opts.BootTimeout = 120 * time.Second
-	opts.BootIntervals = 3
 	opts.TerminationGrace = 30 * time.Second
 	opts.Scheduling = Scheduling{PriorityClass: "legion"}
-	opts.Resources = map[claim.Role]corev1.ResourceRequirements{
-		claim.RoleTester: {
-			Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("2Gi")},
-			Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("4Gi")},
-		},
-	}
 	return opts
+}
+
+// reservations are the daemon's default reservations (config.DefaultResources) as the daemon
+// translates them for the runtime (internal/daemon/kubernetes.go, roleRequirements): every role,
+// the controller included, its cpu and memory the request and the limit alike, and its ephemeral
+// storage the limit over the smaller request.
+func reservations() map[claim.Role]corev1.ResourceRequirements {
+	translated := map[claim.Role]corev1.ResourceRequirements{}
+	for role, reservation := range config.DefaultResources() {
+		translated[role] = requirementsOf(reservation)
+	}
+	return translated
+}
+
+// probeReservation is the image probe's own reservation as the daemon hands it
+// (internal/daemon/kubernetes.go, probeReservation), translated the same way: 250m and 1Gi, with a
+// 5Gi disk bound over a 1Gi request — not a role's share, written here as data as the defaults are.
+func probeReservation() corev1.ResourceRequirements {
+	return requirementsOf(config.RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "5Gi", EphemeralStorageRequest: "1Gi"})
+}
+
+// requirementsOf is reservation as a container's requirements, translated as roleRequirements
+// translates it.
+func requirementsOf(reservation config.RoleResources) corev1.ResourceRequirements {
+	cpu, memory := resource.MustParse(reservation.CPU), resource.MustParse(reservation.Memory)
+	return corev1.ResourceRequirements{
+		Requests: corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorageRequest)},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory, corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorage)},
+	}
+}
+
+// Every container of every pod the runtime builds reserves cpu and memory and bursts past neither:
+// each has a non-zero request for both, equal to its limit, which is the kubelet's rule for the
+// Guaranteed class — judged over every container of the pod, the init containers included — and
+// each is bounded on the node's disk, an ephemeral-storage request under its limit. An issue pod's
+// six launchers each carry their role's reservation and its two init containers the launching
+// role's; the controller's pod carries the controller's on both its containers; and the image
+// probe's one container carries the probe's own, which the daemon hands it.
+func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := reservations()
+	probe := r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: probeReservation(), RoleReferences: testRoleReferences}, time.Now())
+	for name, tc := range map[string]struct {
+		pod corev1.PodSpec
+		// launch is the reservation every container that is not a role's own carries: the init
+		// containers', the role whose launch creates the pod; the probe's one, the probe's own.
+		launch     corev1.ResourceRequirements
+		containers int
+	}{
+		"root":       {podOf(t, r, rootSpec(t)), want[claim.RoleArchitect], 8},
+		"worker":     {podOf(t, r, workerSpec(t)), want[claim.RoleTester], 8},
+		"controller": {podOf(t, r, controllerSpec(t)), want[claim.RoleController], 2},
+		"probe":      {probe.Spec.PodTemplate.Spec, probeReservation(), 1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			containers := slices.Concat(tc.pod.InitContainers, tc.pod.Containers)
+			if len(containers) != tc.containers {
+				t.Fatalf("the pod runs %d containers, want %d", len(containers), tc.containers)
+			}
+			for _, c := range containers {
+				expected, whose := tc.launch, "the launch's"
+				if named := claim.Role(c.Name); claim.IsRole(named) || named == claim.RoleController {
+					expected, whose = want[named], string(named)+"'s"
+				}
+				if !reflect.DeepEqual(c.Resources, expected) {
+					t.Errorf("container %s carries %+v, want %s reservation %+v", c.Name, c.Resources, whose, expected)
+				}
+				for _, kind := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+					request, limit := c.Resources.Requests[kind], c.Resources.Limits[kind]
+					if request.Sign() <= 0 {
+						t.Errorf("container %s requests %s %s, want a positive reservation", c.Name, kind, request.String())
+					}
+					if request.Cmp(limit) != 0 {
+						t.Errorf("container %s requests %s %s but is limited to %s; the pod is Guaranteed only when they are equal", c.Name, kind, request.String(), limit.String())
+					}
+				}
+				if request, limit := c.Resources.Requests[corev1.ResourceEphemeralStorage], c.Resources.Limits[corev1.ResourceEphemeralStorage]; request.Sign() <= 0 || request.Cmp(limit) > 0 {
+					t.Errorf("container %s requests ephemeral-storage %s under a limit of %s, want a positive request no greater than the limit", c.Name, request.String(), limit.String())
+				}
+			}
+		})
+	}
 }
 
 // resumeSession is a session file Oh My Pi recorded in a pod.
 const resumeSession = ompSessionsDir + "/--legion-workspaces-sjawhar-legion-smoke-legion-208--/2026-09-23T12-00-00-000Z_0198.jsonl"
 
-// manifestCases are the Sandboxes the goldens pin: the root, which owns the tree volume; a worker
-// placed beside a scheduled pod of its tree, and one placed with none; a resume; a relaunch
-// whose workspace is recovered after its volume was lost; the root enrolled with the secrets
-// broker; and the project controller's pod, launched fresh and resuming. colocate is
-// whether another pod of the tree is scheduled when the launch runs, and agentSecrets, set for
-// root-enrolled alone, is the runtime's enrollment for that one case (TestManifestGoldens,
-// TestManifestMatchesTheSandboxCRD apply it to the shared runtime before building that case's
-// manifest, and restore nil after — every other case runs unenrolled).
+// manifestCases are the Sandboxes the goldens pin: the root; a worker; a resume; a relaunch whose
+// workspace is recovered after its volume was lost; the root enrolled with the secrets broker; and
+// the project controller's pod, launched fresh and resuming. Every one owns its volume.
+// agentSecrets, set for root-enrolled alone, is the runtime's enrollment for that one case
+// (TestManifestGoldens, TestManifestMatchesTheSandboxCRD apply it to the shared runtime before
+// building that case's manifest, and restore nil after — every other case runs unenrolled).
 func manifestCases(t *testing.T) map[string]struct {
 	spec         runtime.SpawnSpec
-	colocate     bool
 	agentSecrets *AgentSecrets
 } {
 	resume := workerSpec(t)
@@ -67,33 +142,31 @@ func manifestCases(t *testing.T) map[string]struct {
 	controllerResume.ResumeSessionFile = controllerSession
 	return map[string]struct {
 		spec         runtime.SpawnSpec
-		colocate     bool
 		agentSecrets *AgentSecrets
 	}{
-		"root":               {rootSpec(t), false, nil},
-		"worker-affinity":    {workerSpec(t), true, nil},
-		"worker-no-affinity": {workerSpec(t), false, nil},
-		"resume":             {resume, true, nil},
-		"recovered":          {recovered, true, nil},
-		"controller":         {controllerSpec(t), false, nil},
-		"controller-resume":  {controllerResume, false, nil},
-		"root-enrolled": {rootSpec(t), false, &AgentSecrets{
+		"root":              {rootSpec(t), nil},
+		"worker":            {workerSpec(t), nil},
+		"resume":            {resume, nil},
+		"recovered":         {recovered, nil},
+		"controller":        {controllerSpec(t), nil},
+		"controller-resume": {controllerResume, nil},
+		"root-enrolled": {rootSpec(t), &AgentSecrets{
 			URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour,
 		}},
 	}
 }
 
 // manifestOf is the Sandbox a launch of spec leaves running, as the API server holds it: the one
-// the runtime creates, with the relaunch's Running patch applied — the pod template for colocate,
-// and the Running mode.
-func manifestOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, colocate bool) any {
+// the runtime creates, with the relaunch's Running patch applied — the launch's pod template, and
+// the Running mode.
+func manifestOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) any {
 	t.Helper()
 	l, err := r.prepare(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	s := r.sandboxManifest(l)
-	s.Spec.PodTemplate, s.Spec.OperatingMode = r.podTemplate(l, colocate), modeRunning
+	s.Spec.PodTemplate, s.Spec.OperatingMode = r.podTemplate(l), modeRunning
 	u, err := encodeSandbox(s)
 	if err != nil {
 		t.Fatal(err)
@@ -115,7 +188,7 @@ func TestManifestGoldens(t *testing.T) {
 			encoder := json.NewEncoder(&buffer)
 			encoder.SetEscapeHTML(false)
 			encoder.SetIndent("", "  ")
-			if err := encoder.Encode(manifestOf(t, r, tc.spec, tc.colocate)); err != nil {
+			if err := encoder.Encode(manifestOf(t, r, tc.spec)); err != nil {
 				t.Fatal(err)
 			}
 			encoded := buffer.Bytes()
@@ -152,7 +225,7 @@ func TestManifestMatchesTheSandboxCRD(t *testing.T) {
 	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
 			r.agentSecrets = tc.agentSecrets
-			if found := schemaViolations(manifestOf(t, r, tc.spec, tc.colocate), schema, ""); len(found) > 0 {
+			if found := schemaViolations(manifestOf(t, r, tc.spec), schema, ""); len(found) > 0 {
 				t.Fatalf("the manifest has fields the CRD does not declare as sent:\n%s", strings.Join(found, "\n"))
 			}
 		})
@@ -175,7 +248,7 @@ func TestTheOperatorsPodIsSentInFieldsTheSandboxCRDDeclares(t *testing.T) {
 		t.Fatal(err)
 	}
 	schema := sandboxSchema(t)
-	for name, manifest := range map[string]any{"worker": manifestOf(t, r, workerSpec(t), true), "probe": wire(t, probe.Object)} {
+	for name, manifest := range map[string]any{"worker": manifestOf(t, r, workerSpec(t)), "probe": wire(t, probe.Object)} {
 		if found := schemaViolations(manifest, schema, ""); len(found) > 0 {
 			t.Errorf("the %s manifest has fields the CRD does not declare as sent:\n%s", name, strings.Join(found, "\n"))
 		}
@@ -183,13 +256,13 @@ func TestTheOperatorsPodIsSentInFieldsTheSandboxCRDDeclares(t *testing.T) {
 }
 
 // podOf is the pod template a launch of spec runs.
-func podOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool) corev1.PodSpec {
+func podOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) corev1.PodSpec {
 	t.Helper()
 	l, err := r.prepare(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return r.podTemplate(l, affinity).Spec
+	return r.podTemplate(l).Spec
 }
 
 // workerContainer is the role container of workerSpec, the tester.
@@ -199,13 +272,13 @@ const workerContainer = string(claim.RoleTester)
 // it (mounts, kubelet-resolved environment), with the launcher start command's argv as Command and
 // its plain environment appended. That is the process's whole environment: the launcher passes its
 // own on, then the start command's.
-func workerOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec, affinity bool) corev1.Container {
+func workerOf(t *testing.T, r *Runtime, spec runtime.SpawnSpec) corev1.Container {
 	t.Helper()
 	l, err := r.prepare(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := containerNamed(t, r.podTemplate(l, affinity).Spec, string(spec.Role))
+	c := containerNamed(t, r.podTemplate(l).Spec, string(spec.Role))
 	start := launcherCommand(l, r)
 	c.Command = start.Argv
 	for _, entry := range start.Env {
@@ -255,7 +328,7 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := envOf(workerOf(t, r, workerSpec(t), false))
+	env := envOf(workerOf(t, r, workerSpec(t)))
 	got := kubeExpand(env["PI_SHELL_PREFIX"], env)
 	want := shellprefix.For("/legion/worker-bin", "/opt/legion/bin")
 	if got != want {
@@ -263,16 +336,16 @@ func TestPIShellPrefixIsTmuxsFormOverThePodsDirectories(t *testing.T) {
 	}
 }
 
-// The init containers run where the provisioning Secret is mounted, or on the tree volume every
-// agent of the tree can write, so nothing either executes may come from the tree volume: each one's
-// PATH names the image's directories only, and neither is told a tool path (#1258 deep review,
-// finding 3).
-func TestTheInitContainersPathNamesNoTreeVolumeDirectory(t *testing.T) {
+// The init containers run where the provisioning Secret is mounted, or on the issue volume every
+// agent of the issue can write, so nothing either executes may come from the issue volume: each
+// one's PATH names the image's directories only, and neither is told a tool path (#1258 deep
+// review, finding 3).
+func TestTheInitContainersPathNamesNoIssueVolumeDirectory(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, init := range podOf(t, r, workerSpec(t), false).InitContainers {
+	for _, init := range podOf(t, r, workerSpec(t)).InitContainers {
 		env := envOf(init)
 		path, ok := env["PATH"]
 		if !ok {
@@ -280,7 +353,7 @@ func TestTheInitContainersPathNamesNoTreeVolumeDirectory(t *testing.T) {
 		}
 		for _, dir := range filepath.SplitList(path) {
 			if dir == TreeRoot || strings.HasPrefix(dir, TreeRoot+"/") {
-				t.Errorf("%s's PATH names %s, on the tree volume", init.Name, dir)
+				t.Errorf("%s's PATH names %s, on the issue volume", init.Name, dir)
 			}
 		}
 		for name := range env {
@@ -294,15 +367,16 @@ func TestTheInitContainersPathNamesNoTreeVolumeDirectory(t *testing.T) {
 // jj keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME, so what workspace-init
 // sets there reaches the agent's jj only when both containers have one config home, on a volume
 // both mount (#1258 deep review, finding 4). It is in memory, so every pod's starts empty and
-// nothing an agent wrote reaches workspace-init's jj.
+// nothing an agent wrote reaches workspace-init's jj. The state home is not among the names the two
+// must agree on: each role's agent is told one of its own (TestEachRolesAgentIsToldAStateHomeOfItsOwn).
 func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := podOf(t, r, workerSpec(t), false)
-	init, main := containerNamed(t, pod, initContainer), workerOf(t, r, workerSpec(t), false)
-	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"} {
+	pod := podOf(t, r, workerSpec(t))
+	init, main := containerNamed(t, pod, initContainer), workerOf(t, r, workerSpec(t))
+	for _, name := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"} {
 		if envOf(init)[name] == "" || envOf(init)[name] != envOf(main)[name] {
 			t.Errorf("%s: init %q, main %q; the two containers must agree", name, envOf(init)[name], envOf(main)[name])
 		}
@@ -327,6 +401,50 @@ func TestBothContainersShareOneInMemoryXDGConfigHome(t *testing.T) {
 	}
 }
 
+// The role containers of one issue pod share the pod's network namespace, the workspace path and
+// the Oh My Pi profile path, and Oh My Pi's browser broker lock is an abstract unix socket named
+// from the lock path under its state root: one state root would make it one name in every
+// container, the first role's lock blocking every other role's broker. So each role's agent is
+// told a XDG_STATE_HOME of its own, `/home/legion/.local/state/<role>`, differing from every other
+// role's, and the controller's agent one by the same rule; workspace-init, which runs alone, keeps
+// the plain state home. The value is a path on the container's own filesystem, mounted from no
+// volume, so Chromium's profiles and Oh My Pi's logs are not charged to the pod's memory.
+func TestEachRolesAgentIsToldAStateHomeOfItsOwn(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	told := map[string]claim.Role{}
+	for _, role := range launcherRoles {
+		spec := controllerSpec(t)
+		if role != claim.RoleController {
+			token, err := claim.NewToken("legion", testTree, role)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spec = testSpec(t, token, role, testTree)
+		}
+		worker := workerOf(t, r, spec)
+		got := envOf(worker)["XDG_STATE_HOME"]
+		if want := xdgStateHome + "/" + string(role); got != want {
+			t.Errorf("%s's agent is told XDG_STATE_HOME=%q, want %q", role, got, want)
+		}
+		if other, taken := told[got]; taken {
+			t.Errorf("%s's agent is told XDG_STATE_HOME=%q, %s's too", role, got, other)
+		}
+		told[got] = role
+		for _, mount := range worker.VolumeMounts {
+			if overlaps(mount.MountPath, got) {
+				t.Errorf("%s's XDG_STATE_HOME %s overlaps volume %q's mount %q; it must be on the container's own filesystem", role, got, mount.Name, mount.MountPath)
+			}
+		}
+	}
+	init := containerNamed(t, podOf(t, r, workerSpec(t)), initContainer)
+	if got := envOf(init)["XDG_STATE_HOME"]; got != xdgStateHome {
+		t.Errorf("workspace-init is told XDG_STATE_HOME=%q, want %q", got, xdgStateHome)
+	}
+}
+
 // bun (measured: bun 1.3.14, LEGION-198) resolves its install cache at
 // $XDG_CACHE_HOME/.bun/install/cache when neither BUN_INSTALL nor BUN_INSTALL_CACHE_DIR is set —
 // neither is ever set here — and hardlinks that cache's files into every worktree's node_modules,
@@ -345,7 +463,7 @@ func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	main := workerOf(t, r, workerSpec(t), false)
+	main := workerOf(t, r, workerSpec(t))
 	cacheHome := envOf(main)["XDG_CACHE_HOME"]
 	if cacheHome == "" {
 		t.Fatal("the main container carries no XDG_CACHE_HOME")
@@ -358,14 +476,13 @@ func TestBunCacheHomeIsMountedFromNoVolume(t *testing.T) {
 	}
 }
 
-// uv links a project's .venv, in an issue's workspace on the tree volume, to an interpreter under
-// UV_PYTHON_INSTALL_DIR, and installs into it from UV_CACHE_DIR. Both are on the tree volume's own
+// uv links a project's .venv, in an issue's workspace on the issue's volume, to an interpreter
+// under UV_PYTHON_INSTALL_DIR, and installs into it from UV_CACHE_DIR. Both are on the volume's own
 // mount (no other mount covering them) and outside the workspace, whose tree is the project's, so a
-// later pod runs the .venv as it is and reuses what an earlier pod downloaded. The cache is the
-// tree's, the same in every pod of it. The interpreter directory is the issue's: the same for two
-// pods of one issue, and another for a second issue of the tree, whose pods may install at the same
-// moment and share no lock with the first issue's across pods.
-func TestUvKeepsItsPythonsAndCacheOnTheTreeVolume(t *testing.T) {
+// later pod runs the .venv as it is and reuses what an earlier pod downloaded. The cache is at the
+// same path in every pod. The interpreter directory is the issue's: the same for two pods of one
+// issue, and another for a second issue of the tree.
+func TestUvKeepsItsPythonsAndCacheOnTheIssueVolume(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -376,12 +493,12 @@ func TestUvKeepsItsPythonsAndCacheOnTheTreeVolume(t *testing.T) {
 	}
 	var envs []map[string]string
 	for _, spec := range []runtime.SpawnSpec{rootSpec(t), workerSpec(t), testSpec(t, child, claim.RoleImplementer, "LEGION-209")} {
-		main := workerOf(t, r, spec, false)
+		main := workerOf(t, r, spec)
 		env := envOf(main)
 		for _, name := range []string{"UV_PYTHON_INSTALL_DIR", "UV_CACHE_DIR"} {
 			dir := env[name]
-			if mount := mountHolding(main, dir); mount == nil || mount.Name != treeVolume || mount.SubPath != "" {
-				t.Errorf("%s %s: %s %q is on mount %+v, want the tree volume's own mount at %s", spec.Issue, spec.Role, name, dir, mount, TreeRoot)
+			if mount := mountHolding(main, dir); mount == nil || mount.Name != issueVolume || mount.SubPath != "" {
+				t.Errorf("%s %s: %s %q is on mount %+v, want the issue volume's own mount at %s", spec.Issue, spec.Role, name, dir, mount, TreeRoot)
 			}
 			if overlaps(dir, env["LEGION_WORKSPACE"]) {
 				t.Errorf("%s %s: %s %q overlaps the workspace %s", spec.Issue, spec.Role, name, dir, env["LEGION_WORKSPACE"])
@@ -413,8 +530,8 @@ func TestTheWorkerContainerNamesItsGrantFileInMemory(t *testing.T) {
 		t.Fatal(err)
 	}
 	spec := workerSpec(t)
-	pod := podOf(t, r, spec, false)
-	main := workerOf(t, r, spec, false)
+	pod := podOf(t, r, spec)
+	main := workerOf(t, r, spec)
 	want := StateDir + "/secrets/" + string(spec.Claim) + "-grant"
 	if got := envOf(main)["LEGION_GRANT_FILE"]; got != want {
 		t.Fatalf("the worker container's LEGION_GRANT_FILE = %q, want %q", got, want)
@@ -449,12 +566,12 @@ func TestTheManifestCarriesADNSNamedStreamAndDaemonURL(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range podOf(t, r, workerSpec(t), false).Containers {
+	for _, c := range podOf(t, r, workerSpec(t)).Containers {
 		if !slices.Contains(c.Command, "tcp://legion-daemon-widgets.legion.svc:13371") {
 			t.Errorf("the %s launcher's argv = %v, want it to dial tcp://legion-daemon-widgets.legion.svc:13371", c.Name, c.Command)
 		}
 	}
-	worker := workerOf(t, r, workerSpec(t), false)
+	worker := workerOf(t, r, workerSpec(t))
 	if !slices.Contains(worker.Command, "tcp://legion-daemon-widgets.legion.svc:13371") {
 		t.Errorf("the shim's argv = %v, want it to dial tcp://legion-daemon-widgets.legion.svc:13371", worker.Command)
 	}
@@ -482,7 +599,7 @@ func TestTheProvisionTokenSharesNoContainerWithAnythingTheTreeCanWrite(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			template := r.podTemplate(l, tc.colocate)
+			template := r.podTemplate(l)
 			pod := template.Spec
 			claimSecret := secretName(l.name)
 			volumes := map[string]corev1.Volume{}
@@ -599,24 +716,61 @@ func TestALaunchItCannotHonourIsRefused(t *testing.T) {
 	}
 }
 
-// New refuses options no cluster could run: an image not pinned by digest, a tree volume with no
+// New refuses options no cluster could run: an image not pinned by digest, an issue volume with no
 // storage class on a cluster that has no default, a stream pods cannot dial, a pool the runtime
-// does not choose.
+// does not choose, and a Resources map that would leave a container unreserved — a role or the
+// controller without an entry, or an entry that is no reservation: a cpu limit its request falls
+// short of, no memory, an ephemeral-storage request past its limit or none at all, or a resource
+// the daemon never sizes — each refusal naming the role.
 func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 	for name, tc := range map[string]struct {
 		edit func(*Options)
 		want string
 	}{
-		"tag image":         {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
-		"no class":          {func(o *Options) { o.StorageClass = "" }, "no storage class"},
-		"no tree volume":    {func(o *Options) { o.TreeVolume = resource.Quantity{} }, "no tree volume size"},
-		"unix stream":       {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
-		"relative tool":     {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
-		"bad project":       {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},
-		"url no bearer":     {func(o *Options) { o.DispatchURL = "https://dispatch.internal" }, "configured together"},
-		"bearer no url":     {func(o *Options) { o.DispatchToken = "dispatch-bearer" }, "configured together"},
-		"another pool":      {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: "gpu"} }, "legion.dev/pool is the runtime's"},
-		"the pool restated": {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
+		"tag image":                 {func(o *Options) { o.Image = "ghcr.io/sjawhar/legion-worker:latest" }, "not pinned by digest"},
+		"no class":                  {func(o *Options) { o.StorageClass = "" }, "no storage class"},
+		"no volume size":            {func(o *Options) { o.IssueVolume = resource.Quantity{} }, "no issue volume size"},
+		"unix stream":               {func(o *Options) { o.StreamURL = "unix:///run/legion.sock" }, "is not tcp://host:port"},
+		"relative tool":             {func(o *Options) { o.Tools.Git = "git" }, "git path \"git\" is not absolute"},
+		"bad project":               {func(o *Options) { o.Project = "s4a run" }, "is not a label value"},
+		"url no bearer":             {func(o *Options) { o.DispatchURL = "https://dispatch.internal" }, "configured together"},
+		"bearer no url":             {func(o *Options) { o.DispatchToken = "dispatch-bearer" }, "configured together"},
+		"another pool":              {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: "gpu"} }, "legion.dev/pool is the runtime's"},
+		"the pool restated":         {func(o *Options) { o.Scheduling.NodeSelector = map[string]string{poolKey: poolValue} }, "legion.dev/pool is the runtime's"},
+		"a role unreserved":         {func(o *Options) { delete(o.Resources, claim.RoleTester) }, "no reservation for role tester"},
+		"the controller unreserved": {func(o *Options) { delete(o.Resources, claim.RoleController) }, "no reservation for role controller"},
+		"cpu limit past request": {
+			func(o *Options) {
+				o.Resources[claim.RoleReviewer].Limits[corev1.ResourceCPU] = resource.MustParse("1500m")
+			},
+			"role reviewer requests cpu 750m but is limited to 1500m",
+		},
+		"no memory": {
+			func(o *Options) {
+				delete(o.Resources[claim.RoleMerger].Requests, corev1.ResourceMemory)
+				delete(o.Resources[claim.RoleMerger].Limits, corev1.ResourceMemory)
+			},
+			"role merger reserves no memory",
+		},
+		"ephemeral-storage request past its limit": {
+			func(o *Options) {
+				o.Resources[claim.RoleImplementer].Requests[corev1.ResourceEphemeralStorage] = resource.MustParse("40Gi")
+			},
+			"role implementer requests ephemeral-storage 40Gi past its limit 20Gi",
+		},
+		"ephemeral-storage unset": {
+			func(o *Options) {
+				delete(o.Resources[claim.RoleMerger].Requests, corev1.ResourceEphemeralStorage)
+				delete(o.Resources[claim.RoleMerger].Limits, corev1.ResourceEphemeralStorage)
+			},
+			"role merger bounds no ephemeral-storage",
+		},
+		"an extended resource": {
+			func(o *Options) {
+				o.Resources[claim.RoleTester].Limits["nvidia.com/gpu"] = resource.MustParse("1")
+			},
+			"role tester names nvidia.com/gpu in its limits",
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			opts := testOptions()
@@ -645,7 +799,7 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	told := map[string]bool{}
 	for _, spec := range []runtime.SpawnSpec{workerSpec(t), controllerSpec(t)} {
 		spec.Env, spec.Secrets = nil, nil
-		for name := range envOf(workerOf(t, r, spec, false)) {
+		for name := range envOf(workerOf(t, r, spec)) {
 			told[name] = true
 		}
 	}
@@ -679,7 +833,7 @@ func TestHandedAddressesAreEveryAddressAPodCarries(t *testing.T) {
 			start := launcherCommand(l, r)
 			carried := map[string]string{}
 			words := [][]string{start.Argv[:slices.Index(start.Argv, "--")]}
-			for _, c := range podOf(t, r, spec, false).Containers {
+			for _, c := range podOf(t, r, spec).Containers {
 				words = append(words, c.Command)
 			}
 			for _, command := range words {
@@ -728,7 +882,7 @@ func TestTheDispatchBearerIsARuntimeOption(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			pointer, pointed := envOf(workerOf(t, r, workerSpec(t), false))["DISPATCH_TOKEN_FILE"]
+			pointer, pointed := envOf(workerOf(t, r, workerSpec(t)))["DISPATCH_TOKEN_FILE"]
 			if got := l.secrets[dispatchTokenKey]; got != tc.bearer || pointed != (tc.bearer != "") {
 				t.Fatalf("the claim's Secret carries %q as %s and DISPATCH_TOKEN_FILE is %q (set: %t), want %q",
 					got, dispatchTokenKey, pointer, pointed, tc.bearer)
@@ -758,7 +912,7 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 		"fresh":     {workerSpec(t), ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			pod := podOf(t, r, tc.spec, false)
+			pod := podOf(t, r, tc.spec)
 			got, set := envOf(containerNamed(t, pod, initContainer))["LEGION_WORKSPACE_RECOVERED_FROM"]
 			if got != tc.want || set != (tc.want != "") {
 				t.Errorf("the init container's LEGION_WORKSPACE_RECOVERED_FROM = %q (set: %t), want %q", got, set, tc.want)
@@ -766,85 +920,6 @@ func TestTheRecoveredRefReachesTheInitContainerAlone(t *testing.T) {
 			for _, name := range []string{fetchContainer, workerContainer} {
 				if _, set := envOf(containerNamed(t, pod, name))["LEGION_WORKSPACE_RECOVERED_FROM"]; set {
 					t.Errorf("%s carries LEGION_WORKSPACE_RECOVERED_FROM", name)
-				}
-			}
-		})
-	}
-}
-
-// LEGION_GENERATION reaches workspace-init's init container too, not only the worker process
-// (mainEnvironment's own, carried by the launcher's start command): workspace-init provision's own
-// candidate-rotation seed (cmd/legion/workspace_init.go's rotateCandidates) reads it from its own
-// container's environment, and a value only the worker process carries would never reach it. The
-// fetch container, which never rotates anything, carries neither.
-func TestLegionGenerationReachesTheInitContainerToo(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	spec := workerSpec(t)
-	spec.Generation = 7
-	pod := podOf(t, r, spec, false)
-	for name, c := range map[string]corev1.Container{
-		initContainer: containerNamed(t, pod, initContainer), "the worker process": workerOf(t, r, spec, false),
-	} {
-		got, set := envOf(c)["LEGION_GENERATION"]
-		if !set || got != "7" {
-			t.Errorf("%s's LEGION_GENERATION = %q (set: %t), want \"7\"", name, got, set)
-		}
-	}
-	if _, set := envOf(containerNamed(t, pod, fetchContainer))["LEGION_GENERATION"]; set {
-		t.Errorf("%s carries LEGION_GENERATION", fetchContainer)
-	}
-}
-
-// The daemon's removable-workspace candidates (dispatch://LEGION-583) reach the workspace-init
-// container alone, as one JSON object carrying both the list and its notAfter together, never
-// the agent; a launch with none names none. relaunch is what calls setRemovable in production,
-// after the tree's launch turn is held; this reaches directly for podTemplate's own contract,
-// that it reads removableWorkspacesJSON off the launch, not spec.
-func TestTheRemovableWorkspacesReachTheInitContainerAlone(t *testing.T) {
-	r, err := configure(goldenOptions())
-	if err != nil {
-		t.Fatal(err)
-	}
-	notAfter := time.Now().Add(time.Hour)
-	wantCandidates, err := json.Marshal(runtime.RemovableWorkspacesPayload{
-		NotAfter:   notAfter,
-		Workspaces: []runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, tc := range map[string]struct {
-		candidates []runtime.RemovableWorkspace
-		want       string
-	}{
-		"candidates": {[]runtime.RemovableWorkspace{{Issue: "LEGION-100"}, {Issue: "LEGION-101", MergedHead: "abc123"}}, string(wantCandidates)},
-		"none":       {nil, ""},
-	} {
-		t.Run(name, func(t *testing.T) {
-			l, err := r.prepare(workerSpec(t))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := l.setRemovable(tc.candidates, notAfter); err != nil {
-				t.Fatal(err)
-			}
-			pod := r.podTemplate(l, false).Spec
-			env := envOf(containerNamed(t, pod, initContainer))
-			got, set := env["LEGION_REMOVABLE_WORKSPACES"]
-			if got != tc.want || set != (tc.want != "") {
-				t.Errorf("the init container's LEGION_REMOVABLE_WORKSPACES = %q (set: %t), want %q", got, set, tc.want)
-			}
-			for _, c := range slices.Concat([]corev1.Container{containerNamed(t, pod, fetchContainer)}, pod.Containers) {
-				if _, set := envOf(c)["LEGION_REMOVABLE_WORKSPACES"]; set {
-					t.Errorf("%s carries LEGION_REMOVABLE_WORKSPACES", c.Name)
-				}
-			}
-			for _, entry := range launcherCommand(l, r).Env {
-				if strings.HasPrefix(entry, "LEGION_REMOVABLE_WORKSPACES=") {
-					t.Errorf("the worker process's start command carries LEGION_REMOVABLE_WORKSPACES")
 				}
 			}
 		})
@@ -877,7 +952,7 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			spec := r.podTemplate(l, false).Spec
+			spec := r.podTemplate(l).Spec
 			if spec.ServiceAccountName != tc.account || spec.AutomountServiceAccountToken == nil || *spec.AutomountServiceAccountToken {
 				t.Fatalf("serviceAccountName %q automount %v", spec.ServiceAccountName, spec.AutomountServiceAccountToken)
 			}
@@ -888,7 +963,7 @@ func TestAPodCarriesLegionsTokenExactlyWhenItIsEnrolled(t *testing.T) {
 				}
 			}
 			role := manifestCases(t)["root"].spec.Role
-			worker := workerOf(t, r, manifestCases(t)["root"].spec, false)
+			worker := workerOf(t, r, manifestCases(t)["root"].spec)
 			keyVolume := roleVolume(agentSecretsKeyVolume, role)
 			env := map[string]string{}
 			for _, e := range worker.Env {
@@ -955,7 +1030,7 @@ func TestATreeRolesShimIsToldToWarmTheWorkspacesCodegraphIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worker := workerOf(t, r, workerSpec(t), false)
+	worker := workerOf(t, r, workerSpec(t))
 	shim := worker.Command[:slices.Index(worker.Command, "--")]
 	if !slices.Contains(shim, "--warm-codegraph") {
 		t.Fatalf("the shim runs as %v, want --warm-codegraph before --", worker.Command)
@@ -1043,8 +1118,8 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 		pod   corev1.PodSpec
 		agent corev1.Container
 	}{
-		{"root", podOf(t, r, rootSpec(t), false), workerOf(t, r, rootSpec(t), false)},
-		{"worker", podOf(t, r, workerSpec(t), true), workerOf(t, r, workerSpec(t), true)},
+		{"root", podOf(t, r, rootSpec(t)), workerOf(t, r, rootSpec(t))},
+		{"worker", podOf(t, r, workerSpec(t)), workerOf(t, r, workerSpec(t))},
 		{"probe", probeSpec, containerNamed(t, probeSpec, probeContainer)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1133,9 +1208,9 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 			if _, copied := l.secrets["NATS_NKEY_SEED"]; copied {
 				t.Errorf("the claim's Secret carries NATS_NKEY_SEED: %v", slices.Sorted(maps.Keys(l.secrets)))
 			}
-			worker := r.podTemplate(l, false).Spec
+			worker := r.podTemplate(l).Spec
 			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
-			workerProcess := workerOf(t, r, spec, false)
+			workerProcess := workerOf(t, r, spec)
 			for _, pod := range []struct {
 				spec      corev1.PodSpec
 				container string
@@ -1251,8 +1326,8 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	for _, tc := range manifestCases(t) {
 		spec := tc.spec
 		spec.Env, spec.Secrets = nil, nil
-		pod := podOf(t, r, spec, tc.colocate)
-		carry(pod, workerOf(t, r, spec, tc.colocate))
+		pod := podOf(t, r, spec)
+		carry(pod, workerOf(t, r, spec))
 	}
 	probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
 	carry(probe, containerNamed(t, probe, probeContainer))
@@ -1292,38 +1367,63 @@ func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
 	}
 }
 
-// Every tree pod refuses a node that holds a pod of another tree (decision 2: the pool's floor
-// sizes the node for one tree), whether or not it also requires its own tree's node, and a pod
-// with no tree label — the image probe — never counts against it.
-func TestEveryTreePodKeepsOffAnotherTreesNode(t *testing.T) {
+// Every Legion pod, an issue's and the controller's alike, asks nothing of its placement beyond the
+// Legion pool: of its template's fields, the ones that bear on scheduling are the pool's node
+// selector and tolerations and the Legion priority class, and no other — nothing ties it to, or
+// keeps it off, another pod's node. Each issue pod owns a ReadWriteOnce volume of its own and
+// shares nothing with the other pods of its tree, so the scheduler places it wherever the pool has
+// room (LEGION-632). Pinned as the exact key set of the pod spec the manifest sends, so a field
+// added to the template shows here by name.
+func TestEveryLegionPodAsksNothingOfItsPlacementBeyondThePool(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []corev1.PodAffinityTerm{{
-		LabelSelector: &metav1.LabelSelector{MatchExpressions: []metav1.LabelSelectorRequirement{
-			{Key: labelTree, Operator: metav1.LabelSelectorOpExists},
-			{Key: labelTree, Operator: metav1.LabelSelectorOpNotIn, Values: []string{testTree}},
-		}},
-		TopologyKey: corev1.LabelHostname,
-	}}
-	for name, tc := range map[string]struct {
-		spec     runtime.SpawnSpec
-		affinity bool
-	}{
-		"root, alone":             {rootSpec(t), false},
-		"worker, beside its tree": {workerSpec(t), true},
-		"worker, alone":           {workerSpec(t), false},
-	} {
+	want := []string{
+		"automountServiceAccountToken", "containers", "enableServiceLinks", "initContainers", "nodeSelector",
+		"priorityClassName", "restartPolicy", "runtimeClassName", "securityContext", "terminationGracePeriodSeconds",
+		"tolerations", "volumes",
+	}
+	for name, tc := range manifestCases(t) {
 		t.Run(name, func(t *testing.T) {
-			pod := podOf(t, r, tc.spec, tc.affinity)
-			if pod.Affinity == nil || pod.Affinity.PodAntiAffinity == nil ||
-				!reflect.DeepEqual(pod.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution, want) ||
-				len(pod.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution) > 0 {
-				t.Fatalf("pod anti-affinity %+v, want exactly the required term %+v", pod.Affinity, want)
+			r.agentSecrets = tc.agentSecrets
+			manifest := manifestOf(t, r, tc.spec).(map[string]any)
+			pod := manifest["spec"].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)
+			if got := slices.Sorted(maps.Keys(pod)); !slices.Equal(got, want) {
+				t.Errorf("the pod spec sent carries %v, want exactly %v", got, want)
 			}
-			if got := pod.Affinity.PodAffinity != nil; got != tc.affinity {
-				t.Errorf("the pod requires its own tree's node: %t, want %t", got, tc.affinity)
+		})
+	}
+}
+
+// The volume claim template of every Sandbox, an issue's and the controller's alike, carries no
+// tree label: an issue's claim is labelled by project and issue, the controller's by project and
+// role, while the Sandbox itself keeps the tree, which its tree's cleanup selects by. The volume is
+// the issue's, not the tree's: a child re-admitted as a root of its own keeps its Sandbox and
+// volume, and the relabel (ensureSandbox) patches the Sandbox's labels alone — the daemon's
+// restricted identity has no PVC verb — so a tree label on the claim would name the volume's first
+// tree for life (LEGION-632).
+func TestTheClaimTemplateCarriesTheIssueAndNeverTheTree(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range manifestCases(t) {
+		t.Run(name, func(t *testing.T) {
+			r.agentSecrets = tc.agentSecrets
+			l, err := r.prepare(tc.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := r.sandboxManifest(l)
+			want := map[string]string{labelProject: testProject, labelIssue: labelValue(tc.spec.Issue)}
+			if l.kind == (controllerPod{}) {
+				want = map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}
+			} else if s.Labels[labelTree] != labelValue(tc.spec.Tree) {
+				t.Errorf("the Sandbox carries %s=%q, want its tree %q: the tree's cleanup selects it by that label", labelTree, s.Labels[labelTree], tc.spec.Tree)
+			}
+			if got := s.Spec.VolumeClaimTemplates[0].Metadata.Labels; !maps.Equal(got, want) {
+				t.Errorf("the claim template carries %v, want exactly %v", got, want)
 			}
 		})
 	}
@@ -1396,7 +1496,7 @@ func TestTextSurvivesTheKubeletsExpansion(t *testing.T) {
 			t.Errorf("%s reaches the agent as %q, want %q", name, got, want)
 		}
 	}
-	role := containerNamed(t, r.podTemplate(l, false).Spec, string(spec.Role))
+	role := containerNamed(t, r.podTemplate(l).Spec, string(spec.Role))
 	for _, arg := range role.Command {
 		if expanded := kubeExpand(arg, envOf(role)); strings.ReplaceAll(arg, "$$", "$") != expanded {
 			t.Errorf("the launcher's argument %q reaches it as %q", arg, expanded)

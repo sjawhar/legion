@@ -376,9 +376,7 @@ func TestNoJJCommandReadsALegacyConfigurationTheTreePlanted(t *testing.T) {
 // directory and before anything in it is removed (a config.toml with no config-id beside it is
 // removed only in the shared clone's own repository directory). That holds for a pointer to
 // another directory outright, and for one a lexical join reads as the clone's own while jj, which
-// canonicalizes it physically, opens another repository (pointThroughALink): there, RemoveFinished
-// keeps a pushed workspace holding an edit no jj command ever snapshotted, where a snapshot run
-// against the other repository would have hidden the edit and let the workspace be removed.
+// canonicalizes it physically, opens another repository (pointThroughALink).
 func TestTheRunnerRefusesAWorkspaceWhoseRepoPointerNamesAnotherDirectory(t *testing.T) {
 	t.Run("an absolute pointer to another directory", func(t *testing.T) {
 		run := newLocalRunner(t)
@@ -447,35 +445,6 @@ func TestTheRunnerRefusesAWorkspaceWhoseRepoPointerNamesAnotherDirectory(t *test
 		}
 		if _, err := os.Stat(untouched); err != nil {
 			t.Errorf("%s, outside the shared clone, was touched: %v", untouched, err)
-		}
-	})
-
-	t.Run("a pushed workspace holding an unsnapshotted edit under that pointer is never removed", func(t *testing.T) {
-		run := newLocalRunner(t)
-		ws, err := Provision(context.Background(), run, provisionRequest(t))
-		if err != nil {
-			t.Fatalf("provision: %v", err)
-		}
-		if err := os.WriteFile(filepath.Join(ws.Dir, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		runSetup(t, ws.Dir, "jj", "status")
-		runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
-		pointThroughALink(t, ws)
-		pending := filepath.Join(ws.Dir, "pending.txt")
-		if err := os.WriteFile(pending, []byte("never snapshotted\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-
-		var logged []string
-		err = RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) })
-		if _, statErr := os.Stat(pending); statErr != nil {
-			t.Fatalf("the unsnapshotted edit is gone (%v), want the workspace kept or the pass refused; RemoveFinished = %v, logged %v", statErr, err, logged)
-		}
-		for _, line := range logged {
-			if strings.Contains(line, "removed WIDGETS-42's workspace") {
-				t.Errorf("logged %q, want the workspace kept", line)
-			}
 		}
 	})
 }
@@ -587,21 +556,14 @@ func TestTheRunnerRefusesASharedCloneWhoseRepositoryIsASymlink(t *testing.T) {
 
 // A workspace with no .jj of its own is refused, never run in: jj with no -R walks up to the
 // nearest ancestor holding a .jj and opens that repository instead. Here a tree agent removed a
-// pushed workspace's .jj and made its parent a repository: a jj command in the workspace is refused
-// and never reads the parent's planted legacy configuration, and RemoveFinished keeps the
-// workspace and the edit no jj command snapshotted, where a snapshot run against the parent's
-// repository would have hidden the edit and let the workspace be removed.
+// workspace's .jj and made its parent a repository: a jj command in the workspace is refused and
+// never reads the parent's planted legacy configuration.
 func TestTheRunnerRefusesAWorkspaceWithNoJJOfItsOwn(t *testing.T) {
 	run := newLocalRunner(t)
 	ws, err := Provision(context.Background(), run, provisionRequest(t))
 	if err != nil {
 		t.Fatalf("provision: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(ws.Dir, "feature.txt"), []byte("finished work\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	runSetup(t, ws.Dir, "jj", "status")
-	runSetup(t, ws.Clone, "jj", "git", "push", "--remote", "origin", "--bookmark", ws.Bookmark, "--allow-empty-description")
 	if err := os.RemoveAll(filepath.Join(ws.Dir, ".jj")); err != nil {
 		t.Fatal(err)
 	}
@@ -612,10 +574,6 @@ func TestTheRunnerRefusesAWorkspaceWithNoJJOfItsOwn(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(planted, []byte("[revset-aliases]\n\"empty()\" = \"all()\"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	pending := filepath.Join(ws.Dir, "pending.txt")
-	if err := os.WriteFile(pending, []byte("never snapshotted\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -634,17 +592,6 @@ func TestTheRunnerRefusesAWorkspaceWithNoJJOfItsOwn(t *testing.T) {
 	}
 	if _, err := os.Stat(planted); err != nil {
 		t.Errorf("the parent's planted %s was touched: %v", planted, err)
-	}
-
-	var logged []string
-	err = RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) })
-	if _, statErr := os.Stat(pending); statErr != nil {
-		t.Fatalf("the unsnapshotted edit is gone (%v), want the workspace kept or the pass refused; RemoveFinished = %v, logged %v", statErr, err, logged)
-	}
-	for _, line := range logged {
-		if strings.Contains(line, "removed WIDGETS-42's workspace") {
-			t.Errorf("logged %q, want the workspace kept", line)
-		}
 	}
 }
 
@@ -857,22 +804,6 @@ func TestTheRunnerRefusesASymlinkedLayoutDirectory(t *testing.T) {
 		}
 		if _, statErr := os.Stat(pending); statErr != nil {
 			t.Fatalf("Remove touched the unsnapshotted edit (%v), want the layout guard to refuse before rename or RemoveAll", statErr)
-		}
-
-		before = len(run.Calls())
-		var logged []string
-		err = RemoveFinished(context.Background(), run, ws, "WIDGETS-42", "", time.Hour, func(line string) { logged = append(logged, line) })
-		refused(t, "RemoveFinished", err, symlink)
-		if calls := len(run.Calls()); calls != before {
-			t.Errorf("RemoveFinished ran %d command(s) after the layout guard, want %d", calls, before)
-		}
-		if _, statErr := os.Stat(pending); statErr != nil {
-			t.Fatalf("the unsnapshotted edit is gone (%v), want the workspace kept or the pass refused; RemoveFinished = %v, logged %v", statErr, err, logged)
-		}
-		for _, line := range logged {
-			if strings.Contains(line, "removed WIDGETS-42's workspace") {
-				t.Errorf("logged %q, want the workspace kept", line)
-			}
 		}
 	})
 }

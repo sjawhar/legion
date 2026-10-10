@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -54,13 +55,13 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // it lacks the agent-secrets volumes a role that enrolls now is started against. The first role
 // relaunched after either moved replaces it, and its siblings resume into the new pod. Before each
 // start the Sandbox records the addresses the generation is handed (recordAddresses). A new pod is
-// readied by its kind (podKind.readyNewPod): an issue pod waits its turn among its tree's pods and
-// has its workspace's provisioning token minted, the controller's pod needs nothing. A workflow
-// claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so the tree's
-// cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox this creates.
-// On an error the caller owns stopping its previous process (runtime.Runtime's Spawn and Resume);
-// relaunch stops only the child it may itself have started: a Start the launcher received but did
-// not answer in time (stopIssuedChild).
+// provisioned by its kind (podKind.provision), under nothing but the pod's own launch turn: an
+// issue pod has its workspace's provisioning token minted, the controller's pod needs nothing. A
+// workflow claim passed its tree's lifecycle check before the call (supervise's checkLaunch), so the
+// tree's cleanup, which waits for every claim of the tree to retire, lists whatever Sandbox this
+// creates. On an error the caller owns stopping its previous process (runtime.Runtime's Spawn and
+// Resume); relaunch stops only the child it may itself have started: a Start the launcher received
+// but did not answer in time (stopIssuedChild).
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	l, err := r.prepare(spec)
 	if err != nil {
@@ -100,15 +101,13 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		if err != nil {
 			return fail("wait out its previous pod", err)
 		}
-		releaseNewPod, err := l.kind.readyNewPod(ctx, r, &l, s)
-		if err != nil {
+		if err := l.kind.provision(ctx, r, &l, s); err != nil {
 			return runtime.Locator{}, fmt.Errorf("launch %s: %w", spec.Claim, err)
 		}
-		defer releaseNewPod()
 		if err := r.writeLauncherSecrets(ctx, s, l); err != nil {
 			return fail("write its launcher secrets", err)
 		}
-		template := r.podTemplate(l, l.kind.colocate(r, l))
+		template := r.podTemplate(l)
 		running, err := r.patch(ctx, s,
 			jsonPatchOp{Op: "add", Path: "/spec/podTemplate", Value: template},
 			jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeRunning},
@@ -212,13 +211,16 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // refusal.
 //
 // A Sandbox fits a launch when it carries the tree label the launch's pod carries, none for the
-// controller's pod, and owns its volume's claim template when the launch owns the volume
-// (launch.ownsVolume). It is made for its issue's tree (its tree label, and the tree volume template
-// a root's carries), and an issue's key, so its Sandbox's name, outlives a move to another tree: a
-// child of a closed tree re-admitted as a root of its own finds the Sandbox its old tree suspended,
-// which mounts the old root's volume and carries no volume of its own. Such a Sandbox, once
-// Suspended, is deleted and made again for this launch's tree; one that still runs roles of the old
-// tree is a refusal, since replacing it would end them.
+// controller's pod. It is made for an issue, whose key, so its Sandbox's name, outlives a move to
+// another tree: a child of a closed tree re-admitted as a root of its own finds the Sandbox its old
+// tree suspended, labelled with that tree and owning the volume that holds the issue's clone,
+// workspace and its roles' sessions. Such a Sandbox, once Suspended, is relabelled for this
+// launch's tree and kept, volume and sessions with it; the Running patch rewrites its pod template,
+// labels included, before any pod runs. One that still runs roles of the old tree is a refusal,
+// since replacing it would end them. Nothing here deletes a Sandbox, and none without a volume of
+// its own reaches here: every Sandbox this runtime makes carries the issue claim template
+// (sandboxManifest), and the boot census refuses one of the tree-volume layout before any launch
+// (treeVolumeLayout).
 func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
 	tree := r.labels(l)[labelTree]
@@ -253,25 +255,20 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			return nil, fmt.Errorf("sandbox %s exists but is not project %s's (%s=%q)", l.name, r.project, labelProject, s.Labels[labelProject])
 		}
 		if s.DeletionTimestamp == nil {
-			if s.Labels[labelTree] == tree && (!l.ownsVolume || len(s.Spec.VolumeClaimTemplates) > 0) {
+			if s.Labels[labelTree] == tree {
 				return s, nil
 			}
 			if s.mode() != modeSuspended {
-				return nil, fmt.Errorf("sandbox %s, made for tree %s, does not fit this launch of tree %s and still runs roles; it is replaced once they stop",
+				return nil, fmt.Errorf("sandbox %s, made for tree %s, does not fit this launch of tree %s and still runs roles; it is relabelled once they stop",
 					l.name, s.Labels[labelTree], tree)
 			}
-			// A Sandbox with a volume template owns a tree's volume, which only that tree's cleanup
-			// (CleanupTree) deletes, after every claim of the tree retired.
-			if len(s.Spec.VolumeClaimTemplates) > 0 {
-				return nil, fmt.Errorf("sandbox %s owns tree %s's volume and does not fit this launch of tree %s; only that tree's cleanup deletes it",
-					l.name, s.Labels[labelTree], tree)
+			r.log.Info("sandbox runtime: relabelling a suspended sandbox for its issue's new tree, keeping its volume",
+				"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree)
+			relabelled, err := r.patch(ctx, s, jsonPatchOp{Op: "add", Path: labelPatchPath(labelTree), Value: tree})
+			if err != nil {
+				return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, err)
 			}
-			r.log.Info("sandbox runtime: replacing a sandbox made for another tree or without its tree volume", "sandbox", l.name, "uid", s.UID,
-				"tree", s.Labels[labelTree], "for", tree)
-			if err := r.deleteSandbox(ctx, u, false); err != nil && !apierrors.IsConflict(err) {
-				return nil, err
-			}
-			continue
+			return relabelled, nil
 		}
 		r.log.Info("sandbox runtime: waiting out a sandbox being deleted", "sandbox", l.name, "uid", s.UID)
 		gone := func() (bool, error) {
@@ -453,65 +450,10 @@ func ownedBySandbox(refs []metav1.OwnerReference, uid types.UID) bool {
 	return false
 }
 
-// treePods are the other pods of l's tree in the store.
-func (r *Runtime) treePods(l launch) []*corev1.Pod {
-	tree := labelValue(l.spec.Tree)
-	var pods []*corev1.Pod
-	for _, obj := range r.pods.GetStore().List() {
-		pod := obj.(*corev1.Pod)
-		if pod.Name != l.name && pod.Labels[labelTree] == tree {
-			pods = append(pods, pod)
-		}
-	}
-	return pods
-}
-
-// withoutLiveTreePods drops any candidate that still has a live, non-terminal pod of l's tree (by
-// its legion.dev/issue label): a claim whose fail persisted StateFailed despite its own
-// suspendProcess erroring is indistinguishable, in the daemon's own claim store, from one truly
-// gone, so the pod itself, not that record, is checked here — a second guarantee on different
-// evidence than removableWorkspaces' own candidate rule.
-func (r *Runtime) withoutLiveTreePods(l launch, candidates []runtime.RemovableWorkspace) []runtime.RemovableWorkspace {
-	live := make(map[string]bool)
-	for _, pod := range r.treePods(l) {
-		if !terminal(pod) {
-			if issueLabel := pod.Labels[labelIssue]; issueLabel != "" {
-				live[issueLabel] = true
-			}
-		}
-	}
-	filtered := candidates[:0]
-	for _, candidate := range candidates {
-		if !live[labelValue(candidate.Issue)] {
-			filtered = append(filtered, candidate)
-		}
-	}
-	return filtered
-}
-
-// treePodScheduled is whether another pod of l's tree is scheduled now: placed on a node, not
-// finished, and not being deleted. A scheduled pod holds the tree volume's attachment from the
-// moment it is placed, before any container runs, so readiness would be too late a signal.
-func (r *Runtime) treePodScheduled(l launch) bool {
-	for _, pod := range r.treePods(l) {
-		if pod.Spec.NodeName != "" && !terminal(pod) && pod.DeletionTimestamp == nil {
-			return true
-		}
-	}
-	return false
-}
-
-// lockTree takes the tree's launch turn: one relaunch of a tree's pods at a time holds it, from
-// the check that no other pod of the tree is initializing until its own new pod is in the store,
-// where the next relaunch's check sees it.
-func (r *Runtime) lockTree(ctx context.Context, tree string) (func(), error) {
-	return r.takeTurn(ctx, r.trees, tree)
-}
-
 // lockPod takes a pod's launch turn, keyed by its Sandbox's name, an issue pod's and the project
 // controller's alike: one relaunch, issue suspension, release or orphan deletion of a pod at a time
-// holds it. Role starts in a healthy pod share it only while they select a launcher command; child
-// issue pods remain distinct.
+// holds it. Role starts in a healthy pod share it only while they select a launcher command; the
+// pods of one tree's issues take turns of their own, never one another's.
 func (r *Runtime) lockPod(ctx context.Context, sandbox string) (func(), error) {
 	return r.takeTurn(ctx, r.podTurns, sandbox)
 }
@@ -534,47 +476,6 @@ func (r *Runtime) takeTurn(ctx context.Context, turns map[string]chan struct{}, 
 	}
 }
 
-// treeWaitBound is awaitTreeInitialized's budget: runtime.RegistrationDeadline, called with
-// ProvisionBound (the sibling's own pre-hello registration deadline), plus one more boot interval
-// of headroom — the same ceil(boot)×(intervals+1)-against-boot×intervals relationship
-// workspace-init's own lock wait holds to the registration deadline alone. A named function so a
-// test can assert its exact value without waiting it out.
-func (r *Runtime) treeWaitBound() time.Duration {
-	return runtime.RegistrationDeadline(r.bootTimeout, r.bootIntervals, r.ProvisionBound()) + r.bootTimeout
-}
-
-// awaitTreeInitialized waits until no other pod of l's tree is initializing: every tree pod's
-// workspace-init container provisions against the one shared clone on the tree volume, and under
-// gVisor its flock does not reach past its own pod (each sandbox keeps gofer file locks to
-// itself), so the runtime, through which every launch goes, is what keeps two of them from
-// provisioning at once. A pod counts as initializing from its start until workspace-init ends, its
-// workspace-fetch included. The wait is bounded by treeWaitBound.
-func (r *Runtime) awaitTreeInitialized(ctx context.Context, l launch) error {
-	return r.await(ctx, r.treeWaitBound(), "the other pods of tree "+l.spec.Tree+" to finish workspace-init", func() (bool, error) {
-		for _, pod := range r.treePods(l) {
-			if initializing(pod) {
-				return false, nil
-			}
-		}
-		return true, nil
-	})
-}
-
-// initializing excludes failed attempts that Always restarts: the owning claim's recovery
-// replaces those pods, and a failed sibling must not hold the tree's provisioning lock forever.
-func initializing(pod *corev1.Pod) bool {
-	_, initExit := failedInit(pod)
-	if terminal(pod) || initExit != nil {
-		return false
-	}
-	for _, status := range pod.Status.InitContainerStatuses {
-		if status.Name == initContainer {
-			return status.State.Terminated == nil
-		}
-	}
-	return true
-}
-
 // jsonPatchOp is one RFC 6902 operation.
 type jsonPatchOp struct {
 	Op    string `json:"op"`
@@ -582,10 +483,19 @@ type jsonPatchOp struct {
 	Value any    `json:"value"`
 }
 
+// labelPatchEscape escapes a label key as an RFC 6901 JSON pointer token: `~` as `~0`, `/` as `~1`.
+var labelPatchEscape = strings.NewReplacer("~", "~0", "/", "~1")
+
+// labelPatchPath is the JSON pointer of one of a Sandbox's labels, its key escaped as RFC 6901
+// requires (`~` as `~0`, then `/` as `~1`): an `add` there sets the label, replacing its value.
+func labelPatchPath(key string) string {
+	return "/metadata/labels/" + labelPatchEscape.Replace(key)
+}
+
 // patch applies ops to the Sandbox read as s, as one JSON patch whose first operation tests s's
 // uid, so a Sandbox deleted and recreated in between is never written. A JSON patch, not a merge
 // patch: `add` replaces the pod template whole, where a merge patch would keep every key of the
-// previous template the new one leaves out — an affinity among them.
+// previous template the new one leaves out.
 func (r *Runtime) patch(ctx context.Context, s *sandbox, ops ...jsonPatchOp) (*sandbox, error) {
 	body, err := json.Marshal(append([]jsonPatchOp{{Op: "test", Path: "/metadata/uid", Value: string(s.UID)}}, ops...))
 	if err != nil {

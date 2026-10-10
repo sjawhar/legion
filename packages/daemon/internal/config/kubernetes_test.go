@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
@@ -52,7 +53,7 @@ func kubernetesWith(line, replacement string) string {
 }
 
 func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
-	path := writeConfigFile(t, kubernetesFile+`    tree_volume: 30Gi
+	path := writeConfigFile(t, kubernetesFile+`    issue_volume: 30Gi
     kubeconfig: kube/legion-daemon
     context: legion-daemon@example
     session_store: pvc
@@ -63,11 +64,9 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
         - {key: spot, operator: Exists, effect: NoExecute}
       priority_class: legion-workers
     resources:
-      implementer:
-        requests: {cpu: 500m, memory: 2Gi}
-        limits: {memory: 6Gi, ephemeral_storage: 30Gi}
-      tester:
-        limits: {cpu: 4}
+      implementer: {cpu: 1500m, memory: 8Gi, ephemeral_storage: 40Gi, ephemeral_storage_request: 2Gi}
+      tester: {cpu: 2}
+      merger: {}
     pod:
       env: {PI_CONFIG_FILES: /etc/legion-operator/overlay.yml, CLAUDE_CODE_USE_FOUNDRY: 0, GEMINI_API_KEY_FILE: /var/run/operator/gemini}
       service_account: legion-worker
@@ -95,11 +94,14 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 		t.Fatalf("LoadForValidation: %v", err)
 	}
 
+	resources := DefaultResources()
+	resources[claim.RoleImplementer] = RoleResources{CPU: "1500m", Memory: "8Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
+	resources[claim.RoleTester] = RoleResources{CPU: "2", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
 	want := Runtime{Name: "kubernetes", Kubernetes: &Kubernetes{
 		Namespace:    "legion",
 		Image:        workerImage,
 		StorageClass: "gp2",
-		TreeVolume:   "30Gi",
+		IssueVolume:  "30Gi",
 		Kubeconfig:   filepath.Join(filepath.Dir(path), "kube/legion-daemon"),
 		Context:      "legion-daemon@example",
 		Scheduling: Scheduling{
@@ -110,13 +112,9 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 			},
 			PriorityClass: "legion-workers",
 		},
-		Resources: map[claim.Role]RoleResources{
-			claim.RoleImplementer: {
-				Requests: Quantities{CPU: "500m", Memory: "2Gi"},
-				Limits:   Quantities{Memory: "6Gi", EphemeralStorage: "30Gi"},
-			},
-			claim.RoleTester: {Limits: Quantities{CPU: "4"}},
-		},
+		// A role's entry sets a field or leaves it to the default, field by field: the tester's
+		// memory and disk bound and the merger's whole reservation are the defaults.
+		Resources: resources,
 		Pod: PodConfig{
 			Env: map[string]string{
 				"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml", "CLAUDE_CODE_USE_FOUNDRY": "0",
@@ -156,10 +154,12 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 	}
 }
 
-// What a block that sets only its required members settles to: the tree volume at 20Gi, no
-// requests or limits on any role (one tree per node, the pool's floor sizing the node), no
-// scheduling beyond the Legion pool the runtime selects, in-cluster credentials, and nothing of the
-// operator's in any pod.
+// What a block that sets only its required members settles to: the issue volume at 20Gi, every
+// role's reservation at the daemon's default (the six workflow roles and the controller, each with
+// a cpu and a memory, summing to 3 CPU and 19 GiB over an issue pod's six, and each with its
+// ephemeral-storage limit, 20Gi for the implementer and tester and 10Gi for the rest, over a 1Gi
+// request), no scheduling beyond the Legion pool the runtime selects, in-cluster credentials, and
+// nothing of the operator's in any pod.
 func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile), noEnv)
 	if err != nil {
@@ -173,8 +173,16 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		name      string
 		got, want any
 	}{
-		{"tree_volume", block.TreeVolume, "20Gi"},
-		{"resources", block.Resources, map[claim.Role]RoleResources(nil)},
+		{"issue_volume", block.IssueVolume, "20Gi"},
+		{"resources", block.Resources, map[claim.Role]RoleResources{
+			claim.RoleArchitect:   {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RolePlanner:     {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleImplementer: {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleTester:      {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleReviewer:    {CPU: "750m", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleMerger:      {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleController:  {CPU: "1", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+		}},
 		{"scheduling", block.Scheduling, Scheduling{}},
 		{"kubeconfig", block.Kubeconfig, ""},
 		{"context", block.Context, ""},
@@ -186,6 +194,56 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 				t.Errorf("%s = %#v, want %#v", tc.name, tc.got, tc.want)
 			}
 		})
+	}
+	if !reflect.DeepEqual(block.Resources, DefaultResources()) {
+		t.Errorf("DefaultResources() = %#v, want the settled block's %#v: it is what the sandbox tests and the live proof build from", DefaultResources(), block.Resources)
+	}
+	var cpu, memory resource.Quantity
+	for _, role := range claim.Roles {
+		cpu.Add(resource.MustParse(block.Resources[role].CPU))
+		memory.Add(resource.MustParse(block.Resources[role].Memory))
+	}
+	if cpu.Cmp(resource.MustParse("3")) != 0 || memory.Cmp(resource.MustParse("19Gi")) != 0 {
+		t.Errorf("an issue pod's six roles sum to %s CPU and %s, want 3 and 19Gi", cpu.String(), memory.String())
+	}
+}
+
+// A role's entry sets one field alone and keeps the others' defaults, so a partial entry still
+// settles to a complete reservation: the pod stays Guaranteed with no memory the operator wrote,
+// and bounded on the node's disk with no ephemeral storage the operator wrote.
+func TestARoleSettingOnlyItsCPUKeepsTheDefaultMemory(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    resources: {reviewer: {cpu: 2}, planner: {memory: 2Gi}}\n"), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	resources := cfg.Runtime.Kubernetes.Resources
+	if got, want := resources[claim.RoleReviewer], (RoleResources{CPU: "2", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+		t.Errorf("reviewer = %+v, want %+v: the file's cpu and the default memory and disk bound", got, want)
+	}
+	if got, want := resources[claim.RolePlanner], (RoleResources{CPU: "250m", Memory: "2Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+		t.Errorf("planner = %+v, want %+v: the default cpu and disk bound and the file's memory", got, want)
+	}
+	if got, want := resources[claim.RoleArchitect], (RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+		t.Errorf("architect = %+v, want the default %+v: a role the file leaves out", got, want)
+	}
+}
+
+// A role's ephemeral-storage bound is the file's where it sets a side and the default for the side
+// it leaves out: `ephemeral_storage` alone raises the limit over the default 1Gi request, and
+// `ephemeral_storage_request` alone raises the request under the default limit — the operator who
+// knows the node's root volume reserves disk without restating the limit. Each setting is read
+// as the file wrote it, since the daemon parses it into the container's requirements.
+func TestARolesEphemeralStorageBoundSettlesFieldByField(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    resources: {tester: {ephemeral_storage: 40Gi}, merger: {ephemeral_storage_request: 2Gi}}\n"), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	resources := cfg.Runtime.Kubernetes.Resources
+	if got, want := resources[claim.RoleTester], (RoleResources{CPU: "750m", Memory: "6Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+		t.Errorf("tester = %+v, want %+v: the file's limit over the default request", got, want)
+	}
+	if got, want := resources[claim.RoleMerger], (RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "2Gi"}); got != want {
+		t.Errorf("merger = %+v, want %+v: the file's request under the default limit", got, want)
 	}
 }
 
@@ -269,18 +327,25 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "storage_class absent",
 			body: kubernetesWith("    storage_class: gp2\n", ""),
-			want: "runtime.kubernetes.storage_class is required: the cluster has no default storage class for the tree volume",
+			want: "runtime.kubernetes.storage_class is required: the cluster has no default storage class for the issue volumes",
 		},
 		{
-			name: "tree_volume not a quantity",
-			body: kubernetesFile + "    tree_volume: twenty gigs\n",
-			want: "runtime.kubernetes.tree_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+			name: "issue_volume not a quantity",
+			body: kubernetesFile + "    issue_volume: twenty gigs\n",
+			want: "runtime.kubernetes.issue_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
 			// The runtime reads a zero volume as "use the default", so zero would be a silent 20Gi.
-			name: "tree_volume zero",
-			body: kubernetesFile + "    tree_volume: 0\n",
-			want: "runtime.kubernetes.tree_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+			name: "issue_volume zero",
+			body: kubernetesFile + "    issue_volume: 0\n",
+			want: "runtime.kubernetes.issue_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+		},
+		{
+			// The tree-volume layout's key (LEGION-632): refused naming the key that replaced it, not
+			// as a generic unknown key, so --check-config says what to edit.
+			name: "the tree-volume layout's tree_volume",
+			body: kubernetesFile + "    tree_volume: 30Gi\n",
+			want: "runtime.kubernetes.tree_volume is now issue_volume: one volume per issue",
 		},
 		{
 			name: "kubeconfig blank",
@@ -360,12 +425,12 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "resources not a mapping",
 			body: kubernetesFile + "    resources: [planner]\n",
-			want: "runtime.kubernetes.resources must be a mapping of role to requests and limits",
+			want: "runtime.kubernetes.resources must be a mapping of role to its cpu and memory reservation",
 		},
 		{
 			// The TypeScript daemon's resource profiles are not roles.
 			name: "resources keyed by a profile",
-			body: kubernetesFile + "    resources: {small: {requests: {cpu: 500m}}}\n",
+			body: kubernetesFile + "    resources: {small: {cpu: 500m}}\n",
 			want: `runtime.kubernetes.resources key "small" must be a role (architect, planner, implementer, tester, reviewer, merger, controller)`,
 		},
 		{
@@ -376,7 +441,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "a role's resources not a mapping",
 			body: kubernetesFile + "    resources: {planner: 500m}\n",
-			want: "runtime.kubernetes.resources.planner must be a mapping",
+			want: "runtime.kubernetes.resources.planner must be a mapping of cpu and memory",
 		},
 		{
 			name: "a role's resources with an unknown member",
@@ -384,29 +449,52 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "unknown key runtime.kubernetes.resources.planner.claims",
 		},
 		{
-			name: "requests not a mapping",
-			body: kubernetesFile + "    resources: {planner: {requests: 500m}}\n",
-			want: "runtime.kubernetes.resources.planner.requests must be a mapping",
+			// The earlier shape's nested mappings (LEGION-632): each refused naming the one
+			// reservation that replaced them, never as a generic unknown key.
+			name: "a role's requests mapping",
+			body: kubernetesFile + "    resources: {planner: {requests: {cpu: 500m, memory: 1Gi}}}\n",
+			want: "runtime.kubernetes.resources.planner.requests is gone: a role's reservation is one cpu and one memory, each both its request and its limit",
 		},
 		{
-			name: "an unknown resource",
-			body: kubernetesFile + "    resources: {planner: {limits: {nvidia.com/gpu: 1}}}\n",
-			want: "unknown key runtime.kubernetes.resources.planner.limits.nvidia.com/gpu",
+			name: "a role's limits mapping",
+			body: kubernetesFile + "    resources: {planner: {cpu: 500m, limits: {memory: 2Gi}}}\n",
+			want: "runtime.kubernetes.resources.planner.limits is gone: a role's reservation is one cpu and one memory, each both its request and its limit",
+		},
+		{
+			// The settled request is held to the settled limit, whichever side the file set.
+			name: "an ephemeral_storage_request past its ephemeral_storage",
+			body: kubernetesFile + "    resources: {planner: {ephemeral_storage_request: 12Gi}}\n",
+			want: "runtime.kubernetes.resources.planner.ephemeral_storage_request 12Gi exceeds ephemeral_storage 10Gi",
+		},
+		{
+			name: "an ephemeral_storage_request past the ephemeral_storage set beside it",
+			body: kubernetesFile + "    resources: {tester: {ephemeral_storage: 30Gi, ephemeral_storage_request: 31Gi}}\n",
+			want: "runtime.kubernetes.resources.tester.ephemeral_storage_request 31Gi exceeds ephemeral_storage 30Gi",
+		},
+		{
+			name: "an ephemeral_storage that is no quantity",
+			body: kubernetesFile + "    resources: {planner: {ephemeral_storage: lots}}\n",
+			want: "runtime.kubernetes.resources.planner.ephemeral_storage must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+		},
+		{
+			name: "a zero ephemeral_storage_request",
+			body: kubernetesFile + "    resources: {planner: {ephemeral_storage_request: 0}}\n",
+			want: "runtime.kubernetes.resources.planner.ephemeral_storage_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
 			name: "a quantity that is not one",
-			body: kubernetesFile + "    resources: {planner: {requests: {memory: lots}}}\n",
-			want: "runtime.kubernetes.resources.planner.requests.memory must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+			body: kubernetesFile + "    resources: {planner: {memory: lots}}\n",
+			want: "runtime.kubernetes.resources.planner.memory must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
 			name: "a negative quantity",
-			body: kubernetesFile + "    resources: {planner: {limits: {cpu: -1}}}\n",
-			want: "runtime.kubernetes.resources.planner.limits.cpu must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+			body: kubernetesFile + "    resources: {planner: {cpu: -1}}\n",
+			want: "runtime.kubernetes.resources.planner.cpu must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
 			name: "the TypeScript role_profiles",
 			body: kubernetesFile + "    role_profiles: {tester: large}\n",
-			want: "unknown key runtime.kubernetes.role_profiles: each role's requests and limits are set under runtime.kubernetes.resources, and a role absent there gets none",
+			want: "unknown key runtime.kubernetes.role_profiles: a role's reservation is runtime.kubernetes.resources.<role>, a cpu and a memory each both request and limit, and a role absent there takes the daemon's default",
 		},
 		{
 			name: "session_store postgres without its key",
@@ -833,8 +921,8 @@ runtime:
 	if cfg.Linger != 18*time.Minute || cfg.Gates.Design != DesignGateOff || cfg.AdmissionCap != 2 {
 		t.Errorf("Linger=%s Gates=%+v AdmissionCap=%d, want 18m, off, 2", cfg.Linger, cfg.Gates, cfg.AdmissionCap)
 	}
-	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@example" || block.Resources != nil || block.Scheduling.NodeSelector != nil {
-		t.Errorf("kubernetes block = %+v, want the restricted context, no requests, and no node selector", *block)
+	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@example" || !reflect.DeepEqual(block.Resources, DefaultResources()) || block.Scheduling.NodeSelector != nil {
+		t.Errorf("kubernetes block = %+v, want the restricted context, every role's default reservation, and no node selector", *block)
 	}
 	if pod := cfg.Runtime.Kubernetes.Pod; pod.ServiceAccount != "legion-worker" || len(pod.Volumes) != 2 || len(pod.VolumeMounts) != 3 ||
 		pod.Env["PI_CONFIG_FILES"] != "/etc/legion-operator/overlay.yml" {

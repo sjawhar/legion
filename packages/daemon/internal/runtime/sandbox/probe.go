@@ -79,23 +79,28 @@ type ImageProbe struct {
 	// refuse (the zero Names, a kind left nil, a name no prompt can write): a probe pod handed one
 	// would fail, and the failure would be blamed on the image.
 	RoleReferences promptrefs.Names
-	// Resources are the probe container's requests and limits (the TypeScript probe used the
-	// `small` profile): it runs Oh My Pi three times (pi.agents, the plugin's load, the
-	// session-storage setting) and exits. None when zero.
+	// Resources are the probe container's requirements, as the daemon hands them: the probe's own
+	// fixed reservation (internal/daemon/kubernetes.go, probeReservation), its cpu and memory the
+	// request and the limit alike so the probe pod is Guaranteed as every Legion pod is. It runs Oh
+	// My Pi three times, one at a time (pi.agents, the plugin's load, the session-storage setting),
+	// and exits, so it is sized for that and not for a role's work.
 	Resources corev1.ResourceRequirements
 }
 
 // ProbeImage proves the runtime's image (Options.Image) on the cluster before any claim runs on
-// it, answering what the probe's OK line reported of the image (bootprobe.ImageReport), or
-// refuses naming why. Every boot probes: no pass is remembered, because the probe pod's spec
-// cannot show the contents of the operator's ConfigMaps and Secrets, which decide whether the
-// prompt-named agents' models resolve (the LEGION-270 plan, decision 5). An attempt's verdict is
-// definitive — the API refusing what
-// was sent (400, 401, 403, 422, or a create's 404), an image the kubelet cannot use, a pod whose
-// probe container exited on its own and Failed, a log without the OK line or confirming another
-// contract, or not resolving the agents' models, or not checking the capability list, a providers
-// Secret the pod cannot mount — or transient: anything else, a pod the kubelet itself failed
-// included, retried under p.Retry (worker-image-probe.ts:318-338, 470-508).
+// it, answering what the probe's OK line reported of the image and how the run went
+// (bootprobe.ImageReport), or refuses naming why. Every boot probes: no pass is remembered, because
+// the probe pod's spec cannot show the contents of the operator's ConfigMaps and Secrets, which
+// decide whether the prompt-named agents' models resolve (the LEGION-270 plan, decision 5). An
+// attempt's verdict is definitive — the API refusing what was sent (400, 401, 403, 422, or a
+// create's 404), an image the kubelet cannot use, a pod whose probe container exited on its own
+// and Failed, a log without the OK line or confirming another contract, or not resolving the
+// agents' models, or not checking the capability list, a providers Secret the pod cannot mount —
+// or waiting: a pod the pool has no room for (stuck), which counts against no attempt budget, since
+// a full pool says nothing about the image and the daemon must stay up until it has room — or
+// transient: anything else, a pod the kubelet itself failed included, retried under p.Retry
+// (worker-image-probe.ts:318-338, 470-508). The report counts the attempts that waited on capacity
+// and keeps the last one's reason, for the pool-capacity row of the capability report.
 func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.ImageReport, error) {
 	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
 		return bootprobe.ImageReport{}, errors.New("image probe: a contract, a positive budget, and a positive retry wait are required")
@@ -113,18 +118,23 @@ func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.Image
 	digest := "sha256:" + hex
 	name := probeName(r.project, hex)
 	// The report is the passing attempt's: a transient attempt reports nothing, and a refusal ends
-	// the run.
+	// the run. The capacity waits are the run's own count.
 	var report bootprobe.ImageReport
+	waits, reason := 0, ""
 	err := bootprobe.Run(ctx, "worker image", p.Retry, r.log, func(ctx context.Context) bootprobe.Outcome {
 		outcome, passed := r.probeAttempt(ctx, p, name, digest)
-		if outcome.Passed {
+		switch {
+		case outcome.Passed:
 			report = passed
+		case outcome.Waiting != "":
+			waits, reason = waits+1, outcome.Waiting
 		}
 		return outcome
 	})
 	if err != nil {
 		return bootprobe.ImageReport{}, err
 	}
+	report.CapacityWaits, report.CapacityReason = waits, reason
 	return report, nil
 }
 
@@ -345,15 +355,39 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 const providersMountRecheck = 15 * time.Second
 
 // stuck is the verdict on a probe pod that has not finished and never will, or nil while waiting
-// can still change it: an image the kubelet cannot use, or a providers Secret it cannot mount,
-// which leaves the pod Pending, never Failed, and which its events say. They are read at most every
-// providersMountRecheck; mountRead holds when they last were.
+// can still change it: an image the kubelet cannot use; a pod the pool has no room for, which the
+// scheduler leaves Pending with PodScheduled=False Unschedulable, waited on (bootprobe.Outcome.Waiting)
+// once it has been so for longer than the boot timeout — the same bound the liveness rules give an
+// issue pod (observe.go), long enough for Karpenter to add a node under the pool's limits when it
+// can, so a cold pool scaling up is not mistaken for a full one — rather than counted against the
+// attempt budget, since a full pool says nothing about the image; or a providers Secret it cannot
+// mount, which leaves the pod Pending, never Failed, and which its events say. They are read at
+// most every providersMountRecheck; mountRead holds when they last were.
+//
+// Ending the attempt on an Unschedulable pod deletes its Sandbox (probeAttempt's deferred delete)
+// and the next attempt, after the retry's longest wait, creates it again: a probe pod that could
+// not be placed holds no node, so recreating it costs the pool nothing, and the new pod asks the
+// scheduler afresh rather than keeping one object Pending across the daemon's whole wait.
 func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest string, mountRead *time.Time) *bootprobe.Outcome {
 	if reason := probeWaiting(pod); definitiveWaiting[reason] {
 		unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, reason)
 		return &unusable
 	}
-	if !r.mountsProviders() || pod.Status.Phase != corev1.PodPending || r.now().Sub(*mountRead) < providersMountRecheck {
+	if pod.Status.Phase != corev1.PodPending {
+		return nil
+	}
+	if scheduled := podCondition(pod, corev1.PodScheduled); scheduled != nil &&
+		scheduled.Status == corev1.ConditionFalse && scheduled.Reason == corev1.PodReasonUnschedulable {
+		since := scheduled.LastTransitionTime.Time
+		if since.IsZero() {
+			since = pod.CreationTimestamp.Time
+		}
+		if r.now().Sub(since) > r.bootTimeout {
+			waiting := bootprobe.Outcome{Waiting: fmt.Sprintf("probe pod %s is Unschedulable: %s", name, scheduled.Message)}
+			return &waiting
+		}
+	}
+	if !r.mountsProviders() || r.now().Sub(*mountRead) < providersMountRecheck {
 		return nil
 	}
 	*mountRead = r.now()

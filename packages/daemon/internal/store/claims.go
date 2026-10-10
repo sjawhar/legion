@@ -109,14 +109,17 @@ func (s *Store) Claims(ctx context.Context) ([]supervise.Claim, error) {
 	return claims, nil
 }
 
-// TreeHasSessions includes retained and retired roles: a new role may be the first to notice
-// that the shared volume holding another role's recorded session disappeared.
-func (s *Store) TreeHasSessions(ctx context.Context, project, tree string) (bool, error) {
+// IssueHasSessions is whether any stored claim of issue, retained and retired roles included,
+// recorded a session: the issue's volume must then already hold its clone and that session, so a
+// new role of the issue may be the first to notice the volume holding another role's session
+// disappeared. A session another issue of the same tree recorded is on that issue's own volume and
+// does not count.
+func (s *Store) IssueHasSessions(ctx context.Context, project, issue string) (bool, error) {
 	var exists bool
-	err := s.pool.QueryRow(ctx, `select exists (select 1 from claims where project = $1 and tree = $2 and session_file <> '')`,
-		project, tree).Scan(&exists)
+	err := s.pool.QueryRow(ctx, `select exists (select 1 from claims where project = $1 and issue = $2 and session_file <> '')`,
+		project, issue).Scan(&exists)
 	if err != nil {
-		return false, fmt.Errorf("read retained sessions of tree %s: %w", tree, err)
+		return false, fmt.Errorf("read retained sessions of issue %s: %w", issue, err)
 	}
 	return exists, nil
 }

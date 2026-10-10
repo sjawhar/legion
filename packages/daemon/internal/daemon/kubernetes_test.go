@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -19,28 +20,49 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
-	corev1 "k8s.io/api/core/v1"
 )
 
 // kubernetesConfig is testConfig under runtime: kubernetes, its client a kubeconfig whose current
-// context points at server.
+// context points at server, and every role's reservation at the loader's defaults, as a loaded
+// configuration holds them.
 func kubernetesConfig(t *testing.T, server string) config.Config {
 	t.Helper()
 	cfg := testConfig(t)
 	cfg.Runtime = config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{
 		Namespace: "legion", Image: "ghcr.io/sjawhar/legion-worker@sha256:" + strings.Repeat("a", 64),
-		StorageClass: "gp2", TreeVolume: "20Gi", Kubeconfig: writeKubeconfig(t, server, "test"),
+		StorageClass: "gp2", IssueVolume: "20Gi", Kubeconfig: writeKubeconfig(t, server, "test"),
+		Resources: config.DefaultResources(),
 	}}
 	return cfg
+}
+
+// defaultReservations are every role's container requirements at the daemon's defaults, translated
+// as sandboxOptions translates them: the map sandbox.New requires of a test that builds Options by
+// hand, since it refuses one lacking a role.
+func defaultReservations(t *testing.T) map[claim.Role]corev1.ResourceRequirements {
+	t.Helper()
+	reservations := map[claim.Role]corev1.ResourceRequirements{}
+	for role, reservation := range config.DefaultResources() {
+		requirements, err := roleRequirements(role, reservation)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reservations[role] = requirements
+	}
+	return reservations
 }
 
 // writeKubeconfig is a kubeconfig of one cluster at server and one context, its current context
@@ -356,7 +378,7 @@ func TestOpenSupervisionAdvertisesAdvertiseHostNotTheWildcardBind(t *testing.T) 
 }
 
 // prepare refuses what the cluster would refuse only later: a kubeconfig with no current context
-// when runtime.kubernetes.context names none, and a role's request above its limit.
+// when runtime.kubernetes.context names none, or a context the kubeconfig does not have.
 func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -377,15 +399,6 @@ func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *tes
 			},
 			want: `context "production" does not exist`,
 		},
-		{
-			name: "a request above its limit",
-			change: func(k *config.Kubernetes, _ *testing.T) {
-				k.Resources = map[claim.Role]config.RoleResources{claim.RoleImplementer: {
-					Requests: config.Quantities{CPU: "2", Memory: "4Gi"}, Limits: config.Quantities{CPU: "1", Memory: "8Gi"},
-				}}
-			},
-			want: "runtime.kubernetes.resources.implementer: the cpu request 2 is above its limit 1",
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := kubernetesConfig(t, "https://127.0.0.1:1")
@@ -394,6 +407,152 @@ func TestAKubernetesDaemonRefusesAConfigurationTheClusterWouldRefuseLater(t *tes
 				t.Fatalf("prepare = %v, want a refusal containing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+// Every role's reservation reaches the runtime's Options as that role's container requirements,
+// its cpu and memory the request and the limit alike — the file's values where it set them, here
+// one role's — so every container the runtime builds from them is Guaranteed, and its ephemeral
+// storage the limit the file or the default set with the request under it; and the image probe
+// carries its own fixed reservation (probeReservation), 250m and 1Gi over a 5Gi disk bound and a
+// 1Gi disk request, translated the same way and no role's share — a probe that reserved the
+// controller's 1 CPU and 4Gi could not boot the daemon on a pool with room for less.
+func TestEveryReservationReachesTheSandboxRuntimeAsRequestAndLimit(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.Runtime.Kubernetes.Resources[claim.RoleImplementer] = config.RoleResources{CPU: "1500m", Memory: "8Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	if len(opts.Resources) != len(claim.Roles)+1 {
+		t.Fatalf("the runtime's Resources name %d roles, want the six workflow roles and the controller", len(opts.Resources))
+	}
+	for role, reservation := range cfg.Runtime.Kubernetes.Resources {
+		got, ok := opts.Resources[role]
+		if !ok {
+			t.Errorf("%s has no requirements", role)
+			continue
+		}
+		want := corev1.ResourceRequirements{
+			Requests: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory),
+				corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorageRequest),
+			},
+			Limits: corev1.ResourceList{
+				corev1.ResourceCPU: resource.MustParse(reservation.CPU), corev1.ResourceMemory: resource.MustParse(reservation.Memory),
+				corev1.ResourceEphemeralStorage: resource.MustParse(reservation.EphemeralStorage),
+			},
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s's requirements = %+v, want %+v (cpu and memory request == limit; ephemeral-storage request under its limit)", role, got, want)
+		}
+	}
+	probe, err := imageProbe(cfg, promptrefs.New())
+	if err != nil {
+		t.Fatalf("imageProbe: %v", err)
+	}
+	wantProbe, err := requirements("the image probe's reservation", probeReservation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(probe.Resources, wantProbe) {
+		t.Errorf("the image probe carries %+v, want its own reservation %+v", probe.Resources, wantProbe)
+	}
+	for kind, want := range map[corev1.ResourceName]string{corev1.ResourceCPU: "250m", corev1.ResourceMemory: "1Gi", corev1.ResourceEphemeralStorage: "1Gi"} {
+		if request := probe.Resources.Requests[kind]; request.Cmp(resource.MustParse(want)) != 0 {
+			t.Errorf("the image probe requests %s %s, want %s", kind, request.String(), want)
+		}
+	}
+	for kind, want := range map[corev1.ResourceName]string{corev1.ResourceCPU: "250m", corev1.ResourceMemory: "1Gi", corev1.ResourceEphemeralStorage: "5Gi"} {
+		if limit := probe.Resources.Limits[kind]; limit.Cmp(resource.MustParse(want)) != 0 {
+			t.Errorf("the image probe is limited to %s %s, want %s", kind, limit.String(), want)
+		}
+	}
+	if controller := opts.Resources[claim.RoleController]; reflect.DeepEqual(probe.Resources, controller) {
+		t.Errorf("the image probe carries the controller's reservation %+v; it must carry its own", controller)
+	}
+}
+
+// The path that failed live (stage 4b's daemon-controller-liveness, 2026-10-10): a legion.yaml
+// under `controller: daemon` whose controller reservation no node can hold (the checkpoint's
+// `cpu: "100000"`, set so the relaunched controller pod is Unschedulable) is read by the loader as
+// written — the controller's requirements carry the 100000 CPU — while the image probe the daemon
+// builds from the same configuration carries its own 250m / 1Gi and nothing of the controller's,
+// so the daemon's boot probe still schedules. This is the manifest-level proof: the probe pod's
+// container takes ImageProbe.Resources as it is (TestManifestGoldens, probe.json), and a boot-level
+// run needs a cluster.
+func TestAnImpossibleControllerReservationLeavesTheImageProbeItsOwn(t *testing.T) {
+	dir := t.TempDir()
+	body := fmt.Sprintf(`project: DEMO
+postgres_dsn: postgres://legion:legion@127.0.0.1:1/legion
+state_dir: %s
+bind: 10.0.0.5
+daemon_url: http://10.0.0.5:13370
+envoy_url: http://envoy-listener.internal.example:9020
+envoy_token_file: ./envoy-token
+operator_token_file: ./operator-token
+dispatch_url: https://dispatch.internal.example
+dispatch_token_file: ./dispatch-token
+nats_urls: [nats://nats.internal.example:4222]
+controller: daemon
+projects:
+  DEMO: { repo: acme/widgets }
+github_apps:
+  implement: { app_id: "1", private_key_command: "exit 1" }
+  review: { app_id: "2", private_key_command: "exit 1" }
+runtime:
+  kubernetes:
+    namespace: legion
+    image: ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    storage_class: gp2
+    kubeconfig: ./kubeconfig
+    context: legion-daemon
+    resources:
+      controller: { cpu: "100000", memory: 1Gi }
+`, filepath.Join(dir, "state"))
+	path := filepath.Join(dir, "legion.yaml")
+	for name, contents := range map[string]string{
+		path: body, "envoy-token": "envoy\n", "operator-token": "operator\n", "dispatch-token": "dispatch\n",
+		"kubeconfig": `apiVersion: v1
+kind: Config
+clusters: [{name: example, cluster: {server: "https://192.0.2.20:6443"}}]
+users: [{name: legion-daemon, user: {token: placeholder}}]
+contexts: [{name: legion-daemon, context: {cluster: example, user: legion-daemon, namespace: legion}}]
+current-context: legion-daemon
+`,
+	} {
+		if !filepath.IsAbs(name) {
+			name = filepath.Join(dir, name)
+		}
+		if err := os.WriteFile(name, []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := config.LoadForValidation(path, nil)
+	if err != nil {
+		t.Fatalf("load the liveness checkpoint's configuration: %v", err)
+	}
+	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "demo", "", lookup(nil), quietLogger())
+	if err != nil {
+		t.Fatalf("sandboxOptions: %v", err)
+	}
+	controller := opts.Resources[claim.RoleController]
+	if cpu := controller.Requests[corev1.ResourceCPU]; cpu.Cmp(resource.MustParse("100000")) != 0 {
+		t.Fatalf("the controller's request reached the runtime as %s CPU, want the file's 100000", cpu.String())
+	}
+	probe, err := imageProbe(cfg, promptrefs.New())
+	if err != nil {
+		t.Fatalf("imageProbe: %v", err)
+	}
+	for kind, want := range map[corev1.ResourceName]string{corev1.ResourceCPU: "250m", corev1.ResourceMemory: "1Gi"} {
+		request, limit := probe.Resources.Requests[kind], probe.Resources.Limits[kind]
+		if request.Cmp(resource.MustParse(want)) != 0 || limit.Cmp(resource.MustParse(want)) != 0 {
+			t.Errorf("the image probe carries %s request %s / limit %s beside a 100000-CPU controller, want its own %s as both",
+				kind, request.String(), limit.String(), want)
+		}
+	}
+	if reflect.DeepEqual(probe.Resources, controller) {
+		t.Errorf("the image probe carries the controller's impossible reservation %+v", controller)
 	}
 }
 
@@ -554,7 +713,6 @@ func awaitHealthz(t *testing.T, cfg config.Config, done chan error) {
 func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 	cfg.WorkerStopTimeout, cfg.WorkerBootTimeout, cfg.ProbeInterval, cfg.SlowCommandTimeout = 11*time.Second, 22*time.Second, 33*time.Second, 44*time.Second
-	cfg.WorkerBootRegistrationDeadlineIntervals = 5
 
 	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
@@ -576,9 +734,6 @@ func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 		if row.got != row.want {
 			t.Errorf("%s = %s, want %s", row.option, row.got, row.want)
 		}
-	}
-	if opts.BootIntervals != cfg.WorkerBootRegistrationDeadlineIntervals {
-		t.Errorf("sandbox BootIntervals = %d, want %d", opts.BootIntervals, cfg.WorkerBootRegistrationDeadlineIntervals)
 	}
 }
 
