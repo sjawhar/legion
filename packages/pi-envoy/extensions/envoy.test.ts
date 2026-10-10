@@ -21,7 +21,13 @@ import {
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import { LOCAL_ENVOY_NOTICE, resetEnvoyPluginInterfaceForTests } from "@legion/pi-shared/interface";
-import type { MessageRenderer, MessageRendererTheme, PiApi } from "@legion/pi-shared/pi-types";
+import type {
+  HostSlashCommand,
+  MessageRenderer,
+  MessageRendererTheme,
+  PiApi,
+  UserInputResult,
+} from "@legion/pi-shared/pi-types";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
@@ -662,6 +668,11 @@ async function bootDirectSession(
     /** Runs as the host is handed each delivery, before it takes it: a throw is the host refusing
      *  the send. */
     readonly beforeSend?: () => void;
+    /** The host's `pi.sendUserInput`, which a host without it lacks; each call is recorded in
+     *  `inputs` and counts as a delivery. */
+    readonly sendUserInput?: (text: string, options: unknown) => Promise<UserInputResult>;
+    /** The host's `pi.getCommands`. */
+    readonly getCommands?: () => readonly HostSlashCommand[];
   } = {}
 ) {
   process.env.DISPATCH_URL = "http://dispatch.test";
@@ -672,6 +683,9 @@ async function bootDirectSession(
     readonly body: unknown;
   }[] = [];
   const posts: string[] = [];
+  // The session's replies to the direct message's attempts, as Dispatch's reply route took them.
+  const replies: { readonly path: string; readonly body: unknown }[] = [];
+  const replyWaiters: { readonly count: number; readonly resolve: () => void }[] = [];
   globalThis.fetch = async (input, init) => {
     const url = new URL(input.toString());
     if (url.pathname.startsWith("/api/v1/messages/")) {
@@ -687,9 +701,17 @@ async function bootDirectSession(
           (options.accept ?? acceptOnce)(accepts.length)
         );
       }
-      // The session asks Dispatch nothing else about a direct message: any other call is recorded
-      // and refused, so a read-back would keep the card.
+      // The session asks Dispatch nothing else about a direct message but its reply: any other
+      // call is recorded and refused, so a read-back would keep the card.
       posts.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      if ((init?.method ?? "GET") === "POST" && url.pathname.endsWith("/reply")) {
+        replies.push({ body: JSON.parse(init?.body?.toString() ?? "null"), path: url.pathname });
+        for (const waiter of replyWaiters.splice(0)) {
+          if (replies.length >= waiter.count) waiter.resolve();
+          else replyWaiters.push(waiter);
+        }
+        return new Response(JSON.stringify({}), { status: 201 });
+      }
       return new Response(JSON.stringify({ code: "NOT_FOUND" }), { status: 404 });
     }
     const answered = options.dispatch?.(url);
@@ -702,13 +724,15 @@ async function bootDirectSession(
   const fixture = createPi();
   const waiters: { readonly count: number; readonly resolve: () => void }[] = [];
   const recordedWhenDelivered: number[] = [];
+  const inputs: { readonly text: string; readonly options: unknown }[] = [];
   const taken = () => {
-    const count = fixture.deliveries.length + fixture.userMessages.length;
+    const count = fixture.deliveries.length + fixture.userMessages.length + inputs.length;
     for (const waiter of waiters.splice(0)) {
       if (count >= waiter.count) waiter.resolve();
       else waiters.push(waiter);
     }
   };
+  const run = options.sendUserInput;
   envoyExtension({
     ...fixture.pi,
     sendMessage: (message: never, sendOptions: unknown) => {
@@ -723,6 +747,16 @@ async function bootDirectSession(
       fixture.pi.sendUserMessage(content, sendOptions);
       taken();
     },
+    ...(run !== undefined && {
+      sendUserInput: (text: string, inputOptions: unknown) => {
+        options.beforeSend?.();
+        recordedWhenDelivered.push(fixture.entries.length);
+        inputs.push({ options: inputOptions, text });
+        taken();
+        return run(text, inputOptions);
+      },
+    }),
+    getCommands: options.getCommands ?? (() => []),
   });
   const prior = options.entries ?? [];
   const base = sessionContext("ses_delivery");
@@ -743,7 +777,24 @@ async function bootDirectSession(
     taken();
     return waiter.promise;
   };
-  return { accepts, agent, context, delivered, fixture, posts, recordedWhenDelivered };
+  const replied = (count: number): Promise<void> => {
+    const waiter = Promise.withResolvers<void>();
+    if (replies.length >= count) waiter.resolve();
+    else replyWaiters.push({ count, resolve: waiter.resolve });
+    return waiter.promise;
+  };
+  return {
+    accepts,
+    agent,
+    context,
+    delivered,
+    fixture,
+    inputs,
+    posts,
+    recordedWhenDelivered,
+    replied,
+    replies,
+  };
 }
 
 function response(body: unknown): Response {
@@ -5136,6 +5187,181 @@ describe("envoy OMP extension", () => {
         ]);
       });
     }
+
+    // On a host with `pi.sendUserInput` (our fork, can1357/oh-my-pi#14323) a person's accepted
+    // Send or Aside runs as typed at the terminal: a command, a skill, a template or a prompt.
+    // Whatever a command printed, or why it did not run, is the session's reply on Dispatch, which
+    // the conversation shows; a turn the model now works on is its own answer.
+    describe("on a host that runs typed input", () => {
+      test("runs the stored body as typed, tagged with its message id, in the stored mode", async () => {
+        const { agent, delivered, fixture, inputs, posts } = await bootDirectSession(
+          "typed-input-mode",
+          {
+            accept: () => ({ accepted: true, delivery: "aside" }),
+            sendUserInput: async () => ({ handled: "prompt" }),
+          }
+        );
+
+        agent.push(
+          directDispatchEnvelope("steer", "typed-input-mode", { body: "a forger's text" })
+        );
+        await delivered(1);
+
+        expect(inputs).toEqual([
+          { options: { deliverAs: "aside", tag: DIRECT_MESSAGE_ID }, text: DIRECT_MESSAGE_BODY },
+        ]);
+        expect(fixture.userMessages).toEqual([]);
+        expect(posts).toEqual([]);
+      });
+
+      for (const [name, result, reply] of [
+        [
+          "a built-in only the terminal runs",
+          { handled: "terminal-only" },
+          "/new runs only in the session's own terminal; nothing was sent.",
+        ],
+        [
+          "a host mode that cannot run it",
+          { handled: "unavailable" },
+          "/new was not run: this session's host cannot run typed input from Dispatch; nothing was sent.",
+        ],
+        [
+          "a built-in that printed its output",
+          { handled: "command", output: "3 jobs running" },
+          "3 jobs running",
+        ],
+      ] as const satisfies readonly (readonly [string, UserInputResult, string])[]) {
+        test(`answers ${name} with the session's reply`, async () => {
+          const { agent, delivered, replied, replies } = await bootDirectSession(
+            `typed-input-reply-${name}`,
+            {
+              accept: () => ({ accepted: true, body: "/new" }),
+              sendUserInput: async () => result,
+            }
+          );
+
+          agent.push(directDispatchEnvelope("steer", `typed-input-reply-${name}`));
+          await delivered(1);
+          await replied(1);
+
+          expect(replies).toEqual([
+            {
+              body: { actor: { id: "ses_delivery", kind: "session" }, attempt: 1, body: reply },
+              path: `/api/v1/messages/${DIRECT_MESSAGE_ID}/reply`,
+            },
+          ]);
+        });
+      }
+
+      test("a host that fails running it answers with the failure", async () => {
+        const { agent, delivered, replied, replies } = await bootDirectSession(
+          "typed-input-fails",
+          {
+            accept: () => ({ accepted: true, body: "/compact" }),
+            sendUserInput: async () => {
+              throw new Error("compaction is already running");
+            },
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-fails"));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies.map((reply) => reply.body)).toEqual([
+          {
+            actor: { id: "ses_delivery", kind: "session" },
+            attempt: 1,
+            body: "/compact was not run: compaction is already running",
+          },
+        ]);
+      });
+
+      // On an idle session the host answers only once the run it started ends, which can be
+      // minutes; the person's next message must still be taken meanwhile.
+      test("is never awaited, so the next message arrives while the first still runs", async () => {
+        const running = Promise.withResolvers<UserInputResult>();
+        const { agent, delivered, inputs } = await bootDirectSession("typed-input-not-awaited", {
+          accept: () => ({ accepted: true }),
+          sendUserInput: () => running.promise,
+        });
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-not-awaited-1"));
+        agent.push(directDispatchEnvelope("steer", "typed-input-not-awaited-2", { attempt: 2 }));
+        await delivered(2);
+
+        expect(inputs).toHaveLength(2);
+        running.resolve({ handled: "prompt" });
+      });
+
+      // `sendUserInput` takes text alone; the person's pictures reach the host through its input
+      // handlers, as a picture pasted at the terminal does.
+      test("hands the host the pictures the message embeds when it asks for its input's images", async () => {
+        const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
+        const slug = "typed-input-png";
+        const body = `Look:\n\n![shot.png](dispatch://LEGION-1/artifact/${slug}@v1)`;
+        const images: unknown[] = [];
+        const asked = Promise.withResolvers<void>();
+        const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+          {};
+        const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
+          accept: () => ({ accepted: true, body }),
+          dispatch: (url) => {
+            if (url.pathname === `/api/v1/issues/LEGION-1/artifacts/${slug}`) {
+              return Response.json({
+                id: `${slug}-id`,
+                kind: "image",
+                name: "shot.png",
+                versions: [{ mime: "image/png", number: 1, size: png.length }],
+              });
+            }
+            if (url.pathname === `/api/v1/artifacts/${slug}-id/versions/1`) {
+              return new Response(png, { headers: { "Content-Type": "image/png" } });
+            }
+            return undefined;
+          },
+          sendUserInput: async (text) => {
+            const answer = (await handlers.input?.({ source: "extension", text }, context)) as
+              | { readonly images?: readonly unknown[] }
+              | undefined;
+            images.push(...(answer?.images ?? []));
+            asked.resolve();
+            return { handled: "prompt" };
+          },
+        });
+        handlers.input = fixture.handlers.get("input");
+
+        agent.push(directDispatchEnvelope("steer", slug, { body }));
+        await delivered(1);
+        await asked.promise;
+
+        expect(images).toEqual([
+          { data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" },
+        ]);
+      });
+    });
+
+    // A host without `pi.sendUserInput` would hand a command to the model as words, so the
+    // session refuses it with a reply naming its own version; any other text is sent as before.
+    test("refuses a slash command on a host that cannot run typed input, naming the host", async () => {
+      const { agent, fixture, replied, replies } = await bootDirectSession("untyped-host-command", {
+        accept: () => ({ accepted: true, body: "/compact" }),
+      });
+
+      agent.push(directDispatchEnvelope("steer", "untyped-host-command"));
+      await replied(1);
+
+      expect(fixture.userMessages).toEqual([]);
+      expect(replies.map((reply) => reply.body)).toEqual([
+        {
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: expect.stringMatching(
+            /^\/compact was not run: this session's Oh My Pi \S+ cannot run commands sent from Dispatch; nothing was sent\.$/
+          ),
+        },
+      ]);
+    });
   });
 
   // A session is shown each picture once (`shownPictures`). A delivery's pictures count as shown

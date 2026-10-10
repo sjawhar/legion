@@ -1035,8 +1035,12 @@ export default function envoyExtension(pi: PiApi): void {
         ...(builtin.terminalOnly && { terminalOnly: true as const }),
       });
     }
-    for (const command of pi.getCommands()) {
-      commands.push({ description: command.description, name: command.name, source: command.source });
+    for (const command of pi.getCommands?.() ?? []) {
+      commands.push({
+        description: command.description,
+        name: command.name,
+        source: command.source,
+      });
     }
     agentStream.setCommands(agentStreamFramesSubject(session), commands);
   };

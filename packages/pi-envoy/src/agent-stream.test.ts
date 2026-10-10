@@ -179,7 +179,11 @@ describe("AgentStreamPublisher", () => {
     expect(replay.frames.length).toBeGreaterThan(0);
     expect(replay.frames.length).toBeLessThan(60);
     const times = replay.frames.flatMap((frame) =>
-      frame.kind === "message" ? [frame.message.at] : frame.kind === "tool-result" ? [frame.result.at] : []
+      frame.kind === "message"
+        ? [frame.message.at]
+        : frame.kind === "tool-result"
+          ? [frame.result.at]
+          : []
     );
     expect(times).toEqual([...times].sort((left, right) => left - right));
     expect(times.at(-1)).toBe(60);
@@ -191,6 +195,60 @@ describe("AgentStreamPublisher", () => {
     expect(publisher.record(SUBJECT, { content: "hi", role: "user" }, false)).toBe(false);
     expect(publisher.record(SUBJECT, "not a message", false)).toBe(false);
     expect(published).toEqual([]);
+  });
+
+  // The composer offers what the last commands frame lists: it must reach a viewer who opens the
+  // session after the list was set, survive a full history, and change only when the list does.
+  test("the session's commands are the last frame of a replay however long the history", () => {
+    const { publisher } = harness();
+    const body = "x".repeat(AGENT_STREAM_LIMITS.historyBytes / 10);
+    for (let index = 0; index < 20; index += 1) {
+      publisher.record(SUBJECT, assistant(index + 1, [{ text: body, type: "text" }]), false);
+    }
+    publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+    publisher.noteViewer();
+
+    const { frames } = publisher.replay("s1");
+    expect(frames.at(-1)).toMatchObject({
+      commands: [{ name: "compact", source: "builtin" }],
+      kind: "commands",
+    });
+    expect(JSON.stringify(frames).length).toBeLessThanOrEqual(AGENT_STREAM_LIMITS.historyBytes);
+  });
+
+  test("a changed command list is published at once, and an unchanged one is not", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+    publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+    publisher.setCommands(SUBJECT, [
+      { name: "compact", source: "builtin" },
+      { name: "skill:dispatch", source: "skill" },
+    ]);
+
+    expect(
+      published.map((frame) => (frame.kind === "commands" ? frame.commands.length : -1))
+    ).toEqual([1, 2]);
+  });
+
+  // A person types a command as one token, so a name they could not type is not offered, and a
+  // name two sources share is offered once, as the first source lists it.
+  test("a command list keeps each typable name once", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.setCommands(SUBJECT, [
+      { name: "compact", source: "builtin", terminalOnly: undefined },
+      { name: "two words", source: "prompt" },
+      { name: "", source: "extension" },
+      { name: "compact", source: "extension" },
+      { name: "new", source: "builtin", terminalOnly: true },
+    ]);
+
+    const frame = published.at(-1);
+    expect(frame?.kind === "commands" && frame.commands).toEqual([
+      { name: "compact", source: "builtin" },
+      { name: "new", source: "builtin", terminalOnly: true },
+    ]);
   });
 });
 

@@ -60,4 +60,18 @@ describe("the user turns sent into a session", () => {
     ).toBeUndefined();
     expect(matchInjectedUserTurn("s1", user(21, "ship it"))).toBe("m-1");
   });
+
+  // A turn sent through `pi.sendUserInput` carries its Dispatch id as the host's tag: the host
+  // may rewrite its text (a prompt template, a file command), and the same words sent twice are
+  // still two messages, which the tag tells apart where the text cannot.
+  test("are found by the tag the host kept, whatever their text became", () => {
+    noteInjectedUserTurn("s1", "/review src", "m-1");
+    noteInjectedUserTurn("s1", "ship it", "m-2");
+    noteInjectedUserTurn("s1", "ship it", "m-3");
+
+    const expanded = { ...user(20, "Review the code under src for bugs."), tag: "m-1" };
+    expect(matchInjectedUserTurn("s1", expanded)).toBe("m-1");
+    expect(matchInjectedUserTurn("s1", { ...user(30, "ship it"), tag: "m-3" })).toBe("m-3");
+    expect(matchInjectedUserTurn("s1", { ...user(40, "ship it"), tag: "m-2" })).toBe("m-2");
+  });
 });

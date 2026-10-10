@@ -413,8 +413,8 @@ export interface PiApi {
     options?: { readonly deliverAs?: "aside"; readonly tag?: string }
   ) => Promise<UserInputResult>;
   /** The session's extension, custom and skill slash commands (`skill:<name>`), never its
-   *  built-ins. */
-  readonly getCommands: () => readonly HostSlashCommand[];
+   *  built-ins. Every Oh My Pi build has it; Legion's own test hosts leave it out. */
+  readonly getCommands?: () => readonly HostSlashCommand[];
   /** Persist extension state in the session transcript; never sent to the model. */
   readonly appendEntry: <T = unknown>(customType: string, data?: T) => void;
   /**
