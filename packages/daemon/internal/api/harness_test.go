@@ -20,6 +20,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -33,6 +34,10 @@ const (
 	testProject       = "legion"
 	testOperatorToken = "operator-bearer-for-tests"
 )
+
+// testPromptAgents is what the harness's server answers as the task agents a role's prompts
+// dispatch (Options.PromptAgents).
+var testPromptAgents = []string{"deep-worker", "oracle", "plan-gap-analyst"}
 
 // testStore is a migrated database of the test's own on the devbox or CI Postgres: the routes
 // are held to what a real store records, and tests never see each other's rows.
@@ -180,6 +185,8 @@ type harness struct {
 	handler    http.Handler
 	// readied is each claim ClaimReady was told of, in order.
 	readied *[]supervise.Claim
+	// reported is each capability report CapabilityReported was told of, in order.
+	reported *[]capabilities.Report
 }
 
 func newHarness(t *testing.T) *harness {
@@ -216,12 +223,20 @@ func newHarness(t *testing.T) *harness {
 		prompts:  map[claim.Token]string{},
 	}
 	readied := &[]supervise.Claim{}
+	reported := &[]capabilities.Report{}
 	server := NewServer("127.0.0.1", 8437, Options{
 		Supervisor: sup, BootTokens: tokens, Project: testProject, OperatorToken: testOperatorToken, Controller: st, Log: quiet,
 		Pool: st.Pool(), Record: record.NewStore(), Releaser: rt, Trees: st,
-		ClaimReady: func(c supervise.Claim) { *readied = append(*readied, c) },
+		ClaimReady:   func(c supervise.Claim) { *readied = append(*readied, c) },
+		PromptAgents: testPromptAgents,
+		CapabilityReported: func(_ context.Context, _ supervise.Claim, report capabilities.Report) {
+			*reported = append(*reported, report)
+		},
 	})
-	return &harness{t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler, readied: readied}
+	return &harness{
+		t: t, ctx: ctx, store: st, runtime: rt, conns: conns, tokens: tokens, supervisor: sup, handler: server.Handler,
+		readied: readied, reported: reported,
+	}
 }
 
 // request sends one request through the server's own handler. A nil body sends none; a string is

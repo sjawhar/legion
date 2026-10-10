@@ -8,9 +8,11 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -21,9 +23,10 @@ func secretHash(secret string) []byte {
 	return sum[:]
 }
 
-// The registration answers who the agent is and a secret for its later calls, and the secret's
-// hash is on the claim row before the answer is written: a daemon that restarts one instruction
-// later still recognises the agent.
+// The registration answers who the agent is, a secret for its later calls, and the task agents
+// its role's prompts dispatch (Options.PromptAgents), and the secret's hash is on the claim row
+// before the answer is written: a daemon that restarts one instruction later still recognises
+// the agent.
 func TestRegisterIssuesASecretWhoseHashIsStoredBeforeTheResponse(t *testing.T) {
 	h := newHarness(t)
 	token, boot := h.launch("LEGION-208", claim.RoleArchitect)
@@ -32,9 +35,9 @@ func TestRegisterIssuesASecretWhoseHashIsStoredBeforeTheResponse(t *testing.T) {
 
 	want := claim.RegisterResponse{
 		ClaimToken: token, Tree: "LEGION-208", Issue: "LEGION-208", Role: claim.RoleArchitect, Generation: 1,
-		Secret: got.Secret,
+		Secret: got.Secret, PromptAgents: testPromptAgents,
 	}
-	if got != want || got.Secret == "" {
+	if !reflect.DeepEqual(got, want) || got.Secret == "" {
 		t.Fatalf("register answered %+v, want %+v with a secret", got, want)
 	}
 	stored := h.stored(token)
@@ -47,6 +50,25 @@ func TestRegisterIssuesASecretWhoseHashIsStoredBeforeTheResponse(t *testing.T) {
 	}
 	if bytes.Contains([]byte(stored.Session+stored.SessionFile), []byte(got.Secret)) {
 		t.Error("the secret itself reached the claim row")
+	}
+}
+
+// A daemon given no task agents answers an empty `promptAgents` list, never null: the plugin's
+// strict reader takes an array, and a role whose prompts dispatch no agent measures none.
+func TestRegisterAnswersAnEmptyPromptAgentsListWhenTheDaemonHasNone(t *testing.T) {
+	h := newHarness(t)
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, Controller: h.store,
+	}).Handler
+	_, boot := h.launch("LEGION-208", claim.RoleArchitect)
+
+	recorder := h.register(boot, "ses_architect")
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("register = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if !bytes.Contains(recorder.Body.Bytes(), []byte(`"promptAgents":[]`)) {
+		t.Fatalf("register answered %s, want an empty promptAgents array", recorder.Body)
 	}
 }
 
@@ -222,6 +244,90 @@ func TestReadyOfTheClaimsSessionTellsTheWorkflow(t *testing.T) {
 
 	if got := *h.readied; len(got) != 2 || got[0].Token != token || got[0].Session != "ses_architect" || got[1].Session != "ses_architect" {
 		t.Fatalf("told of %+v, want the claim's session twice and never ses_other", got)
+	}
+}
+
+// A ready that carries the session's capability report (LEGION-663) hands it to the daemon
+// (Options.CapabilityReported) once, normalised: a row the table has no live row for is dropped,
+// a live row the session did not report is open as "not reported by this session", a chatty
+// detail is cut at capabilities.MaxReportDetail, the rows are in the table's order, and the
+// report names the claim's process and the generation the ready ran at. Nothing in the report is
+// a reason to refuse the ready — the daemon runs the session and reports what it lacks — so the
+// route still answers 204.
+func TestReadyWithACapabilityReportTellsTheDaemonTheNormalisedReport(t *testing.T) {
+	h := newHarness(t)
+	token, boot := h.launch("LEGION-208", claim.RoleImplementer)
+	registered := h.registered(boot, "ses_implementer")
+	measured := time.Date(2026, 10, 10, 2, 18, 59, 0, time.UTC)
+	long := strings.Repeat("x", 2000)
+
+	recorder := h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: token, SessionID: "ses_implementer", Secret: registered.Secret, Generation: registered.Generation,
+		Capabilities: &claim.CapabilityReport{
+			MeasuredAt: measured, ElapsedMs: 1200,
+			Rows: []claim.CapabilityRow{
+				{Name: "github", OK: false, Detail: long},
+				{Name: "eval-js", OK: true, Detail: "an image row, not a live one"},
+				{Name: "subagents", OK: true, Detail: "3 task agents discovered"},
+				{Name: "web-search", OK: true, Detail: "web_search is active"},
+				{Name: "mcp", OK: true, Detail: "no MCP server is configured"},
+				{Name: "repository-extensions", OK: true, Detail: "2 extension paths discovered"},
+			},
+		},
+	}, nil)
+
+	if recorder.Code != http.StatusNoContent || recorder.Body.Len() != 0 {
+		t.Fatalf("ready = %d %q, want 204 and no body", recorder.Code, recorder.Body)
+	}
+	stored := h.stored(token)
+	if stored.State != supervise.StateReady || stored.Locator == nil {
+		t.Fatalf("stored %+v, want the claim ready with its process", stored)
+	}
+	before := time.Now().Add(-time.Minute)
+	if len(*h.reported) != 1 {
+		t.Fatalf("told of %d reports, want one", len(*h.reported))
+	}
+	got := (*h.reported)[0]
+	if got.ReportedAt.Before(before) || got.ReportedAt.Location() != time.UTC {
+		t.Errorf("reportedAt = %v, want now in UTC", got.ReportedAt)
+	}
+	got.ReportedAt = time.Time{}
+	want := capabilities.Report{
+		Claim: token, Generation: registered.Generation, Locator: *stored.Locator,
+		MeasuredAt: measured, ElapsedMs: 1200,
+		Rows: []capabilities.Row{
+			{Name: capabilities.Subagents, OK: true, Detail: "3 task agents discovered"},
+			{Name: capabilities.WebSearch, OK: true, Detail: "web_search is active"},
+			{Name: capabilities.MCP, OK: true, Detail: "no MCP server is configured"},
+			{Name: capabilities.RepositoryExtensions, OK: true, Detail: "2 extension paths discovered"},
+			{Name: capabilities.DispatchEnvoyTools, OK: false, Detail: "not reported by this session"},
+			{Name: capabilities.GitHub, OK: false, Detail: long[:capabilities.MaxReportDetail]},
+		},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("told of %+v, want %+v", got, want)
+	}
+}
+
+// A ready without a report — the controller's, or a plugin that measured nothing — tells the
+// daemon no report, while the ready itself is taken as before.
+func TestReadyWithoutACapabilityReportTellsTheDaemonNothing(t *testing.T) {
+	h := newHarness(t)
+	token, boot := h.launch("LEGION-208", claim.RoleArchitect)
+	registered := h.registered(boot, "ses_architect")
+
+	recorder := h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: token, SessionID: "ses_architect", Secret: registered.Secret, Generation: registered.Generation,
+	}, nil)
+
+	if recorder.Code != http.StatusNoContent {
+		t.Fatalf("ready = %d %q, want 204", recorder.Code, recorder.Body)
+	}
+	if got := *h.reported; len(got) != 0 {
+		t.Fatalf("told of %+v, want no report", got)
+	}
+	if got := *h.readied; len(got) != 1 {
+		t.Fatalf("ClaimReady told of %+v, want the one ready", got)
 	}
 }
 

@@ -1326,7 +1326,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	state, err := projection.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, s.project, claims)
+	state, err := projection.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, s.project, claims, nil)
 	if err != nil {
 		return api.State{}, err
 	}

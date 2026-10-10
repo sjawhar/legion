@@ -1,0 +1,27 @@
+{
+  "claimToken": "legion-legion-legion-208-implementer",
+  "sessionId": "ses_implementer_208",
+  "secret": "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+  "generation": 5,
+  "capabilities": {
+    "measuredAt": "2026-10-10T02:18:59Z",
+    "elapsedMs": 1200,
+    "rows": [
+      {
+        "name": "subagents",
+        "ok": true,
+        "detail": "6 task agents discovered: deep-worker, oracle, plan-gap-analyst, plan-reviewer, thermonuclear-code-quality, thermonuclear-deep-review"
+      },
+      {
+        "name": "dispatch-envoy-tools",
+        "ok": true,
+        "detail": "dispatch read LEGION-208 answered; envoy_whoami is active"
+      },
+      {
+        "name": "github",
+        "ok": false,
+        "detail": "gh api user: HTTP 401: Bad credentials"
+      }
+    ]
+  }
+}

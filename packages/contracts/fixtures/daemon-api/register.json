@@ -4,5 +4,13 @@
   "issue": "LEGION-208",
   "role": "architect",
   "generation": 3,
-  "secret": "U3VwZXJ2aXNlZEJ5TGVnaW9u"
+  "secret": "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+  "promptAgents": [
+    "deep-worker",
+    "oracle",
+    "plan-gap-analyst",
+    "plan-reviewer",
+    "thermonuclear-code-quality",
+    "thermonuclear-deep-review"
+  ]
 }

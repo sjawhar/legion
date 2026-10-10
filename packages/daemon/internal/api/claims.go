@@ -11,8 +11,11 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -100,17 +103,30 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("api: claim registered", "claim", c.Token, "generation", launch.Generation,
 		"session", req.SessionID, "agent", req.AgentID, "pluginContract", req.PluginContract)
 	writeJSON(w, http.StatusOK, claim.RegisterResponse{
-		ClaimToken: c.Token,
-		Tree:       c.Tree,
-		Issue:      c.Issue,
-		Role:       c.Role,
-		Generation: launch.Generation,
-		Secret:     secret,
+		ClaimToken:   c.Token,
+		Tree:         c.Tree,
+		Issue:        c.Issue,
+		Role:         c.Role,
+		Generation:   launch.Generation,
+		Secret:       secret,
+		PromptAgents: s.promptAgentsList(),
 	})
 }
 
+// promptAgentsList is Options.PromptAgents as the registration answers it: never nil, so a role
+// whose prompts dispatch no task agent reads `[]` rather than `null`.
+func (s *server) promptAgentsList() []string {
+	if len(s.promptAgents) == 0 {
+		return []string{}
+	}
+	return s.promptAgents
+}
+
 // ready is the agent saying it can be prompted; its machine sends the pending delivery, if any,
-// once the claim's connection is registered.
+// once the claim's connection is registered. A ready that carries the session's capability report
+// (LEGION-663) hands it, normalised, to Options.CapabilityReported once the claim has taken the
+// ready: what the report says is never a reason to refuse the ready — the daemon runs the session
+// and reports what it lacks — and a row the table has no live row for is dropped and logged.
 func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	var req claim.ReadyRequest
 	if !readBody(w, r, &req) || !requireFields(w,
@@ -132,10 +148,41 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 		s.claimFailure(w, "ready", req.ClaimToken, err)
 		return
 	}
+	c := m.Claim()
+	if req.Capabilities != nil {
+		report := s.capabilityReport(c, req)
+		if s.capabilityReported != nil {
+			s.capabilityReported(r.Context(), c, report)
+		}
+	}
 	if s.claimReady != nil {
-		s.claimReady(m.Claim())
+		s.claimReady(c)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// capabilityReport is the ready's capability report as the daemon keeps it: the rows normalised
+// (capabilities.Normalize), the claim's process as the reporter — or a locator naming the claim
+// alone, for a claim its machine records no process for — and the generation the ready ran at.
+func (s *server) capabilityReport(c supervise.Claim, req claim.ReadyRequest) capabilities.Report {
+	kept, dropped := capabilities.Normalize(req.Capabilities.Rows)
+	if len(dropped) > 0 {
+		s.log.Warn("api: a ready's capability report named rows the table has no live row for",
+			"claim", req.ClaimToken, "session", req.SessionID, "names", dropped)
+	}
+	locator := runtime.Locator{Claim: req.ClaimToken}
+	if c.Locator != nil {
+		locator = *c.Locator
+	}
+	return capabilities.Report{
+		Claim:      req.ClaimToken,
+		Generation: req.Generation,
+		Locator:    locator,
+		MeasuredAt: req.Capabilities.MeasuredAt,
+		ReportedAt: time.Now().UTC(),
+		ElapsedMs:  req.Capabilities.ElapsedMs,
+		Rows:       kept,
+	}
 }
 
 // exit is the agent reporting its own end: a worker's claim is released and retires, the tree's

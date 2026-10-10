@@ -6,6 +6,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -89,6 +90,14 @@ func populatedState() State {
 									Container: "implementer", Generation: 5,
 								},
 							},
+							// The session's capability report (LEGION-663), from the process the locator
+							// names: two rows it proved and one it did not, with the fact its check found.
+							Capabilities: &CapabilityReportView{
+								MeasuredAt:  time.Date(2026, 9, 22, 9, 17, 3, 0, time.UTC),
+								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
+								OK:          []string{"subagents", "dispatch-envoy-tools"},
+								Open:        []CapabilityGap{{Name: "github", Detail: "gh api user: HTTP 401: Bad credentials"}},
+							},
 						},
 						HandoffCommit: "",
 						Rounds:        2,
@@ -128,9 +137,10 @@ func populatedState() State {
 		},
 		AgentSecretsLogin: &AgentSecretsLoginView{State: "pending", Code: "WXYZ-1234"},
 		// A kubernetes deployment whose image passed the probe, with the broker gap decided and
-		// one role unreserved, so the fixture carries a decided row and an open row beside the
-		// present, live and withheld ones, rendered by the report itself: a wording change there
-		// rewrites the fixture rather than leaving the pinned words stale.
+		// one role unreserved, and no session's report yet, so the fixture carries a decided row and
+		// an open row beside the present, unchecked and withheld ones, rendered by the report
+		// itself: a wording change there rewrites the fixture rather than leaving the pinned words
+		// stale.
 		Capabilities: CapabilityStatesOf(capabilities.Deployment{
 			Runtime: "kubernetes", Probed: true, ModelFallback: "on",
 			Decided:               map[capabilities.Name]string{capabilities.Secrets: "pods are enrolled with the secrets broker once dispatch://LEGION-205 lands; until then no pod reads a secret"},
@@ -239,16 +249,84 @@ func golden(t *testing.T, name string, value any) {
 	}
 }
 
-// The register response is what the plugin reads its claim and its secret from.
+// The register response is what the plugin reads its claim, its secret and the task agents its
+// role's prompts dispatch from.
 func TestRegisterResponseGolden(t *testing.T) {
 	golden(t, "register.json", claim.RegisterResponse{
-		ClaimToken: "legion-legion-legion-208-architect",
-		Tree:       "LEGION-208",
-		Issue:      "LEGION-208",
-		Role:       claim.RoleArchitect,
-		Generation: 3,
-		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		ClaimToken:   "legion-legion-legion-208-architect",
+		Tree:         "LEGION-208",
+		Issue:        "LEGION-208",
+		Role:         claim.RoleArchitect,
+		Generation:   3,
+		Secret:       "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		PromptAgents: []string{"deep-worker", "oracle", "plan-gap-analyst", "plan-reviewer", "thermonuclear-code-quality", "thermonuclear-deep-review"},
 	})
+}
+
+// The ready request is what the plugin posts once its session can be prompted, with the capability
+// report the session measured while it booted (LEGION-663): the one request body of the claim
+// routes the contract pins, since the report is the one with a shape of its own.
+func TestReadyRequestGolden(t *testing.T) {
+	golden(t, "ready.json", claim.ReadyRequest{
+		ClaimToken: "legion-legion-legion-208-implementer",
+		SessionID:  "ses_implementer_208",
+		Secret:     "U3VwZXJ2aXNlZEJ5TGVnaW9u",
+		Generation: 5,
+		Capabilities: &claim.CapabilityReport{
+			MeasuredAt: time.Date(2026, 10, 10, 2, 18, 59, 0, time.UTC),
+			ElapsedMs:  1200,
+			Rows: []claim.CapabilityRow{
+				{Name: "subagents", OK: true, Detail: "6 task agents discovered: deep-worker, oracle, plan-gap-analyst, plan-reviewer, thermonuclear-code-quality, thermonuclear-deep-review"},
+				{Name: "dispatch-envoy-tools", OK: true, Detail: "dispatch read LEGION-208 answered; envoy_whoami is active"},
+				{Name: "github", OK: false, Detail: "gh api user: HTTP 401: Bad credentials"},
+			},
+		},
+	})
+}
+
+// A session's report shows on its claim as the names it proved and the gaps it did not, each side
+// in the report's order, and both sides are arrays on the wire even when empty: a session that
+// proved every row has `"open": []`, not `null`, under the plugin's strict reader.
+func TestCapabilityReportViewPartitionsTheRowsAndNeverMarshalsNull(t *testing.T) {
+	measured := time.Date(2026, 10, 10, 2, 18, 59, 0, time.UTC)
+	report := capabilities.Report{
+		Claim: "legion-legion-legion-208-implementer", Generation: 5, MeasuredAt: measured,
+		Locator: runtime.Locator{Runtime: runtime.RuntimeSandbox, Claim: "legion-legion-legion-208-implementer", Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5"},
+		Rows: []capabilities.Row{
+			{Name: capabilities.Subagents, OK: true, Detail: "6 task agents discovered"},
+			{Name: capabilities.WebSearch, Detail: "web_search is not an active tool"},
+			{Name: capabilities.MCP, OK: true, Detail: "no MCP server is configured"},
+			{Name: capabilities.GitHub, Detail: "gh api user: HTTP 401: Bad credentials"},
+		},
+	}
+	want := &CapabilityReportView{
+		MeasuredAt:  measured,
+		Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
+		OK:          []string{"subagents", "mcp"},
+		Open: []CapabilityGap{
+			{Name: "web-search", Detail: "web_search is not an active tool"},
+			{Name: "github", Detail: "gh api user: HTTP 401: Bad credentials"},
+		},
+	}
+	if got := CapabilityReportViewOf(report); !reflect.DeepEqual(got, want) {
+		t.Fatalf("CapabilityReportViewOf = %#v, want %#v", got, want)
+	}
+
+	allOK := CapabilityReportViewOf(capabilities.Report{Rows: []capabilities.Row{{Name: capabilities.Subagents, OK: true}}})
+	encoded, err := json.Marshal(allOK)
+	if err != nil {
+		t.Fatalf("marshal the view: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"open":[]`)) {
+		t.Fatalf("view = %s, want an empty open array", encoded)
+	}
+	noneOK := CapabilityReportViewOf(capabilities.Report{Rows: []capabilities.Row{{Name: capabilities.Subagents, Detail: "no task agent discovered"}}})
+	if encoded, err = json.Marshal(noneOK); err != nil {
+		t.Fatalf("marshal the view: %v", err)
+	}
+	if !bytes.Contains(encoded, []byte(`"ok":[]`)) {
+		t.Fatalf("view = %s, want an empty ok array", encoded)
+	}
 }
 
 // A session that registered with the controller capability learns the project's controller token
