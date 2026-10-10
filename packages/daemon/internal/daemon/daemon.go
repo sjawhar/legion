@@ -6,9 +6,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -745,10 +747,17 @@ type supervision struct {
 	// capability report read present.
 	imageReport bootprobe.ImageReport
 	probed      bool
-	// reportedGaps are the open capabilities the last report logged (reportCapabilities), under
-	// reportMu: the tick's reads and boot's run on different goroutines.
+	// reportMu guards reportedGaps and reports: the tick's reads, the API's readies and boot's run
+	// on different goroutines. reportedGaps are the open capabilities the last report logged
+	// (reportCapabilities). reports is each claim's latest capability report (LEGION-663), as its
+	// session's ready carried it (capabilityReported) or the store held it at boot (openSupervision),
+	// whatever process reported: deployment fences each against its claim's current process.
 	reportMu     sync.Mutex
 	reportedGaps []string
+	reports      map[claim.Token]capabilities.Report
+	// reportStore persists each report as it arrives (store.Store), so a restart renders the
+	// sessions it re-adopts without waiting for them to report again.
+	reportStore capabilityReportStore
 
 	cancel context.CancelFunc
 	// draining is the worker stream's life and what the API's routes run their decisions on
@@ -795,21 +804,136 @@ func Deployment(cfg config.Config) capabilities.Deployment {
 }
 
 // deployment is Deployment with what this boot learned: the broker login's state, whether the
-// image passed its probe, and the model-fallback mark the probe or the gate read.
+// image passed its probe, the model-fallback mark the probe or the gate read, and the live
+// sessions' reports of the live rows (LEGION-663). A session is live when its claim is ready,
+// working or idle with a process, and its report is that process's: a report from a claim since
+// relaunched, suspended or retired names a session that no longer runs and contributes nothing,
+// until the new process reports. The claims are read as their machines last published them
+// (supervise.Machine.View), never waiting on a decision in flight, so the tick and the state route
+// read the deployment while a relaunch waits on its pods; the sessions are in claim token order.
+// It reads memory alone: no store, no context.
 func (s *supervision) deployment() capabilities.Deployment {
 	d := Deployment(s.cfg)
 	if s.plan.secretsLogin != nil {
 		d.SecretsLogin = s.plan.secretsLogin.LoginStatus().State
 	}
 	d.Probed, d.ModelFallback = s.probed, s.imageReport.ModelFallback
+	if s.supervisor == nil {
+		return d
+	}
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	for _, m := range s.supervisor.supervised() {
+		c := m.View().Claim
+		report, ok := s.reports[c.Token]
+		if !ok || c.Locator == nil || report.Locator.Incarnation != c.Locator.Incarnation {
+			continue
+		}
+		switch c.State {
+		case supervise.StateReady, supervise.StateWorking, supervise.StateIdle:
+			d.Sessions = append(d.Sessions, capabilities.Session{Role: c.Role, Issue: c.Issue, Report: report})
+		}
+	}
+	slices.SortFunc(d.Sessions, func(a, b capabilities.Session) int {
+		return strings.Compare(string(a.Report.Claim), string(b.Report.Claim))
+	})
 	return d
+}
+
+// capabilityReportStore is the store's keeping of each claim's latest capability report
+// (store.Store.PutCapabilityReport), as capabilityReported persists one.
+type capabilityReportStore interface {
+	PutCapabilityReport(ctx context.Context, report capabilities.Report) error
+}
+
+// capabilityReported takes a session's report of the live rows, which its ready carried
+// (api.Options.CapabilityReported): kept as its claim's latest, persisted, and logged — one line
+// naming the session and every row it measured, then one warning per row whose check failed, so
+// an operator reading the log at the ready sees what this session lacks without waiting for the
+// tick's report. A store that refuses the write is logged and the report kept in memory all the
+// same: the daemon runs the session and reports what it lacks, so a lost persistence loses a
+// report at the next boot, never a claim.
+func (s *supervision) capabilityReported(ctx context.Context, c supervise.Claim, report capabilities.Report) {
+	s.reportMu.Lock()
+	if s.reports == nil {
+		s.reports = map[claim.Token]capabilities.Report{}
+	}
+	s.reports[c.Token] = report
+	s.reportMu.Unlock()
+	if err := s.reportStore.PutCapabilityReport(ctx, report); err != nil {
+		s.log.Error("capabilities: the session's report could not be persisted; it is kept until the daemon stops", "claim", c.Token, "error", err)
+	}
+	rows := make([]claim.CapabilityRow, len(report.Rows))
+	for i, row := range report.Rows {
+		rows[i] = claim.CapabilityRow{Name: string(row.Name), OK: row.OK, Detail: row.Detail}
+	}
+	// A slice of strings and booleans always marshals.
+	encoded, _ := json.Marshal(rows)
+	log := s.log.With("claim", c.Token, "role", c.Role, "issue", c.Issue,
+		"locator", locatorLabel(report.Locator), "incarnation", report.Locator.Incarnation)
+	log.Info("capabilities: session reported", "elapsedMs", report.ElapsedMs, "rows", string(encoded))
+	for _, row := range report.Rows {
+		if !row.OK {
+			log.Warn(fmt.Sprintf("capability %s is open: %s", row.Name, row.Detail), "capability", string(row.Name))
+		}
+	}
+}
+
+// capabilityReports is a copy of every claim's latest report, for the state route
+// (source.reports): the projection shows each claim its own, whatever process reported it, with
+// the incarnation a reader compares to the claim's locator.
+func (s *supervision) capabilityReports() map[claim.Token]capabilities.Report {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	return maps.Clone(s.reports)
+}
+
+// locatorLabel is how a log line names the process a report came from: its pod and container
+// under a sandbox locator, its pane under tmux, and the claim alone when the locator names no
+// process (api's report of a claim whose machine held none).
+func locatorLabel(locator runtime.Locator) string {
+	switch {
+	case locator.Sandbox != nil:
+		return "pod " + locator.Sandbox.Name + "/" + locator.Sandbox.Container
+	case locator.Tmux != nil:
+		return "pane " + locator.Tmux.Window + ":" + locator.Tmux.Pane
+	}
+	return "claim " + string(locator.Claim)
+}
+
+// reportsOfClaims is the stored reports of claims, by claim: the store is shared across projects,
+// and another legion's sessions are not this deployment's.
+func reportsOfClaims(reports []capabilities.Report, claims []supervise.Claim) map[claim.Token]capabilities.Report {
+	tokens := make(map[claim.Token]bool, len(claims))
+	for _, c := range claims {
+		tokens[c.Token] = true
+	}
+	own := make(map[claim.Token]capabilities.Report, len(reports))
+	for _, report := range reports {
+		if tokens[report.Claim] {
+			own[report.Claim] = report
+		}
+	}
+	return own
+}
+
+// promptAgents is the sorted names of every task agent the role prompts dispatch
+// (prompts.RoleReferences), which the registration answers (api.Options.PromptAgents): an empty
+// list, never nil, when the prompts dispatch none.
+func promptAgents(references promptrefs.Names) []string {
+	agents := slices.Sorted(maps.Keys(references[promptrefs.TaskAgents]))
+	if agents == nil {
+		return []string{}
+	}
+	return agents
 }
 
 // reportCapabilities names the deployment capabilities with no decision, in the table's order, and
 // logs the report whenever that set differs from the one last logged: once at boot, and again from
 // a controller tick that finds it changed (admit.Admission.ReportCapabilities asks only when the
 // tick queues a wake: a controller is registered and no tick notice is pending) — the broker's
-// login reaching issued is the one change a running daemon sees — so a gap is logged at boot and
+// login reaching issued, and a live session's report of a row its check failed
+// (capabilityReported), are the changes a running daemon sees — so a gap is logged at boot and
 // at the first tick after a change, never on every tick, and never between ticks.
 func (s *supervision) reportCapabilities() []string {
 	d := s.deployment()
@@ -846,16 +970,20 @@ func shimAddress(bound, advertiseHost string) (string, error) {
 	return "tcp://" + net.JoinHostPort(advertiseHost, port), nil
 }
 
-// openSupervision reads the claims the store holds, takes the worker stream, and builds the
-// runtime over it, for supervision's lifetime and with the workflow's App tokens (nil without a
-// workflow): every step of supervision that can refuse, so a daemon that cannot supervise refuses
-// before its boot is recorded.
+// openSupervision reads the claims the store holds and their sessions' capability reports, takes
+// the worker stream, and builds the runtime over it, for supervision's lifetime and with the
+// workflow's App tokens (nil without a workflow): every step of supervision that can refuse, so a
+// daemon that cannot supervise refuses before its boot is recorded.
 func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, p plan, st *store.Store, apps appauth.Tokens) (*supervision, error) {
 	claims, err := st.Claims(boot)
 	if err != nil {
 		return nil, err
 	}
 	claims = ofProject(claims, p.project)
+	reports, err := st.CapabilityReports(boot)
+	if err != nil {
+		return nil, err
+	}
 
 	supervising, cancel := context.WithCancel(context.Background())
 	draining, endDrain := context.WithCancel(context.Background())
@@ -913,6 +1041,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{
 		cfg: cfg, log: log, plan: p, stream: listener, runtime: rt, supervisor: sup, tokens: tokens, claims: claims,
+		reports: reportsOfClaims(reports, claims), reportStore: st,
 		cancel: cancel, draining: draining, endDrain: endDrain, decided: api.NewRouteDecisions(),
 		stopping: stopping, beginStop: beginStop,
 	}, nil
@@ -1204,6 +1333,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 			startedAt:    startedAt,
 			secretsLogin: p.secretsLogin,
 			deployment:   s.deployment,
+			reports:      s.capabilityReports,
 		},
 		StateTransactions:  st,
 		Supervisor:         s.supervisor,
@@ -1229,6 +1359,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Releaser:           s.supervisor.deps.Runtime,
 		Trees:              st,
 		ClaimReady:         claimReadyHook(keeper, claimReady),
+		PromptAgents:       promptAgents(p.roleReferences),
+		CapabilityReported: s.capabilityReported,
 	})
 
 	group, serving := errgroup.WithContext(ctx)
@@ -1286,6 +1418,9 @@ type source struct {
 	// deployment is the deployment's capabilities as this boot knows them (supervision.deployment),
 	// whose report the state carries.
 	deployment func() capabilities.Deployment
+	// reports is each claim's latest capability report (supervision.capabilityReports), which the
+	// projection shows on the claim's view whatever process reported it.
+	reports func() map[claim.Token]capabilities.Report
 }
 
 // projectRecords scopes the shared daemon database to the daemon's configured project without
@@ -1326,7 +1461,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	state, err := projection.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, s.project, claims, nil)
+	state, err := projection.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, s.project, claims, s.reports())
 	if err != nil {
 		return api.State{}, err
 	}
