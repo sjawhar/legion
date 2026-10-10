@@ -1541,10 +1541,16 @@ block asks - its question, options, `multiple` and urgency, which a copy carries
 (`copiedAskSources`, `docs/copied_asks.go`): a record copy of a spec uploaded beside it carries its
 blocks under their ids. Block ids are unique per document only (`asks_block_id_unique` is on
 `block_artifact_id` and `block_id`), so the text has to match as well, since an author-chosen id
-such as `decision` can name unrelated questions on two documents. Where several asks match, the
-earliest asked is the source, whether it matched on its current wording or an earlier one, so two
-unrelated asks of one owner under one id asking the same thing are one question to a copy. A copy
-opens no ask: settlement writes its source's state and answer into the block, names the source in
+such as `decision` can name unrelated questions on two documents. A match on an earlier wording
+counts only while the ask is open, or when its answer or resolution was given while that wording was
+current: its `ask.answered` or `ask.resolved` event comes after the event that made the wording
+current and before the `ask.edited` that retired it, ordered by `events.id`, which the broker
+allocates in commit order (`askHistory.shownBy`). An answer or resolution given after the rewording
+decides a question the block does not ask, so the block is no copy of that ask and opens its own, as
+a block whose options differ does. Where several asks match, the earliest asked is the source,
+whether it matched on its current wording or an earlier one, so two unrelated asks of one owner
+under one id asking the same thing are one question to a copy. A copy opens no ask: settlement
+writes its source's state and answer into the block, names the source in
 the server-owned `copied_from` and its document's `dispatch://` address (`refs.ArtifactRef`) in
 `copied_from_document`, neither of which an upload can set (`asUploaded`). The block is read-only
 there, since the copy has no ask row an answer or resolve route could reach and settlement only

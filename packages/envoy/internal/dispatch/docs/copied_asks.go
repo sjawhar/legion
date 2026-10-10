@@ -1,11 +1,13 @@
 package docs
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -20,18 +22,22 @@ import (
 // questions on two documents. A block is therefore a copy only of an ask on another document of
 // the same owner - the same issue, or for a project document the same project's other documents -
 // that indexes the same block id and asks exactly what the block asks (its question, options,
-// multiple and urgency, which a copy carries unchanged), now or before an edit: the copy can be of
-// an earlier version (askContentsAsked). A block whose text the copy changes is a new question and
-// opens an ask. An ask settlement retracted because its block left its document is no source: a
-// block cut from one document and pasted into another is the only one left, and opens an ask as any
-// new block does. Of several sources, the earliest asked is the original, whichever wording it
-// matched on, since a copy that opened asks of its own before copies were recognised came after it;
-// two unrelated asks of one owner under one id asking the same thing are therefore one question to
-// a copy, the earlier. The copy shows its source's state as of its own last settlement, and an
-// answer or a resolution of the source settles it again (SettleCopiesOf). The rows are read, never
-// locked or written: settlement holds this document's owner row and room lock, and a source's
-// answer route takes the source's ask row before its own document's room. A project document's
-// settlement also takes its project's copy lock first (lockProjectCopies).
+// multiple and urgency, which a copy carries unchanged). The block may ask the ask's current
+// wording or an earlier one, since a copy can be taken before an edit (askHistories), but a match
+// on an earlier wording counts only while the ask is open, or when its answer or resolution was
+// given while it asked that wording (askHistory.shownBy), so a copy never shows a decision on a
+// question it does not ask. A block whose text the copy changes, or whose earlier-wording match does
+// not count, opens an ask as any new block does. An ask settlement retracted because its block left
+// its document is no source: a block cut from one document and pasted into another is the only one
+// left, and opens an ask as any new block does. Of several sources, the earliest asked is the
+// original, whichever wording it matched on, since a copy that opened asks of its own before copies
+// were recognised came after it; two unrelated asks of one owner under one id asking the same thing
+// are therefore one question to a copy, the earlier. The copy shows its source's state as of its
+// own last settlement, and an answer or a resolution of the source settles it again
+// (SettleCopiesOf). The rows are read, never locked or written: settlement holds this document's
+// owner row and room lock, and a source's answer route takes the source's ask row before its own
+// document's room. A project document's settlement also takes its project's copy lock first
+// (lockProjectCopies).
 func copiedAskSources(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -79,8 +85,8 @@ func copiedAskSources(
 	if len(candidates) == 0 {
 		return nil, nil
 	}
-	// The earliest asked match wins whichever wording it matched on, so an ask's earlier wordings
-	// are read only for the candidates older than a block's first match on its current wording.
+	// The earliest asked match wins whichever wording it matched on, so an ask's history is read
+	// only for the candidates older than a block's first match on its current wording.
 	var earlier []string
 	for _, block := range blocks {
 		for _, candidate := range candidates[block.id] {
@@ -90,16 +96,16 @@ func copiedAskSources(
 			earlier = append(earlier, candidate.ask.ID)
 		}
 	}
-	var asked map[string][]model.AskEditPrevious
+	var histories map[string]askHistory
 	if len(earlier) > 0 {
-		if asked, err = askContentsAsked(ctx, tx, earlier); err != nil {
+		if histories, err = askHistories(ctx, tx, earlier); err != nil {
 			return nil, err
 		}
 	}
 	sources := map[string]copiedSource{}
 	for _, block := range blocks {
 		for _, candidate := range candidates[block.id] {
-			if block.asks(model.NewAskEditPrevious(candidate.ask)) || slices.ContainsFunc(asked[candidate.ask.ID], block.asks) {
+			if block.asks(model.NewAskEditPrevious(candidate.ask)) || histories[candidate.ask.ID].shownBy(block, candidate.ask) {
 				sources[block.id] = candidate
 				break
 			}
@@ -309,44 +315,141 @@ func (block askBlock) asks(content model.AskEditPrevious) bool {
 		block.multiple == content.Multiple && block.urgency == content.Urgency
 }
 
-// copiedAskContentsQuery reads what each ask asked: an ask.opened event its text when it opened, an
-// ask.edited event its text after the edit and before it (previous). Its type list is a subset of
-// events_ask_payload_id's, which the planner needs to use that index (migration 0030).
-const copiedAskContentsQuery = `
-	select payload->>'id', payload
+// copiedAskHistoryQuery reads what each ask asked and decided: an ask.opened event its wording when
+// it opened, an ask.edited event its wording after the edit and before it (previous), an
+// ask.answered event an answer, an ask.resolved event a resolution. Its type list is a subset of
+// events_ask_payload_id's, which the planner needs to use that index (migration 0030). askHistories
+// puts the rows in commit order itself: an order by id here would offer the planner a walk of the
+// events' primary key in place of that index.
+const copiedAskHistoryQuery = `
+	select id, payload->>'id', type, payload
 	from events
-	where type in ('ask.opened', 'ask.edited') and payload->>'id' = any($1)
+	where type in ('ask.opened', 'ask.edited', 'ask.answered', 'ask.resolved') and payload->>'id' = any($1)
 `
 
-// askContentsAsked is every text each of the asks ids names has asked, keyed by ask id, read from
-// the ask.opened and ask.edited events that record them (copiedAskContentsQuery).
-func askContentsAsked(ctx context.Context, tx pgx.Tx, ids []string) (map[string][]model.AskEditPrevious, error) {
-	rows, err := tx.Query(ctx, copiedAskContentsQuery, ids)
+// askHistory is what one ask asked and decided, from its events in commit order: events.id, which
+// the broker allocates under its commit-order lock (events.Broker.Append), so an edit and an answer
+// committed a moment apart keep the order they committed in, whatever their clocks say.
+type askHistory struct {
+	// wordings are each wording the ask asked, with the event that made it current (from) and the
+	// ask.edited event that retired it (until, 0 for the wording it still asks).
+	wordings []askWording
+	// answers and resolutions are the ask's ask.answered and ask.resolved events, in commit order.
+	answers     []askDecision
+	resolutions []askDecision
+}
+
+type askWording struct {
+	content     model.AskEditPrevious
+	from, until int64
+}
+
+// askDecision is one ask.answered or ask.resolved event: its id, and the at of the answer or
+// resolution it records.
+type askDecision struct {
+	event int64
+	at    time.Time
+}
+
+// shownBy reports whether block, which asks one of ask's earlier wordings, is a copy of ask: while
+// ask is open, or when its answer or resolution was given while that wording was current, after
+// the event that made it current and before the ask.edited event that retired it. An answer or a
+// resolution given after the rewording decides a question the block does not ask, and showing it
+// on the block would put a decision on a question nobody answered into a copy kept as the record.
+func (history askHistory) shownBy(block askBlock, ask model.Ask) bool {
+	decided, known := history.decidedAt(ask)
+	for _, wording := range history.wordings {
+		if wording.until == 0 || !block.asks(wording.content) {
+			continue
+		}
+		if ask.State == "open" || known && decided >= wording.from && decided < wording.until {
+			return true
+		}
+	}
+	return false
+}
+
+// decidedAt is the event that gave ask's current answer or resolution: the first ask.answered or
+// ask.resolved event recording its at. The first, because settlement's restoration of a retracted
+// ask appends another ask.answered carrying the same answer. known is false for an open ask and for
+// a decision no event records, which no earlier wording can then be shown with.
+func (history askHistory) decidedAt(ask model.Ask) (event int64, known bool) {
+	decisions, at := history.answers, time.Time{}
+	switch {
+	case ask.State == "answered" && ask.Answer != nil:
+		at = ask.Answer.At
+	case ask.State == "resolved" && ask.Resolution != nil:
+		decisions, at = history.resolutions, ask.Resolution.At
+	default:
+		return 0, false
+	}
+	for _, decision := range decisions {
+		if decision.at.Equal(at) {
+			return decision.event, true
+		}
+	}
+	return 0, false
+}
+
+// askHistories is the history of each of the asks ids names, keyed by ask id, read from the
+// events that record it (copiedAskHistoryQuery).
+func askHistories(ctx context.Context, tx pgx.Tx, ids []string) (map[string]askHistory, error) {
+	rows, err := tx.Query(ctx, copiedAskHistoryQuery, ids)
 	if err != nil {
-		return nil, fmt.Errorf("load what copied asks asked: %w", err)
+		return nil, fmt.Errorf("load copied asks' histories: %w", err)
 	}
 	defer rows.Close()
-	asked := map[string][]model.AskEditPrevious{}
+	type askEvent struct {
+		id      int64
+		ask     string
+		kind    string
+		payload []byte
+	}
+	var events []askEvent
 	for rows.Next() {
-		var id string
-		var payload []byte
-		if err := rows.Scan(&id, &payload); err != nil {
-			return nil, fmt.Errorf("scan what a copied ask asked: %w", err)
+		var event askEvent
+		if err := rows.Scan(&event.id, &event.ask, &event.kind, &event.payload); err != nil {
+			return nil, fmt.Errorf("scan a copied ask's event: %w", err)
 		}
-		var event struct {
-			model.AskEditPrevious
-			Previous *model.AskEditPrevious `json:"previous"`
-		}
-		if err := json.Unmarshal(payload, &event); err != nil {
-			return nil, fmt.Errorf("decode what copied ask %s asked: %w", id, err)
-		}
-		asked[id] = append(asked[id], event.AskEditPrevious)
-		if event.Previous != nil {
-			asked[id] = append(asked[id], *event.Previous)
-		}
+		events = append(events, event)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate what copied asks asked: %w", err)
+		return nil, fmt.Errorf("iterate copied asks' events: %w", err)
 	}
-	return asked, nil
+	slices.SortFunc(events, func(a, b askEvent) int { return cmp.Compare(a.id, b.id) })
+	histories := map[string]askHistory{}
+	for _, event := range events {
+		var payload struct {
+			model.AskEditPrevious
+			Previous   *model.AskEditPrevious `json:"previous"`
+			Answer     *model.AskAnswer       `json:"answer"`
+			Resolution *model.AskResolution   `json:"resolution"`
+		}
+		if err := json.Unmarshal(event.payload, &payload); err != nil {
+			return nil, fmt.Errorf("decode copied ask %s's %s event: %w", event.ask, event.kind, err)
+		}
+		history := histories[event.ask]
+		switch event.kind {
+		case "ask.opened", "ask.edited":
+			// Each makes its wording current and retires the one before it. An ask.opened after the
+			// first is settlement's restoration of a retracted ask (reconcileAskBlocks), which asks
+			// what it asked before it was retracted.
+			if last := len(history.wordings) - 1; last >= 0 && history.wordings[last].until == 0 {
+				history.wordings[last].until = event.id
+			} else if payload.Previous != nil {
+				history.wordings = append(history.wordings, askWording{content: *payload.Previous, until: event.id})
+			}
+			history.wordings = append(history.wordings, askWording{content: payload.AskEditPrevious, from: event.id})
+		case "ask.answered":
+			if payload.Answer != nil {
+				history.answers = append(history.answers, askDecision{event: event.id, at: payload.Answer.At})
+			}
+		case "ask.resolved":
+			if payload.Resolution != nil {
+				history.resolutions = append(history.resolutions, askDecision{event: event.id, at: payload.Resolution.At})
+			}
+		}
+		histories[event.ask] = history
+	}
+	return histories, nil
 }

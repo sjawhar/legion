@@ -46,7 +46,7 @@ func TestCopiedAskQueriesAvoidSequentialScans(t *testing.T) {
 		// The lateral read of each candidate's latest version: its unique (artifact_id, number).
 		{"the latest versions of an issue's copies", copiesOnIssue, "artifact_versions", "artifact_versions_artifact_id_number_key", []any{blocks, document, issueKey, patterns}},
 		{"the latest versions of a project's copies", copiesOnProject, "artifact_versions", "artifact_versions_artifact_id_number_key", []any{blocks, document, projectKey, patterns}},
-		{"what a copied ask asked before an edit", copiedAskContentsQuery, "events", "events_ask_payload_id", []any{[]string{"ask-id"}}},
+		{"what a copied ask asked and decided", copiedAskHistoryQuery, "events", "events_ask_payload_id", []any{[]string{"ask-id"}}},
 	} {
 		t.Run(query.name, func(t *testing.T) {
 			var planJSON []byte

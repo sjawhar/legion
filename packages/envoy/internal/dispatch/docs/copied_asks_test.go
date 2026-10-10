@@ -382,6 +382,103 @@ func TestACopyOfASourcesEarlierWordingShowsItsStateAndOpensNoAsk(t *testing.T) {
 	requireCopiedStates(t, service, copied, copiedSourceStates(t, service, original, asks)...)
 }
 
+// shipBlock is an ask block whose source tests reword: its question and its options both change.
+const shipBlock = ":::ask{#ship urgency=\"med\" multiple=\"false\"}\nShip on Monday?\n\n- Yes: Monday.\n- No: Later.\n:::\n"
+
+// blockAskOn reads the ask of blockID on document.
+func blockAskOn(t *testing.T, service *Service, document, blockID string) model.Ask {
+	t.Helper()
+	ask, err := ScanAsk(service.store.Pool.QueryRow(context.Background(),
+		`select `+AskColumns+` from asks a where a.block_artifact_id = $1 and a.block_id = $2`, document, blockID))
+	if err != nil {
+		t.Fatalf("read the ask of %s: %v", blockID, err)
+	}
+	return ask
+}
+
+// rewordShip rewords the ship block on original to a question with other options, settles it, and
+// returns its ask as reworded.
+func rewordShip(t *testing.T, service *Service, original string) model.Ask {
+	t.Helper()
+	editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
+		return replaceRun("Yes: Monday.", "Tuesday: Ship it.")(replaceRun("Ship on Monday?", "Ship on Tuesday?")(tree))
+	})
+	settleCurrentGeneration(t, service, original)
+	source := blockAskOn(t, service, original, "ship")
+	if source.Question != "Ship on Tuesday?" || len(source.Options) != 2 || source.Options[0].Label != "Tuesday" {
+		t.Fatalf("the source asks %q with %v, want it reworded with new options", source.Question, source.Options)
+	}
+	return source
+}
+
+// A copy taken while its source was open asks the source's wording of then. Once the source is
+// reworded with other options and then answered or resolved, that state is a decision on a question
+// the copy does not ask, so the copy is no copy of it: its next settlement, which the answer or the
+// resolution owes it, opens the block's own ask on the copy as for any new block, rather than
+// writing a decision on the reworded question into the record.
+func TestAnAnswerOrResolutionOfACopysSourceAfterARewordingOpensTheCopysOwnAsk(t *testing.T) {
+	for _, closing := range []string{"answered", "resolved"} {
+		t.Run(closing, func(t *testing.T) {
+			service, original := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, original, "Context\n\n"+shipBlock)
+			settleCurrentGeneration(t, service, original)
+			source := blockAskOn(t, service, original, "ship")
+			copied := createIssueDocument(t, service.store, 1, "# Copy")
+			seedServiceText(t, service, copied, "Record\n\n"+shipBlock)
+			settleCurrentGeneration(t, service, copied)
+			requireCopiedStates(t, service, copied, `:::ask{#ship urgency="med" multiple="false" state="open" `+copiedFrom(t, service, source.ID, original)+`}`)
+
+			source = rewordShip(t, service, original)
+			var answer *model.AskAnswer
+			if closing == "answered" {
+				answer = &model.AskAnswer{User: "alice", Selected: []string{"Tuesday"}, At: time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)}
+			}
+			if err := closeSource(context.Background(), service, original, "ship", source, answer, nil); err != nil {
+				t.Fatal(err)
+			}
+			if owed := copyOwed(t, service, copied); owed != 1 {
+				t.Fatalf("the copy owes %d settlements after its source was %s, want one", owed, closing)
+			}
+			settleCurrentGeneration(t, service, copied)
+			text, err := service.Text(context.Background(), copied)
+			if err != nil {
+				t.Fatalf("read the copy: %v", err)
+			}
+			if strings.Contains(text, `state="`+closing+`"`) || strings.Contains(text, "copied_from") {
+				t.Fatalf("the copy of the earlier wording shows its source %s on the reworded question:\n%s", closing, text)
+			}
+			requireCopiedStates(t, service, copied, `:::ask{#ship urgency="med" multiple="false" state="open"}`+"\nShip on Monday?")
+			if blocks := openAskBlocksOn(t, service, copied); blocks != "ship" {
+				t.Fatalf("the copy's open asks = %q, want its own ship", blocks)
+			}
+		})
+	}
+}
+
+// An answer given while the source asked the copy's wording is an answer to the copy's question,
+// so a copy of that wording taken after the source was reworded still shows it and opens no ask.
+func TestAnAnswerGivenBeforeASourcesRewordingShowsOnACopyOfTheWordingItAnswered(t *testing.T) {
+	service, original := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, original, "Context\n\n"+shipBlock)
+	settleCurrentGeneration(t, service, original)
+	source := blockAskOn(t, service, original, "ship")
+	answer := model.AskAnswer{User: "alice", Selected: []string{"Yes"}, At: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
+	if err := closeSource(context.Background(), service, original, "ship", source, &answer, nil); err != nil {
+		t.Fatal(err)
+	}
+	rewordShip(t, service, original)
+	copied := createIssueDocument(t, service.store, 1, "# Copy")
+	seedServiceText(t, service, copied, "Record\n\n"+shipBlock)
+	settleCurrentGeneration(t, service, copied)
+	if count := asksOn(t, service, copied); count != 0 {
+		t.Fatalf("the copy of the answered wording opened %d asks, want none", count)
+	}
+	requireCopiedStates(t, service, copied,
+		`:::ask{#ship urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-08T12:00:00Z" selected="[&#x22;Yes&#x22;]" `+copiedFrom(t, service, source.ID, original)+`}`)
+}
+
 // pendingSettlements counts the documents that owe a settlement no settlement has committed.
 func pendingSettlements(t *testing.T, service *Service) int {
 	t.Helper()
@@ -644,53 +741,73 @@ func TestACopySettlingWhileItsSourceIsAnsweredWaitsForTheAnswerAndNeitherFails(t
 	}
 }
 
-// answerSource answers source, the ask of the block shared on original, in the answer route's order
-// (closeAskTx, answerTransition's WriteBlock): the source's owner row and ask row, then
-// SettleCopiesOf, which takes the project's copy lock and marks the copies owed, then the source's
-// block, the ask row and the ask.answered event, and commits. between runs right after
-// SettleCopiesOf, while the answer holds the copy lock and the copies' pending rows. It returns its
-// error rather than failing the test, so it can run off the test's goroutine.
+// answerSource answers source, the ask of the block shared on the project document original, as
+// closeSource does, with eu-west-1. between runs right after SettleCopiesOf.
 func answerSource(ctx context.Context, service *Service, original string, source model.Ask, between func()) error {
+	region := "eu-west-1"
+	answer := model.AskAnswer{User: "alice", Selected: []string{}, Text: &region, At: time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)}
+	return closeSource(ctx, service, original, "shared", source, &answer, between)
+}
+
+// closeSource answers source, the ask of blockID on original, with answer, or resolves it when
+// answer is nil, in its route's order (closeAskTx, the answer's WriteBlock, the resolve's Apply):
+// the source's owner row and ask row, then SettleCopiesOf, which takes the project's copy lock and
+// marks the copies owed, then the source's block, the ask row and the ask.answered or ask.resolved
+// event, and commits. between, when set, runs right after SettleCopiesOf, while the transaction
+// holds the copy lock and the copies' pending rows. It returns its error rather than failing the
+// test, so it can run off the test's goroutine.
+func closeSource(ctx context.Context, service *Service, original, blockID string, source model.Ask, answer *model.AskAnswer, between func()) error {
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	tx, err := service.store.Pool.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("begin the answer: %w", err)
+		return fmt.Errorf("begin closing the source: %w", err)
 	}
 	defer tx.Rollback(context.Background())
-	answering, ledger := service.Join(ctx, tx)
+	closing, ledger := service.Join(ctx, tx)
 	defer ledger.Discard()
-	if _, err := tx.Exec(ctx, `select 1 from artifacts where id = $1 for no key update`, original); err != nil {
+	owner, _, err := lockArtifactOwner(ctx, tx, original)
+	if err != nil {
 		return fmt.Errorf("lock the source's owner row: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `select 1 from asks where id = $1 for no key update`, source.ID); err != nil {
 		return fmt.Errorf("lock the source ask: %w", err)
 	}
-	if err := service.SettleCopiesOf(answering, source); err != nil {
+	if err := service.SettleCopiesOf(closing, source); err != nil {
 		return fmt.Errorf("mark the copies owed: %w", err)
 	}
 	if between != nil {
 		between()
 	}
-	region := "eu-west-1"
-	answer := model.AskAnswer{User: alice.ID, Selected: []string{}, Text: &region, At: time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)}
-	if err := service.SetBlockAttributes(answering, original, "shared", map[string]any{
-		"state": "answered", "answered_by": alice.ID, "answered_at": answer.At.Format(time.RFC3339Nano),
-		"selected": answer.Selected, "answer": region,
-	}, alice); err != nil {
-		return fmt.Errorf("write the answer into the source's block: %w", err)
+	eventType, attributes := "ask.resolved", map[string]any{"state": "resolved"}
+	if answer != nil {
+		var text any
+		if answer.Text != nil {
+			text = *answer.Text
+		}
+		eventType, attributes = "ask.answered", map[string]any{
+			"state": "answered", "answered_by": answer.User, "answered_at": answer.At.Format(time.RFC3339Nano),
+			"selected": answer.Selected, "answer": text,
+		}
 	}
-	encoded, _ := json.Marshal(answer)
-	if _, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1`, source.ID, encoded); err != nil {
-		return fmt.Errorf("answer the source ask: %w", err)
+	if err := service.SetBlockAttributes(closing, original, blockID, attributes, alice); err != nil {
+		return fmt.Errorf("write the source's block: %w", err)
 	}
-	source.State, source.Answer = "answered", &answer
-	if _, err := service.events.Append(ctx, tx, model.Event{
-		ArtifactID: &original, Type: "ask.answered", Actor: alice, Payload: model.NewAskEventPayload(source, model.ReferenceChanges{}),
-	}); err != nil {
-		return fmt.Errorf("append the answer's event: %w", err)
+	if answer != nil {
+		encoded, _ := json.Marshal(answer)
+		if _, err := tx.Exec(ctx, `update asks set state = 'answered', answer = $2 where id = $1`, source.ID, encoded); err != nil {
+			return fmt.Errorf("answer the source ask: %w", err)
+		}
+		source.State, source.Answer = "answered", answer
+	} else if source, err = WriteAskResolution(ctx, tx, source, "resolved", "Waived.", alice); err != nil {
+		return fmt.Errorf("resolve the source ask: %w", err)
+	}
+	if _, err := service.events.Append(ctx, tx, documentAskEvent(
+		owner, original, eventType, alice, model.NewAskEventPayload(source, model.ReferenceChanges{}),
+	)); err != nil {
+		return fmt.Errorf("append the source's %s event: %w", eventType, err)
 	}
 	if err := ledger.Commit(ctx); err != nil {
-		return fmt.Errorf("commit the answer: %w", err)
+		return fmt.Errorf("commit closing the source: %w", err)
 	}
 	return nil
 }

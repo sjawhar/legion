@@ -376,10 +376,14 @@
   it was copied from, read-only, and names it and its document in the server-owned `copied_from`
   and `copied_from_document`, where settlement had opened a new ask in a person's Inbox for every
   copied block, answered and resolved ones included. Of several matching asks the earliest asked
-  is the source, whichever wording it matched on. Answering or resolving the source reaches its
-  copies a settlement later. `dispatch request-approval`'s refusal and the dashboard's decision card
-  name the source, its document and its state from those attributes. A copy whose text is changed,
-  or an id no ask of the owner indexes, still opens one, and so do a source's copies once its block
+  is the source, whichever wording it matched on. A block matching only a source's earlier wording
+  is a copy of it while the source is open, or when the source's answer or resolution was given
+  while it asked that wording, ordered by the events' commit order; one answered or resolved after
+  the rewording opens its own ask, so no copy shows a decision on a question it does not ask.
+  Answering or resolving the source reaches its copies a settlement later.
+  `dispatch request-approval`'s refusal and the dashboard's decision card name the source, its
+  document and its state from those attributes. A copy whose text is changed, or an id no ask of
+  the owner indexes, still opens one, and so do a source's copies once its block
   leaves its document: settlement of the source retracts its ask and settles every copy, the first
   opens one ask, credited to whoever wrote the block into it, and the others name that ask, on a
   project's documents as on an issue's. Migration `0087_artifacts_project_documents` adds the
