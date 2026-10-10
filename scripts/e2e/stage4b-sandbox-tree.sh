@@ -2886,7 +2886,10 @@ on_tree "$tree1" until_true 600 "the implementer to report jj undo --help's firs
 # is the App whose token the pane pushes with) is read for each head: the repository's events feed
 # is lossy (a push can be missing from it while later ones are listed), so it is no oracle.
 pr_head=$(gh -R "$repo" pr view "$pr_number" --json headRefOid --jq .headRefOid)
-plan_head=$(workspace_jj "$tree1" log -r 'description(glob:"plan: record handoff*")' --no-graph -T 'commit_id ++ "\n"' | head -1)
+# One line is asked of jj (`--limit 1`, the newest match first in jj's order), never cut from more
+# with `head`: under pipefail a consumer that stops reading sends the kubectl-backed producer
+# SIGPIPE, and the pipeline exits 141 whenever the log holds a second match.
+plan_head=$(workspace_jj "$tree1" log -r 'description(glob:"plan: record handoff*")' --no-graph --limit 1 -T 'commit_id ++ "\n"')
 [ -n "$plan_head" ] || fail "no 'plan: record handoff' commit on tree 1's workspace"
 for pair in "$plan_head:legion-reviewer[bot]:the planner's handoff commit" "$pr_head:legion-implementer[bot]:the implementer's head"; do
   IFS=: read -r sha want what <<<"$pair"
@@ -2906,9 +2909,18 @@ plan_checks=$(timeout 60 gh api "repos/$repo/commits/$plan_head/check-runs" --jq
 [ "$plan_checks" = 0 ] || fail "GitHub started $plan_checks check run(s) on the planner's handoff-only push $plan_head"
 [ "$(role_handoff "$tree1" planner)" = "$plan_head" ] || fail "the daemon recorded the planner's completion at $(role_handoff "$tree1" planner), not the pushed head $plan_head"
 [ "$(role_handoff "$tree1" implementer)" = "$pr_head" ] || fail "the daemon recorded the implementer's completion at $(role_handoff "$tree1" implementer), not the branch head $pr_head"
-code_head=$(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].sha' | tac | while read -r sha; do
-  if timeout 60 gh api "repos/$repo/commits/$sha" --jq '.files[].filename' | grep -qv '^\.legion/'; then printf '%s\n' "$sha" && break; fi
-done)
+# The pull request's commits newest first, then each one's files, read whole before they are
+# judged: a `grep -q` or a `break` downstream of a live `gh api` would close its pipe early and
+# turn the pipeline's status into the producer's SIGPIPE under pipefail.
+pr_commits=$(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].sha' | tac)
+code_head=
+for sha in $pr_commits; do
+  files=$(timeout 60 gh api "repos/$repo/commits/$sha" --jq '.files[].filename') || fail "GitHub could not list the files of $sha on $repo"
+  if grep -qv '^\.legion/' <<<"$files"; then
+    code_head=$sha
+    break
+  fi
+done
 [ -n "$code_head" ] || fail "pull request #$pr_number has no commit touching a path outside .legion/"
 code_message=$(timeout 60 gh api "repos/$repo/commits/$code_head" --jq .commit.message) || fail "GitHub could not read the implementer's code head $code_head"
 ! grep -qE 'skip-checks: true|\[(skip ci|ci skip|no ci|skip actions|actions skip)\]' <<<"$code_message" || fail "the implementer's code head $code_head carries a CI-skipping line: $(tr '\n' '|' <<<"$code_message")"
