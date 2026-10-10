@@ -645,12 +645,12 @@ export default function legionExtension(pi: PiApi): void {
 
   // The daemon's assignment (a user message) opens the phase; an Envoy delivery re-arms a stall
   // that already had its follow-up or a WAITING reply. A person's direct message that envoy.ts
-  // sent in as the user's own turn is a user message too, but it is an inbound event, as its Envoy
-  // card was: the record envoy.ts keeps of the turns it sent in says which user message that is,
-  // whichever of the two extensions asks first. A turn that record misses falls through to
-  // `inboundKind` and counts as an assignment; `packages/pi-envoy/AGENTS.md` (the phase-worker
-  // section) says which turns it misses. The `legion` tool's successful `handoff_complete` closes
-  // the phase (`onPhaseCompleted`, below).
+  // sent in as the user's own turn is a user message too (a `skill-prompt` custom message for a
+  // `/skill:`), but it is an inbound event, as its Envoy card was: the record envoy.ts keeps of the
+  // turns it sent in says which message that is, whichever of the two extensions asks first. A turn
+  // that record misses falls through to `inboundKind` and counts as an assignment; the phase-stall
+  // section of `packages/pi-legion/AGENTS.md` says which turns it misses. The `legion` tool's
+  // successful `handoff_complete` closes the phase (`onPhaseCompleted`, below).
   pi.on("message_start", async (event, context) => {
     if (!phaseWorkerSession(context)) return;
     const injected =

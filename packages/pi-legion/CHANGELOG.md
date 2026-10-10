@@ -25,6 +25,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The plugin interface it reads from `@sjawhar/pi-envoy` is at version 2 (LEGION-394). In a phase
+  worker, a person's `/skill:<name>` sent from Dispatch's Agents page counts as an inbound event,
+  as their plain Send does, and so does a Send the host runs as a turn of its own after a run's
+  `agent_end`, where it counted as the daemon's assignment. Install this release together with the
+  `@sjawhar/pi-envoy` built from the same commit: this entry refuses a pi-envoy at another interface
+  version, naming both, and so does the daemon's boot gate. `legion.daemonApiVersion` is unchanged.
 - The `legion-controller` skill no longer tells a controller the daemon launched
   (`controller: daemon`) that nobody types into its session or reads its replies, or that text
   left in its session reaches no one (LEGION-306). A plain user turn in that session other than

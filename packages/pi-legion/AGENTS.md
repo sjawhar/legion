@@ -15,7 +15,7 @@ in the environment: a person's own session gets no tool, no title and no daemon 
 The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
 through the interface the Envoy entry publishes: one process-wide object on `globalThis` under
 `Symbol.for("legion.pi-shared.envoy-plugin-interface")`, at `ENVOY_PLUGIN_INTERFACE_VERSION`
-(currently 1), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
+(currently 2), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
 sets its own load marker, `Symbol.for("legion.pi-legion.loaded")`, to
 `{ from: import.meta.url, envoyInterface: ENVOY_PLUGIN_INTERFACE_VERSION }`, which the daemon's load
 probe reads.
@@ -279,14 +279,20 @@ In a phase-worker session (planner, implementer, tester, reviewer, merger: never
 controller, a session with no Legion environment, or a `task` subagent), `src/phase-stall.ts`
 tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
 `handoff_complete` closes it. A person's direct message the Envoy extension sent in as the user's
-own turn is a user message too, and counts as an Envoy delivery rather than an assignment: the
-Envoy extension records each body it sends in, process-wide, on the shared interface
-(`injectedUserTurns`, `@legion/pi-shared/injected-user-turns`), and legion.ts asks that record at
-`message_start` (`matchInjectedUserTurn`). The record is forgotten at the run's `agent_end`, so a
-Send or an Aside sent in after the run's last queue or aside poll and before that `agent_end`,
-which the host then runs as a turn of its own, matches nothing: it counts as an assignment, which
-opens even a closed phase, and the dashboard shows it twice. One sent in after that `agent_end`
-starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
+own turn is a user message too (for a `/skill:`, the host's `skill-prompt` custom message), and
+counts as an Envoy delivery rather than an assignment: the Envoy extension records each turn it
+sends in, process-wide, on the shared interface (`injectedUserTurns`,
+`@legion/pi-shared/injected-user-turns`), and legion.ts asks that record at `message_start`
+(`matchInjectedUserTurn`). A turn sent as typed input (`pi.sendUserInput`) is found by the Dispatch
+id the host keeps as the message's `tag`, and only by it, so a command that submitted nothing
+(`/compact`, `/session`) leaves nothing the daemon's next assignment could match; it stays in the
+record past the run's `agent_end` until its message arrives or the host answers that the input
+submitted none, so a Send the host runs as a turn of its own after that run still counts as the
+person's. On a host without `sendUserInput` a turn is found by its text and forgotten at the run's
+`agent_end`, so a Send or an Aside sent in after the run's last queue or aside poll and before that
+`agent_end`, which the host then runs as a turn of its own, matches nothing: it counts as an
+assignment, which opens even a closed phase, and the dashboard shows it twice. One sent in after
+that `agent_end` starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
 open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
 as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
 message holding a tool call written as text is told so. One follow-up per stall; a WAITING reply or a

@@ -122,7 +122,7 @@ func installPlugins(t *testing.T, omp string, environ []string, roots ...string)
 
 // The plugins this checkout releases, packed as the release packs them and installed into a
 // pane's profile on the real Oh My Pi. With pi-envoy alone — every session that is not a Legion
-// pane — the probe reads no Legion marker and the Envoy interface at version 1, and the gate
+// pane — the probe reads no Legion marker and the Envoy interface at version 2, and the gate
 // refuses, naming the pi-legion release to install; with both, it reads pi-legion loaded,
 // speaking the interface version pi-envoy publishes, and the gate passes on the skills and agents
 // the two packages ship between them. Only the real bundles show that the symbol strings the probe
@@ -137,9 +137,9 @@ func TestTheRealPluginsOnTheRealOhMyPi(t *testing.T) {
 		answer  []string
 		refusal string
 	}{
-		{"pi-envoy alone", []string{envoy}, []string{"LEGION_PLUGIN_LOADED=no\n", "LEGION_ENVOY_INTERFACE=1\n"},
+		{"pi-envoy alone", []string{envoy}, []string{"LEGION_PLUGIN_LOADED=no\n", "LEGION_ENVOY_INTERFACE=2\n"},
 			"pi-legion manifest at @MANIFEST could not be read"},
-		{"both", []string{envoy, legion}, []string{"LEGION_PLUGIN_LOADED=yes\n", "LEGION_PLUGIN_ENVOY_INTERFACE=1\n", "LEGION_ENVOY_INTERFACE=1\n"}, ""},
+		{"both", []string{envoy, legion}, []string{"LEGION_PLUGIN_LOADED=yes\n", "LEGION_PLUGIN_ENVOY_INTERFACE=2\n", "LEGION_ENVOY_INTERFACE=2\n"}, ""},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			dir := t.TempDir()

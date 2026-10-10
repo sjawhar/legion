@@ -15,7 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type IssueKey, LEGION_ROLES, type LegionRole, roleToken } from "@legion/contracts";
 import { readSessionTitle, sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
-import { noteInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
+import { noteInjectedUserTurn, noteTypedUserTurn } from "@legion/pi-shared/injected-user-turns";
 import {
   ENVOY_PLUGIN_INTERFACE_KEY,
   ENVOY_PLUGIN_INTERFACE_VERSION,
@@ -2146,6 +2146,30 @@ describe("Legion OMP extension", () => {
 
       await worker.arrives({ message: { ...personsMessage.message, timestamp: 2 } });
       expect(await worker.settles("Answered.")).toEqual(followUp("handoff_complete"));
+    });
+
+    // A person's `/skill:<name>` sent from Dispatch runs as typed input, and the host submits it as
+    // its `skill-prompt` custom message, tagged with the Dispatch message, where a plain Send is a
+    // user message. It is the person's message all the same: it wakes a stall that had its WAITING
+    // reply, as their Send does.
+    test("a person's /skill: wakes a stall that had its WAITING reply, as their Send does", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      expect(await worker.settles("WAITING: CI on the pull request")).toBeUndefined();
+
+      noteTypedUserTurn("ses_stall", "m-1");
+      await worker.arrives({
+        message: {
+          attribution: "user",
+          content: "Run the review skill on src.",
+          customType: "skill-prompt",
+          display: true,
+          role: "custom",
+          tag: "m-1",
+          timestamp: 3,
+        },
+      });
+      expect(await worker.settles("Reviewed.")).toEqual(followUp("handoff_complete"));
     });
 
     test("a handoff_complete whose command fails is an error result and leaves the phase open", async () => {

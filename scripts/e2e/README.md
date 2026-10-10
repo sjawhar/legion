@@ -51,7 +51,8 @@ names a 0600 operator token file in the work directory; `LEGION_OMP_PATH` points
 that answers the gate's load probe (`omp models --extension <probe> --json`) as a pane loading both
 plugins does — `LEGION_PLUGIN_LOADED=yes` and, beside it, `LEGION_PLUGIN_LOADED_FROM=file://…/dist/legion.js`
 inside the `@sjawhar/pi-legion` package the gate read and `LEGION_PLUGIN_ENVOY_INTERFACE=1`, then
-`LEGION_ENVOY_INTERFACE=1` and `LEGION_ENVOY_LOADED_FROM=file://…/dist/envoy.js` inside an
+`LEGION_ENVOY_INTERFACE=1` (one number on both lines, whatever the plugins' own version: the gate
+compares the two with each other, never with a constant) and `LEGION_ENVOY_LOADED_FROM=file://…/dist/envoy.js` inside an
 `@sjawhar/pi-envoy` package; `LEGION_PROMPT_AGENTS=resolved` and `LEGION_PROMPT_SKILLS=resolved`
 when the gate asks for the task agents and skills the role prompts name; and
 `LEGION_AGENT_MODELS=resolved` when it asks whether those agents' models resolve — and exits 1 on
