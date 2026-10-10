@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync, statSync } from "node:fs";
 import * as path from "node:path";
 import {
   brokenRelativeLinks,
@@ -83,4 +83,40 @@ test("the worker skill names the merger's merge command, and no skill or prompt 
     )
     .map((file) => path.relative(REPO_ROOT, file));
   expect(saying).toEqual([]);
+});
+
+// The controller's `gh` acts as the review App (LEGION-668): the skill must say how it checks a
+// pull request's state, and nothing anywhere in the sweep's roots may still claim the controller
+// (or any role) cannot read GitHub.
+test("the controller skill reads pull requests as the review App, and nothing says the controller holds no GitHub credential", () => {
+  const controllerSkill = readFileSync(path.join(staged, "legion-controller/SKILL.md"), "utf8");
+  expect(controllerSkill).toContain("gh pr view <url> --json state -q .state");
+  for (const token of ["OPEN", "MERGED", "CLOSED", "unreadable", '"phase":"controller"']) {
+    expect(controllerSkill).toContain(token);
+  }
+
+  const forbidden =
+    /no GitHub credential|never reads GitHub|has no App|cannot read GitHub|holds no repository credential/;
+  const extensions = new Set([".md", ".go", ".ts", ".yaml", ".yml", ".example", ".sh"]);
+  const roots = [
+    path.join(REPO_ROOT, "skills/legion-controller"),
+    path.join(REPO_ROOT, "docs/kubernetes.md"),
+    path.join(REPO_ROOT, "packages/daemon/internal"),
+    path.join(REPO_ROOT, "docs/site/src/content/docs"),
+    path.join(REPO_ROOT, "deploy/kubernetes/daemon/controller.yaml.example"),
+    path.join(REPO_ROOT, "AGENTS.md"),
+    path.join(REPO_ROOT, "README.md"),
+  ];
+  const skipDirs = /(^|\/)(node_modules|dist|testdata)(\/|$)/;
+  const candidates = roots.flatMap((root) => (statSync(root).isDirectory() ? files(root) : [root]));
+  const offending = candidates
+    .filter((file) => extensions.has(path.extname(file)) && !skipDirs.test(file))
+    .flatMap((file) =>
+      readFileSync(file, "utf8")
+        .split("\n")
+        .map((line, index) => ({ line, number: index + 1 }))
+        .filter(({ line }) => forbidden.test(line))
+        .map(({ number }) => `${path.relative(REPO_ROOT, file)}:${number}`)
+    );
+  expect(offending).toEqual([]);
 });
