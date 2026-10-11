@@ -64,12 +64,10 @@
 #   are the only other inputs: left at their defaults, a run collides with another default run
 #   exactly as before; set all three to distinct values and two runs proceed at once on the same
 #   devbox against the same production cluster. A lane's two ports must be ones the devbox's
-#   security group admits from the Legion nodes — today TCP 13370-13375 only, six ports beside
-#   the production daemon's own 13370/13371 and this proof's default 13372/13373; widening that
-#   range is a change to the deployment repository's infrastructure, not this one. That leaves
-#   room for one extra Stage 4b lane at its defaults (or one Stage 4a lane beside a default Stage
-#   4b), never more, until the range is widened. LEGION_E2E_PROJECT must already exist as a
-#   Dispatch project: production Dispatch has no auto-create, and only a signed-in human may
+#   security group admits from the Legion nodes (README's port-admission note states the current
+#   allocation and how many lanes it leaves room for); widening that admitted range is a change to
+#   the deployment repository's infrastructure, not this one. LEGION_E2E_PROJECT must already exist
+#   as a Dispatch project: production Dispatch has no auto-create, and only a signed-in human may
 #   create one (createProject refuses a bearer actor, HUMAN_ONLY).
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
@@ -158,11 +156,11 @@ providers_secret=legion-$run_label-providers
 # daemon's spawn requires; the trailing digit keeps the child apart from the root.
 optree="S4BOP-$$"
 opchild="S4BOP-${$}1"
-# The rigs' own pair, beside the production daemon's 13370/13371: the devbox admits both pairs from
-# the Legion nodes, so a run never waits for the production daemon to stop. The daemon binds both on
-# every interface, and every pod dials the worker stream at advertise_host, the devbox's private
-# address ($host, read in prerequisites). address-moved-stream-new-pod swaps the two, moving the
-# worker stream within the pair the devbox admits.
+# The rigs' own pair, within the devbox's admitted range (README's port-admission note has the
+# current allocation). The daemon binds both on every interface, and every pod dials the worker
+# stream at advertise_host, the devbox's private address ($host, read in prerequisites).
+# address-moved-stream-new-pod swaps the two, moving the worker stream within the pair the devbox
+# admits.
 bind=0.0.0.0
 port_daemon=${LEGION_E2E_DAEMON_PORT:-13372}
 port_worker_stream=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
@@ -415,6 +413,68 @@ limit_pending() {
     | "pod \($pod.name) (uid \($pod.uid)): Karpenter at \($current.at): \($current.message | tojson); PodScheduled \($pod.condition.reason) since \($pod.condition.lastTransitionTime): \(($pod.condition.message // "") | tojson); default scheduler: \(if $scheduler == null then "none" else ($scheduler.message | tojson) end)"' "$work/limit-pods.json" | sort -u
 }
 
+# limit_pending_exhausted SELECTOR: like limit_pending, but for one of SELECTOR's pods the daemon
+# has already given up retrying — gone from Pending by the time the wait's own timeout ends, so
+# limit_pending alone (which only reads currently-Pending pods) finds nothing, even though the
+# pod was starved for exactly the reason limit_pending reports while a pod is still trying.
+# awaitRoleLauncher's launch failures do not suspend the Sandbox (relaunch.go, machine.go): the
+# pod can stay Pending through every attempt, the claim fails once its budget runs out, and the
+# pod is then placed once another lane frees room — after the daemon has already given up, so
+# "never scheduled" (an earlier version of this function) misses it, and "any pod ever starved"
+# would wrongly BLOCK an unrelated later timeout on an old failure. Ties a match to the current
+# check instead: reads the daemon log for a claim that failed with launch failures ran out at or
+# after check_started, whose token (claim_token, lib/workflow.sh:133) names an issue inside
+# SELECTOR; from the pod watch, keeps that issue's pod if it was Unschedulable at or before the
+# failure with no PodScheduled=True before it (placement after the failure still counts); then
+# requires Karpenter's own nodepool-limit event on that pod's uid, dated at or before the failure
+# — events outlive the pod by the cluster's event TTL, so this still finds it once the pod itself
+# is gone. Prints nothing when there is none, or when a read fails.
+limit_pending_exhausted() {
+  local key value has_value=true
+  case $1 in
+    *=*) key=${1%%=*} value=${1#*=} ;;
+    *) key=$1 value='' has_value=false ;;
+  esac
+  kubectl --context "$operator" -n "$namespace" --request-timeout=20s get events --field-selector involvedObject.kind=Pod -o json >"$work/limit-events-exhausted.json" || return 0
+  jq -n -r --rawfile log "$daemon_log" --slurpfile watch "$evidence/pod-watch.json" --slurpfile events "$work/limit-events-exhausted.json" \
+    --arg key "$key" --arg value "$value" --argjson has_value "$has_value" --arg run_label "$run_label" --arg since "$check_started" '
+    def seconds: sub("\\.[0-9]+"; "") | fromdateiso8601;
+    def at: .series.lastObservedTime // .lastTimestamp // .eventTime // .metadata.creationTimestamp;
+    ($since | seconds) as $since_t
+    | ($log | split("\n") | map(fromjson? // empty)) as $lines
+    | [$lines[]
+        | select(.msg == "supervise: claim failed" and .why == "launch failures ran out")
+        | select((.time | seconds) >= $since_t)
+        | (.claim | capture("^legion-" + $run_label + "-(?<issue>.+)-(?<role>architect|planner|implementer|tester|reviewer|merger)$")) as $m
+        | select($m != null)
+        | {issue: ($m.issue | ascii_upcase), failed_at: (.time | seconds)}
+      ] as $failures
+    | [$watch[] | select(.object.kind == "Pod") | .object] as $pods
+    | [
+        $failures[] as $f
+        | [$pods[] | select(.metadata.labels["legion.dev/issue"] == $f.issue)] as $issue_pods
+        | select(($issue_pods | length) > 0)
+        | select(any($issue_pods[]; if $has_value then (.metadata.labels[$key] // "") == $value else (.metadata.labels | has($key)) end))
+        | ($issue_pods | map(.metadata.uid) | unique) as $uids
+        | $uids[] as $uid
+        | ([$issue_pods[] | select(.metadata.uid == $uid) | .status.conditions[]? | select(.type == "PodScheduled")]
+            | map({status, reason, t: (.lastTransitionTime | seconds)})) as $transitions
+        | select(any($transitions[]; .status == "False" and .reason == "Unschedulable" and .t <= $f.failed_at))
+        | select((any($transitions[]; .status == "True" and .t < $f.failed_at)) | not)
+        | {uid: $uid, failed_at: $f.failed_at, issue: $f.issue}
+      ] as $candidates
+    | [$events[0].items[]
+        | select(.involvedObject.kind == "Pod" and at != null)
+        | {uid: .involvedObject.uid, component: (.source.component // .reportingComponent), reason, message: (.message // ""), at: at, t: (at | seconds)}
+      ] as $seen
+    | $candidates[] as $c
+    | ([$seen[] | select(.uid == $c.uid and .component == "karpenter" and .t <= $c.failed_at)] | max_by(.t)) as $current
+    | select($current != null and $current.reason == "FailedScheduling"
+        and ($current.message | contains("exceed limits for nodepool (NodePool=legion)")))
+    | "pod uid \($c.uid), issue \($c.issue), unschedulable before its claims launch failures ran out: Karpenter at \($current.at): \($current.message | tojson)"
+  ' | sort -u
+}
+
 # capacity_subject is the label selector (within the run) of the pods the current wait needs placed,
 # set by on_subject for that wait alone; empty, no wait is a capacity question.
 capacity_subject=
@@ -444,13 +504,20 @@ on_issue() {
 
 # limit_pending_blocked is the run's timeout_hook (lib/rig.sh until_true). A wait that timed out
 # while one of its own subject's pods could not be placed for the pool's limits was starved by
-# capacity, which is no verdict on the change, so the check ends BLOCKED naming the pod. A wait with
-# no subject, a starved pod outside the subject, any other timeout, and every check that fails
-# outright (a leak, an audit, a pod verdict) still fail.
+# capacity, which is no verdict on the change, so the check ends BLOCKED naming the pod —
+# currently Pending (limit_pending), or starved before its claim's launch failures ran out, inside
+# the current check (limit_pending_exhausted): without the second check a slower lane's capacity
+# shortfall that resolves after the daemon gives up, the ordinary case under concurrency, would
+# read as a bare timeout FAIL, a verdict on the change that has nothing to do with it. A wait
+# with no subject, a starved pod outside the subject, any other timeout, and every check that
+# fails outright (a leak, an audit, a pod verdict) still fail.
 limit_pending_blocked() {
   local pending
   [ -n "$capacity_subject" ] || return 0
-  pending=$(limit_pending "$capacity_subject" 2>/dev/null) || pending=
+  pending=$(limit_pending "$capacity_subject") || pending=
+  if [ -z "$pending" ]; then
+    pending=$(limit_pending_exhausted "$capacity_subject") || pending=
+  fi
   [ -z "$pending" ] || blocked "capacity: the legion pool is at its limits, so the scheduler cannot place $(awk 'NR > 1 { printf " // " } { printf "%s", $0 }' <<<"$pending")"
 }
 
@@ -2104,11 +2171,16 @@ start_interests_sampler() {
 # its repository's GitHub subjects (notifications.github.sjawhar.legion-smoke., where an agent
 # follows its own pull request), operator-close's tree ($optree), a legion-legsmoke- role, or the
 # session itself. $project and $optree match as whole tokens, bounded by non-alphanumeric
-# characters: a bare contains() would read another lane's LEGSMOKE2 as ours when we are LEGSMOKE,
-# or its S4BOP-1234 as ours when we are S4BOP-123 — the exact leak this audit exists to catch.
+# characters, not by regex's `\b` (word-boundary) alone: `\b` treats `_` as a word character, so
+# `\bLEGSMOKE\b` would miss a topic spelled `LEGSMOKE_something`, which a bare contains() would
+# at least have caught by accident. A bare contains() has the opposite failure: it would read
+# another lane's LEGSMOKE2 as ours when we are LEGSMOKE, or its S4BOP-1234 as ours when we are
+# S4BOP-123 — the exact leak this audit exists to catch. Neither gap is here: both inputs are
+# validated to [A-Z][A-Z0-9]* and digits before this runs, so neither carries a character this
+# regex would need to escape.
 interests_outside() {
   jq -s -c --arg p "$project" --arg t "legion-$run_label-" --arg space "notifications.legion.$run_label." --arg repo "notifications.github.${repo/\//.}." --arg op "$optree" '[.[] | .session_id as $s | .topics[]?
-    | select((test("\\b" + $p + "\\b") or contains($t) or startswith($space) or startswith($repo) or test("\\b" + $op + "\\b") or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
+    | select((test("(^|[^A-Za-z0-9])" + $p + "([^A-Za-z0-9]|$)") or contains($t) or startswith($space) or startswith($repo) or test("(^|[^A-Za-z0-9])" + $op + "([^A-Za-z0-9]|$)") or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
 }
 audit_verdict() { [ "$(jq -c . "$1")" = "[]" ] && [ "$(jq -c . "$2")" = "[]" ]; }
 # audit_failure is what a failed production audit says, in the checkpoint and in the teardown.
@@ -2492,7 +2564,7 @@ drive_gated_spec() {
 begin spec-posted
 specs=("$tree1")
 if [ -n "$design_gate" ]; then
-  drive_gated_spec "$tree1"
+  on_tree "$tree1" drive_gated_spec "$tree1"
 else
   specs+=("$tree2")
   for issue in "${specs[@]}"; do on_tree "$issue" drive_spec "$issue"; done
@@ -2831,7 +2903,7 @@ daemon_state | jq -e --arg b "$tree2" --arg c "$tree3" '(.admission.active | ind
   fail "the proof human's backlog took tree 2 out: $(daemon_state | jq -c --arg b "$tree2" '{admission, phase: .issues[$b].phase}')"
 note "the proof human's backlog on tree 2 was set back to $(dispatch_get "issues/$tree2" | jq -r .status) by legion-daemon:$project, its architect told, and tree 2 kept its slot"
 take_out "$tree2"
-until_true 300 "tree 3 to take tree 2's admission slot" sh -c \
+on_tree "$tree3" until_true 300 "tree 3 to take tree 2's admission slot" sh -c \
   "'$work/legion' state --json --config '$work/legion.yaml' | jq -e --arg c '$tree3' '(.admission.active | index(\$c)) != null'"
 note "legion status moved tree 2 to backlog, its pods gone; tree 3 ($tree3) admitted"
 pass
@@ -3743,7 +3815,7 @@ shape_checked() {
   uids=$(live_claims | jq -r '.[].podUid' | sort -u) || return 1
   for uid in $uids; do grep -qF " $uid " "$evidence/pods-checked.txt" || return 1; done
 }
-until_true 300 "the shape watcher to check every pod the run's claims run in since the move" shape_checked
+on_subject "legion.dev/tree" until_true 300 "the shape watcher to check every pod the run's claims run in since the move" shape_checked
 bad=$(pod_shape_verdict "$evidence/pod-watch.json")
 [ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
 note "the shape watcher checked every pod the run's claims run in since the move, and each of the $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l) pods seen ready so far dials the stream served when it was created"

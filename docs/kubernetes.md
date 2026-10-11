@@ -903,8 +903,8 @@ runtime:
       volume_mounts: [...]
 bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
 advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
-worker_stream_port: 13371
-daemon_url: http://<the address pods reach the daemon at>:13370
+worker_stream_port: <the port advertise_host or bind serves it on>
+daemon_url: http://<the address pods reach the daemon at>:<the daemon's own port>
 capabilities:                   # optional: the deployment capabilities decided by name, with the reason (The deployment's capability report, below); a gap is reported, never refused
   decided: { secrets: "<reason>", model-fallback: "<reason>", resource-limits: "<reason>", pool-capacity: "<reason>" }
 ```
@@ -1975,7 +1975,7 @@ runtime:
       node_selector: { legion.dev/pool: legion }
       tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
       priority_class: legion
-daemon_url: http://<address pods reach the daemon at>:13370   # required under kubernetes
+daemon_url: http://<address pods reach the daemon at>:<the daemon's own port>   # required under kubernetes
 bind: 0.0.0.0
 envoy_token_file: /var/run/legion/providers/ENVOY_TOKEN       # required under kubernetes
 ```
@@ -2232,9 +2232,9 @@ nats_urls: [nats://nats.internal.example.com:4222]
 envoy_url: http://envoy-listener.internal.example.com:9020
 envoy_token_file: /home/legion/.config/legion/sjawhar-legion/envoy-api-token
 dispatch_url: https://dispatch.internal.example.com
-daemon_url: http://<devbox VPC IP>:13370
+daemon_url: http://<devbox VPC IP>:<daemon port>
 bind: <devbox VPC IP>
-worker_stream_port: 13371
+worker_stream_port: <worker stream port>
 ```
 
 **`--resume` keeps the same-agent invariant through the init container.** The tmux runtime `stat`s the

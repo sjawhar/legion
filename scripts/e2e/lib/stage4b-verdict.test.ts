@@ -81,10 +81,45 @@ const nominatedEvent = podEvent(
 const schedulerMessage =
   "0/17 nodes are available: 17 node(s) didn't match Pod's node affinity/selector.";
 const schedulerEvent = podEvent("default-scheduler", "FailedScheduling", schedulerMessage);
+// watchPod is a pod-watch.json entry for pod NAME (uid UID, issue ISSUE, carrying ISSUE as both
+// its legion.dev/issue and legion.dev/tree label) with a single PodScheduled condition — STATUS,
+// REASON (only for False) — that last transitioned AT.
+const watchPod = (
+  name: string,
+  uid: string,
+  issue: string,
+  status: "True" | "False",
+  reason: string | undefined,
+  at: string
+) => ({
+  object: {
+    kind: "Pod",
+    metadata: {
+      name,
+      uid,
+      labels: { "legion.dev/project": "x", "legion.dev/issue": issue, "legion.dev/tree": issue },
+    },
+    status: {
+      conditions: [
+        { type: "PodScheduled", status, ...(reason ? { reason } : {}), lastTransitionTime: at },
+      ],
+    },
+  },
+});
+// claimFailed is a supervise: claim failed daemon-log line for ISSUE's ROLE, dated AT, with the
+// one reason limit_pending_exhausted reads (launch failures ran out), the run label fixed at x.
+const claimFailed = (issue: string, role: string, at: string) => ({
+  msg: "supervise: claim failed",
+  claim: `legion-x-${issue.toLowerCase()}-${role}`,
+  why: "launch failures ran out",
+  time: at,
+});
 interface Capacity {
   subject?: string;
   pods?: object[];
   events?: object[];
+  watch?: object[];
+  daemonLog?: object[];
 }
 
 let runs = 0;
@@ -122,6 +157,14 @@ function verdictRun(outside: string, tail: string, capacity: Capacity = {}) {
   const run = join(dir, `run-${++runs}`);
   const evidence = join(run, "evidence");
   mkdirSync(evidence, { recursive: true });
+  writeFileSync(
+    join(evidence, "pod-watch.json"),
+    (capacity.watch ?? []).map((o) => JSON.stringify(o)).join("\n")
+  );
+  writeFileSync(
+    join(evidence, "daemon.log"),
+    (capacity.daemonLog ?? []).map((o) => JSON.stringify(o)).join("\n")
+  );
   const result = Bun.spawnSync(
     [
       "bash",
@@ -129,7 +172,7 @@ function verdictRun(outside: string, tail: string, capacity: Capacity = {}) {
       `set -Eeuo pipefail
 root=${JSON.stringify(join(import.meta.dir, "..", "..", ".."))}
 work=${JSON.stringify(join(run, "work"))} evidence=${JSON.stringify(evidence)}
-check=controller check_started=2026-09-30T12:00:00Z
+check=controller check_started=2026-09-30T12:00:00Z daemon_log=${JSON.stringify(join(evidence, "daemon.log"))}
 ok= was_blocked= until=controller locked=1 compared= snapshotted= audited= prod_baseline=2026-09-30T11:00:00.000000000Z
 tree1= tree2= tree3= tree4= pair_session= shape_pid= daemon_pid= watch_pid= events_pid= leaks_pid= sampler_pid= interests_pid= pg_container=none project=LEGSMOKE run_label=x smoke_main_cleaning=
 operator=production namespace=legion capacity_subject=
@@ -154,6 +197,7 @@ ${fn("fail")}
 ${fn("until_reached")}
 ${fn("pass")}
 ${fn("limit_pending")}
+${fn("limit_pending_exhausted")}
 ${fn("on_subject")}
 ${fn("on_tree")}
 ${fn("limit_pending_blocked")}
@@ -315,7 +359,25 @@ describe("stage 4b's verdict line", () => {
         ],
       },
     ],
-    ["no pod Pending on the pool's limits", { subject: "T1" }],
+    [
+      "a pod starved before an earlier check began, its claim long since failed",
+      {
+        subject: "T1",
+        watch: [
+          watchPod(
+            "legion-x-t1",
+            "uid-earlier",
+            "T1",
+            "False",
+            "Unschedulable",
+            "2026-09-30T11:00:00Z"
+          ),
+        ],
+        daemonLog: [claimFailed("T1", "implementer", "2026-09-30T11:30:00Z")],
+        events: [limitEvent("legion-x-t1", "uid-earlier", "2026-09-30T11:30:05Z")],
+      },
+    ],
+    ["no pod Pending and no claim failed on the pool's limits", { subject: "T1" }],
   ] as [string, Capacity][]) {
     test(`still fails a wait that timed out with ${name}`, () => {
       const timedOut = controllerRun("[]", "timeout", capacity);
@@ -325,6 +387,31 @@ describe("stage 4b's verdict line", () => {
       expect(timedOut.stdout).not.toContain("BLOCKED");
     });
   }
+
+  test("says BLOCKED on capacity for a pod the scheduler placed only after its claim's launch failures ran out", () => {
+    const exhausted = controllerRun("[]", "timeout", {
+      subject: "T1",
+      watch: [
+        watchPod(
+          "legion-x-t1",
+          "uid-exhausted",
+          "T1",
+          "False",
+          "Unschedulable",
+          "2026-09-30T11:55:00Z"
+        ),
+        watchPod("legion-x-t1", "uid-exhausted", "T1", "True", undefined, "2026-10-02T10:10:00Z"),
+      ],
+      daemonLog: [claimFailed("T1", "implementer", "2026-09-30T12:00:30Z")],
+      events: [limitEvent("legion-x-t1", "uid-exhausted", "2026-09-30T12:00:05Z")],
+    });
+    expect(exhausted.code).toBe(1);
+    expect(exhausted.stdout).toContain(
+      `CHECK controller: BLOCKED: capacity: the legion pool is at its limits, so the scheduler cannot place pod uid uid-exhausted, issue T1, unschedulable before its claims launch failures ran out: Karpenter at 2026-09-30T12:00:05Z: ${JSON.stringify(limitMessage)}`
+    );
+    expect(exhausted.stdout).toContain("stage 4b e2e: BLOCKED (check controller)");
+    expect(exhausted.stdout).not.toContain("CHECK controller: FAIL");
+  });
 });
 
 // The issue-independence checkpoint reads whether tree 2's planner held from on_tree's exit status

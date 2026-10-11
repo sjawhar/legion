@@ -476,6 +476,30 @@ evidence directory is under the scratch work directory, whose processes the tear
 so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ([`lib/transcript.sh`](#libtranscriptsh)).
 
+## Port admission
+
+The devbox's security group admits TCP 13370-13375 from the Legion nodes, six ports, and nothing
+wider: widening it is a change to the deployment repository's infrastructure, not either stage
+script. The Legion daemon that once ran on the devbox and held 13370/13371 there has moved into
+the cluster; nothing on the devbox holds them today. That makes all six ports available to a
+lane's own identity, not five beside a fixed occupant — confirm with `ss` before relying on it,
+since the harness's own `ports_free` and taken-port checks are the authority at run time and this
+note only the architecture behind them.
+
+Each stage needs exactly two of the six, never three — the two scripts need different pairs of
+two, which is where "two or three" confusion comes from, not either one needing three:
+- **Stage 4b**: `LEGION_E2E_DAEMON_PORT` (default `13372`) and `LEGION_E2E_WORKER_STREAM_PORT`
+  (default `13373`). It has no session database of its own; `stage4b-sandbox-tree.sh` names no
+  `SESSION_DB` anywhere.
+- **Stage 4a**: `LEGION_E2E_WORKER_STREAM_PORT` (default `13373`, the same name and default Stage
+  4b reads) and `LEGION_E2E_SESSION_DB_PORT` (required, no default: `postgres-resume`'s scratch
+  Postgres).
+
+Both scripts default `LEGION_E2E_WORKER_STREAM_PORT` to `13373`, so two lanes at their defaults —
+two Stage 4b's, two Stage 4a's, or one of each — collide there; set at least one override to run
+two lanes together. With six admitted ports and two per lane, the ceiling is three lanes at once,
+each on its own pair with nothing shared; a fourth needs the admitted range widened.
+
 ## stage4a-sandbox-runtime.sh
 
 ```sh
@@ -564,9 +588,8 @@ namespace list. Every evidence line names which one observed it (`[runtime]`, `[
 `[harness]` for the listener and its resolver).
 
 The harness hosts the worker stream itself, on the devbox's private address (from instance
-metadata, never `0.0.0.0`) and port `LEGION_E2E_WORKER_STREAM_PORT` (default 13373) — the rigs'
-worker-stream port, which the devbox's security group admits from Legion nodes beside the
-production daemon's 13370/13371 — and refuses
+metadata, never `0.0.0.0`) and port `LEGION_E2E_WORKER_STREAM_PORT` (default 13373) — within the
+devbox's admitted range ([Port admission](#port-admission)) — and refuses
 to start while anything holds it, naming the holder. Its resolver accepts
 only each claim's current generation and records every hello with the claim, the generation, and
 the hash of the token presented. The pods run a stub agent under the real Go shim: it appends its
@@ -784,11 +807,11 @@ shape holds no character `ProjectToken` would drop. The lock is today's single f
 `run_label` is the default `legsmoke`, else a path named for `run_label`, so a non-default
 project never shares today's lock, its leftover checks, or its durable consumers with a default
 run. `LEGION_E2E_DAEMON_PORT` (default `13372`) and `LEGION_E2E_WORKER_STREAM_PORT` (default
-`13373`, the same name Stage 4a reads for its one port) are the only other inputs — the
-production daemon keeps its own 13370/13371 beside them, and the run's daemon may swap which of
-its two takes the API and which the worker stream (`address-moved-stream-new-pod`), never a
-third. Left at their defaults, a run collides with another default run exactly as it always has;
-set all three to distinct values and two runs proceed at once, on the same devbox, against the
+`13373`, the same name Stage 4a reads for its one port) are the only other inputs, within the
+devbox's admitted range ([Port admission](#port-admission)); the run's daemon may swap which of
+its two takes the API and which the worker stream (`address-moved-stream-new-pod`), never a third.
+Left at their defaults, a run collides with another default run exactly as it always has; set all
+three to distinct values and two runs proceed at once, on the same devbox, against the
 same production cluster. `LEGION_E2E_PROJECT` must already exist as a Dispatch project:
 production Dispatch has no auto-create, and only a signed-in human may create one
 (`createProject` refuses a bearer actor, `HUMAN_ONLY`).
@@ -803,14 +826,15 @@ production Dispatch has no auto-create, and only a signed-in human may create on
   daemon on the same address.
 
 **Two lanes need separate checkouts, not just distinct identities above.** The controller
-checkpoint packs this checkout's `@sjawhar/pi-legion-envoy`
-([`lib/pack-plugin.sh`](#libpack-pluginsh)), which rewrites `packages/pi-envoy/package.json` in
-place for the few seconds the pack takes, under its own flock on that file. That flock serializes
-two lanes' *packs* against each other (whichever holds it waits its turn, as `release.yaml` and
-every other branch-built install already rely on); it does not protect a lane's own
-[`lib/built-from.sh`](#libbuilt-fromsh) — called in `prerequisites` and again before the build —
-whose `jj diff`/`jj log` read the shared working copy directly, with no lock of their own. A
-second lane's pack landing mid-read reads as this lane's own tree having changed, failing
+checkpoint packs both of this checkout's plugins, `@sjawhar/pi-envoy` (`packages/pi-envoy`) and
+`@sjawhar/pi-legion` (`packages/pi-legion`) ([`lib/pack-plugin.sh`](#libpack-pluginsh)), each
+rewriting its own `package.json` in place for the few seconds its pack takes, under its own flock
+on that one file: pi-envoy's pack and pi-legion's pack take separate locks, each serializing
+two lanes' packs of that one plugin against each other (whichever holds it waits its turn, as
+`release.yaml` and every other branch-built install already rely on); neither protects a lane's
+own [`lib/built-from.sh`](#libbuilt-fromsh) — called in `prerequisites` and again before the
+build — whose `jj diff`/`jj log` read the shared working copy directly, with no lock of their
+own. A second lane's pack landing mid-read reads as this lane's own tree having changed, failing
 `prerequisites` or the build's own revision check for a reason that has nothing to do with the
 change under test. Run concurrent lanes from separate checkouts (`jj workspace add`, or separate
 clones) of the same commit.

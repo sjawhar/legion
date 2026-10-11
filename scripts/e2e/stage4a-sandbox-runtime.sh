@@ -46,13 +46,13 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 namespace=legion
-# The rigs' worker-stream port, beside the production daemon's 13370/13371. Overridable
+# The rigs' worker-stream port, within the devbox's admitted range. Overridable
 # (LEGION_E2E_WORKER_STREAM_PORT, see Inputs, above) so two runs — two Stage 4a's, or a Stage 4a
 # and a Stage 4b — can each hold their own; left at its default, each stage refuses to start while
 # the other holds it, exactly as before. A lane's port must be one the devbox's security group
-# admits from the Legion nodes — today TCP 13370-13375 only, six ports beside the production
-# daemon's own 13370/13371 and this proof's default 13373; widening that range is a change to the
-# deployment repository's infrastructure, not this one.
+# admits from the Legion nodes (README's port-admission note has the current allocation and how
+# many lanes it leaves room for); widening that admitted range is a change to the deployment
+# repository's infrastructure, not this one.
 port=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 repo=sjawhar/legion-smoke
 app_id=3202636
