@@ -297,10 +297,12 @@ type PendingStatusWrite struct {
 
 // StrandedClaim is one claim nothing will wake — a worker of its issue's phase, or its tree's
 // architect, in a tree that runs — named by its issue, its role and its state; the issue's own
-// entry under `issues` carries the rest. The state is the move that brings it back: `suspended`,
-// the operator's resume (`legion claims resume`); `failed`, a workflow start, since a failed claim
-// ignores resume and deliver — its architect's retry of the held phase for a worker, its tree's
-// re-admission for an architect.
+// entry under `issues` carries the rest. The state and role are the move that brings it back: a
+// `suspended` architect, the operator's resume (`legion claims resume`), which a catch-up follows;
+// a `suspended` worker, the operator's delivery of its phase's resume task (`legion claims
+// deliver`), since a resumed worker that holds no task relaunches with nothing to do; `failed`, a
+// workflow start, since a failed claim ignores resume and deliver — its architect's retry of the
+// held phase for a worker, its tree's re-admission for an architect.
 type StrandedClaim struct {
 	Issue string     `json:"issue"`
 	Role  claim.Role `json:"role"`

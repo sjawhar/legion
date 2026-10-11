@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/registry"
@@ -407,23 +408,32 @@ func pendingSummary(pending []api.PendingStatusWrite) string {
 
 // strandedSummary is the one line an operator reads for the claims nothing will wake: how many,
 // and each by issue and role under the move that brings it back. `legion claims resume` brings back
-// a suspended one; a failed one ignores resume, and runs again only on a workflow start.
+// a suspended architect, which is sent a catch-up once it is ready; a suspended phase worker needs
+// `legion claims deliver` with its phase's resume task, since a suspension retired its phase's task
+// and a resume would relaunch it with nothing to do; a failed one ignores both, and runs again only
+// on a workflow start.
 func strandedSummary(stranded []api.StrandedClaim) string {
 	if len(stranded) == 0 {
 		return "claims nothing will wake: none"
 	}
-	var resume, workflowStart []string
+	var resume, deliver, workflowStart []string
 	for _, c := range stranded {
 		named := c.Issue + " " + string(c.Role)
-		if c.State == string(supervise.StateFailed) {
+		switch {
+		case c.State == string(supervise.StateFailed):
 			workflowStart = append(workflowStart, named)
-		} else {
+		case c.Role == legionclaim.RoleArchitect:
 			resume = append(resume, named)
+		default:
+			deliver = append(deliver, named)
 		}
 	}
 	var groups []string
 	if len(resume) > 0 {
 		groups = append(groups, "resume "+strings.Join(resume, ", "))
+	}
+	if len(deliver) > 0 {
+		groups = append(groups, "deliver its phase's resume task to "+strings.Join(deliver, ", "))
 	}
 	if len(workflowStart) > 0 {
 		groups = append(groups, "failed, needs a workflow start "+strings.Join(workflowStart, ", "))

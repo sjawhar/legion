@@ -8,6 +8,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
@@ -22,12 +23,15 @@ const strandedReportTimeout = 5 * time.Second
 // reportStranded logs, once the boot has re-adopted every claim and replayed the failed ones to
 // the workflow, the claims nothing will wake (workflow.Stranded), read from records as the state
 // route reads them: one error line, however many there are, naming each claim as `<issue> <role>`
-// under the move that brings it back. `resume` lists the suspended ones, which the operator's
-// `legion claims resume` brings back; `needsWorkflowStart` lists the failed ones, which ignore
-// resume and deliver and run again only on a workflow start: their architect's retry of the held
-// phase for a worker, their tree's re-admission for an architect. A fleet a restart did not bring
-// back otherwise looks healthy — its controller registers, the state shows its trees active, and
-// nothing else is logged. A boot with none logs nothing. The state route judges the same rule on
+// under the move that brings it back. `resume` lists the suspended architects, which the
+// operator's `legion claims resume` brings back with a catch-up; `deliver` lists the suspended
+// phase workers, which a resume would relaunch with no task (a suspension retires the phase's
+// task, and only an architect is sent a catch-up), so the operator's `legion claims deliver` with
+// the phase's resume task brings each back; `needsWorkflowStart` lists the failed ones, which
+// ignore resume and deliver and run again only on a workflow start: their architect's retry of the
+// held phase for a worker, their tree's re-admission for an architect. A fleet a restart did not
+// bring back otherwise looks healthy — its controller registers, the state shows its trees active,
+// and nothing else is logged. A boot with none logs nothing. The state route judges the same rule on
 // every read (strandedClaims). A failed read is logged and stops nothing: the report is the boot's
 // account of its claims, and no step after it depends on it. A read the daemon's stop cancels is
 // not a failure and logs nothing; one that outlives strandedReportTimeout is. project is the
@@ -53,15 +57,18 @@ func reportStranded(ctx context.Context, st *store.Store, records record.Store, 
 	if len(stranded) == 0 {
 		return
 	}
-	resume, workflowStart := []string{}, []string{}
+	resume, deliver, workflowStart := []string{}, []string{}, []string{}
 	for _, c := range stranded {
 		named := c.Issue + " " + string(c.Role)
-		if c.State == supervise.StateFailed {
+		switch {
+		case c.State == supervise.StateFailed:
 			workflowStart = append(workflowStart, named)
-		} else {
+		case c.Role == claim.RoleArchitect:
 			resume = append(resume, named)
+		default:
+			deliver = append(deliver, named)
 		}
 	}
 	log.Error("legion daemon started with claims nothing will wake", "project", project, "count", len(stranded),
-		"resume", resume, "needsWorkflowStart", workflowStart)
+		"resume", resume, "deliver", deliver, "needsWorkflowStart", workflowStart)
 }

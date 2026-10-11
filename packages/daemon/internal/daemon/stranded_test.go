@@ -176,7 +176,9 @@ func keysOf(state map[string]json.RawMessage) []string {
 // failed phase worker (its issue is held from that phase) and a failed tree architect. It names
 // none of the claims something will still start: a worker whose phase is not its own, and the
 // members of a tree that lingers, which re-admission starts again. One error line names them all,
-// the suspended ones under `resume` and the failed ones, which resume does not move, under
+// the suspended architects under `resume`, which brings one back with a catch-up, the suspended
+// phase workers under `deliver`, since a resumed worker is handed no task and needs its phase's
+// resume task delivered, and the failed ones, which resume does not move, under
 // `needsWorkflowStart`; the state carries the same claims, each with its state.
 func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
@@ -227,11 +229,12 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 		}
 		return named
 	}
-	resume := []string{implementing + " architect", implementing + " implementer", tested + " tester"}
+	resume := []string{implementing + " architect"}
+	deliver := []string{implementing + " implementer", tested + " tester"}
 	workflowStart := []string{reviewing + " reviewer", planning + " architect"}
-	if line["level"] != "ERROR" || line["project"] != cfg.Project || line["count"] != float64(len(resume)+len(workflowStart)) ||
-		!reflect.DeepEqual(listed("resume"), resume) || !reflect.DeepEqual(listed("needsWorkflowStart"), workflowStart) {
-		t.Fatalf("the boot's line = %v, want an error for project %s naming %q to resume and %q needing a workflow start", line, cfg.Project, resume, workflowStart)
+	if line["level"] != "ERROR" || line["project"] != cfg.Project || line["count"] != float64(len(resume)+len(deliver)+len(workflowStart)) ||
+		!reflect.DeepEqual(listed("resume"), resume) || !reflect.DeepEqual(listed("deliver"), deliver) || !reflect.DeepEqual(listed("needsWorkflowStart"), workflowStart) {
+		t.Fatalf("the boot's line = %v, want an error for project %s naming %q to resume, %q to deliver to and %q needing a workflow start", line, cfg.Project, resume, deliver, workflowStart)
 	}
 	wantWire := []map[string]string{
 		{"issue": implementing, "role": "architect", "state": "suspended"},
