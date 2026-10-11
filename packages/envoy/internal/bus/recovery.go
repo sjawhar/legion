@@ -79,7 +79,9 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 // there would cut off the deliveries still in their handlers.
 func (c *Client) closeStopped(nc *nats.Conn) {
 	c.mu.Lock()
-	reconnectedBeforeTheDrain := nc == c.drained && nc.Stats().Reconnects == c.drainedReconnects
+	// A callback reports at least one reconnect, and a client stopped by Close alone leaves the
+	// count at 0, so only a reconnect Drain counted at its stop matches.
+	reconnectedBeforeTheDrain := nc == c.Conn && nc.Stats().Reconnects == c.drainedReconnects
 	c.mu.Unlock()
 	if !reconnectedBeforeTheDrain {
 		nc.Close()
