@@ -5,7 +5,7 @@
 ### Added
 
 - The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
-  (migration 0090), is a stable id, a name and the sessions it holds; a pull request whose first
+  (migration 0091), is a stable id, a name and the sessions it holds; a pull request whose first
   session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,
   colours, lanes, list and measures all follow the group while the Session facet keeps each
   session apart. `POST /api/v1/delivery/session-groups` and `PATCH` and `DELETE

@@ -14,7 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-// SessionGroup is one of the Delivery page's session groups (LEGION-682, migration 0090): a
+// SessionGroup is one of the Delivery page's session groups (LEGION-682, migration 0091): a
 // stable id, a name and the agent sessions it holds. A pull request whose first session is a
 // member shows the group as its Parent agent, under ParentAgentValue, instead of the session.
 // Mirrors packages/contracts/src/dispatch-api.ts's DeliverySessionGroup exactly.
