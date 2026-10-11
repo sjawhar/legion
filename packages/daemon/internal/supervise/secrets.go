@@ -41,6 +41,11 @@ type Enroller interface {
 // 4xx); the machine drops the identity and waits for the shim's next hello.
 type PermanentError interface{ Permanent() bool }
 
+// ExpiredTokenError is an Enroll failure the broker gave because the pod token presented had
+// expired (POD_TOKEN_EXPIRED): the key the hello carried stands, its token does not. The machine
+// drops the token, keeps the key, and enrolls that key with the next token it holds.
+type ExpiredTokenError interface{ TokenExpired() bool }
+
 const (
 	// revokeAttempts and revokeRetryDelay bound the revocation of a let-go process's enrollment;
 	// past them the enrollment's lease, which nothing renews once the pod is gone, ends it.
@@ -50,7 +55,8 @@ const (
 
 // heldIdentity is the latest hello2 identity for the claim's current incarnation, kept in memory
 // until the enrollment lands: a resume enrolls on the hello itself, a fresh launch once the agent
-// registers and the session id is known.
+// registers and the session id is known. Its token is empty once the broker found it expired,
+// until a fresh one replaces it.
 type heldIdentity struct {
 	incarnation string
 	AgentSecretsIdentity
@@ -60,7 +66,9 @@ type heldIdentity struct {
 // identity: the hello's thumbprint and token for this incarnation, and the agent's session id,
 // the broker's wake address. It never fails a transition: a refusal is logged with its code, a
 // transient one retried on the next Alive observation, a permanent one on the shim's next hello.
-// Once enrolled, the id is handed to the shim over the claim's connection, once per connection.
+// An expired token is dropped and the key kept, and nothing is presented until a token is held
+// again. Once enrolled, the id is handed to the shim over the claim's connection, once per
+// connection.
 func (m *Machine) ensureEnrolled(ctx context.Context) error {
 	if m.deps.Secrets == nil || m.claim.Locator == nil {
 		return nil
@@ -75,17 +83,25 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 		if m.identity == nil || m.identity.incarnation != incarnation || m.claim.Session == "" {
 			return nil
 		}
+		if m.identity.PodToken == "" {
+			return nil // the broker found the token expired; the shim's next hello carries a fresh one
+		}
 		enrolling, cancel := context.WithTimeout(ctx, m.deps.Timeouts.RPC)
 		id, err := m.deps.Secrets.Enroll(enrolling, PodEnrollment{
 			PodUID: podUID, Slot: slot, Thumbprint: m.identity.Thumbprint, PodToken: m.identity.PodToken, Session: m.claim.Session,
 		})
 		cancel()
 		if err != nil {
+			var expired ExpiredTokenError
 			var permanent PermanentError
-			if errors.As(err, &permanent) && permanent.Permanent() {
+			switch {
+			case errors.As(err, &expired) && expired.TokenExpired():
+				m.log.Warn("supervise: agent-secrets: the broker found the pod token expired; keeping the key for a fresh token", "incarnation", incarnation, "error", err)
+				m.identity.PodToken = ""
+			case errors.As(err, &permanent) && permanent.Permanent():
 				m.log.Error("supervise: agent-secrets: enrollment refused; waiting for the shim's next hello", "incarnation", incarnation, "error", err)
 				m.identity = nil
-			} else {
+			default:
 				m.log.Warn("supervise: agent-secrets: enrollment failed; retrying on the next observation", "incarnation", incarnation, "error", err)
 			}
 			return nil

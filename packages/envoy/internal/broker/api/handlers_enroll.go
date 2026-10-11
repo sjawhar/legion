@@ -103,6 +103,9 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	case errors.Is(err, enroll.ErrAlreadyEnrolled):
 		writeError(w, http.StatusConflict, "ALREADY_ENROLLED", err.Error())
 		return
+	case errors.Is(err, enroll.ErrPodTokenExpired):
+		writeError(w, http.StatusForbidden, "POD_TOKEN_EXPIRED", err.Error())
+		return
 	case errors.Is(err, enroll.ErrPodIdentity):
 		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
 		return
