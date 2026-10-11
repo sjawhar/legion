@@ -1422,7 +1422,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			s.afterSettleVersionRead(room)
 		}
 	}
-	markdown, err := renderTree(versioned)
+	markdown, offsets, err := renderTreeWithOffsets(versioned)
 	if err != nil {
 		if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
 			slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
@@ -1501,7 +1501,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		return
 	}
 	if versioning {
-		result, writeErr := s.writeVersionTx(ctx, tx, room, markdown, versioned, credit.actor, &versionWrite{
+		result, writeErr := s.writeVersionTx(ctx, tx, room, renderedTree{tree: versioned, markdown: markdown, offsets: offsets}, credit.actor, &versionWrite{
 			authors:          credit.authors,
 			capture:          &credit.capture,
 			docUpdateVersion: &snapshotCursor,

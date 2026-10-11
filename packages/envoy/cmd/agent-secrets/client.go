@@ -28,12 +28,33 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"time"
 )
 
 type client struct {
 	baseURL string
 	http    *http.Client
+}
+
+// terminalRenewal is the closed set of renewal refusals `agent-secrets renew` stops on, exiting
+// exitRenewRefused (76) so the worker shim does not restart it; every other refusal keeps the retry
+// backoff. Each member is an answer no retry can change: POD_TOKEN_REQUIRED is a pod enrollment's
+// renewal that carried no token, and ENROLLMENT_NOT_LIVE an enrollment that has ended, lapsed or
+// never existed. A broker that predates ENROLLMENT_NOT_LIVE answers an ended enrollment
+// PROOF_INVALID with a message saying "not live" (its renew handler's "enrollment is not live" and
+// its proof check's "proof invalid: not live"), which no recoverable proof failure says.
+// POD_IDENTITY_MISMATCH is not a member: the broker also answers it for a token it could not
+// verify while its issuer or key set was unreachable, and a real mismatch ends with the lease,
+// after which the next renewal is ENROLLMENT_NOT_LIVE.
+var terminalRenewal = struct {
+	Codes                     []string
+	LegacyCode, LegacyMessage string
+}{
+	Codes:         []string{"POD_TOKEN_REQUIRED", "ENROLLMENT_NOT_LIVE"},
+	LegacyCode:    "PROOF_INVALID",
+	LegacyMessage: "not live",
 }
 
 func newClient(baseURL string) *client {
@@ -53,6 +74,15 @@ func (e *apiError) Error() string {
 		return fmt.Sprintf("HTTP %d: %s", e.Status, e.Message)
 	}
 	return fmt.Sprintf("%s (%s)", e.Message, e.Code)
+}
+
+// Permanent reports whether this refusal is one of terminalRenewal's: a code it lists, or its
+// legacy code with a message naming the ended enrollment.
+func (e *apiError) Permanent() bool {
+	if slices.Contains(terminalRenewal.Codes, e.Code) {
+		return true
+	}
+	return e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage)
 }
 
 // do sends the request and, on a 2xx response, returns its raw body; any other status decodes
@@ -256,9 +286,17 @@ func (c *client) Self(ctx context.Context, signer Signer) (SelfResult, []byte, e
 
 // RenewEnrollment is the one Signer-taking method that still needs enrollmentID explicitly: the
 // broker route is /v1/enrollments/{id}/renew, so the id is in the URL path, not just the signed
-// payload.
-func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID string) (time.Time, error) {
-	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", nil)
+// payload. A pod's renewal carries its current projected token as pod_token; podToken "" sends no
+// body at all, a box's renewal.
+func (c *client) RenewEnrollment(ctx context.Context, signer Signer, enrollmentID, podToken string) (time.Time, error) {
+	var body []byte
+	if podToken != "" {
+		var err error
+		if body, err = json.Marshal(map[string]string{"pod_token": podToken}); err != nil {
+			return time.Time{}, err
+		}
+	}
+	raw, err := c.doProof(ctx, signer, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", body)
 	if err != nil {
 		return time.Time{}, err
 	}

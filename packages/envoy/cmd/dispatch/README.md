@@ -454,6 +454,14 @@ reconciles them, and marks the restored asks' copies owed the same way, so a rew
 the earlier release writes during the roll is undone by that document's next settlement on this
 release, which also writes the decided wording back into the block and settles its copies again.
 
+Migration `0092_refs_excerpts` adds three nullable columns to `refs` with no default
+(`excerpt_block_id`, `excerpt_text`, `excerpt_version`), a catalog change that rewrites no row,
+and the partial index `refs_excerpt_drift` over the rows whose `excerpt_version` is null: the
+stored excerpt `GET /api/v1/references` answers a document mention with, which every version write
+fills and the reference-excerpt reconciliation fills for every row stored before it
+(`packages/envoy/AGENTS.md`). On the 2026-10-10 production dump the reconciliation's first pass
+filled 7,498 mentions of 2,150 documents in 248 s at `GOMAXPROCS=2`. Its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

@@ -1224,7 +1224,39 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
-exists, and refuses to run without `dispatch.server_url`.
+exists, and refuses to run without `dispatch.server_url`. A document mention's backlink excerpt -
+the block holding the target's first mention, its id the `#b-<id>` jump and its markdown cut to
+480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
+`excerpt_version`, migration 0092) when the mention is indexed, cut from a render of the version's
+tree that the write already makes: every renderer of a version's tree takes the block offsets from
+its own render (`pmdoc.RenderWithBlockOffsets`; `renderTreeWithOffsets`,
+`documentMarkdownWithOffsets`), and a `docs.renderedTree` carries the tree, the markdown and the
+offsets together to `refs.MentionExcerpts` and `refs.RecordExcerpts` (`writeVersionTx`, and an
+upload's and a seeded spec's `docs.Service.IndexDocumentReferences`, which take the transaction's
+recorded rendering from the ledger), so the route reads no document and no write renders its tree
+for the excerpts (LEGION-531). An edit, a named version, a seed, a rebuild and a settlement render
+the tree once; an upload that changes the document renders it twice, as it did before excerpts -
+`ReplaceText`'s render of the replacement, which is the stored markdown, and `applyLive`'s render
+of the fork - and its excerpts are cut from `applyLive`'s render only when the two agree. A null
+`excerpt_version` marks a mention owed an excerpt: every row 0092 found, each one `rebuild-refs`
+inserts, and every mention of an upload whose replacement left the document as it was, the one
+version write that records no rendering (`refs.ClearExcerpts`, which keeps the payload the row
+holds for the reconciliation but sets its version null). `cmd/dispatch` runs
+`docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows through the partial index
+`refs_excerpt_drift` (an empty index once it has caught up), stores one batch of 20 documents per
+tick, every 2 s while a batch is full and every five minutes after, and for the hour after its
+start first marks owed the excerpts a version written by the binary a deploy replaces left
+behind (`refs.MarkStaleExcerpts`). A document the reconciliation cannot read for any reason but
+an unloadable history or a tree outside the schema (which it records as having no block), or whose
+excerpts it cannot store, is logged at ERROR and skipped for that tick, its mentions left owed, so
+one document never holds back the rest of its batch. `refs.StoredExcerpts` serves only a row whose
+`excerpt_version` is non-null; a row owed an excerpt is answered with the document's name, not the
+payload it still holds. One window is left: during the one rolling deploy that ships 0092, a
+version the binary it replaces writes leaves the previous version's excerpt with its
+`excerpt_version` still set, and the route serves that excerpt until `refs.MarkStaleExcerpts`
+marks it owed at the reconciliation's next tick, which starts within five minutes
+(`docs.ReferenceExcerptReconcileInterval`) of the last one ending. The deploy's overlap lies inside
+the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
@@ -2327,19 +2359,41 @@ or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but c
 for callers that choose between the broker and another backend. A helper holding no launcher
 credential, from every restart until the operator logs the machine in, enrolls no one: its sign
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
-with the same not-logged-in notice naming `agent-secrets machine login`. The login that installs
-a credential wakes every registered session's enrollment retry, so those sessions reach the broker
-within about a second of it rather than when a backoff of up to a minute comes round. A session
-whose renew the broker refuses (its lease lapsed) stops counting as enrolled at once, and its
-enrollment becomes the session's lapsed id; so does a re-pinned session's recorded enrollment
-after a helper restart. While it is lapsed and the helper holds a credential, sign answers
-NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its re-enrollment. The
-helper revokes a lapsed id before the session enrolls again, and while the session lives its
-record keeps that id until the revoke lands, so a restart meanwhile, even a second one before any
-login, still revokes it. A session that ends first takes its record with it and hands the id to a
-bounded revoke (three tries); before a login those fail, and the broker's sweeper ends the id once
-its lease lapses. A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another
-operator's launcher credential) counts as done, and the session enrolls afresh.
+with the same not-logged-in notice naming `agent-secrets machine login`.
+
+`agent-secrets renew --pod-token-file FILE` is the pod renewer: it re-reads and trims the
+projected token before every broker request, and sends it as `pod_token`. A blank or unreadable
+file makes no request: the renewer prints `ERROR: enrollment <id> cannot read its pod token
+(<reason>); nothing was sent, so its lease lapses unless the file becomes readable`, the only
+record naming the lapsing enrollment since the broker hears nothing, and retries rather than
+exiting 76 - at start it exits 2 and the shim starts it again, and after a renewal it waits and
+reads again. The worker shim passes its projected token file and writes the renewer's stderr to
+its own.
+The client works against a broker that predates the renewal body because that handler reads no
+body. The terminal renewal refusals are one set in `cmd/agent-secrets` (`terminalRenewal`):
+`POD_TOKEN_REQUIRED`, `ENROLLMENT_NOT_LIVE`, and an older broker's `PROOF_INVALID` whose message
+says `not live` (its word for an ended enrollment). Only those exit 76 (`EX_PROTOCOL`) with the
+enrollment id, HTTP status and broker code; the shim quotes that terminal line beside its own
+enrollment id and stops rather than restarting a renewer that cannot succeed. Every other refusal
+keeps the retry backoff: `POD_IDENTITY_MISMATCH`, because the broker also answers it for a token
+it could not verify while its issuer or key set was unreachable (a real mismatch ends with the
+lease, and the next renewal is `ENROLLMENT_NOT_LIVE`); `POD_TOKEN_EXPIRED`, retried with the token
+the file holds next; and any other `PROOF_INVALID`, since a clock or URL correction can make the
+next proof valid.
+
+The login that installs a credential wakes every registered session's enrollment retry, so those
+sessions reach the broker within about a second of it rather than when a backoff of up to a minute
+comes round. A session whose renew the broker refuses (its lease lapsed) stops counting as enrolled
+at once, and its enrollment becomes the session's lapsed id; so does a re-pinned session's recorded
+enrollment after a helper restart. While it is lapsed and the helper holds a credential, sign
+answers NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its
+re-enrollment. The helper revokes a lapsed id before the session enrolls again, and while the
+session lives its record keeps that id until the revoke lands, so a restart meanwhile, even a
+second one before any login, still revokes it. A session that ends
+first takes its record with it and hands the id to a bounded revoke (three tries); before a login
+those fail, and the broker's sweeper ends the id once its lease lapses. A revoke refused 403
+`OPERATOR_MISMATCH` (an enrollment made under another operator's launcher credential) counts as
+done, and the session enrolls afresh.
 `agent-secrets machine login-status`, which the helper answers, exits 0 while the helper holds a
 launcher credential and prints `issued`. A
 re-login that is denied, expires unapproved or is still pending leaves the credential an earlier

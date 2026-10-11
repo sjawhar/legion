@@ -11,7 +11,6 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
 // Ledger is what the document operations joined to one database transaction produce until it
@@ -60,11 +59,13 @@ type ledgerVersion struct {
 }
 
 // ledgerSeed is a document SeedText wrote in this transaction: the actor who wrote its first
-// text, and the tree so credit can register that actor against every ask block the seed
-// introduced (registerAskAuthors) once the transaction has committed.
+// text, and the tree it wrote with that tree's rendering and its blocks' byte ranges. Credit
+// registers the actor against every ask block the tree introduced (registerAskAuthors) once the
+// transaction has committed, and the seed's version cuts its mentions' excerpts from the
+// rendering.
 type ledgerSeed struct {
-	actor model.Actor
-	tree  *pmdoc.Node
+	actor    model.Actor
+	rendered renderedTree
 }
 
 type ledgerContextKey struct{}
@@ -354,7 +355,7 @@ func (l *Ledger) creditRooms() {
 		state.creditSeq.Add(1)
 		state.lastActor = new(seed.actor)
 		state.unsettled = true
-		state.registerAskAuthors(askBlockIDs(seed.tree), seed.actor)
+		state.registerAskAuthors(askBlockIDs(seed.rendered.tree), seed.actor)
 		l.service.unlockState(artifactID, state)
 	}
 	for _, artifactID := range l.order {
@@ -379,12 +380,25 @@ func (l *Ledger) creditRooms() {
 }
 
 // seeded records that this transaction seeded artifactID's first text as actor (SeedText), with
-// the tree it wrote, whose ask blocks credit registers to actor once the transaction commits.
-func (l *Ledger) seeded(artifactID string, tree *pmdoc.Node, actor model.Actor) {
+// the rendering of the tree it wrote, whose ask blocks credit registers to actor once the
+// transaction commits.
+func (l *Ledger) seeded(artifactID string, rendered renderedTree, actor model.Actor) {
 	if l.seeds == nil {
 		l.seeds = make(map[string]ledgerSeed)
 	}
-	l.seeds[artifactID] = ledgerSeed{actor: actor, tree: tree}
+	l.seeds[artifactID] = ledgerSeed{actor: actor, rendered: rendered}
+}
+
+// writtenRendering is the rendering of the tree this transaction last wrote to artifactID: its
+// live write's (applyLive), else the tree it seeded (SeedText); none when it holds neither.
+func (l *Ledger) writtenRendering(artifactID string) renderedTree {
+	if l == nil {
+		return renderedTree{}
+	}
+	if write := l.liveWriteFor(artifactID); write != nil && write.tree != nil {
+		return renderedTree{tree: write.tree, markdown: write.markdown, offsets: write.offsets}
+	}
+	return l.seeds[artifactID].rendered
 }
 
 // publish applies the committed transaction's live writes to their rooms and broadcasts them.

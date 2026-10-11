@@ -344,6 +344,10 @@ func main() {
 	// are counted again, at start and on an interval, so their progress shows without anyone
 	// editing them (LEGION-542).
 	go documentService.RunTaskProgressReconciliation(ctx)
+	// The references route serves each document mention's stored excerpt; this fills the ones no
+	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
+	// inserts (LEGION-531).
+	go documentService.RunReferenceExcerptReconciliation(ctx)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {

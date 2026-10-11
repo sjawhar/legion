@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/ompdirs"
@@ -37,11 +36,11 @@ type Image struct {
 // Line is one printed row of the table.
 type Line struct {
 	Name Name
-	// Status is "present", "installed" or "missing" for an image row, "live", "reported" or
-	// "withheld" for the others.
+	// Status is "present", "installed" or "missing" for an image row, "reported" or "withheld"
+	// for the others.
 	Status string
-	// Detail is the row's evidence: what was run and what it answered, the check that proves a
-	// live row, who reports a deployment row, or the ruling that withholds one.
+	// Detail is the row's evidence: what was run and what it answered, who reports a live or a
+	// deployment row, or the ruling that withholds one.
 	Detail string
 }
 
@@ -52,7 +51,6 @@ const (
 	// yet: the image carries it, and the row's Capability.Awaits says why no worker has it.
 	installed = "installed"
 	missing   = "missing"
-	live      = "live"
 	reported  = "reported"
 	withheld  = "withheld"
 )
@@ -82,14 +80,14 @@ var imageChecks = map[Name]imageCheck{
 // CheckImage checks every image-site row under img and renders every row of Table, in its order:
 // image rows present or missing with their evidence — installed, the evidence then the sentence
 // that says why, where the check passed but the row awaits a launch that loads what the image
-// carries (Capability.Awaits) — live rows as live naming the check, deployment rows as reported by
-// the daemon, withheld rows with their ruling. It runs after the launch probes (daemon.ProbeImage)
-// passed: the eval-js and skills rows are present by those probes, which ran Oh My Pi — its own
-// JavaScript runtime — and resolved the prompt-named skills. err is nil when every image row's
-// check passed; otherwise it names every missing one, so one rebuild of the image fixes them all
-// rather than the first alone: an image lacking what an installed row awaits a launch for is as
-// refused as one lacking anything else. A ctx that ends ends the check with an error wrapping
-// ctx's.
+// carries (Capability.Awaits) — live rows as reported by each session at its start, deployment
+// rows as reported by the daemon, withheld rows with their ruling. It runs after the launch
+// probes (daemon.ProbeImage) passed: the eval-js and skills rows are present by those probes,
+// which ran Oh My Pi — its own JavaScript runtime — and resolved the prompt-named skills. err is
+// nil when every image row's check passed; otherwise it names every missing one, so one rebuild
+// of the image fixes them all rather than the first alone: an image lacking what an installed row
+// awaits a launch for is as refused as one lacking anything else. A ctx that ends ends the check
+// with an error wrapping ctx's.
 func CheckImage(ctx context.Context, img Image) ([]Line, error) {
 	lines := make([]Line, 0, len(Table))
 	var absent []string
@@ -111,7 +109,7 @@ func CheckImage(ctx context.Context, img Image) ([]Line, error) {
 				line.Status = present
 			}
 		case SiteLive:
-			line.Status, line.Detail = live, liveDetail(row)
+			line.Status, line.Detail = reported, "each session reports it at start; `legion state` renders it: "+row.Summary
 		case SiteDeployment:
 			line.Status, line.Detail = reported, "the daemon reports it from the deployment's configuration: "+row.Summary
 		case SiteWithheld:
@@ -412,15 +410,11 @@ func (img Image) run(ctx context.Context, name string, args ...string) ran {
 }
 
 // oneLine is text as one printed line: its whitespace runs collapsed, and cut at maxDetail on a
-// rune boundary.
+// rune boundary with an ellipsis after the cut.
 func oneLine(text string) string {
 	line := strings.Join(strings.Fields(text), " ")
 	if len(line) > maxDetail {
-		cut := maxDetail
-		for cut > 0 && !utf8.RuneStart(line[cut]) {
-			cut--
-		}
-		line = line[:cut] + "…"
+		line = truncate(line, maxDetail) + "…"
 	}
 	return line
 }

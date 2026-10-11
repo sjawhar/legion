@@ -15,7 +15,7 @@
 //	agent-secrets grant list [--json]|revoke <grant_id>
 //	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
 //	agent-secrets identity
-//	agent-secrets renew
+//	agent-secrets renew [--pod-token-file FILE]
 //	agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]
 //	agent-secrets status <request_id> [--json]
 //	agent-secrets cancel <request_id>
@@ -71,22 +71,19 @@ import (
 	"github.com/sjawhar/envoy/internal/buildversion"
 )
 
-// Exit codes beyond 0 (done) and 1 (failed): 75 (EX_TEMPFAIL) and 77 (EX_NOPERM) follow BSD
-// sysexits.h, chosen so a caller of the "request" and NAME... -- <command> forms can tell "still
-// waiting" from "refused" without parsing stderr, and 126 and 127 are the shell's own for a command
-// that cannot run or is not there. Each carries a comment, and every exit code is 0, 1 or one of
-// these: the broker's generated error reference (cmd/broker-refgen) prints them and refuses a code
-// without a comment or a function that returns any other.
+// Exit codes beyond 0 and 1 use BSD sysexits.h values where applicable. Every value returned by
+// this command is listed here so broker-refgen can document it.
 const (
-	exitUsageError  = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
-	exitPending     = 75  // the request is still waiting for a person to approve it; nothing was run
-	exitDenied      = 77  // the request was denied; nothing was run
-	exitCannotRun   = 126 // the command `register --exec` was given exists but could not be run
-	exitNotFound    = 127 // the command `register --exec` was given was not found
-	exitHangup      = 129 // the value prompt received SIGHUP: the terminal is restored and the process ends by SIGHUP; nothing was written
-	exitInterrupted = 130 // `secret create` or `secret set` was interrupted (Ctrl-C) at the value prompt: the process ends by SIGINT, which a shell's $? reads as 130; nothing was written
-	exitQuit        = 131 // `secret create` or `secret set` quit (Ctrl-\) at the value prompt: the process ends by SIGQUIT, which a shell's $? reads as 131; nothing was written
-	exitTerminated  = 143 // `secret create` or `secret set` was terminated (SIGTERM) at the value prompt: the process ends by SIGTERM, which a shell's $? reads as 143; nothing was written
+	exitUsageError   = 2   // usage error: a flag, argument, token file, or required environment value is invalid
+	exitPending      = 75  // request still waiting for a person to approve it
+	exitRenewRefused = 76  // renew reached a refusal in terminalRenewal; the worker shim must not restart it
+	exitDenied       = 77  // request denied
+	exitCannotRun    = 126 // register --exec command exists but could not run
+	exitNotFound     = 127 // register --exec command was not found
+	exitHangup       = 129 // secret prompt received SIGHUP
+	exitInterrupted  = 130 // secret prompt received SIGINT
+	exitQuit         = 131 // secret prompt received SIGQUIT
+	exitTerminated   = 143 // secret prompt received SIGTERM
 )
 
 // command is one form of agent-secrets, as usage lists it and its own -h describes it.
@@ -122,8 +119,8 @@ var commands = []command{
 		"Exit 0 when this process has a broker identity and 1 when it does not, asking the broker\nnothing."},
 	{"--version", "agent-secrets --version",
 		"Print the release this binary was built as."},
-	{"renew", "agent-secrets renew",
-		"Keep an agent box's enrollment lease alive, renewing it until interrupted."},
+	{"renew", "agent-secrets renew [--pod-token-file FILE]",
+		"Keep an agent box's or pod's enrollment lease alive, renewing it until interrupted. A pod\nnames its projected service-account token's file: each renewal sends the token the file holds\nthen, which the broker checks names the pod and service account the enrollment was made for.\nPOD_TOKEN_REQUIRED, ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID saying\n\"not live\" exits 76, naming the enrollment, HTTP status and broker code; every other\nrefusal retries."},
 	{"request", "agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]",
 		"Request secrets and print the request's id and state, and who approves it and where while\nit waits; exit 75 while it waits for approval and 77 when it is denied. The grant lasts\n--ttl, or until this session ends."},
 	{"status", "agent-secrets status <request_id> [--json]",
@@ -162,7 +159,7 @@ environment:
                              form needs a sign-in in the broker's account, and a write your own
                              Identity Center sign-in there
 
-exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
+exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 76 permanent renewal refusal, 77 denied;
 register --exec exits 127 when COMMAND is not found and 126 when it cannot run;
 secret create and set end by the signal on hang-up (SIGHUP), interrupt (Ctrl-C), quit (Ctrl-\)
 or termination (SIGTERM) at the value prompt: a shell reports 129, 130, 131 or 143
@@ -519,9 +516,20 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 // renew
 // ---------------------------------------------------------------------------
 
+// cmdRenew renews this session's enrollment until interrupted. With --pod-token-file (a pod; the
+// Legion worker shim passes the projected token file the runtime mounts) every renewal reads the
+// file again and sends its contents as pod_token, since the kubelet rotates the token in place;
+// the broker verifies it against the enrollment's pod UID and service account. Without the flag a
+// renewal has no body, a box's renewal. A broker that predates the token reads no renew body, so a
+// renewal carrying one still renews there. A refusal in terminalRenewal (POD_TOKEN_REQUIRED,
+// ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID saying "not live") exits
+// exitRenewRefused (76), so the worker shim stops rather than restarting a renewer that cannot
+// succeed; every other refusal, POD_IDENTITY_MISMATCH and POD_TOKEN_EXPIRED among them, retries.
 func cmdRenew(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, nil)
-	if err := newFlagSet("renew", stderr).Parse(flagArgs); err != nil {
+	flagArgs, positional := splitArgs(args, map[string]bool{"pod-token-file": true})
+	flags := newFlagSet("renew", stderr)
+	podTokenFile := flags.String("pod-token-file", "", "a pod's projected service-account token file, read again before every renewal")
+	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
 	if len(positional) > 0 {
@@ -534,32 +542,61 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if enrollmentID == "" {
-		fmt.Fprintln(stderr, "agent-secrets renew: a machine session's lease is renewed by agent-secrets-helper; agent-secrets renew is for agent boxes")
+		fmt.Fprintln(stderr, "agent-secrets renew: a machine session's lease is renewed by agent-secrets-helper; agent-secrets renew is for agent boxes and pods")
 		return 1
+	}
+	podToken := func() (string, error) { return "", nil }
+	if *podTokenFile != "" {
+		podToken = func() (string, error) { return readPodToken(*podTokenFile) }
+		if _, err := podToken(); err != nil {
+			fmt.Fprintf(stderr, "agent-secrets renew: %s\n", tokenUnreadable(enrollmentID, err))
+			return exitUsageError
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	c := newClient(base)
+	return renewLoop(ctx, newClient(base), signer, enrollmentID, podToken, stderr, time.After)
+}
+
+// tokenUnreadable is the ERROR a pod's renewer prints when it cannot read its projected token: it
+// sends nothing (a bodyless renewal of a pod whose UID has renewed with its token is refused, and
+// would hide the fault), so the broker never hears of it, and this line, which the worker shim
+// relays into the pod's log, is the only record naming the enrollment whose lease is lapsing.
+func tokenUnreadable(enrollmentID string, err error) string {
+	return fmt.Sprintf("ERROR: enrollment %s cannot read its pod token (%v); nothing was sent, so its lease lapses unless the file becomes readable", enrollmentID, err)
+}
+
+func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, podToken func() (string, error), stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
 	backoff := 2 * time.Second
 	for {
-		expires, err := c.RenewEnrollment(ctx, signer, enrollmentID)
+		token, tokenErr := podToken()
+		var expires time.Time
+		err := tokenErr
+		if err == nil {
+			expires, err = c.RenewEnrollment(ctx, signer, enrollmentID, token)
+		}
 		if err != nil {
 			if ctx.Err() != nil {
 				return 0
 			}
-			// The broker answering with a refusal (401 PROOF_INVALID: the enrollment is gone) is
-			// final; anything else — a restart, a network blip, a 5xx — is retried until the lease
-			// would be lost anyway.
 			var refused *apiError
-			if errors.As(err, &refused) && refused.Status/100 == 4 {
-				fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
-				return 1
+			if errors.As(err, &refused) && refused.Permanent() {
+				code := refused.Code
+				if code == "" {
+					code = "UNKNOWN"
+				}
+				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by broker: HTTP %d %s: %s\n", enrollmentID, refused.Status, code, refused.Message)
+				return exitRenewRefused
 			}
-			fmt.Fprintf(stderr, "agent-secrets renew: %v; retrying in %s\n", err, backoff)
+			if tokenErr != nil {
+				fmt.Fprintf(stderr, "agent-secrets renew: %s; retrying in %s\n", tokenUnreadable(enrollmentID, tokenErr), backoff)
+			} else {
+				fmt.Fprintf(stderr, "agent-secrets renew: %v; retrying in %s\n", err, backoff)
+			}
 			select {
 			case <-ctx.Done():
 				return 0
-			case <-time.After(backoff):
+			case <-after(backoff):
 			}
 			backoff = nextBackoff(backoff)
 			continue
@@ -572,7 +609,7 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 		select {
 		case <-ctx.Done():
 			return 0
-		case <-time.After(lease / 3):
+		case <-after(lease / 3):
 		}
 	}
 }
