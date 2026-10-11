@@ -1,9 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -168,7 +171,9 @@ func operatorSuspend(t *testing.T, sup *supervisor, token claim.Token) {
 }
 
 // An operator's suspend holds until the operator resumes the claim: a phase moving on to the role
-// does not resume it. The start waits, and once the operator resumes the claim, its task is given.
+// does not resume it. The start waits, logged once at Info naming who suspended the claim (the line
+// Stage 4b's child-reentered control reads), and once the operator resumes the claim, its task is
+// given.
 func TestAStartWaitsForTheOperatorToResumeAClaimItSuspended(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -178,7 +183,8 @@ func TestAStartWaitsForTheOperatorToResumeAClaimItSuspended(t *testing.T) {
 	tester := launchedClaim(t, sup, issue.Tree, issue.Key, claim.RoleTester)
 	operatorSuspend(t, sup, tester)
 	clock := time.Now()
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion",
+	var logged bytes.Buffer
+	runner := &outbox{log: slog.New(slog.NewJSONHandler(&logged, nil)), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion",
 		now: func() time.Time { return clock }}
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester,
 		Generation: 1, Phase: phase.Testing, Task: "Test it."}, clock))
@@ -192,6 +198,11 @@ func TestAStartWaitsForTheOperatorToResumeAClaimItSuspended(t *testing.T) {
 	if resumes := resumesOf(rt, tester); len(resumes) != 0 || machine.Claim().State != supervise.StateSuspended || outboxRows(t, pool) != 1 {
 		t.Fatalf("after the start the tester is %s with %d resumes and %d rows, want it suspended, never resumed, the start waiting",
 			machine.Claim().State, len(resumes), outboxRows(t, pool))
+	}
+	if waits := strings.Count(logged.String(), `"msg":"outbox row waits"`); waits != 1 ||
+		!strings.Contains(logged.String(), `"level":"INFO","msg":"outbox row waits"`) ||
+		!strings.Contains(logged.String(), "suspended by operator; it waits for the operator's resume: the suspension holds until the operator resumes the claim") {
+		t.Fatalf("the waiting start logged %q, want one Info line naming the operator's suspension", logged.String())
 	}
 
 	if err := machine.Handle(ctx, supervise.RequestResume{Claim: tester}); err != nil {

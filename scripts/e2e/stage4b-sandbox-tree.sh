@@ -2708,8 +2708,15 @@ begin child-reentered
 # at its next generation, and that run's planning start resumes the planner by rule: the daemon logs
 # `supervise: resuming by rule` for it, once, naming the daemon's suspension; the planner relaunches
 # its own session with no `suspendedBy`; and the new run's planning task reaches that session, the
-# second after the first run's. The proof human then parks child 2 again, so the later checkpoints
-# find it as child-release left it, its planner suspended by the daemon once more.
+# second after the first run's. The proof human then parks child 2 again.
+#
+# The control, on the same claim and the same start path: the operator suspends the parked planner,
+# which takes the daemon's suspension over (`suspendedBy: operator`), and child 2 is set to todo once
+# more. The planning start now waits (`outbox row waits`, naming the suspension that holds until the
+# operator resumes the claim), the planner stays suspended by the operator at the same generation,
+# and no rule resumes it. The operator's resume then relaunches it, the waiting start gives it the
+# run's planning task, and child 2 is parked a last time, so the later checkpoints find it as
+# child-release left it, its planner suspended by the daemon.
 reentry_planner=$(claim_token "$child2" planner)
 reentry_was=$(claim_by_token "$reentry_planner") || fail "legion claims shows no planner claim $reentry_planner on $child2"
 jq -e '.state == "suspended" and .suspendedBy == "daemon"' <<<"$reentry_was" >/dev/null ||
@@ -2740,6 +2747,45 @@ reentry_parked=$(claim_by_token "$reentry_planner") || fail "legion claims shows
 jq -e '.state == "suspended" and .suspendedBy == "daemon"' <<<"$reentry_parked" >/dev/null ||
   fail "$child2's planner after its second backlog is $(jq -c '{state, suspendedBy}' <<<"$reentry_parked"), want suspended by the daemon"
 note "$child2 parked again: Sandbox $child2_pod Suspended, no pod, PVC ${found%% *} Bound, its planner suspended by the daemon"
+held_planner=$(claims_cli suspend --json --claim "$reentry_planner") || fail "the operator's suspend of $child2's parked planner failed: $held_planner"
+jq -e '.state == "suspended" and .suspendedBy == "operator"' <<<"$held_planner" >/dev/null ||
+  fail "the operator's suspend of the parked planner left it $(jq -c '{state, suspendedBy}' <<<"$held_planner"), want suspended by the operator"
+held_planner_generation=$(jq -r .generation <<<"$held_planner")
+held_planner_mark=$(wc -l <"$daemon_log")
+set_status "$child2" todo
+# held_start_waits: since the todo, the planning start of child 2 waits for the operator's resume.
+held_start_waits() {
+  tail -n "+$((held_planner_mark + 1))" "$daemon_log" | jq -R -e --arg issue "$child2" \
+    'fromjson? | select(.msg == "outbox row waits" and .kind == "supervise" and .issue == $issue
+      and ((.error // "") | contains("the suspension holds until the operator resumes the claim")))' >/dev/null
+}
+on_issue "$child2" until_true 600 "$child2's planning start to wait for the operator-suspended planner" held_start_waits
+held_planner_still() {
+  claim_by_token "$reentry_planner" | jq -e --argjson generation "$held_planner_generation" \
+    '.state == "suspended" and .suspendedBy == "operator" and .generation == $generation and .locator == null' >/dev/null
+}
+for ((held_i = 0; held_i < 12; held_i++)); do
+  held_planner_still || fail "$child2's operator-suspended planner did not stay held while its start waited: $(claim_by_token "$reentry_planner" | jq -c '{state, suspendedBy, generation}')"
+  sleep 5
+done
+held_planner_rule=$(tail -n "+$((held_planner_mark + 1))" "$daemon_log" |
+  jq -R -c --arg c "$reentry_planner" 'fromjson? | select(.msg == "supervise: resuming by rule" and .claim == $c)')
+[ -z "$held_planner_rule" ] || fail "the daemon resumed the operator-suspended planner by rule: $held_planner_rule"
+note "$child2 set to todo with its planner suspended by the operator: the planning start waited, and the planner stayed suspended by the operator at generation $held_planner_generation for 60 s, resumed by no rule"
+held_planner_resumed=$(claims_cli resume --json --claim "$reentry_planner") || fail "the operator's resume of $reentry_planner failed: $held_planner_resumed"
+on_issue "$child2" until_true 900 "the operator-resumed planner $reentry_planner to be live" claim_live "$reentry_planner"
+held_task_delivered() { [ "$(planning_tasks "$child2")" -ge 3 ]; }
+on_issue "$child2" until_true 900 "the waiting planning start to reach $child2's operator-resumed planner" held_task_delivered
+held_tasks=$(planning_tasks "$child2") || fail "$child2's planner session could not be read after the operator's resume"
+[ "$held_tasks" = 3 ] || fail "$child2's planner session holds $held_tasks planning tasks after the operator's resume, want three: one per run"
+note "the operator's resume relaunched $reentry_planner and the waiting start gave it the run's planning task, its session's third"
+set_status "$child2" backlog
+until_true 900 "$child2's Sandbox to be Suspended and its pod gone after its last backlog" child2_parked
+assert_one_bound_pvc "$child2" " after its last backlog"
+held_planner_parked=$(claim_by_token "$reentry_planner") || fail "legion claims shows no planner claim $reentry_planner on $child2"
+jq -e '.state == "suspended" and .suspendedBy == "daemon"' <<<"$held_planner_parked" >/dev/null ||
+  fail "$child2's planner after its last backlog is $(jq -c '{state, suspendedBy}' <<<"$held_planner_parked"), want suspended by the daemon"
+note "$child2 parked a last time: Sandbox $child2_pod Suspended, no pod, PVC ${found%% *} Bound, its planner suspended by the daemon"
 pass
 
 begin repository-configuration
@@ -2849,12 +2895,13 @@ note "legion status moved tree 2 to backlog, its pods gone; tree 3 ($tree3) admi
 pass
 
 begin tree-moved
-# An operator's suspension holds (LEGION-683): tree 1's architect is suspended from the operator
-# shell before its implementer completes, so the completion's phase-finished notice finds no holder.
-# The daemon resumes no claim an operator suspended and a notice resumes nothing, so the architect
-# stays suspended, `suspendedBy: operator`, at the same generation while the row waits; the
-# operator's resume then relaunches it and the held notice arrives. Each operator request that
-# changed the claim logs one `api: operator request` line naming its route and the claim.
+# A held notice waits and resumes nothing (LEGION-683): tree 1's architect is suspended from the
+# operator shell before its implementer completes, so the completion's phase-finished notice finds
+# no holder. The row waits, and the architect stays suspended, `suspendedBy: operator`, at the same
+# generation while it does; the operator's resume then relaunches it and the held notice arrives.
+# Each operator request that changed the claim logs one `api: operator request` line naming its
+# route and the claim. No rule acts on a tree architect, so this cannot show the rule passing over
+# an operator's suspension: child-reentered's control shows that, on a phase owner.
 held_architect=$(claim_token "$tree1" architect)
 held_needle=$(notice_needle phase-finished "$tree1")
 held_before=$(notice_deliveries "$tree1" architect "$held_needle")
@@ -2890,7 +2937,7 @@ for ((held_i = 0; held_i < 24; held_i++)); do
 done
 held_rule=$(tail -n "+$((held_mark + 1))" "$daemon_log" | jq -R -c --arg c "$held_architect" 'fromjson? | select(.msg == "supervise: resuming by rule" and .claim == $c)')
 [ -z "$held_rule" ] || fail "the daemon resumed the operator-suspended architect by rule: $held_rule"
-note "$tree1's phase-finished notice waited and its architect stayed suspended by the operator at generation $held_generation for 120 s, resumed by no rule"
+note "$tree1's phase-finished notice waited, resuming nothing: its architect stayed suspended by the operator at generation $held_generation for 120 s"
 held_resumed=$(claims_cli resume --json --claim "$held_architect") || fail "the operator's resume of $held_architect failed: $held_resumed"
 on_tree "$tree1" until_true 900 "the operator-resumed architect $held_architect to be live" claim_live "$held_architect"
 claim_by_token "$held_architect" | jq -e '.suspendedBy == null' >/dev/null ||
