@@ -45,10 +45,6 @@ var (
 	externalRefPattern = regexp.MustCompile(`^([^/\s]+)/([^/\s#]+)#([1-9][0-9]*)$`)
 )
 
-// projectKeyRule says projectKeyPattern's rule in words: every refusal of a key that is not a
-// project key gives it, so the rule is described one way whichever route refuses it.
-const projectKeyRule = "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE"
-
 // repoLabelPrefix marks an issue created through DISPATCH_DEFAULT_PROJECT
 // with the external repository it came from, so the repository stays
 // visible and filterable once it's no longer named by the project key.

@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -68,7 +69,7 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 	}
 	input.Project = strings.TrimSpace(input.Project)
 	if !projectKeyPattern.MatchString(input.Project) {
-		writeError(w, "INVALID_REPO_PROJECT", http.StatusBadRequest, fmt.Sprintf("project %q is not a project key: %s", input.Project, projectKeyRule))
+		writeError(w, "INVALID_REPO_PROJECT", http.StatusBadRequest, fmt.Sprintf("project %q is not a project key: %s", input.Project, contracts.ProjectKeyRule))
 		return
 	}
 	if err := s.deps.Store.Pool.QueryRow(r.Context(), "select key from projects where key = $1", input.Project).Scan(new(string)); err != nil {

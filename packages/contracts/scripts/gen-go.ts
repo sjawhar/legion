@@ -13,7 +13,12 @@ import {
   RECEIPT_TIMEOUT_CAUSE,
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
-import { SEARCH_KIND_DEPTH, SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
+import {
+  PROJECT_KEY_RULE,
+  SEARCH_KIND_DEPTH,
+  SEARCH_QUERY_HINT,
+  SEARCH_QUERY_MAX,
+} from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
 import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
@@ -113,6 +118,11 @@ const SearchQueryMax = ${SEARCH_QUERY_MAX}
 // SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = ${JSON.stringify(SEARCH_QUERY_HINT)}
+
+// ProjectKeyRule says the project-key pattern's rule in words; every refusal of a key that is not
+// a project key gives it. Generated from PROJECT_KEY_RULE in packages/contracts so the server and
+// the tool word it once.
+const ProjectKeyRule = ${JSON.stringify(PROJECT_KEY_RULE)}
 
 // SearchKindDepth is how many of its best matches each kind of content lists before
 // GET /api/v1/search merges the kinds; a kind's later matches count in the total and no offset

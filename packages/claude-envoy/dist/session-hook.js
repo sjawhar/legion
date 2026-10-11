@@ -14177,6 +14177,7 @@ var SEARCH_QUERY_MAX = 1000;
 var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passage";
 var SEARCH_KIND_DEPTH = 100;
 var PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
+var PROJECT_KEY_RULE = "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE";
 var ISSUE_STATUSES = [
   "triage",
   "icebox",
@@ -14530,7 +14531,7 @@ var dispatchToolSpecs = [
         const { project } = value;
         return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
       },
-      message: "project must be a project key such as CORE"
+      message: `project is not a project key: ${PROJECT_KEY_RULE}`
     }
   },
   {
@@ -16781,7 +16782,7 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, serverUrl, pro
   }
   if (typeof projectArgument === "string") {
     if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
-      problems.push("project must be a project key such as CORE");
+      problems.push(`project is not a project key: ${PROJECT_KEY_RULE}`);
     }
     const refDocument = ref?.owner.kind === "project" ? ref.artifact ?? ref.id : undefined;
     if (ref?.owner.kind === "project" && (ref.owner.project !== projectArgument || artifactArgument !== undefined && artifactArgument !== refDocument)) {

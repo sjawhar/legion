@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -63,7 +64,7 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 	input.Key = strings.TrimSpace(input.Key)
 	input.Name = strings.TrimSpace(input.Name)
 	if !projectKeyPattern.MatchString(input.Key) {
-		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, fmt.Sprintf("project key %q is not a project key: %s", input.Key, projectKeyRule))
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, fmt.Sprintf("project key %q is not a project key: %s", input.Key, contracts.ProjectKeyRule))
 		return
 	}
 	if input.Name == "" {

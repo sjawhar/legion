@@ -137,7 +137,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if !projectKeyPattern.MatchString(input.Project) {
-		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, fmt.Sprintf("project %q is not a project key: %s", input.Project, projectKeyRule))
+		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, fmt.Sprintf("project %q is not a project key: %s", input.Project, contracts.ProjectKeyRule))
 		return
 	}
 	if input.Title == "" {

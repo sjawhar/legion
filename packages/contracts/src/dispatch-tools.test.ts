@@ -7,6 +7,7 @@ import {
   dispatchToolSchema,
   dispatchToolSpecs,
   ISSUE_STATUSES,
+  PROJECT_KEY_RULE,
   SEARCH_QUERY_MAX,
 } from "./dispatch-tools";
 import { type SchemaApi, type SchemaNode, zodSchemaApi } from "./tool-schema";
@@ -267,9 +268,16 @@ describe("dispatchToolSpecs", () => {
     ]) {
       const refused = schema.safeParse({ query: "ok", project });
       expect(refused.error?.issues.map((issue) => issue.message)).toEqual([
-        "project must be a project key such as CORE",
+        `project is not a project key: ${PROJECT_KEY_RULE}`,
       ]);
     }
+  });
+
+  test("the project-key rule is worded once, as the server's refusal words it", () => {
+    // Generated into Go as contracts.ProjectKeyRule, which every server refusal of a bad key uses.
+    expect(PROJECT_KEY_RULE).toBe(
+      "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE"
+    );
   });
 
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {

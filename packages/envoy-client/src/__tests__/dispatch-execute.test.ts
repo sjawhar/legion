@@ -7,6 +7,7 @@ import {
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
+  PROJECT_KEY_RULE,
   SEARCH_QUERY_MAX,
   type SearchResult,
   type TablePosition,
@@ -5630,7 +5631,7 @@ describe("executeDispatchTool", () => {
         args: { project: "not-a-project", artifact: "runbook-md" },
         ...shared,
       })
-    ).rejects.toThrow("project must be a project key");
+    ).rejects.toThrow(`project is not a project key: ${PROJECT_KEY_RULE}`);
   });
   test("uploads a relative artifact path from the Dispatch process cwd", async () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "dispatch-execute-"));

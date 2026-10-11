@@ -223,6 +223,11 @@ export const SEARCH_KIND_DEPTH = 100;
  *  `projects.key` check constraint). */
 export const PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 
+/** PROJECT_KEY_PATTERN's rule in words. Every refusal of a key that is not a project key gives
+ *  it, the tool's and the server's alike: generated into Go as `contracts.ProjectKeyRule`. */
+export const PROJECT_KEY_RULE =
+  "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE";
+
 /** Issue lifecycle statuses the Dispatch server accepts (`model.IssueStatuses`), in lifecycle order. */
 export const ISSUE_STATUSES = [
   "triage",
@@ -1088,7 +1093,7 @@ export const dispatchToolSpecs = [
         const { project } = value as { readonly project?: unknown };
         return typeof project !== "string" || project === "" || PROJECT_KEY_PATTERN.test(project);
       },
-      message: "project must be a project key such as CORE",
+      message: `project is not a project key: ${PROJECT_KEY_RULE}`,
     },
   },
   {

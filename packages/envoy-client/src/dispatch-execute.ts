@@ -50,6 +50,7 @@ import {
   itemFromSearch,
   overCapMessage,
   PROJECT_KEY_PATTERN,
+  PROJECT_KEY_RULE,
   serviceSubjectLabel,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -911,7 +912,7 @@ async function resolveOwnerArguments(
   }
   if (typeof projectArgument === "string") {
     if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
-      problems.push("project must be a project key such as CORE");
+      problems.push(`project is not a project key: ${PROJECT_KEY_RULE}`);
     }
     const refDocument = ref?.owner.kind === "project" ? (ref.artifact ?? ref.id) : undefined;
     if (

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
@@ -111,10 +112,15 @@ func TestCreatingATakenProjectKeyIsRefusedForABearerAndACookie(t *testing.T) {
 }
 
 // Every route that takes a project key refuses a bad one with the same description of the rule,
-// so an agent learns the rule once, whichever route it called.
+// so an agent learns the rule once, whichever route it called. The rule is generated from
+// contracts' PROJECT_KEY_RULE, which the dispatch command's own refusal gives too; this pins its
+// text on the Go side as contracts' test pins it on the TypeScript side.
 func TestEveryRouteRefusesABadProjectKeyInOneWording(t *testing.T) {
 	handler := newTestHandler(t)
 	const rule = "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE"
+	if contracts.ProjectKeyRule != rule {
+		t.Fatalf("contracts.ProjectKeyRule = %q, want %q", contracts.ProjectKeyRule, rule)
+	}
 	for _, probe := range []struct {
 		name, method, target, code string
 		body                       any

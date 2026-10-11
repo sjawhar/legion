@@ -368,6 +368,15 @@ describe("the dispatch CLI", () => {
     expect(taken.code).toBe(1);
     expect(taken.stdout).toContain("PROJECT_EXISTS: a project with this key already exists");
   });
+
+  test("dispatch search refuses a project that is not a key in the server's wording, sending nothing", async () => {
+    const { code, stdout } = await run(["search", "--query", "ok", "--project", "lower"], omp);
+    expect(code).toBe(1);
+    expect(stdout).toContain(
+      "project is not a project key: an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE"
+    );
+    expect(requests).toEqual([]);
+  });
 });
 
 describe("fitOutput", () => {
