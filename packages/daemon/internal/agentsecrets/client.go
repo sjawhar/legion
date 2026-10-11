@@ -558,8 +558,11 @@ func (c *Client) doProof(ctx context.Context, method, path string, body any) (in
 		}
 		if status != http.StatusUnauthorized {
 			moved := &credential{key: next, id: cred.id}
+			if err := c.keepRotation(ctx, cred, moved); err != nil {
+				c.log().Error("agent-secrets: took up the broker's renewed key but did not replace its durable key; another daemon may hold the durable winner", "error", err)
+				return 0, nil, err
+			}
 			if c.cred.CompareAndSwap(cred, moved) {
-				_ = c.keep(ctx, moved)
 				c.wake()
 			}
 			return status, raw, nil
@@ -700,12 +703,17 @@ func (c *Client) resolveNext(ctx context.Context, held *credential) (*credential
 		}
 		moved := &credential{key: next, id: held.id}
 		moved.setExpires(answer.ExpiresAt)
+		if err := c.keepRotation(ctx, held, moved); err != nil {
+			c.log().Error("agent-secrets: took up the broker's renewed key but did not replace its durable key; another daemon may hold the durable winner", "error", err)
+			return nil, err
+		}
 		c.cred.CompareAndSwap(held, moved)
-		_ = c.keep(ctx, moved)
 		return moved, nil
 	case http.StatusUnauthorized:
 		held.next.Store(nil)
-		_ = c.keep(ctx, held)
+		if err := c.keepCurrent(ctx, held); err != nil {
+			c.log().Error("agent-secrets: did not clear a stale next key from the durable credential; another daemon may hold the durable winner", "error", err)
+		}
 		return held, nil
 	default:
 		return nil, refusal(status, raw)
@@ -733,7 +741,7 @@ func (c *Client) rotate(ctx context.Context, held *credential) (*credential, err
 		return nil, fmt.Errorf("agent-secrets renewal: sign request object: %w", err)
 	}
 	held.next.Store(key)
-	if err := c.keep(ctx, held); err != nil {
+	if err := c.keepCurrent(ctx, held); err != nil {
 		held.next.Store(nil)
 		return nil, fmt.Errorf("keep the next key before asking the broker to move to it: %w", err)
 	}
@@ -763,7 +771,9 @@ func (c *Client) rotate(ctx context.Context, held *credential) (*credential, err
 		return nil, refusal(status, raw)
 	}
 	held.next.Store(nil)
-	_ = c.keep(ctx, held)
+	if err := c.keepCurrent(ctx, held); err != nil {
+		c.log().Error("agent-secrets: did not clear a losing next key from the durable credential; another daemon may hold the durable winner", "error", err)
+	}
 	switch status {
 	case http.StatusUnauthorized:
 		c.refused(ctx, held)
@@ -910,6 +920,37 @@ func (c *Client) keep(ctx context.Context, cred *credential) error {
 	if err := c.Keeper.Save(ctx, kept); err != nil {
 		c.log().Error("agent-secrets: could not keep the launcher credential; the next restart starts a machine login", "error", err)
 		return err
+	}
+	return nil
+}
+
+// keepCurrent updates only the non-key fields of cred's durable row while that row still holds
+// cred's key. It is used before a renewal stores its candidate next key and while a loser clears
+// one; neither write may restore an old key over another daemon's durable winner.
+func (c *Client) keepCurrent(ctx context.Context, cred *credential) error {
+	if c.Keeper == nil {
+		return nil
+	}
+	keeper, ok := c.Keeper.(RotationKeeper)
+	if !ok {
+		return c.keep(ctx, cred)
+	}
+	expected, err := keptCredential(&credential{key: cred.key, id: cred.id})
+	if err != nil {
+		return err
+	}
+	kept, err := keptCredential(cred)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keeperTimeout)
+	defer cancel()
+	saved, err := keeper.CompareAndSave(ctx, expected.PrivateKey, kept)
+	if err != nil {
+		return err
+	}
+	if !saved {
+		return errDurableCredentialChanged
 	}
 	return nil
 }
