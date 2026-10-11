@@ -121,6 +121,9 @@ type overrides struct {
 	// required-checks reads and its issue branches' creates); empty, in production, is
 	// https://api.github.com.
 	githubAPI string
+	// startSecretsLogin starts the secrets broker login after supervision starts. Tests replace it
+	// to prove a daemon whose supervision start fails never emits a machine-login code.
+	startSecretsLogin func(context.Context, *agentsecrets.Client, agentsecrets.Keeper, *slog.Logger)
 	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
 }
@@ -344,14 +347,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		st.Close()
 		return err
 	}
-	// The broker login starts once nothing in the boot can refuse it any more, so a daemon whose boot
-	// keeps failing never shows anyone a code. It keeps its credential in the store, so a restart
-	// takes back the credential a person approved instead of asking again; the database can be
-	// shared by several projects' daemons, so the credential is the project's own. Until it starts,
-	// a pod enrollment is refused as "no machine login yet" and retried.
-	if plan.secretsLogin != nil {
-		startSecretsLogin(ctx, plan.secretsLogin, credentialKeeper{store: st, project: cfg.Project, url: plan.secretsLogin.URL}, log)
-	}
 	// From here every way the daemon ends halts supervision before anything waits: the signal, at
 	// once, serve's end, or a start that failed. The signal also ends the boot's own steps, which run
 	// on starting. Everything after the boot record runs on a goroutine of its own, so run waits for
@@ -389,6 +384,19 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 				"claims", s.supervisor.count(),
 				"boot", bootID,
 			)
+			startLogin := o.startSecretsLogin
+			if startLogin == nil {
+				startLogin = startSecretsLogin
+			}
+			// The broker login begins only after supervision started and the daemon will serve: a
+			// first boot that cannot restore claims or observe its runtime never shows anyone a code.
+			// It keeps the credential in the store, so a restart takes back the credential a person
+			// approved instead of asking again; the database can be shared by several projects'
+			// daemons, so the credential is the project's own. Until it starts, a pod enrollment is
+			// refused as "no machine login yet" and retried.
+			if plan.secretsLogin != nil {
+				startLogin(ctx, plan.secretsLogin, credentialKeeper{store: st, project: cfg.Project, url: plan.secretsLogin.URL}, log)
+			}
 			if workflow != nil {
 				log.Info("legion workflow boot stage", "stage", "api")
 			}

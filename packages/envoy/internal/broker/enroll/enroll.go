@@ -37,10 +37,11 @@ var (
 )
 
 type Credential struct {
-	ID       uuid.UUID
-	Operator *string
-	Service  *string
-	Host     string
+	ID         uuid.UUID
+	Operator   *string
+	Service    *string
+	Host       string
+	Thumbprint string
 }
 
 // LiveCredential is one of the machine logins a person may revoke, as their machine-login page
@@ -185,16 +186,18 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 	return thumbprint, true, nil
 }
 
-// Credential loads a launcher credential's own identity (operator, service, host) by its id, for
-// a handler that has already authenticated the caller via a launcher proof (proof.Subject's
+// Credential loads a launcher credential's own identity and pinned key thumbprint by its id, for a
+// handler that has already authenticated the caller via a launcher proof (proof.Subject's
 // LauncherID, verified live by AuthenticateLauncher through proof.Verifier.LookupLauncher) and
-// needs that identity to pass to Create or Revoke. err is a genuine dependency failure; a launcher
-// id a live proof just verified vanishing before this read is treated the same way (never
-// silently swallowed into an empty Credential).
+// needs that identity to pass to Create, Revoke or Renew. Renew passes Thumbprint back into its
+// locked update: a proof the broker authenticated before another renewal moved the key must not
+// replace that newer key. err is a genuine dependency failure; a launcher id a live proof just
+// verified vanishing before this read is treated the same way (never silently swallowed into an
+// empty Credential).
 func (s *Service) Credential(ctx context.Context, id string) (Credential, error) {
 	var cred Credential
-	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host from launcher_credentials where id=$1`, id).
-		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host); err != nil {
+	if err := s.Store.Pool.QueryRow(ctx, `select id, operator, service, host, key_thumbprint from launcher_credentials where id=$1`, id).
+		Scan(&cred.ID, &cred.Operator, &cred.Service, &cred.Host, &cred.Thumbprint); err != nil {
 		return Credential{}, err
 	}
 	return cred, nil

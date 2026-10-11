@@ -18,9 +18,13 @@ const jtiRetentionMargin = time.Minute
 
 // Subject is who a verified proof authenticates: exactly one of EnrollmentID (an "eid" proof) or
 // LauncherID (an "lid" proof, a key-bound launcher credential authenticating directly) is set.
+// Thumbprint is the embedded proof key's verified RFC 7638 thumbprint. A launcher handler carries
+// it into a later row lock, so a proof that authenticated before another request moved that
+// credential to a new key cannot win after the move.
 type Subject struct {
 	EnrollmentID string
 	LauncherID   string
+	Thumbprint   string
 }
 
 type Verifier struct {
@@ -102,5 +106,5 @@ func (v *Verifier) Verify(ctx context.Context, compact, method, url string, now 
 	if !fresh {
 		return Subject{}, fmt.Errorf("%w: replayed jti", ErrInvalid)
 	}
-	return Subject{EnrollmentID: c.EnrollmentID, LauncherID: c.LauncherID}, nil
+	return Subject{EnrollmentID: c.EnrollmentID, LauncherID: c.LauncherID, Thumbprint: presented}, nil
 }

@@ -49,6 +49,25 @@ func (s *Store) SaveAgentSecretsCredential(ctx context.Context, project, brokerU
 	return nil
 }
 
+// CompareAndSaveAgentSecretsCredential replaces project's kept launcher credential only when its
+// current private key is expectedPrivateKey. A broker renewal moves the broker's row from that old
+// key to a new one under its own lock; this matching CAS keeps a losing daemon from overwriting the
+// durable key the winner saved. false, nil means another process already changed the row.
+func (s *Store) CompareAndSaveAgentSecretsCredential(ctx context.Context, project, brokerURL string, expectedPrivateKey []byte, kept agentsecrets.Kept) (bool, error) {
+	var expires *time.Time
+	if !kept.ExpiresAt.IsZero() {
+		expires = &kept.ExpiresAt
+	}
+	tag, err := s.pool.Exec(ctx, `update agent_secrets_credentials
+		set credential_id = $4, private_key = $5, next_private_key = $6, expires_at = $7, saved_at = now()
+		where project = $1 and broker_url = $2 and private_key = $3`,
+		project, brokerURL, expectedPrivateKey, kept.CredentialID, kept.PrivateKey, kept.NextPrivateKey, expires)
+	if err != nil {
+		return false, fmt.Errorf("compare and keep the agent-secrets launcher credential for %s: %w", project, err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // ForgetAgentSecretsCredential drops project's kept launcher credential for the broker at brokerURL
 // when it is credentialID, and nothing otherwise.
 func (s *Store) ForgetAgentSecretsCredential(ctx context.Context, project, brokerURL, credentialID string) error {

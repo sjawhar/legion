@@ -390,8 +390,11 @@ func (s *Service) CredentialExpiry(ctx context.Context, credentialID string) (ti
 // credential's current key is record.ErrRequestInvalid; a new key that already holds another live
 // credential is ErrKeyHoldsLiveCredential. It holds the credential's row for update, as
 // RevokeCredential does, so a renewal racing a revoke either commits first and is then revoked, or
-// finds the credential revoked.
-func (s *Service) Renew(ctx context.Context, credentialID, compactRequest string) (time.Time, error) {
+// finds the credential revoked. The launcher proof's key thumbprint is passed from the handler into
+// this locked read: a copied or second daemon's proof can authenticate before another renewal
+// commits, but once the row has moved to a new key it is refused here rather than replacing that
+// winner.
+func (s *Service) Renew(ctx context.Context, credentialID, oldThumbprint, compactRequest string) (time.Time, error) {
 	obj, err := record.VerifyRequestObject(compactRequest, s.Audience, s.Skew, time.Now())
 	if err != nil {
 		return time.Time{}, err
@@ -429,6 +432,8 @@ func (s *Service) Renew(ctx context.Context, credentialID, compactRequest string
 	}
 	switch {
 	case !live:
+		return time.Time{}, ErrCredentialNotLive
+	case thumbprint != oldThumbprint:
 		return time.Time{}, ErrCredentialNotLive
 	case service == nil:
 		return time.Time{}, ErrPersonCredential

@@ -256,16 +256,16 @@ func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *
 	return brokerEnroller{client: client}, client
 }
 
-// startSecretsLogin starts the daemon's broker login (agentsecrets.Client.Start) once the boot is
-// recorded, with keeper (the store, credentialKeeper) holding the credential a login wins: a daemon
-// that restarts takes back the credential a person approved before it rather than asking again, and
-// keeps it renewed, onto a new key each time, for as long as ctx lives. It logs that it took the
-// credential back (the client then logs its boot renewal: INFO when it succeeds, ERROR naming the
-// credential when the broker refuses it), or, when it has none it can use, the confirmation code
-// exactly once — pod enrollment is held until a person signed in to Dispatch approves it on the
-// credential page. A boot login that fails, expires or is denied is retried by the client on a later
-// enrollment (agentsecrets.Client.doProof), so no restart is needed. Nothing when client is nil (no
-// block).
+// startSecretsLogin starts the daemon's broker login (agentsecrets.Client.Start) once supervision
+// has started and the daemon will serve, with keeper (the store, credentialKeeper) holding the
+// credential a login wins: a daemon that restarts takes back the credential a person approved
+// before it rather than asking again, and keeps it renewed, onto a new key each time, for as long as
+// ctx lives. It logs that it took the credential back (the client then logs its boot renewal: INFO
+// when it succeeds, ERROR naming the credential when the broker refuses it), or, when it has none it
+// can use, the confirmation code exactly once — pod enrollment is held until a person signed in to
+// Dispatch approves it on the credential page. A boot login that fails, expires or is denied is
+// retried by the client on a later enrollment, so no restart is needed. Nothing when client is nil
+// (no block).
 func startSecretsLogin(ctx context.Context, client *agentsecrets.Client, keeper agentsecrets.Keeper, log *slog.Logger) {
 	if client == nil {
 		return
@@ -300,6 +300,10 @@ func (k credentialKeeper) Load(ctx context.Context) (agentsecrets.Kept, bool, er
 
 func (k credentialKeeper) Save(ctx context.Context, kept agentsecrets.Kept) error {
 	return k.store.SaveAgentSecretsCredential(ctx, k.project, k.url, kept)
+}
+
+func (k credentialKeeper) CompareAndSave(ctx context.Context, expectedPrivateKey []byte, kept agentsecrets.Kept) (bool, error) {
+	return k.store.CompareAndSaveAgentSecretsCredential(ctx, k.project, k.url, expectedPrivateKey, kept)
 }
 
 func (k credentialKeeper) Forget(ctx context.Context, credentialID string) error {

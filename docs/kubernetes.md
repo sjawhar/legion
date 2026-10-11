@@ -2014,9 +2014,9 @@ issue's pod (every role container of it alike) and the image probe's.
   address). The block names no approver: the daemon's login is the `legion-daemon` service's, which
   anyone signed in to Dispatch approves on the Dispatch credential page, and a file that sets
   `operator` is refused at load naming the key — there is no launcher-token file and no manual CLI
-  step. Once its boot is recorded (nothing in the boot can refuse after that), the daemon takes back
-  the launcher credential it kept from an earlier boot (the `agent_secrets_credentials` table of its
-  own database, keyed by project and broker URL), logs `agent-secrets machine login resumed`, and
+  step. Once supervision starts and the daemon will serve, the daemon takes back the launcher
+  credential it kept from an earlier boot (the `agent_secrets_credentials` table of its own
+  database, keyed by project and broker URL), logs `agent-secrets machine login resumed`, and
   renews it, logging `renewed the launcher credential onto a new key`, so a restart needs nobody.
   With none it can use (a first boot, a credential past its expiry, or a new broker URL) it runs a
   login and logs the confirmation code exactly once: `agent-secrets machine login: enter code

@@ -8,6 +8,7 @@ import (
 	"crypto/ecdsa"
 	"net/http"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -176,5 +177,71 @@ func TestARenewalRefusesWhatItMayNotExtend(t *testing.T) {
 	}
 	if got := ts.column(t, `select detail->>'credential_id' from audit where kind='launcher_credential.renewed'`); len(got) != 0 {
 		t.Fatalf("launcher_credential.renewed audit rows = %v, want none: no renewal was allowed", got)
+	}
+}
+
+// credentialKey reads a launcher credential's current key thumbprint from the broker's own row.
+func (ts *testServer) credentialKey(t *testing.T, credentialID string) string {
+	t.Helper()
+	var thumbprint string
+	if err := ts.Store.Pool.QueryRow(context.Background(), `select key_thumbprint from launcher_credentials where id=$1`, credentialID).Scan(&thumbprint); err != nil {
+		t.Fatalf("read launcher credential %s's key: %v", credentialID, err)
+	}
+	return thumbprint
+}
+
+// TestTwoProofsThatAuthenticatedTheOldKeyCannotBothWin: two renewal requests signed with the same
+// current key can both pass the handler's authentication before either locks the credential. Renew
+// binds that proof's thumbprint to the row it locks, so exactly one updates it; the other gets 401
+// rather than replacing the winner's new key.
+func TestTwoProofsThatAuthenticatedTheOldKeyCannotBothWin(t *testing.T) {
+	ts := newTestServer(t)
+	credentialID, oldKey := ts.mintServiceLauncherCredential(t)
+	keys := [2]*ecdsa.PrivateKey{newSigningKey(t), newSigningKey(t)}
+	type answer struct {
+		status int
+		body   []byte
+	}
+	answers := make(chan answer, len(keys))
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	for _, key := range keys {
+		group.Add(1)
+		go func(next *ecdsa.PrivateKey) {
+			defer group.Done()
+			<-start
+			status, body := ts.renewTo(t, oldKey, credentialID, next, "legion-daemon")
+			answers <- answer{status: status, body: body}
+		}(key)
+	}
+	close(start)
+	group.Wait()
+	close(answers)
+
+	var winner *ecdsa.PrivateKey
+	for answer := range answers {
+		switch answer.status {
+		case http.StatusOK:
+			if winner != nil {
+				t.Fatalf("two renewals succeeded, second body %s", answer.body)
+			}
+			if got := ts.credentialKey(t, credentialID); got == thumbprintOf(t, keys[0]) {
+				winner = keys[0]
+			} else {
+				winner = keys[1]
+			}
+		case http.StatusUnauthorized:
+			if decode[wireError](t, answer.body).Code != "LAUNCHER_INVALID" {
+				t.Fatalf("losing renewal = %d %s, want 401 LAUNCHER_INVALID", answer.status, answer.body)
+			}
+		default:
+			t.Fatalf("renewal = %d %s, want one 200 and one 401", answer.status, answer.body)
+		}
+	}
+	if winner == nil {
+		t.Fatal("no renewal succeeded")
+	}
+	if got, want := ts.credentialKey(t, credentialID), thumbprintOf(t, winner); got != want {
+		t.Fatalf("broker key = %s, want the winning renewal's key %s", got, want)
 	}
 }

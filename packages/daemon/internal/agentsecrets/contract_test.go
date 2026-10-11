@@ -24,6 +24,7 @@
 package agentsecrets
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"encoding/json"
@@ -222,6 +223,16 @@ func (k *memoryKeeper) Save(_ context.Context, kept Kept) error {
 	defer k.mu.Unlock()
 	k.kept = &kept
 	return nil
+}
+
+func (k *memoryKeeper) CompareAndSave(_ context.Context, expectedPrivateKey []byte, kept Kept) (bool, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.kept == nil || !bytes.Equal(k.kept.PrivateKey, expectedPrivateKey) {
+		return false, nil
+	}
+	k.kept = &kept
+	return true, nil
 }
 
 func (k *memoryKeeper) Forget(_ context.Context, credentialID string) error {

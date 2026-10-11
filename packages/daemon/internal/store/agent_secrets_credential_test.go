@@ -67,3 +67,32 @@ func TestAgentSecretsCredentialSaveLoadForget(t *testing.T) {
 		t.Fatalf("a credential saved with no expiry reads back expiring at %s, want the zero time", got.ExpiresAt)
 	}
 }
+
+// The renewal winner replaces the kept key only while that row still holds the key it renewed
+// from. A second daemon carrying the same old key loses its compare-and-save and leaves the winner.
+func TestCompareAndSaveAgentSecretsCredentialKeepsTheWinner(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	const (
+		project = "demo"
+		broker  = "https://broker.internal.example"
+	)
+	old := agentsecrets.Kept{CredentialID: "cred-1", PrivateKey: []byte("old-key")}
+	if err := store.SaveAgentSecretsCredential(ctx, project, broker, old); err != nil {
+		t.Fatal(err)
+	}
+	winner := agentsecrets.Kept{CredentialID: "cred-1", PrivateKey: []byte("winner-key")}
+	saved, err := store.CompareAndSaveAgentSecretsCredential(ctx, project, broker, old.PrivateKey, winner)
+	if err != nil || !saved {
+		t.Fatalf("winner compare-and-save = %v, %v; want saved", saved, err)
+	}
+	loser := agentsecrets.Kept{CredentialID: "cred-1", PrivateKey: []byte("loser-key")}
+	saved, err = store.CompareAndSaveAgentSecretsCredential(ctx, project, broker, old.PrivateKey, loser)
+	if err != nil || saved {
+		t.Fatalf("loser compare-and-save = %v, %v; want not saved", saved, err)
+	}
+	got, found, err := store.AgentSecretsCredential(ctx, project, broker)
+	if err != nil || !found || !bytes.Equal(got.PrivateKey, winner.PrivateKey) {
+		t.Fatalf("kept credential after the race = %+v, %v, %v; want the winner", got, found, err)
+	}
+}

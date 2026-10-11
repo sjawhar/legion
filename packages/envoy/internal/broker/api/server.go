@@ -129,6 +129,10 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 			writeUnavailable(w, "DATABASE_UNAVAILABLE", "read launcher credential", err)
 			return caller{}, false
 		}
+		// Credential's identity read can race a renewal that moves the row to another key; keep
+		// the key this proof actually verified, so the renewal's locked update rejects that stale
+		// proof rather than allowing it to replace the winner.
+		cred.Thumbprint = subject.Thumbprint
 		return caller{launcher: cred}, true
 	case authProof:
 		subject, err := s.proofSubject(r)

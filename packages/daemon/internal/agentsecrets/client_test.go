@@ -1339,3 +1339,46 @@ func TestAnEnrollmentBeforeTheBootLoginStartsOpensNoLogin(t *testing.T) {
 		t.Fatalf("the broker saw %d machine logins before the boot login started, want none", n)
 	}
 }
+
+// blockingSaveKeeper does not return its first Save until release closes, so a test can observe
+// whether poll exposes a broker-issued credential before it is durable.
+type blockingSaveKeeper struct {
+	memoryKeeper
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (k *blockingSaveKeeper) Save(ctx context.Context, kept Kept) error {
+	k.once.Do(func() { close(k.started) })
+	select {
+	case <-k.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return k.memoryKeeper.Save(ctx, kept)
+}
+
+// TestIssuedCredentialIsPersistedBeforeItIsPublished: while the Keeper's save is blocked, Login
+// remains pending and Enroll has no credential. Only after the save returns does poll publish
+// "issued", preventing a process exit in that gap from asking a person again at its next boot.
+func TestIssuedCredentialIsPersistedBeforeItIsPublished(t *testing.T) {
+	withFastPolling(t)
+	broker, server := newFakeBroker(t)
+	keeper := &blockingSaveKeeper{started: make(chan struct{}), release: make(chan struct{})}
+	c := &Client{URL: server.URL, HTTP: server.Client(), Keeper: keeper}
+	if _, err := c.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	broker.setPending(1, "issued", "cred-1")
+	select {
+	case <-keeper.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("the issued credential was not offered to the Keeper")
+	}
+	if got := c.LoginStatus().State; got != "pending" || c.cred.Load() != nil {
+		t.Fatalf("while the save is blocked: LoginStatus=%q credential=%v; want pending and none", got, c.cred.Load() != nil)
+	}
+	close(keeper.release)
+	eventually(t, func() bool { return c.LoginStatus().State == "issued" && c.cred.Load() != nil }, "the persisted credential to be published")
+}

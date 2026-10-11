@@ -174,7 +174,7 @@ func (s *server) renewLauncherCredential(w http.ResponseWriter, r *http.Request,
 	if !readJSON(w, r, &body, "INVALID_REQUEST") {
 		return
 	}
-	expires, err := s.deps.MachineLogin.Renew(r.Context(), id, body.Request)
+	expires, err := s.deps.MachineLogin.Renew(r.Context(), id, cred.Thumbprint, body.Request)
 	switch {
 	case errors.Is(err, machine.ErrPersonCredential):
 		writeError(w, http.StatusForbidden, "PERSON_CREDENTIAL", "a person's machine login does not renew; it logs in again with a code its person approves")

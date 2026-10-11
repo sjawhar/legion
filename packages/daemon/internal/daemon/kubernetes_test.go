@@ -210,6 +210,34 @@ func TestAKubernetesDaemonRefusesTheBootItsWorkerImageProbeRefuses(t *testing.T)
 	}
 }
 
+// A daemon whose supervisor cannot observe the runtime has recorded its boot but never serves; its
+// agent-secrets login must not start and show someone a code. The login starts only after s.start
+// succeeded, not merely after RecordBoot.
+func TestAKubernetesDaemonWhoseSupervisionStartFailsOpensNoSecretsLogin(t *testing.T) {
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
+		URL: "https://broker.internal.example", Audience: "agent-secrets", TokenExpirySeconds: 3600,
+	}
+	rebindHeldPorts(t, &cfg)
+	rt := fake.NewRuntime()
+	rt.FailObserve(errors.New("runtime observe failed"))
+	var started atomic.Bool
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err := run(ctx, cfg, quietLogger(), overrides{
+		runtime: fakeRuntime(rt, &built{}).runtime, listen: heldListen,
+		startSecretsLogin: func(context.Context, *agentsecrets.Client, agentsecrets.Keeper, *slog.Logger) {
+			started.Store(true)
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "runtime observe failed") {
+		t.Fatalf("boot = %v, want the runtime observation refusal", err)
+	}
+	if started.Load() {
+		t.Fatal("a supervision failure started the secrets login")
+	}
+}
+
 // Under kubernetes the worker stream is TCP on the daemon's bind, at a port the listener resolves
 // itself, the one address the runtime hands every pod's shim, and the runtime is given the
 // workflow's App tokens. The host's own agent machinery never runs: no pane launcher is

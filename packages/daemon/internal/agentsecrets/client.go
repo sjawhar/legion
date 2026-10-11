@@ -155,6 +155,14 @@ type Keeper interface {
 	Forget(ctx context.Context, credentialID string) error
 }
 
+// RotationKeeper is a Keeper that updates a renewed credential only when the key it kept is the
+// old key a broker renewal replaced. A second daemon that lost the same renewal race must not write
+// its key over the broker winner's.
+type RotationKeeper interface {
+	Keeper
+	CompareAndSave(ctx context.Context, expectedPrivateKey []byte, kept Kept) (saved bool, err error)
+}
+
 // Kept is a launcher credential as a Keeper keeps it: the broker's id for it, its private key and,
 // while a renewal's answer is unknown, the key that renewal asked the broker to move to, each as
 // PKCS #8 DER (NextPrivateKey nil otherwise), and when it expires (the zero time when the broker
@@ -393,9 +401,9 @@ func (c *Client) LoginStatus() LoginState {
 }
 
 // poll reads the pending login until it reaches a terminal state (issued, denied, or expired),
-// backing off from pollInitialInterval to pollMaxInterval between reads, and settles it: on
-// "issued" with the credential key won by Login alongside the broker's credential_id and its
-// expiry, which it then hands the Keeper (keep) and the renewal loop (wake).
+// backing off from pollInitialInterval to pollMaxInterval between reads. On "issued" it persists
+// the credential before publishing it to Enroll or the state route: a daemon that exits in that
+// gap must take back this same key at its next boot, not ask a person again.
 func (c *Client) poll(ctx context.Context, key *ecdsa.PrivateKey, pendingID, code string) {
 	wait := pollInitialInterval
 	for {
@@ -413,11 +421,18 @@ func (c *Client) poll(ctx context.Context, key *ecdsa.PrivateKey, pendingID, cod
 		}
 		won := &credential{key: key, id: credentialID}
 		won.setExpires(expiresAt)
+		if state == "issued" {
+			if err := c.keep(ctx, won); err != nil {
+				c.loginMu.Lock()
+				c.settle(LoginState{State: "failed", reason: "keep issued launcher credential: " + err.Error()}, nil)
+				c.loginMu.Unlock()
+				return
+			}
+		}
 		c.loginMu.Lock()
 		c.settle(LoginState{State: state, Code: code}, won)
 		c.loginMu.Unlock()
 		if state == "issued" {
-			_ = c.keep(ctx, won)
 			c.wake()
 		}
 		return
@@ -642,6 +657,9 @@ var (
 	// errReplaced is a renewal of a credential the client no longer holds: a login replaced it or a
 	// refusal cleared it while the renewal waited for proofMu.
 	errReplaced = errors.New("the launcher credential was replaced before its renewal")
+	// errDurableCredentialChanged is a successful broker renewal whose local CAS found another
+	// process had already changed the durable credential. The broker winner stays untouched.
+	errDurableCredentialChanged = errors.New("the durable launcher credential changed during its renewal")
 )
 
 // renew moves held to a new key and a new expiry (rotate), first settling which key the broker holds
@@ -731,8 +749,13 @@ func (c *Client) rotate(ctx context.Context, held *credential) (*credential, err
 		}
 		renewed := &credential{key: key, id: held.id}
 		renewed.setExpires(answer.ExpiresAt)
+		if err := c.keepRotation(ctx, held, renewed); err != nil {
+			c.cred.CompareAndSwap(held, renewed)
+			c.log().Error("agent-secrets: renewed the broker credential but did not replace its durable key; another daemon may hold the durable winner", "error", err)
+			c.wake()
+			return nil, err
+		}
 		c.cred.CompareAndSwap(held, renewed)
-		_ = c.keep(ctx, renewed)
 		c.log().Info("agent-secrets: renewed the launcher credential onto a new key", "expires_at", formatExpiry(answer.ExpiresAt))
 		return renewed, nil
 	case status >= http.StatusInternalServerError:
@@ -858,13 +881,8 @@ func formatExpiry(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
 }
 
-// keep hands cred to the Keeper, its key and any next key as PKCS #8 DER, and answers whether it
-// could. A failure is also logged: the credential still works in this process, and the next restart
-// logs in.
-func (c *Client) keep(ctx context.Context, cred *credential) error {
-	if c.Keeper == nil {
-		return nil
-	}
+// keptCredential serializes cred as a Keeper row.
+func keptCredential(cred *credential) (Kept, error) {
 	kept := Kept{CredentialID: cred.id, ExpiresAt: cred.expiresAt()}
 	var err error
 	if kept.PrivateKey, err = x509.MarshalPKCS8PrivateKey(cred.key); err == nil {
@@ -872,6 +890,17 @@ func (c *Client) keep(ctx context.Context, cred *credential) error {
 			kept.NextPrivateKey, err = x509.MarshalPKCS8PrivateKey(next)
 		}
 	}
+	return kept, err
+}
+
+// keep hands cred to the Keeper, its key and any next key as PKCS #8 DER, and answers whether it
+// could. A failure is also logged: the credential still works in this process, and the next restart
+// logs in.
+func (c *Client) keep(ctx context.Context, cred *credential) error {
+	if c.Keeper == nil {
+		return nil
+	}
+	kept, err := keptCredential(cred)
 	if err != nil {
 		c.log().Error("agent-secrets: could not encode the launcher credential's key to keep it; the next restart starts a machine login", "error", err)
 		return err
@@ -881,6 +910,38 @@ func (c *Client) keep(ctx context.Context, cred *credential) error {
 	if err := c.Keeper.Save(ctx, kept); err != nil {
 		c.log().Error("agent-secrets: could not keep the launcher credential; the next restart starts a machine login", "error", err)
 		return err
+	}
+	return nil
+}
+
+// keepRotation stores renewed only if the Keeper still holds held's key: the broker has already
+// made renewed its winner, and a losing daemon must never overwrite that durable winner. A Keeper
+// without the optional CAS operation is a unit-test implementation; production's credentialKeeper
+// implements it.
+func (c *Client) keepRotation(ctx context.Context, held, renewed *credential) error {
+	if c.Keeper == nil {
+		return nil
+	}
+	keeper, ok := c.Keeper.(RotationKeeper)
+	if !ok {
+		return c.keep(ctx, renewed)
+	}
+	expected, err := keptCredential(held)
+	if err != nil {
+		return err
+	}
+	kept, err := keptCredential(renewed)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keeperTimeout)
+	defer cancel()
+	saved, err := keeper.CompareAndSave(ctx, expected.PrivateKey, kept)
+	if err != nil {
+		return err
+	}
+	if !saved {
+		return errDurableCredentialChanged
 	}
 	return nil
 }
