@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -62,19 +63,11 @@ var deliveryPrioritySelection = regexp.MustCompile(`^[pP]?([0-3])$`)
 // either is absent, and refuses a malformed value, an inverted window, or one wider than
 // maxDeliveryWindow.
 func parseDeliveryWindow(query url.Values) (from, to time.Time, err error) {
-	to = time.Now().UTC()
-	if query.Has("to") {
-		to, err = time.Parse(time.RFC3339, strings.TrimSpace(query.Get("to")))
-		if err != nil {
-			return time.Time{}, time.Time{}, errors.New("to must be an RFC3339 timestamp")
-		}
+	if to, err = parseOptionalRFC3339(query, "to", time.Now().UTC()); err != nil {
+		return time.Time{}, time.Time{}, err
 	}
-	from = to.Add(-defaultDeliveryWindow)
-	if query.Has("from") {
-		from, err = time.Parse(time.RFC3339, strings.TrimSpace(query.Get("from")))
-		if err != nil {
-			return time.Time{}, time.Time{}, errors.New("from must be an RFC3339 timestamp")
-		}
+	if from, err = parseOptionalRFC3339(query, "from", to.Add(-defaultDeliveryWindow)); err != nil {
+		return time.Time{}, time.Time{}, err
 	}
 	if !from.Before(to) {
 		return time.Time{}, time.Time{}, errors.New("from must be before to")
@@ -83,6 +76,19 @@ func parseDeliveryWindow(query url.Values) (from, to time.Time, err error) {
 		return time.Time{}, time.Time{}, errors.New("from..to must not span more than 84 days")
 	}
 	return from, to, nil
+}
+
+// parseOptionalRFC3339 is query's name parameter as an RFC3339 time, or fallback when the query
+// has no such parameter, refusing a value that does not parse with an error naming the parameter.
+func parseOptionalRFC3339(query url.Values, name string, fallback time.Time) (time.Time, error) {
+	if !query.Has(name) {
+		return fallback, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(query.Get(name)))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must be an RFC3339 timestamp", name)
+	}
+	return parsed, nil
 }
 
 // deliverySettings reads the timeline's configuration record, answering 404

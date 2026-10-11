@@ -603,8 +603,10 @@ two init containers and six role containers — `architect`, `planner`, `impleme
 that authenticates to the daemon's worker stream with its role's own token and starts or stops
 that role's `legion worker-shim` and Oh My Pi when the daemon tells it to. Every role of the issue
 shares the issue's checkout, the issue's own volume, the sessions directory on it and the pod's network;
-each role keeps its own state directory, agent-secrets key and launch credentials. A role's Secret holds
-only its launcher token, projected into that role's container alone and bound to the pod's uid; the
+each role keeps its own state directory, agent-secrets key, GitHub App credential and launch credentials. A role's Secret holds
+its launcher token, projected into that role's container alone and bound to the pod's uid, and the
+two gh files its `gh` and `git` read the role's App token from
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)); the
 daemon accepts a launcher only for that role, that pod and that token. Each generation's boot token
 and launch credentials (the Envoy and Dispatch bearers, a spec's secrets) travel in the authenticated
 start command, and the launcher writes them owner-only and exclusively into a fresh `g<generation>`
@@ -841,6 +843,26 @@ release cannot read what they and this release write:
   recorded and compares nothing against the version the database is at
   (`internal/store/store.go`, the same at `legion-v10.0.0`), so it would boot and then fail row by
   row.
+
+### Pinning a release that drops what a running pod still uses
+
+A pod is built whole from the image pinned when it was launched, and nothing relaunches it for an
+image change alone: a release whose daemon stops serving a route, or stops setting a variable,
+that the previous image's agents call or read leaves every pod still on the earlier image calling
+this daemon as the older release. LEGION-631 is one: it deletes the `/legion/v1/gh-token` and
+`/legion/v1/git-credential` routes, which a pod's `legion gh` and `legion credential` from the
+earlier image still call. Such a release is pinned only after every tree is drained (step 1 of the
+runbook above) or every issue pod is relaunched onto the new image. The daemon's boot log, and
+every orphan sweep after it, names each pod still on another image —
+`sandbox runtime: <sandbox> runs image <image>, the configured image is <image>; its agents call
+this daemon as the older release until the pod is relaunched` (`warnImageDrift` in
+`internal/runtime/sandbox/sandbox.go`) — and the daemon replaces such a pod at the next launch of
+any of its roles (`imageDrift` beside the moved-stream trigger in `relaunch.go`), which interrupts
+the roles live in it once: they are stopped and resumed in the new pod, as a moved worker stream
+already does. The daemon-launched controller's pod is in scope for both the warning and the
+replacement, which happens only when the controller's process is being started anyway. The boot
+action is the log line alone: refusing to adopt a drifted pod would stop observing a live pod and
+trigger nothing.
 
 ### Configuration
 
@@ -1132,9 +1154,11 @@ waits and the logged `detail` may never name the authorization error at all (LEG
 While the readiness gate waits, callers outside the daemon see it as still booting, not as down:
 the API port is already bound by this point (the same as during the image probe, both before this
 gate), so it accepts a connection but serves nothing until the gate passes, and `legion status`
-reports the daemon's PID alive but not yet answering. A pane's own `bash` calls (each one mints
-its own grant first), `legion credential`, `gh`, `handoff complete` and `controller start` all
-wait on that same API, so none of them succeeds until the daemon actually serves.
+reports the daemon's PID alive but not yet answering. A pane's `legion` tool calls (`read_record`
+and `handoff_complete`, the latter minting its grant in-process first) and `controller start` all
+wait on that same API, so none of them succeeds until the daemon actually serves; a pane's plain
+`gh` and `git` do not, since they read the role's credential from its gh files and call the daemon
+for nothing.
 
 Rollout order for the server's `legion-daemon` user: the server admits
 `legion-daemon` (its public key applied) with the daemon's grants first; then its seed is stored,
@@ -1238,9 +1262,14 @@ relabelled. From it Agent Sandbox creates the PVC `issue-legion-<project>-<issue
 (`IssueClaimName`, `names.go`) with the Sandbox as its owner, so `kubectl -n legion get pvc -l
 legion.dev/issue=<KEY>` finds it and the Sandbox's deletion takes it. `workspace-init` and every
 role container mount it at `/legion`, and each role container again at Oh My Pi's sessions directory
-through a `subPath`, so a session survives its pod. Each role's Secret holds only that role's
-launcher token, projected read-only into the role's own container; the issue's `-boot` Secret holds
-the provisioning token, projected into `workspace-fetch` alone. The operator's volumes and mounts
+through a `subPath`, so a session survives its pod. Each role's Secret,
+`<sandbox>-<role>-boot`, holds that role's launcher token and its two gh files — `github-hosts`,
+gh's `hosts.yml` carrying the role's GitHub App installation token under user `x-access-token`, and
+`github-config`, a `config.yml` of `version: "1"` — all projected read-only into the role's own
+container: the token where the launcher reads it, the two gh files through a per-role `gh-<role>`
+volume mounted at `/var/run/legion/gh` in that role's container alone (the implement App's token
+for the implementer and the merger, the review App's for every other role). The issue's `-boot`
+Secret holds the provisioning token, projected into `workspace-fetch` alone. The operator's volumes and mounts
 join every role container's, and the providers Secret's configured keys when there are any, with its
 `NATS_NKEY_SEED` key when the daemon has a NATS nkey seed. Each role's private and state directories
 and the XDG config home are in-memory, one set per role so no role's launcher or state collides
@@ -1265,6 +1294,27 @@ ephemeral-storage limit over a smaller request: each role container its role's
 reservation of the role whose launch created the pod (`issuePod.initContainers`, `podkind.go`). So
 the pod is `Guaranteed`, each container is bounded on the node's disk, and it carries no affinity
 ([Issue sizing](#issue-sizing-one-reservation-per-pod)).
+
+Every role container is told `GH_CONFIG_DIR=/var/run/legion/gh`, so the image's plain `gh` reads
+its App token from the files there, and `git` reads the same file through the shared clone's
+`credential.helper`, `!gh auth git-credential` — the helper `gh auth setup-git` itself writes;
+`workspace-init provision` is passed it as `--credential-helper '!gh auth git-credential'`, and the
+`gh` in it resolves on the PATH of whichever process runs git. `GH_TOKEN`, `GITHUB_TOKEN` and
+`GH_HOST` are set to the empty string, which gh ignores, so no value the image or an operator's rc
+file leaves in the environment outranks the file. No container is told `LEGION_GH_PATH`,
+`LEGION_GIT_PATH`, `LEGION_JJ_PATH`, `LEGION_CREDENTIAL_HELPER` or a grant file (the `legion` tool
+mints the grants for its own daemon calls in-process), and nothing is installed under the issue's volume for a pod to run: a pod's
+`gh`, `git` and `jj` are the image's, resolved on its PATH, which puts only the `legion` directory
+first. The daemon renders the two gh keys when it writes the role Secret at the pod's start,
+logging `sandbox runtime: github credential written` with the sandbox, role, App and `expiresAt`,
+and a refresher walks every live role each minute, re-rendering its credential from the daemon's
+cached lease and updating the Secret only when its `hosts.yml` changed (`sandbox runtime: github
+credential refreshed`, the same fields); the kubelet rewrites the projection in place, so the next
+`gh` runs with the new token. The `appauth` lease re-mints 20 minutes before its token expires, so a
+new token lands at least 15 minutes before the old one lapses, and GitHub keeps the old token valid
+until its own expiry. `gh config set`, `gh alias set` and `gh auth login` cannot write the read-only
+directory, and `gh auth status` reports the account as `x-access-token`. A `task` subagent inherits
+the container's `GH_CONFIG_DIR`, so its `gh` acts as the same App.
 
 Every role container is told `UV_PYTHON_INSTALL_DIR=/legion/uv/python/<issue>` (the issue key as a
 DNS label), `UV_CACHE_DIR=/legion/uv/cache` and `UV_LINK_MODE=copy`. uv keeps the Pythons it installs
@@ -1344,8 +1394,7 @@ and with no `advertise_host` set the stream also moves when the daemon restarts 
 daemon that restarts re-adopts each live claim by its recorded locator (the boot orphan sweep), and
 re-adoption alone would leave the role holding the old addresses: a launcher dialling a stale
 stream never reaches the new daemon, and a stale `LEGION_DAEMON_URL` fails every call the agent
-makes to the daemon's API (its credential helper, `legion gh`, its phase completion) while its
-stream still works.
+makes to the daemon's API (its phase completion, its record read) while its stream still works.
 
 So the runtime compares a role's addresses with what it hands now on every evaluation of the role
 (each watch event, the probe-interval sweep, each probe):
@@ -1762,7 +1811,8 @@ no other issue's pod mounts it: the clone's hooks, its git and jj configuration 
 `.jj/workspace-config.toml`, which jj would migrate into what it reads, included), its remote URL,
 its `http.proxy`. git and jj obey all of it — they run hooks, the git jj is told to run,
 working-copy filters and `ext::` transports, and send credentials through the proxy the
-configuration names — so no process that can read the token may touch the issue's volume. The Go
+configuration names — so the provisioning clone, which runs with that token before any role of the
+issue exists, happens in no process whose git or jj an agent's plant can reach. The Go
 coordinator's pods (`packages/daemon`) keep to that with two init containers:
 
 - **`workspace-fetch`** mounts the provisioning Secret, an in-memory `TMPDIR` of its own, and the
@@ -1805,6 +1855,21 @@ directory nor a regular file (`guardWorkspace`, the same file). The worker image
 the tmux runtime, which runs the host's jj through the same code, the daemon refuses to start with a
 jj older than 0.38 (`resolveTools`, naming `LEGION_JJ_PATH`), since before 0.38
 `.jj/repo/config.toml` is the repository's live configuration.
+
+What the boundary protects is identity. Since LEGION-631 each role container holds its own App's
+token, read-only, in the gh files its `GH_CONFIG_DIR` names
+([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)): an implement-role container (the
+implementer's, the merger's) holds the implement App's token — the same App, from the same lease,
+as the provisioning token — and a review-role container (the architect's, planner's, tester's,
+reviewer's) the review App's; and each role's plain `gh` and `git` run in a container that mounts
+the issue's volume, with whatever an agent of the issue planted in the clone's configuration. A plant in the
+implementer's container, then, reaches a token the implementer already holds for its push and its
+pull request. What no plant reaches is the other App: no review-role container ever holds the
+implement App's token (the review App cannot resolve a review thread on the implementer's pull
+request, so the reviewer names the bot threads it accepted to the implementer, which resolves them
+with its own `gh`; the daemon serves no thread route), and no implement-role container the review
+App's, so an approval posted as the review App is a review-role container's, and a push or a pull
+request as the implement App an implement-role container's.
 
 On the **tmux** runtime there is no such boundary: panes run under the daemon's uid and can read its
 0600 credential files, and the daemon's credentialed clone and fetch run in the host's shared clone
@@ -2288,7 +2353,6 @@ For a daemon contract change, first merge the worker image and the two plugin re
 `@sjawhar/pi-legion`) in the Legion profile, restart
 the daemon, and relaunch every live root, worker, and controller. The boot log is the checklist:
 each line naming an older or unrecorded `pi-legion` process identifies one process to relaunch.
-
 ### RBAC the daemon needs
 
 For the daemon's Role (LEGION-25), the verbs this runtime uses on core/v1 in its namespace:
@@ -2544,7 +2608,7 @@ keeping nothing until the daemon has answered, the command:
    carries the daemon's `gates.design`, and an answer without `root-issues` or `off` is refused
    with a request to upgrade the daemon;
 4. writes the secret 0600 under the local state directory (`state_dir`, by default
-   `$XDG_STATE_HOME/legion/<project>-controller`), beside the `gh` shim, the `legion` launcher and the
+   `$XDG_STATE_HOME/legion/<project>-controller`), beside the `legion` launcher and the
    deployment instructions;
 5. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
@@ -2554,7 +2618,7 @@ keeping nothing until the daemon has answered, the command:
    extension sends it as the session's first turn right after its role claim succeeds and before
    it opens the live wake subscription, so the controller's first turn runs its start procedure
    deterministically, with nothing typed, rather than racing a wake for the session's one
-   first-turn slot — LEGION-392), its grant and secret files, the Envoy and Dispatch
+   first-turn slot — LEGION-392), its grant and secret files, a `GH_CONFIG_DIR` holding no login with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied (the controller has no App), the Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
    of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE`
    (the controller is pane-side, and never gets the daemon's seed) and less `LEGION_BOOT_TOKEN` and

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"maps"
@@ -9,6 +10,7 @@ import (
 	"slices"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 )
 
 // envName is a name a shell accepts as a variable, which is also a valid Kubernetes Secret key.
@@ -20,24 +22,29 @@ func IsEnvName(name string) bool { return envName.MatchString(name) }
 // SecretsDir is `<state_dir>/secrets`, where secret files live under a state directory. Under a
 // daemon's state directory the daemon prunes it (internal/daemon/secrets.go): a claim's files go
 // when the claim is written with no process, and at boot every regular file that no claim with a
-// process owns goes, except the Dispatch token file; subdirectories are never pruned. So a claim's
-// file is named for its claim token (`<claim>` or `<claim>-<name>`, as GrantFile is), and a file
-// the daemon holds across claims is a subdirectory (config.ProviderEnvDir) or is kept by name in
-// boot's prune. In a Sandbox pod it is on the worker container's memory-backed state volume, which
-// goes with the pod.
+// process owns goes, except the Dispatch token file; subdirectories are never pruned, except a
+// claim's `-gh` directory (GHConfigDir), which goes with the claim's files. So a claim's file is
+// named for its claim token (`<claim>` or `<claim>-<name>`), and a file the daemon holds across
+// claims is a subdirectory (config.ProviderEnvDir) or is kept by name in boot's prune. In a
+// Sandbox pod it is on the worker container's memory-backed state volume, which goes with the pod.
 func SecretsDir(stateDir string) string { return filepath.Join(stateDir, "secrets") }
 
 // SecretFilePath is the secret file name in SecretsDir: `<state_dir>/secrets/<name>`.
 func SecretFilePath(stateDir, name string) string { return filepath.Join(SecretsDir(stateDir), name) }
 
-// GrantFile is the file an agent's LEGION_GRANT_FILE names: `<state_dir>/secrets/<claim>-grant`,
-// under tmux beside the claim's other secret files, which the daemon prunes it with. Every
-// runtime names it in the agent's environment from the process's start, because Oh My Pi copies
-// that environment once for every `gh` it runs to serve a pr:// or issue:// read, and none writes
-// it: the pi-legion extension writes a fresh grant there before each tool call that redeems one, and
-// `legion credential`, `legion gh` and `legion handoff complete` read it.
-func GrantFile(stateDir string, token claim.Token) string {
-	return SecretFilePath(stateDir, string(token)+"-grant")
+// GitHubCredential is the daemon's one function a runtime calls for a tree role's GitHub
+// credential files: the gh `hosts.yml` and `config.yml` rendered from the role's App token
+// (ghconfig.Render), which the runtime puts under the agent's GH_CONFIG_DIR and rewrites from the
+// same function as the lease nears its expiry. Never for the controller: it works Dispatch, never
+// GitHub, and appauth.AppRoleFor has no App for it.
+type GitHubCredential func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error)
+
+// GHConfigDir is the tmux pane's GH_CONFIG_DIR: `<state_dir>/secrets/<claim>-gh`, the directory
+// holding the claim's gh files (ghconfig.HostsFile and ghconfig.ConfigFile), named for its claim
+// token so the daemon prunes it with the claim's other secret files. A pod has no use for it:
+// there the files are a Secret volume the manifest mounts.
+func GHConfigDir(stateDir string, token claim.Token) string {
+	return SecretFilePath(stateDir, string(token)+"-gh")
 }
 
 // ValidateSpawnSpec is the refusal every runtime makes before anything touches its disk, its

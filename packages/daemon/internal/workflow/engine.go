@@ -171,7 +171,7 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 
 // sessionStatusWrite takes a lifecycle status change written by a session whose write the workflow
 // does not act on. A session holding a claim in the issue's tree is an agent, never a human move,
-// since a phase ends only by its completion (legion handoff complete) and a tree only by the
+// since a phase ends only by its completion (the `legion` tool's `handoff_complete`) and a tree only by the
 // architect's sign-off. Any other session on the root of an admitted tree — another tree's agent, or
 // one outside Legion that took the issue for its own — has no part in the running tree it would end
 // or park, so the tree's architect is told who wrote what. Either way the workflow does not react:
@@ -341,6 +341,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, err
 	}
 	if phase.FileBacked(issue.Phase) {
+		// The commit a completion carries is the pushed commit carrying the phase's handoff, which
+		// the `legion` tool's handoff_complete found in the pane: the one the role reported for its
+		// previous phase means this phase wrote none.
 		if fact.Commit == row.LastHandoff {
 			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the %s reported commit %s for its previous phase of %s; write and commit this phase's handoff before completing", fact.Role, fact.Commit, issue.Key)), nil
 		}

@@ -59,9 +59,9 @@ var (
 //     origin's branch); or start from main instead, by deleting the branch on GitHub (the pull
 //     request's Delete branch button, or `gh api -X DELETE`), after which the next provisioning's
 //     fetch drops the row. A push of the deletion from the shared clone is not offered: the clone
-//     authenticates only through `legion credential`, which needs a tree's grant that no operator
-//     shell holds, and `jj git push --deleted` would push every pending deletion in the shared
-//     clone, other issues' branches with it.
+//     authenticates through `gh auth git-credential`, which reads a role's gh files under a
+//     GH_CONFIG_DIR no operator shell carries, and `jj git push --deleted` would push every
+//     pending deletion in the shared clone, other issues' branches with it.
 //   - No row at all is an issue whose branch GitHub does not have, such as a merged branch GitHub
 //     deleted. The workspace starts at main, resolved to one commit first (mainCommit), with the
 //     bookmark created on it.

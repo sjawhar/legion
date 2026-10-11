@@ -578,24 +578,25 @@ func describedArgs(jj, dir string) []string {
 	return []string{jj, "log", "-r", `@ ~ description(exact:"")`, "--no-graph", "-T", "commit_id", "-R", dir}
 }
 
-// runAdoption runs the adoption with the jj the daemon resolved at boot on the workspace — both
-// named by the shim's environment, LEGION_JJ_PATH and LEGION_WORKSPACE, which the runtime sets on
-// every pane — under the requested identity and budget. Every role of an issue shares the
-// workspace, so a working copy the previous role left described (its pushed commit) is kept as it
-// is, and the incoming role starts on a fresh one of its own (`jj new`): otherwise its work would
-// land in the previous role's commit, authored by the previous role's App. One read decides which
-// of the two changes the working copy needs, and only that one runs. A failure is reported the way
-// the shipped runner does (commandFailure, packages/workspace/src/workspace.ts): the daemon
-// decides what a failed adoption means. A shim without either variable was not started by a
-// runtime, and refuses (runWorkingCopyAdoption, worker-shim.ts).
+// runAdoption runs the adoption with PATH's jj — the one the pane's own shell runs, since no
+// runtime pins a jj on a pane or pod — on the workspace the shim's environment names in
+// LEGION_WORKSPACE, which the runtime sets on every pane, under the requested identity and
+// budget. Every role of an issue shares the workspace, so a working copy the previous role left
+// described (its pushed commit) is kept as it is, and the incoming role starts on a fresh one of
+// its own (`jj new`): otherwise its work would land in the previous role's commit, authored by the
+// previous role's App. One read decides which of the two changes the working copy needs, and only
+// that one runs. A failure is reported the way the shipped runner does (commandFailure,
+// packages/workspace/src/workspace.ts): the daemon decides what a failed adoption means. A shim
+// without LEGION_WORKSPACE was not started by a runtime, and refuses (runWorkingCopyAdoption,
+// worker-shim.ts); a PATH without jj refuses naming jj and the PATH searched.
 func (s *shim) runAdoption(request shimwire.AdoptWorkingCopy) error {
 	workspace := envValue(s.cfg.Env, "LEGION_WORKSPACE")
 	if workspace == "" {
 		return errors.New("worker-shim: LEGION_WORKSPACE is not set; no workspace to adopt")
 	}
-	jj := envValue(s.cfg.Env, "LEGION_JJ_PATH")
-	if jj == "" {
-		return errors.New("worker-shim: LEGION_JJ_PATH is not set; no jj to adopt the working copy with")
+	jj, err := exec.LookPath("jj")
+	if err != nil {
+		return fmt.Errorf("worker-shim: jj is not on PATH (%s); no jj to adopt the working copy with", os.Getenv("PATH"))
 	}
 	budget := time.Duration(request.TimeoutMs) * time.Millisecond
 	ctx, cancel := context.WithTimeout(context.Background(), budget)

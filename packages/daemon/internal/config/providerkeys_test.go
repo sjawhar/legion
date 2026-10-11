@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -213,5 +214,28 @@ func TestProviderKeysMayNotNameAnAgentSecretsVariable(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), "provider_keys names "+name) || !strings.Contains(err.Error(), "AGENT_SECRETS_") {
 			t.Fatalf("%s: err %v, want the agent-secrets refusal", name, err)
 		}
+	}
+}
+
+// A provider key named for a gh variable the daemon sets on every pane and pod is refused by the
+// loader, naming the key and that every pane sets it, so `legion start --check-config` refuses the
+// file under either runtime rather than the deployment stopping on every pane's shim; a key of
+// another name passes.
+func TestProviderKeysMayNotNameAGhVariableEveryPaneSets(t *testing.T) {
+	for _, name := range []string{"GH_CONFIG_DIR", "GH_TOKEN", "GITHUB_TOKEN", "GH_HOST"} {
+		t.Run(name, func(t *testing.T) {
+			want := "provider_keys names " + name + ", which the daemon sets on every pane and pod (the role's GitHub App token is the gh files under GH_CONFIG_DIR; GH_TOKEN, GITHUB_TOKEN and GH_HOST are emptied so nothing outranks them), so a provider key may not use that name"
+			_, err := LoadForValidation(writeConfigFile(t, minimalFile+"provider_keys:\n  "+name+": "+name+"_TESTS\n"), noEnv)
+			if err == nil || err.Error() != want {
+				t.Fatalf("LoadForValidation = %v, want %q", err, want)
+			}
+		})
+	}
+	cfg, err := LoadForValidation(writeConfigFile(t, minimalFile+"provider_keys:\n  GEMINI_API_KEY: GEMINI_API_KEY_TESTS\n"), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation with a provider key of another name: %v", err)
+	}
+	if want := []ProviderKey{{Env: "GEMINI_API_KEY", Secret: "GEMINI_API_KEY_TESTS"}}; !reflect.DeepEqual(cfg.ProviderKeys, want) {
+		t.Fatalf("ProviderKeys = %+v, want %+v", cfg.ProviderKeys, want)
 	}
 }

@@ -37,7 +37,7 @@ events to the right session.
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
-| Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves it as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`); `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once |
+| Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, its clock `?at=` or now; `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
@@ -336,6 +336,18 @@ to the document: settlement weighs each such answer and leaves out the ones the 
 room for (`withholdAnswers`). A joined
 operation never writes the room: it runs on the transaction's fork of the room's document
 (`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
+A document no room holds is forked from the store (`coldFork`) and loads no room until the
+committed write is published, so a cold edit holds one copy of the document rather than a room
+beside its fork; an upload's version on such a fork takes out the stored updates through the head
+that read loaded and no in-flight credit. A browser's room load takes no lock the write holds, so
+a room that loads while `coldFork` reads the store is forked from instead and the stored copy is
+dropped undecoded, and one that loads later is forked from at the write's next operation. Every
+mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading
+its own; `applyLive` lets that tree go before the one check that decodes a second copy of the
+state (`refuseUndecodable`); and a write drops its fork and rendering once it commits, before its
+publish loads the room (`releaseFork`), since a pooled connection's context can keep the write
+reachable long after it answered (LEGION-504). The `nodeToken` hash streams the token's encoding
+(`pmdoc.WriteTokenJSON`) rather than holding it whole.
 The handler ends the transaction with
 `ledger.Commit`, which records each settlement credit with the document content and takes each
 version's authors back out of that record, commits, credits the writes' actor to their rooms,

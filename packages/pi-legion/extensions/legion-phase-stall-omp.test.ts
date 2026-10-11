@@ -1,4 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
+import * as path from "node:path";
 import {
   type Cleanup,
   type LegionPane,
@@ -23,11 +25,63 @@ import { PHASE_STALL_ENTRY } from "../src/phase-stall";
 const omp = process.env.LEGION_TEST_OMP;
 const onActions = process.env.GITHUB_ACTIONS === "true";
 
-/** The implementer pane the phase-stall cases run, with its transcript's phase-stall entries. */
+/** The implementer pane the phase-stall cases run, with what its stand-in daemon recorded and
+ * its transcript's phase-stall entries. */
 interface StallPane extends LegionPane {
+  /** The body of each `POST /legion/v1/handoff/complete` the pane made, in order. */
+  readonly completions: () => unknown[];
   /** The persisted transcript's phase-stall entries, in order. */
   readonly phaseEntries: () => Promise<unknown[]>;
+  /** The pushed commit carrying `.legion/STALL-2/implement.json` in the pane's workspace: what
+   * its `handoff_complete` finds and reports. */
+  readonly handoffCommit: string;
 }
+
+/** The identity the daemon puts on every pane (runtime.GitIdentity), which the pane's jj commits
+ * as and `handoff_complete` holds the carrying commit's author to. */
+const PANE_IDENTITY = { JJ_USER: "Legion Test", JJ_EMAIL: "legion-test@example.invalid" };
+
+/** Runs `jj` in `cwd` as the pane's identity, failing loudly on a non-zero exit, and answers its
+ * stdout. */
+async function runJj(jj: string, cwd: string, args: readonly string[]): Promise<string> {
+  const child = Bun.spawn([jj, ...args], {
+    cwd,
+    env: { ...process.env, ...PANE_IDENTITY },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  if (code !== 0) throw new Error(`jj ${args.join(" ")} exited ${code}:\n${stderr}`);
+  return stdout.trim();
+}
+
+/** The daemon's state as the pane's `handoff_complete` reads it: STALL-2 at implementing, the
+ * phase whose handoff is `.legion/STALL-2/implement.json`. */
+const STALL_STATE = {
+  daemon: {
+    project: "STALL",
+    schemaVersion: 1,
+    boots: 1,
+    firstBootAt: "2026-09-18T14:03:27Z",
+    startedAt: "2026-09-22T09:15:02Z",
+  },
+  admission: { cap: 1, active: ["STALL-1"], waiting: [] },
+  issues: {
+    "STALL-2": {
+      key: "STALL-2",
+      generation: 1,
+      phase: "implementing",
+      status: "in_progress",
+      workers: {},
+    },
+  },
+  pendingStatusWrites: [],
+  capabilities: [],
+};
 
 const cleanup: Cleanup = [];
 afterEach(async () => {
@@ -66,14 +120,18 @@ interface PaneOptions extends Pick<LegionPaneOptions, "legion" | "quietMs" | "se
 }
 
 /**
- * Runs one implementer pane on the real Oh My Pi (`runLegionPane`), the stand-in answering
- * Dispatch's open-ask snapshot when a case configures Dispatch, until its run settles.
+ * Runs one implementer pane on the real Oh My Pi (`runLegionPane`), the stand-in answering the
+ * daemon's state and completion routes and Dispatch's open-ask snapshot when a case configures
+ * Dispatch, until its run settles. The pane's workspace is a jj repository with
+ * `.legion/STALL-2/implement.json` committed and pushed to a bare origin's `legion/STALL-2`, as a
+ * worker leaves it before completing, so the pane's `handoff_complete` finds the carrying commit.
  */
 async function stallPane(
   binary: string,
   replies: readonly Reply[],
   options: PaneOptions = {}
 ): Promise<StallPane> {
+  let handoffCommit = "";
   const pane = await runLegionPane(
     binary,
     replies,
@@ -87,7 +145,37 @@ async function stallPane(
       legion: options.legion,
       quietMs: options.quietMs,
       selfCheck: options.selfCheck,
+      env: PANE_IDENTITY,
+      prepare: async ({ workspace, bin }) => {
+        // The pane's PATH is the harness's fixed one plus `bin`: the jj this test process finds is
+        // linked into `bin`, so the pane's `handoff_complete` runs the one that made its workspace.
+        const jj = Bun.which("jj");
+        if (jj === null) throw new Error("jj is not on PATH");
+        await symlink(jj, path.join(bin, "jj"));
+        const origin = path.join(path.dirname(workspace), "origin.git");
+        if ((await Bun.spawn(["git", "init", "--bare", "--quiet", origin]).exited) !== 0) {
+          throw new Error(`git init --bare ${origin} failed`);
+        }
+        await runJj(jj, path.dirname(workspace), ["git", "init", workspace]);
+        // From here on, every command runs in the workspace, as the pane's own shell does.
+        const jjIn = (...args: string[]) => runJj(jj, workspace, args);
+        await jjIn("git", "remote", "add", "origin", origin);
+        await writeFile(path.join(workspace, "main.py"), 'print("stall")\n');
+        await jjIn("describe", "-m", "implement: the change");
+        await jjIn("new");
+        await mkdir(path.join(workspace, ".legion", "STALL-2"), { recursive: true });
+        await writeFile(
+          path.join(workspace, ".legion", "STALL-2", "implement.json"),
+          '{"schemaVersion":1,"phase":"implement","issue":"STALL-2","completed":"2026-10-09T08:00:00Z"}\n'
+        );
+        await jjIn("split", "-m", "implement: record handoff", ".legion/STALL-2/implement.json");
+        await jjIn("bookmark", "set", "legion/STALL-2", "-r", "@-");
+        await jjIn("git", "push", "--bookmark", "legion/STALL-2");
+        handoffCommit = await jjIn("log", "-r", "@-", "--no-graph", "-T", "commit_id");
+      },
       answer: (url) => {
+        if (url.pathname === "/legion/v1/state") return Response.json(STALL_STATE);
+        if (url.pathname === "/legion/v1/handoff/complete") return Response.json({});
         if (url.pathname !== "/api/v1/asks/open") return undefined;
         const questions = options.openAskQuestions ?? [];
         return Response.json({
@@ -116,11 +204,19 @@ async function stallPane(
     },
     cleanup
   );
-  return { ...pane, phaseEntries: () => pane.transcriptEntries(PHASE_STALL_ENTRY) };
+  return {
+    ...pane,
+    completions: () =>
+      pane.requests
+        .filter((request) => request.path === "/legion/v1/handoff/complete")
+        .map((request) => request.body),
+    phaseEntries: () => pane.transcriptEntries(PHASE_STALL_ENTRY),
+    handoffCommit,
+  };
 }
 
 test.skipIf(omp === undefined && !onActions)(
-  "a turn that ends on a legion tool call written as text gets the follow-up, and the next turn's real legion tool call runs legion handoff complete",
+  "a turn that ends on a legion tool call written as text gets the follow-up, and the next turn's real legion tool call posts the completion",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
     const pane = await stallPane(omp, [
@@ -140,10 +236,29 @@ test.skipIf(omp === undefined && !onActions)(
       [{ type: "text", text: "Reported." }],
     ]);
 
-    // The worker registered through the daemon's routes, and its handoff_complete minted a grant.
+    // The worker registered through the daemon's routes, and its handoff_complete read the issue's
+    // phase, found the pushed commit carrying .legion/STALL-2/implement.json in its workspace with
+    // the pane's jj, minted a grant in-process and posted the completion with both: no grant
+    // file, no `legion` command, and no handoff read by the daemon.
     expect(
       pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
-    ).toEqual(["/legion/v1/claims/register", "/legion/v1/claims/ready", "/legion/v1/grants"]);
+    ).toEqual([
+      "/legion/v1/claims/register",
+      "/legion/v1/claims/ready",
+      "/legion/v1/state",
+      "/legion/v1/grants",
+      "/legion/v1/handoff/complete",
+    ]);
+    expect(pane.handoffCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(pane.completions()).toEqual([
+      {
+        grantId: "stall-grant-1",
+        summary: "Stall proof done.",
+        verdict: "",
+        ready: false,
+        commit: pane.handoffCommit,
+      },
+    ]);
     const turns = pane.turns();
     // Three turns in one run: the text-only one, the follow-up's, and the reply to the tool result.
     // None after: the handoff closed the phase, so the last settle sent nothing.
@@ -153,10 +268,6 @@ test.skipIf(omp === undefined && !onActions)(
     expect(userText(turns[0] as Request)).not.toContain("handoff_complete");
     expect(userText(turns[1] as Request)).toContain("written as text");
     expect(userText(turns[1] as Request)).toContain("WAITING");
-    expect(await pane.legionLog()).toEqual([
-      "handoff complete --summary Stall proof done.",
-      "grant stall-grant-1",
-    ]);
     // The transcript holds every change, which a worker relaunched with --resume restores.
     expect(await pane.phaseEntries()).toEqual([
       { state: "open" },
@@ -180,49 +291,7 @@ test.skipIf(omp === undefined && !onActions)(
     expect(turns).toHaveLength(2);
     expect(userText(turns[1] as Request)).toContain("handoff_complete");
     expect(userText(turns[1] as Request)).not.toContain("written as text");
-    expect(await pane.legionLog()).toEqual([]);
-    expect(await pane.phaseEntries()).toEqual([{ state: "open" }, { state: "quiet" }]);
-  },
-  120_000
-);
-
-test.skipIf(omp === undefined && !onActions)(
-  "a shell `legion handoff complete` runs and completes nothing the extension can see: the settle still gets the follow-up",
-  async () => {
-    if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
-    const pane = await stallPane(omp, [
-      [
-        {
-          type: "tool_use",
-          name: "bash",
-          input: {
-            i: "Completing from the shell",
-            command: "legion handoff complete --summary 'Shell proof done.'",
-          },
-        },
-      ],
-      [{ type: "text", text: "Completed from the shell." }],
-      [{ type: "text", text: "WAITING: the phase was completed from the shell." }],
-    ]);
-
-    // The bash call minted a grant like any other credentialed command: nothing refused it.
-    expect(
-      pane.requests.map((request) => request.path).filter((p) => p.startsWith("/legion/"))
-    ).toEqual(["/legion/v1/claims/register", "/legion/v1/claims/ready", "/legion/v1/grants"]);
-    // The CLI ran with that grant (the stand-in logs `$*`: the quotes were the shell's).
-    expect(await pane.legionLog()).toEqual([
-      "handoff complete --summary Shell proof done.",
-      "grant stall-grant-1",
-    ]);
-    const turns = pane.turns();
-    // Three turns: the bash one, the reply to its result, and the follow-up's.
-    expect(turns).toHaveLength(3);
-    // The extension saw no completion and asked for the tool call; the reply was not
-    // tool-call-shaped text.
-    expect(userText(turns[2] as Request)).toContain("handoff_complete");
-    expect(userText(turns[2] as Request)).not.toContain("written as text");
-    // Never closed: only the `legion` tool's own handoff_complete closes the stall
-    // (src/handoff-actions.ts calls onPhaseCompleted from the tool alone); WAITING quieted it.
+    expect(pane.completions()).toEqual([]);
     expect(await pane.phaseEntries()).toEqual([{ state: "open" }, { state: "quiet" }]);
   },
   120_000
