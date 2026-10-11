@@ -200,6 +200,9 @@ func (c *Conn) FailAbort(err error) { c.fail("Abort", err) }
 // FailAdoptWorkingCopy makes every later AdoptWorkingCopy return err.
 func (c *Conn) FailAdoptWorkingCopy(err error) { c.fail("AdoptWorkingCopy", err) }
 
+// FailAgentSecretsToken makes every later AgentSecretsToken return err; nil clears it.
+func (c *Conn) FailAgentSecretsToken(err error) { c.fail("AgentSecretsToken", err) }
+
 func (c *Conn) fail(method string, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
