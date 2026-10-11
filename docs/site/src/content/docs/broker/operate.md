@@ -210,10 +210,27 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | `agent secret policy load failed; previous policy kept error=…` | At ERROR: a reread of the namespace failed (Secrets Manager or KMS out of reach, or refusing the broker), and the broker keeps serving the policy from its last good read; or, with `name=<NAME>` (the name a request asked for), the request named a secret the broker did not serve and the broker's reread of that one secret failed, so the request is refused `UNKNOWN_SECRET`. A reread of the namespace in flight when the broker shuts down is not one of these and logs nothing. |
 | `broker: <operation> failed error=…` | A request failed with a 500 or 503; the line carries the cause the response does not. A reread whose own request ended before it finished - its caller went away, or it reached the 45-second bound - is not one of these: it answers `503 REQUEST_ENDED` and logs nothing, since anyone can end a request. |
 | `broker sweeper: ended an enrollment whose lease lapsed enrollment_id=… kind=… runtime_id=… slot=… lease_expired_at=… grants_revoked=… requests_cancelled=…` | A session stopped renewing (a pod that is gone, a box whose `agent-secrets renew` stopped); the sweep ended it, revoking its grants and cancelling its pending requests. |
-| `broker: pod enrollment renewed without its projected token enrollment=… pod_uid=… slot=…` | At WARN: a pod renewed with no projected token, which the broker still accepts from a pod enrollment that has never renewed with one, for a pod whose `agent-secrets renew` predates the token. Once a full `BROKER_LEASE_SECONDS` passes with no such line, every live pod renews with its token, and the broker can stop accepting a renewal without one. |
+| `broker: pod enrollment renewed without its projected token enrollment=… pod_uid=… slot=…` | At WARN: a pod enrolled before migration 0012 renewed with no projected token, which the broker still accepts from such an enrollment until its first renewal with one; a pod enrolled since is refused `POD_TOKEN_REQUIRED` instead. While this line appears, a pod on a worker image whose `agent-secrets renew` sends no token is still running. |
 | `broker shutting down` | SIGTERM or SIGINT: in-flight requests get 10 seconds to finish. |
 
 Each request is bounded to 45 seconds. Request bodies are JSON of at most 1 MiB.
+
+## Upgrading to the renew token check
+
+A broker of this release refuses a pod's renewal without its projected token (`POD_TOKEN_REQUIRED`)
+for every pod enrollment it makes. Deploy it only after every running issue pod runs a worker image
+whose `agent-secrets renew` sends the token (`--pod-token-file`): a new worker image does not replace
+a running issue pod, and a pod on an older image that this broker enrolls loses its lease and grants
+one `BROKER_LEASE_SECONDS` later. Once deployed, the pod enrollments migration 0012 found renew
+without a token until they end, each renewal logged as the WARN line above. They are all gone when
+that line has not appeared for one `BROKER_LEASE_SECONDS` and
+
+```sql
+select count(*) from enrollments
+where kind = 'pod' and revoked_at is null and pod_token_renewed_at is null;
+```
+
+answers 0.
 
 ## The audit record
 

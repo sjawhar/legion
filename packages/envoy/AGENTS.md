@@ -1979,6 +1979,18 @@ ALREADY_ENROLLED`, and the policy never sees the slot: a pod is a requester with
 service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`. Migration 0007 is forward-only: an
 older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds
 two slots, so the binary is never rolled back past it once a slotted enrollment exists.
+`enroll.Service.verifyPodToken` verifies a pod's projected token (issuer, audience, signature,
+expiry, a pod UID named) for both `Create` and `Renew`, before either opens a transaction. A pod's
+`POST /v1/enrollments/{id}/renew` carries its current token as `pod_token`, which must name the
+enrollment's pod UID and recorded subject (`403 POD_IDENTITY_MISMATCH`); a box's or host's carries
+none (`400 POD_TOKEN_OFF_POD`). `Create` sets a pod row's `pod_token_renewed_at` (migration 0012),
+so a renewal without the token is `403 POD_TOKEN_REQUIRED` from the first; only the pod rows 0012
+found start null and renew without one, logged at WARN, until their first renewal carrying it sets
+the column. 0012 is forward-only too: an older broker inserts pod rows with the column null, and
+so lets them renew without a token. A pod enrollment is ended only by the launcher credential that
+made it (`DELETE` by any other is `403 NOT_ENROLLING_CREDENTIAL`), so a Legion daemon that logs in
+again (a restart, or its login's expiry) leaves its earlier login's pods to their leases or to a
+revoke of that login.
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
@@ -2297,7 +2309,8 @@ proves the caller is Dispatch, and Dispatch vouches for the approving login each
 `BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
 `BROKER_SERVICES` (optional; whitespace-separated `name=system:serviceaccount:<namespace>:<name>`
 entries, each name `record.ValidService`'s form, not `shared` and given once, and each account bound
-to one name — any other entry is refused naming it, and an account given twice names both; unset,
+to one name, never a namespace's `default` account (every pod there that names no account runs as
+it) — any other entry is refused naming it, and an account given twice names both; unset,
 `Config.ServiceAccounts` is nil and no service is registered),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
@@ -2609,7 +2622,8 @@ listed, `expired: true`, until its last enrollment ends or its lease lapses, swe
 revoking every listed login ends every session the person's machines started.
 `POST /v1/launcher-credentials/{id}/revoke-by-approver` `{approver}` ends one, expired or not
 (`enroll.Service.RevokeCredential`). A service's credential (the Legion daemon's,
-`launcher_credentials.service` set) has no operator (`authorized` needs it null to enroll pods) and
+`launcher_credentials.service` set) has no operator (`authorized` needs it null to enroll pods, and
+`Revoke` also needs a pod enrollment's `launcher_credential_id` to be the caller's) and
 acts as no person, so both routes give it to every login but `anyone` and an empty one, whoever
 approved it. A person's own credential keys on the approver of the `launcher_credential` record it
 was minted from (`credential_requests.approver`, joined through `launcher_credentials.record_id`

@@ -36,12 +36,7 @@ esac
 	return path
 }
 
-func agentSecretsConfig(t *testing.T, socket string, o *omp) (shim.Config, string) {
-	cfg, keyDir, _ := agentSecretsConfigWithToken(t, socket, o)
-	return cfg, keyDir
-}
-
-func agentSecretsConfigWithToken(t *testing.T, socket string, o *omp) (shim.Config, string, string) {
+func agentSecretsConfig(t *testing.T, socket string, o *omp) (shim.Config, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	keyDir := filepath.Join(dir, "keys")
@@ -62,7 +57,7 @@ func TestTheHelloCarriesTheKeyThumbprintAndTheProjectedToken(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, keyDir := agentSecretsConfig(t, path, o)
+	cfg, keyDir, _ := agentSecretsConfig(t, path, o)
 	r := run(t, cfg, newClock())
 	peer := stub.accept(t)
 
@@ -107,7 +102,7 @@ func TestTheEnrollmentFrameIsWrittenBesideTheKeyAndStartsTheRenewer(t *testing.T
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, keyDir, tokenFile := agentSecretsConfigWithToken(t, path, o)
+	cfg, keyDir, tokenFile := agentSecretsConfig(t, path, o)
 	r := run(t, cfg, newClock())
 	peer := stub.accept(t)
 	peer.open(t) // hello2 read, acked, the child's first frame read back
@@ -168,7 +163,7 @@ func TestKeygenFailureEndsTheShimBeforeAnyDial(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, _ := agentSecretsConfig(t, path, o)
+	cfg, _, _ := agentSecretsConfig(t, path, o)
 	if err := os.WriteFile(cfg.AgentSecrets.Binary, []byte("#!/bin/sh\necho 'keygen: disk full' >&2; exit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}

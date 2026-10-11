@@ -37,7 +37,7 @@ var (
 	// ErrNotEnrollingCredential refuses a revoke of a pod enrollment by any launcher credential but
 	// the one that enrolled it (Revoke).
 	ErrNotEnrollingCredential = errors.New("only the machine login that enrolled a pod may end its enrollment")
-	ErrPodTokenRequired       = errors.New("this pod enrollment has renewed with its projected token, so every renewal must carry it")
+	ErrPodTokenRequired       = errors.New("a pod enrollment's renewal must carry its projected token")
 	ErrPodTokenOffPod         = errors.New("only a pod enrollment's renewal carries a projected token")
 )
 
@@ -229,11 +229,11 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 	}
 	in.Subject = nil
 	if in.Kind == "pod" {
-		if s.Pod == nil {
-			return Enrollment{}, fmt.Errorf("%w: pod enrollment needs BROKER_K8S_OIDC_ISSUER", ErrPodIdentity)
+		claims, err := s.verifyPodToken(ctx, in.PodToken)
+		if err != nil {
+			return Enrollment{}, err
 		}
-		claims, err := s.Pod.Verify(ctx, in.PodToken)
-		if err != nil || claims.PodUID == "" || claims.PodUID != in.RuntimeID {
+		if claims.PodUID != in.RuntimeID {
 			return Enrollment{}, ErrPodIdentity
 		}
 		in.Subject = &claims.Subject
@@ -274,8 +274,10 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	if err != nil {
 		return Enrollment{}, false, err
 	}
-	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
-		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+	// A pod enrollment is made with its pod's verified token, so pod_token_renewed_at starts set and
+	// every renewal must carry the token (Renew); only rows migration 0012 found start null.
+	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at, pod_token_renewed_at)
+		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, case when $2 = 'pod' then now() end)`,
 		in.ID, in.Kind, in.RuntimeID, in.Slot, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
 	if store.IsUniqueViolation(err) {
 		// The failed insert aborted tx, which still holds its pooled connection. Release it before
@@ -447,27 +449,52 @@ type Renewal struct {
 	RuntimeID, Slot string
 }
 
+// verifyPodToken verifies a pod's projected service-account token (issuer, audience, signature,
+// expiry) and requires it to name a pod UID. Create and Renew both call it before any transaction
+// opens, so the issuer's key-set fetch on an unknown key id never holds a row lock or a pooled
+// connection. ErrPodIdentity for every failure, and for a broker with no BROKER_K8S_OIDC_ISSUER.
+func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, error) {
+	if s.Pod == nil {
+		return PodClaims{}, fmt.Errorf("%w: a pod's token needs BROKER_K8S_OIDC_ISSUER", ErrPodIdentity)
+	}
+	claims, err := s.Pod.Verify(ctx, raw)
+	if err != nil || claims.PodUID == "" {
+		return PodClaims{}, ErrPodIdentity
+	}
+	return claims, nil
+}
+
 // Renew extends a live enrollment's lease by Lease. The caller's session proof says only that it
 // holds the enrollment's key; a pod enrollment's renewal also proves the pod is still running:
 // podToken is the pod's current projected service-account token, verified as Create verifies it
-// (issuer, audience, signature, expiry) and required to name the pod UID (runtime_id) and the
-// service-account subject the enrollment recorded at Create, else ErrPodIdentity and the lease
+// (verifyPodToken, before the row is locked) and required to name the pod UID (runtime_id) and
+// the service-account subject the enrollment recorded at Create, else ErrPodIdentity and the lease
 // stays where it was. A token copied out of a pod therefore renews nothing once it expires, and a
 // token from another pod or account never renews this one. A box or host renews on its proof
 // alone, and a pod token on its renewal is ErrPodTokenOffPod.
 //
-// Compatibility: a pod whose agent-secrets renew predates the token sends none. While a pod
-// enrollment has never renewed with its token (pod_token_renewed_at is null), a renewal without one
-// still extends the lease and answers WithoutPodToken, which the API logs, naming the enrollment;
-// its first renewal carrying the token sets pod_token_renewed_at, and every later renewal without
-// one is ErrPodTokenRequired. An older broker ignores the token a newer client sends, so client
-// and broker roll out in either order. The token-less path closes no hole for a pod whose renewer
-// never sends a token, so it is removed once every pinned worker image's agent-secrets sends one
-// and no live pod enrollment renews without it: the broker logs no "renewed without its projected
-// token" line for one full lease, and
-// `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null and created_at < now() - <BROKER_LEASE_SECONDS>`
+// Every pod enrollment Create makes starts with pod_token_renewed_at set, so a renewal without the
+// token is ErrPodTokenRequired from the first. Compatibility: the rows migration 0012 found, pod
+// enrollments a broker from before the check made, start null; while null, a renewal without a
+// token still extends the lease and answers WithoutPodToken, which the API logs, naming the
+// enrollment, and the first renewal carrying the token sets the column, after which every renewal
+// needs it. Those pods' agent-secrets renew predates the token and sends none, so the hole stays
+// open for them until they end. An older broker ignores the token a newer client sends. Rollout:
+// the worker image whose renewer sends the token ships first, and this broker deploys only once no
+// issue pod runs an older image, since a pod a broker of this release enrolls is refused without
+// the token and an image change does not replace a running issue pod. The token-less path is
+// removed once the broker logs no "renewed without its projected token" line for one full lease
+// and `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null`
 // answers 0.
 func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, error) {
+	withToken := podToken != ""
+	var claims PodClaims
+	if withToken {
+		var err error
+		if claims, err = s.verifyPodToken(ctx, podToken); err != nil {
+			return Renewal{}, err
+		}
+	}
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return Renewal{}, err
@@ -488,14 +515,10 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 		return Renewal{}, err
 	}
 	switch {
-	case kind != "pod" && podToken != "":
+	case kind != "pod" && withToken:
 		return Renewal{}, ErrPodTokenOffPod
-	case kind == "pod" && podToken != "":
-		if s.Pod == nil {
-			return Renewal{}, fmt.Errorf("%w: pod renewal needs BROKER_K8S_OIDC_ISSUER", ErrPodIdentity)
-		}
-		claims, err := s.Pod.Verify(ctx, podToken)
-		if err != nil || claims.PodUID != renewal.RuntimeID || subject == nil || claims.Subject != *subject {
+	case kind == "pod" && withToken:
+		if claims.PodUID != renewal.RuntimeID || subject == nil || claims.Subject != *subject {
 			return Renewal{}, ErrPodIdentity
 		}
 	case kind == "pod" && tokenRenewedAt != nil:
@@ -506,7 +529,7 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 	renewal.LeaseExpires = time.Now().Add(s.Lease)
 	if _, err := tx.Exec(ctx, `update enrollments set lease_expires_at=$2,
 		pod_token_renewed_at = case when $3 then coalesce(pod_token_renewed_at, now()) else pod_token_renewed_at end
-		where id=$1`, id, renewal.LeaseExpires, kind == "pod" && podToken != ""); err != nil {
+		where id=$1`, id, renewal.LeaseExpires, kind == "pod" && withToken); err != nil {
 		return Renewal{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -542,13 +565,15 @@ func authorized(cred Credential, kind string, operator *string) bool {
 // A pod enrollment carries no operator, so the operator cannot tell one service's pods from
 // another's: a pod enrollment is ended only by the launcher credential that created it
 // (ErrNotEnrollingCredential for any other), never by another service's credential nor a second
-// credential of the same service. A Legion daemon that restarts holds a new credential, since its
-// key lives in memory and every machine login mints a new one, so it cannot end the enrollments
-// its earlier login made: each ends when its pod stops renewing, one lease
-// (BROKER_LEASE_SECONDS) after its renewer stops with the process it belongs to, or at once when
-// a person revokes that earlier login (RevokeCredential), and the pods its current login enrolled
-// it ends here as before. A box or host enrollment keeps the operator rule alone: a helper that
-// logs in again revokes the enrollments its earlier credential made for the same operator.
+// credential of the same service. A Legion daemon holds a new credential whenever it logs in
+// again: after a restart, since its key lives in memory and every machine login mints a new one,
+// and when its login reaches its expiry (BROKER_LAUNCHER_CREDENTIAL_SECONDS, 7 days by default)
+// and the next refusal starts a new machine login. Either way it cannot end the enrollments its
+// earlier login made: each ends when its pod stops renewing, one lease (BROKER_LEASE_SECONDS)
+// after its renewer stops, or at once when a person revokes that earlier login
+// (RevokeCredential), and the pods its current login enrolled it ends here as before. A box or
+// host enrollment keeps the operator rule alone: a helper that logs in again revokes the
+// enrollments its earlier credential made for the same operator.
 //
 // Once ownership passes, Revoke returns ErrNotLive, changing nothing, when the enrollment is
 // already revoked — the guard that keeps the audit trail honest: without it a no-op call would

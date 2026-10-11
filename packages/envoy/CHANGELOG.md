@@ -166,20 +166,29 @@
   pod in that namespace whose spec names no account runs as it and can get a token for the broker's
   audience, so the binding proves nothing about which pods are the service's. Bind each service to
   a dedicated account its pods set as `serviceAccountName` before taking this release.
-- A pod's renewal (`POST /v1/enrollments/{id}/renew`) carries the pod's current projected token as
-  `pod_token`, and the broker refuses it `403 POD_IDENTITY_MISMATCH` unless the token names the pod
-  UID and service account the enrollment was made for, so a token copied out of a pod no longer
-  keeps an enrollment alive past its expiry. `agent-secrets renew --pod-token-file FILE` reads the
-  file before every renewal and sends it, and Legion's worker shim passes the projected token file.
-  A pod enrollment that has never renewed with its token still renews without one, logged as
-  `broker: pod enrollment renewed without its projected token`; once it has, a renewal without one
-  is `403 POD_TOKEN_REQUIRED`. A box's renewal carrying a token is `400 POD_TOKEN_OFF_POD`. An
-  older broker reads no renew body, so the new client renews there too. Adds migration 0012.
+- **Breaking:** a pod's renewal (`POST /v1/enrollments/{id}/renew`) carries the pod's current
+  projected token as `pod_token`, and the broker refuses it `403 POD_IDENTITY_MISMATCH` unless the
+  token names the pod UID and service account the enrollment was made for, and `403
+  POD_TOKEN_REQUIRED` without one. `agent-secrets renew --pod-token-file FILE` reads the file
+  before every renewal and sends it, and Legion's worker shim passes the projected token file. For
+  every pod enrollment this broker makes, a token copied out of a pod no longer keeps the
+  enrollment alive past the token's expiry. The pod enrollments that exist when migration 0012 runs
+  still renew without a token, logged as `broker: pod enrollment renewed without its projected
+  token`, until their first renewal with one; the hole stays open for those until they end. A box's
+  renewal carrying a token is `400 POD_TOKEN_OFF_POD`. **Rollout:** ship the worker image whose
+  `agent-secrets renew` sends the token first, and deploy this broker only once no issue pod runs an
+  older image, since an image change does not replace a running issue pod and a pod this broker
+  enrolls is refused without the token. The new client renews against an older broker, which reads
+  no renew body. Once every pod enrolled before the deploy has ended, the token-less path is idle:
+  no WARN line for one `BROKER_LEASE_SECONDS`, and
+  `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null`
+  answers 0.
 - Only the machine login that enrolled a pod may end its enrollment: `DELETE /v1/enrollments/{id}`
   of a pod enrollment by any other login, another service's or a second login of the same service,
-  is `403 NOT_ENROLLING_CREDENTIAL` and ends nothing. A Legion daemon restarted under a new login
-  cannot end its earlier login's pods; each ends one lease after its pod stops renewing, or at once
-  when someone revokes that earlier login, and the daemon no longer retries that refusal.
+  is `403 NOT_ENROLLING_CREDENTIAL` and ends nothing. A Legion daemon that logs in again (after a
+  restart, or when its login reaches its expiry, `BROKER_LAUNCHER_CREDENTIAL_SECONDS`, 7 days by
+  default) cannot end its earlier login's pods; each ends one lease after its pod stops renewing,
+  or at once when someone revokes that earlier login, and the daemon no longer retries that refusal.
 - **Breaking:** `agent-secrets launcher login` and `launcher login-status` are removed, with no
   alias: `agent-secrets machine login` and `machine login-status` replace them, beside
   `machine list` and `machine revoke`. A script that still calls `launcher` gets the usage and

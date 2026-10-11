@@ -2041,10 +2041,14 @@ issue's pod (every role container of it alike) and the image probe's.
   wherever it lets the pod go (a death, the registration deadline, a suspension, a stop, the
   tree's close). The shim's renewer, `agent-secrets renew --pod-token-file <the projected token>`,
   sends the pod's current token with every renewal, and the broker refuses a renewal whose token
-  names another pod UID or service account than the enrollment's (`POD_IDENTITY_MISMATCH`). The
-  broker ends a pod enrollment only for the machine login that made it, so a restarted daemon,
-  which logs in again with a new key, cannot revoke the enrollments its earlier login made (the
-  broker answers `NOT_ENROLLING_CREDENTIAL`, and the daemon logs
+  names another pod UID or service account than the enrollment's (`POD_IDENTITY_MISMATCH`), and one
+  with no token (`POD_TOKEN_REQUIRED`), except from a pod enrolled before its migration 0012. So the
+  worker image whose renewer sends the token ships before that broker, which deploys only once no
+  issue pod runs an older image (a new image replaces no running issue pod). The broker ends a pod
+  enrollment only for the machine login that made it, so a daemon that logs in again with a new key
+  (after a restart, or once its login reaches its expiry, `BROKER_LAUNCHER_CREDENTIAL_SECONDS`)
+  cannot revoke the enrollments its earlier login made (the broker answers
+  `NOT_ENROLLING_CREDENTIAL`, and the daemon logs
   `supervise: agent-secrets: enrollment revocation refused; its lease ends it once its pod stops renewing`):
   each ends one lease after its pod's renewer stops, or at once when someone revokes that earlier
   login on Dispatch's machine-login page. The daemon's login is the service `legion-daemon`'s, and

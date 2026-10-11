@@ -37,15 +37,17 @@ An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session
 renews host sessions, `agent-secrets renew` renews a box, and Legion's pod shim renews a pod. A
 pod's renewal carries the pod's current projected token, and the broker refuses it
 (`POD_IDENTITY_MISMATCH`) unless the token names the pod UID and service account the enrollment was
-made for, so a token copied out of a pod stops renewing anything once it expires. A pod enrollment
-that has never renewed with its token (one whose `agent-secrets renew` predates the token) still
-renews without one, and the broker logs each such renewal. Once it has renewed with its token, a
-renewal without one is refused `POD_TOKEN_REQUIRED`. An
+made for, and refuses a renewal without one (`POD_TOKEN_REQUIRED`). So for every pod enrollment a
+broker of this release makes, a token copied out of a pod stops renewing anything once it expires.
+A pod enrollment made before the broker's migration 0012 (one whose `agent-secrets renew` predates
+the token) still renews without one, and the broker logs each such renewal, until its first renewal
+with the token; for those enrollments the copied-token hole stays open until they end. An
 enrollment has **ended** once its launcher revokes it (the helper does as soon as a host session's
 process exits), whoever may revoke its machine login revokes that login
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its
 lease lapses. A `pod` enrollment's launcher is the one machine login that made it: another login,
-even another login of the same service such as a restarted Legion daemon's, is refused
+even another login of the same service, such as the Legion daemon's after a restart or after its
+login reached its expiry and it logged in again, is refused
 `NOT_ENROLLING_CREDENTIAL`, and that pod's enrollment ends with its lease or with that machine
 login. From the moment the lease lapses, the session's calls are refused `PROOF_INVALID`; the
 broker's sweep, which runs every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run
