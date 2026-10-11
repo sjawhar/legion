@@ -180,6 +180,31 @@ test("laned by Parent agent, a group's lane reads as the group's name", () => {
   ]);
 });
 
+test("laned by Parent agent with values chosen, each chosen value has its lane, in the chosen order, and the rest share Other at any width", () => {
+  const agents = [
+    ...byAuthor("x", 3, 1).map((pr) => ({ ...pr, parent_agent: "a" })),
+    ...byAuthor("x", 2, 100).map((pr) => ({ ...pr, parent_agent: "b" })),
+    ...byAuthor("x", 1, 200).map((pr) => ({ ...pr, parent_agent: "c" })),
+    ...byAuthor("x", 1, 300),
+  ];
+  for (const width of [widthFor(1), widthFor(8)]) {
+    const lanes = foldLanes(agents, {
+      colorBy: "parentAgent",
+      lanes: true,
+      filters: noFilters,
+      width,
+      components: {},
+      sessionGroups: [],
+      chosen: ["b"],
+    });
+    expect(lanes.map((lane) => [lane.key, lane.count])).toEqual([
+      ["b", 2],
+      [OTHER_LANE, 4],
+      ["__no_session__", 1],
+    ]);
+  }
+});
+
 test("a drag becomes the brush window earlier end first, and an unplaced end sets none", () => {
   const early = Date.parse("2024-06-01T02:00:00Z");
   const late = Date.parse("2024-06-01T05:00:00Z");

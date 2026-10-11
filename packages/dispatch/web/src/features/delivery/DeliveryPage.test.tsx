@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type {
@@ -116,6 +116,11 @@ const emptyTimeline: DeliveryTimelineResponse = {
   window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
 };
 
+/** The router's query string, where a test reads what the page wrote to the URL. */
+function LocationProbe() {
+  return <output data-testid="location">{useLocation().search}</output>;
+}
+
 function renderPage(url = DELIVERY_URL) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
@@ -123,11 +128,16 @@ function renderPage(url = DELIVERY_URL) {
       <QueryClientProvider client={queryClient}>
         <KeymapProvider>
           <DeliveryPage />
+          <LocationProbe />
         </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
   );
   return queryClient;
+}
+
+function currentSearch(): URLSearchParams {
+  return new URLSearchParams(screen.getByTestId("location").textContent ?? "");
 }
 
 let getDeliveryMeasures: Mock<typeof api.getDeliveryMeasures>;
@@ -602,6 +612,44 @@ test("the drill-down is a dialog: focus moves into it, Escape closes it and focu
     fireEvent.keyDown(document.body, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
     expect(document.activeElement).toBe(row);
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("colouring by Parent agent offers the values to give their own colour and lane, kept in the URL", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    color_counts: {
+      ...emptyTimeline.color_counts,
+      parent_agent: { "group:g1": 3, Reviewer: 2, __no_session__: 1 },
+    },
+    session_groups: [
+      {
+        created_at: "2026-10-11T00:00:00Z",
+        created_by: { id: "alice@example.com", kind: "user" },
+        id: "g1",
+        name: "Release crew",
+        sessions: ["s1", "s2"],
+        updated_at: "2026-10-11T00:00:00Z",
+        updated_by: { id: "alice@example.com", kind: "user" },
+      },
+    ],
+  });
+  try {
+    renderPage(`${DELIVERY_URL}&colorBy=parentAgent&agents=group%3Ag1`);
+    const trigger = await screen.findByRole("button", { name: "Own colour and lane: 1 chosen" });
+    fireEvent.click(trigger);
+    const listbox = within(screen.getByRole("listbox", { name: "Own colour and lane options" }));
+    expect(
+      listbox.getAllByRole("option").map((option) => option.getAttribute("aria-label"))
+    ).toEqual(["Release crew, 3 PRs", "Reviewer, 2 PRs"]);
+    fireEvent.click(listbox.getByRole("option", { name: /^Reviewer/ }));
+    await waitFor(() => expect(currentSearch().getAll("agents")).toEqual(["group:g1", "Reviewer"]));
+
+    fireEvent.change(screen.getByLabelText("Color merges by"), { target: { value: "repo" } });
+    expect(screen.queryByRole("button", { name: /^Own colour and lane/ })).toBeNull();
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();

@@ -4,18 +4,22 @@ import { useSearchParams } from "react-router-dom";
 
 import { type DeliveryTimelineOptions, isDeliveryNotConfigured } from "../../api/client";
 import { deliveryMeasuresQuery, deliveryTimelineQuery } from "../../api/queries";
+import type { DeliverySessionGroup } from "../../api/types";
+import { MultiSelect } from "../../components/MultiSelect";
 import { QueryError } from "../../components/QueryError";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
 import {
   borderStrong,
   dragHandleBg,
   linkText,
+  surfaceBg,
   surfaceMutedBg,
   switchOffBg,
   switchOnBg,
   switchThumbBg,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
+  textPrimaryOnSurface,
   textPrimaryOnSurfaceMuted,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
@@ -34,8 +38,10 @@ import {
   FACET_KEYS,
   FACET_PARAMS,
   type Filters,
+  PLACEHOLDER_LABELS,
   type ReworkFacet,
 } from "./lib/facets";
+import { parentAgentLabel } from "./lib/parentAgent";
 import { MeasuresPanel } from "./MeasuresPanel";
 import { PRList } from "./PRList";
 import { SourceFreshness } from "./SourceFreshness";
@@ -52,15 +58,25 @@ const COLOR_FACETS = COLOR_FACET_OPTIONS.map((option) => option.value);
 /** The colour-by facet the page uses when its URL names none, as the prototype does. */
 const DEFAULT_COLOR_BY: ColorFacet = "repo";
 
+/** No Parent agent value chosen: one array, so a render that chooses none hands the colour scale
+ *  the same dependency. */
+const NO_AGENTS: readonly string[] = [];
+
 type Mode = "timeline" | "list";
 
 /** How the filtered PRs are shown: dots on the timeline or a sortable list, the facet the merges
- *  are coloured by, and whether the timeline splits them into one column per value. */
+ *  are coloured by, whether the timeline splits them into one column per value, and, coloured by
+ *  Parent agent, the values chosen to have their own colour and lane (`agents`). */
 interface DeliveryView {
   colorBy: ColorFacet;
   lanes: boolean;
   mode: Mode;
+  agents: string[];
 }
+
+/** The repeatable URL parameter that names the Parent agent values given their own colour and
+ *  lane, kept apart from the facet filters, which narrow the population. */
+const AGENTS_PARAM = ["agents"] as const;
 
 /** A sub-window of the read window a brush drag set (`ws`/`we`): it narrows what the chart, the
  *  list and the count show without a new read, so the facets keep counting the whole window. */
@@ -102,7 +118,8 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
   const colorBy = COLOR_FACETS.find((facet) => facet === colorByParam) ?? DEFAULT_COLOR_BY;
   const lanes = searchParams.get("lanes") === "1";
   const mode: Mode = searchParams.get("mode") === "list" ? "list" : "timeline";
-  const view = useMemo(() => ({ colorBy, lanes, mode }), [colorBy, lanes, mode]);
+  const { agents } = useRepeatableSearchParams(AGENTS_PARAM);
+  const view = useMemo(() => ({ colorBy, lanes, mode, agents }), [colorBy, lanes, mode, agents]);
   const ws = searchParams.get("ws");
   const we = searchParams.get("we");
   const brush = useMemo(
@@ -138,6 +155,8 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
         else params.delete("lanes");
         if (next.view.mode === "list") params.set("mode", "list");
         else params.delete("mode");
+        params.delete("agents");
+        for (const agent of next.view.agents) params.append("agents", agent);
         if (next.brush === null) {
           params.delete("ws");
           params.delete("we");
@@ -209,6 +228,46 @@ function LanesSwitch({
       </button>
       <span className={textPrimaryOnCanvas}>Swimlanes</span>
     </label>
+  );
+}
+
+/** Coloured by Parent agent: which values get their own colour and lane, busiest first. The rest
+ *  share one Other colour and lane; with none chosen, the colours and lanes are the facet's usual. */
+function OwnColourPicker({
+  counts,
+  groups,
+  selected,
+  onChange,
+}: {
+  counts: Readonly<Record<string, number>>;
+  groups: readonly DeliverySessionGroup[];
+  selected: readonly string[];
+  onChange: (next: string[]) => void;
+}): ReactNode {
+  const [open, setOpen] = useState(false);
+  const options = Object.keys(counts)
+    .filter((value) => !(value in PLACEHOLDER_LABELS))
+    .sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0));
+  const state = selected.length === 0 ? "every value" : `${selected.length} chosen`;
+  const countOf = (value: string) => counts[value] ?? 0;
+  return (
+    <MultiSelect
+      emptyMessage="No matches."
+      label="Own colour and lane"
+      onChange={onChange}
+      onOpenChange={setOpen}
+      open={open}
+      optionDetail={(value) => String(countOf(value))}
+      optionDetailLabel={(value) => `${countOf(value)} PR${countOf(value) === 1 ? "" : "s"}`}
+      optionLabel={(value) => parentAgentLabel(value, groups)}
+      options={[...new Set([...selected, ...options])]}
+      searchLabel="Search parent agents…"
+      selected={selected}
+      triggerAriaLabel={`Own colour and lane: ${state}`}
+      triggerClassName={`flex h-8 items-center rounded border px-2 text-sm ${borderStrong} ${surfaceBg} ${textPrimaryOnSurface}`}
+    >
+      <span className="truncate">Own colour: {state}</span>
+    </MultiSelect>
   );
 }
 
@@ -285,9 +344,12 @@ export function DeliveryPage(): ReactNode {
     ],
     [data]
   );
+  // Coloured by Parent agent, the chosen values take the palette and the rest share Other.
+  const chosenAgents = state.view.colorBy === "parentAgent" ? state.view.agents : NO_AGENTS;
   const colorScale = useMemo(
-    () => buildColorScale(data?.color_counts[COLOR_COUNT_KEYS[state.view.colorBy]] ?? {}),
-    [data, state.view.colorBy]
+    () =>
+      buildColorScale(data?.color_counts[COLOR_COUNT_KEYS[state.view.colorBy]] ?? {}, chosenAgents),
+    [data, state.view.colorBy, chosenAgents]
   );
   const allRepos = useMemo(() => Object.keys(data?.color_counts.repo ?? {}), [data]);
 
@@ -393,6 +455,14 @@ export function DeliveryPage(): ReactNode {
                     ))}
                   </select>
                 </label>
+                {state.view.colorBy === "parentAgent" ? (
+                  <OwnColourPicker
+                    counts={data.color_counts.parent_agent}
+                    groups={data.session_groups}
+                    onChange={(agents) => setView({ ...state.view, agents })}
+                    selected={state.view.agents}
+                  />
+                ) : null}
                 {state.view.mode === "timeline" ? (
                   <LanesSwitch
                     checked={state.view.lanes}
@@ -415,6 +485,7 @@ export function DeliveryPage(): ReactNode {
                 <div className="flex h-[75dvh] min-h-[28rem] min-w-0 flex-col xl:h-auto xl:flex-1">
                   {state.view.mode === "timeline" ? (
                     <Timeline
+                      chosen={chosenAgents}
                       colorBy={state.view.colorBy}
                       colorScale={colorScale}
                       components={data.components}

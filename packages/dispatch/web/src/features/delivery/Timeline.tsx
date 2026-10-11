@@ -58,6 +58,8 @@ interface Props {
   filters: Filters;
   components: Readonly<Record<string, DeliveryComponent>>;
   sessionGroups: readonly DeliverySessionGroup[];
+  /** Coloured by Parent agent: the values chosen to have their own colour and lane. */
+  chosen: readonly string[];
   onSelect: (selection: TimelineSelection) => void;
   onBrush: (range: { start: string; end: string }) => void;
 }
@@ -104,6 +106,7 @@ export function Timeline({
   filters,
   components,
   sessionGroups,
+  chosen,
   onSelect,
   onBrush,
 }: Props): ReactNode {
@@ -135,8 +138,16 @@ export function Timeline({
 
   const laneList = useMemo(
     () =>
-      foldLanes(prs, { colorBy, lanes, filters, width: containerWidth, components, sessionGroups }),
-    [prs, colorBy, lanes, filters, containerWidth, components, sessionGroups]
+      foldLanes(prs, {
+        colorBy,
+        lanes,
+        filters,
+        width: containerWidth,
+        components,
+        sessionGroups,
+        chosen,
+      }),
+    [prs, colorBy, lanes, filters, containerWidth, components, sessionGroups, chosen]
   );
 
   // Maps every original colorKeyFor() value (including ones folded into "Other") to the lane it's
