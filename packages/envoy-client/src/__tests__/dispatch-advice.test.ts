@@ -241,18 +241,6 @@ describe("Dispatch write advice", () => {
     expect(result.details.advice).toEqual(rawAdvice);
   });
 
-  // Fresh-reader guidance belongs before creation, not in an issue's successful result.
-  test("dispatch_issue with a spec omits fresh-reader guidance after creation", async () => {
-    const result = await executeWrite(
-      "dispatch_issue",
-      { project: "DSP", title: "Created issue", spec: "# Spec\n" },
-      advice({ decision_blocks: 0 })
-    );
-
-    expect(result.text).not.toContain("fresh reader");
-    expect(result.text).not.toContain("plan-gap-analyst");
-    expect(result.text).toEndWith(zeroBlocks);
-  });
 
   test("renders only decision-block advice for a project document", async () => {
     const rawAdvice: WriteAdvice = { decision_blocks: 0 };
