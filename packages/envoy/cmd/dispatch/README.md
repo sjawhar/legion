@@ -363,13 +363,7 @@ Migration `0068_people` creates `people`, everyone who has signed in, holding th
 refresh token for a person who signed in through it, and drops `users`, the GitHub OAuth token pair
 of each GitHub login that signed in, which the GitHub proxy acted with before it read GitHub as the
 App. It locks `users` alone, `ACCESS EXCLUSIVE` for the drop; `people` is new. Its census counts the
-`users` rows the drop deletes, so wherever anyone signed in with GitHub it answers non-zero and the
-pre-deploy census of the release that carries it refuses:
-`REFUSED 0068_people.up.sql: its census counts <n> (0068_people.census.sql)`. That refusal is
-expected for this release: no code reads those rows once it ships. The deployer checks that `<n>`
-is `select count(*) from users` and that the report ends `census: REFUSED (1 reason)`, so 0068's
-count is its only refusal, and then rolls the release. Any other reason (a lock holder, a long
-transaction, a table over the limit) still stops the deploy.
+`users` rows the drop deletes.
 
 No migration retires the refresh tokens that `0068`'s release stored in plain text: every boot does
 (Identity, above), since a task of that release can write one during the roll, or after a
@@ -429,7 +423,38 @@ cross: on 60,000 issues the two deadlocked (`40P01`) in each of two runs, and wi
 the reparent waited for the migration and committed. Neither refuses a row; both censuses answer
 `0`.
 
-Migration `0091_refs_excerpts` adds three nullable columns to `refs` with no default
+Migration `0091_artifacts_project_documents` adds the partial index
+`artifacts_project_documents`, on `artifacts (project_key)` where `issue_key` and `session_id` are
+null: a project's unlinked documents. Settlement of a project document holding an ask block no ask
+of its own indexes reads its project's other documents through it, for the ask the block may be a
+copy of and for the copies of an ask it retracts, and so do the answer and resolve routes, for the
+copies of the ask they close (LEGION-651). Building it takes `SHARE` on `artifacts`; its census
+answers `0` because it refuses and rewrites no row.
+
+A decided ask that a release before LEGION-651 reworded gets back, in code, the wording its decision
+was given on: the `previous` wording of the first `ask.edited` after its latest `ask.answered` or
+`ask.resolved`, with no `ask.opened` between. No migration rewrites those rows, since the census
+refuses one that does (Pre-deploy census, below). Every boot runs the restoration over every
+decided ask in one statement (`docs.Service.RestoreDecidedWordings`, bounded at 30 s), reading
+`events` through `events_ask_payload_id` and writing only the rows whose wording differs; it logs
+`dispatch: restored a decided ask's wording` for each with the ask, its document and the question
+it asks again. In the same transaction it marks owed, in one upsert, the settlement of each
+restored block ask's own document, whose block still asks the rewording beside the decision, and
+of every other document of each restored ask's owner whose latest version holds the ask's block
+with no ask of its own under that id, a copy that may have matched the rewording and shown the
+decision on it, and arms those settlements once it commits; then it logs `dispatch: restored
+decided asks' wordings` with `restored=<n> copies=<n>`. On the 2026-10-11 production dump (3,739
+asks, 82,153 events) it restores 5 asks, each a block ask on a document of its own, and marks 0
+copies owed, in 0.17-0.77 s: the one other document holding one of those 5 blocks has an ask of
+its own under that id, so it is no copy, and the first boot of the release that carries it logs
+`restored=5 copies=0` and settles those 5 documents; each whose block still asks the rewording gets
+the decided wording written back and logs `dispatch: wrote a decided ask's wording back into its
+block`. Each document's settlement runs the same statement over its own decided asks before it
+reconciles them, and marks the restored asks' copies owed the same way, so a rewording a task of
+the earlier release writes during the roll is undone by that document's next settlement on this
+release, which also writes the decided wording back into the block and settles its copies again.
+
+Migration `0092_refs_excerpts` adds three nullable columns to `refs` with no default
 (`excerpt_block_id`, `excerpt_text`, `excerpt_version`), a catalog change that rewrites no row,
 and the partial index `refs_excerpt_drift` over the rows whose `excerpt_version` is null: the
 stored excerpt `GET /api/v1/references` answers a document mention with, which every version write
@@ -445,7 +470,9 @@ it backfills each artifact's project and generated `ref_key`.
 ### Pre-deploy census
 
 Before a deployment rolls a new image, it runs `envoy-dispatch census` with the service's
-`DATABASE_URL`, as a one-off task under the service's own database credentials:
+`DATABASE_URL`, as a one-off task under the service's own database credentials, and the census is
+a gate: a census that refuses fails the deploy before the service moves, and nothing accepts a
+refusal and rolls past it.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch census
@@ -525,6 +552,12 @@ census like every later one. It refuses:
 - a census that fails or answers anything but one integer in one row;
 - a database that records no version yet holds tables, on its first migration: the runner would
   apply every migration from `0001` over them.
+
+So a migration that changes values readers already had, whose census counts the rows it rewrites,
+cannot pass the census wherever such a row exists, and a release that must repair existing rows
+does so in code instead: an idempotent pass at boot, and on the path that reads the rows, so a task
+of the earlier release still running during the roll cannot undo it. The restoration of decided
+asks' wordings (`docs.Service.RestoreDecidedWordings`, Database migrations above) is one.
 
 A migration declares its census in `<version>_<name>.census.sql` beside it: one `select` (or
 `with … select`) answering one integer, how many existing rows the migration would refuse (a
@@ -753,7 +786,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. A `text/markdown` file is a document. Any other file's kind is read from its bytes, never from the part's declared `Content-Type`: it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image. A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
 | `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact, its kind read as an issue upload's is. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
 | `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact, its versions, and incoming references. `{id}` must be a UUID. Every version on every artifact read and list (this route, the issue and project artifact lists, the issue read, the reference reads, and each version write's answer and event) carries `size`: the bytes it stores, a file's or an image's bytes or a document's markdown, read from the row's own length without rendering the document or loading its history. |
-| `/api/v1/artifacts/{id}/rebuild` | POST | cookie or trusted header (human only) | Rebuild a document only when its durable history cannot load (`409 DOCUMENT_UNLOADABLE` on its reads): deletes its document updates, checkpoints, and snapshots, then writes one fresh update from the latest saved version or optional `{markdown}`. A supplied markdown source that changes the document writes the next immutable version, emits `artifact.version`, and moves an open approval request to that version, where it waits on its agent, as every version does; an omitted source keeps the existing latest-version behavior. The rebuild, that version, its event and the move commit in one transaction, and every refusal comes before anything is written: a live room is `409 DOCUMENT_LIVE`; a healthy, non-resident document is `409 DOCUMENT_LOADS`; supplied markdown on a closed issue's document is `409 ISSUE_CLOSED`; supplied markdown held to a new document's limits - more than 65,536 elements, or stored as markdown longer than 1 MiB or making more than 65,536 elements - is `413 CAP_EXCEEDED`. The latest saved version rebuilds whatever it weighs. A refused or failed rebuild leaves the document unchanged. It answers the report, whose `source_version` is the version the rebuilt document holds: its latest saved version, or the version supplied markdown wrote. |
+| `/api/v1/artifacts/{id}/rebuild` | POST | cookie or trusted header (human only) | Rebuild a document only when its durable history cannot load (`409 DOCUMENT_UNLOADABLE` on its reads): deletes its document updates, checkpoints, and snapshots, then writes one fresh update from the latest saved version or optional `{markdown}`. A supplied markdown source that changes the document writes the next immutable version, emits `artifact.version`, and moves an open approval request to that version, where it waits on its agent, as every version does; an omitted source keeps the existing latest-version behavior. The rebuild, that version, its event and the move commit in one transaction, and every refusal comes before anything is written: a live room is `409 DOCUMENT_LIVE`; a healthy, non-resident document is `409 DOCUMENT_LOADS`; supplied markdown on a closed issue's document is `409 ISSUE_CLOSED`; supplied markdown held to a new document's limits - more than 65,536 elements, or stored as markdown longer than 1 MiB or making more than 65,536 elements - is `413 CAP_EXCEEDED`. The latest saved version rebuilds whatever it weighs, except a document whose tree is more items than ygo decodes in one update (1,048,576), which no document can hold and which is `413 CAP_EXCEEDED` naming the count, from either source. A refused or failed rebuild leaves the document unchanged. It answers the report, whose `source_version` is the version the rebuilt document holds: its latest saved version, or the version supplied markdown wrote. |
 | `/api/v1/artifacts/{id}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{id}` must be a UUID. A stored tree outside the Proof schema is `409 DOC_SCHEMA`, and a stored history that cannot load `409 DOCUMENT_UNLOADABLE` (Document errors). |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. A file whose bytes are in the bucket is `502 FILE_STORE_UNAVAILABLE` when the bucket does not answer, `503` on a server with no bucket configured. A file or image version, whoever owns it, is served with `Cache-Control: private, max-age=31536000, immutable` beside its `ETag` (the bytes' sha256), since a version's bytes never change and the route is authenticated; a document version, and every error, carries no cache header. |
 | `/api/v1/artifacts/{id}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{id}` must be a UUID. |

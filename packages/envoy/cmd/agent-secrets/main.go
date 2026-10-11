@@ -1,6 +1,6 @@
 // Command agent-secrets is the client for the secrets broker: an agent box or pod
 // signs with the key.pem and enrollment file it keeps under AGENT_SECRETS_KEY_DIR (file mode); a
-// host session has no key of its own and asks agent-secrets-helper, over
+// machine session has no key of its own and asks agent-secrets-helper, over
 // AGENT_SECRETS_HELPER_SOCK, to sign on its behalf (helper mode). It enrolls a runtime (box
 // enrollment only, through the local helper — see cmdEnrollHelper below), requests and reads
 // back secret grants, and — in its most common shape — requests one or more secrets and execs a
@@ -9,14 +9,14 @@
 // and then ask the broker to reread what they wrote.
 //
 //	agent-secrets keygen --out <dir>
-//	agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]
+//	agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]
 //	agent-secrets unenroll --helper --enrollment <id>
 //	agent-secrets machine login|login-status|list [--json]|revoke <credential_id>
 //	agent-secrets grant list [--json]|revoke <grant_id>
 //	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
 //	agent-secrets identity
 //	agent-secrets renew
-//	agent-secrets request NAME... [--reason TEXT] [--json]
+//	agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]
 //	agent-secrets status <request_id> [--json]
 //	agent-secrets cancel <request_id>
 //	agent-secrets revoke <grant_id>
@@ -24,11 +24,11 @@
 //	agent-secrets whoami [--json]
 //	agent-secrets sign --method M --url U [--enrollment E]
 //	agent-secrets secret list|show|create|set|retag|delete|restore ...
-//	agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
+//	agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <command> [args...]
 //
 // Environment: AGENT_SECRETS_URL (the broker's base URL) and, for every session-authenticated
 // subcommand, either AGENT_SECRETS_KEY_DIR (an agent box or pod's key.pem and enrollment, the
-// two files keygen and enroll write) or AGENT_SECRETS_HELPER_SOCK (a host session's
+// two files keygen and enroll write) or AGENT_SECRETS_HELPER_SOCK (a machine session's
 // agent-secrets-helper socket, joined by `agent-secrets register`). When unset, each falls back
 // to its launcher's default path, $XDG_RUNTIME_DIR/agent-secrets and the helper socket inside it,
 // and a default counts only when its file is there (identity.go). AGENT_SECRETS_ENROLL_WAIT (a
@@ -37,9 +37,9 @@
 // where a person decides, and a pending request (request, status, the exec form's wait) name its
 // record's page beside the approver the broker names. The exec form's child keeps
 // AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, since it is the same
-// session (buildChildEnv). A host session enrolls (kind host) automatically through the helper's
-// own enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
-// enrollment path for either; only a box enrolls through it, and only via --helper (the shared
+// session (buildChildEnv). A machine session enrolls automatically through the helper's own
+// enroll loop, and a pod's own enrollment is its launcher's job — this CLI has no direct
+// enrollment path for either; only a session key a launcher holds (a box's) enrolls through it, and only via --helper (the shared
 // broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
 // that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
@@ -66,7 +66,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sjawhar/envoy/internal/broker/helper"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/buildversion"
@@ -101,10 +100,10 @@ type command struct {
 var commands = []command{
 	{"keygen", "agent-secrets keygen --out <dir>",
 		"Write a new signing key to <dir>/key.pem and print its thumbprint. A box's launcher runs it\ninside the box before enrolling it."},
-	{"enroll", "agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]",
-		"Enroll a box's key through this machine's agent-secrets-helper, write the enrollment id to\nAGENT_SECRETS_KEY_DIR/enrollment, and print it."},
+	{"enroll", "agent-secrets enroll --helper --runtime-id <id> --thumbprint <tp> [--session-id <id>]",
+		"Enroll a session key a launcher holds (a box's) through this machine's agent-secrets-helper,\nwrite the enrollment id to AGENT_SECRETS_KEY_DIR/enrollment, and print it."},
 	{"unenroll", "agent-secrets unenroll --helper --enrollment <id>",
-		"Revoke a box's enrollment through this machine's agent-secrets-helper."},
+		"End an enrollment `enroll --helper` made, through this machine's agent-secrets-helper."},
 	{"machine login", "agent-secrets machine login",
 		"Log this machine in: print the confirmation code its operator types into Dispatch, then wait\nfor the decision (exit 0 once approved, 1 when denied or expired)."},
 	{"machine login-status", "agent-secrets machine login-status",
@@ -118,15 +117,15 @@ var commands = []command{
 	{"grant revoke", "agent-secrets grant revoke <grant_id>",
 		"End a grant as its operator or approver, under this machine's login, as Dispatch's Live\ngrants page does. Ending an automatic grant also makes its session ask before it gets those\nsecrets again."},
 	{"register", "agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]",
-		"Register this process with agent-secrets-helper as a host session. With --exec, run COMMAND\nas this same process, so it and everything it starts are that session."},
+		"Register this process with agent-secrets-helper as a machine session. With --exec, run COMMAND\nas this same process, so it and everything it starts are that session."},
 	{"identity", "agent-secrets identity",
 		"Exit 0 when this process has a broker identity and 1 when it does not, asking the broker\nnothing."},
 	{"--version", "agent-secrets --version",
 		"Print the release this binary was built as."},
 	{"renew", "agent-secrets renew",
 		"Keep an agent box's enrollment lease alive, renewing it until interrupted."},
-	{"request", "agent-secrets request NAME... [--reason TEXT] [--json]",
-		"Request secrets and print the request's id and state, and who approves it and where while\nit waits; exit 75 while it waits for approval and 77 when it is denied."},
+	{"request", "agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]",
+		"Request secrets and print the request's id and state, and who approves it and where while\nit waits; exit 75 while it waits for approval and 77 when it is denied. The grant lasts\n--ttl, or until this session ends."},
 	{"status", "agent-secrets status <request_id> [--json]",
 		"Print a request's state, who approves it and where while it waits, its grant once\ngranted, and who decided it."},
 	{"cancel", "agent-secrets cancel <request_id>",
@@ -139,8 +138,8 @@ var commands = []command{
 		"Print this session's enrollment as the broker's JSON, as self --json does."},
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
-	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]",
-		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted."},
+	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <command> [args...]",
+		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. The grant lasts --ttl, or until this session ends."},
 }
 
 // usageEnvironment closes usage: the variables every form reads, and the exit codes.
@@ -149,8 +148,7 @@ environment:
   AGENT_SECRETS_URL          the broker's base URL; every form that calls the broker needs it
   AGENT_SECRETS_KEY_DIR      an agent box's or pod's key.pem and enrollment
                              (default $XDG_RUNTIME_DIR/agent-secrets, used when key.pem is there)
-  AGENT_SECRETS_HELPER_SOCK  a host session's agent-secrets-helper socket
-                             (default $XDG_RUNTIME_DIR/agent-secrets/helper.sock, used when it is there)
+  AGENT_SECRETS_HELPER_SOCK  a machine session's agent-secrets-helper socket
   AGENT_SECRETS_ENROLL_WAIT  how long a call waits while a box's launcher is still enrolling it
                              (default 20s)
   AGENT_SECRETS_APPROVE_URL  Dispatch's address; machine login names the page under it where the
@@ -363,37 +361,6 @@ func splitArgs(args []string, takesValue map[string]bool) (flagArgs, positional 
 	return flagArgs, positional
 }
 
-func readTrimmed(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
-	}
-	return strings.TrimSpace(string(data)), nil
-}
-
-// writeFileAtomic writes data to path by renaming a finished temporary file into place, so no
-// reader ever sees path half-written: a call waiting out a box's enrollment (awaitEnrollment)
-// reads key.pem and enrollment the moment each appears.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name()) // a no-op once the rename has taken it
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
-}
-
 func loadKey(path string) (*ecdsa.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -415,15 +382,15 @@ func loadKey(path string) (*ecdsa.PrivateKey, error) {
 }
 
 // buildSigner selects and builds this process's Signer: an agent box or pod signs with the key
-// and enrollment id it keeps in its key dir (file mode); a host session has no key of its own and
+// and enrollment id it keeps in its key dir (file mode); a machine session has no key of its own and
 // asks agent-secrets-helper over its socket, which signs only for processes descending from a
 // session `agent-secrets register` registered (helper mode). The key dir and socket are
 // AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, or their defaults where those are unset
 // (identity.go). While a box's launcher is still enrolling it (a fresh enrollment.pending in the
 // key dir), this first waits for key.pem and enrollment, for AGENT_SECRETS_ENROLL_WAIT at most.
 // The enrollment id it returns is file mode's own; helper mode returns "" because nothing needs
-// it as a literal except RenewEnrollment's URL path, and a host session's lease is renewed by the
-// helper itself — cmdRenew refuses outright once it sees an empty id from a successful build.
+// it as a literal except RenewEnrollment's URL path, and a machine session's lease is renewed by
+// the helper itself — cmdRenew refuses outright once it sees an empty id from a successful build.
 func buildSigner() (enrollmentID string, signer Signer, err error) {
 	wait, err := enrollWait()
 	if err != nil {
@@ -460,7 +427,7 @@ func selectSigner(dir string) (string, Signer, error) {
 	if named || exists(sock) {
 		return "", &helperSigner{sock: sock}, nil
 	}
-	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or pod is enrolled by its launcher) and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a host session is registered by `agent-secrets register`)", dir, sock)
+	return "", nil, fmt.Errorf("no session identity: the key dir %s has no key.pem (AGENT_SECRETS_KEY_DIR; an agent box or pod is enrolled by its launcher) and no helper socket is set or at %s (AGENT_SECRETS_HELPER_SOCK; a machine session is registered by `agent-secrets register`)", dir, sock)
 }
 
 // sessionContext resolves the broker URL and this process's Signer every session-authenticated
@@ -549,130 +516,6 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 }
 
 // ---------------------------------------------------------------------------
-// enroll / unenroll (box only, through the local agent-secrets-helper socket)
-// ---------------------------------------------------------------------------
-
-// cmdEnroll implements "enroll --helper --kind box --runtime-id <id> --thumbprint <tp>
-// [--session-id <id>]". --helper is required: the broker's HTTP API has no launcher bearer
-// token, so this CLI has no other way to enroll anything — the host's one launcher credential
-// lives only in agent-secrets-helper's memory (a human installs it with `agent-secrets machine
-// login`), and only a box enrolls through this command at all (a host session enrolls itself
-// automatically via `agent-secrets register`; a pod's enrollment is its own launcher's job).
-func cmdEnroll(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, map[string]bool{
-		"kind": true, "runtime-id": true, "thumbprint": true, "session-id": true,
-	})
-	if len(positional) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
-		return exitUsageError
-	}
-	flags := newFlagSet("enroll", stderr)
-	kind := flags.String("kind", "", `"box" (the only kind --helper supports)`)
-	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
-	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
-	sessionID := flags.String("session-id", "", "the agent session the broker notifies if one of this box's pending requests expires")
-	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
-	if err := flags.Parse(flagArgs); err != nil {
-		return exitUsage(err)
-	}
-	if !*helperFlag {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls only through the local agent-secrets-helper socket)")
-		return exitUsageError
-	}
-	return cmdEnrollHelper(*kind, *runtimeID, *thumbprint, *sessionID, stdout, stderr)
-}
-
-// cmdEnrollHelper asks the local agent-secrets-helper daemon, over its unix socket, to enroll
-// this box's key using the machine credential `agent-secrets machine login` installed.
-// --helper supports only kind "box" today: a host session enrolls itself through
-// `agent-secrets register`, not this flag, and a pod has no local helper daemon to ask. On
-// success it writes the enrollment id into AGENT_SECRETS_KEY_DIR/enrollment (buildSigner reads
-// it back for every later session-authenticated subcommand) and prints the enrollment id alone
-// on stdout — the contract scripts/agentbox parses.
-func cmdEnrollHelper(kind, runtimeID, thumbprint, sessionID string, stdout, stderr io.Writer) int {
-	if kind != "box" {
-		fmt.Fprintln(stderr, `agent-secrets enroll: --helper supports only --kind box today`)
-		return exitUsageError
-	}
-	if runtimeID == "" || thumbprint == "" {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --helper needs --runtime-id and --thumbprint")
-		return exitUsageError
-	}
-	dir := os.Getenv("AGENT_SECRETS_KEY_DIR")
-	if dir == "" {
-		fmt.Fprintln(stderr, "agent-secrets enroll: AGENT_SECRETS_KEY_DIR is required")
-		return exitUsageError
-	}
-	sock, _ := helperSocket()
-	var sessionIDPtr *string
-	if sessionID != "" {
-		sessionIDPtr = &sessionID
-	}
-	resp, err := helper.Call(sock, helper.Request{Op: "enroll-box", RuntimeID: runtimeID, Thumbprint: thumbprint, SessionID: sessionIDPtr}, 30*time.Second)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
-		return 1
-	}
-	if !resp.OK {
-		fmt.Fprintf(stderr, "agent-secrets enroll: %s: %s\n", resp.Code, resp.Error)
-		return 1
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
-		return 1
-	}
-	if err := writeFileAtomic(filepath.Join(dir, enrollmentFile), []byte(resp.EnrollmentID+"\n"), 0o600); err != nil {
-		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
-		return 1
-	}
-	fmt.Fprintln(stdout, resp.EnrollmentID)
-	return 0
-}
-
-// cmdUnenroll implements "unenroll --helper --enrollment <id>". --helper is required for the
-// same reason cmdEnroll requires it: the broker's HTTP API has no launcher bearer token.
-func cmdUnenroll(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, map[string]bool{"enrollment": true})
-	if len(positional) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets unenroll: unexpected argument %q\n", positional[0])
-		return exitUsageError
-	}
-	flags := newFlagSet("unenroll", stderr)
-	enrollmentID := flags.String("enrollment", "", "the enrollment id to revoke")
-	helperFlag := flags.Bool("helper", false, "unenroll through the local agent-secrets-helper socket")
-	if err := flags.Parse(flagArgs); err != nil {
-		return exitUsage(err)
-	}
-	if !*helperFlag {
-		fmt.Fprintln(stderr, "agent-secrets unenroll: --helper is required (this CLI unenrolls only through the local agent-secrets-helper socket)")
-		return exitUsageError
-	}
-	if *enrollmentID == "" {
-		fmt.Fprintln(stderr, "agent-secrets unenroll: --enrollment is required")
-		return exitUsageError
-	}
-	return cmdUnenrollHelper(*enrollmentID, stderr)
-}
-
-// cmdUnenrollHelper asks the local agent-secrets-helper daemon to revoke a box enrollment over
-// its unix socket, using the machine credential `agent-secrets machine login` installed.
-// Idempotent: the helper's UnenrollBox treats 204 and 404 as done. Prints nothing on success,
-// matching the exit-code-only unenroll contract.
-func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
-	sock, _ := helperSocket()
-	resp, err := helper.Call(sock, helper.Request{Op: "unenroll-box", EnrollmentID: enrollmentID}, 30*time.Second)
-	if err != nil {
-		fmt.Fprintf(stderr, "agent-secrets unenroll: %v\n", err)
-		return 1
-	}
-	if !resp.OK {
-		fmt.Fprintf(stderr, "agent-secrets unenroll: %s: %s\n", resp.Code, resp.Error)
-		return 1
-	}
-	return 0
-}
-
-// ---------------------------------------------------------------------------
 // renew
 // ---------------------------------------------------------------------------
 
@@ -691,7 +534,7 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	if enrollmentID == "" {
-		fmt.Fprintln(stderr, "agent-secrets renew: a host session's lease is renewed by agent-secrets-helper; agent-secrets renew is for agent boxes")
+		fmt.Fprintln(stderr, "agent-secrets renew: a machine session's lease is renewed by agent-secrets-helper; agent-secrets renew is for agent boxes")
 		return 1
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -739,12 +582,18 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 // ---------------------------------------------------------------------------
 
 func cmdRequest(args []string, stdout, stderr io.Writer) int {
-	flagArgs, names := splitArgs(args, map[string]bool{"reason": true})
+	flagArgs, names := splitArgs(args, map[string]bool{"reason": true, "ttl": true})
 	flags := newFlagSet("request", stderr)
 	reason := flags.String("reason", "", "why these secrets are needed")
+	ttlFlagValue := flags.Duration("ttl", 0, ttlFlag)
 	asJSON := flags.Bool("json", false, "print the response body verbatim")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
+	}
+	ttl, err := ttlSeconds(flags, *ttlFlagValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
+		return exitUsageError
 	}
 	if len(names) == 0 {
 		fmt.Fprintln(stderr, "agent-secrets request: at least one secret NAME is required")
@@ -755,9 +604,14 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return exitUsageError
 	}
-	result, raw, err := newClient(base).CreateRequest(context.Background(), signer, names, *reason, requestSessionID())
+	c := newClient(base)
+	result, raw, err := c.CreateRequest(context.Background(), signer, names, *reason, ttl, requestSessionID())
 	if err != nil {
 		reportError(stderr, "agent-secrets request", err)
+		return 1
+	}
+	if err := grantedLifetime(context.Background(), c, signer, result, ttl); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return 1
 	}
 	if *asJSON {
@@ -909,6 +763,10 @@ func cmdSelf(name string, args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "enrollment_id: %s\nkind: %s\noperator: %s\nlease_expires_at: %s\n",
 		result.EnrollmentID, result.Kind, operator, result.LeaseExpiresAt.Format(time.RFC3339))
 	for _, g := range result.Grants {
+		if g.ExpiresAt == nil {
+			fmt.Fprintf(stdout, "grant: %s (request %s, until this session ends)\n", g.GrantID, g.RequestID)
+			continue
+		}
 		fmt.Fprintf(stdout, "grant: %s (request %s, expires %s)\n", g.GrantID, g.RequestID, g.ExpiresAt.Format(time.RFC3339))
 	}
 	return 0
@@ -942,12 +800,18 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true})
+	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true, "ttl": true})
 	flags := newFlagSet("", stderr)
 	reason := flags.String("reason", "", "why these secrets are needed")
 	wait := flags.Duration("wait", 30*time.Minute, "how long to wait for a pending request")
+	ttlFlagValue := flags.Duration("ttl", 0, ttlFlag)
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
+	}
+	ttl, err := ttlSeconds(flags, *ttlFlagValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		return exitUsageError
 	}
 	if len(names) == 0 {
 		fmt.Fprintln(stderr, "agent-secrets: at least one secret NAME is required")
@@ -961,9 +825,13 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	}
 	c := newClient(base)
 	ctx := context.Background()
-	result, _, err := c.CreateRequest(ctx, signer, names, *reason, requestSessionID())
+	result, _, err := c.CreateRequest(ctx, signer, names, *reason, ttl, requestSessionID())
 	if err != nil {
 		reportError(stderr, "agent-secrets", err)
+		return 1
+	}
+	if err := grantedLifetime(ctx, c, signer, result, ttl); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v; nothing was run\n", err)
 		return 1
 	}
 

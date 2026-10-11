@@ -3,15 +3,15 @@
 // client is agent-secrets's own thin HTTP client for the broker routes it needs, as the broker's
 // HTTP API reference (https://sjawhar.github.io/legion/broker/reference/api/) defines them. Session routes
 // — everything but enrollment issuance/revocation and launcher-credential issuance — are signed
-// per call through a Signer (proofsource.go: an agent box or pod's own key, or a host session's
+// per call through a Signer (proofsource.go: an agent box or pod's own key, or a machine session's
 // agent-secrets-helper), producing exactly the Proof header internal/broker/proof.Verifier
 // expects. CreateRequest additionally needs a signed credential-request object (record.Sign)
 // embedded in its body, since the broker carries authorization_details and
 // reason inside that signed object rather than as plain top-level JSON fields; building it is
-// also a Signer responsibility (Signer.SignRequestObject), since a host session's key never
+// also a Signer responsibility (Signer.SignRequestObject), since a machine session's key never
 // leaves agent-secrets-helper.
 // Enrollment issuance/revocation and launcher-credential issuance are helper-socket operations
-// (see cmdEnrollHelper/cmdUnenrollHelper in main.go, cmdMachineLogin in machine.go, and
+// (see cmdEnrollHelper/cmdUnenrollHelper in enroll.go, cmdMachineLogin in machine.go, and
 // internal/broker/helper): no route here ever carries a bearer launcher token, and POST/GET
 // /v1/launcher-credentials still carry no credential at all (a launcher has none yet). The
 // operator routes (/v1/operator/*) are signed with a launcher proof the helper's sign-launcher op
@@ -114,15 +114,18 @@ type SecretDecision struct {
 	Decision string `json:"decision"`
 }
 
-// RequestResult is POST /v1/requests's exact response shape.
+// RequestResult is POST /v1/requests's exact response shape. LifetimeSeconds is the lifetime the
+// broker gave the request's grant, nil for until its session ends; a broker from before
+// lifetime_seconds sends no such field, and it decodes as nil.
 type RequestResult struct {
-	RequestID string           `json:"request_id"`
-	State     string           `json:"state"`
-	Secrets   []SecretDecision `json:"secrets"`
-	GrantID   *string          `json:"grant_id"`
-	RecordID  *string          `json:"record_id"`
-	Approver  *string          `json:"approver"`
-	Coalesced bool             `json:"coalesced,omitempty"`
+	RequestID       string           `json:"request_id"`
+	State           string           `json:"state"`
+	Secrets         []SecretDecision `json:"secrets"`
+	GrantID         *string          `json:"grant_id"`
+	RecordID        *string          `json:"record_id"`
+	Approver        *string          `json:"approver"`
+	LifetimeSeconds *int             `json:"lifetime_seconds"`
+	Coalesced       bool             `json:"coalesced,omitempty"`
 }
 
 // createRequestBody is POST /v1/requests's exact shape in the broker's HTTP API: a signed
@@ -133,14 +136,14 @@ type createRequestBody struct {
 	SessionID *string `json:"session_id"`
 }
 
-// CreateRequest asks signer to build and sign a credential-request object naming one
-// agent_secret authorization_detail per requested name (Signer.SignRequestObject, audience ==
-// the broker's own base URL), then calls POST /v1/requests with that object nested in the body
-// and the outer call still authenticated with a session Proof header. It returns both the
-// decoded result and the exact raw response bytes, for --json's "print the response body
-// verbatim" requirement.
-func (c *client) CreateRequest(ctx context.Context, signer Signer, names []string, reason, sessionID string) (RequestResult, []byte, error) {
-	requestObject, err := signer.SignRequestObject(c.baseURL, names, reason)
+// CreateRequest builds and signs a credential-request object carrying one
+// agent_secret authorization_detail per requested name and lifetimeSeconds, the grant's lifetime
+// (nil for until the session ends) (Signer.SignRequestObject, audience == the broker's own base
+// URL), then calls POST /v1/requests with that object nested in the body and the outer call still
+// authenticated with a session Proof header. It returns both the decoded result and the exact raw
+// response bytes, for --json's "print the response body verbatim" requirement.
+func (c *client) CreateRequest(ctx context.Context, signer Signer, names []string, reason string, lifetimeSeconds *int, sessionID string) (RequestResult, []byte, error) {
+	requestObject, err := signer.SignRequestObject(c.baseURL, names, reason, lifetimeSeconds)
 	if err != nil {
 		return RequestResult{}, nil, fmt.Errorf("sign request object: %w", err)
 	}
@@ -200,7 +203,7 @@ func (c *client) CancelRequest(ctx context.Context, signer Signer, id string) er
 // GrantValues is POST /v1/grants/{id}/values's exact response shape.
 type GrantValues struct {
 	Values    map[string]string `json:"values"`
-	ExpiresAt time.Time         `json:"expires_at"`
+	ExpiresAt *time.Time        `json:"expires_at"`
 }
 
 func (c *client) GrantValues(ctx context.Context, signer Signer, grantID string) (GrantValues, error) {
@@ -224,10 +227,10 @@ func (c *client) RevokeGrant(ctx context.Context, signer Signer, grantID string)
 
 // Grant mirrors requests.Grant's wire shape.
 type Grant struct {
-	GrantID   string    `json:"grant_id"`
-	RequestID string    `json:"request_id"`
-	Approver  *string   `json:"approver"`
-	ExpiresAt time.Time `json:"expires_at"`
+	GrantID   string     `json:"grant_id"`
+	RequestID string     `json:"request_id"`
+	Approver  *string    `json:"approver"`
+	ExpiresAt *time.Time `json:"expires_at"`
 }
 
 // SelfResult is GET /v1/enrollments/self's exact response shape.
@@ -372,7 +375,7 @@ type OperatorGrant struct {
 	Enrollment OperatorGrantEnrollment `json:"enrollment"`
 	Names      []string                `json:"names"`
 	Approver   *string                 `json:"approver"`
-	ExpiresAt  time.Time               `json:"expires_at"`
+	ExpiresAt  *time.Time              `json:"expires_at"`
 	CreatedAt  time.Time               `json:"created_at"`
 }
 

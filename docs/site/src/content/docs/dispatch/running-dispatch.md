@@ -145,7 +145,9 @@ DATABASE_URL='<your database URL>' envoy-dispatch census
 ```
 
 It reads the database without changing it, and reports each pending migration's tables, their
-sizes, and any long-running transactions in the way.
+sizes, and any long-running transactions in the way. Run before a deploy, it is a gate: a census
+that refuses, such as one counting rows a migration would rewrite, should fail the deploy before
+any server moves. Dispatch repairs rows it already holds in code, at start, for that reason.
 
 ## The HTTP API
 

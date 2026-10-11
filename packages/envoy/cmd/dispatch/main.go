@@ -264,6 +264,7 @@ func main() {
 		ServerURL: serverURL,
 		Settle:    boot.SettleDelay,
 	})
+	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
 	if err != nil {
@@ -344,7 +345,7 @@ func main() {
 	// editing them (LEGION-542).
 	go documentService.RunTaskProgressReconciliation(ctx)
 	// The references route serves each document mention's stored excerpt; this fills the ones no
-	// version write stored: every mention indexed before migration 0091, and each rebuild-refs
+	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx)
 
@@ -742,6 +743,42 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
 	built.AgentTokens = boot.AgentTokens
 	return docs.New(built)
+}
+
+// decidedWordingRestoreTimeout bounds the boot's restoration of decided asks' wordings. On the
+// 2026-10-11 production dump (3,739 asks, 82,153 events) the restoration and its marking of the
+// documents it leaves owed took 0.17-0.77 s.
+const decidedWordingRestoreTimeout = 30 * time.Second
+
+// restoreDecidedWordings is the boot's restoration of the wording each decided ask was decided on,
+// where a task of an earlier release reworded it, and its marking owed of each such block ask's own
+// document and copies (docs.Service.RestoreDecidedWordings), bounded by timeout. Each ask it
+// restored has its own line; this logs their count and the copies' count. A restoration that fails
+// or runs out of time is logged and the start goes on, since each document's next settlement
+// restores its own asks.
+func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeout time.Duration) {
+	bootTask(ctx, timeout, "dispatch: restore decided asks' wordings", "dispatch: restored decided asks' wordings",
+		func(ctx context.Context) ([]any, error) {
+			restored, copies, err := documents.RestoreDecidedWordings(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return []any{"restored", restored, "copies", copies}, nil
+		})
+}
+
+// bootTask runs task, a repair the boot makes before it serves, bounded by timeout, and logs what
+// it reports: the counts task returns under done at INFO, or, when task fails or runs out of time,
+// those counts and the error under failed at ERROR. Either way the start goes on.
+func bootTask(ctx context.Context, timeout time.Duration, failed, done string, task func(context.Context) ([]any, error)) {
+	taskCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	counts, err := task(taskCtx)
+	if err != nil {
+		slog.Error(failed, append(counts, "error", err)...)
+		return
+	}
+	slog.Info(done, counts...)
 }
 
 // appContextOptions is what main hands routes.BuildAppContext: built, what main made from the

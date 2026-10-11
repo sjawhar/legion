@@ -25,9 +25,11 @@ has no broker connected.
 Opening a **Secret request** shows the broker's record of it:
 
 - **Identifiers**: the secrets asked for. A grant covers all of them or none.
-- **Enrollment**: the session asking, as kind, runtime id and operator. A `host` runtime id starts
-  with the machine's host name; a `pod` enrollment also shows its **Worker slot**.
-- **Lifetime**: how long the grant would last from the moment you approve.
+- **Enrollment**: the session asking, as kind, runtime id and operator. A `session` started on a
+  machine has a runtime id that starts with the machine's host name; a `pod` enrollment also shows
+  its **Worker slot**.
+- **Lifetime**: how long the grant would last from the moment you approve: the `--ttl` the agent
+  asked for, or **Until the session ends**.
 - **Requested** and **Expires**: when it was made, and when it
   [expires](/legion/broker/concepts/#approvals) if nobody decides it.
 - **Policy version**: the version of the secret policy the request was decided under.

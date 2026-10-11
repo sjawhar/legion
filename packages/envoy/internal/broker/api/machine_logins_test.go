@@ -53,7 +53,7 @@ func (ts *testServer) enrollBox(t *testing.T, machineKey *ecdsa.PrivateKey, cred
 	t.Helper()
 	key := newSigningKey(t)
 	status, body := ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
-		"kind": "box", "runtime_id": runtimeID, "thumbprint": thumbprintOf(t, key),
+		"kind": "session", "runtime_id": runtimeID, "thumbprint": thumbprintOf(t, key),
 	})
 	return status, body, decode[wireEnrolled](t, body).EnrollmentID, key
 }
@@ -342,7 +342,7 @@ func TestAnEnrollmentRacingItsMachineLoginsRevokeIsLauncherInvalid(t *testing.T)
 	if err != nil {
 		t.Fatalf("proof.SignLauncher: %v", err)
 	}
-	payload, err := json.Marshal(map[string]any{"kind": "box", "runtime_id": "box-" + t.Name(), "thumbprint": thumbprint})
+	payload, err := json.Marshal(map[string]any{"kind": "session", "runtime_id": "session-" + t.Name(), "thumbprint": thumbprint})
 	if err != nil {
 		t.Fatal(err)
 	}

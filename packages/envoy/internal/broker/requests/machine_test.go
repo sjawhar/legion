@@ -138,13 +138,12 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 	t.Helper()
 	st := storetest.Open(t)
 	local := secrets.NewLocal(fixtureSecrets()...)
-	enrollmentID, requesterKey = newEnrollment(t, st, "box", "box-a-"+t.Name(), new(fixtureOperator), nil)
+	enrollmentID, requesterKey = newEnrollment(t, st, "session", "box-a-"+t.Name(), new(fixtureOperator), nil)
 
 	m = &Machine{
 		Store:           st,
 		Policy:          policytest.Current(t, local, fixtureService),
 		Secrets:         secrets.AWS{Client: local},
-		MaxGrant:        time.Hour,
 		PendingTTL:      12 * time.Hour,
 		Audience:        testAudience,
 		Skew:            time.Minute,
@@ -162,7 +161,7 @@ func signRequest(t *testing.T, m *Machine, key *ecdsa.PrivateKey, reason string,
 	for i, n := range names {
 		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: n, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(key, m.Audience, details, reason, "", time.Now())
+	compact, err := record.Sign(key, m.Audience, details, reason, "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -172,7 +171,7 @@ func signRequest(t *testing.T, m *Machine, key *ecdsa.PrivateKey, reason string,
 func TestCreatePendingWritesTheRecordAndApproveMintsTheGrant(t *testing.T) {
 	m, enr, key, approver := newFixture(t)
 	ctx := context.Background()
-	compact, err := record.Sign(key, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}}}, "why", "", time.Now())
+	compact, err := record.Sign(key, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}}}, "why", "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -263,8 +262,8 @@ func TestValuesRefusesAChainTheBrokerDidNotWrite(t *testing.T) {
 	for name, tamper := range map[string]func(t testing.TB, st *store.Store, recordID string){
 		"a tampered body": storetest.Exec(
 			`alter table credential_requests disable trigger credential_requests_no_update`,
-			`update credential_requests set body = replace(body, 'lifetime_seconds: 3600', 'lifetime_seconds: 43200')
-				where id=$1 and body like '%lifetime_seconds: 3600%'`,
+			`update credential_requests set body = replace(body, 'lifetime_seconds: -', 'lifetime_seconds: 43200')
+				where id=$1 and body like '%lifetime_seconds: -%'`,
 		),
 		"an approval by another login": storetest.Exec(
 			`update credential_request_events set login='mallory' where record_id=$1 and event='approved'`,
@@ -323,7 +322,7 @@ func TestCreateRefusesLoginHintAndForeignThumbprint(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
 
-	withHint, err := record.Sign(key, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}}}, "why", fixtureOperator, time.Now())
+	withHint, err := record.Sign(key, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}}}, "why", fixtureOperator, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign(login_hint): %v", err)
 	}
@@ -398,7 +397,7 @@ func TestDenyOpensNoRecord(t *testing.T) {
 // the machine's own claim, which anyone signed in to Dispatch may approve, so the service account is what
 // proves the service: a pod under the service's login running as another account, a pod running
 // as the service's account under a login for a service the broker does not register, the
-// operator's own host session, and a pod no service's launcher enrolled are each denied it with no
+// operator's own machine session, and a pod no service's launcher enrolled are each denied it with no
 // record. Nobody approved the service pod's grant and it runs on no one's machine, so no person's
 // grant list holds it.
 func TestAServicesSecretGoesToItsOwnPodsAlone(t *testing.T) {
@@ -423,7 +422,7 @@ func TestAServicesSecretGoesToItsOwnPodsAlone(t *testing.T) {
 
 	impostor, impostorKey := newServiceEnrollment(t, m.Store, fixtureService, "system:serviceaccount:example:other-sa", "impostor-pod-"+t.Name())
 	unlisted, unlistedKey := newServiceEnrollment(t, m.Store, "unlisted-service", fixtureSubject, "unlisted-pod-"+t.Name())
-	host, hostKey := newEnrollment(t, m.Store, "host", "host-"+t.Name(), new(operator), nil)
+	host, hostKey := newEnrollment(t, m.Store, "session", "host-"+t.Name(), new(operator), nil)
 	plainPod, plainPodKey := newEnrollment(t, m.Store, "pod", "plain-pod-"+t.Name(), nil, new(fixtureSubject))
 	for who, r := range map[string]struct {
 		enrollment string
@@ -431,7 +430,7 @@ func TestAServicesSecretGoesToItsOwnPodsAlone(t *testing.T) {
 	}{
 		"a pod under the service's login running as another account":       {impostor, impostorKey},
 		"a pod running as the service's account under an unlisted service": {unlisted, unlistedKey},
-		"the operator's host session":                                      {host, hostKey},
+		"the operator's machine session":                                   {host, hostKey},
 		"a pod no service's launcher enrolled":                             {plainPod, plainPodKey},
 	} {
 		denied, err := m.Create(ctx, r.enrollment, signRequest(t, m, r.key, "need it", "SERVICE_KEY"), "")
@@ -699,7 +698,7 @@ func TestApplyDecisionRefusesARecordPastItsExpiry(t *testing.T) {
 func TestExpirePendingAuditsEveryExpiredRequest(t *testing.T) {
 	m, enrA, keyA, _ := newFixture(t)
 	ctx := context.Background()
-	enrB, keyB := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
+	enrB, keyB := newEnrollment(t, m.Store, "session", "box-b-"+t.Name(), new(fixtureOperator), nil)
 
 	reqA, err := m.Create(ctx, enrA, signRequest(t, m, keyA, "need it", "DEEL_API_KEY"), "")
 	if err != nil {
@@ -736,7 +735,7 @@ func TestExpirePendingAuditsEveryExpiredRequest(t *testing.T) {
 func TestOtherEnrollmentCannotUseGrant(t *testing.T) {
 	m, enrA, keyA, _ := newFixture(t)
 	ctx := context.Background()
-	enrB, _ := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
+	enrB, _ := newEnrollment(t, m.Store, "session", "box-b-"+t.Name(), new(fixtureOperator), nil)
 
 	granted, err := m.Create(ctx, enrA, signRequest(t, m, keyA, "need it", "AUTO_TOKEN"), "")
 	if err != nil {
@@ -775,9 +774,9 @@ func TestRevokeStopsValues(t *testing.T) {
 func TestMachineSessionID(t *testing.T) {
 	m, enrA, keyA, _ := newFixture(t)
 	ctx := context.Background()
-	enrB, keyB := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
+	enrB, keyB := newEnrollment(t, m.Store, "session", "box-b-"+t.Name(), new(fixtureOperator), nil)
 
-	compact, err := record.Sign(keyA, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "AUTO_TOKEN", Actions: []string{"inject"}}}, "need it", "", time.Now())
+	compact, err := record.Sign(keyA, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "AUTO_TOKEN", Actions: []string{"inject"}}}, "need it", "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -1177,7 +1176,7 @@ func TestEveryRequesterIsDecidedByOwnerAndTier(t *testing.T) {
 	m, ownerEnr, ownerKey, _ := newFixture(t)
 	retag(t, m, policytest.Secret("SHARED_TOKEN", policy.OwnerShared, policy.TierAgent, "shared-token-v1"))
 	ctx := context.Background()
-	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-other-"+t.Name(), new(otherOperator), nil)
+	otherEnr, otherKey := newEnrollment(t, m.Store, "session", "box-other-"+t.Name(), new(otherOperator), nil)
 	podEnr, podKey := newEnrollment(t, m.Store, "pod", "pod-"+t.Name(), nil, new("system:serviceaccount:legion:worker"))
 	servicePodEnr, servicePodKey := newServiceEnrollment(t, m.Store, fixtureService, fixtureSubject, "service-pod-"+t.Name())
 	requesters := map[string]struct {

@@ -123,7 +123,7 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 // its id a #b-<id> jump target, and its markdown. The route reads no document: a mention whose
 // excerpt the reconciliation has not stored yet, is owed a fresh one, or lies in no block keeps
 // the document's name. The reconciliation serves the next stored block only after it records a
-// non-null excerpt_version. During the deploy that ships migration 0091, a stale excerpt whose
+// non-null excerpt_version. During the deploy that ships migration 0092, a stale excerpt whose
 // version is still set is served until the reconciliation marks it owed (refs.StoredExcerpts).
 func (s *server) documentMentionExcerpts(ctx context.Context, query refs.Query, edges []model.GraphEdge) error {
 	stored, err := refs.StoredExcerpts(ctx, s.deps.Store.Pool, query.Kind, query.ID)

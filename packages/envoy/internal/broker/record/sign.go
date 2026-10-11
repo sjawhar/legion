@@ -12,8 +12,9 @@ import (
 
 // Sign builds and signs a credential-request object (used by the CLI, the host helper, the
 // Legion daemon, and tests). It mirrors proof/sign.go's go-jose usage: iss is the key's
-// proof.Thumbprint, and exp is iat+600s.
-func Sign(key *ecdsa.PrivateKey, audience string, details []AuthorizationDetail, reason, loginHint string, now time.Time) (string, error) {
+// proof.Thumbprint, exp is iat+600s, and lifetimeSeconds is nil when an agent-secret grant lasts
+// until its session ends.
+func Sign(key *ecdsa.PrivateKey, audience string, details []AuthorizationDetail, reason, loginHint string, lifetimeSeconds *int, now time.Time) (string, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, &jose.SignerOptions{
 		EmbedJWK:     true,
 		ExtraHeaders: map[jose.HeaderKey]any{jose.HeaderType: RequestTyp},
@@ -35,6 +36,7 @@ func Sign(key *ecdsa.PrivateKey, audience string, details []AuthorizationDetail,
 		AuthorizationDetails: details,
 		Reason:               reason,
 		LoginHint:            loginHint,
+		LifetimeSeconds:      lifetimeSeconds,
 	})
 	if err != nil {
 		return "", err

@@ -115,4 +115,16 @@ package api
 // LEGION-578 landed at 16, LEGION-588 at 17 and LEGION-632 at 18 first, pi-legion 8.4.1, 8.6.0
 // and 8.9.0 declaring them without the token file, so a daemon at any of them would pass the gate
 // against them. Renumbered three times, as the collision note says.)
-const DaemonAPIVersion = 19
+//
+// 20: LEGION-668 -- the controller holds the review App's GitHub token like every role: `POST
+// /legion/v1/controller/github-credential` is the route `legion controller start` fetches the
+// controller's gh files from and refreshes them over, with the controller capability. The
+// controller pod's agent environment gains `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN` and
+// `GH_HOST` exactly as an issue pod's role container has them, backed by a `gh-controller` volume
+// of its role Secret. A `legion` built before 20 never fetches the credential, so its controller's
+// gh acts as nobody against a daemon that expects it to, and a daemon before 20 serves no such
+// route, so `legion controller start` from 20 is refused after the mint and cuts the incumbent
+// controller off for nothing: the boot gate and `legion probe-image` refuse the mixed pair. (This
+// branch first took 19; LEGION-631 landed at 19 first, pi-legion 8.10.1 declaring it without this
+// route, so a daemon at 19 would pass the gate against it. Renumbered, as the collision note says.)
+const DaemonAPIVersion = 20

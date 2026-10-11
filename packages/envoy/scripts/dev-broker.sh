@@ -167,7 +167,6 @@ BROKER_UI_TOKEN="$UI_TOKEN" \
 BROKER_SECRETS_PREFIX="$SECRETS_PREFIX" \
 BROKER_SECRETS_KMS_KEY_ARN="$SECRETS_KMS_KEY_ARN" \
 BROKER_FAKE_SECRETS_FILE="$FAKE_SECRETS_FILE" \
-BROKER_MAX_GRANT_SECONDS=3600 \
 BROKER_LISTEN_ADDR="$LISTEN_ADDR" \
 "$BROKER_BIN" > >(trap '' TERM INT; exec tee -a "$BROKER_LOG" >&2) 2>&1 &
 BROKER_PID=$!
@@ -237,8 +236,8 @@ dev-broker: ready.
   database:            $DISPLAY_URL  (this instance's own; created and dropped by this script)
 
   One agent-tier secret (DEMO_READ_TOKEN, granted without asking) and one human-tier secret
-  (DEMO_API_KEY, approver: $APPROVER_LOGIN), both owned by $APPROVER_LOGIN, whose box or host
-  sessions ask for them.
+  (DEMO_API_KEY, approver: $APPROVER_LOGIN), both owned by $APPROVER_LOGIN, whose sessions ask
+  for them. A grant lasts until its session ends, or for the --ttl its request names.
   Drive it with agent-secrets, agent-secrets-helper and agent-secrets-devrelay in another shell;
   press Ctrl-C here to stop the broker.
 EOF

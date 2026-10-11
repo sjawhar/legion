@@ -67,7 +67,7 @@ const (
 )
 
 // RunReferenceExcerptReconciliation stores the excerpts of every document some of whose mentions
-// are owed one (refs.DriftedExcerpts): every mention indexed before migration 0091, each one
+// are owed one (refs.DriftedExcerpts): every mention indexed before migration 0092, each one
 // rebuild-refs inserts, and each a version write could not cut. One batch per tick, at start, then
 // every referenceExcerptStep while a full batch says drift remains and every
 // ReferenceExcerptReconcileInterval once none does, until ctx ends. For the first

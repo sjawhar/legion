@@ -41,7 +41,7 @@ const uiToken = "brokertest-ui-token-0123456789ab"
 const podAudience = "legion-broker-pod"
 
 // Rig is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to its
-// store — enough to drive a machine login, a box or host enrollment, and an agent-secret request
+// store — enough to drive a machine login, a session enrollment, and an agent-secret request
 // end to end over genuine HTTP, and to reach into the store directly for what the API itself has
 // no route to do (e.g. forcing a launcher credential's expiry). A human decision is a UI-route
 // call naming Operator as the approver, the body Dispatch's server sends.
@@ -114,8 +114,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
-		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local},
-		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
+		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local}, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)

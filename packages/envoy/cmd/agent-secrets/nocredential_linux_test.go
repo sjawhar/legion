@@ -1,7 +1,7 @@
 // packages/envoy/cmd/agent-secrets/nocredential_linux_test.go
 //go:build linux
 
-// A host session on a helper that holds no launcher credential has no broker identity: after a
+// A machine session on a helper that holds no launcher credential has no broker identity: after a
 // reboot or helper restart the helper enrolls no one until the operator logs the machine in, so
 // identity sends its callers to their other backend, and every command that meets the helper's
 // NO_CREDENTIAL answer says so in one line. Linux-only for the real helper's pidfd pinning.
@@ -24,7 +24,7 @@ import (
 const notLoggedInNotice = "agent-secrets: this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets machine login)\n"
 
 // runInSession runs `agent-secrets register --exec -- binary args...` against the helper at sock,
-// so the command runs as a freshly registered host session, and returns its exit code and output.
+// so the command runs as a freshly registered machine session, and returns its exit code and output.
 func runInSession(t *testing.T, binary, sock string, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	cmd := exec.Command(binary, append([]string{"register", "--exec", "--", binary}, args...)...)

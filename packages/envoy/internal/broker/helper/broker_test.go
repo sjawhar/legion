@@ -125,6 +125,9 @@ type fakeBroker struct {
 	// it, so every later one gets lease. A test gives one enrollment a lease short enough that it
 	// renews soon, and nothing it re-enrolls can lapse under the test however the steps interleave.
 	nextLease time.Duration
+	// refuseKinds answers an enroll naming one of these kinds 400 INVALID_KIND, as a broker before
+	// the session kind refuses "session".
+	refuseKinds map[string]bool
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -161,6 +164,10 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.posts = append(f.posts, body)
+		if kind, _ := body["kind"].(string); f.refuseKinds[kind] {
+			writeJSON(w, 400, map[string]string{"code": "INVALID_KIND", "error": `kind must be "box", "host", or "pod"`})
+			return
+		}
 		tp, _ := body["thumbprint"].(string)
 		if id, ok := f.byTP[tp]; ok {
 			// The idempotent-enroll conflict path: the real broker answers with the SAME id and
@@ -644,7 +651,7 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 	}
 }
 
-func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
+func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", nil)
@@ -654,7 +661,7 @@ func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
 	}
 	posts, _, _ := f.snapshot()
 	post := posts[0]
-	if post["kind"] != "host" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "ada@example.com" ||
+	if post["kind"] != "session" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "ada@example.com" ||
 		post["thumbprint"] != sess.Thumbprint || post["approver"] != nil ||
 		post["session_id"] != nil || post["pod_token"] != nil {
 		t.Fatalf("enroll body: %+v", post)

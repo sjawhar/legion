@@ -70,14 +70,14 @@ type Options struct {
 	// without them, OMP's Dispatch client falls back to the operator's user-level configuration.
 	DispatchURL       string
 	DispatchTokenFile string
-	// GitHubCredential is the daemon's function for a tree role's gh files
-	// (runtime.GitHubCredential): hosts.yml and config.yml rendered from the role's App token. A
-	// launch calls it for the pane's claim and writes the two files under the claim's directory
-	// (runtime.GHConfigDir), the pane's GH_CONFIG_DIR, and the refresher started by Observe
-	// (refreshGitHubCredentials) calls it again for every tracked pane and rewrites hosts.yml when
-	// the render changed; never for the controller, which has no App. Nil is a daemon with no
-	// GitHub Apps (Stage 2's, which configures no workflow): its panes are told no GH_CONFIG_DIR,
-	// hold no gh files, and the refresher does nothing.
+	// GitHubCredential is the daemon's function for a role's gh files (runtime.GitHubCredential):
+	// hosts.yml and config.yml rendered from the role's App token. A launch calls it for the pane's
+	// claim and writes the two files under the claim's directory (runtime.GHConfigDir), the pane's
+	// GH_CONFIG_DIR, and the refresher started by Observe (refreshGitHubCredentials) calls it again
+	// for every tracked pane and rewrites hosts.yml when the render changed; the controller's pane
+	// is one like any other's, since it acts as the review App (appauth.AppRoleFor). Nil is a
+	// daemon with no GitHub Apps (Stage 2's, which configures no workflow): its panes are told no
+	// GH_CONFIG_DIR, hold no gh files, and the refresher does nothing.
 	GitHubCredential runtime.GitHubCredential
 	// OmpInvocation is the resolved launch fragment (omplaunch.ResolveInvocation); OmpLaunchPrefix the
 	// configured argv prepended to it.

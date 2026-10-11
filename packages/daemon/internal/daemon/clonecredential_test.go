@@ -42,6 +42,12 @@ func TestTmuxBootRewritesAnOlderClonesCredentialHelper(t *testing.T) {
 	if _, err := os.Stat(realGit); err != nil {
 		t.Skipf("no git at %s: %v", realGit, err)
 	}
+	// The clone's helper keys are read with `git config --get-all`, which lists every scope, and the
+	// host's own config can carry the very helper asserted here (`gh auth setup-git` writes the
+	// github.com one to ~/.gitconfig). Neither the global nor the system file may reach the test:
+	// its own git, its `git init`, and the fix-up's runner all inherit this process's environment.
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
 	cfg := config.Config{Project: "WIDGETS", StateDir: t.TempDir(), Runtime: config.Runtime{Name: "tmux"},
 		Projects: map[string]config.Project{"WIDGETS": {Repo: ghrepo.MustParse("acme/widgets")}}}
 	tools := map[string]string{"git": realGit}
