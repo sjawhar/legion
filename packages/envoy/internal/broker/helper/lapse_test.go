@@ -102,8 +102,37 @@ func testGate(t *testing.T) (chan struct{}, func()) {
 	return gate, open
 }
 
-// lapseReason is the last error a lapse records for the fake's refused renew (LEASE_EXPIRED).
-const lapseReason = "the broker refused this session's renew (LEASE_EXPIRED); enrolling again"
+// lapseReason is the last error a lapse records for the fake's terminal renew refusal.
+const lapseReason = "the broker refused this session's renew (ENROLLMENT_NOT_LIVE); enrolling again"
+
+// TestAProofInvalidRenewKeepsTheEnrollment: only ENROLLMENT_NOT_LIVE (or an older broker's
+// explicit "not live" message) lapses and re-enrolls a helper session. PROOF_INVALID may be an
+// iat-skew error; its next proof can succeed after the clock is corrected, so the helper retains
+// the enrollment and retries it.
+func TestAProofInvalidRenewKeepsTheEnrollment(t *testing.T) {
+	r := startRig(t, filepath.Join(t.TempDir(), "sessions.json"))
+	r.fake.mu.Lock()
+	r.fake.nextLease = 150 * time.Millisecond
+	r.fake.refuseRenewNext = 1
+	r.fake.renewRefusalCode = "PROOF_INVALID"
+	r.fake.mu.Unlock()
+	reg := r.call(t, Request{Op: "register", WaitSeconds: 5})
+	if !reg.OK || reg.State != "enrolled" {
+		t.Fatalf("register: %+v", reg)
+	}
+	waitFor(t, func() bool {
+		_, _, renews := r.fake.snapshot()
+		return renews >= 1
+	})
+	sess := r.srv.Registry.Get(os.Getpid())
+	if sess.EnrollmentID() != reg.EnrollmentID {
+		t.Fatalf("session enrollment after retryable PROOF_INVALID = %q, want %q", sess.EnrollmentID(), reg.EnrollmentID)
+	}
+	_, deletes, _ := r.fake.snapshot()
+	if slices.Contains(deletes, reg.EnrollmentID) {
+		t.Fatalf("retryable PROOF_INVALID revoked %q", reg.EnrollmentID)
+	}
+}
 
 // TestALapsedEnrollmentStopsSigningWhileItsRevokeRetries: once the broker refuses a renew, the
 // enrollment is dead, so the session must stop signing with it at once rather than when its

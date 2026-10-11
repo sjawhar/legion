@@ -445,8 +445,10 @@ logins**: the machine logins the viewer may revoke that can still reach a secret
 page also invalidates), the viewer's own machines' and every service's whoever approved it, since
 anyone signed in approves and revokes a service's login and a person's machine login is that
 person's alone. One row per login with its machine (the host, or `<service> on <host>` for a
-service's login such as the Legion daemon's), who approved it (`approved_by`), when it was issued
-and when it expires, and a Revoke button that asks
+service's login such as the Legion daemon's), its credential id (`credential_id`, which every
+enrollment the login made names, while the host is the machine's own claim, so two logins of one
+service on one host differ only there), who approved it (`approved_by`), when it was issued and
+when it expires, and a Revoke button that asks
 `window.confirm` first and then POSTs `{}` to `/api/v1/machine-logins/{id}/revoke`. A login's
 sessions outlive its expiry, so the broker also lists an expired login while one of its sessions
 runs (`expired: true`), and its row reads `expired, sessions still running` under the machine. The

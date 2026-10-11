@@ -2,6 +2,11 @@ package pmdoc
 
 import (
 	"fmt"
+	"os"
+	"os/exec"
+	"runtime"
+	"runtime/debug"
+	"runtime/metrics"
 	"sort"
 	"strings"
 	"sync"
@@ -19,12 +24,13 @@ import (
 // -race, linear_sizes_race.go, so a -count=N run stays well inside go test's own default
 // per-package timeout even there), through growsLinearly (below).
 //
-// What each shape's closure measures is this process's own CPU time (processCPUTime), not wall
-// time. A loaded box's scheduler can inflate wall time on either side of a comparison without
-// either side doing more work - that is LEGION-569/571's whole flake history across three rounds
-// of widening the growth step and the slack without removing the root cause. CPU time is immune
-// to another process's contention for the same cores; it only grows with work this process (and
-// its GC) actually does.
+// What each shape's closure measures is the CPU time this process spends on the call alone
+// (cpuTimeOf), not wall time. A loaded box's scheduler can inflate wall time on either side of a
+// comparison without either side doing more work - that is LEGION-569/571's whole flake history
+// across three rounds of widening the growth step and the slack without removing the root cause.
+// CPU time is immune to another process's contention for the same cores. The collector is settled
+// before each call and stopped during it, because a collection's CPU time depends on when it lands
+// rather than on the call (cpuTimeOf has the mechanism).
 //
 // growsLinearly also samples every size the same number of times and keeps the fastest
 // (growthVerdict's sampleCount), so neither a first run's warm-up nor whichever side a stray spike
@@ -51,13 +57,13 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 		full := parseFullTarget / len(shape)
 		small := full / growthStep
 		t.Run(shape, func(t *testing.T) {
-			growsLinearly(t, fmt.Sprintf("parsing %q", shape), []int{small * len(shape), full * len(shape)}, linearSlack, func(size int) time.Duration {
-				repeats := size / len(shape)
-				before := processCPUTime()
-				if _, err := ParseRendering(strings.Repeat(shape, repeats)); err != nil {
-					t.Fatalf("parse %d bytes of %q: %v", size, shape, err)
-				}
-				return processCPUTime() - before
+			growsLinearly(t, fmt.Sprintf("parsing %q", shape), []int{small * len(shape), full * len(shape)}, linearSlack, func(size int) (time.Duration, error) {
+				text := strings.Repeat(shape, size/len(shape))
+				return cpuTimeOf(func() {
+					if _, err := ParseRendering(text); err != nil {
+						t.Fatalf("parse %d bytes of %q: %v", size, shape, err)
+					}
+				})
 			})
 		})
 	}
@@ -68,13 +74,13 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 			return &Node{Type: "doc", Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: strings.Repeat(shape, repeats)}}}}}
 		}
 		t.Run(shape, func(t *testing.T) {
-			growsLinearly(t, fmt.Sprintf("rendering %q", shape), []int{small * len(shape), full * len(shape)}, linearSlack, func(size int) time.Duration {
-				repeats := size / len(shape)
-				before := processCPUTime()
-				if _, err := Render(doc(repeats)); err != nil {
-					t.Fatalf("render %d bytes of %q: %v", size, shape, err)
-				}
-				return processCPUTime() - before
+			growsLinearly(t, fmt.Sprintf("rendering %q", shape), []int{small * len(shape), full * len(shape)}, linearSlack, func(size int) (time.Duration, error) {
+				tree := doc(size / len(shape))
+				return cpuTimeOf(func() {
+					if _, err := Render(tree); err != nil {
+						t.Fatalf("render %d bytes of %q: %v", size, shape, err)
+					}
+				})
 			})
 		})
 	}
@@ -122,7 +128,7 @@ func TestGrowsLinearlyCatchesQuadraticAtThisFilesGrowthStepAndSlack(t *testing.T
 	// growsLinearly itself, through a real *testing.T, confirms the wrapper agrees with
 	// growthVerdict on the passing direction (the failing direction cannot run through a real
 	// t.Fatalf without failing this test, which the growthVerdict assertion above already proves).
-	growsLinearly(t, "synthetic linear", []int{small, full}, linearSlack, linear)
+	growsLinearly(t, "synthetic linear", []int{small, full}, linearSlack, func(size int) (time.Duration, error) { return linear(size), nil })
 }
 
 // linearSlack is how many times faster than growth itself a linear operation's time may grow
@@ -189,13 +195,13 @@ func TestRenderIsLinearOnRunsFootnoteLabelsAndLineFeeds(t *testing.T) {
 // rendering is, whose parse no element limit stops.
 func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 	const header, row = "| a |\n| --- |\n", "`\\|`\n"
-	growsLinearly(t, "parsing a table of `\\|` cells", []int{16 << 10, 256 << 10, 1 << 20}, growthAllowance, func(size int) time.Duration {
+	growsLinearly(t, "parsing a table of `\\|` cells", []int{16 << 10, 256 << 10, 1 << 20}, growthAllowance, func(size int) (time.Duration, error) {
 		markdown := header + strings.Repeat(row, (size-len(header))/len(row))
-		before := processCPUTime()
-		if _, err := ParseRendering(markdown); err != nil {
-			t.Fatalf("parse %d bytes of `\\|` rows: %v", size, err)
-		}
-		return processCPUTime() - before
+		return cpuTimeOf(func() {
+			if _, err := ParseRendering(markdown); err != nil {
+				t.Fatalf("parse %d bytes of `\\|` rows: %v", size, err)
+			}
+		})
 	})
 }
 
@@ -235,7 +241,7 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 		full := test.target / len(test.to)
 		small := full / growthStep
 		t.Run(test.name, func(t *testing.T) {
-			growsLinearly(t, test.name, []int{small * len(test.to), full * len(test.to)}, linearSlack, func(size int) time.Duration {
+			growsLinearly(t, test.name, []int{small * len(test.to), full * len(test.to)}, linearSlack, func(size int) (time.Duration, error) {
 				blocks := size / len(test.to)
 				doc := crdt.New()
 				fragment := doc.GetXmlFragment("prosemirror")
@@ -243,19 +249,17 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 					writeUpdate(t, doc, fragment, repeatedBlocks(t, test.from, blocks))
 				}
 				want := repeatedBlocks(t, test.to, blocks)
-				before := processCPUTime()
-				writeUpdate(t, doc, fragment, want)
-				took := processCPUTime() - before
+				took, err := cpuTimeOf(func() { writeUpdate(t, doc, fragment, want) })
 				if got, err := Read(fragment); err != nil || !got.Equal(want) {
 					t.Fatalf("%s: %d blocks read back otherwise (%v)", test.name, blocks, err)
 				}
-				return took
+				return took, err
 			})
 		})
 	}
 	t.Run("replacing every other block", func(t *testing.T) {
 		for _, blocks := range alternatingBlocks {
-			fastest := func(what string, op func() time.Duration) time.Duration {
+			fastest := func(what string, op func() (time.Duration, error)) time.Duration {
 				return fastestOf(func() time.Duration {
 					return timedWithDeadline(t, fmt.Sprintf("%s at %d blocks", what, blocks), perCallDeadline, op)
 				})
@@ -269,26 +273,24 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 				return doc, fragment
 			}
 			want := repeatedBlocks(t, "a\n\n", blocks)
-			update := fastest("replacing every other block", func() time.Duration {
+			update := fastest("replacing every other block", func() (time.Duration, error) {
 				doc, fragment := from()
-				before := processCPUTime()
-				writeUpdate(t, doc, fragment, want)
-				took := processCPUTime() - before
+				took, err := cpuTimeOf(func() { writeUpdate(t, doc, fragment, want) })
 				if got, err := Read(fragment); err != nil || !got.Equal(want) {
 					t.Fatalf("replacing every other block: %d blocks read back otherwise (%v)", blocks, err)
 				}
-				return took
+				return took, err
 			})
-			walks := fastest("ygo's walks to every other block", func() time.Duration {
+			walks := fastest("ygo's walks to every other block", func() (time.Duration, error) {
 				doc, fragment := from()
-				before := processCPUTime()
-				doc.Transact(func(txn *crdt.Transaction) {
-					for index := 0; index < blocks; index += 2 {
-						fragment.Delete(txn, index, 1)
-						fragment.InsertElement(txn, index, crdt.NewYXmlElement("paragraph"))
-					}
+				return cpuTimeOf(func() {
+					doc.Transact(func(txn *crdt.Transaction) {
+						for index := 0; index < blocks; index += 2 {
+							fragment.Delete(txn, index, 1)
+							fragment.InsertElement(txn, index, crdt.NewYXmlElement("paragraph"))
+						}
+					})
 				})
-				return processCPUTime() - before
 			})
 			if update > alternatingAllowance*walks {
 				t.Fatalf("replacing every other block of %d took %s, %.1f times the %s ygo's own Delete and Insert at those indexes take (at most %d)", blocks, update.Round(time.Millisecond), float64(update)/float64(walks), walks.Round(time.Millisecond), alternatingAllowance)
@@ -341,11 +343,68 @@ const sampleCount = 3
 // (cputest.Process), not wall time - immune to another process's contention for the same cores,
 // which is LEGION-569/571's whole flake history (the file-level comment above has the fuller
 // account). No test in this package calls t.Parallel (there is no t.Parallel() anywhere under
-// internal/dispatch/pmdoc), so ordinarily at most one measured call runs at a time, and this
-// process's CPU delta across one call is that call's own cost plus whatever GC work its
-// allocations trigger meanwhile. leakedCallGuard (below) is what keeps that true even once a call
-// has missed its own deadline and gone on running in the background.
+// internal/dispatch/pmdoc), so ordinarily at most one measured call runs at a time.
+// leakedCallGuard (below) is what keeps that true even once a call has missed its own deadline
+// and gone on running in the background. Every measured call reads it through cpuTimeOf.
 func processCPUTime() time.Duration { return cputest.Process() }
+
+// cpuTimeOf is the CPU time this process spends running op, with the garbage collector settled
+// before op starts and stopped while it runs, so the time is op's own work alone.
+//
+// A collection inside the window adds CPU time that depends on when it lands rather than on op.
+// Whether one lands depends on the heap goal the untimed setup and the tests before it leave
+// behind, so a small size's write can run with no collection at all while a full-size write runs
+// one or two. A collection's own CPU time varies several times over between cycles, since its
+// idle mark workers run on every processor the single-threaded write leaves idle and
+// processCPUTime counts them. Either way the full size's time grows against the small size's
+// without the work growing, which is how a linear write went over linearSlack's bound.
+//
+// Stopping the collector hides nothing a regression would show: work that grows quadratically
+// does so on op's own goroutine, and allocation that grows quadratically still pays inside the
+// window for the fresh memory it touches. The heap may grow to windowMemoryLimit while the
+// collector is stopped, so a regression that allocates without bound is collected rather than
+// killing the process; a window that reaches the limit comes back with an error naming its
+// collections, since that collection would put its noise back into the time. op's caller builds
+// its input before the window, since the input is not the code under test.
+//
+// cpuTimeOf reports through no *testing.T. It runs inside the goroutine runWithDeadline starts,
+// which a call that misses its deadline leaves running past its test's end, and testing panics the
+// whole binary on a Fail from such a goroutine; the caller waiting on runWithDeadline reports the
+// error on its test's own goroutine (timedWithDeadline). A call that misses its deadline may also
+// never return to restore the collector, so runWithDeadline restores it as well.
+func cpuTimeOf(op func()) (time.Duration, error) {
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	limit := min(debug.SetMemoryLimit(-1), windowMemoryLimit)
+	defer debug.SetMemoryLimit(debug.SetMemoryLimit(limit))
+	cycles := gcCycles()
+	before := processCPUTime()
+	op()
+	took := processCPUTime() - before
+	if collected := gcCycles() - cycles; collected != 0 {
+		return took, fmt.Errorf("%d collections ran inside a timed window, which grew the heap to the %d MiB memory limit; their CPU time is in its %s", collected, limit>>20, took.Round(time.Millisecond))
+	}
+	return took, nil
+}
+
+// windowMemoryLimit is the most memory cpuTimeOf lets a window grow the heap to with the collector
+// stopped, unless the process already runs under a lower limit. The largest window here, seeding a
+// mebibyte of paragraphs, allocates about 1 GiB, and a parse of a mebibyte table about 800 MiB.
+const windowMemoryLimit = 3 << 30
+
+// gcCycles is how many collections this process has completed.
+func gcCycles() uint64 {
+	sample := []metrics.Sample{{Name: "/gc/cycles/total:gc-cycles"}}
+	metrics.Read(sample)
+	return sample[0].Value.Uint64()
+}
+
+// collectorSettings is GOGC and the memory limit as they stand, read without changing either.
+func collectorSettings() (percent int, limit int64) {
+	sample := []metrics.Sample{{Name: "/gc/gogc:percent"}}
+	metrics.Read(sample)
+	return int(int64(sample[0].Value.Uint64())), debug.SetMemoryLimit(-1)
+}
 
 // leaking counts how many of each what (growsLinearly's shape-and-size label) are currently
 // running past their own deadline - a count, not a single flag, so two concurrently leaking calls
@@ -390,13 +449,27 @@ func leakedCallGuard(what string) string {
 // a deadline miss, and only then: on a call that truly never returns, it stays parked on result's
 // receive, at no CPU cost, for as long as the test binary runs. cleared, non-nil only on a
 // deadline miss, closes the instant that goroutine deregisters op's own entry - the signal
-// waitForLeakToClear waits on, rather than polling.
-func runWithDeadline(what string, deadline time.Duration, op func() time.Duration) (took time.Duration, onTime bool, cleared <-chan struct{}) {
-	result := make(chan time.Duration, 1)
-	go func() { result <- op() }()
+// waitForLeakToClear waits on, rather than polling. err is op's own, a timed window's verdict
+// (cpuTimeOf), handed back only with an op that returned in time: a late op's is dropped with it,
+// since no test waits for it any more. It hands back the collector's settings as it found them on
+// either return, since an op stopped inside cpuTimeOf's window that misses its deadline would
+// otherwise leave the collector stopped for every later test in the binary.
+func runWithDeadline(what string, deadline time.Duration, op func() (time.Duration, error)) (took time.Duration, onTime bool, cleared <-chan struct{}, err error) {
+	percent, limit := collectorSettings()
+	defer debug.SetMemoryLimit(limit)
+	defer debug.SetGCPercent(percent)
+	type outcome struct {
+		took time.Duration
+		err  error
+	}
+	result := make(chan outcome, 1)
+	go func() {
+		took, err := op()
+		result <- outcome{took, err}
+	}()
 	select {
-	case took := <-result:
-		return took, true, nil
+	case got := <-result:
+		return got.took, true, nil, got.err
 	case <-time.After(deadline):
 		leaking.mu.Lock()
 		if leaking.what == nil {
@@ -415,21 +488,25 @@ func runWithDeadline(what string, deadline time.Duration, op func() time.Duratio
 			leaking.mu.Unlock()
 			close(done)
 		}()
-		return 0, false, done
+		return 0, false, done, nil
 	}
 }
 
 // timedWithDeadline refuses to run op, naming whatever is still leaking (leakedCallGuard), then
 // runs it under runWithDeadline and fails t, naming what and deadline, if it did not return in
-// time.
-func timedWithDeadline(t *testing.T, what string, deadline time.Duration, op func() time.Duration) time.Duration {
+// time, and reports op's error, naming what, if it did. Both are reported here, on t's own
+// goroutine, never from inside op, which can outlive t.
+func timedWithDeadline(t *testing.T, what string, deadline time.Duration, op func() (time.Duration, error)) time.Duration {
 	t.Helper()
 	if msg := leakedCallGuard(what); msg != "" {
 		t.Fatal(msg)
 	}
-	took, onTime, _ := runWithDeadline(what, deadline, op)
+	took, onTime, _, err := runWithDeadline(what, deadline, op)
 	if !onTime {
 		t.Fatalf("%s did not return within %s", what, deadline)
+	}
+	if err != nil {
+		t.Errorf("%s: %v", what, err)
 	}
 	return took
 }
@@ -441,41 +518,140 @@ func timedWithDeadline(t *testing.T, what string, deadline time.Duration, op fun
 // go test's own default timeout with none attached.
 func TestRunWithDeadlineReportsAHangPromptly(t *testing.T) {
 	const deadline = 20 * time.Millisecond
-	const hang = 200 * time.Millisecond
+	release := make(chan struct{})
 	started := time.Now()
-	_, onTime, cleared := runWithDeadline("synthetic prompt hang", deadline, func() time.Duration {
-		time.Sleep(hang) // longer than deadline, short enough this test and its cleanup stay fast
-		return 0
+	_, onTime, cleared, _ := runWithDeadline("synthetic prompt hang", deadline, func() (time.Duration, error) {
+		<-release // blocked until this test has its verdict, however the scheduler runs it
+		return 0, nil
 	})
 	if elapsed := time.Since(started); elapsed > 10*deadline {
 		t.Errorf("runWithDeadline took %s to report a hang against a %s deadline, want close to immediate", elapsed, deadline)
 	}
 	if onTime {
-		t.Error("runWithDeadline reported onTime=true for an op that slept far longer than its deadline")
+		t.Error("runWithDeadline reported onTime=true for an op still blocked past its deadline")
 	}
+	close(release)
 	waitForLeakToClear(t, cleared)
 }
 
 // TestLeakedCallBlocksTheNextMeasurement proves leakedCallGuard directly: once a synthetic op has
 // missed its own deadline and is still running, a second, otherwise-healthy call through
 // timedWithDeadline refuses to start - naming the first call - rather than silently sharing its
-// still-accruing CPU (processCPUTime is this whole process's, not per-goroutine).
+// still-accruing CPU (processCPUTime is this whole process's, not per-goroutine). The op is held
+// until the guard has answered, so it is still running when asked, however late the test runs.
 func TestLeakedCallBlocksTheNextMeasurement(t *testing.T) {
 	const deadline = 20 * time.Millisecond
-	const hang = 200 * time.Millisecond
-	_, onTime, cleared := runWithDeadline("synthetic leaked hang", deadline, func() time.Duration {
-		time.Sleep(hang)
-		return 0
+	release := make(chan struct{})
+	_, onTime, cleared, _ := runWithDeadline("synthetic leaked hang", deadline, func() (time.Duration, error) {
+		<-release
+		return 0, nil
 	})
 	if onTime {
-		t.Fatal("runWithDeadline reported onTime=true for an op that slept far longer than its deadline")
+		close(release)
+		t.Fatal("runWithDeadline reported onTime=true for an op still blocked past its deadline")
 	}
 	if msg := leakedCallGuard("a second call"); msg == "" {
 		t.Error("leakedCallGuard let a second call measure while the first was still registered as leaked, want it refused")
 	} else {
 		t.Logf("leakedCallGuard correctly refused: %s", msg)
 	}
+	close(release)
 	waitForLeakToClear(t, cleared)
+}
+
+// TestAMissedDeadlineLeavesTheCollectorAsItWas proves runWithDeadline hands back the collector as
+// it found it when a call misses its deadline inside cpuTimeOf's window, where the collector is
+// stopped: the call may never return to restore it, and a collector left stopped would hold every
+// later test in this binary to the window's memory limit with no collection below it.
+func TestAMissedDeadlineLeavesTheCollectorAsItWas(t *testing.T) {
+	percent, limit := collectorSettings()
+	stopped, release := make(chan struct{}), make(chan struct{})
+	runtime.GC() // so the window's own collection takes no part of the deadline
+	_, onTime, cleared, _ := runWithDeadline("synthetic hang inside a timed window", time.Second, func() (time.Duration, error) {
+		return cpuTimeOf(func() {
+			close(stopped)
+			<-release
+		})
+	})
+	if onTime {
+		close(release)
+		t.Fatal("runWithDeadline reported onTime=true for an op still blocked past its deadline")
+	}
+	select {
+	case <-stopped:
+	default:
+		close(release)
+		waitForLeakToClear(t, cleared)
+		t.Fatal("the op had not stopped the collector by its deadline, so this test proves nothing")
+	}
+	gotPercent, gotLimit := collectorSettings()
+	if gotPercent != percent || gotLimit != limit {
+		t.Errorf("after a missed deadline the collector reads GOGC %d and a %d-byte memory limit, want %d and %d as before the call", gotPercent, gotLimit, percent, limit)
+	}
+	close(release)
+	waitForLeakToClear(t, cleared)
+}
+
+// TestALateCallFinishingAfterItsTestDoesNotPanic proves a timed call that misses its deadline and
+// returns only after its test has ended, with a collection in its window, reports nothing through
+// that test: testing panics the whole binary on a Fail from a goroutine whose test has completed,
+// which would turn one missed deadline into a crash of every test in pmdoc. The call runs in a
+// child process so that crash, if it happens, is this test's failure rather than the binary's; the
+// child's own verdict is the missed deadline, reported on its test's goroutine.
+func TestALateCallFinishingAfterItsTestDoesNotPanic(t *testing.T) {
+	child := exec.Command(os.Args[0], "-test.run", "^TestALateCallFinishingAfterItsTestDoesNotPanicHelper$", "-test.count=1", "-test.v")
+	child.Env = append(os.Environ(), lateCallHelperEnv+"=1")
+	output, _ := child.CombinedOutput() // the helper fails by design: its call misses its deadline
+	if strings.Contains(string(output), "panic:") {
+		t.Fatalf("a call that finished after its test had ended crashed the test binary:\n%s", output)
+	}
+	if !strings.Contains(string(output), lateCallWhat+" did not return within") || !strings.Contains(string(output), lateCallFinished) {
+		t.Fatalf("the child process did not report the missed deadline and then outlive the late call:\n%s", output)
+	}
+}
+
+const (
+	// lateCallHelperEnv names the child process TestALateCallFinishingAfterItsTestDoesNotPanic
+	// starts.
+	lateCallHelperEnv = "PMDOC_LATE_CALL_HELPER"
+	// lateCallWhat labels the child's call.
+	lateCallWhat = "synthetic call finishing after its test"
+	// lateCallFinished is what the child logs once the late call has returned.
+	lateCallFinished = "the late call returned after its test had ended"
+)
+
+// TestALateCallFinishingAfterItsTestDoesNotPanicHelper is that child process: a subtest whose call
+// misses its deadline through timedWithDeadline, as every growth measurement's does, then the
+// call's release once the subtest has ended, a collection inside its window, and a wait until it
+// has returned.
+func TestALateCallFinishingAfterItsTestDoesNotPanicHelper(t *testing.T) {
+	if os.Getenv(lateCallHelperEnv) == "" {
+		t.Skip("the child process of TestALateCallFinishingAfterItsTestDoesNotPanic")
+	}
+	stopped, release, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	runtime.GC() // so the window's own collection takes no part of the deadline
+	t.Run("a call that misses its deadline", func(t *testing.T) {
+		timedWithDeadline(t, lateCallWhat, time.Second, func() (time.Duration, error) {
+			defer close(finished)
+			return cpuTimeOf(func() {
+				close(stopped)
+				<-release
+				runtime.GC() // a collection inside the window, once its test has ended
+			})
+		})
+	})
+	select {
+	case <-stopped:
+	default:
+		t.Fatal("the op had not opened its window by its deadline, so this test proves nothing")
+	}
+	close(release)
+	select {
+	case <-finished:
+		t.Log(lateCallFinished)
+	case <-time.After(10 * time.Second):
+		t.Fatal("the late call never returned")
+	}
 }
 
 // waitForLeakToClear blocks until cleared closes or fails t: the deregistration goroutine
@@ -550,10 +726,10 @@ const perCallDeadline = 60 * time.Second
 // more than allowance times faster than the size did (growthVerdict, which this wraps). Every
 // measured call runs under perCallDeadline (timedWithDeadline), so a call that itself hangs fails
 // this shape by name instead of the package's own default timeout firing with none.
-func growsLinearly(t *testing.T, what string, sizes []int, allowance int, timed func(size int) time.Duration) {
+func growsLinearly(t *testing.T, what string, sizes []int, allowance int, timed func(size int) (time.Duration, error)) {
 	t.Helper()
 	bounded := func(size int) time.Duration {
-		return timedWithDeadline(t, fmt.Sprintf("%s at %s", what, sizeText(size)), perCallDeadline, func() time.Duration {
+		return timedWithDeadline(t, fmt.Sprintf("%s at %s", what, sizeText(size)), perCallDeadline, func() (time.Duration, error) {
 			return timed(size)
 		})
 	}

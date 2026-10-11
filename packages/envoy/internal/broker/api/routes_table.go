@@ -12,6 +12,7 @@ const (
 	authNone routeAuth = iota
 	authLauncher
 	authProof
+	authRenewProof
 	authUI
 )
 
@@ -55,6 +56,16 @@ func sessionAuth(h func(*server, http.ResponseWriter, *http.Request, string)) ro
 	}}
 }
 
+// renewAuth is session authentication for the one route that gives an ended enrollment a distinct
+// refusal. A skewed/malformed proof remains PROOF_INVALID; only proof.ErrNotLive is
+// ENROLLMENT_NOT_LIVE so the pod renewer can stop rather than retry an enrollment that cannot
+// recover.
+func renewAuth(h func(*server, http.ResponseWriter, *http.Request, string)) routeHandler {
+	return routeHandler{auth: authRenewProof, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
+		h(s, w, r, who.enrollment)
+	}}
+}
+
 // uiAuth is a route for Dispatch's server, which sends the broker's UI token as a bearer token and
 // names the person acting (the approver) in the body or query. The broker trusts that name, so the
 // UI token is an approval credential: only Dispatch's server holds it.
@@ -76,14 +87,15 @@ func routes() []apiRoute {
 	return []apiRoute{
 		// Enroll a session's or pod's signing key under the caller's machine credential.
 		{http.MethodPost, "/v1/enrollments", launcherAuth((*server).createEnrollment)},
-		// Revoke an enrollment made under the caller's machine credential's operator.
+		// Revoke an enrollment made under the caller's machine credential's operator, or a pod
+		// enrollment the caller's own machine credential made.
 		{http.MethodDelete, "/v1/enrollments/{id}", launcherAuth((*server).deleteEnrollment)},
 		// Start a machine login: answers the confirmation code a person types and a pending id.
 		{http.MethodPost, "/v1/launcher-credentials", public((*server).machineLogin)},
 		// Poll a machine login by its pending id; once approved, answers its credential's id.
 		{http.MethodGet, "/v1/launcher-credentials/{pending}", public((*server).readMachineLogin)},
 		// Extend the calling session's lease.
-		{http.MethodPost, "/v1/enrollments/{id}/renew", sessionAuth((*server).renewEnrollment)},
+		{http.MethodPost, "/v1/enrollments/{id}/renew", renewAuth((*server).renewEnrollment)},
 		// Describe the calling session's enrollment and its live grants.
 		{http.MethodGet, "/v1/enrollments/self", sessionAuth((*server).readSelf)},
 		// Request secrets: the policy grants or denies them at once, or a person must approve them.

@@ -1,6 +1,9 @@
 package capabilities
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -231,5 +234,76 @@ func TestNormalizeKeepsTheLiveRowsInTableOrder(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// readFixture decodes one file of packages/contracts/fixtures into into.
+func readFixture(t *testing.T, name string, into any) {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "fixtures", name))
+	if err != nil {
+		t.Fatalf("read the fixture %s: %v", name, err)
+	}
+	if err := json.Unmarshal(raw, into); err != nil {
+		t.Fatalf("decode the fixture %s: %v", name, err)
+	}
+}
+
+// redactionCase is one entry of packages/contracts/fixtures/capability-redaction.json's patterns:
+// a detail and what it reads cleaned, each prefixed with Pad letters `a` where it has one. The
+// plugin's cleanDetail is held to the same cases (packages/pi-legion/src/capability-report.test.ts).
+type redactionCase struct {
+	Pattern string `json:"pattern"`
+	Name    string `json:"name"`
+	Pad     int    `json:"pad"`
+	Detail  string `json:"detail"`
+	Want    string `json:"want"`
+}
+
+// Normalize cleans every detail as the shared fixture's cases say — one line, every credential
+// redacted, cut at MaxReportDetail — since a kept detail reaches the unauthenticated state route,
+// the log and the store whatever the session sent. Cleaning is idempotent: the session's plugin
+// cleans its report the same way before the daemon cleans it again, so each want stays as it is.
+func TestNormalizeCleansEachDetailAsTheSharedFixtureSays(t *testing.T) {
+	var fixture struct {
+		Patterns []redactionCase `json:"patterns"`
+	}
+	readFixture(t, "capability-redaction.json", &fixture)
+	for _, testCase := range fixture.Patterns {
+		t.Run(testCase.Pattern+": "+testCase.Name, func(t *testing.T) {
+			padding := strings.Repeat("a", testCase.Pad)
+			want := padding + testCase.Want
+			for _, sent := range []string{padding + testCase.Detail, want} {
+				kept, _ := Normalize([]claim.CapabilityRow{{Name: "github", OK: true, Detail: sent}})
+				if got := kept[slices.IndexFunc(kept, func(row Row) bool { return row.Name == GitHub })].Detail; got != want {
+					t.Errorf("Normalize(%q) detail = %q\nwant %q", sent, got, want)
+				}
+			}
+		})
+	}
+}
+
+// What the session's plugin sends for the shared fixture's branches —
+// packages/contracts/fixtures/capability-redaction-plugin-report.json, which the plugin's test
+// holds to what it sends — is already clean, so Normalize keeps every row of it as it came.
+func TestNormalizeKeepsThePluginsReportAsItIs(t *testing.T) {
+	var sent struct {
+		Rows []claim.CapabilityRow `json:"rows"`
+	}
+	readFixture(t, "capability-redaction-plugin-report.json", &sent)
+	if len(sent.Rows) != len(Live()) {
+		t.Fatalf("the plugin's report has %d rows, want one per live row (%d)", len(sent.Rows), len(Live()))
+	}
+
+	kept, dropped := Normalize(sent.Rows)
+
+	if len(dropped) > 0 {
+		t.Fatalf("dropped %q, want every row of the plugin's report kept", dropped)
+	}
+	for _, row := range sent.Rows {
+		want := Row{Name: Name(row.Name), OK: row.OK, Detail: row.Detail}
+		if got := kept[slices.IndexFunc(kept, func(k Row) bool { return k.Name == want.Name })]; got != want {
+			t.Errorf("kept %+v\nwant %+v", got, want)
+		}
 	}
 }

@@ -11,7 +11,12 @@ import (
 	"github.com/go-jose/go-jose/v4"
 )
 
-var ErrInvalid = errors.New("proof invalid")
+var (
+	ErrInvalid = errors.New("proof invalid")
+	// ErrNotLive says a correctly parsed, signed proof named an enrollment or launcher the lookup
+	// no longer considers live. API routes may distinguish it from invalid proof material.
+	ErrNotLive = errors.New("proof enrollment not live")
+)
 
 // jtiRetentionMargin is how long past the end of a proof's acceptance window its jti is kept.
 const jtiRetentionMargin = time.Minute
@@ -83,7 +88,7 @@ func (v *Verifier) Verify(ctx context.Context, compact, method, url string, now 
 		return Subject{}, err
 	}
 	if !live {
-		return Subject{}, fmt.Errorf("%w: not live", ErrInvalid)
+		return Subject{}, fmt.Errorf("%w: not live", ErrNotLive)
 	}
 	presented, err := thumbprintOf(*header.JSONWebKey)
 	if err != nil {

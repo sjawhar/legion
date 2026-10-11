@@ -153,18 +153,47 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 	if status != http.StatusCreated || enrollmentID == "" {
 		t.Fatalf("enroll a pod = %d %s, want 201", status, answer)
 	}
-	renew := func() int {
+	renewAt := func(body any, at time.Time) (int, string) {
 		t.Helper()
 		path := "/v1/enrollments/" + enrollmentID + "/renew"
-		signed, err := proof.Sign(sessionKey, enrollmentID, http.MethodPost, base+path, time.Now())
+		signed, err := proof.Sign(sessionKey, enrollmentID, http.MethodPost, base+path, at)
 		if err != nil {
 			t.Fatal(err)
 		}
-		status, _ := call(http.MethodPost, path, map[string]string{"Proof": signed}, nil)
-		return status
+		status, answer := call(http.MethodPost, path, map[string]string{"Proof": signed}, body)
+		return status, field(answer, "code")
 	}
-	if status := renew(); status != http.StatusOK {
-		t.Fatalf("the pod renews = %d, want 200", status)
+	renew := func(body any) (int, string) { t.Helper(); return renewAt(body, time.Now()) }
+	podToken := func(uid string) string {
+		claims := issuer.Claims("system:serviceaccount:legion:legion-worker", podAudience)
+		claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": uid}}
+		return issuer.Mint(t, podKey, claims)
+	}
+	expiredToken := func(uid string) string {
+		claims := issuer.Claims("system:serviceaccount:legion:legion-worker", podAudience)
+		claims["iat"], claims["exp"] = time.Now().Add(-20*time.Minute).Unix(), time.Now().Add(-10*time.Minute).Unix()
+		claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": uid}}
+		return issuer.Mint(t, podKey, claims)
+	}
+
+	t.Log("--- the pod renews: no token accepted until its first token renewal, another pod's token and its own expired token refused, a skewed proof retryable, then no token refused")
+	if status, code := renew(nil); status != http.StatusOK {
+		t.Fatalf("the new pod renews with no token = %d %s, want 200 (the ratchet is not set yet)", status, code)
+	}
+	if status, code := renew(map[string]any{"pod_token": podToken("pod-2")}); status != http.StatusForbidden || code != "POD_IDENTITY_MISMATCH" {
+		t.Fatalf("the pod renews with another pod's token = %d %s, want 403 POD_IDENTITY_MISMATCH", status, code)
+	}
+	if status, code := renew(map[string]any{"pod_token": expiredToken("pod-1")}); status != http.StatusForbidden || code != "POD_TOKEN_EXPIRED" {
+		t.Fatalf("the pod renews with its own token past its expiry = %d %s, want 403 POD_TOKEN_EXPIRED", status, code)
+	}
+	if status, code := renewAt(map[string]any{"pod_token": podToken("pod-1")}, time.Now().Add(-10*time.Minute)); status != http.StatusUnauthorized || code != "PROOF_INVALID" {
+		t.Fatalf("the pod renews with a proof signed 10 minutes ago = %d %s, want 401 PROOF_INVALID", status, code)
+	}
+	if status, code := renew(map[string]any{"pod_token": podToken("pod-1")}); status != http.StatusOK {
+		t.Fatalf("the pod renews with its own token = %d %s, want 200", status, code)
+	}
+	if status, code := renew(nil); status != http.StatusForbidden || code != "POD_TOKEN_REQUIRED" {
+		t.Fatalf("the pod renews with no token after renewing with it = %d %s, want 403 POD_TOKEN_REQUIRED", status, code)
 	}
 
 	t.Log("--- carol, who approved nothing, lists the daemon's login and revokes it")
@@ -177,8 +206,8 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 	if status != http.StatusOK || field(answer, "state") != "revoked" {
 		t.Fatalf("carol revokes it = %d %s, want 200 revoked", status, answer)
 	}
-	if status := renew(); status != http.StatusUnauthorized {
-		t.Fatalf("the pod renews after the revoke = %d, want 401", status)
+	if status, code := renew(map[string]any{"pod_token": podToken("pod-1")}); status != http.StatusUnauthorized || code != "ENROLLMENT_NOT_LIVE" {
+		t.Fatalf("the pod renews after the revoke = %d %s, want 401 ENROLLMENT_NOT_LIVE", status, code)
 	}
 
 	t.Log("--- ada's own machine login: refused to carol, approved by ada")
