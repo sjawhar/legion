@@ -326,8 +326,10 @@ func TestAPreRestartProcessAdmittedBeforeItsRelaunchNeitherMovesItsClaimNorLocks
 	if status != http.StatusConflict || !strings.Contains(string(body), "previous launch") {
 		t.Fatalf("the pre-restart process's registration = %d %s, want a named 409", status, body)
 	}
-	if c := d.claim(token); c.State != string(supervise.StateLaunchUncertain) || c.Locator != nil || c.Generation != 1 {
-		t.Fatalf("the admitted pre-restart hello left the claim %s at generation %d with locator %+v, want launch_uncertain at 1 with none",
+	// The store, not the listing: the listing's view shows a release in flight as queued, and the
+	// refused release is retried at every 20 ms sweep.
+	if c := storedClaim(t, cfg, token); c.State != supervise.StateLaunchUncertain || c.Locator != nil || c.Generation != 1 {
+		t.Fatalf("the admitted pre-restart hello left the claim stored %s at generation %d with locator %+v, want launch_uncertain at 1 with none",
 			c.State, c.Generation, c.Locator)
 	}
 	rt.mu.Lock()
