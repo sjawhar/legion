@@ -358,19 +358,6 @@ func splitArgs(args []string, takesValue map[string]bool) (flagArgs, positional 
 	return flagArgs, positional
 }
 
-// readPodToken reads a projected pod token through the package's one file-reader and refuses an
-// empty trimmed value. The caller never converts a blank file into a bodyless renewal: a pod given
-// --pod-token-file either sends a token or makes no request.
-func readPodToken(path string) (string, error) {
-	token, err := readTrimmed(path)
-	if err != nil {
-		return "", err
-	}
-	if token == "" {
-		return "", fmt.Errorf("pod token file %s is empty", path)
-	}
-	return token, nil
-}
 func loadKey(path string) (*ecdsa.PrivateKey, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {

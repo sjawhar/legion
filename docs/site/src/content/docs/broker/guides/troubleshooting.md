@@ -24,6 +24,12 @@ generated from the code, lists every code.
 | `ENROLLMENT_NOT_LIVE` from `agent-secrets renew` (exit 76) | The session ended: its lease lapsed, its launcher unenrolled it, or its machine login was revoked. The renewer names the enrollment, HTTP status and code; the pod shim stops rather than retrying it. | Start a new session (a box: a new key and enrollment, [run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
 | `PROOF_INVALID` | The broker refused the proof itself: its `iat` is outside `BROKER_PROOF_SKEW_SECONDS`, its key does not match the enrollment, or `AGENT_SECRETS_URL` differs from the broker's public URL. A renewer keeps retrying this code because a clock or URL correction can make the next proof valid. | Check the clock and URL; for a key mismatch, start a new session. |
 
+## A pod's renewer cannot read its token
+
+| Message | Cause | Fix |
+| --- | --- | --- |
+| `agent-secrets renew: ERROR: enrollment … cannot read its pod token (…); nothing was sent, so its lease lapses unless the file becomes readable` | The pod's renewer (`agent-secrets renew --pod-token-file`) could not read its projected service-account token, or read it blank, so it sent the broker nothing. The broker never hears of it, so this line in the pod's container log is the only record. The renewer does not exit 76 for it: at start it exits 2 and the worker shim starts it again 5 s later, and after a renewal it waits and reads the file again. If the file stays unreadable the enrollment's lease lapses, and its grants end with it. | Check the projected-token volume is mounted read-only at `/var/run/legion/agent-secrets-token` in that role's container, with the file `token` present and non-empty, and that the container's user can read it: the volume's mode is `0440`, readable through the pod's `fsGroup`. Once the file is readable, the next renewal succeeds. |
+
 ## The request was refused
 
 | Message | Cause | Fix |

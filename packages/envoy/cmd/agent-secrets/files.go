@@ -18,6 +18,20 @@ func readTrimmed(path string) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
+// readPodToken reads a projected pod token through readTrimmed and refuses an empty trimmed value.
+// The caller never converts a blank file into a bodyless renewal: a pod given --pod-token-file
+// either sends a token or makes no request.
+func readPodToken(path string) (string, error) {
+	token, err := readTrimmed(path)
+	if err != nil {
+		return "", err
+	}
+	if token == "" {
+		return "", fmt.Errorf("pod token file %s is empty", path)
+	}
+	return token, nil
+}
+
 // writeFileAtomic writes data to path by renaming a finished temporary file into place, so no
 // reader ever sees path half-written: a call waiting out a box's enrollment (awaitEnrollment)
 // reads key.pem and enrollment the moment each appears.
