@@ -2,6 +2,7 @@ package fake
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -111,13 +112,17 @@ func (c *Conn) AgentSecretsEnrollment(_ context.Context, enrollmentID string) er
 }
 
 // AgentSecretsToken answers the daemon asking the agent's shim to read its projected token again:
-// the token SetAgentSecretsToken gave it.
+// the token SetAgentSecretsToken gave it. With none given it fails, so a test that never expected
+// the daemon to ask sees the request go unanswered rather than an empty token.
 func (c *Conn) AgentSecretsToken(_ context.Context) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.tokenReads++
 	if err := c.failures["AgentSecretsToken"]; err != nil {
 		return "", err
+	}
+	if c.podToken == "" {
+		return "", errors.New("fake: the shim was asked for its projected token, and the test set none (SetAgentSecretsToken)")
 	}
 	return c.podToken, nil
 }

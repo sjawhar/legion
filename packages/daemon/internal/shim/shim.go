@@ -285,10 +285,10 @@ func (s *shim) connect() (acked bool, err error) {
 func (s *shim) fromDaemon(line []byte) {
 	frame, err := shimwire.Decode(line)
 	if err != nil {
-		switch frameType(line) {
+		switch typ := frameType(line); typ {
 		case shimwire.TypeAdoptWorkingCopy, shimwire.TypeAgentSecretsEnrollment, shimwire.TypeAgentSecretsToken:
 			// The daemon is its only sender, and it is never OMP's to read.
-			s.log.Printf("[worker-shim] refusing a malformed %s frame: %v", frameType(line), err)
+			s.log.Printf("[worker-shim] refusing a malformed %s frame: %v", typ, err)
 			return
 		}
 		s.toChild(line)

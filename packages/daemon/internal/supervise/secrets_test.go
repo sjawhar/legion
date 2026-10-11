@@ -200,7 +200,6 @@ func TestATransientEnrollmentFailureIsRetriedOnTheNextAliveObservation(t *testin
 func TestAnEnrollmentHeldPastTheHelloTokensExpiryPresentsAFreshToken(t *testing.T) {
 	h := newHarness(t)
 	broker := h.withSecrets()
-	broker.now = h.clock.Now
 	broker.enrollErr = errors.New("broker answered 0 NO_MACHINE_CREDENTIAL: machine login pending; code ABCD-1234")
 	h.launch()
 	h.helloWithToken(podToken(h.clock.Now().Add(time.Hour)))
@@ -246,7 +245,6 @@ func TestAHeldTokenIsReadAgainOnlyWhenItCouldExpireBeforeTheBrokerVerifiesIt(t *
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
 			broker := h.withSecrets()
-			broker.now = h.clock.Now
 			fresh := podToken(h.clock.Now().Add(time.Hour))
 			h.conn.SetAgentSecretsToken(fresh)
 			hello := podToken(h.clock.Now().Add(tc.left))
@@ -273,7 +271,6 @@ func TestAHeldTokenIsReadAgainOnlyWhenItCouldExpireBeforeTheBrokerVerifiesIt(t *
 func TestAShimThatCannotReadItsTokenAgainWaitsForItsNextHello(t *testing.T) {
 	h := newHarness(t)
 	broker := h.withSecrets()
-	broker.now = h.clock.Now
 	h.conn.FailAgentSecretsToken(fmt.Errorf("worker-stream: %s refused agent-secrets-token: Unknown command: agent-secrets-token: %w", h.token, runtime.ErrTokenRefused))
 	h.launch()
 	h.helloWithToken(podToken(h.clock.Now().Add(-time.Minute)))
@@ -301,7 +298,6 @@ func TestAShimThatCannotReadItsTokenAgainWaitsForItsNextHello(t *testing.T) {
 func TestATokenRequestTheTransportLosesIsRetriedOnTheNextAliveObservation(t *testing.T) {
 	h := newHarness(t)
 	broker := h.withSecrets()
-	broker.now = h.clock.Now
 	h.conn.FailAgentSecretsToken(errors.New("worker-stream: agent-secrets-token: no answer on the worker stream within the RPC timeout"))
 	h.launch()
 	h.helloWithToken(podToken(h.clock.Now().Add(-time.Minute)))

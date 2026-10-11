@@ -655,9 +655,9 @@ func waitFor(t *testing.T, what string, ch <-chan string) string {
 var errBoom = errors.New("boom")
 
 // fakeEnroller is the broker as the machine sees it: it records every enrollment and revocation,
-// mints ids, and fails what the test told it to. With now set it verifies the pod token's expiry
-// as the broker does (enroll.Service.Create), answering an expired one with the refusal the broker
-// gives every token it cannot verify.
+// mints ids, and fails what the test told it to. It verifies the pod token's expiry against now
+// as the broker does (enroll.Service.Create), answering an expired or unreadable one with the
+// refusal the broker gives every token it cannot verify.
 type fakeEnroller struct {
 	mu          sync.Mutex
 	enrollments []PodEnrollment
@@ -675,10 +675,8 @@ func (f *fakeEnroller) Enroll(_ context.Context, e PodEnrollment) (string, error
 	if f.enrollErr != nil {
 		return "", f.enrollErr
 	}
-	if f.now != nil {
-		if expires, ok := tokenExpiry(e.PodToken); !ok || !expires.After(f.now()) {
-			return "", permanentErr{"broker answered 403 POD_IDENTITY_MISMATCH: the projected token does not identify this pod"}
-		}
+	if expires, ok := tokenExpiry(e.PodToken); !ok || !expires.After(f.now()) {
+		return "", permanentErr{"broker answered 403 POD_IDENTITY_MISMATCH: the projected token does not identify this pod"}
 	}
 	f.enrollments = append(f.enrollments, e)
 	f.next++
@@ -754,7 +752,7 @@ var testIdentity = &AgentSecretsIdentity{Thumbprint: "NzbLsXh8uDCcd-6MNwXF4W_7no
 // withSecrets gives the harness a broker; hello sends the identity with every hello from then on.
 func (h *harness) withSecrets() *fakeEnroller {
 	h.t.Helper()
-	f := &fakeEnroller{}
+	f := &fakeEnroller{now: h.clock.Now}
 	h.deps.Secrets = f
 	h.start(h.store.load(h.token))
 	return f
