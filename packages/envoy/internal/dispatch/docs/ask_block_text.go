@@ -62,20 +62,20 @@ func (s *Service) SetAskBlockText(
 	actor model.Actor,
 ) (AskBlockText, error) {
 	var stored *AskBlockText
-	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
-		tree, err := treeOf(doc)
+	err := s.applyLive(ctx, artifactID, actor, func(doc *crdt.Doc, current *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
+		tree, err := startTree(current, doc)
 		if err != nil {
 			return err
 		}
-		current, err := askBlockOf(tree, blockID)
+		block, err := askBlockOf(tree, blockID)
 		if err != nil {
 			return err
 		}
 		want := AskBlockText{
-			Question: current.question,
-			Options:  current.options,
-			Multiple: current.multiple,
-			Urgency:  current.urgency,
+			Question: block.question,
+			Options:  block.options,
+			Multiple: block.multiple,
+			Urgency:  block.urgency,
 		}
 		attributes := pmdoc.Attrs{}
 		if edit.Multiple != nil {
@@ -93,10 +93,10 @@ func (s *Service) SetAskBlockText(
 			want.Options = normalizeAskOptions(*edit.Options)
 		}
 
-		wroteBody := askBlockBodyChanges(current, edit)
+		wroteBody := askBlockBodyChanges(block, edit)
 		var next *pmdoc.Node
 		if wroteBody {
-			children, err := askBlockChildren(current, edit, pmdoc.NewWriteBudget())
+			children, err := askBlockChildren(block, edit, pmdoc.NewWriteBudget())
 			if err != nil {
 				return err
 			}

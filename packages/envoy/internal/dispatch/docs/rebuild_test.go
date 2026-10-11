@@ -229,6 +229,40 @@ func TestARebuildFromTheLatestVersionRestoresItWhateverItWeighs(t *testing.T) {
 	}
 }
 
+// A rebuild whose seed holds more items than ygo decodes in one update (maxUpdateItems) is refused
+// as too large to store, as an append of such an update is (AppendUpdateTx), not failed as a fault:
+// the route answers it 413 CAP_EXCEEDED rather than 500. 160,000 empty list items make about 1.12
+// million items, from 320 KB of markdown, and replace no history.
+func TestARebuildWhoseSeedPassesTheItemCapIsRefusedAsTooLarge(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	items := strings.Repeat("-\n", 160_000)
+	if _, err := database.Pool.Exec(context.Background(), `update artifact_versions set markdown = $2 where artifact_id = $1`, artifactID, items); err != nil {
+		t.Fatalf("store a version past the item cap: %v", err)
+	}
+	history := func(t *testing.T) string {
+		t.Helper()
+		var rows string
+		if err := database.Pool.QueryRow(context.Background(), `
+			select coalesce(string_agg(version::text || ':' || md5(update), ',' order by version), '')
+			from doc_updates where artifact_id = $1
+		`, artifactID).Scan(&rows); err != nil {
+			t.Fatalf("read document history: %v", err)
+		}
+		return rows
+	}
+	before := history(t)
+	persist := &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}
+	service := New(Deps{Store: database, Persistence: persist})
+	_, _, err := rebuildDocument(t, service, artifactID, nil)
+	if !errors.Is(err, ErrDocumentTooLarge) || !strings.HasPrefix(err.Error(), "document too large to store: ") || !strings.Contains(err.Error(), fmt.Sprintf("exceed the %d", maxUpdateItems)) {
+		t.Fatalf("rebuild from a version past ygo's item cap: %v, want ErrDocumentTooLarge naming the cap, unwrapped", err)
+	}
+	if after := history(t); after != before {
+		t.Fatalf("the refused rebuild changed the document history from %q to %q", before, after)
+	}
+}
+
 // Markdown a caller supplies to a rebuild is weighed as a new document's is (SeedText): its
 // rendering, which can run longer than what was sent, may hold no more than one upload. 16,384
 // headings of exactly 1 MiB, which render as 1,064,959 bytes, are refused and replace no history;
