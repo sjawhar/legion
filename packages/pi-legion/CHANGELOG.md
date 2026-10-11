@@ -8,7 +8,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 ### Added
 
 - Every root architect's and phase worker's session measures six live capabilities as it boots
-  and reports them with `POST /legion/v1/claims/ready` (`capabilities`, contract 20, LEGION-663),
+  and reports them with `POST /legion/v1/claims/ready` (`capabilities`, contract 21, LEGION-663),
   which the daemon renders in `legion state`: `subagents` (`pi.agents` exposed, `task` registered,
   and `discoverAgents` resolving every agent the registration's `promptAgents` names, none of them
   in `task.disabledAgents`), `web-search` (`web_search` registered and one real `runSearchQuery`
@@ -45,16 +45,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- `legion.daemonApiVersion` is 20 (LEGION-663). Contract 20 adds an optional `capabilities`
+- `legion.daemonApiVersion` is 21 (LEGION-663). Contract 21 adds an optional `capabilities`
   report to `POST /legion/v1/claims/ready` — what a session measured of the six live capability
   rows at boot — and `promptAgents`, the sorted task agents the role's prompts dispatch, to the
   `claims/register` answer; on `GET /legion/v1/state` each claim view carries its session's latest
   report under `capabilities`, and a capability row's `status` is never `live` any more (a live
   row is `present`, `open` or `unchecked` from the sessions' reports). Install this release with a
-  Go `legion` built from the same commit: a daemon at 19 or earlier refuses the report as an
+  Go `legion` built from the same commit: a daemon at 20 or earlier refuses the report as an
   unknown field with 400, which exits the session, and this release's strict state reader is the
   first to accept a claim view carrying one. The daemon's boot gate and `legion probe-image` refuse
-  any earlier contract (the 8.11.0 release declares 19, the LEGION-631 entry below).
+  any earlier contract (the 8.11.0 release declares 19, the LEGION-631 entry below; 20 is the
+  LEGION-668 entry below, which no release declares yet).
 - `legion.daemonApiVersion` is 19 (LEGION-631). Each Legion role's GitHub App token is now a file
   the pane's plain `gh` and `git` read: the daemon sets `GH_CONFIG_DIR` (gh's `hosts.yml` and
   `config.yml`, rendered and refreshed by the daemon) and empties `GH_TOKEN`, `GITHUB_TOKEN` and
@@ -116,6 +117,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   from Dispatch's Agents page, and the controller answers it first, in the conversation. The
   daemon's `How this controller runs` prompt for that launch says the same.
   `legion.daemonApiVersion` is unchanged.
+- `legion.daemonApiVersion` is 20 (LEGION-668): the controller holds the review App's GitHub token
+  like every role — a daemon-launched controller pod gets it as a mounted gh directory
+  (`GH_CONFIG_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied, backed by a
+  `gh-controller` volume of the role Secret) and `legion controller start` fetches it over `POST
+  /legion/v1/controller/github-credential` and refreshes it every minute. The plugin's code does
+  not change; the number only gates the pair.
 - The `legion-worker` skill says what a shell `legion handoff complete` and a `task` subagent's bash
   can do since LEGION-630 removed the role gate, and how the phase-stall reminder then behaves
   (LEGION-634): a shell completion, should one run, completes the phase at the daemon and is not

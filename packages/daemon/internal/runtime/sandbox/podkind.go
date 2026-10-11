@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	corev1 "k8s.io/api/core/v1"
 
@@ -39,12 +40,6 @@ type podKind interface {
 	initVolumes(l launch) []corev1.Volume
 	// agentEnv is what each agent is told of its kind, mainEnvironment's one block of its own.
 	agentEnv(l launch) []corev1.EnvVar
-	// holdsGitHubCredential is whether each of the pod's roles holds a GitHub App token: its role
-	// Secret carries the role's gh files (GitHubHostsKey, GitHubConfigKey) beside the launcher
-	// token, its container projects them read-only at GHConfigDir, and the refresher rewrites them
-	// from the daemon's function. An issue pod's roles do; the controller works Dispatch alone and
-	// has no App (appauth.AppRoleFor).
-	holdsGitHubCredential() bool
 	// provision readies what a new pod needs before relaunch writes its launcher Secrets and sets
 	// its Sandbox, s, running, under nothing but the pod's own launch turn: each pod works on a
 	// volume of its own, so no pod's provisioning waits on another's.
@@ -165,31 +160,39 @@ func (issuePod) initVolumes(l launch) []corev1.Volume {
 }
 
 // agentEnv tells each agent its tree, issue and workspace, where its gh reads its credential, and
-// uv's directories on the issue's volume. GH_CONFIG_DIR is the role's gh volume (GHConfigDir), so
+// uv's directories on the issue's volume.
+func (issuePod) agentEnv(l launch) []corev1.EnvVar {
+	return slices.Concat(
+		[]corev1.EnvVar{
+			{Name: "LEGION_TREE", Value: l.spec.Tree},
+			{Name: "LEGION_ISSUE", Value: l.spec.Issue},
+			{Name: "LEGION_WORKSPACE", Value: l.workspace},
+		},
+		ghAgentEnv(),
+		[]corev1.EnvVar{
+			{Name: "UV_PYTHON_INSTALL_DIR", Value: uvPythonDir(l.spec.Issue)},
+			{Name: "UV_CACHE_DIR", Value: uvCacheDir},
+			{Name: "UV_LINK_MODE", Value: uvLinkMode},
+		},
+	)
+}
+
+// ghAgentEnv is the four variables that point an agent's gh at its own gh volume (GHConfigDir), so
 // its plain `gh` and the clone's `gh auth git-credential` helper (workspace.GitHubCredentialHelper)
 // read the role's App token from the files there. GH_TOKEN, GITHUB_TOKEN and GH_HOST are set to
-// the empty string, which gh ignores, so no value the image or an operator's rc file could leave
-// in the environment outranks the file: a non-empty GH_TOKEN would. No tool path or helper is
-// told: the agent's gh, git and jj are the image's on PATH, and the helper is the clone's own
-// configuration.
-func (issuePod) agentEnv(l launch) []corev1.EnvVar {
+// the empty string, which gh ignores, so no value the image or an operator's rc file could leave in
+// the environment outranks the file: a non-empty GH_TOKEN would. No tool path or helper is told:
+// the agent's gh, git and jj are the image's on PATH, and the helper is the clone's own
+// configuration. Every launcher role's container, the controller's included, holds its App's gh
+// files, so this is appended once for every kind.
+func ghAgentEnv() []corev1.EnvVar {
 	return []corev1.EnvVar{
-		{Name: "LEGION_TREE", Value: l.spec.Tree},
-		{Name: "LEGION_ISSUE", Value: l.spec.Issue},
-		{Name: "LEGION_WORKSPACE", Value: l.workspace},
 		{Name: "GH_CONFIG_DIR", Value: GHConfigDir},
 		{Name: "GH_TOKEN", Value: ""},
 		{Name: "GITHUB_TOKEN", Value: ""},
 		{Name: "GH_HOST", Value: ""},
-		{Name: "UV_PYTHON_INSTALL_DIR", Value: uvPythonDir(l.spec.Issue)},
-		{Name: "UV_CACHE_DIR", Value: uvCacheDir},
-		{Name: "UV_LINK_MODE", Value: uvLinkMode},
 	}
 }
-
-// holdsGitHubCredential is true: every workflow role has an App (appauth.AppRoleFor), whose token
-// its gh and git read from its own gh volume.
-func (issuePod) holdsGitHubCredential() bool { return true }
 
 // provision is what a new issue pod needs before it starts: it reads whether workspace-init must
 // find the issue's volume holding retained sessions (never under a session database, which keeps
@@ -223,9 +226,9 @@ func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox
 
 // controllerPod is the project controller's pod (`controller: daemon`): the controller's launcher
 // alone, working in the root of a volume of its own, which its Sandbox owns, so a relaunch resumes
-// its session. It belongs to no tree and holds no repository credential: it provisions no
-// workspace, and its one init container makes its sessions directory and holds a resume to its
-// session.
+// its session. It belongs to no tree and holds the review App's GitHub credential like any
+// verdict-only role (appauth.AppRoleFor), but provisions no workspace: its one init container
+// makes its sessions directory and holds a resume to its session.
 type controllerPod struct{}
 
 func (controllerPod) roles() []claim.Role { return []claim.Role{claim.RoleController} }
@@ -275,17 +278,13 @@ func (controllerPod) initContainers(r *Runtime, l launch) []corev1.Container {
 // initVolumes are none: its init container mounts only its volume.
 func (controllerPod) initVolumes(launch) []corev1.Volume { return nil }
 
-// agentEnv tells the agent LEGION_CONTROLLER=1, its pane marker, and nothing a tree agent alone
-// needs: no tree, issue or workspace, no GH_CONFIG_DIR of a GitHub credential, and none of uv's
-// directories on an issue's volume.
+// agentEnv tells the agent LEGION_CONTROLLER=1, its pane marker, where its gh reads its
+// credential (ghAgentEnv), and nothing a tree agent alone needs: no tree, issue or workspace, and
+// none of uv's directories on an issue's volume.
 func (controllerPod) agentEnv(launch) []corev1.EnvVar {
-	return []corev1.EnvVar{{Name: "LEGION_CONTROLLER", Value: "1"}}
+	env := []corev1.EnvVar{{Name: "LEGION_CONTROLLER", Value: "1"}}
+	return append(env, ghAgentEnv()...)
 }
-
-// holdsGitHubCredential is false: the controller works Dispatch, never GitHub, and
-// appauth.AppRoleFor has no App for it, so its Secret holds the launcher token alone and its pod
-// has no gh volume.
-func (controllerPod) holdsGitHubCredential() bool { return false }
 
 // provision readies nothing: the controller's pod provisions no workspace and mints no token.
 func (controllerPod) provision(context.Context, *Runtime, *launch, *sandbox) error { return nil }

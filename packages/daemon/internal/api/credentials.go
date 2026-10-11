@@ -132,7 +132,10 @@ func (s *server) claimHolds(grant credential.Grant) bool {
 	return supervised && s.grants.StillMatches(grant, machine.Claim())
 }
 
-func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant credential.Grant, role appauth.AppRole) (appauth.Lease, bool) {
+// appLease is the GitHub App token mint every credential route needs: the token source and
+// repository owner must be configured, and the mint itself must succeed. logRole names the role
+// in the error log line; it carries no secret.
+func (s *server) appLease(w http.ResponseWriter, r *http.Request, role appauth.AppRole, logRole string) (appauth.Lease, bool) {
 	if s.tokens == nil {
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
 		return appauth.Lease{}, false
@@ -143,8 +146,19 @@ func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant cre
 	}
 	lease, err := s.tokens.Token(r.Context(), role, s.githubOwner)
 	if err != nil {
-		s.log.Error("api: mint GitHub App token", "role", grant.Role, "owner", s.githubOwner, "error", err)
+		s.log.Error("api: mint GitHub App token", "role", logRole, "owner", s.githubOwner, "error", err)
 		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")
+		return appauth.Lease{}, false
+	}
+	return lease, true
+}
+
+// leaseForGrant is appLease for a claim's grant: the mint runs first since it is the slow step,
+// then the grant's claim must still hold the capability that minted it, so a claim revoked while
+// the mint was in flight is caught before its token is handed back.
+func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant credential.Grant, role appauth.AppRole) (appauth.Lease, bool) {
+	lease, ok := s.appLease(w, r, role, string(grant.Role))
+	if !ok {
 		return appauth.Lease{}, false
 	}
 	if !s.claimHolds(grant) {

@@ -60,11 +60,44 @@ func (s *shim) identity() (*shimwire.AgentSecretsHello, error) {
 		s.mu.Unlock()
 		s.log.Printf("[worker-shim] agent-secrets: key %s generated in %s", thumbprint, a.KeyDir)
 	}
+	token, err := readPodToken(a)
+	if err != nil {
+		return nil, err
+	}
+	return &shimwire.AgentSecretsHello{Thumbprint: thumbprint, PodToken: token}, nil
+}
+
+// readPodToken reads the projected token from its mount. The kubelet rewrites the file before the
+// token expires, so each read is the token as it is now.
+func readPodToken(a *AgentSecrets) (string, error) {
 	token, err := os.ReadFile(a.TokenFile)
 	if err != nil {
-		return nil, fmt.Errorf("agent-secrets: read the projected token %s: %w", a.TokenFile, err)
+		return "", fmt.Errorf("agent-secrets: read the projected token %s: %w", a.TokenFile, err)
 	}
-	return &shimwire.AgentSecretsHello{Thumbprint: thumbprint, PodToken: strings.TrimSpace(string(token))}, nil
+	return strings.TrimSpace(string(token)), nil
+}
+
+// podToken is the daemon's agent-secrets-token frame: the projected token is read again and
+// answered, for an enrollment the daemon makes after the token the hello carried has expired. A
+// pane with no key directory answers a refusal naming the flag, as enroll does.
+func (s *shim) podToken(f shimwire.AgentSecretsToken) {
+	answer := func(token string, err error) {
+		result := shimwire.AgentSecretsTokenResult{ID: f.ID, OK: err == nil, PodToken: token}
+		if err != nil {
+			result.Error = err.Error()
+			s.log.Printf("[worker-shim] agent-secrets: token request refused: %v", err)
+		}
+		s.toDaemon(result)
+	}
+	if err := f.Validate(); err != nil {
+		answer("", err)
+		return
+	}
+	if s.cfg.AgentSecrets == nil {
+		answer("", errors.New("this shim was started without --agent-secrets-key-dir; it has no projected token"))
+		return
+	}
+	answer(readPodToken(s.cfg.AgentSecrets))
 }
 
 // enroll is the daemon's agent-secrets-enrollment frame: the id is written to <key dir>/enrollment

@@ -48,7 +48,7 @@ export interface RegisterInput {
 }
 
 /** `claim.ReadyRequest`: the claim the registration issued, authenticated by its secret, and the
- * session's report of the six live capability rows (`src/capability-report.ts`, contract 20); the
+ * session's report of the six live capability rows (`src/capability-report.ts`, contract 21); the
  * controller's ready carries none. */
 export type ReadyInput = z.input<typeof LegionReadyRequest>;
 

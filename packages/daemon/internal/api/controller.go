@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -37,6 +39,25 @@ type ControllerSecretRequest struct {
 type ControllerSecretResponse struct {
 	Secret     string            `json:"secret"`
 	DesignGate config.DesignGate `json:"designGate"`
+}
+
+// ControllerCredentialRequest is `POST /legion/v1/controller/github-credential`'s body: the
+// current controller capability, the same secret `legion controller start` holds from
+// `ControllerSecretResponse`.
+type ControllerCredentialRequest struct {
+	Secret string `json:"secret"`
+}
+
+// ControllerCredentialResponse is `POST /legion/v1/controller/github-credential`'s answer: the
+// two files `ghconfig.Rendered` renders for the review App's token (Hosts for `gh`'s hosts.yml,
+// Config for its config.yml), the App name, and the token's expiry. `legion controller start`
+// writes them under `<state_dir>/gh` and refreshes them every minute; the plugin never reads this
+// route or that directory.
+type ControllerCredentialResponse struct {
+	Hosts     string `json:"hosts"`
+	Config    string `json:"config"`
+	App       string `json:"app"`
+	ExpiresAt string `json:"expiresAt"`
 }
 
 // ControllerRegisterResponse is `POST /legion/v1/claims/register`'s answer to a session that
@@ -103,6 +124,70 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	s.grants.RevokeControllers()
 	s.log.Info("api: minted a controller capability; the previous controller's registration and grants are revoked", "generation", generation)
 	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate})
+}
+
+// controllerGitHubCredential is `legion controller start`'s refresh call: proving the current
+// controller capability buys a fresh review App token, rendered as the two files `gh` reads
+// (ghconfig.Render). The capability compare runs under controllerMu, the same lock the mint and
+// the controller-session grant take, so a capability a concurrent mint just replaced is never
+// matched; the token mint itself runs after the lock is released, since GitHub is the slow step
+// and holding the lock across it would block every other controller-record read or mint for as
+// long as GitHub takes to answer. A caller whose capability a later `legion controller start` has
+// since replaced is refused with a code the CLI can tell apart from a missing or malformed
+// secret, so its refresh loop stops rather than retrying forever; a daemon that launches its own
+// controller (`controller: daemon`) refuses every call, as controllerSecret does, since its
+// controller's token lives in its pod's Secret and no `legion controller start` runs against it.
+func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Request) {
+	if s.controllerLaunched {
+		s.log.Warn("api: refused a controller GitHub credential: this daemon launches the project's controller itself")
+		writeFailure(w, http.StatusConflict, "CONTROLLER_LAUNCHED",
+			"this daemon launches the project's controller itself (controller: daemon), so legion controller start has none to start")
+		return
+	}
+	var req ControllerCredentialRequest
+	if !readBody(w, r, &req) {
+		return
+	}
+	if !requireFailureFields(w, field{"secret", req.Secret}) {
+		return
+	}
+	matched, err := s.controllerCapabilityCurrent(r, req.Secret)
+	if err != nil {
+		s.log.Error("api: read the controller record for a GitHub credential", "error", err)
+		writeFailure(w, http.StatusInternalServerError, "CONTROLLER_RECORD_UNREADABLE", "could not read the controller record")
+		return
+	}
+	if !matched {
+		s.log.Warn("api: refused a controller GitHub credential: INVALID_CONTROLLER_CAPABILITY")
+		writeFailure(w, http.StatusForbidden, "INVALID_CONTROLLER_CAPABILITY",
+			"the controller capability is not the current one: a later legion controller start replaced it")
+		return
+	}
+	app := appauth.AppRoleFor(claim.RoleController)
+	lease, ok := s.appLease(w, r, app, string(claim.RoleController))
+	if !ok {
+		return
+	}
+	rendered := ghconfig.Render(lease.Token, string(app), lease.ExpiresAt)
+	s.log.Info("api: controller github credential served", "app", rendered.App, "expiresAt", lease.ExpiresAt)
+	writeJSON(w, http.StatusOK, ControllerCredentialResponse{
+		Hosts:     rendered.Hosts,
+		Config:    rendered.Config,
+		App:       rendered.App,
+		ExpiresAt: lease.ExpiresAt.UTC().Format(timeFormat),
+	})
+}
+
+// controllerCapabilityCurrent compares secret against the project's current controller
+// capability under controllerMu, so the compare never races the mint that would replace it.
+func (s *server) controllerCapabilityCurrent(r *http.Request, secret string) (bool, error) {
+	s.controllerMu.Lock()
+	defer s.controllerMu.Unlock()
+	record, found, err := s.controller.Controller(r.Context(), s.project)
+	if err != nil {
+		return false, err
+	}
+	return found && subtle.ConstantTimeCompare(record.CapabilityHash, capabilityHash(secret)) == 1, nil
 }
 
 // registerController is a registration whose token is no launch's boot token, on a daemon that

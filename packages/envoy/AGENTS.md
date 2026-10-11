@@ -1940,14 +1940,26 @@ the synchronous listener call records the sent or failed attempt instead of blin
   notifying comment-thread or message-reply event without an `ask_id` keeps the author routes:
   a comment reply's
   thread-root author and its direct parent author when different; a message reply's direct parent
-  author; and, for a bare resolve or reopen, the resolved comment's own root author. An author
-  route is skipped for a human author and for a session replying to its own thread.
+  author; for a bare resolve or reopen, the resolved comment's own root author; and for a new
+  comment on a document (no `reply_to`, no `ask_id`) and its edit, every session the document
+  credits - the one that created it (`artifacts.created_by`) and every one a version lists
+  (`artifact_versions.authors`), read in one query (`loadDocumentSessionAuthors`) - so a person's
+  comment on a passage, on a whole document or as a suggestion reaches the agent that wrote the
+  document. That document is the anchor's (`anchor.artifact_id`) for a comment on a passage of an
+  issue's document, and the event's own for a project document; a comment on an issue's
+  conversation names no document and reaches no author. An author route is skipped for a human
+  author, who has no topic, for the event's own actor, so a session commenting on a document it
+  wrote is never told of its own comment, and for a session the comment's mentions already reach
+  (`suppressed_authors`: on a new comment every session a mention resolved to, so a mentioned
+  writer hears the comment once; on a reply only the thread's root author when mentioned). An
+  agent's comment notifies nobody (`notify` is false), so it takes no author route at all.
   `ask.follower_added` and `ask.follower_removed` also route directly to the session they name,
   since a newly added follower is not subscribed to the issue topic by default.
 - Dispatch document events use `notifications.dispatch.document.<PROJECT>.<slug>.<type>` and
   are retained in JetStream. Consumers subscribe or tail that document topic directly; a document
   has no delivery route, so the same author routes above are the only way an involved session
-  learns about a human reply, resolution, reopening, or edit on its ask or comment thread.
+  learns about a human reply, resolution, reopening, or edit on its ask or comment thread, or a
+  human's new comment on a document it wrote.
 - Dispatch project events use `notifications.dispatch.project.<PROJECT>.<type>` and are retained in JetStream. They have no issue route; project, repository-setting, and user-interface state consumers refresh from the event stream.
 - Direct agent topics use `notifications.agent.<session_id>`.
 - Role topics use `notifications.role.<role>` and are normally published to,
@@ -1984,7 +1996,9 @@ credential, runtime id and slot: `POST /v1/enrollments` takes an optional pod-on
 same way) naming one of several independent identities in one pod. The launcher whose proof
 authenticates the enrollment chooses the slot; a session's proof cannot enroll anything
 (`401 LAUNCHER_INVALID`). So each slot of a pod holds its own key, lease, requests and grants,
-while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
+while a pod's `runtime_id` stays the pod UID its token proves. A pod token past its expiry is
+`403 POD_TOKEN_EXPIRED`, naming that expiry, and any other token that does not prove the pod is
+`403 POD_IDENTITY_MISMATCH`. Omitted or `""` is the runtime's
 one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
 ALREADY_ENROLLED`, and the policy never sees the slot: a pod is a requester with no operator, whose

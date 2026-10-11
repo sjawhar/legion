@@ -11,7 +11,7 @@
   gains `promptAgents`, the sorted task agents the role's prompts dispatch, and the claim view on
   `GET /legion/v1/state` gains an optional `capabilities` (`measuredAt`, `incarnation`, `ok`,
   `open[{name, detail}]`), the claim's latest report as the daemon shows it — daemon API contract
-  20 (LEGION-663).
+  21 (LEGION-663).
 - Added `AnswerAskInput.expected_answer_at`, `AskRead.answers`, `InboxThread.answers`,
   `MyAnswerRow`, `MyAnswersResponse`, and `AskAnsweredEventPayload`, whose
   `previous_answer` names the answer a human changed (LEGION-622).
@@ -31,7 +31,7 @@
 
 - `live` is removed from the capability row's `status` enum on `GET /legion/v1/state`: a live row
   is `present`, `open` or `unchecked` from the sessions' reports, and a row no session has reported
-  reads `unchecked` beside an image row no probe has checked — daemon API contract 20 (LEGION-663).
+  reads `unchecked` beside an image row no probe has checked — daemon API contract 21 (LEGION-663).
 - Added `ISSUE_TITLE_MAX` (1,000), the longest issue title in UTF-16 units that
   `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept, generated into Go as
   `contracts.IssueTitleMax`; the dashboard's title fields take it as their `maxLength`

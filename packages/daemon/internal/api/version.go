@@ -116,7 +116,19 @@ package api
 // and 8.9.0 declaring them without the token file, so a daemon at any of them would pass the gate
 // against them. Renumbered three times, as the collision note says.)
 //
-// 20: LEGION-663 -- every Legion session reports the six live capability rows with its ready, and
+// 20: LEGION-668 -- the controller holds the review App's GitHub token like every role: `POST
+// /legion/v1/controller/github-credential` is the route `legion controller start` fetches the
+// controller's gh files from and refreshes them over, with the controller capability. The
+// controller pod's agent environment gains `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN` and
+// `GH_HOST` exactly as an issue pod's role container has them, backed by a `gh-controller` volume
+// of its role Secret. A `legion` built before 20 never fetches the credential, so its controller's
+// gh acts as nobody against a daemon that expects it to, and a daemon before 20 serves no such
+// route, so `legion controller start` from 20 is refused after the mint and cuts the incumbent
+// controller off for nothing: the boot gate and `legion probe-image` refuse the mixed pair. (This
+// branch first took 19; LEGION-631 landed at 19 first, pi-legion 8.10.1 declaring it without this
+// route, so a daemon at 19 would pass the gate against it. Renumbered, as the collision note says.)
+//
+// 21: LEGION-663 -- every Legion session reports the six live capability rows with its ready, and
 // the daemon renders them from those reports. `claim.RegisterResponse` gains `promptAgents`, the
 // sorted names of the task agents the role's prompts dispatch, which the session's subagents check
 // measures against; `claim.ReadyRequest` gains an optional `capabilities` report (`measuredAt`,
@@ -124,13 +136,14 @@ package api
 // and never refuses: a session runs and reports, whatever it reports. `api.ClaimView` gains
 // `capabilities` (`measuredAt`, `incarnation`, `ok`, `open`), the claim's latest report as the
 // state shows it, and `api.CapabilityState.status` loses `live`: a live row is `present`, `open` or
-// `unchecked` from the sessions' reports, never a promise of a check to come. A 19 plugin's strict
-// reader refuses a state whose claim views carry `capabilities`, and a 20 plugin's `capabilities`
-// on `claims/ready` is an unknown field a 19 daemon's `readBody` refuses with 400, which exits the
+// `unchecked` from the sessions' reports, never a promise of a check to come. A 20 plugin's strict
+// reader refuses a state whose claim views carry `capabilities`, and a 21 plugin's `capabilities`
+// on `claims/ready` is an unknown field a 20 daemon's `readBody` refuses with 400, which exits the
 // plugin, so the boot gate and `legion probe-image` refuse the mixed pair. (This branch first took
 // 19, based on LEGION-631's branch while that branch declared 18; LEGION-631 landed at 19 first,
-// pi-legion 8.11.0 declaring it without the report, so a daemon at 19 would pass the gate against
-// it. Renumbered, as
+// pi-legion 8.11.0 declaring it without the report. Renumbered to 20 at the retarget to main; then
+// LEGION-668 landed at 20 first, with no pi-legion release declaring it yet, so a daemon at 20
+// would pass the gate against a plugin without the report. Renumbered twice, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
-const DaemonAPIVersion = 20
+const DaemonAPIVersion = 21
