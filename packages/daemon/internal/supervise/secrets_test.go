@@ -196,7 +196,7 @@ func TestATransientEnrollmentFailureIsRetriedOnTheNextAliveObservation(t *testin
 // A projected token is valid for an hour at most, and the shim reads it once per hello. An
 // enrollment held up past the hello token's expiry (the daemon's machine login waiting for a
 // person to approve it) presents a token the shim reads again then, never the expired one, which
-// the broker refuses as POD_IDENTITY_MISMATCH.
+// the broker refuses as POD_TOKEN_EXPIRED.
 func TestAnEnrollmentHeldPastTheHelloTokensExpiryPresentsAFreshToken(t *testing.T) {
 	h := newHarness(t)
 	broker := h.withSecrets()
@@ -389,5 +389,52 @@ func TestWithoutABrokerNothingIsEnrolledOrRevoked(t *testing.T) {
 	h.observe(runtime.Gone)
 	if got := h.conn.Enrollments(); len(got) != 0 {
 		t.Fatalf("the shim was told %v", got)
+	}
+}
+
+// expiredTokenErr is the broker refusing the presented pod token as expired (POD_TOKEN_EXPIRED).
+type expiredTokenErr struct{ msg string }
+
+func (e expiredTokenErr) Error() string      { return e.msg }
+func (e expiredTokenErr) TokenExpired() bool { return true }
+
+// A broker whose clock runs further ahead of the daemon's than podTokenSkew refuses as expired a
+// token the daemon still holds good. The key stands: the machine drops the token, keeps the
+// identity, and at its next observation asks the shim for the pod's current token and enrolls the
+// same key with it, rather than waiting for a hello.
+func TestAnExpiredTokenRefusalReadsTheTokenAgainAtTheNextObservation(t *testing.T) {
+	h := newHarness(t)
+	broker := h.withSecrets()
+	broker.enrollErr = expiredTokenErr{"broker answered 403 POD_TOKEN_EXPIRED: the projected token has expired (oidc: token expired at 2026-10-11T04:54:28Z)"}
+	h.launch()
+	h.helloWithIdentity() // a token the daemon's clock holds good for an hour
+	h.register()
+	h.ready()
+	if lines := h.logs.lines("agent-secrets: the broker found the pod token expired", "POD_TOKEN_EXPIRED"); len(lines) != 1 {
+		t.Fatalf("log %q", h.logs.lines("agent-secrets"))
+	}
+	if refused := h.logs.lines("agent-secrets: enrollment refused"); len(refused) != 0 {
+		t.Fatalf("an expired token was read as a refusal of the key: %q", refused)
+	}
+	if h.m.identity == nil || h.m.identity.Thumbprint != testIdentity.Thumbprint || h.m.identity.PodToken != "" {
+		t.Fatalf("held identity %+v, want the key kept and the expired token dropped", h.m.identity)
+	}
+	if reads := h.conn.TokenReads(); reads != 0 {
+		t.Fatalf("the shim was asked for its token %d times before the refusal, want none: the daemon held it good", reads)
+	}
+
+	broker.enrollErr = nil
+	fresh := podToken(h.clock.Now().Add(time.Hour + time.Minute))
+	h.conn.SetAgentSecretsToken(fresh)
+	h.observe(runtime.Alive)
+	if reads := h.conn.TokenReads(); reads != 1 {
+		t.Fatalf("the shim was asked for its token %d times at the next observation, want once", reads)
+	}
+	enrollments := broker.enrolled()
+	if len(enrollments) != 1 || enrollments[0].PodToken != fresh || enrollments[0].Thumbprint != testIdentity.Thumbprint {
+		t.Fatalf("enrolled %+v, want the same key enrolled once, with the token the shim read", enrollments)
+	}
+	if c := h.claim(); c.Enrollment == nil {
+		t.Fatal("the claim records no enrollment")
 	}
 }
