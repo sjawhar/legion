@@ -267,3 +267,44 @@ func TestWithoutABrokerNothingIsEnrolledOrRevoked(t *testing.T) {
 		t.Fatalf("the shim was told %v", got)
 	}
 }
+
+// expiredTokenErr is the broker refusing the presented pod token as expired (POD_TOKEN_EXPIRED).
+type expiredTokenErr struct{ msg string }
+
+func (e expiredTokenErr) Error() string      { return e.msg }
+func (e expiredTokenErr) TokenExpired() bool { return true }
+
+// A broker that finds the pod token expired leaves the key standing: the machine drops the token
+// and keeps the identity, presents nothing again while it holds no token, and enrolls the same key
+// with the next token that arrives, without the expired one ever being presented twice.
+func TestAnExpiredTokenRefusalDropsTheTokenAndKeepsTheKey(t *testing.T) {
+	h := newHarness(t)
+	broker := h.withSecrets()
+	broker.enrollErr = expiredTokenErr{"broker answered 403 POD_TOKEN_EXPIRED: the projected token has expired (oidc: token expired at 2026-10-11T04:54:28Z)"}
+	h.launch()
+	h.helloWithIdentity()
+	h.register()
+	h.ready()
+	if lines := h.logs.lines("agent-secrets: the broker found the pod token expired", "POD_TOKEN_EXPIRED"); len(lines) != 1 {
+		t.Fatalf("log %q", h.logs.lines("agent-secrets"))
+	}
+	if refused := h.logs.lines("agent-secrets: enrollment refused"); len(refused) != 0 {
+		t.Fatalf("an expired token was read as a refusal of the key: %q", refused)
+	}
+	if h.m.identity == nil || h.m.identity.Thumbprint != testIdentity.Thumbprint || h.m.identity.PodToken != "" {
+		t.Fatalf("held identity %+v, want the key kept and the expired token dropped", h.m.identity)
+	}
+
+	broker.enrollErr = nil
+	h.observe(runtime.Alive)
+	if c := h.claim(); c.Enrollment != nil || len(broker.enrolled()) != 0 {
+		t.Fatalf("enrolled %+v with no token to present", broker.enrolled())
+	}
+
+	const fresh = "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjJ9.fresh"
+	h.conns.Register(h.token, h.conn)
+	h.must(StreamHello{Claim: h.token, Generation: h.generation(), AgentSecrets: &AgentSecretsIdentity{Thumbprint: testIdentity.Thumbprint, PodToken: fresh}})
+	if enrollments := broker.enrolled(); len(enrollments) != 1 || enrollments[0].PodToken != fresh || enrollments[0].Thumbprint != testIdentity.Thumbprint {
+		t.Fatalf("enrolled %+v, want the same key enrolled once, with the token the next hello carried", enrollments)
+	}
+}

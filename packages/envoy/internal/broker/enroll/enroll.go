@@ -30,6 +30,10 @@ var (
 	ErrOperatorMismatch = errors.New("this launcher credential enrols a different operator")
 	ErrAlreadyEnrolled  = errors.New("this runtime is already enrolled and live")
 	ErrPodIdentity      = errors.New("the projected token does not identify this pod")
+	// ErrPodTokenExpired is a pod token that verifies in every other way but has expired: the
+	// launcher presents the pod's current token with the same key, where ErrPodIdentity is a token
+	// for another pod, or no token of this cluster at all.
+	ErrPodTokenExpired = errors.New("the projected token has expired")
 	ErrNotLive          = errors.New("enrollment is not live")
 	ErrInvalidSlot      = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
 	ErrNoCredential     = errors.New("no such machine login")

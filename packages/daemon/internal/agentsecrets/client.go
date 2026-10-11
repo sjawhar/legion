@@ -127,6 +127,10 @@ func (e *APIError) Permanent() bool {
 	return e.Status >= 400 && e.Status < 500 && e.Status != http.StatusTooManyRequests
 }
 
+// TokenExpired is the broker refusing the pod token presented because it has expired
+// (POD_TOKEN_EXPIRED): the key stands, and the pod's current token enrolls it.
+func (e *APIError) TokenExpired() bool { return false }
+
 // IsPermanent reports whether err is a permanent broker refusal. A transport failure, a 5xx, a
 // 429, and a pending machine login are all transient.
 func IsPermanent(err error) bool {
