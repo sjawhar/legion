@@ -451,10 +451,7 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 			return err
 		}
 	} else if (event.Type == "comment.created" || event.Type == "comment.edited") && payloadString(event.Payload, "ask_id") == "" {
-		document, err := commentedDocument(ctx, deps, event)
-		if err != nil {
-			return err
-		}
+		document := commentedDocument(event)
 		if document != "" {
 			authors, err := loadDocumentSessionAuthors(ctx, deps, document)
 			if err != nil {
@@ -496,11 +493,10 @@ func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.
 	return decodeAuthor(authorJSON, "comment", commentID)
 }
 
-// commentedDocument resolves the document a comment event is on: its anchor's for a comment on a
-// passage (of an issue's document or a project document), otherwise the event's own artifact for a
-// comment on a whole project document. It returns "" for a comment on an issue's conversation or
-// for an image or file, which have no document-author route.
-func commentedDocument(ctx context.Context, deps Deps, event model.Event) (string, error) {
+// commentedDocument names the artifact a top-level comment is on: its anchor's for a comment on a
+// passage (of an issue's document or a project artifact), otherwise the event's own artifact for a
+// comment on a whole project artifact. The author lookup decides whether that artifact is a document.
+func commentedDocument(event model.Event) string {
 	document := ""
 	if values, ok := event.Payload.(map[string]any); ok {
 		document = payloadString(values["anchor"], "artifact_id")
@@ -508,20 +504,7 @@ func commentedDocument(ctx context.Context, deps Deps, event model.Event) (strin
 	if document == "" && event.ArtifactID != nil {
 		document = *event.ArtifactID
 	}
-	if document == "" {
-		return "", nil
-	}
-	var isDocument bool
-	if err := deps.Store.Pool.QueryRow(ctx, `select kind = 'doc' from artifacts where id = $1`, document).Scan(&isDocument); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return "", nil
-		}
-		return "", fmt.Errorf("load commented artifact %q: %w", document, err)
-	}
-	if !isDocument {
-		return "", nil
-	}
-	return document, nil
+	return document
 }
 
 // loadDocumentSessionAuthors lists, in one query, the sessions a document credits: the one that
