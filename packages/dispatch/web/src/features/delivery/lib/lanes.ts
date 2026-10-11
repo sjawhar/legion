@@ -82,14 +82,15 @@ export function foldLanes(prs: readonly DeliveryPR[], options: LaneOptions): Lan
   const totalBudget = Math.max(1, Math.floor(available / MIN_LANE_WIDTH_PX));
   const budgetForReal = Math.max(1, totalBudget - placeholderEntries.length);
 
+  const chosenKeys = [...new Set(chosen)];
   let shownReal = realEntries;
   let otherCount: number | null = null;
-  if (colorBy === "parentAgent" && chosen.length > 0) {
-    shownReal = chosen.flatMap((key) => {
+  if (colorBy === "parentAgent" && chosenKeys.length > 0) {
+    shownReal = chosenKeys.flatMap((key) => {
       const count = counts.get(key);
       return count === undefined || key in PLACEHOLDER_LABELS ? [] : [[key, count] as const];
     });
-    const rest = realEntries.filter(([key]) => !chosen.includes(key));
+    const rest = realEntries.filter(([key]) => !chosenKeys.includes(key));
     if (rest.length > 0) otherCount = rest.reduce((sum, [, count]) => sum + count, 0);
   } else if (!skipFold && realEntries.length > budgetForReal) {
     // "Other" takes one of the budget's lanes, so one fewer real value shows beside it: none at

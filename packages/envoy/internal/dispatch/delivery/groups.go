@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -189,35 +190,25 @@ func refuseTakenName(ctx context.Context, tx pgx.Tx, groupID *string, name strin
 
 // sessionsTitled lists, by id, every session a population pull request names whose latest title
 // (the one ResolveSessionTitles shows) is name without regard to case and that members does not
-// hold.
+// hold. ResolveSessionTitles is the one latest-title query; this function only scopes its ids to
+// the delivery population and applies the group rule.
 func sessionsTitled(ctx context.Context, tx pgx.Tx, name string, members []string) ([]string, error) {
-	rows, err := tx.Query(ctx, `
-		with titled as (
-			select distinct on (actor->>'id')
-				actor->>'id' as session_id,
-				actor->'origin'->>'session_title' as title
-			from events
-			where actor->>'kind' = 'session'
-				and actor->>'id' = any(array(select distinct unnest(sessions) from delivery_pull_requests))
-			order by actor->>'id', created_at desc
-		)
-		select session_id from titled
-		where lower(title) = lower($1) and session_id <> all($2)
-		order by session_id
-	`, name, members)
+	sessionIDs, err := ListPopulationSessionIDs(ctx, tx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	outside := []string{}
-	for rows.Next() {
-		var session string
-		if err := rows.Scan(&session); err != nil {
-			return nil, err
-		}
-		outside = append(outside, session)
+	titles, err := ResolveSessionTitles(ctx, tx, sessionIDs)
+	if err != nil {
+		return nil, err
 	}
-	return outside, rows.Err()
+	outside := []string{}
+	for session, title := range titles {
+		if strings.EqualFold(title, name) && !slices.Contains(members, session) {
+			outside = append(outside, session)
+		}
+	}
+	slices.Sort(outside)
+	return outside, nil
 }
 
 // refuseTitleClash holds a group's name to the title rule: a name may be a session's title only

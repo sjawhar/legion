@@ -259,9 +259,9 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	// (store.ForConcurrentRead): on the request's shared mark one read's open cursor would refuse
 	// the rest. The run jobs depend on the runs, so they follow the runs in the same goroutine.
 	//
-	// A timeline request therefore holds up to four of the pool's 16 connections
+	// A timeline request therefore holds up to five of the pool's 16 connections
 	// (store.sharedPoolSize) for the length of its longest read, where it held one at a time. That
-	// is fine because none of the four holds a lock or opens a transaction, so none waits on
+	// is fine because none of the five holds a lock or opens a transaction, so none waits on
 	// another caller or makes another caller wait on it: the deadlock the pool's guard exists to
 	// prevent needs a caller already holding a connection, which ForConcurrentRead refuses. A read
 	// past the pool's free connections waits for one, as any request does. The page reads the
@@ -273,6 +273,7 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		applyRuns        []delivery.DeliveryRun
 		jobsByRun        map[int64][]delivery.DeliveryRunJob
 		unfetchableCount int
+		groups           []delivery.SessionGroup
 	)
 	independent := []func(ctx context.Context) error{
 		func(ctx context.Context) (err error) {
@@ -302,6 +303,10 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		},
 		func(ctx context.Context) (err error) {
 			unfetchableCount, err = delivery.CountUnfetchablePullRequests(ctx, pool)
+			return err
+		},
+		func(ctx context.Context) (err error) {
+			groups, err = delivery.ListSessionGroups(ctx, pool)
 			return err
 		},
 	}
@@ -351,10 +356,6 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	if err != nil {
 		return deliveryPopulation{}, err
 	}
-	groups, err := delivery.ListSessionGroups(ctx, pool)
-	if err != nil {
-		return deliveryPopulation{}, err
-	}
 	parentAgents := delivery.NewParentAgents(groups, titles)
 	sessionTitles := map[string]string{}
 	sessionPRCounts := map[string]int{}
@@ -364,10 +365,7 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		}
 		first := pr.Sessions[0]
 		sessionPRCounts[first]++
-		sessionTitles[first] = first
-		if title, ok := titles[first]; ok {
-			sessionTitles[first] = title
-		}
+		sessionTitles[first] = delivery.SessionTitle(titles, first)
 	}
 	issues, err := s.deliveryIssueFacts(ctx, issueKeys)
 	if err != nil {

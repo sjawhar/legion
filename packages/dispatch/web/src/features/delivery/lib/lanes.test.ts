@@ -195,7 +195,7 @@ test("laned by Parent agent with values chosen, each chosen value has its lane, 
       width,
       components: {},
       sessionGroups: [],
-      chosen: ["b"],
+      chosen: ["b", "b"],
     });
     expect(lanes.map((lane) => [lane.key, lane.count])).toEqual([
       ["b", 2],

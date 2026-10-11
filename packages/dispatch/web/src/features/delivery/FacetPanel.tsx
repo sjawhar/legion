@@ -194,15 +194,20 @@ export function FacetPanel({
           />
         </div>
       </div>
-      {LIST_FACETS.map(({ key, label }) => (
-        <div key={key}>
+      {LIST_FACETS.map(({ key, label }) => {
+        const facet = (
           <Facet
             {...facetProps(key)}
+            key={key}
             label={label}
             valueLabel={(value) => valueLabel(key, value)}
             values={byCount(key)}
           />
-          {key === "parentAgent" ? (
+        );
+        if (key !== "parentAgent") return facet;
+        return (
+          <div key={key}>
+            {facet}
             <button
               className={`mt-1 text-xs underline ${linkText}`}
               onClick={() => setEditingGroups(true)}
@@ -210,9 +215,9 @@ export function FacetPanel({
             >
               Edit groups
             </button>
-          ) : null}
-        </div>
-      ))}
+          </div>
+        );
+      })}
       {editingGroups ? (
         <SessionGroupsEditor
           counts={data.session_pr_counts}

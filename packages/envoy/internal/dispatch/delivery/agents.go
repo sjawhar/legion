@@ -1,10 +1,6 @@
 package delivery
 
-import (
-	"context"
-
-	"github.com/sjawhar/envoy/internal/dispatch/store"
-)
+import "context"
 
 // ResolveSessionTitles answers each session's most recent known title, which the Delivery page
 // shows a session by (LEGION-567): a subagent's own commit trailer carries no parent-session
@@ -17,16 +13,15 @@ import (
 // recent known title" one indexed query per id. This is durable -- it survives the session ending,
 // unlike Envoy's live, TTL-expiring session registry -- for any session that ever claimed an
 // issue, posted a message/comment/ask, or wrote a document. A session with no Dispatch footprint
-// at all is simply absent from the returned map; the caller falls back to the bare session id
-// ("show the session as itself"), never a generic placeholder.
-func ResolveSessionTitles(ctx context.Context, pool *store.Pool, sessionIDs []string) (map[string]string, error) {
+// at all is simply absent from the returned map; SessionTitle falls back to its bare id.
+func ResolveSessionTitles(ctx context.Context, q Querier, sessionIDs []string) (map[string]string, error) {
 	titles := make(map[string]string, len(sessionIDs))
 	if len(sessionIDs) == 0 {
 		return titles, nil
 	}
 	// One sessionIDs lookup table joined against the index, rather than one query per id: a
 	// Delivery timeline page can name hundreds of distinct sessions across its window.
-	rows, err := pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		select distinct on (actor->>'id')
 			actor->>'id' as session_id,
 			actor->'origin'->>'session_title' as session_title
@@ -49,4 +44,32 @@ func ResolveSessionTitles(ctx context.Context, pool *store.Pool, sessionIDs []st
 		}
 	}
 	return titles, rows.Err()
+}
+
+// SessionTitle is the title Dispatch knows for session, or session itself when it has no
+// Dispatch footprint. ParentAgents and the timeline's editor payload share this fallback.
+func SessionTitle(titles map[string]string, session string) string {
+	if title, ok := titles[session]; ok {
+		return title
+	}
+	return session
+}
+
+// ListPopulationSessionIDs lists every session any stored delivery population pull request names.
+// The group title rule reads this population, while the timeline reads only its current window.
+func ListPopulationSessionIDs(ctx context.Context, q Querier) ([]string, error) {
+	rows, err := q.Query(ctx, `select distinct unnest(sessions) from delivery_pull_requests order by 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

@@ -38,8 +38,9 @@ test("grouping two sessions makes them one Parent agent", async ({ browser }) =>
 
   await page.getByRole("button", { name: "Edit groups" }).click();
   const editor = page.getByRole("dialog", { name: "Session groups" });
-  await editor.getByRole("checkbox", { name: "Planner, first run" }).check();
-  await editor.getByRole("checkbox", { name: "Planner, second run" }).check();
+
+  await editor.getByRole("checkbox", { name: "Planner, first run (e2e-planner-1)" }).check();
+  await editor.getByRole("checkbox", { name: "Planner, second run (e2e-planner-2)" }).check();
   await editor.getByLabel("New group name").fill("Release crew");
   await editor.getByRole("button", { name: "Create group" }).click();
   await expect(editor.getByRole("group", { name: "Release crew" })).toBeVisible();

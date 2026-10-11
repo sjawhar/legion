@@ -638,7 +638,7 @@ test("colouring by Parent agent offers the values to give their own colour and l
     ],
   });
   try {
-    renderPage(`${DELIVERY_URL}&colorBy=parentAgent&agents=group%3Ag1`);
+    renderPage(`${DELIVERY_URL}&colorBy=parentAgent&agents=group%3Ag1&agents=group%3Ag1`);
     const trigger = await screen.findByRole("button", { name: "Own colour and lane: 1 chosen" });
     fireEvent.click(trigger);
     const listbox = within(screen.getByRole("listbox", { name: "Own colour and lane options" }));
@@ -650,6 +650,27 @@ test("colouring by Parent agent offers the values to give their own colour and l
 
     fireEvent.change(screen.getByLabelText("Color merges by"), { target: { value: "repo" } });
     expect(screen.queryByRole("button", { name: /^Own colour and lane/ })).toBeNull();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("a malformed custom window falls back to the 28-day preset and removes its bad parameters", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
+  try {
+    renderPage("/delivery?mode=list&from=not-a-date&to=also-not-a-date");
+    const window = await screen.findByLabelText("Window");
+    expect((window as HTMLSelectElement).value).toBe("28d");
+    await waitFor(() => {
+      expect(currentSearch().has("from")).toBe(false);
+      expect(currentSearch().has("to")).toBe(false);
+      expect(currentSearch().has("window")).toBe(false);
+    });
+    const options = getDeliveryTimeline.mock.lastCall?.[0];
+    expect(Date.parse(options?.to ?? "") - Date.parse(options?.from ?? "")).toBe(
+      28 * 24 * 60 * 60 * 1000
+    );
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();

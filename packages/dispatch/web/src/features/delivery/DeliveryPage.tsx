@@ -44,6 +44,7 @@ import {
 import { parentAgentLabel } from "./lib/parentAgent";
 import {
   DEFAULT_WINDOW_PRESET,
+  hasMalformedWindowParams,
   presetRange,
   readWindow,
   type WindowChoice,
@@ -108,6 +109,8 @@ interface DeliveryUrlState {
  *  identity, so a render with an unchanged URL hands `deliveryTimelineQuery` the same options. */
 function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => void] {
   const [searchParams] = useSearchParams();
+  const update = useSearchParamsUpdate();
+  const malformedWindow = hasMalformedWindowParams(searchParams);
   const windowChoice = readWindow(searchParams);
   // A preset's range is computed when the preset is chosen or first read, then held: computing
   // "now" fresh on every render would mint a new ISO string (and so a new deliveryTimelineQuery
@@ -130,12 +133,23 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
     }
     ({ from, to } = presetRef.current);
   }
+  useEffect(() => {
+    if (!malformedWindow) return;
+    update((params) => {
+      params.delete("from");
+      params.delete("to");
+      params.delete("window");
+      params.delete("ws");
+      params.delete("we");
+    });
+  }, [malformedWindow, update]);
   const search = searchParams.get("q") ?? "";
   const colorByParam = searchParams.get("colorBy");
   const colorBy = COLOR_FACETS.find((facet) => facet === colorByParam) ?? DEFAULT_COLOR_BY;
   const lanes = searchParams.get("lanes") === "1";
   const mode: Mode = searchParams.get("mode") === "list" ? "list" : "timeline";
-  const { agents } = useRepeatableSearchParams(AGENTS_PARAM);
+  const { agents: agentParams } = useRepeatableSearchParams(AGENTS_PARAM);
+  const agents = useMemo(() => [...new Set(agentParams)], [agentParams]);
   const view = useMemo(() => ({ colorBy, lanes, mode, agents }), [colorBy, lanes, mode, agents]);
   const ws = searchParams.get("ws");
   const we = searchParams.get("we");
@@ -154,7 +168,6 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
     [arrayParams, search]
   );
 
-  const update = useSearchParamsUpdate();
   const setState = useCallback(
     (next: DeliveryUrlState) => {
       update((params) => {

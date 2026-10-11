@@ -31,12 +31,38 @@ function isPreset(value: string | null): value is WindowPreset {
   return WINDOW_PRESETS.some((preset) => preset === value);
 }
 
-/** The window the URL names: `from` and `to` together are a custom range, else `window` names a
- *  preset, else (absent or unknown) the 28-day preset. */
+function isCustomWindow(from: string, to: string): boolean {
+  const fromMs = Date.parse(from);
+  const toMs = Date.parse(to);
+  return (
+    Number.isFinite(fromMs) &&
+    Number.isFinite(toMs) &&
+    toMs > fromMs &&
+    toMs - fromMs <= MAX_WINDOW_DAYS * DAY_MS
+  );
+}
+
+/** Whether the address names a malformed window. A valid custom range wins over an accompanying
+ *  preset for backward compatibility; partial, unparseable, inverted and overlong custom values
+ *  are malformed, as is an unknown preset with no valid custom range. */
+export function hasMalformedWindowParams(params: URLSearchParams): boolean {
+  const from = params.get("from");
+  const to = params.get("to");
+  if (from !== null || to !== null) {
+    return from === null || to === null || !isCustomWindow(from, to);
+  }
+  const preset = params.get("window");
+  return preset !== null && !isPreset(preset);
+}
+
+/** The window the URL names: a valid `from` and `to` together are a custom range, else `window`
+ *  names a preset, else (absent or malformed) the 28-day preset. */
 export function readWindow(params: URLSearchParams): WindowChoice {
   const from = params.get("from");
   const to = params.get("to");
-  if (from !== null && to !== null) return { kind: "custom", from, to };
+  if (from !== null && to !== null && isCustomWindow(from, to)) {
+    return { kind: "custom", from, to };
+  }
   const preset = params.get("window");
   return { kind: "preset", preset: isPreset(preset) ? preset : DEFAULT_WINDOW_PRESET };
 }

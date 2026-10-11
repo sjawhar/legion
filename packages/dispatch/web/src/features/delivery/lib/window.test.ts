@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 
-import { customRange, MAX_WINDOW_DAYS, presetRange, readWindow } from "./window";
+import {
+  customRange,
+  hasMalformedWindowParams,
+  MAX_WINDOW_DAYS,
+  presetRange,
+  readWindow,
+} from "./window";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -15,6 +21,16 @@ test("the URL's window: from and to are a custom range, window names a preset, a
     kind: "preset",
     preset: "28d",
   });
+});
+
+test("a malformed custom window falls back to the default and tells the page to drop its parameters", () => {
+  const malformed = new URLSearchParams("from=not-a-date&to=also-not-a-date");
+  expect(readWindow(malformed)).toEqual({ kind: "preset", preset: "28d" });
+  expect(hasMalformedWindowParams(malformed)).toBe(true);
+
+  const inverted = new URLSearchParams("from=2026-10-11T00:00:00Z&to=2026-10-10T00:00:00Z");
+  expect(readWindow(inverted)).toEqual({ kind: "preset", preset: "28d" });
+  expect(hasMalformedWindowParams(inverted)).toBe(true);
 });
 
 test("a preset spans its days, ending now", () => {
