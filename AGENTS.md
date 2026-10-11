@@ -179,10 +179,8 @@ own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. Th
 `READY` packet with its completion; the daemon posts it on the Dispatch issue and, when the project's
 `projects.<KEY>.merge_queue_role` names one, publishes it to that role. A project may configure
 `projects.<KEY>.merge.by_hand` regular-expression paths: a matching pull request completes READY
-without auto-arming, and the repository's authorized person merges it. Its
-`merge.one_at_a_time` paths refuse READY while another matching pull request is in the merge queue;
-after it leaves, the merger sends a fresh READY. Otherwise, on acceptance the merger submits the
-pull request with `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` (a
+without auto-arming, and the repository's authorized person merges it. Otherwise, on acceptance the
+merger submits the pull request with `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` (a
 merge queue enqueues it; a repository without one arms auto-merge), and the repository's required
 reviews and checks decide when it merges. A head that moves before submission is not armed: the
 merger builds a new READY packet. When the head's own CI turns red before the merge, or the head

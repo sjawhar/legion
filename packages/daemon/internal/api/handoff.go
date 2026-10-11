@@ -161,7 +161,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 //   - NO_REPOSITORY: the issue's project has no repository configured (a guard; configuration
 //     requires one).
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_HEAD_CARRIES_HANDOFFS,
-//     READY_HEAD_MOVED, READY_CHECKS_NOT_GREEN, READY_ONE_AT_A_TIME_WAITING.
+//     READY_HEAD_MOVED, READY_CHECKS_NOT_GREEN.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
 // The reads are made as the implement App, whose token never leaves the daemon; a runtime that
