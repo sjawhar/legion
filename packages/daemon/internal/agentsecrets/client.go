@@ -31,7 +31,8 @@ import (
 
 // launcherService is the authorization_details "service" this daemon's token logins always
 // request: a Legion daemon's launcher credential is a service credential, never an operator's own
-// machine credential.
+// machine credential. It is also the request object's identifier, which the broker does not read
+// for a token login: it names the credential after the token's ServiceAccount instead.
 const launcherService = "legion-daemon"
 
 // loginRetryInitial and loginRetryMax bound the wait after a token login that failed (the broker
@@ -47,43 +48,44 @@ var (
 // Client speaks the broker's token-login and enrollment routes. URL is the broker's base URL with
 // no path (also the request object's audience); HTTP is the client every call goes through, nil
 // for http.DefaultClient; TokenFile is the path of the daemon's projected ServiceAccount token,
-// read at every login so the kubelet's rotation is always picked up; Log is where the login loop
-// reports, nil for slog's default.
+// read at every login so the kubelet's rotation is always picked up; Log is where each login's
+// outcome is reported, nil for slog's default.
 //
-// cred is the launcher credential the latest login won, cleared when the broker refuses it as
-// invalid; login is the latest login's outcome. loginMu serializes logins. proofMu is held shared
-// by every call a launcher proof signs (doProof) and exclusively by a login, which moves the
-// broker's credential to a new key: no proof signed with the old key is in flight when the broker
-// switches, so none comes back refused and clears a credential that was only renewed.
-// failedLogins and nextLogin pace the next login after a failed one. changed wakes the login loop
-// (Start) when a call finds no credential or the broker refuses it.
+// cred is the launcher credential the latest login won, cleared only when the broker refuses it
+// (doProof). Every login proves the same key again, minting a new one only when no credential is
+// held (the first login, or after a refusal), so a renewal never moves the broker to another key
+// and a proof in flight during one stays valid: nothing makes an Enroll or a Revoke wait for a
+// login. failure is why no live credential is held — the latest login's failure, or the broker's
+// refusal of the credential — nil once a login wins. changed wakes the login loop (Start) when a
+// call finds no live credential or the broker refuses it.
 type Client struct {
 	URL       string
 	HTTP      *http.Client
 	TokenFile string
 	Log       *slog.Logger
 
-	cred         atomic.Pointer[credential]
-	login        atomic.Pointer[LoginState]
-	loginMu      sync.Mutex
-	proofMu      sync.RWMutex
-	failedLogins int       // guarded by loginMu
-	nextLogin    time.Time // guarded by loginMu: the login loop starts no login before it
-	changed      chan struct{}
-	changedOnce  sync.Once
+	cred        atomic.Pointer[credential]
+	failure     atomic.Pointer[string]
+	changed     chan struct{}
+	changedOnce sync.Once
 }
 
 // credential is a won launcher credential: the key it is bound to (which never leaves process
-// memory), the id the broker answered, and when it expires.
+// memory), the id the broker answered, when it expires, and when the login loop renews it, halfway
+// from the login that won it to its expiry.
 type credential struct {
-	key     *ecdsa.PrivateKey
-	id      string
-	expires time.Time
+	key              *ecdsa.PrivateKey
+	id               string
+	expires, renewAt time.Time
 }
 
+// live reports whether c is a credential that has not expired at now.
+func (c *credential) live(now time.Time) bool { return c != nil && c.expires.After(now) }
+
 // LoginState is the daemon's token login as it knows it. State is one of "none" (no login has
-// finished yet), "issued", or "failed" (the latest login did not win a credential). reason is why a
-// "failed" login failed, for noCredentialError and the log; it is unexported so it never reaches
+// finished yet), "issued" (a credential that has not expired is held, whatever the latest renewal
+// did), or "failed" (no live credential, and the latest login failed or the broker refused the
+// credential). reason is why, for noCredentialError; it is unexported so it never reaches
 // GET /legion/v1/state.
 type LoginState struct {
 	State  string
@@ -139,148 +141,145 @@ func IsPermanent(err error) bool {
 	return errors.As(err, &api) && api.Permanent()
 }
 
-// Start logs the daemon in with its token now and keeps it logged in until ctx ends: it logs in
-// again halfway through each credential's life, at once when a call finds no credential or the
-// broker refuses it, and, after a login that failed, once loginRetryWait has passed. It returns
-// after the first login, with that login's error. No step of it asks a person anything. Call it
-// once.
+// Start logs the daemon in with its token now and keeps it logged in until ctx ends
+// (keepLoggedIn), under the retry bounds loginRetryInitial and loginRetryMax hold at the call. It
+// returns after the first login, with that login's error. No step of it asks a person anything.
+// Call it once.
 func (c *Client) Start(ctx context.Context) error {
-	err := c.Login(ctx)
-	go c.keepLoggedIn(ctx)
+	retry := backoff{initial: loginRetryInitial, most: loginRetryMax}
+	_, err := c.Login(ctx)
+	if err != nil {
+		retry.failed = 1
+	}
+	go c.keepLoggedIn(ctx, retry)
 	return err
 }
 
-// Login logs the daemon in once: it reads the token file, mints a fresh key, signs a request object
-// with it naming os.Hostname() and launcherService, and posts both to
-// /v1/launcher-credentials/token. On 200 the broker has moved the daemon's one launcher credential
-// to the new key, which the client then holds; any other outcome records the login failed and
-// lengthens the wait before the next. It holds proofMu exclusively while the broker switches keys.
-func (c *Client) Login(ctx context.Context) error {
-	c.loginMu.Lock()
-	defer c.loginMu.Unlock()
-	if err := c.tokenLogin(ctx); err != nil {
-		c.failedLogins++
-		c.nextLogin = time.Now().Add(loginRetryWait(c.failedLogins))
-		c.login.Store(&LoginState{State: "failed", reason: err.Error()})
-		return err
+// Login logs the daemon in once and answers when the credential it won expires: it reads the token
+// file and posts the token, with a request object signed by the held credential's key (a fresh one
+// when none is held), to /v1/launcher-credentials/token. On 200 the client holds the credential the
+// broker answered, bound to that key; any other outcome records the login failed and leaves a held
+// credential in place, which keeps working until it expires. Login logs its outcome, the expiry and
+// never the key, the token or the credential's id, except when ctx has ended. Start's loop is its
+// one caller; it is not safe to call concurrently with itself.
+func (c *Client) Login(ctx context.Context) (time.Time, error) {
+	cred, err := c.tokenLogin(ctx)
+	if err != nil {
+		reason := "token login failed: " + err.Error()
+		c.failure.Store(&reason)
+		if ctx.Err() == nil {
+			c.log().Error("agent-secrets: the token login failed; retrying", "error", err)
+		}
+		return time.Time{}, err
 	}
-	c.failedLogins, c.nextLogin = 0, time.Time{}
-	c.login.Store(&LoginState{State: "issued"})
-	return nil
+	c.failure.Store(nil)
+	c.cred.Store(cred)
+	c.log().Info("agent-secrets: logged in with the daemon's ServiceAccount token", "expires_at", cred.expires.UTC().Format(time.RFC3339))
+	return cred.expires, nil
 }
 
-// tokenLogin is one POST /v1/launcher-credentials/token, with loginMu held; on 200 it stores the
-// credential the broker answered.
-func (c *Client) tokenLogin(ctx context.Context) error {
+// tokenLogin is one POST /v1/launcher-credentials/token, answering the credential the broker
+// issued.
+func (c *Client) tokenLogin(ctx context.Context) (*credential, error) {
 	raw, err := os.ReadFile(c.TokenFile)
 	if err != nil {
-		return fmt.Errorf("agent-secrets login: read the ServiceAccount token: %w", err)
+		return nil, fmt.Errorf("agent-secrets login: read the ServiceAccount token: %w", err)
 	}
 	token := strings.TrimSpace(string(raw))
 	if token == "" {
-		return fmt.Errorf("agent-secrets login: the ServiceAccount token file %s is empty", c.TokenFile)
+		return nil, fmt.Errorf("agent-secrets login: the ServiceAccount token file %s is empty", c.TokenFile)
 	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	var key *ecdsa.PrivateKey
+	if held := c.cred.Load(); held != nil {
+		key = held.key
+	} else if key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader); err != nil {
+		return nil, fmt.Errorf("agent-secrets login: generate key: %w", err)
+	}
+	now := time.Now()
+	request, err := signRequestObject(key, c.URL, launcherService, now)
 	if err != nil {
-		return fmt.Errorf("agent-secrets login: generate key: %w", err)
+		return nil, fmt.Errorf("agent-secrets login: sign request object: %w", err)
 	}
-	host, err := os.Hostname()
-	if err != nil {
-		return fmt.Errorf("agent-secrets login: hostname: %w", err)
-	}
-	request, err := signRequestObject(key, c.URL, host, time.Now())
-	if err != nil {
-		return fmt.Errorf("agent-secrets login: sign request object: %w", err)
-	}
-	c.proofMu.Lock()
-	defer c.proofMu.Unlock()
 	status, body, err := c.do(ctx, http.MethodPost, "/v1/launcher-credentials/token", map[string]string{"token": token, "request": request}, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if status != http.StatusOK {
-		return refusal(status, body)
+		return nil, refusal(status, body)
 	}
 	var answer struct {
 		CredentialID string    `json:"credential_id"`
 		ExpiresAt    time.Time `json:"expires_at"`
 	}
-	if err := json.Unmarshal(body, &answer); err != nil || answer.CredentialID == "" || answer.ExpiresAt.IsZero() {
-		return fmt.Errorf("broker answered %d with a body that is not the contract's shape: %s", status, body)
+	if err := json.Unmarshal(body, &answer); err != nil {
+		return nil, fmt.Errorf("broker answered %d with a body that is not the contract's shape: %w", status, err)
 	}
-	c.cred.Store(&credential{key: key, id: answer.CredentialID, expires: answer.ExpiresAt})
-	return nil
+	if answer.CredentialID == "" || answer.ExpiresAt.IsZero() {
+		return nil, fmt.Errorf("broker answered %d with no credential_id or no expires_at", status)
+	}
+	return &credential{key: key, id: answer.CredentialID, expires: answer.ExpiresAt, renewAt: now.Add(answer.ExpiresAt.Sub(now) / 2)}, nil
 }
 
-// LoginStatus reports the latest login's outcome: {"none"} before the first login finishes.
+// LoginStatus reports the login as LoginState describes it.
 func (c *Client) LoginStatus() LoginState {
-	if s := c.login.Load(); s != nil {
-		return *s
+	cred := c.cred.Load()
+	if cred.live(time.Now()) {
+		return LoginState{State: "issued"}
+	}
+	if reason := c.failure.Load(); reason != nil {
+		return LoginState{State: "failed", reason: *reason}
+	}
+	if cred != nil {
+		return LoginState{State: "failed", reason: "the launcher credential expired before a login renewed it"}
 	}
 	return LoginState{State: "none"}
 }
 
-// keepLoggedIn is Start's loop: it logs in again when the next login is due (nextDue) and logs
-// each outcome, the expiry and never the key, the token or the credential's id.
-func (c *Client) keepLoggedIn(ctx context.Context) {
+// keepLoggedIn is Start's loop, retry counting how many logins in a row have failed so far: it
+// logs in again when nextDue says, and recomputes that whenever a call wakes it. After a failed
+// login it waits retry.wait before the next, so a refresh the broker keeps refusing, or a token file
+// it cannot read, is retried at 30 s doubling to 5 min and never in a tight loop, whether or not a
+// credential is still held.
+func (c *Client) keepLoggedIn(ctx context.Context, retry backoff) {
+	var retryAt time.Time
+	if retry.failed > 0 {
+		retryAt = time.Now().Add(retry.wait())
+	}
 	for {
-		timer := time.NewTimer(time.Until(c.nextDue(time.Now())))
+		timer := time.NewTimer(time.Until(c.nextDue(time.Now(), retryAt)))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return
 		case <-c.changes():
 			timer.Stop()
-			if !c.due(time.Now()) {
-				continue
-			}
+			continue
 		case <-timer.C:
 		}
-		if err := c.Login(ctx); err != nil {
+		if _, err := c.Login(ctx); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			c.log().Error("agent-secrets: the token login failed; retrying", "error", err, "retry_in", c.retryIn().String())
+			retry.failed++
+			retryAt = time.Now().Add(retry.wait())
 			continue
 		}
-		c.log().Info("agent-secrets: logged in with the daemon's ServiceAccount token", "expires_at", c.cred.Load().expires.UTC().Format(time.RFC3339))
+		retry.failed, retryAt = 0, time.Time{}
 	}
 }
 
-// nextDue is when the next login is due: halfway from now to the held credential's expiry, or,
-// with no credential, once the wait after the last failed login has passed.
-func (c *Client) nextDue(now time.Time) time.Time {
-	c.loginMu.Lock()
-	next := c.nextLogin
-	c.loginMu.Unlock()
-	if cred := c.cred.Load(); cred != nil {
-		if !cred.expires.After(now) {
-			return now
-		}
-		return now.Add(cred.expires.Sub(now) / 2)
+// nextDue is when the next login is due: with a live credential, the later of its renewal instant
+// and retryAt (the wait after the last failed login, zero after one that won); with none, or an
+// expired one, retryAt; and never before now.
+func (c *Client) nextDue(now, retryAt time.Time) time.Time {
+	due := retryAt
+	if cred := c.cred.Load(); cred.live(now) && cred.renewAt.After(due) {
+		due = cred.renewAt
 	}
-	if next.After(now) {
-		return next
+	if due.Before(now) {
+		return now
 	}
-	return now
-}
-
-// due reports whether a login woken by a call (a missing or refused credential) may start now: only
-// with no credential held and the wait after the last failed login passed.
-func (c *Client) due(now time.Time) bool {
-	if c.cred.Load() != nil {
-		return false
-	}
-	c.loginMu.Lock()
-	defer c.loginMu.Unlock()
-	return !now.Before(c.nextLogin)
-}
-
-// retryIn is the wait before the login loop's next attempt after a failure.
-func (c *Client) retryIn() time.Duration {
-	c.loginMu.Lock()
-	defer c.loginMu.Unlock()
-	return time.Until(c.nextLogin).Round(time.Second)
+	return due
 }
 
 // changes is the channel wake signals: one pending signal at most, so a burst of refusals wakes
@@ -290,7 +289,7 @@ func (c *Client) changes() chan struct{} {
 	return c.changed
 }
 
-// wake tells the login loop a call found no credential or the broker refused it.
+// wake tells the login loop a call found no live credential or the broker refused it.
 func (c *Client) wake() {
 	select {
 	case c.changes() <- struct{}{}:
@@ -366,17 +365,15 @@ func (c *Client) Revoke(ctx context.Context, id string) error {
 }
 
 // doProof signs a launcher proof over this call with the held credential's key and sends it as
-// the Proof header — never Authorization, which no route on this client uses. It holds proofMu
-// shared from reading the credential to handling the answer, so no login moves the broker to
-// another key while this call's proof is in flight. With no credential it wakes the login loop and
-// answers NO_MACHINE_CREDENTIAL. A 401 (LAUNCHER_INVALID) clears the credential that failed,
-// wakes the login loop, and answers NO_MACHINE_CREDENTIAL; a 401 on a credential a login already
-// replaced clears nothing.
+// the Proof header — never Authorization, which no route on this client uses. It takes no lock: a
+// renewal proves the same key again, so the broker keeps the credential's id and key and a proof
+// in flight during one stays valid. With no live credential it wakes the login loop and answers
+// NO_MACHINE_CREDENTIAL. A 401 (LAUNCHER_INVALID) clears the credential that failed, wakes the
+// login loop, and answers NO_MACHINE_CREDENTIAL; a 401 on a credential a login already replaced
+// clears nothing.
 func (c *Client) doProof(ctx context.Context, method, path string, body any) (int, []byte, error) {
-	c.proofMu.RLock()
-	defer c.proofMu.RUnlock()
 	cred := c.cred.Load()
-	if cred == nil {
+	if !cred.live(time.Now()) {
 		c.wake()
 		return 0, nil, c.noCredentialError()
 	}
@@ -391,34 +388,43 @@ func (c *Client) doProof(ctx context.Context, method, path string, body any) (in
 		return 0, nil, err
 	}
 	if status == http.StatusUnauthorized {
-		c.cred.CompareAndSwap(cred, nil)
+		if c.cred.CompareAndSwap(cred, nil) {
+			reason := "the broker refused the daemon's launcher credential; logging in again"
+			c.failure.Store(&reason)
+		}
 		c.wake()
 		return 0, nil, c.noCredentialError()
 	}
 	return status, raw, nil
 }
 
-// loginRetryWait is the wait after failed consecutive logins: loginRetryInitial, doubled for each
-// one after the first, never more than loginRetryMax.
-func loginRetryWait(failed int) time.Duration {
-	wait := loginRetryInitial
-	for i := 1; i < failed && wait < loginRetryMax; i++ {
+// backoff is the login loop's wait after failed consecutive logins: initial after the first,
+// doubled for each one after it, never more than most.
+type backoff struct {
+	initial, most time.Duration
+	failed        int
+}
+
+func (b backoff) wait() time.Duration {
+	wait := b.initial
+	for i := 1; i < b.failed && wait < b.most; i++ {
 		wait *= 2
 	}
-	return min(wait, loginRetryMax)
+	return min(wait, b.most)
 }
 
 // noCredentialError is the fail-closed refusal Enroll/Revoke return with no live launcher
-// credential: non-permanent, naming why — the latest login's failure, or that none has finished —
-// never the key, the token or the credential id.
+// credential: non-permanent, naming why — the latest login's failure, the broker's refusal of the
+// credential, its expiry, or that no login has finished — never the key, the token or the
+// credential id.
 func (c *Client) noCredentialError() error {
 	state := c.LoginStatus()
 	message := "no token login yet"
 	switch state.State {
 	case "failed":
-		message = "token login failed: " + state.reason
+		message = state.reason
 	case "issued":
-		message = "the broker refused the daemon's launcher credential; logging in again"
+		message = "the broker refused the launcher credential this call proved; a newer one is held"
 	}
 	return &APIError{Code: "NO_MACHINE_CREDENTIAL", Message: message}
 }

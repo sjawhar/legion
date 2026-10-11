@@ -17,6 +17,7 @@ const devbox: MachineLogin = {
   host: "devbox.example.com",
   issued_at: "2026-10-03T12:00:00Z",
   service: null,
+  subject: null,
 };
 const laptop: MachineLogin = {
   approved_by: "ada@example.com",
@@ -26,6 +27,7 @@ const laptop: MachineLogin = {
   host: "laptop.example.com",
   issued_at: "2026-10-02T08:00:00Z",
   service: null,
+  subject: null,
 };
 /** A service's login a person approved before services logged in with their own Kubernetes
  *  token, which someone other than the viewer approved: anyone signed in lists and revokes it. */
@@ -37,6 +39,7 @@ const daemon: MachineLogin = {
   host: "cluster.example.com",
   issued_at: "2026-10-03T09:00:00Z",
   service: "legion-daemon",
+  subject: null,
 };
 /** The devbox's previous login: expired, but a box it started still renews with its own key. */
 const stale: MachineLogin = {
@@ -47,6 +50,7 @@ const stale: MachineLogin = {
   host: "devbox.example.com",
   issued_at: "2026-09-26T11:00:00Z",
   service: null,
+  subject: null,
 };
 
 function renderPage() {
@@ -225,12 +229,13 @@ test("a service's login someone else approved is listed by its service and its a
   }
 });
 
-test("a service's token login names no approver, and its Revoke says the service logs in again", async () => {
+test("a service's token login names its ServiceAccount, and its Revoke says what logs in again", async () => {
   const tokenLogin: MachineLogin = {
     ...daemon,
     approved_by: "",
     credential_id: "cred-token",
     host: "legion-system/legion-daemon-legion",
+    subject: "system:serviceaccount:legion-system:legion-daemon-legion",
   };
   const getMachineLogins = spyOn(api, "getMachineLogins").mockResolvedValue({
     credentials: [tokenLogin],
@@ -244,11 +249,15 @@ test("a service's token login names no approver, and its Revoke says the service
     const row = (
       await section.findByText("legion-daemon on legion-system/legion-daemon-legion")
     ).closest("tr");
-    expect(within(row as HTMLElement).getByText("No one: its Kubernetes token")).toBeDefined();
+    expect(
+      within(row as HTMLElement).getByText(
+        "No one: system:serviceaccount:legion-system:legion-daemon-legion"
+      )
+    ).toBeDefined();
     fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Revoke" }));
     expect(confirm.mock.calls).toEqual([
       [
-        "Revoke the machine login for legion-daemon on legion-system/legion-daemon-legion? Every session it started, its worker pods included, ends at once; legion-daemon logs in again with its Kubernetes token unless its account is removed from the broker's BROKER_SERVICE_LOGINS.",
+        "Revoke the machine login for legion-daemon on legion-system/legion-daemon-legion? Every session it started, its worker pods included, ends at once, and a running pod stays without secrets until it is replaced; legion-daemon logs in again with its Kubernetes token, for the pods it launches next, unless system:serviceaccount:legion-system:legion-daemon-legion is removed from the broker's BROKER_SERVICE_LOGINS.",
       ],
     ]);
     expect(revokeMachineLogin).not.toHaveBeenCalled();

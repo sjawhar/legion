@@ -72,19 +72,34 @@ token, and no person approves it. `BROKER_SERVICE_LOGINS` lists which ServiceAcc
 as which service, whitespace-separated `<service>=<service account>` entries, for example
 `BROKER_SERVICE_LOGINS=legion-daemon=system:serviceaccount:legion-system:legion-daemon-legion`,
 one entry per daemon. Each account is named exactly, with no wildcard, and logs in as the one
-service its entry names. The broker verifies the token as it verifies a pod's, against
-`BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE`, so the setting needs both. Each account
-holds one launcher credential: every login moves it to the login's new key and to the token's
-expiry, at most an hour away, so the daemon's earlier key stops working at once and the pods it
-enrolled before a restart stay its own. A device-code login that names a service is refused
-`SERVICE_LOGS_IN_WITH_TOKEN`. Dispatch's machine-login page lists a daemon's token login for
-everyone signed in, naming no approver, and anyone may revoke it, which ends every pod it enrolled at
-once; the daemon then logs in again with its token under a new credential and enrolls its pods
-afresh. To stop a daemon logging in, remove its entry and redeploy the broker: its credential stops
-authenticating at its next call, and its next login is refused. Deleting the daemon's ServiceAccount
-stops new tokens, but a token already issued keeps verifying until it expires, at most an hour,
-because the broker checks tokens against the cluster's published keys rather than asking the API
-server.
+service its entry names. The broker refuses to start on an entry naming a namespace's `default`
+account, which every pod in that namespace whose spec names no account runs as, or an account
+`BROKER_SERVICES` binds for a service's pods, which every such pod holds a token for: either would
+let a pod log in as the daemon. The broker verifies the token as it verifies a pod's, against
+`BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE`, so the setting needs both, and refuses a
+token that lives longer than an hour from its issue (`exp` minus `iat`, beside a minute of skew) as
+`TOKEN_TOO_LONG_LIVED`: give the daemon's projected token an `expirationSeconds` of at most 3600,
+and `kubectl create token` a `--duration` of at most `1h`. Each account holds one launcher
+credential: every login moves it to the login's key and to the token's expiry, at most an hour
+away. A running daemon proves the same key at each login, so nothing about it changes but its
+expiry; a restart's login brings a new key, so the daemon's earlier key stops working at once and
+the pods it enrolled before the restart stay its own. A device-code login that names a service is
+refused `SERVICE_LOGS_IN_WITH_TOKEN`. Dispatch's machine-login page lists a daemon's token login
+for everyone signed in, naming its account and no approver, and anyone may revoke it, which ends
+every pod it enrolled at once; the daemon then logs in again with its token under a new credential,
+which enrolls the pods it launches next, while a pod already running stays without secrets until it
+is replaced. To stop a daemon logging in, remove its entry and redeploy the broker: its credential
+stops authenticating at its next call, and its next login is refused.
+
+Whoever can get a token for a listed account logs in as its service. Kubernetes access control on
+the daemon's namespace is that boundary: anyone who may create pods there naming the account,
+create `serviceaccounts/token` for it, or exec into the daemon's pod and read its token file can
+get one. Deleting the daemon's ServiceAccount stops new tokens, but a token already issued keeps
+verifying until it expires, at most an hour after it was minted, because the broker checks tokens
+against the cluster's published keys rather than asking the API server. A verified token login
+spends a rate-limit bucket of its account's own, never its source address's, so another caller
+behind the same address cannot keep the daemon from logging in.
+
 A service login a person approved through a device code before this broker keeps working until
 it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (7 days by default) after its approval.
 
@@ -307,7 +322,8 @@ own token is bound to the daemon's own pod, so a login whose `pod_uid` is anothe
 daemon off the cluster with such a token:
 
 ```sql
-select at, detail->>'pod_uid' as pod_uid, detail->>'key_thumbprint' as key, detail->>'expires_at' as expires_at
+select at, detail->>'pod_uid' as pod_uid, detail->>'key_thumbprint' as key, detail->>'expires_at' as expires_at,
+       detail->>'token_expires_at' as token_expires_at
 from audit
 where kind = 'launcher_credential.token_login' and detail->>'credential_id' = '<the query''s credential_id>'
 order by at;
@@ -323,11 +339,13 @@ revoke its enrollment as it lets the process go. If the pod is gone and the enro
 live (the daemon logs `supervise: agent-secrets: enrollment not revoked after every attempt; the
 lease ends it`, which a copy that keeps renewing never lets happen), or a copy holds the daemon's
 token, end the daemon's login at once: revoke it on Dispatch's machine-login page by its
-**Credential** (the query's `credential_id`, **Approved by** reading `No one: its Kubernetes
-token`), which ends every pod it enrolled, and, while a copy holds the daemon's token, remove its
-entry from `BROKER_SERVICE_LOGINS` and redeploy the broker so neither can log in again; find and
-remove what copied the token before you restore the entry, since a token lasts at most an hour
-after it was minted.
+**Credential** (the query's `credential_id`, **Approved by** reading `No one:` and the daemon's
+account), which ends every pod it enrolled, and, while a copy holds the daemon's token, remove its
+entry from `BROKER_SERVICE_LOGINS` and redeploy the broker so neither can log in again. Find and
+remove what copied the token before you restore the entry: the broker refuses a token that lives
+longer than an hour from its issue, so the copy's token ends at most an hour after it was minted,
+and the latest `token_expires_at` above among the logins that are not the daemon's says when.
+Pods the revoke ended stay without secrets until they are replaced.
 
 To end a login you know by its code instead, such as a person's machine or a service login from
 before token logins, find its row by that code:

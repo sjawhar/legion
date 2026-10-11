@@ -133,6 +133,40 @@ func TestContractARefusedCredentialLogsInAgain(t *testing.T) {
 	}
 }
 
+// TestContractARenewalKeepsTheCredentialAndItsPods: a renewal proves the key the credential is
+// already bound to, so the real broker keeps the credential's id and key: a pod enrolled before the
+// renewal is still the daemon's to end after it, a proof signed before the renewal still
+// authenticates, and the broker holds one credential throughout.
+func TestContractARenewalKeepsTheCredentialAndItsPods(t *testing.T) {
+	rig := newBrokerRig(t)
+	ctx := context.Background()
+	c := &Client{URL: rig.URL, TokenFile: daemonTokenFile(t, rig, brokertest.DaemonAccount, time.Hour)}
+	first, err := c.Login(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := c.cred.Load()
+	enrolled := enrollPod(t, rig, c, "pod-uid-1")
+	time.Sleep(10 * time.Millisecond)
+	// The kubelet's next token, which outlives the first, so the renewed credential expires later.
+	c.TokenFile = daemonTokenFile(t, rig, brokertest.DaemonAccount, time.Hour+30*time.Second)
+	renewed, err := c.Login(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := c.cred.Load()
+	if after.id != before.id || after.key != before.key || !renewed.After(first) {
+		t.Fatalf("renewal moved the credential from %s to %s (same key %v), expiry %v to %v; want the same credential, later", before.id, after.id, after.key == before.key, first, renewed)
+	}
+	c.cred.Store(before)
+	if err := c.Revoke(ctx, enrolled.ID); err != nil {
+		t.Fatalf("a proof under the credential as it was before the renewal: %v", err)
+	}
+	if n := count(t, rig, `select count(*) from launcher_credentials`); n != 1 {
+		t.Fatalf("the broker holds %d launcher credentials, want the account's one", n)
+	}
+}
+
 // TestContractOnlyTheListedAccountWithALiveTokenLogsIn: a token for an account the broker does not
 // list is refused ACCOUNT_NOT_LISTED and an expired token TOKEN_EXPIRED, each a failed login and no
 // credential; once BROKER_SERVICE_LOGINS drops the daemon's own account, its live credential stops
@@ -149,7 +183,7 @@ func TestContractOnlyTheListedAccountWithALiveTokenLogsIn(t *testing.T) {
 		{"an expired token", brokertest.DaemonAccount, -time.Minute, "TOKEN_EXPIRED"},
 	} {
 		client := &Client{URL: rig.URL, TokenFile: daemonTokenFile(t, rig, c.account, c.lifetime)}
-		err := client.Login(ctx)
+		_, err := client.Login(ctx)
 		var api *APIError
 		if !errors.As(err, &api) || api.Code != c.code || client.LoginStatus().State != "failed" {
 			t.Fatalf("%s: Login = %v, state %q; want %s and failed", c.name, err, client.LoginStatus().State, c.code)
@@ -157,7 +191,7 @@ func TestContractOnlyTheListedAccountWithALiveTokenLogsIn(t *testing.T) {
 	}
 
 	c := &Client{URL: rig.URL, TokenFile: daemonTokenFile(t, rig, brokertest.DaemonAccount, time.Hour)}
-	if err := c.Login(ctx); err != nil {
+	if _, err := c.Login(ctx); err != nil {
 		t.Fatal(err)
 	}
 	enrollPod(t, rig, c, "pod-uid-1")
@@ -165,7 +199,7 @@ func TestContractOnlyTheListedAccountWithALiveTokenLogsIn(t *testing.T) {
 	if _, err := c.Enroll(ctx, PodEnrollment{PodUID: "pod-uid-2", Thumbprint: "tp-2", PodToken: rig.MintPodToken(t, "pod-uid-2")}); !isNoCredential(err, "") {
 		t.Fatalf("Enroll once the account is unlisted = %v, want the broker's refusal", err)
 	}
-	err := c.Login(ctx)
+	_, err := c.Login(ctx)
 	var api *APIError
 	if !errors.As(err, &api) || api.Code != "ACCOUNT_NOT_LISTED" {
 		t.Fatalf("Login once the account is unlisted = %v, want ACCOUNT_NOT_LISTED", err)

@@ -394,7 +394,9 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   succeeds. The answer says why: `ACCOUNT_NOT_LISTED` (the broker's `BROKER_SERVICE_LOGINS` does not
   name the daemon's ServiceAccount for `legion-daemon`: add it and redeploy the broker),
   `TOKEN_EXPIRED` or `TOKEN_INVALID` (the token file is stale, or not a token for the broker's
-  issuer and audience: check the daemon's projected-token volume), `TOKEN_LOGIN_OFF` (the broker
+  issuer and audience: check the daemon's projected-token volume), `TOKEN_TOO_LONG_LIVED` (the
+  token lives longer than an hour from its issue: set the projected token's `expirationSeconds`,
+  or `kubectl create token`'s `--duration`, to at most an hour), `TOKEN_LOGIN_OFF` (the broker
   trusts no Kubernetes token issuer), `read the ServiceAccount token` (the file is missing), a
   `404` from a broker too old to have the token route, or a network fault. `.agentSecretsLogin`
   reads `"state": "failed"` until a login succeeds. Nothing needs restarting: the daemon retries

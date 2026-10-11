@@ -87,10 +87,12 @@ type Config struct {
 	// entries, such as legion-daemon=system:serviceaccount:legion-system:legion-daemon-legion. Each
 	// account (system:serviceaccount:<namespace>:<name>, named exactly: there is no wildcard) logs in
 	// as the one service its entry names and is given once; one service may have several accounts,
-	// one per machine. Keyed by account, each answering its service. A token whose subject is not
-	// listed is refused, and a credential an account's login issued stops authenticating once its
-	// entry is gone. Needs BROKER_K8S_OIDC_ISSUER, whose tokens it trusts. Unset, no service logs in
-	// with a token.
+	// one per machine. A namespace's default account is refused, since every pod there that names
+	// no account runs as it, and so is an account BROKER_SERVICES binds for a service's pods, since
+	// every such pod holds a token for it. Keyed by account, each answering its service. A token
+	// whose subject is not listed is refused, and a credential an account's login issued stops
+	// authenticating once its entry is gone. Needs BROKER_K8S_OIDC_ISSUER, whose tokens it trusts.
+	// Unset, no service logs in with a token.
 	ServiceLogins map[string]string
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
@@ -165,6 +167,36 @@ var serviceAccountPattern = regexp.MustCompile(`^system:serviceaccount:[a-z0-9](
 // defaultServiceAccount is the account name Kubernetes gives every namespace and runs every pod
 // whose spec names no account as.
 const defaultServiceAccount = "default"
+
+// serviceAccountEntry is one <service>=system:serviceaccount:<namespace>:<name> entry of
+// BROKER_SERVICES or BROKER_SERVICE_LOGINS, with its text as the setting gave it.
+type serviceAccountEntry struct{ service, subject, text string }
+
+// parseServiceAccounts reads setting's whitespace-separated <service>=<ServiceAccount subject>
+// entries, the form BROKER_SERVICES and BROKER_SERVICE_LOGINS share, in order. It refuses, naming
+// the entry: one not of that form or naming the service policy.OwnerShared; a namespace's default
+// account, which every pod in that namespace whose spec names no account runs as and can get a
+// token for the broker's audience with, so it proves nothing; and an account given twice, since
+// each account proves one service.
+func parseServiceAccounts(setting, value string) ([]serviceAccountEntry, error) {
+	var entries []serviceAccountEntry
+	seen := map[string]string{}
+	for _, text := range strings.Fields(value) {
+		service, subject, ok := strings.Cut(text, "=")
+		if !ok || !record.ValidService(service) || service == policy.OwnerShared || !serviceAccountPattern.MatchString(subject) {
+			return nil, fmt.Errorf("%s must be <service>=system:serviceaccount:<namespace>:<name> entries, each service lowercase letters, digits and hyphens, at most 64, not %s, got %q", setting, policy.OwnerShared, text)
+		}
+		if _, account, _ := strings.Cut(strings.TrimPrefix(subject, "system:serviceaccount:"), ":"); account == defaultServiceAccount {
+			return nil, fmt.Errorf("%s names a namespace's default service account, got %q: every pod in that namespace whose spec names no account runs as it and can get a token for the broker's audience, so it proves nothing; name a dedicated account", setting, text)
+		}
+		if other, twice := seen[subject]; twice {
+			return nil, fmt.Errorf("%s names the service account %s for both %q and %q; each account proves one service, so name it once", setting, subject, other, service)
+		}
+		seen[subject] = service
+		entries = append(entries, serviceAccountEntry{service: service, subject: subject, text: text})
+	}
+	return entries, nil
+}
 
 // databasePasswordPlaceholder is the removed BROKER_DATABASE_PASSWORD's placeholder. Load refuses a
 // BROKER_DATABASE_URL that names it, as it refuses the variable, rather than sign in with it as a
@@ -299,38 +331,33 @@ func Load(getenv func(string) string) (Config, error) {
 	if !policy.ValidKeyARN(cfg.SecretsKMSKeyARN) {
 		return Config{}, fmt.Errorf("BROKER_SECRETS_KMS_KEY_ARN must be a KMS key ARN, arn:aws:kms:<region>:<account>:key/<key id>, got %q", cfg.SecretsKMSKeyARN)
 	}
-	boundTo := map[string]string{}
-	for _, entry := range strings.Fields(getenv("BROKER_SERVICES")) {
-		name, subject, ok := strings.Cut(entry, "=")
-		_, duplicate := cfg.ServiceAccounts[name]
-		if !ok || !record.ValidService(name) || name == policy.OwnerShared || !serviceAccountPattern.MatchString(subject) || duplicate {
-			return Config{}, fmt.Errorf("BROKER_SERVICES must be name=system:serviceaccount:<namespace>:<name> entries, each name lowercase letters, digits and hyphens, at most 64, not %s and given once, got %q", policy.OwnerShared, entry)
+	services, err := parseServiceAccounts("BROKER_SERVICES", getenv("BROKER_SERVICES"))
+	if err != nil {
+		return Config{}, err
+	}
+	for _, entry := range services {
+		if _, duplicate := cfg.ServiceAccounts[entry.service]; duplicate {
+			return Config{}, fmt.Errorf("BROKER_SERVICES must give each service once, got %q", entry.text)
 		}
-		if _, account, _ := strings.Cut(strings.TrimPrefix(subject, "system:serviceaccount:"), ":"); account == defaultServiceAccount {
-			return Config{}, fmt.Errorf("BROKER_SERVICES binds a namespace's default service account, got %q: every pod in that namespace whose spec names no account runs as it and can get a token for the broker's audience, so it proves nothing; bind the service to a dedicated account its pods name", entry)
-		}
-		if other, shared := boundTo[subject]; shared {
-			return Config{}, fmt.Errorf("BROKER_SERVICES binds the service account %s to both %q and %q; each account proves one service, so bind it to one", subject, other, name)
-		}
-		boundTo[subject] = name
 		if cfg.ServiceAccounts == nil {
 			cfg.ServiceAccounts = map[string]string{}
 		}
-		cfg.ServiceAccounts[name] = subject
+		cfg.ServiceAccounts[entry.service] = entry.subject
 	}
-	for _, entry := range strings.Fields(getenv("BROKER_SERVICE_LOGINS")) {
-		name, subject, ok := strings.Cut(entry, "=")
-		_, duplicate := cfg.ServiceLogins[subject]
-		if !ok || !record.ValidService(name) || name == policy.OwnerShared || !serviceAccountPattern.MatchString(subject) {
-			return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS must be <service>=system:serviceaccount:<namespace>:<name> entries, each service lowercase letters, digits and hyphens, at most 64, not %s, got %q", policy.OwnerShared, entry)
-		}
-		if duplicate {
-			return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS names the service account %s twice; each account logs in as one service", subject)
+	logins, err := parseServiceAccounts("BROKER_SERVICE_LOGINS", getenv("BROKER_SERVICE_LOGINS"))
+	if err != nil {
+		return Config{}, err
+	}
+	for _, entry := range logins {
+		for name, subject := range cfg.ServiceAccounts {
+			if subject == entry.subject {
+				return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS names %s, the account BROKER_SERVICES binds for %q's pods, got %q: every such pod holds a token for it and would log in as %s; log the service in with an account of its own that no pod it enrolls runs as", entry.subject, name, entry.text, entry.service)
+			}
 		}
 		if cfg.ServiceLogins == nil {
 			cfg.ServiceLogins = map[string]string{}
 		}
-		cfg.ServiceLogins[subject] = name
+		cfg.ServiceLogins[entry.subject] = entry.service
 	}
 	issuer, audience, err := oidc.ConfigFromEnv(getenv, "BROKER_K8S_OIDC_ISSUER", "BROKER_K8S_OIDC_AUDIENCE")
 	if err != nil {

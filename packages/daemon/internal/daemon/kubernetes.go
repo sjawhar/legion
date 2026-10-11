@@ -244,24 +244,19 @@ func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []s
 // newSecretsLogin is the daemon's agent-secrets login as the machines' Enroller: it constructs the
 // client from runtime.kubernetes.agent_secrets and starts it at boot on a background context, so
 // the daemon logs in with its own projected ServiceAccount token (token_file) and keeps logging in
-// before each credential expires; no person approves any of it, a restart included. A login that
-// fails is logged and retried by the client, and pod enrollment waits for it. The client itself is
-// returned too, read-only, so the state route can show the login's current status (source.State,
-// agentsecrets.Client.LoginStatus). Never part of launchSecrets, so no pod is ever handed the
-// daemon's key, token or credential. Nil, nil without the block.
+// before each credential expires; no person approves any of it, a restart included. Every login
+// logs its own outcome (agentsecrets.Client.Login); one that fails is retried by the client, and
+// pod enrollment waits for it. The client itself is returned too, read-only, so the state route can
+// show the login's current status (source.State, agentsecrets.Client.LoginStatus). Never part of
+// launchSecrets, so no pod is ever handed the daemon's key, token or credential. Nil, nil without
+// the block.
 func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *agentsecrets.Client) {
 	k := cfg.Runtime.Kubernetes
 	if k == nil || k.AgentSecrets == nil {
 		return nil, nil
 	}
 	client := &agentsecrets.Client{URL: k.AgentSecrets.URL, HTTP: &http.Client{Timeout: 30 * time.Second}, TokenFile: k.AgentSecrets.TokenFile, Log: log}
-	go func() {
-		if err := client.Start(context.Background()); err != nil {
-			log.Error("agent-secrets: the daemon's token login failed at boot; retrying", "error", err)
-			return
-		}
-		log.Info("agent-secrets: logged in with the daemon's ServiceAccount token")
-	}()
+	go func() { _ = client.Start(context.Background()) }()
 	return brokerEnroller{client: client}, client
 }
 

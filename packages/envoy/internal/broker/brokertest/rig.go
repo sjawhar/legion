@@ -113,8 +113,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	}
 
 	serviceLogins := map[string]string{DaemonAccount: "legion-daemon"}
-	k8s := enroll.K8sPodVerifier{Verifier: podVerifier}
-	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: k8s, ServiceLogins: serviceLogins}
+	enr := &enroll.Service{Store: st, Lease: config.lease, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
@@ -125,7 +124,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
-		Replay: enr.Replay, Tokens: k8s, ServiceLogins: serviceLogins,
+		Replay: enr.Replay,
 	}
 
 	api.Register(mux, api.Deps{
@@ -262,7 +261,7 @@ func (r *Rig) MintAccountToken(t *testing.T, account string, lifetime time.Durat
 	t.Helper()
 	claims := r.podIssuer.Claims(account, podAudience)
 	now := time.Now()
-	claims["iat"] = now.Add(min(lifetime, 0) - time.Minute).Unix()
+	claims["iat"] = now.Add(min(lifetime, 0) - 5*time.Second).Unix()
 	claims["exp"] = now.Add(lifetime).Unix()
 	return r.podIssuer.Mint(t, r.podKey, claims)
 }

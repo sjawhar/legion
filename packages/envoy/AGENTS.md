@@ -2543,8 +2543,10 @@ it) — any other entry is refused naming it, and an account given twice names b
 `Config.ServiceAccounts` is nil and no service is registered),
 `BROKER_SERVICE_LOGINS` (optional; whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>`
 entries, the ServiceAccounts that log in as a service with their own token, each account given
-once and named exactly, keyed by account in `Config.ServiceLogins`; needs
-`BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
+once and named exactly, keyed by account in `Config.ServiceLogins`; read by the same parser as
+`BROKER_SERVICES` (`parseServiceAccounts`), so a namespace's `default` account is refused, and so
+is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for
+it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
@@ -2645,36 +2647,49 @@ any bucket. An attacker naming a specific victim operator repeatedly can still l
 operator's machine logins at a low rate; this is inherent to a per-login limit on an
 unauthenticated route and is an accepted risk, not a bug. A request object `Login` refuses (a
 person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQUEST_INVALID`.
-`POST /v1/launcher-credentials/token`, a service's token login, is rate limited per source address
-alone (`refuseAddress`), since it names no login before its token verifies. Read `routes()`
-for the current, authoritative route list.
+`POST /v1/launcher-credentials/token`, a service's token login, spends its source address's bucket
+(`refuseAddress`) before the token verifies only when the token's unverified subject
+(`enroll.ClaimedSubject`) is no listed account; a verified listed account spends an
+`account:<subject>` bucket of the per-login limit instead (`refuseAccount`), so a flood from an
+address the daemon shares cannot keep it from logging in. A token claiming a listed account that
+does not verify spends no bucket; the broker verifies each such token. Read `routes()` for the
+current, authoritative route list.
 
 A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
-token (`machine.Service.TokenLogin`, `POST /v1/launcher-credentials/token`), and no person
-approves it. The body carries the token and a machine request object the login's new key signed,
-with one `launcher_credential` detail naming the service. The broker verifies the token with
-`enroll.K8sPodVerifier.VerifyAccount`, the verifier pod enrollment uses against
-`BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` (a token bound to no pod is accepted, so a
-`kubectl create token` token logs a daemon off the cluster in), and maps its subject through
-`BROKER_SERVICE_LOGINS` (`config.ServiceLogins`, keyed by exact subject, no wildcard) to the one
-service it logs in as; a subject not listed, or listed for another service than the request names,
-is `403 ACCOUNT_NOT_LISTED`, an expired token `401 TOKEN_EXPIRED`, any other verification failure
-`401 TOKEN_INVALID`, a request object that does not verify or repeats a `jti` `400 REQUEST_INVALID`,
-a key another live credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a broker with no issuer
-`404 TOKEN_LOGIN_OFF`. Each subject holds one live launcher credential (migration 0015,
-`launcher_credentials.subject` and its partial unique index on live rows): the first login inserts
-it, with no operator, the service, host `<namespace>/<name>` and no `record_id`, and each later one
-moves it, in one upsert, to the new key and to the token's expiry, at most an hour away
-(`MaxTokenLoginLifetime`), so the previous key stops authenticating at once while every pod the
-account enrolled stays under the same credential, and writes one `launcher_credential.token_login`
-audit row naming the credential as actor, the subject, the pod the token is bound to and the new
-key. `AuthenticateLauncher` authenticates such a credential while `enroll.Service.ServiceLogins`
-still names its subject for its service, rather than through a record's chain, so removing the
-entry and redeploying ends it at its next call. A revoke on Dispatch's machine-login page ends it as
-any service's login (anyone signed in; `LiveCredentials` lists it with `approved_by` empty), and the
-service's next login inserts a new credential. A service login a person approved through a code
-before token logins keeps authenticating through its record's chain until it expires.
-for the current, authoritative route list.
+token (`POST /v1/launcher-credentials/token`: `machine.Service.VerifyServiceToken`, then
+`TokenLogin`), and no person approves it. The body carries the token and a machine request object
+the login's key signed, with one `launcher_credential` detail naming the service. The broker
+verifies the token with `enroll.Service.Pod.VerifyAccount`, the verifier pod enrollment uses
+against `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` (a token bound to no pod is
+accepted, so a `kubectl create token` token logs a daemon off the cluster in), refuses a token that
+names no `iat` or whose `exp` lies more than `MaxTokenLoginLifetime` (an hour) plus the request
+skew past it, `401 TOKEN_TOO_LONG_LIVED`, so a copied token logs in for at most an hour after it
+was minted, and maps its subject through `BROKER_SERVICE_LOGINS` (`enroll.Service.ServiceLogins`,
+keyed by exact subject, no wildcard) to the one service it logs in as; a subject not listed, or
+listed for another service than the request names, is `403 ACCOUNT_NOT_LISTED`, an expired token
+`401 TOKEN_EXPIRED`, any other verification failure `401 TOKEN_INVALID`, a request object that does
+not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `Login`
+shares), a key another live credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a broker with no
+issuer `404 TOKEN_LOGIN_OFF`. `enroll.Service.IssueTokenLogin` writes the credential. Each subject
+holds one live launcher credential (migration 0015, `launcher_credentials.subject`, its partial
+unique index on live rows, and a check that a row with a subject names a service and no record):
+the first login inserts it, with no operator, the service, host `<namespace>/<name>` and no
+`record_id`, and each later one moves it, in one upsert under the same id, to the request's key and
+to the token's expiry, at most an hour away, so a key that was already the credential's (the
+daemon's renewals) changes nothing but the expiry, a new key (a restart) stops the previous one
+authenticating at once, and every pod the account enrolled stays under the same credential. Each
+login writes one `launcher_credential.token_login` audit row naming the credential as actor, the
+subject, the pod the token is bound to, the key, and both the credential's and the token's expiry
+(`token_expires_at`). `AuthenticateLauncher` authenticates such a credential while
+`enroll.Service.ServiceLogins` still names its subject for its service, rather than through a
+record's chain, so removing the entry and redeploying ends it at its next call. A revoke on
+Dispatch's machine-login page ends it as any service's login (anyone signed in, through
+`record.MayDecide`; `LiveCredentials` lists it with `approved_by` empty and its `subject`), and the
+service's next login inserts a new credential, which enrolls the pods it launches next; the daemon
+never enrolls a pod the revoke ended again. A service login a person approved through a code
+before token logins keeps authenticating through its record's chain until it expires; a pending one
+can only be denied (`ErrServiceLogsInWithToken`, `400 SERVICE_LOGS_IN_WITH_TOKEN`, the same
+sentinel a device-code login naming a service is refused with).
 
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request

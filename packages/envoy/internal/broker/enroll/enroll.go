@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -65,6 +66,9 @@ type LiveCredential struct {
 	// Service names the service a service's login is for (legion-daemon); nil for a person's own
 	// machine.
 	Service *string
+	// Subject is the ServiceAccount a service's token login proved
+	// (system:serviceaccount:<namespace>:<name>); nil for every login a person approved.
+	Subject *string
 	// ApprovedBy is the login of the person who approved it, "" for a service's token login, which
 	// no person approves.
 	ApprovedBy string
@@ -100,14 +104,21 @@ type PodClaims struct {
 	PodUID  string
 }
 
+// PodVerifier verifies the cluster's projected ServiceAccount tokens (K8sPodVerifier): Verify a
+// pod's own token, bound to its pod, for enrollment and renewal; VerifyAccount a service's token,
+// bound to a pod or to none, for its token login (machine.Service.TokenLogin).
 type PodVerifier interface {
 	Verify(ctx context.Context, raw string) (PodClaims, error)
+	VerifyAccount(ctx context.Context, raw string) (AccountClaims, error)
 }
 
 type Service struct {
 	Store *store.Store
 	Lease time.Duration
-	Pod   PodVerifier
+	// Pod verifies the cluster's projected ServiceAccount tokens against BROKER_K8S_OIDC_ISSUER and
+	// BROKER_K8S_OIDC_AUDIENCE; nil on a broker that trusts no Kubernetes token issuer, which enrolls
+	// no pod and serves no token login.
+	Pod PodVerifier
 
 	// Chain re-verifies a launcher credential's issuance chain on every AuthenticateLauncher
 	// call: a launcher_credentials row is never trusted on its own, since it must still trace
@@ -154,10 +165,65 @@ func (s *Service) mintLauncherCredential(ctx context.Context, exec execer, opera
 	return id, nil
 }
 
-// MintLauncherCredentialTx mints a launcher credential inside tx, joined to the caller's own
-// transaction — machine.Service.ApplyDecision's own approval commit.
-func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, operator, service *string, host, thumbprint string, jwk json.RawMessage, recordID string, expires time.Time) (uuid.UUID, error) {
-	return s.mintLauncherCredential(ctx, tx, operator, service, host, thumbprint, jwk, recordID, expires)
+// MintLauncherCredentialTx mints a person's launcher credential, operating operator's machine,
+// inside tx, joined to the caller's own transaction — machine.Service.ApplyDecision's own approval
+// commit.
+func (s *Service) MintLauncherCredentialTx(ctx context.Context, tx pgx.Tx, operator, host, thumbprint string, jwk json.RawMessage, recordID string, expires time.Time) (uuid.UUID, error) {
+	return s.mintLauncherCredential(ctx, tx, &operator, nil, host, thumbprint, jwk, recordID, expires)
+}
+
+// TokenLogin is one verified token login, as IssueTokenLogin records it: the ServiceAccount
+// subject and the service BROKER_SERVICE_LOGINS maps it to, the pod its token is bound to ("" for
+// none) and when the token expires, the key the request object proved (its thumbprint and public
+// JWK), and when the credential expires.
+type TokenLogin struct {
+	Subject, Service, PodUID string
+	TokenExpires             time.Time
+	Thumbprint               string
+	JWK                      json.RawMessage
+	Expires                  time.Time
+}
+
+// IssueTokenLogin issues or moves the launcher credential of a service's token login, which no
+// person approves (machine.Service.TokenLogin verified everything in login). The subject holds one
+// live credential, created at its first login: each login moves it to login's key and expiry under
+// the same id, so a login proving the key the credential already holds changes only its expiry and
+// every pod the account enrolled stays under it. Its host is the account's <namespace>/<name>.
+// Each login writes a launcher_credential.token_login audit row naming the subject, the pod the
+// token is bound to, the key, and both expiries. A key another live credential holds is a unique
+// violation (store.IsUniqueViolation), and nothing is written.
+func (s *Service) IssueTokenLogin(ctx context.Context, login TokenLogin) (uuid.UUID, error) {
+	namespace, name := accountName(login.Subject)
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer tx.Rollback(ctx)
+	var id uuid.UUID
+	if err := tx.QueryRow(ctx, `insert into launcher_credentials (id, operator, service, host, key_thumbprint, public_jwk, record_id, subject, expires_at)
+		values ($1, null, $2, $3, $4, $5, null, $6, $7)
+		on conflict (subject) where subject is not null and revoked_at is null
+		do update set service=excluded.service, host=excluded.host, key_thumbprint=excluded.key_thumbprint,
+			public_jwk=excluded.public_jwk, expires_at=excluded.expires_at
+		returning id`,
+		uuid.New(), login.Service, namespace+"/"+name, login.Thumbprint, []byte(login.JWK), login.Subject, login.Expires).Scan(&id); err != nil {
+		return uuid.Nil, err
+	}
+	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.token_login',$1,
+		jsonb_strip_nulls(jsonb_build_object('credential_id',$2::text,'service',$3::text,'subject',$4::text,'pod_uid',nullif($5::text,''),
+			'key_thumbprint',$6::text,'expires_at',$7::timestamptz,'token_expires_at',$8::timestamptz)))`,
+		record.LauncherActor(id.String()), id.String(), login.Service, login.Subject, login.PodUID, login.Thumbprint, login.Expires, login.TokenExpires); err != nil {
+		return uuid.Nil, err
+	}
+	return id, tx.Commit(ctx)
+}
+
+// accountName splits a ServiceAccount subject, system:serviceaccount:<namespace>:<name>, which
+// BROKER_SERVICE_LOGINS already holds to that form.
+func accountName(subject string) (namespace, name string) {
+	rest := strings.TrimPrefix(subject, "system:serviceaccount:")
+	namespace, name, _ = strings.Cut(rest, ":")
+	return namespace, name
 }
 
 // NewChainVerifier builds the record.ChainVerifier AuthenticateLauncher's issuance-chain
@@ -171,11 +237,12 @@ func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *rec
 // unexpired credential row and checks what vouches for it. A credential a person approved has its
 // entire issuance chain re-verified through s.Chain — a launcher_credentials row is never trusted
 // on its own, so a row inserted without a genuine approved credential-request record behind it
-// never authenticates. A credential a service's token login issued (machine.Service.TokenLogin,
-// its subject set) authenticates while ServiceLogins still names its subject for its service, so
-// removing an account from BROKER_SERVICE_LOGINS ends its credential at its next call. A missing,
-// expired, revoked, chain-broken or no-longer-listed credential all answer ("", false, nil); only a
-// genuine dependency failure is a non-nil error, matching Lookup's own contract.
+// never authenticates. A credential a service's token login issued (IssueTokenLogin, its subject
+// set, and so its service, as the table's check constraint holds) authenticates while
+// ServiceLogins still names its subject for its service, so removing an account from
+// BROKER_SERVICE_LOGINS ends its credential at its next call. A missing, expired, revoked,
+// chain-broken or no-longer-listed credential all answer ("", false, nil); only a genuine
+// dependency failure is a non-nil error, matching Lookup's own contract.
 func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string, bool, error) {
 	if _, err := uuid.Parse(lid); err != nil {
 		return "", false, nil
@@ -195,7 +262,7 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 		return "", false, nil
 	}
 	if subject != nil {
-		if listed, ok := s.ServiceLogins[*subject]; !ok || service == nil || listed != *service {
+		if listed, ok := s.ServiceLogins[*subject]; !ok || listed != *service {
 			return "", false, nil
 		}
 		return thumbprint, true, nil
@@ -707,7 +774,7 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 	if person == "" || person == record.AnyoneApprover {
 		return nil, nil
 	}
-	rows, err := s.Store.Pool.Query(ctx, `select c.id, c.host, c.service,
+	rows, err := s.Store.Pool.Query(ctx, `select c.id, c.host, c.service, c.subject,
 			coalesce((select ev.login from credential_request_events ev where ev.record_id = r.id and ev.event = 'approved'), ''),
 			c.created_at, c.expires_at, c.expires_at <= now() from launcher_credentials c
 		left join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
@@ -758,11 +825,13 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var approver *string
-	var host string
+	var approver, host string
 	var service *string
 	var revokedAt *time.Time
-	err = tx.QueryRow(ctx, `select r.approver, c.service, c.host, c.revoked_at from launcher_credentials c
+	// A token login's credential has no record, so no approver: as every service's login, anyone
+	// signed in may revoke it (record.MayDecide), and its service logs in again with its token at
+	// its next call, under a new credential, unless BROKER_SERVICE_LOGINS no longer names its account.
+	err = tx.QueryRow(ctx, `select coalesce(r.approver, ''), c.service, c.host, c.revoked_at from launcher_credentials c
 		left join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
 		where c.id = $1 and (r.id is not null or c.subject is not null) for no key update of c`, id).Scan(&approver, &service, &host, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -778,16 +847,7 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 		}
 		svc = *service
 	}
-	person = record.CanonicalLogin(person)
-	switch {
-	case approver == nil:
-		// A service's token login: no person approved it, and like every service's login anyone
-		// signed in may revoke it. Its service logs in again with its token at its next call, under
-		// a new credential, unless BROKER_SERVICE_LOGINS no longer names its account.
-		if person == "" || person == record.AnyoneApprover {
-			return ErrNotApprover
-		}
-	case !record.MayDecide(record.KindLauncherCredential, *approver, svc, person):
+	if !record.MayDecide(record.KindLauncherCredential, approver, svc, person) {
 		return ErrNotApprover
 	}
 	if revokedAt != nil {

@@ -56,17 +56,22 @@ func (s *server) lookupMachineLogin(w http.ResponseWriter, r *http.Request) {
 type launcherCredentialResp struct {
 	// The launcher credential's id, which the revoke route takes.
 	CredentialID string `json:"credential_id"`
-	// The machine's host name, as its login named it.
+	// The machine's host name, as a person's machine login named it; for a service's token login,
+	// its ServiceAccount's <namespace>/<name>.
 	Host string `json:"host"`
 	// The service a service's login is for (legion-daemon), whose sessions are its pods; null for
 	// a person's own machine.
 	Service *string `json:"service"`
-	// The login of the person who approved the login; anyone signed in may have approved a
-	// service's.
+	// The ServiceAccount a service's token login proved (system:serviceaccount:<namespace>:<name>);
+	// null for every login a person approved.
+	Subject *string `json:"subject"`
+	// The login of the person who approved the login (anyone signed in may have approved a service's
+	// login before token logins); "" for a service's token login, which no person approves.
 	ApprovedBy string `json:"approved_by"`
-	// When the login was approved.
+	// When the login was approved, or a token login's first login.
 	IssuedAt time.Time `json:"issued_at"`
-	// When the credential expires; the broker has no renewal.
+	// When the credential expires. A person's machine login does not renew; a token login moves it
+	// later at each login, at most an hour away.
 	ExpiresAt time.Time `json:"expires_at"`
 	// True once expires_at has passed: the login enrolls nothing more, but sessions it enrolled
 	// still run (each renews with its own key), and revoking it ends them.
@@ -106,7 +111,7 @@ func (s *server) writeLauncherCredentials(w http.ResponseWriter, r *http.Request
 	}
 	out := make([]launcherCredentialResp, len(rows))
 	for i, c := range rows {
-		out[i] = launcherCredentialResp{CredentialID: c.ID.String(), Host: c.Host, Service: c.Service, ApprovedBy: c.ApprovedBy, IssuedAt: c.IssuedAt, ExpiresAt: c.ExpiresAt, Expired: c.Expired}
+		out[i] = launcherCredentialResp{CredentialID: c.ID.String(), Host: c.Host, Service: c.Service, Subject: c.Subject, ApprovedBy: c.ApprovedBy, IssuedAt: c.IssuedAt, ExpiresAt: c.ExpiresAt, Expired: c.Expired}
 	}
 	writeJSON(w, http.StatusOK, launcherCredentialsResponse{Credentials: out})
 }

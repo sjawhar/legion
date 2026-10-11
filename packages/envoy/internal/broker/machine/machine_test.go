@@ -288,7 +288,8 @@ func TestAMachineLoginNamingAnyoneIsDecidedByNoOne(t *testing.T) {
 	}
 }
 
-// fakeTokens is a TokenVerifier answering one account's claims, or one refusal.
+// fakeTokens is an enroll.PodVerifier whose VerifyAccount answers one account's claims, or one
+// refusal; a pod's own token never reaches it.
 type fakeTokens struct {
 	claims enroll.AccountClaims
 	err    error
@@ -298,6 +299,20 @@ func (f fakeTokens) VerifyAccount(context.Context, string) (enroll.AccountClaims
 	return f.claims, f.err
 }
 
+func (f fakeTokens) Verify(context.Context, string) (enroll.PodClaims, error) {
+	return enroll.PodClaims{}, errors.New("fakeTokens verifies no pod's token")
+}
+
+// daemonTokenAccount is the ServiceAccount the token-login tests list for legion-daemon.
+const daemonTokenAccount = "system:serviceaccount:legion-system:legion-daemon-test"
+
+// withTokenAccount lists daemonTokenAccount for legion-daemon and has svc's verifier answer a
+// token for it issued at issued and expiring at expires.
+func withTokenAccount(svc *Service, issued, expires time.Time) {
+	svc.Enroll.Pod = fakeTokens{claims: enroll.AccountClaims{Subject: daemonTokenAccount, IssuedAt: issued, Expiry: expires}}
+	svc.Enroll.ServiceLogins = map[string]string{daemonTokenAccount: "legion-daemon"}
+}
+
 // TestATokenLoginsCredentialEnrollsOnlyPods pins that a credential a service's token login issued
 // has no operator, names its service and the account's host, authenticates while
 // BROKER_SERVICE_LOGINS names its account, and keeps enroll's own authorized() trust boundary: a
@@ -305,21 +320,22 @@ func (f fakeTokens) VerifyAccount(context.Context, string) (enroll.AccountClaims
 func TestATokenLoginsCredentialEnrollsOnlyPods(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
-	const account = "system:serviceaccount:legion-system:legion-daemon-test"
-	svc.Tokens = fakeTokens{claims: enroll.AccountClaims{Subject: account, Expiry: time.Now().Add(time.Hour)}}
-	svc.ServiceLogins = map[string]string{account: "legion-daemon"}
-	svc.Enroll.ServiceLogins = svc.ServiceLogins
+	withTokenAccount(svc, time.Now(), time.Now().Add(time.Hour))
 	machineKey, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	compact, err := record.Sign(machineKey, testAudience, []record.AuthorizationDetail{
-		{Type: "launcher_credential", Identifier: "cluster", Service: "legion-daemon"},
+		{Type: "launcher_credential", Identifier: "legion-daemon", Service: "legion-daemon"},
 	}, "", "", nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	issued, err := svc.TokenLogin(ctx, "the-daemon's-token", compact)
+	account, err := svc.VerifyServiceToken(ctx, "the-daemon's-token")
+	if err != nil {
+		t.Fatalf("VerifyServiceToken: %v", err)
+	}
+	issued, err := svc.TokenLogin(ctx, account, compact)
 	if err != nil {
 		t.Fatalf("TokenLogin: %v", err)
 	}
@@ -338,15 +354,42 @@ func TestATokenLoginsCredentialEnrollsOnlyPods(t *testing.T) {
 	}
 }
 
+// TestAServiceTokenLivingPastAnHourIsRefused pins MaxTokenLoginLifetime on the token itself: a
+// token that lives longer than an hour from its issue, beyond the request object's skew, or that
+// names no issue time, is refused ErrTokenTooLongLived, so a copy of it logs in as its service for
+// at most an hour after it was minted; one that lives an hour plus less than the skew verifies.
+func TestAServiceTokenLivingPastAnHourIsRefused(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	issued := time.Now().Truncate(time.Second)
+	for _, c := range []struct {
+		name            string
+		issued, expires time.Time
+		refused         bool
+	}{
+		{"a three-hour token", issued, issued.Add(3 * time.Hour), true},
+		{"an hour past the skew", issued, issued.Add(MaxTokenLoginLifetime + svc.Skew + time.Second), true},
+		{"no issue time", time.Time{}, issued.Add(time.Hour), true},
+		{"an hour", issued, issued.Add(MaxTokenLoginLifetime), false},
+		{"an hour within the skew", issued, issued.Add(MaxTokenLoginLifetime + svc.Skew - time.Second), false},
+	} {
+		withTokenAccount(svc, c.issued, c.expires)
+		_, err := svc.VerifyServiceToken(ctx, "token")
+		if c.refused != errors.Is(err, ErrTokenTooLongLived) || (!c.refused && err != nil) {
+			t.Fatalf("%s: VerifyServiceToken = %v, want refused %v", c.name, err, c.refused)
+		}
+	}
+}
+
 // TestAServiceDeviceCodeLoginIsRefused pins that a device-code login naming a service, whether or
-// not it names a person too, is refused record.ErrRequestInvalid and opens no record: a service
+// not it names a person too, is refused ErrServiceLogsInWithToken and opens no record: a service
 // logs in with its own token.
 func TestAServiceDeviceCodeLoginIsRefused(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
 	for _, hint := range []string{"", testApprover} {
-		if _, _, err := svc.Login(ctx, signMachineLogin(t, hint, "cluster", "legion-daemon")); !errors.Is(err, record.ErrRequestInvalid) {
-			t.Fatalf("Login(a service's login, login_hint %q) = %v, want record.ErrRequestInvalid", hint, err)
+		if _, _, err := svc.Login(ctx, signMachineLogin(t, hint, "cluster", "legion-daemon")); !errors.Is(err, ErrServiceLogsInWithToken) {
+			t.Fatalf("Login(a service's login, login_hint %q) = %v, want ErrServiceLogsInWithToken", hint, err)
 		}
 	}
 	var records int
@@ -388,15 +431,15 @@ func insertServiceRecord(t *testing.T, svc *Service, approver string) (recordID,
 
 // TestAPendingServiceLoginIsNeverApprovedButMayBeDenied pins a service login an older broker
 // opened, still pending at the deploy, whichever approver it stored: approving it is refused
-// record.ErrRequestInvalid and mints nothing, and anyone signed in may still deny it, which the
+// ErrServiceLogsInWithToken and mints nothing, and anyone signed in may still deny it, which the
 // denied event records.
 func TestAPendingServiceLoginIsNeverApprovedButMayBeDenied(t *testing.T) {
 	for _, approver := range []string{record.AnyoneApprover, testApprover} {
 		svc := newFixture(t)
 		ctx := context.Background()
 		recordID, code, _ := insertServiceRecord(t, svc, approver)
-		if _, _, err := svc.ApplyDecision(ctx, recordID, true, "bob@example.com", code); !errors.Is(err, record.ErrRequestInvalid) {
-			t.Fatalf("approver %q: ApplyDecision(approve) = %v, want record.ErrRequestInvalid", approver, err)
+		if _, _, err := svc.ApplyDecision(ctx, recordID, true, "bob@example.com", code); !errors.Is(err, ErrServiceLogsInWithToken) {
+			t.Fatalf("approver %q: ApplyDecision(approve) = %v, want ErrServiceLogsInWithToken", approver, err)
 		}
 		var minted int
 		if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials`).Scan(&minted); err != nil || minted != 0 {

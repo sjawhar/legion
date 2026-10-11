@@ -109,7 +109,6 @@ func main() {
 		loader.Secrets, loader.Describer, loader.Aliases, reader = sm, sm, kms.NewFromConfig(awsCfg), secrets.AWS{Client: sm}
 	}
 	var pod enroll.PodVerifier
-	var tokens machine.TokenVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
 	verifier, err := oidc.Discover(ctx, cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, oidc.DiscoveryTimeout)
@@ -117,8 +116,7 @@ func main() {
 	if verifier != nil {
 		// One verifier for both: a pod's enrollment token and a service's login token are the same
 		// cluster's projected tokens, for the same audience.
-		k8s := enroll.K8sPodVerifier{Verifier: verifier}
-		pod, tokens = k8s, k8s
+		pod = enroll.K8sPodVerifier{Verifier: verifier}
 	}
 
 	current, err := policy.NewCurrent(ctx, loader, policyRefresh)
@@ -157,7 +155,7 @@ func main() {
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
 		PendingTTL: machineLoginPendingTTL, CredentialLifetime: time.Duration(cfg.LauncherCredentialSeconds) * time.Second,
-		Replay: enr.Replay, Tokens: tokens, ServiceLogins: cfg.ServiceLogins,
+		Replay: enr.Replay,
 	}
 
 	var waker func(context.Context, string, string, string)

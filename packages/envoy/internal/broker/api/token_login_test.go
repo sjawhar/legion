@@ -13,6 +13,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
@@ -23,13 +25,13 @@ type wireTokenLogin struct {
 }
 
 // accountToken mints a projected ServiceAccount token for account, bound to podUID ("" for none,
-// as `kubectl create token` mints), expiring lifetime from now (negative for one already expired),
-// signed by the local OIDC issuer the test server trusts.
+// as `kubectl create token` mints), issued a few seconds ago and expiring lifetime from now
+// (negative for one already expired), signed by the local OIDC issuer the test server trusts.
 func (ts *testServer) accountToken(t *testing.T, account, podUID string, lifetime time.Duration) string {
 	t.Helper()
 	claims := ts.podIssuer.Claims(account, podAudience)
 	now := time.Now()
-	claims["iat"] = now.Add(min(lifetime, 0) - time.Minute).Unix()
+	claims["iat"] = now.Add(min(lifetime, 0) - 5*time.Second).Unix()
 	claims["nbf"] = claims["iat"]
 	claims["exp"] = now.Add(lifetime).Unix()
 	if podUID != "" {
@@ -91,19 +93,67 @@ func TestAServiceLogsInWithItsOwnTokenAndNoOneApproves(t *testing.T) {
 		from audit where kind='launcher_credential.token_login'`); !slices.Equal(got, []string{record.LauncherActor(login.CredentialID) + " " + daemonAccount + " " + daemonPod + " " + thumbprintOf(t, key)}) {
 		t.Fatalf("token_login audit rows = %v, want one naming the account, its pod and the key", got)
 	}
+	if got := ts.column(t, `select ((detail->>'token_expires_at')::timestamptz = (detail->>'expires_at')::timestamptz)::text from audit where kind='launcher_credential.token_login'`); !slices.Equal(got, []string{"true"}) {
+		t.Fatalf("token_login audit row's token_expires_at matches its expires_at = %v, want true for a 20-minute token", got)
+	}
 }
 
-// TestATokenLoginIsCappedAtAnHour: a token that lives a day issues a credential that still
-// expires an hour after the login.
+// TestATokenLoginIsCappedAtAnHour: a token whose expiry lies past an hour from the login, within
+// the skew MaxTokenLoginLifetime allows, issues a credential that still expires an hour after the
+// login, and the audit row records the token's own later expiry.
 func TestATokenLoginIsCappedAtAnHour(t *testing.T) {
 	ts := newTestServer(t)
 	before := time.Now()
-	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", 24*time.Hour), ts.daemonRequest(t, newSigningKey(t)))
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour+40*time.Second), ts.daemonRequest(t, newSigningKey(t)))
 	if status != http.StatusOK {
 		t.Fatalf("token login = %d %s, want 200", status, body)
 	}
 	if got := decode[wireTokenLogin](t, body).ExpiresAt; got.Before(before.Add(time.Hour-time.Second)) || got.After(time.Now().Add(time.Hour)) {
 		t.Fatalf("expires_at = %s, want an hour after the login", got)
+	}
+	if got := ts.column(t, `select ((detail->>'token_expires_at')::timestamptz > (detail->>'expires_at')::timestamptz)::text from audit where kind='launcher_credential.token_login'`); !slices.Equal(got, []string{"true"}) {
+		t.Fatalf("token_login audit row's token_expires_at after its expires_at = %v, want true", got)
+	}
+}
+
+// TestATokenLoginRefusesAKeyAnotherLoginHolds: a token login whose request a key signed that a
+// person's live machine login already holds is 409 KEY_HOLDS_LIVE_CREDENTIAL, issues nothing, and
+// leaves the person's credential on its key.
+func TestATokenLoginRefusesAKeyAnotherLoginHolds(t *testing.T) {
+	ts := newTestServer(t)
+	personsID, key := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
+	status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), ts.daemonRequest(t, key))
+	if status != http.StatusConflict || decode[wireError](t, body).Code != "KEY_HOLDS_LIVE_CREDENTIAL" {
+		t.Fatalf("token login with a person's key = %d %s, want 409 KEY_HOLDS_LIVE_CREDENTIAL", status, body)
+	}
+	if got := ts.column(t, `select count(*)::text from launcher_credentials where subject is not null`); !slices.Equal(got, []string{"0"}) {
+		t.Fatalf("token-issued credentials = %v, want none", got)
+	}
+	if got := ts.column(t, `select key_thumbprint from launcher_credentials where id=$1`, personsID); !slices.Equal(got, []string{thumbprintOf(t, key)}) {
+		t.Fatalf("the person's credential's key = %v, want it unchanged", got)
+	}
+}
+
+// TestAnAddressFloodDoesNotKeepTheDaemonFromLoggingIn: tokens claiming no listed account spend
+// their source address's bucket before they verify, and are refused 429 once it is empty; the
+// daemon's verified token, from the same address, spends its account's own bucket instead and logs
+// in, until that bucket is empty in turn.
+func TestAnAddressFloodDoesNotKeepTheDaemonFromLoggingIn(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 1},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 2},
+		}
+	})
+	for i, want := range []int{http.StatusForbidden, http.StatusTooManyRequests, http.StatusTooManyRequests} {
+		if status, body := ts.tokenLogin(t, ts.accountToken(t, workerAccount, "", time.Hour), ts.daemonRequest(t, newSigningKey(t))); status != want {
+			t.Fatalf("unlisted token %d = %d %s, want %d", i, status, body, want)
+		}
+	}
+	for i, want := range []int{http.StatusOK, http.StatusOK, http.StatusTooManyRequests} {
+		if status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), ts.daemonRequest(t, newSigningKey(t))); status != want {
+			t.Fatalf("the daemon's login %d after the flood = %d %s, want %d", i, status, body, want)
+		}
 	}
 }
 
@@ -170,6 +220,7 @@ func TestATokenLoginRefusesWhatDoesNotProveTheAccount(t *testing.T) {
 	}{
 		{"another ServiceAccount's token", ts.accountToken(t, workerAccount, uuid.NewString(), time.Hour), ts.daemonRequest(t, newSigningKey(t)), http.StatusForbidden, "ACCOUNT_NOT_LISTED"},
 		{"an expired token", ts.accountToken(t, daemonAccount, uuid.NewString(), -time.Minute), ts.daemonRequest(t, newSigningKey(t)), http.StatusUnauthorized, "TOKEN_EXPIRED"},
+		{"a token that lives three hours", ts.accountToken(t, daemonAccount, "", 3*time.Hour), ts.daemonRequest(t, newSigningKey(t)), http.StatusUnauthorized, "TOKEN_TOO_LONG_LIVED"},
 		{"a token for another audience", ts.podIssuer.Mint(t, ts.podKey, wrongAudience), ts.daemonRequest(t, newSigningKey(t)), http.StatusUnauthorized, "TOKEN_INVALID"},
 		{"a token the issuer never signed", "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJ4In0.c2ln", ts.daemonRequest(t, newSigningKey(t)), http.StatusUnauthorized, "TOKEN_INVALID"},
 		{"a request naming another service", ts.accountToken(t, daemonAccount, "", time.Hour), signMachineLoginRequest(t, newSigningKey(t), ts.URL, "", "legion-daemon-test-7d9f", "other-service"), http.StatusForbidden, "ACCOUNT_NOT_LISTED"},
@@ -233,7 +284,7 @@ func TestAnyoneRevokesAServicesTokenLoginAndItLogsInAgain(t *testing.T) {
 	for _, person := range []string{testApprover, "bob@example.com"} {
 		logins := ts.machineLogins(t, person)
 		if len(logins) != 1 || logins[0].CredentialID != credentialID || logins[0].Service == nil || *logins[0].Service != "legion-daemon" ||
-			logins[0].ApprovedBy != "" || logins[0].Host != "legion-system/legion-daemon-test" {
+			logins[0].ApprovedBy != "" || logins[0].Subject == nil || *logins[0].Subject != daemonAccount || logins[0].Host != "legion-system/legion-daemon-test" {
 			t.Fatalf("machine logins of %s = %+v, want the daemon's token login, approved by no one", person, logins)
 		}
 	}

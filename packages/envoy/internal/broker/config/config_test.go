@@ -252,6 +252,26 @@ func TestLoadReadsTheServiceLogins(t *testing.T) {
 	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "system:serviceaccount:x:y") {
 		t.Errorf("BROKER_SERVICE_LOGINS naming one account twice: err = %v, want a refusal naming the account", err)
 	}
+	// A namespace's default account proves nothing, as BROKER_SERVICES refuses it, and the account
+	// BROKER_SERVICES binds for a service's pods is one every such pod holds a token for, so neither
+	// logs a service in.
+	e = withIssuer()
+	e["BROKER_SERVICE_LOGINS"] = "legion-daemon=system:serviceaccount:legion-system:default"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICE_LOGINS") || !strings.Contains(err.Error(), "default service account") {
+		t.Errorf("BROKER_SERVICE_LOGINS naming a default account: err = %v, want a refusal naming the setting and the default account", err)
+	}
+	e = withIssuer()
+	e["BROKER_SERVICES"] = "legion-daemon=system:serviceaccount:legion:legion-worker"
+	e["BROKER_SERVICE_LOGINS"] = "legion-daemon=system:serviceaccount:legion-system:legion-daemon-a legion-daemon=system:serviceaccount:legion:legion-worker"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICE_LOGINS") || !strings.Contains(err.Error(), `"legion-daemon=system:serviceaccount:legion:legion-worker"`) || !strings.Contains(err.Error(), "BROKER_SERVICES") {
+		t.Errorf("BROKER_SERVICE_LOGINS naming the pods' account: err = %v, want a refusal naming the entry and BROKER_SERVICES", err)
+	}
+	e = withIssuer()
+	e["BROKER_SERVICES"] = "legion-daemon=system:serviceaccount:legion:legion-worker"
+	e["BROKER_SERVICE_LOGINS"] = "legion-daemon=system:serviceaccount:legion-system:legion-daemon-a"
+	if _, err := Load(env(e)); err != nil {
+		t.Errorf("BROKER_SERVICE_LOGINS beside a BROKER_SERVICES binding another account: %v", err)
+	}
 	e = validEnv()
 	e["BROKER_SERVICE_LOGINS"] = "legion-daemon=system:serviceaccount:legion-system:legion-daemon-a"
 	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_K8S_OIDC_ISSUER") {

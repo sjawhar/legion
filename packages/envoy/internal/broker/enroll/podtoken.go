@@ -19,12 +19,14 @@ import (
 type K8sPodVerifier struct{ Verifier *oidc.Verifier }
 
 // AccountClaims are a verified ServiceAccount token's subject
-// (system:serviceaccount:<namespace>:<name>), its expiry, and the UID of the pod it is bound to:
-// "" for a token bound to no pod, such as one `kubectl create token` mints.
+// (system:serviceaccount:<namespace>:<name>), its expiry, when it was issued (zero for a token with
+// no iat), and the UID of the pod it is bound to: "" for a token bound to no pod, such as one
+// `kubectl create token` mints.
 type AccountClaims struct {
-	Subject string
-	PodUID  string
-	Expiry  time.Time
+	Subject  string
+	PodUID   string
+	Expiry   time.Time
+	IssuedAt time.Time
 }
 
 // VerifyAccount verifies raw as Verify does but accepts a token bound to no pod. Every error wraps
@@ -38,6 +40,7 @@ func (k K8sPodVerifier) VerifyAccount(ctx context.Context, raw string) (AccountC
 	if err != nil {
 		return AccountClaims{}, err
 	}
+	var registered jwt.Claims
 	var private struct {
 		Kubernetes struct {
 			Pod struct {
@@ -47,10 +50,28 @@ func (k K8sPodVerifier) VerifyAccount(ctx context.Context, raw string) (AccountC
 	}
 	// The signature was verified by oidc.Verifier on this exact token; reading the claims
 	// without a second verification is safe here and only here.
-	if err := parsed.UnsafeClaimsWithoutVerification(&private); err != nil {
+	if err := parsed.UnsafeClaimsWithoutVerification(&registered, &private); err != nil {
 		return AccountClaims{}, err
 	}
-	return AccountClaims{Subject: claims.Subject, PodUID: private.Kubernetes.Pod.UID, Expiry: claims.Expiry}, nil
+	var issuedAt time.Time
+	if registered.IssuedAt != nil {
+		issuedAt = registered.IssuedAt.Time()
+	}
+	return AccountClaims{Subject: claims.Subject, PodUID: private.Kubernetes.Pod.UID, Expiry: claims.Expiry, IssuedAt: issuedAt}, nil
+}
+
+// ClaimedSubject is the subject raw claims, read without verifying anything: "" for a token that
+// does not parse. Only a rate limiter may use it, to pick a bucket before the token verifies.
+func ClaimedSubject(raw string) string {
+	parsed, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256, jose.ES256})
+	if err != nil {
+		return ""
+	}
+	var claims jwt.Claims
+	if err := parsed.UnsafeClaimsWithoutVerification(&claims); err != nil {
+		return ""
+	}
+	return claims.Subject
 }
 
 func (k K8sPodVerifier) Verify(ctx context.Context, raw string) (PodClaims, error) {

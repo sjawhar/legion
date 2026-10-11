@@ -90,12 +90,14 @@ person approves a **machine login**, which works like a device code:
 4. On approval the broker mints the launcher credential bound to the machine's key.
 
 A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
-token instead, and no person approves it: the broker verifies the token as it verifies a pod's, and
-issues the credential when the token's account is one `BROKER_SERVICE_LOGINS` names for that
-service ([Operate](/legion/broker/operate/#what-to-run)). Each such account holds one credential,
-which every login moves to the login's new key and to the token's expiry, at most an hour away, so
-the service logs in again before then and at every restart. A device-code login that names a
-service is refused `SERVICE_LOGS_IN_WITH_TOKEN`.
+token instead, and no person approves it: the broker verifies the token as it verifies a pod's,
+refuses one that lives longer than an hour from its issue, and issues the credential when the
+token's account is one `BROKER_SERVICE_LOGINS` names for that service
+([Operate](/legion/broker/operate/#what-to-run)). Each such account holds one credential, which
+every login moves to the login's key and to the token's expiry, at most an hour away, so the
+service logs in again before then and at every restart; a running daemon proves the same key at
+each login, and a restart brings a new one. A device-code login that names a service is refused
+`SERVICE_LOGS_IN_WITH_TOKEN`.
 
 A person's launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. It may be revoked from
 Dispatch's machine-login page by the person who approved it and no one else, or from any of their
@@ -113,13 +115,15 @@ operator, so the machine-login page lists it for everyone signed in, and anyone 
 ends every pod it enrolled at once: a service login a person approved through a code before
 services logged in with their tokens, until it expires, and a service's token login, which names no
 approver. A service whose token login was revoked logs in again with its token at its next call,
-under a new credential; to stop it logging in, remove its account from `BROKER_SERVICE_LOGINS` and
-redeploy the broker.
+under a new credential, which enrolls the pods it launches next; a pod the revoke ended stays
+without secrets until it is replaced. To stop it logging in, remove its account from
+`BROKER_SERVICE_LOGINS` and redeploy the broker.
 
 A credential enrolls sessions only for its own operator: an enrollment naming anyone else is refused
 `OPERATOR_MISMATCH`. The broker's rate limiter caps how often anyone can start a machine login, per
-source address and per named person, and how often anyone can try a token login, per source
-address.
+source address and per named person, and how often anyone can try a token login: per source
+address for a token naming no listed account, and per account for a listed one once its token
+verifies, so another caller behind the same address cannot keep a service from logging in.
 
 ## Owner and tier: who may have which secret
 
@@ -337,9 +341,10 @@ a grant already revoked, naming under `withheld` the secrets it withheld from th
 `launcher_credential.revoked` (naming the machine login's `credential_id`, its `host`, its
 `service` for a service's login, and under `enrollments` the sessions the revoke ended) and
 `launcher_credential.token_login` (a service's token login: the `credential_id`, its `service`, the
-token's `subject`, the `pod_uid` the token is bound to when it is, the new `key_thumbprint` and
-`expires_at`). Each row names its actor: `human:<email>` for a change Dispatch made for its
-signed-in person, `session:<enrollment id>` for a session's own, `launcher:<credential id>` for one
+token's `subject`, the `pod_uid` the token is bound to when it is, the login's `key_thumbprint`,
+the credential's `expires_at` and the token's own `token_expires_at`). Each row names its actor:
+`human:<email>` for a change Dispatch made for its signed-in person, `session:<enrollment id>` for
+a session's own, `launcher:<credential id>` for one
 a machine login made under its own credential, a person's revoke from their machine and a
 service's token login included, or `broker`. No
 record, event or audit row ever holds a secret value.

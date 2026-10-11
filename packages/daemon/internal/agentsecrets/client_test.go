@@ -65,10 +65,10 @@ type fakeBroker struct {
 }
 
 type tokenLogin struct {
-	token   string
-	iss     string
-	host    string
-	service string
+	token      string
+	iss        string
+	identifier string
+	service    string
 }
 
 type enrollAnswer struct {
@@ -116,7 +116,7 @@ func (b *fakeBroker) handleTokenLogin(w http.ResponseWriter, r *http.Request) {
 	b.mu.Lock()
 	b.logins = append(b.logins, tokenLogin{
 		token: body.Token, iss: fmt.Sprint(payload["iss"]),
-		host: fmt.Sprint(detail["identifier"]), service: fmt.Sprint(detail["service"]),
+		identifier: fmt.Sprint(detail["identifier"]), service: fmt.Sprint(detail["service"]),
 	})
 	seq := len(b.logins)
 	held := b.holdLogins
@@ -273,10 +273,10 @@ func (l *lockedLog) String() string {
 }
 
 // TestLoginPostsTheTokenAndAKeyItThenSignsWith pins the token login: Login reads the token file and
-// posts its token beside a request object naming this host and legion-daemon, signed by a fresh
-// key, to /v1/launcher-credentials/token; once it succeeds Enroll authenticates with a launcher
-// proof — never Authorization — and enrolling before any login fails closed with
-// NO_MACHINE_CREDENTIAL.
+// posts its token beside a request object naming legion-daemon, signed by a fresh key, to
+// /v1/launcher-credentials/token, and answers the expiry it won; once it succeeds Enroll
+// authenticates with a launcher proof — never Authorization — and enrolling before any login fails
+// closed with NO_MACHINE_CREDENTIAL.
 func TestLoginPostsTheTokenAndAKeyItThenSignsWith(t *testing.T) {
 	broker, server := newFakeBroker(t)
 	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "the-daemon's-token")}
@@ -286,12 +286,15 @@ func TestLoginPostsTheTokenAndAKeyItThenSignsWith(t *testing.T) {
 	if got := c.LoginStatus().State; got != "none" {
 		t.Fatalf("LoginStatus before any login = %q, want none", got)
 	}
-	if err := c.Login(context.Background()); err != nil {
+	expires, err := c.Login(context.Background())
+	if err != nil {
 		t.Fatalf("Login: %v", err)
 	}
-	host, _ := os.Hostname()
-	if got := broker.login(0); got.token != "the-daemon's-token" || got.host != host || got.service != launcherService || got.iss == "" {
-		t.Fatalf("token login = %+v, want the file's token, host %q, service %s and the key's thumbprint as iss", got, host, launcherService)
+	if until := time.Until(expires); until < 59*time.Minute || until > time.Hour {
+		t.Fatalf("Login answered an expiry %v away, want the broker's hour", until)
+	}
+	if got := broker.login(0); got.token != "the-daemon's-token" || got.identifier != launcherService || got.service != launcherService || got.iss == "" {
+		t.Fatalf("token login = %+v, want the file's token, identifier and service %s, and the key's thumbprint as iss", got, launcherService)
 	}
 	if got := c.LoginStatus().State; got != "issued" {
 		t.Fatalf("LoginStatus after the login = %q, want issued", got)
@@ -315,32 +318,43 @@ func TestLoginPostsTheTokenAndAKeyItThenSignsWith(t *testing.T) {
 	}
 }
 
-// TestEachLoginReadsTheCurrentTokenAndMakesANewKey: a second login presents the token the file now
-// holds, as the kubelet rotates it, and signs with a new key.
-func TestEachLoginReadsTheCurrentTokenAndMakesANewKey(t *testing.T) {
+// TestEachLoginReadsTheCurrentTokenAndProvesTheSameKey: a renewal presents the token the file now
+// holds, as the kubelet rotates it, and proves the key the credential is already bound to, so the
+// broker never moves it to another key; only once the broker has refused the credential does the
+// next login bring a new key.
+func TestEachLoginReadsTheCurrentTokenAndProvesTheSameKey(t *testing.T) {
 	broker, server := newFakeBroker(t)
+	broker.enrollAnswers = []enrollAnswer{{status: http.StatusUnauthorized, body: `{"code":"LAUNCHER_INVALID","error":"refused"}`}}
 	path := tokenFile(t, "token-1")
 	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: path}
-	if err := c.Login(context.Background()); err != nil {
+	if _, err := c.Login(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte("token-2"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Login(context.Background()); err != nil {
+	if _, err := c.Login(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	first, second := broker.login(0), broker.login(1)
-	if first.token != "token-1" || second.token != "token-2" || first.iss == second.iss {
-		t.Fatalf("logins = %+v then %+v, want each token as the file held it, under two keys", first, second)
+	if first.token != "token-1" || second.token != "token-2" || first.iss != second.iss {
+		t.Fatalf("logins = %+v then %+v, want each token as the file held it, under one key", first, second)
+	}
+	if _, err := c.Enroll(context.Background(), podEnrollment); !isNoCredential(err, "refused") {
+		t.Fatalf("Enroll the broker refuses = %v, want NO_MACHINE_CREDENTIAL", err)
+	}
+	if _, err := c.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if third := broker.login(2); third.iss == first.iss {
+		t.Fatal("the login after the broker refused the credential proved the refused key, want a new one")
 	}
 }
 
 // TestALoginTheBrokerRefusesIsFailedAndAsksNoOne: a refused login (another ServiceAccount, an
-// expired token) or one whose token file is missing records the login failed, keeps no credential,
-// and lengthens the wait before the next; nothing in it names a code for anyone.
+// expired token) or one whose token file is missing records the login failed and keeps no
+// credential; nothing in it names a code for anyone.
 func TestALoginTheBrokerRefusesIsFailedAndAsksNoOne(t *testing.T) {
-	withLoginRetry(t, time.Minute, 4*time.Minute)
 	broker, server := newFakeBroker(t)
 	broker.refuseLogins = []enrollAnswer{
 		{http.StatusForbidden, `{"code":"ACCOUNT_NOT_LISTED","error":"this ServiceAccount does not log in as this service"}`},
@@ -348,7 +362,7 @@ func TestALoginTheBrokerRefusesIsFailedAndAsksNoOne(t *testing.T) {
 	}
 	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token")}
 	for i, code := range []string{"ACCOUNT_NOT_LISTED", "TOKEN_EXPIRED"} {
-		err := c.Login(context.Background())
+		_, err := c.Login(context.Background())
 		var api *APIError
 		if !errors.As(err, &api) || api.Code != code {
 			t.Fatalf("login %d = %v, want the broker's %s", i, err, code)
@@ -360,15 +374,87 @@ func TestALoginTheBrokerRefusesIsFailedAndAsksNoOne(t *testing.T) {
 			t.Fatalf("Enroll after login %d = %v, want NO_MACHINE_CREDENTIAL naming %s", i, err, code)
 		}
 	}
-	if wait := time.Until(c.nextLogin); wait < time.Minute || wait > 2*time.Minute {
-		t.Fatalf("wait after two failed logins = %v, want about two minutes", wait)
-	}
 	missing := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: filepath.Join(t.TempDir(), "absent")}
-	if err := missing.Login(context.Background()); err == nil || !strings.Contains(err.Error(), "read the ServiceAccount token") {
+	if _, err := missing.Login(context.Background()); err == nil || !strings.Contains(err.Error(), "read the ServiceAccount token") {
 		t.Fatalf("a login with no token file = %v, want a failure naming the token file", err)
 	}
 	if got := broker.loginCount(); got != 2 {
 		t.Fatalf("the broker saw %d logins, want the two refused ones and none from a missing token", got)
+	}
+}
+
+// TestALoginAnswerWithNoExpiryNamesNoCredential: a 200 whose body lacks expires_at is a failed
+// login, and its error never repeats the body, which carries the credential's id.
+func TestALoginAnswerWithNoExpiryNamesNoCredential(t *testing.T) {
+	broker, server := newFakeBroker(t)
+	broker.refuseLogins = []enrollAnswer{{http.StatusOK, `{"credential_id":"secret-credential-id"}`}}
+	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token")}
+	_, err := c.Login(context.Background())
+	if err == nil || strings.Contains(err.Error(), "secret-credential-id") {
+		t.Fatalf("Login = %v, want a failure that does not name the credential", err)
+	}
+	if _, err := c.Enroll(context.Background(), podEnrollment); err == nil || strings.Contains(err.Error(), "secret-credential-id") {
+		t.Fatalf("Enroll = %v, want NO_MACHINE_CREDENTIAL that does not name the credential", err)
+	}
+}
+
+// TestARefusedRenewalLeavesTheHeldCredentialIssued: a renewal the broker refuses while the
+// credential it would replace has not expired leaves that credential working: the state stays
+// issued and pods still enroll under it until it expires, after which the state reads failed.
+func TestARefusedRenewalLeavesTheHeldCredentialIssued(t *testing.T) {
+	withLoginRetry(t, time.Minute, time.Minute)
+	broker, server := newFakeBroker(t)
+	broker.lifetime = 2 * time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := c.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	broker.mu.Lock()
+	broker.refuseLogins = []enrollAnswer{{http.StatusServiceUnavailable, `{"code":"DATABASE","error":"down"}`}}
+	broker.mu.Unlock()
+	eventually(t, func() bool { return broker.loginCount() == 2 }, "the renewal to reach the broker")
+	eventually(t, func() bool { return c.failure.Load() != nil }, "the refused renewal to be recorded")
+	if got := c.LoginStatus().State; got != "issued" {
+		t.Fatalf("state after a refused renewal under a live credential = %q, want issued", got)
+	}
+	if _, err := c.Enroll(ctx, podEnrollment); err != nil {
+		t.Fatalf("Enroll under the still-live credential: %v", err)
+	}
+	eventually(t, func() bool { return c.LoginStatus().State == "failed" }, "the credential to expire")
+	if _, err := c.Enroll(ctx, podEnrollment); !isNoCredential(err, "DATABASE") {
+		t.Fatalf("Enroll once the credential expired = %v, want NO_MACHINE_CREDENTIAL naming the refusal", err)
+	}
+}
+
+// TestRefusedRenewalsKeepTheirWaitPastTheCredentialsExpiry: renewals the broker keeps refusing are
+// retried after loginRetryWait, before the held credential expires and after it, never in a loop
+// that waits for nothing: two seconds of a broker that answers every renewal 503 at once see a
+// handful of logins, not thousands.
+func TestRefusedRenewalsKeepTheirWaitPastTheCredentialsExpiry(t *testing.T) {
+	withLoginRetry(t, 200*time.Millisecond, 400*time.Millisecond)
+	broker, server := newFakeBroker(t)
+	broker.lifetime = time.Second
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	if err := c.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	refusals := make([]enrollAnswer, 10000)
+	for i := range refusals {
+		refusals[i] = enrollAnswer{http.StatusServiceUnavailable, `{"code":"DATABASE","error":"down"}`}
+	}
+	broker.mu.Lock()
+	broker.refuseLogins = refusals
+	broker.mu.Unlock()
+	time.Sleep(2500 * time.Millisecond)
+	if n := broker.loginCount(); n > 12 {
+		t.Fatalf("%d logins in 2.5 s of refused renewals, want at most 12: a renewal waits 200 ms doubling to 400 ms after each refusal", n)
+	}
+	if got := c.LoginStatus().State; got != "failed" {
+		t.Fatalf("state after the credential expired under refused renewals = %q, want failed", got)
 	}
 }
 
@@ -388,7 +474,7 @@ func TestARefusedProofLogsInAgain(t *testing.T) {
 	if err := c.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Enroll(ctx, podEnrollment); !isNoCredential(err, "") {
+	if _, err := c.Enroll(ctx, podEnrollment); !isNoCredential(err, "refused") {
 		t.Fatalf("Enroll refused by the broker = %v, want NO_MACHINE_CREDENTIAL", err)
 	}
 	eventually(t, func() bool { return broker.loginCount() == 2 && c.cred.Load() != nil }, "the login loop to log in again")
@@ -417,13 +503,14 @@ func TestTheLoginLoopRenewsHalfwayToExpiry(t *testing.T) {
 	if cred := c.cred.Load(); cred == nil || !cred.expires.After(time.Now()) {
 		t.Fatal("no live credential after renewals, want one")
 	}
-	if !strings.Contains(logged.String(), "logged in with the daemon's ServiceAccount token") {
-		t.Fatalf("log = %s, want each renewal logged", logged.String())
+	if got := strings.Count(logged.String(), "logged in with the daemon's ServiceAccount token"); got != broker.loginCount() && got != broker.loginCount()-1 {
+		t.Fatalf("log = %s, want each login logged once", logged.String())
 	}
 }
 
-// TestAFailedLoginIsRetriedAfterItsWait: a login the broker refuses is retried by the loop once
-// loginRetryWait has passed, and the first one that succeeds gives the client its credential.
+// TestAFailedLoginIsRetriedAfterItsWait: a login the broker refuses is logged and retried by the
+// loop once loginRetryWait has passed, and the first one that succeeds gives the client its
+// credential.
 func TestAFailedLoginIsRetriedAfterItsWait(t *testing.T) {
 	withLoginRetry(t, 50*time.Millisecond, 100*time.Millisecond)
 	broker, server := newFakeBroker(t)
@@ -433,7 +520,8 @@ func TestAFailedLoginIsRetriedAfterItsWait(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
-	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	logged := &lockedLog{}
+	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token"), Log: slog.New(slog.NewTextHandler(logged, nil))}
 	if err := c.Start(ctx); err == nil {
 		t.Fatal("the first login succeeded, want the refusal")
 	}
@@ -441,40 +529,44 @@ func TestAFailedLoginIsRetriedAfterItsWait(t *testing.T) {
 	if n := broker.loginCount(); n != 3 {
 		t.Fatalf("%d logins, want the two refused and the third that succeeded", n)
 	}
+	if got := strings.Count(logged.String(), "the token login failed"); got != 2 {
+		t.Fatalf("log = %s, want each refused login logged once", logged.String())
+	}
 }
 
-// TestALoginWaitsForProofsInFlight: a login holds every proof back while the broker moves the
-// credential to the new key, and a proof already in flight finishes before the login posts, so no
-// proof signed with the old key reaches a broker that has already switched.
-func TestALoginWaitsForProofsInFlight(t *testing.T) {
+// TestAProofDuringALoginPOSTReturnsWithinItsDeadline: an Enroll or a Revoke runs under its claim's
+// machine lock with the RPC deadline, so it never waits for a login the broker is slow to answer:
+// while a renewal's POST hangs, an enrollment under the held credential succeeds, and one the broker
+// refuses 401 answers NO_MACHINE_CREDENTIAL, both well within their deadline.
+func TestAProofDuringALoginPOSTReturnsWithinItsDeadline(t *testing.T) {
 	broker, server := newFakeBroker(t)
 	release := make(chan struct{})
 	broker.holdLogins = release
-	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token")}
+	broker.enrollAnswers = []enrollAnswer{
+		{status: http.StatusCreated, body: `{"enrollment_id":"enr-1","lease_expires_at":"2026-09-26T12:15:00Z"}`},
+		{status: http.StatusUnauthorized, body: `{"code":"LAUNCHER_INVALID","error":"refused"}`},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c := &Client{URL: server.URL, HTTP: server.Client(), TokenFile: tokenFile(t, "token"), Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	withCredential(t, c, "cred-0")
-	loggedIn := make(chan error, 1)
-	go func() { loggedIn <- c.Login(context.Background()) }()
-	eventually(t, func() bool { return broker.loginCount() == 1 }, "the login to reach the broker")
-	enrolled := make(chan error, 1)
-	go func() {
-		_, err := c.Enroll(context.Background(), podEnrollment)
-		enrolled <- err
-	}()
-	select {
-	case err := <-enrolled:
-		t.Fatalf("Enroll finished while the login was switching keys: %v", err)
-	case <-time.After(100 * time.Millisecond):
+	started := make(chan error, 1)
+	go func() { started <- c.Start(ctx) }()
+	eventually(t, func() bool { return broker.loginCount() == 1 }, "the renewal to reach the broker")
+	for i, want := range []string{"", "NO_MACHINE_CREDENTIAL"} {
+		rpc, rpcCancel := context.WithTimeout(ctx, 500*time.Millisecond)
+		_, err := c.Enroll(rpc, podEnrollment)
+		rpcCancel()
+		switch {
+		case want == "" && err != nil:
+			t.Fatalf("Enroll %d during the renewal's POST = %v, want it enrolled under the held credential", i, err)
+		case want != "" && !isNoCredential(err, "refused"):
+			t.Fatalf("Enroll %d during the renewal's POST = %v, want %s, not its deadline", i, err, want)
+		}
 	}
 	close(release)
-	if err := <-loggedIn; err != nil {
+	if err := <-started; err != nil {
 		t.Fatal(err)
-	}
-	if err := <-enrolled; err != nil {
-		t.Fatalf("Enroll after the login: %v", err)
-	}
-	_, payload, err := decodeCompactJWSRaw(broker.lastEnrollRequest().proof)
-	if err != nil || payload["lid"] != "cred-1" {
-		t.Fatalf("the held enrollment's proof = %v, %v; want it signed for the new credential", payload, err)
 	}
 }
 

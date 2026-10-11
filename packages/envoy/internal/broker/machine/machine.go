@@ -67,13 +67,6 @@ type Service struct {
 	// and confirmation code — a confirmation-fatigue/notification-spam vector against the named
 	// operator.
 	Replay func(ctx context.Context, jti string, expires time.Time) (fresh bool, err error)
-
-	// Tokens verifies a service's ServiceAccount token for TokenLogin; nil on a broker that trusts
-	// no Kubernetes token issuer, which serves no token login.
-	Tokens TokenVerifier
-	// ServiceLogins is BROKER_SERVICE_LOGINS: each ServiceAccount subject that logs in with its
-	// token, answering the service it logs in as.
-	ServiceLogins map[string]string
 }
 
 // jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
@@ -134,39 +127,57 @@ func deref(s *string) string {
 	return *s
 }
 
+// verifyLauncherRequest verifies a machine request object for a launcher credential at now: its
+// signature and freshness (record.VerifyRequestObject), exactly one launcher_credential detail,
+// then the caller's own check, then its jti, which it records, so a replayed request is refused.
+// Every refusal but check's own is record.ErrRequestInvalid.
+func (s *Service) verifyLauncherRequest(ctx context.Context, compact string, now time.Time, check func(record.RequestObject) error) (record.RequestObject, error) {
+	obj, err := record.VerifyRequestObject(compact, s.Audience, s.Skew, now)
+	if err != nil {
+		return record.RequestObject{}, err
+	}
+	if len(obj.Details) != 1 || obj.Details[0].Type != record.KindLauncherCredential {
+		return record.RequestObject{}, fmt.Errorf("%w: exactly one launcher_credential detail is required", record.ErrRequestInvalid)
+	}
+	if err := check(obj); err != nil {
+		return record.RequestObject{}, err
+	}
+	fresh, err := s.Replay(ctx, obj.JTI, obj.Expires.Add(s.Skew+jtiRetentionMargin))
+	if err != nil {
+		return record.RequestObject{}, err
+	}
+	if !fresh {
+		return record.RequestObject{}, fmt.Errorf("%w: replayed jti", record.ErrRequestInvalid)
+	}
+	return obj, nil
+}
+
 // Login verifies a signed machine credential-request object and opens a pending record for a
 // human to approve or deny. authorization_details must carry exactly one launcher_credential
-// entry, and it must name no service: a service logs in with its own Kubernetes token
-// (TokenLogin), never through a code a person approves. A person's machine login must carry a
-// login_hint naming the person who decides it and whose machine it becomes, so never
+// entry, and it must name no service (ErrServiceLogsInWithToken): a service logs in with its own
+// Kubernetes token (TokenLogin), never through a code a person approves. A person's machine login
+// must carry a login_hint naming the person who decides it and whose machine it becomes, so never
 // record.AnyoneApprover.
 // Nothing here touches Dispatch; the record and its poll row are the whole state, and rate
 // limiting this unauthenticated route is the api layer's job, not this one's.
 func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, code string, err error) {
 	now := time.Now()
-	obj, err := record.VerifyRequestObject(compactRequest, s.Audience, s.Skew, now)
+	var approver string
+	_, err = s.verifyLauncherRequest(ctx, compactRequest, now, func(obj record.RequestObject) error {
+		if obj.Service() != "" {
+			return ErrServiceLogsInWithToken
+		}
+		approver = record.CanonicalLogin(obj.LoginHint)
+		if approver == "" {
+			return fmt.Errorf("%w: login_hint is required for a person's machine login", record.ErrRequestInvalid)
+		}
+		if approver == record.AnyoneApprover {
+			return fmt.Errorf("%w: a person's machine login's login_hint names its operator, never %q", record.ErrRequestInvalid, record.AnyoneApprover)
+		}
+		return nil
+	})
 	if err != nil {
 		return "", "", err
-	}
-	if len(obj.Details) != 1 || obj.Details[0].Type != record.KindLauncherCredential {
-		return "", "", fmt.Errorf("%w: exactly one launcher_credential detail is required", record.ErrRequestInvalid)
-	}
-	if obj.Service() != "" {
-		return "", "", fmt.Errorf("%w: %s", record.ErrRequestInvalid, errServiceLogsInWithToken)
-	}
-	approver := record.CanonicalLogin(obj.LoginHint)
-	if approver == "" {
-		return "", "", fmt.Errorf("%w: login_hint is required for a person's machine login", record.ErrRequestInvalid)
-	}
-	if approver == record.AnyoneApprover {
-		return "", "", fmt.Errorf("%w: a person's machine login's login_hint names its operator, never %q", record.ErrRequestInvalid, record.AnyoneApprover)
-	}
-	fresh, err := s.Replay(ctx, obj.JTI, obj.Expires.Add(s.Skew+jtiRetentionMargin))
-	if err != nil {
-		return "", "", err
-	}
-	if !fresh {
-		return "", "", fmt.Errorf("%w: replayed jti", record.ErrRequestInvalid)
 	}
 
 	code, err = confirmationCode()
@@ -299,14 +310,12 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 		}
 		detail := obj.Details[0]
 		if detail.Service != "" {
-			return "", "", fmt.Errorf("%w: %s", record.ErrRequestInvalid, errServiceLogsInWithToken)
+			return "", "", ErrServiceLogsInWithToken
 		}
-		op := login
-		operator := &op
 		if body.LifetimeSeconds == nil {
 			return "", "", fmt.Errorf("machine login record has no credential lifetime")
 		}
-		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operator, nil, detail.Identifier, obj.Thumbprint, jwk, recordID,
+		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, login, detail.Identifier, obj.Thumbprint, jwk, recordID,
 			time.Now().Add(time.Duration(*body.LifetimeSeconds)*time.Second))
 		if store.IsUniqueViolation(err) {
 			return "", "", ErrKeyHoldsLiveCredential

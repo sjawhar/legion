@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
@@ -55,7 +56,7 @@ func (s *server) machineLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if obj.Service() != "" {
-		writeError(w, http.StatusBadRequest, "SERVICE_LOGS_IN_WITH_TOKEN", "a service logs in with its own Kubernetes ServiceAccount token at POST /v1/launcher-credentials/token, never through a code a person approves")
+		writeError(w, http.StatusBadRequest, "SERVICE_LOGS_IN_WITH_TOKEN", machine.ErrServiceLogsInWithToken.Error())
 		return
 	}
 	if s.launcherLimiter.refuse(w, r, launcherLoginKey(obj)) {
@@ -63,6 +64,9 @@ func (s *server) machineLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	pendingID, code, err := s.deps.MachineLogin.Login(r.Context(), body.Request)
 	switch {
+	case errors.Is(err, machine.ErrServiceLogsInWithToken):
+		writeError(w, http.StatusBadRequest, "SERVICE_LOGS_IN_WITH_TOKEN", err.Error())
+		return
 	case errors.Is(err, record.ErrRequestInvalid):
 		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", err.Error())
 		return
@@ -120,23 +124,48 @@ type tokenLoginResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
-// tokenLogin is POST /v1/launcher-credentials/token: public, rate-limited per source address. A
-// service (the Legion daemon) logs in with its own projected ServiceAccount token, and no person
-// approves it (machine.Service.TokenLogin). The account's one launcher credential moves to the
-// request's key and the token's expiry. A token that has expired is 401 TOKEN_EXPIRED, one that
-// does not verify 401 TOKEN_INVALID, one whose account BROKER_SERVICE_LOGINS does not name for the
-// requested service 403 ACCOUNT_NOT_LISTED, a request object that does not verify or repeats a jti
-// 400 REQUEST_INVALID, a key another live credential holds 409 KEY_HOLDS_LIVE_CREDENTIAL, and a
-// broker that trusts no Kubernetes token issuer answers 404 TOKEN_LOGIN_OFF.
+// tokenLogin is POST /v1/launcher-credentials/token: public. A service (the Legion daemon) logs in
+// with its own projected ServiceAccount token, and no person approves it (machine.Service's
+// VerifyServiceToken, then TokenLogin). The account's one launcher credential moves to the
+// request's key and the token's expiry. A token whose subject is no account BROKER_SERVICE_LOGINS
+// lists spends its source address's bucket before it is verified; a verified listed account spends
+// a bucket of its own (limits.go, refuseAccount) and never its address's, so a flood from an
+// address the daemon shares cannot keep it from logging in. A token that claims a listed account
+// and does not verify spends no bucket: the broker verifies every such token, which is the cost of
+// never refusing the daemon for its neighbours' requests. A token that has expired is 401
+// TOKEN_EXPIRED, one that does not verify 401 TOKEN_INVALID, one that lives longer than an hour
+// from its issue 401 TOKEN_TOO_LONG_LIVED, one whose account BROKER_SERVICE_LOGINS does not name
+// for the requested service 403 ACCOUNT_NOT_LISTED, a request object that does not verify or
+// repeats a jti 400 REQUEST_INVALID, a key another live credential holds 409
+// KEY_HOLDS_LIVE_CREDENTIAL, and a broker that trusts no Kubernetes token issuer answers 404
+// TOKEN_LOGIN_OFF.
 func (s *server) tokenLogin(w http.ResponseWriter, r *http.Request) {
-	if s.launcherLimiter.refuseAddress(w, r) {
-		return
-	}
 	var body tokenLoginBody
 	if !readJSON(w, r, &body, "INVALID_REQUEST") {
 		return
 	}
-	cred, err := s.deps.MachineLogin.TokenLogin(r.Context(), body.Token, body.Request)
+	login := s.deps.MachineLogin
+	if !login.ListsAccount(enroll.ClaimedSubject(body.Token)) && s.launcherLimiter.refuseAddress(w, r) {
+		return
+	}
+	account, err := login.VerifyServiceToken(r.Context(), body.Token)
+	if err != nil {
+		writeTokenLoginRefusal(w, err)
+		return
+	}
+	if s.launcherLimiter.refuseAccount(w, account.Subject) {
+		return
+	}
+	cred, err := login.TokenLogin(r.Context(), account, body.Request)
+	if err != nil {
+		writeTokenLoginRefusal(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tokenLoginResponse{CredentialID: cred.ID, ExpiresAt: cred.ExpiresAt})
+}
+
+// writeTokenLoginRefusal answers a token login's refusal with the code tokenLogin documents.
+func writeTokenLoginRefusal(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, machine.ErrTokenLoginsOff):
 		writeError(w, http.StatusNotFound, "TOKEN_LOGIN_OFF", err.Error())
@@ -144,15 +173,15 @@ func (s *server) tokenLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "TOKEN_EXPIRED", err.Error())
 	case errors.Is(err, machine.ErrTokenInvalid):
 		writeError(w, http.StatusUnauthorized, "TOKEN_INVALID", err.Error())
+	case errors.Is(err, machine.ErrTokenTooLongLived):
+		writeError(w, http.StatusUnauthorized, "TOKEN_TOO_LONG_LIVED", err.Error())
 	case errors.Is(err, machine.ErrAccountNotListed):
 		writeError(w, http.StatusForbidden, "ACCOUNT_NOT_LISTED", err.Error())
 	case errors.Is(err, record.ErrRequestInvalid):
 		writeError(w, http.StatusBadRequest, "REQUEST_INVALID", err.Error())
 	case errors.Is(err, machine.ErrKeyHoldsLiveCredential):
 		writeError(w, http.StatusConflict, "KEY_HOLDS_LIVE_CREDENTIAL", err.Error())
-	case err != nil:
-		writeInternal(w, "token login", err)
 	default:
-		writeJSON(w, http.StatusOK, tokenLoginResponse{CredentialID: cred.ID, ExpiresAt: cred.ExpiresAt})
+		writeInternal(w, "token login", err)
 	}
 }

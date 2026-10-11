@@ -46,6 +46,7 @@ type wireLauncherCredential struct {
 	CredentialID string    `json:"credential_id"`
 	Host         string    `json:"host"`
 	Service      *string   `json:"service"`
+	Subject      *string   `json:"subject"`
 	ApprovedBy   string    `json:"approved_by"`
 	IssuedAt     time.Time `json:"issued_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
@@ -523,7 +524,7 @@ func (ts *testServer) mintOutstandingServiceCredential(t *testing.T, approvedBy 
 }
 
 // TestAPendingServiceLoginFromBeforeTokenLoginsIsNeverApproved: a service's device-code login a
-// broker opened before token logins, still pending, is refused 400 REQUEST_INVALID to anyone who
+// broker opened before token logins, still pending, is refused 400 SERVICE_LOGS_IN_WITH_TOKEN to anyone who
 // approves it, and mints nothing; anyone signed in may still deny it.
 func TestAPendingServiceLoginFromBeforeTokenLoginsIsNeverApproved(t *testing.T) {
 	ts := newTestServer(t)
@@ -541,8 +542,8 @@ func TestAPendingServiceLoginFromBeforeTokenLoginsIsNeverApproved(t *testing.T) 
 		t.Fatal(err)
 	}
 	status, answer := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+body.ID()+"/approve", map[string]any{"approver": "bob@example.com", "code": body.Code})
-	if status != http.StatusBadRequest || decode[wireError](t, answer).Code != "REQUEST_INVALID" {
-		t.Fatalf("approve a pending service login = %d %s, want 400 REQUEST_INVALID", status, answer)
+	if status != http.StatusBadRequest || decode[wireError](t, answer).Code != "SERVICE_LOGS_IN_WITH_TOKEN" {
+		t.Fatalf("approve a pending service login = %d %s, want 400 SERVICE_LOGS_IN_WITH_TOKEN", status, answer)
 	}
 	if got := ts.column(t, `select count(*)::text from launcher_credentials`); !slices.Equal(got, []string{"0"}) {
 		t.Fatalf("launcher credentials = %v, want none", got)

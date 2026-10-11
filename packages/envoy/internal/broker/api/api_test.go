@@ -108,8 +108,7 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 		t.Fatalf("oidc.New: %v", err)
 	}
 	serviceLogins := map[string]string{daemonAccount: "legion-daemon", otherDaemonAccount: "legion-daemon"}
-	k8s := enroll.K8sPodVerifier{Verifier: podVerifier}
-	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: k8s, ServiceLogins: serviceLogins}
+	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
@@ -121,7 +120,7 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
-		Replay: enr.Replay, Tokens: k8s, ServiceLogins: serviceLogins,
+		Replay: enr.Replay,
 	}
 
 	deps := api.Deps{
