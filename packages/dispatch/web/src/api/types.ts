@@ -284,8 +284,9 @@ export interface MachineLogin {
    *  null for the viewer's own machine. */
   service: string | null;
   /** The Kubernetes ServiceAccount a service's token login proved
-   *  (`system:serviceaccount:<namespace>:<name>`); null for every login a person approved. */
-  subject: string | null;
+   *  (`system:serviceaccount:<namespace>:<name>`); null for every login a person approved, and
+   *  absent from a broker older than token logins. */
+  subject?: string | null;
   /** The login of the person who approved it; empty for a service's token login, which no person
    *  approves. */
   approved_by: string;

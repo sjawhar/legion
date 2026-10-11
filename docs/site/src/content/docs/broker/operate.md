@@ -98,10 +98,12 @@ get one. Deleting the daemon's ServiceAccount stops new tokens, but a token alre
 verifying until it expires, at most an hour after it was minted, because the broker checks tokens
 against the cluster's published keys rather than asking the API server. A token login spends its
 source address's rate-limit bucket before its token is verified and its account's own after, so a
-daemon behind an address other callers share is held to that address's bucket: set
-`BROKER_TRUSTED_PROXY_HEADER` behind a proxy, so each caller is keyed on its own address. The
-daemon renews halfway through its credential's life, so a refused login has half an hour to
-succeed.
+daemon behind an address other callers share is held to that address's bucket. Set
+`BROKER_TRUSTED_PROXY_HEADER` behind a proxy, so each caller is keyed on its own address, and
+keep the daemon's and its pods' traffic to the broker on their own pod addresses rather than
+translated to a node's or a gateway's. The daemon renews halfway through its credential's life,
+which carries it through brief contention for its address's bucket; a caller that keeps that
+bucket drained for the rest of the credential's life stops it logging in.
 
 A service login a person approved through a device code before this broker keeps working until
 it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (7 days by default) after its approval.

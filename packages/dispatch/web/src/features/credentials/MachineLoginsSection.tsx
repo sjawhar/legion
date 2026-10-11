@@ -28,7 +28,8 @@ const columns: readonly RevocableColumn<MachineLogin>[] = [
     header: "Credential",
   },
   {
-    cell: (login) => (login.subject === null ? login.approved_by : `No one: ${login.subject}`),
+    // `== null`: a broker older than this Dispatch sends no `subject` at all.
+    cell: (login) => (login.subject == null ? login.approved_by : `No one: ${login.subject}`),
     header: "Approved by",
   },
   { cell: (login) => <Timestamp at={login.issued_at} />, header: "Issued" },
@@ -63,7 +64,7 @@ export function MachineLoginsSection(): ReactNode {
       confirm={(login) =>
         `Revoke the machine login for ${machineName(login)}? ${
           login.service
-            ? login.subject === null
+            ? login.subject == null
               ? `Every session it started, its worker pods included, ends at once.`
               : `Every session it started, its worker pods included, ends at once, and a running pod stays without secrets until it is replaced; ${login.service} logs in again with its Kubernetes token, for the pods it launches next, unless ${login.subject} is removed from the broker's BROKER_SERVICE_LOGINS.`
             : "Every agent session it started loses its secrets at once, and the machine needs a new login."

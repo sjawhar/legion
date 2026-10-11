@@ -22,7 +22,8 @@ import (
 // and one account cannot log in faster than its bucket allows. A daemon behind an address others
 // share is held to that address's bucket too: BROKER_TRUSTED_PROXY_HEADER keys the bucket on the
 // caller's own address behind a proxy, and the daemon renews its credential halfway through its
-// life, so a refused login has half an hour to succeed before the credential it holds expires.
+// life, which carries it through brief contention for that bucket, not through a caller that keeps
+// it drained until the credential expires.
 type LauncherLimits struct {
 	PerAddress ratelimit.Limit
 	PerLogin   ratelimit.Limit

@@ -229,6 +229,35 @@ test("a service's login someone else approved is listed by its service and its a
   }
 });
 
+// A broker older than token logins sends no `subject` at all, so while Dispatch deploys first, a
+// service's login a person approved is shown with its approver and its plain Revoke, never as a
+// token login of `undefined`.
+test("a service's login from a broker that sends no subject is shown as one a person approved", async () => {
+  const { subject: _omitted, ...fromOlderBroker } = daemon;
+  const getMachineLogins = spyOn(api, "getMachineLogins").mockResolvedValue({
+    credentials: [fromOlderBroker],
+  });
+  const confirm = spyOn(window, "confirm").mockReturnValue(false);
+
+  try {
+    renderPage();
+    const section = within(await screen.findByRole("region", { name: "Machine logins" }));
+    const row = (await section.findByText("legion-daemon on cluster.example.com")).closest("tr");
+    expect(within(row as HTMLElement).getByText("bob@example.com")).toBeDefined();
+    expect(section.queryByText(/undefined/)).toBeNull();
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Revoke" }));
+    expect(confirm.mock.calls).toEqual([
+      [
+        "Revoke the machine login for legion-daemon on cluster.example.com? Every session it started, its worker pods included, ends at once.",
+      ],
+    ]);
+  } finally {
+    cleanup();
+    confirm.mockRestore();
+    getMachineLogins.mockRestore();
+  }
+});
+
 test("a service's token login names its ServiceAccount, and its Revoke says what logs in again", async () => {
   const tokenLogin: MachineLogin = {
     ...daemon,
