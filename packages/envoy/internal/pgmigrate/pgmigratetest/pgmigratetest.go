@@ -30,13 +30,14 @@ import (
 // than a migration, but only a file it is given, and a //go:embed pattern can leave an entry out
 // without an error. A directory pattern without all: drops every name beginning with _ or ., so
 // both stores embed all:migrations; beyond that, no directive embeds a symlink, a version-control
-// name (.git, .hg, .svn, .bzr), an empty directory, a file that is not regular (a FIFO, socket or
-// device), or a hidden name Go's module paths refuse (one holding a colon, for instance), all:
-// included. A migration file left out would go unapplied while it sits in the tree, and an empty
-// directory, which holds nothing to apply, is still an entry Load never judges. On today's tree the
-// all: prefix changes nothing, since neither directory holds a _ or . name. This check fails for
-// each of those causes and names it: a _ or . name, a symlink, a version-control name, an empty
-// directory, and a file that is not regular, falling back to the store's pattern for anything else.
+// name (.git, .hg, .svn, .bzr), a directory it takes nothing from (an empty one, for instance), a
+// file that is not regular (a FIFO, socket or device), or a hidden name Go's module paths refuse
+// (one holding a colon, for instance), all: included. A migration file left out would go
+// unapplied while it sits in the tree, and a directory left out is an entry Load never judges,
+// though it refuses any directory it is given. On today's tree the all: prefix changes nothing,
+// since neither directory holds a _ or . name. This check fails for each of those causes and
+// names it: a _ or . name, a symlink, a version-control name, a directory, and a file that is not
+// regular, falling back to the store's pattern for anything else.
 func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 	onDisk, err := os.ReadDir(dir)
 	if err != nil {
@@ -61,7 +62,7 @@ func CheckEmbedsEveryFile(embedded fs.FS, dir string) error {
 		case slices.Contains([]string{".git", ".hg", ".svn", ".bzr"}, name):
 			return fmt.Errorf("%s/%s is a version-control name, which no //go:embed directive embeds, all: included; remove it", dir, name)
 		case entry.IsDir():
-			return fmt.Errorf("%s/%s is a directory holding nothing //go:embed can carry, such as an empty one, and a migrations directory holds files alone; remove it", dir, name)
+			return fmt.Errorf("%s/%s is a directory //go:embed took nothing from (an empty one, for instance), and a migrations directory holds files alone; remove it", dir, name)
 		case !entry.Type().IsRegular():
 			return fmt.Errorf("%s/%s is not a regular file (a FIFO, socket or device), which no //go:embed directive embeds; remove it", dir, name)
 		case strings.HasPrefix(name, "_") || strings.HasPrefix(name, "."):

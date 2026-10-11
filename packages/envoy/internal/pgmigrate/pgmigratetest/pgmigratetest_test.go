@@ -35,7 +35,19 @@ func TestCheckEmbedsEveryFileNamesWhyAnEntryIsMissing(t *testing.T) {
 					t.Fatal(err)
 				}
 			},
-			want: "migrations/.empty is a directory holding nothing //go:embed can carry",
+			want: "migrations/.empty is a directory //go:embed took nothing from (an empty one, for instance), and a migrations directory holds files alone; remove it",
+		},
+		{
+			name: "a directory holding a file, which a directive without all: drops whole",
+			place: func(t *testing.T, dir string) {
+				if err := os.MkdirAll(filepath.Join(dir, "_old"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "_old", "0002_b.up.sql"), []byte("select 2"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "migrations/_old is a directory //go:embed took nothing from (an empty one, for instance), and a migrations directory holds files alone; remove it",
 		},
 		{
 			name: "a name a directive without all: drops",
