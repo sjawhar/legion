@@ -356,6 +356,17 @@ type Store interface {
 	// RoleRun reads one role's run of an issue generation: its queued supervise rows and the claim
 	// with token.
 	RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, issue string, role claim.Role, generation uint64) (RoleRun, error)
+	// RoleRuns is RoleRun for a bounded batch, keyed by token. Each batch reads its queued starts
+	// and claims from the caller's transaction snapshot rather than one query pair per role.
+	RoleRuns(ctx context.Context, tx pgx.Tx, keys []RoleRunKey) (map[claim.Token]RoleRun, error)
+}
+
+// RoleRunKey identifies one role's run of an issue generation.
+type RoleRunKey struct {
+	Token      claim.Token
+	Issue      string
+	Role       claim.Role
+	Generation uint64
 }
 
 // RoleRun is what the store holds of one role's run of an issue generation: the role's supervise

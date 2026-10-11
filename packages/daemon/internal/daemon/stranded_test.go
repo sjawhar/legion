@@ -6,11 +6,12 @@ import (
 	"log/slog"
 	"net/http"
 	"reflect"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -18,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
@@ -204,6 +206,9 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 
 	d := startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(&logs, nil)))
 
+	testwait.Eventually(t, "the boot stranded-claim report", func() bool {
+		return len(loggedLines(t, logs.String(), strandedLine)) == 1
+	})
 	lines := loggedLines(t, logs.String(), strandedLine)
 	if len(lines) != 1 {
 		t.Fatalf("the boot logged %d lines %q, want one; log:\n%s", len(lines), strandedLine, logs.String())
@@ -266,5 +271,132 @@ func TestABootWithOnlyIdleSuspendedClaimsReportsNothing(t *testing.T) {
 	}
 	if got := strandedOnTheWire(t, bootState(t, d)); len(got) != 0 {
 		t.Fatalf("strandedClaims = %v, want none", got)
+	}
+}
+
+// The report reads the issue record only after supervision has restored every claim. That read is
+// advisory: a held database lock must not put it between boot restoration and the API, which is
+// the same boot-cycle deadlock unfinished relaunches used to cause. Holding `issues` exclusively
+// makes the report's read wait on a real Postgres connection; /healthz must still answer.
+func TestABootServesHealthzWhileTheStrandedReportStoreReadWaits(t *testing.T) {
+	cfg := testConfig(t)
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.Migrate(ctx); err != nil {
+		t.Fatalf("migrate the store: %v", err)
+	}
+	lock, err := st.Pool().Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the report lock: %v", err)
+	}
+	locked := true
+	if _, err := lock.Exec(ctx, "lock table issues in access exclusive mode"); err != nil {
+		t.Fatalf("lock the report's issues read: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- run(runCtx, cfg, quietLogger(), fakeRuntime(fake.NewRuntime(), &built{})) }()
+	t.Cleanup(func() {
+		if locked {
+			_ = lock.Rollback(context.Background())
+		}
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("run: %v", err)
+			}
+		case <-time.After(15 * time.Second):
+			t.Error("run did not return after the report lock released")
+		}
+	})
+
+	base := "http://127.0.0.1:" + strconv.Itoa(cfg.Port)
+	deadline := time.Now().Add(3 * time.Second)
+	for !answersHealthz(base) {
+		select {
+		case err := <-done:
+			t.Fatalf("the daemon exited before /healthz answered: %v", err)
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("/healthz did not answer while the stranded report read waited on the store")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := lock.Rollback(ctx); err != nil {
+		t.Fatalf("release the report lock: %v", err)
+	}
+	locked = false
+}
+
+// A state transaction is a snapshot: when a claim changes after that snapshot begins, its worker
+// view and strandedClaims must both say what the snapshot saw. Reading worker state from the live
+// supervisor after beginning the transaction, while RoleRuns stayed in the transaction, used to
+// answer the newer `suspended` worker with no stranded entry.
+func TestStateSnapshotKeepsStrandedClaimsConsistentWithWorkerStates(t *testing.T) {
+	cfg := testConfig(t)
+	issue := cfg.Project + "-1"
+	held := previousClaim(t, cfg, issue, issue, claim.RoleImplementer, supervise.StateIdle)
+	putPreviousRun(t, cfg, previousRun{
+		issues: []record.Issue{runningRoot(issue, phase.Implementing)},
+		slots:  []string{issue},
+		claims: []supervise.Claim{held},
+	})
+
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	tx, err := st.Pool().BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		t.Fatalf("begin the state snapshot: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := st.SchemaVersionTx(ctx, tx); err != nil {
+		t.Fatalf("establish the state snapshot: %v", err)
+	}
+
+	stored, err := st.Claims(ctx)
+	if err != nil {
+		t.Fatalf("read the stored claim: %v", err)
+	}
+	var current supervise.Claim
+	for _, candidate := range stored {
+		if candidate.Token == held.Token {
+			current = candidate
+			break
+		}
+	}
+	if current.Token == "" {
+		t.Fatalf("the stored claims omit %s", held.Token)
+	}
+	current.State = supervise.StateSuspended
+	if err := st.PutClaim(ctx, current); err != nil {
+		t.Fatalf("suspend the claim after the snapshot: %v", err)
+	}
+
+	project, err := claim.ProjectToken(cfg.Project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := &source{
+		store: st, records: record.NewStore(), project: cfg.Project, projectToken: project, runtime: "tmux", admissionCap: cfg.AdmissionCap,
+		startedAt: time.Now(), deployment: func() capabilities.Deployment { return capabilities.Deployment{} },
+	}
+	state, err := view.State(ctx, tx)
+	if err != nil {
+		t.Fatalf("State: %v", err)
+	}
+	worker := state.Issues[issue].Workers[claim.RoleImplementer].Claim
+	if worker.State != string(supervise.StateIdle) || len(state.StrandedClaims) != 0 {
+		t.Fatalf("snapshot state = worker %s, stranded %v; want idle worker and no stranded claims", worker.State, state.StrandedClaims)
 	}
 }

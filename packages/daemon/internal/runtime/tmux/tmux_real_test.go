@@ -410,6 +410,10 @@ func (c *stubConn) AgentSecretsEnrollment(context.Context, string) error {
 	return errors.New("the stream stub does not enroll agent secrets")
 }
 
+func (c *stubConn) AgentSecretsToken(context.Context) (string, error) {
+	return "", errors.New("the stream stub reads no projected token")
+}
+
 func (c *stubConn) awaitEvent(t *testing.T, want string) {
 	t.Helper()
 	deadline := time.After(10 * time.Second)

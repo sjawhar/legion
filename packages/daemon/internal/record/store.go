@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -660,58 +659,112 @@ func (s *Postgres) RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseTo
 	return nil
 }
 
-// RoleRun reads one role's run of an issue generation as the store holds it: the role's supervise
-// rows for the generation still queued, oldest first, and the claim with token (this daemon's own
-// claim on the role), with the task it holds. It decides nothing:
-// workflow.StartFor reads it.
+// RoleRun reads one role's run of an issue generation as the store holds it. RoleRuns owns the
+// query shape, so the one-role caller and a state-report batch share it.
 func (s *Postgres) RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, issue string, role claim.Role, generation uint64) (RoleRun, error) {
-	rows, err := tx.Query(ctx, `select `+outboxColumns+` from outbox
-		where issue = $1 and kind = $2 and payload->>'role' = $3 and payload->>'generation' = $4 order by id`,
-		issue, string(OutboxKindSupervise), string(role), strconv.FormatUint(generation, 10))
+	runs, err := s.RoleRuns(ctx, tx, []RoleRunKey{{Token: token, Issue: issue, Role: role, Generation: generation}})
 	if err != nil {
-		return RoleRun{}, fmt.Errorf("read the queued %s rows of %s: %w", role, issue, err)
+		return RoleRun{}, err
 	}
-	defer rows.Close()
-	var run RoleRun
+	return runs[token], nil
+}
+
+type roleRunIdentity struct {
+	issue      string
+	role       claim.Role
+	generation uint64
+}
+
+// RoleRuns reads the claims and queued supervise rows of keys in two bounded queries, under the
+// caller's transaction snapshot. The outbox query reads the selected issues' supervise rows, then
+// retains only keys' roles and generations: JSON carries those two fields, and filtering them in
+// SQL would turn a simple indexed issue scan into a JSON-expression scan. A state report batches
+// at most workflow's bounded key count, so a tree with several roles adds only its own rows.
+func (s *Postgres) RoleRuns(ctx context.Context, tx pgx.Tx, keys []RoleRunKey) (map[claim.Token]RoleRun, error) {
+	runs := make(map[claim.Token]RoleRun, len(keys))
+	if len(keys) == 0 {
+		return runs, nil
+	}
+	tokens := make([]string, 0, len(keys))
+	issues := make([]string, 0, len(keys))
+	seenIssues := make(map[string]struct{}, len(keys))
+	candidates := make(map[roleRunIdentity]claim.Token, len(keys))
+	for _, key := range keys {
+		if _, exists := runs[key.Token]; exists {
+			continue
+		}
+		runs[key.Token] = RoleRun{}
+		tokens = append(tokens, string(key.Token))
+		candidates[roleRunIdentity{issue: key.Issue, role: key.Role, generation: key.Generation}] = key.Token
+		if _, seen := seenIssues[key.Issue]; !seen {
+			seenIssues[key.Issue] = struct{}{}
+			issues = append(issues, key.Issue)
+		}
+	}
+
+	rows, err := tx.Query(ctx, `select c.token, c.state, c.last_start_row, d.claim_token is not null,
+		coalesce(d.generation, 0), coalesce(d.phase, ''), d.confirmed_at
+		from claims c left join pending_task_deliveries d on d.claim_token = c.token where c.token = any($1)`, tokens)
+	if err != nil {
+		return nil, fmt.Errorf("read the claims of %d role runs: %w", len(keys), err)
+	}
 	for rows.Next() {
-		row, err := scanOutbox(rows)
-		if err != nil {
-			return RoleRun{}, fmt.Errorf("read the queued %s rows of %s: %w", role, issue, err)
+		var token string
+		var held RoleClaim
+		var pending bool
+		var task supervise.Delivery
+		var confirmed *time.Time
+		if err := rows.Scan(&token, &held.State, &held.LastStartRow, &pending, &task.Generation, &task.Phase, &confirmed); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("read the claims of %d role runs: %w", len(keys), err)
 		}
-		payload, err := DecodeOutboxPayload(row)
-		if err != nil {
-			return RoleRun{}, err
-		}
-		request, ok := payload.(SuperviseRequest)
-		if !ok {
-			return RoleRun{}, fmt.Errorf("outbox row %d of kind %s decodes to %T", row.ID, row.Kind, payload)
-		}
-		run.Queued = append(run.Queued, QueuedSupervise{ID: row.ID, Request: request})
-	}
-	if err := rows.Err(); err != nil {
-		return RoleRun{}, fmt.Errorf("read the queued %s rows of %s: %w", role, issue, err)
-	}
-	var held RoleClaim
-	var pending bool
-	var task supervise.Delivery
-	var confirmed *time.Time
-	err = tx.QueryRow(ctx, `select c.state, c.last_start_row, d.claim_token is not null, coalesce(d.generation, 0), coalesce(d.phase, ''), d.confirmed_at
-		from claims c left join pending_task_deliveries d on d.claim_token = c.token where c.token = $1`, string(token)).
-		Scan(&held.State, &held.LastStartRow, &pending, &task.Generation, &task.Phase, &confirmed)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-	case err != nil:
-		return RoleRun{}, fmt.Errorf("read claim %s: %w", token, err)
-	default:
 		if pending {
 			if confirmed != nil {
 				task.ConfirmedAt = *confirmed
 			}
 			held.Pending = &task
 		}
+		run := runs[claim.Token(token)]
 		run.Claim = &held
+		runs[claim.Token(token)] = run
 	}
-	return run, nil
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, fmt.Errorf("read the claims of %d role runs: %w", len(keys), err)
+	}
+	rows.Close()
+
+	rows, err = tx.Query(ctx, `select `+outboxColumns+` from outbox
+		where kind = $1 and issue = any($2) order by id`, string(OutboxKindSupervise), issues)
+	if err != nil {
+		return nil, fmt.Errorf("read the queued role runs of %d issues: %w", len(issues), err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		row, err := scanOutbox(rows)
+		if err != nil {
+			return nil, fmt.Errorf("read the queued role runs of %d issues: %w", len(issues), err)
+		}
+		payload, err := DecodeOutboxPayload(row)
+		if err != nil {
+			return nil, err
+		}
+		request, ok := payload.(SuperviseRequest)
+		if !ok {
+			return nil, fmt.Errorf("outbox row %d of kind %s decodes to %T", row.ID, row.Kind, payload)
+		}
+		token, wanted := candidates[roleRunIdentity{issue: row.Issue, role: request.Role, generation: request.Generation}]
+		if !wanted {
+			continue
+		}
+		run := runs[token]
+		run.Queued = append(run.Queued, QueuedSupervise{ID: row.ID, Request: request})
+		runs[token] = run
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read the queued role runs of %d issues: %w", len(issues), err)
+	}
+	return runs, nil
 }
 
 // PendingStatusWrites lists every Dispatch status write of project's issues the outbox has not

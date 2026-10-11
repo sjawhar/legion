@@ -474,8 +474,9 @@ A BTW, Aside or Steer frame, or a message from the Agents page, is answered as
 ## Following
 
 You follow every ask you open or reply to: its answer, edits, resolution and replies reach you
-directly. Nothing else on an issue reaches you unless you subscribe to its topic. Leaving or
-rejoining a thread, and the topic to subscribe to, are in
+directly. A person's reply to a comment you started, and a person's new comment on a document you
+wrote, reach you directly too. Nothing else on an issue reaches you unless you subscribe to its
+topic. Leaving or rejoining a thread, and the topic to subscribe to, are in
 [Asks after they open](skill://dispatch/references/asks.md).
 
 ## References

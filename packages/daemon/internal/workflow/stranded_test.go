@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -18,19 +19,35 @@ import (
 // stored row is the one its role run reads back.
 type strandedStore struct {
 	record.Store
-	issues []record.Issue
-	queued map[claim.Token][]record.QueuedSupervise
-	claims map[claim.Token]supervise.Claim
+	issues        []record.Issue
+	queued        map[claim.Token][]record.QueuedSupervise
+	claims        map[claim.Token]supervise.Claim
+	roleRunCalls  int
+	roleRunsCalls int
 }
 
-func (s strandedStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) { return s.issues, nil }
+func (s *strandedStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) { return s.issues, nil }
 
-func (s strandedStore) RoleRun(_ context.Context, _ pgx.Tx, token claim.Token, _ string, _ claim.Role, _ uint64) (record.RoleRun, error) {
+func (s *strandedStore) RoleRun(_ context.Context, _ pgx.Tx, token claim.Token, _ string, _ claim.Role, _ uint64) (record.RoleRun, error) {
+	s.roleRunCalls++
+	return s.roleRun(token), nil
+}
+
+func (s *strandedStore) RoleRuns(_ context.Context, _ pgx.Tx, keys []record.RoleRunKey) (map[claim.Token]record.RoleRun, error) {
+	s.roleRunsCalls++
+	runs := make(map[claim.Token]record.RoleRun, len(keys))
+	for _, key := range keys {
+		runs[key.Token] = s.roleRun(key.Token)
+	}
+	return runs, nil
+}
+
+func (s *strandedStore) roleRun(token claim.Token) record.RoleRun {
 	run := record.RoleRun{Queued: s.queued[token]}
 	if c, ok := s.claims[token]; ok {
 		run.Claim = &record.RoleClaim{State: c.State, LastStartRow: c.LastStartRow}
 	}
-	return run, nil
+	return run
 }
 
 func strandedClaim(t *testing.T, tree, issue string, role claim.Role, state supervise.ClaimState) supervise.Claim {
@@ -110,7 +127,7 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 	for _, c := range claims {
 		stored[c.Token] = c
 	}
-	s := strandedStore{
+	s := &strandedStore{
 		issues: issues,
 		claims: stored,
 		queued: map[claim.Token][]record.QueuedSupervise{
@@ -140,4 +157,30 @@ func names(claims []supervise.Claim) []string {
 		out[i] = c.Issue + " " + string(c.Role) + " " + string(c.State)
 	}
 	return out
+}
+
+// A large fleet has hundreds of suspended claims after an operator action. Stranded reads their
+// queued starts in bounded batches rather than issuing one outbox and one claims query per role.
+func TestStrandedReadsRoleRunsInBatches(t *testing.T) {
+	const claimsCount = 401
+	store := &strandedStore{claims: map[claim.Token]supervise.Claim{}}
+	claims := make([]supervise.Claim, 0, claimsCount)
+	for i := range claimsCount {
+		issue := fmt.Sprintf("LEGION-%d", i+1)
+		store.issues = append(store.issues, strandedIssue(issue, issue, phase.Planning))
+		current := strandedClaim(t, issue, issue, claim.RolePlanner, supervise.StateSuspended)
+		store.claims[current.Token] = current
+		claims = append(claims, current)
+	}
+
+	got, err := Stranded(context.Background(), nil, store, claims)
+	if err != nil {
+		t.Fatalf("Stranded: %v", err)
+	}
+	if len(got) != claimsCount {
+		t.Fatalf("stranded claims = %d, want %d", len(got), claimsCount)
+	}
+	if store.roleRunCalls != 0 || store.roleRunsCalls != 3 {
+		t.Fatalf("role-run reads = %d single and %d batches, want 0 single and 3 bounded batches", store.roleRunCalls, store.roleRunsCalls)
+	}
 }

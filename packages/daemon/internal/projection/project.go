@@ -15,9 +15,8 @@ import (
 )
 
 // Project joins durable issue facts to current supervision claims for GET /legion/v1/state. The
-// caller owns the repeatable-read transaction, so its record reads share one snapshot; claims are
-// intentionally live process facts and arrive separately from the supervisor. project is the
-// Dispatch project whose pending status writes the state lists.
+// caller owns the repeatable-read transaction, so its record reads and claims share one snapshot.
+// project is the Dispatch project whose pending status writes the state lists.
 func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, claims []supervise.Claim) (api.State, error) {
 	issues, err := s.Issues(ctx, tx)
 	if err != nil {

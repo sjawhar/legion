@@ -2,7 +2,9 @@ package supervise
 
 import (
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -188,6 +190,128 @@ func TestATransientEnrollmentFailureIsRetriedOnTheNextAliveObservation(t *testin
 	}
 	if got := h.conn.Enrollments(); len(got) != 1 {
 		t.Fatalf("the shim was told %v", got)
+	}
+}
+
+// A projected token is valid for an hour at most, and the shim reads it once per hello. An
+// enrollment held up past the hello token's expiry (the daemon's machine login waiting for a
+// person to approve it) presents a token the shim reads again then, never the expired one, which
+// the broker refuses as POD_IDENTITY_MISMATCH.
+func TestAnEnrollmentHeldPastTheHelloTokensExpiryPresentsAFreshToken(t *testing.T) {
+	h := newHarness(t)
+	broker := h.withSecrets()
+	broker.enrollErr = errors.New("broker answered 0 NO_MACHINE_CREDENTIAL: machine login pending; code ABCD-1234")
+	h.launch()
+	h.helloWithToken(podToken(h.clock.Now().Add(time.Hour)))
+	h.register()
+	h.ready()
+	if c := h.claim(); c.Enrollment != nil {
+		t.Fatalf("enrolled %+v while the login was pending", c.Enrollment)
+	}
+
+	h.clock.Advance(80 * time.Minute) // the login is approved long after the hello
+	broker.enrollErr = nil
+	fresh := podToken(h.clock.Now().Add(time.Hour))
+	h.conn.SetAgentSecretsToken(fresh)
+	h.observe(runtime.Alive)
+
+	if refused := h.logs.lines("agent-secrets: enrollment refused"); len(refused) != 0 {
+		t.Fatalf("the enrollment was refused: %q", refused)
+	}
+	enrollments := broker.enrolled()
+	if len(enrollments) != 1 || enrollments[0].PodToken != fresh {
+		t.Fatalf("enrolled %+v, want one enrollment presenting the token the shim read after the hello's expired", enrollments)
+	}
+	if c := h.claim(); c.Enrollment == nil || c.Enrollment.ID != "enr-1" {
+		t.Fatalf("stored enrollment %+v", c.Enrollment)
+	}
+	if h.m.identity.PodToken != "" {
+		t.Fatal("the machine kept the pod token past the enrollment")
+	}
+}
+
+// The machine asks the shim for its token again only when the token it holds could expire before
+// the broker verifies it: within the Enroll call's RPC bound plus a minute of clock skew. A token
+// that outlives that is presented as the hello carried it.
+func TestAHeldTokenIsReadAgainOnlyWhenItCouldExpireBeforeTheBrokerVerifiesIt(t *testing.T) {
+	for name, tc := range map[string]struct {
+		left  time.Duration // the hello token's life left when the agent registers
+		reads int
+	}{
+		"expired":                    {-time.Minute, 1},
+		"expiring within the margin": {testRPC + 30*time.Second, 1},
+		"outliving the margin":       {testRPC + 2*time.Minute, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			broker := h.withSecrets()
+			fresh := podToken(h.clock.Now().Add(time.Hour))
+			h.conn.SetAgentSecretsToken(fresh)
+			hello := podToken(h.clock.Now().Add(tc.left))
+			h.launch()
+			h.helloWithToken(hello)
+			h.register()
+			want := hello
+			if tc.reads > 0 {
+				want = fresh
+			}
+			if enrollments := broker.enrolled(); len(enrollments) != 1 || enrollments[0].PodToken != want {
+				t.Fatalf("enrolled %+v, want one enrollment presenting %s", enrollments, want)
+			}
+			if reads := h.conn.TokenReads(); reads != tc.reads {
+				t.Fatalf("the shim was asked for its token %d times, want %d", reads, tc.reads)
+			}
+		})
+	}
+}
+
+// A shim built before the token request forwards it to OMP, which refuses it as an unknown
+// command. The machine presents the broker nothing it would refuse: it drops the identity and
+// waits for the shim's next hello, whose token is read then, as it does after a refusal.
+func TestAShimThatCannotReadItsTokenAgainWaitsForItsNextHello(t *testing.T) {
+	h := newHarness(t)
+	broker := h.withSecrets()
+	h.conn.FailAgentSecretsToken(fmt.Errorf("worker-stream: %s refused agent-secrets-token: Unknown command: agent-secrets-token: %w", h.token, runtime.ErrTokenRefused))
+	h.launch()
+	h.helloWithToken(podToken(h.clock.Now().Add(-time.Minute)))
+	h.register()
+	h.ready()
+	h.observe(runtime.Alive)
+	if c := h.claim(); c.Enrollment != nil || len(broker.enrolled()) != 0 {
+		t.Fatalf("enrolled %+v with no token to present", c.Enrollment)
+	}
+	if reads := h.conn.TokenReads(); reads != 1 {
+		t.Fatalf("the shim was asked for its token %d times, want once: its refusal stands until its next hello", reads)
+	}
+	if lines := h.logs.lines("agent-secrets: the shim did not read its projected token again", "Unknown command"); len(lines) != 1 {
+		t.Fatalf("log %q", h.logs.lines("agent-secrets"))
+	}
+	if refused := h.logs.lines("agent-secrets: enrollment refused"); len(refused) != 0 {
+		t.Fatalf("the expired token reached the broker: %q", refused)
+	}
+	h.helloWithToken(podToken(h.clock.Now().Add(time.Hour))) // the shim reconnected
+	if c := h.claim(); c.Enrollment == nil {
+		t.Fatal("the fresh hello did not enroll")
+	}
+}
+
+func TestATokenRequestTheTransportLosesIsRetriedOnTheNextAliveObservation(t *testing.T) {
+	h := newHarness(t)
+	broker := h.withSecrets()
+	h.conn.FailAgentSecretsToken(errors.New("worker-stream: agent-secrets-token: no answer on the worker stream within the RPC timeout"))
+	h.launch()
+	h.helloWithToken(podToken(h.clock.Now().Add(-time.Minute)))
+	h.register()
+	h.ready()
+	if c := h.claim(); c.Enrollment != nil {
+		t.Fatalf("enrolled %+v with no token to present", c.Enrollment)
+	}
+	h.conn.FailAgentSecretsToken(nil)
+	fresh := podToken(h.clock.Now().Add(time.Hour))
+	h.conn.SetAgentSecretsToken(fresh)
+	h.observe(runtime.Alive)
+	if enrollments := broker.enrolled(); len(enrollments) != 1 || enrollments[0].PodToken != fresh {
+		t.Fatalf("enrolled %+v, want the alive observation to ask again and present what the shim read", enrollments)
 	}
 }
 

@@ -2092,6 +2092,17 @@ issue's pod (every role container of it alike) and the image probe's.
   `enrollment failed; retrying on the next observation` warning. After a login that ends without a
   credential the daemon waits 30 s before the next, doubling each time to at most 5 minutes, and an
   approved login resets the wait. It never starts a login while one is pending.
+  A held enrollment can come long after the shim's hello, which carries the pod's projected token
+  as the shim read it then, and that token lives `token_expiry_seconds` from when the kubelet wrote
+  it; the broker refuses an expired one as `POD_IDENTITY_MISMATCH`. So when the token the daemon
+  holds would expire within the enrollment's RPC bound plus a minute, the daemon first asks the
+  shim to read the file again (the `agent-secrets-token` frame), which the kubelet rewrites before
+  the token expires. A shim from a worker image older than that frame forwards it to Oh My Pi,
+  which refuses it; the daemon then logs
+  `supervise: agent-secrets: the shim did not read its projected token again; waiting for its next hello`
+  and enrolls on the shim's next hello: one its dropped connection redials with, or the claim's
+  next generation, which an operator starts with `legion claims suspend` and then
+  `legion claims resume` once the login reads `issued`.
   `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
   `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the

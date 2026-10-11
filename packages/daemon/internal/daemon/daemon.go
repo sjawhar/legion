@@ -389,7 +389,6 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 				"claims", s.supervisor.count(),
 				"boot", bootID,
 			)
-			reportStranded(starting, st, projectRecords{Store: record.NewStore(), project: cfg.Project}, s.supervisor, cfg.Project, log)
 			if workflow != nil {
 				log.Info("legion workflow boot stage", "stage", "api")
 			}
@@ -1235,7 +1234,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		State: &source{
 			store:        st,
 			records:      records,
-			supervisor:   s.supervisor,
 			project:      cfg.Project,
 			projectToken: p.project,
 			runtime:      cfg.Runtime.Name,
@@ -1271,10 +1269,26 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	})
 
 	group, serving := errgroup.WithContext(ctx)
+	serverStarted := make(chan struct{})
 	group.Go(func() error {
+		close(serverStarted)
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve the API on %s: %w", server.Addr, err)
 		}
+		return nil
+	})
+	// The report is advisory: its transaction must never sit in the path from restored claims to a
+	// serving API. Start it only after the server goroutine has begun and bound its store read; a
+	// lock or unavailable connection is a report error, not a failed or unhealthy boot.
+	group.Go(func() error {
+		select {
+		case <-serverStarted:
+		case <-serving.Done():
+			return nil
+		}
+		report, cancel := context.WithTimeout(serving, strandedReportTimeout)
+		defer cancel()
+		reportStranded(report, st, projectRecords{Store: record.NewStore(), project: cfg.Project}, p.project, s.log)
 		return nil
 	})
 	group.Go(func() error {
@@ -1307,13 +1321,13 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	return group.Wait()
 }
 
-// source answers the state route out of the daemon's own store: the daemon itself, the cap it
-// admits under, every claim it supervises, filed under the issue it is on, and the project's
-// controller.
+// source answers the state route out of one repeatable-read snapshot: the daemon itself, the cap
+// it admits under, every stored claim filed under the issue it is on, and the project's controller.
+// A machine persists its claim before it publishes it to supervision, so the durable snapshot
+// prevents a claim view and strandedClaims from describing different instants.
 type source struct {
 	store        *store.Store
 	records      record.Store
-	supervisor   *supervisor
 	project      string
 	projectToken string
 	runtime      string
@@ -1361,10 +1375,11 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	claims, err := s.supervisor.Claims(ctx)
+	claims, err := s.store.ClaimsTx(ctx, tx)
 	if err != nil {
 		return api.State{}, err
 	}
+	claims = ofProject(claims, s.projectToken)
 	records := projectRecords{Store: s.records, project: s.project}
 	state, err := projection.Project(ctx, tx, records, s.project, claims)
 	if err != nil {

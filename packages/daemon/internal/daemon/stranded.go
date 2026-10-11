@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -11,6 +13,11 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
+
+// strandedReportTimeout bounds an advisory boot report's transaction. The API is already serving
+// when it starts, and a report that cannot read promptly must not retain a database connection
+// through the daemon's normal work or shutdown.
+const strandedReportTimeout = 5 * time.Second
 
 // reportStranded logs, once the boot has re-adopted every claim and replayed the failed ones to
 // the workflow, the claims nothing will wake (workflow.Stranded), read from records as the state
@@ -22,18 +29,22 @@ import (
 // back otherwise looks healthy — its controller registers, the state shows its trees active, and
 // nothing else is logged. A boot with none logs nothing. The state route judges the same rule on
 // every read (strandedClaims). A failed read is logged and stops nothing: the report is the boot's
-// account of its claims, and no step after it depends on it.
-func reportStranded(ctx context.Context, st *store.Store, records record.Store, sup *supervisor, project string, log *slog.Logger) {
-	claims, err := sup.Claims(ctx)
-	if err != nil {
-		log.Error("boot: read the claims to report those nothing will wake", "error", err)
-		return
-	}
+// account of its claims, and no step after it depends on it. A read the daemon's stop cancels is
+// not a failure and logs nothing; one that outlives strandedReportTimeout is.
+func reportStranded(ctx context.Context, st *store.Store, records record.Store, project string, log *slog.Logger) {
 	var stranded []supervise.Claim
 	if err := pgx.BeginTxFunc(ctx, st.Pool(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+		claims, err := st.ClaimsTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+		claims = ofProject(claims, project)
 		stranded, err = workflow.Stranded(ctx, tx, records, claims)
 		return err
 	}); err != nil {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return
+		}
 		log.Error("boot: read the issue record to report the claims nothing will wake", "error", err)
 		return
 	}

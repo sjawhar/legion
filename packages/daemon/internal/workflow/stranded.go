@@ -13,6 +13,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
+const strandedRoleRunBatchSize = 200
+
 // Stranded is every claim of s's issues that nothing will wake, by issue and then role. A claim is
 // stranded when its issue's tree runs — the tree's root is recorded and does not linger, since
 // linger holds every member where it stood and re-admission starts each one again — no start the
@@ -32,10 +34,13 @@ import (
 // The operator's resume (`legion claims resume`) brings back a suspended one. A failed one ignores
 // resume and deliver: only a workflow start retries it, its architect's retry of the held phase for
 // a worker and its tree's re-admission for an architect.
-//
 // It names no other claim: a worker whose phase is not its own is started again when its phase
-// comes, and a lingering tree's members wait for its re-admission. claims are the supervisor's;
-// the daemon's boot logs what this returns, and the state route serves it as strandedClaims.
+// comes, and a lingering tree's members wait for its re-admission. claims are the caller's
+// transaction snapshot; the daemon's boot logs what this returns, and the state route serves it as
+// strandedClaims.
+//
+// Candidates' queued starts and their claims are read through RoleRuns in bounded batches: a fleet
+// of hundreds of suspended claims makes a few snapshot queries, never one pair per claim.
 func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise.Claim) ([]supervise.Claim, error) {
 	issues, err := s.Issues(ctx, tx)
 	if err != nil {
@@ -45,7 +50,13 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 	for _, issue := range issues {
 		recorded[issue.Key] = issue
 	}
-	var stranded []supervise.Claim
+	type candidate struct {
+		claim   supervise.Claim
+		issue   record.Issue
+		root    record.Issue
+		current phase.Phase
+	}
+	candidates := make([]candidate, 0, len(claims))
 	for _, c := range claims {
 		if c.State != supervise.StateSuspended && c.State != supervise.StateFailed {
 			continue
@@ -67,12 +78,26 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 		default:
 			continue
 		}
-		run, err := s.RoleRun(ctx, tx, c.Token, issue.Key, c.Role, issue.Generation)
+		candidates = append(candidates, candidate{claim: c, issue: issue, root: root, current: current})
+	}
+
+	var stranded []supervise.Claim
+	for start := 0; start < len(candidates); start += strandedRoleRunBatchSize {
+		end := min(start+strandedRoleRunBatchSize, len(candidates))
+		batch := candidates[start:end]
+		keys := make([]record.RoleRunKey, len(batch))
+		for i, candidate := range batch {
+			keys[i] = record.RoleRunKey{Token: candidate.claim.Token, Issue: candidate.issue.Key, Role: candidate.claim.Role, Generation: candidate.issue.Generation}
+		}
+		runs, err := s.RoleRuns(ctx, tx, keys)
 		if err != nil {
 			return nil, err
 		}
-		if StartFor(run, root, issue.Generation, current) {
-			stranded = append(stranded, c)
+		for _, candidate := range batch {
+			run := runs[candidate.claim.Token]
+			if StartFor(run, candidate.root, candidate.issue.Generation, candidate.current) {
+				stranded = append(stranded, candidate.claim)
+			}
 		}
 	}
 	slices.SortFunc(stranded, func(a, b supervise.Claim) int {
