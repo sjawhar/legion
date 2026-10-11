@@ -211,7 +211,7 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | `broker: <operation> failed error=…` | A request failed with a 500 or 503; the line carries the cause the response does not. A reread whose own request ended before it finished - its caller went away, or it reached the 45-second bound - is not one of these: it answers `503 REQUEST_ENDED` and logs nothing, since anyone can end a request. |
 | `broker sweeper: ended an enrollment whose lease lapsed enrollment_id=… kind=… runtime_id=… slot=… lease_expired_at=… grants_revoked=… requests_cancelled=…` | A session stopped renewing (a pod that is gone, a box whose `agent-secrets renew` stopped); the sweep ended it, revoking its grants and cancelling its pending requests. |
 | `broker: pod enrollment renewed without its projected token enrollment=… pod_uid=… slot=…` | At WARN: a pod enrollment renewed without its token, and no enrollment naming its pod UID has ever renewed with one, so the broker accepted it; for that pod a token copied out of it still keeps an enrollment alive. It is expected from a pod on a worker image whose `agent-secrets renew` predates `--pod-token-file`. A pod on the current image sends its token from its first renewal, so a line naming such a pod means a holder of an enrollment key for it is renewing outside the cluster before the pod's own first token renewal. List pod images below and replace an older-image pod. If its pod UID is absent or every image is current, identify the enrollment's launcher credential in Postgres and revoke that machine login from Dispatch's machine-login page, which ends every enrollment it made. |
-| `broker: pod enrollment renewal refused: projected token required enrollment=…` | At WARN: a pod enrollment renewed without its token after an enrollment naming the same pod UID, this one or another, had renewed with one, and was refused. Either someone holding its key, possibly enrolled under another machine login with a token copied out of the pod, is renewing outside the cluster, or a renewer that predates `--pod-token-file` is renewing a pod a current-image renewer has marked. A current-image renewer that cannot read its token file sends nothing at all, so the broker logs nothing for it; `agent-secrets renew` prints `ERROR: enrollment <id> cannot read its pod token` instead, which the worker shim relays into the pod's log. Its lease and grants end one `BROKER_LEASE_SECONDS` after its last valid renewal. |
+| `broker: pod enrollment renewal refused: projected token required enrollment=…` | At WARN: a pod enrollment renewed without its token after an enrollment naming the same pod UID, this one or another, had renewed with one, and was refused. One cause is someone holding its key, possibly enrolled under another machine login with a token copied out of the pod, renewing outside the cluster. The other is an old-image pod refused because someone else marked its UID first: whoever holds an unexpired copy of an old-image pod's token and an approved service login can enroll a key of their own on that UID and renew it with the copy, which marks the UID, and from then on the real old-image pod, whose renewer sends no token, is refused here until its lease lapses. That is weaker than what the copy already allowed, which was to enroll and renew as the pod. The refused enrollment's pod UID names the pod: list pod images (below), and if that pod runs an older image, rotate the service login that enrolled it (revoke it from Dispatch's machine-login page and log the service in again), and replace the pod with a current image. A current-image renewer that cannot read its token file sends nothing at all, so the broker logs nothing for it; `agent-secrets renew` prints `ERROR: enrollment <id> cannot read its pod token` instead, which the worker shim relays into the pod's log. Its lease and grants end one `BROKER_LEASE_SECONDS` after its last valid renewal. |
 | `broker shutting down` | SIGTERM or SIGINT: in-flight requests get 10 seconds to finish. |
 
 Each request is bounded to 45 seconds. Request bodies are JSON of at most 1 MiB.
@@ -241,11 +241,13 @@ kubectl get pods -n <namespace> -l legion.dev/issue \
 The release that requires the token from every pod is safe to deploy only when all three of these
 hold:
 
-- this query answers 0:
+- this query answers 0. A pod's row is unmarked until its first renewal, seconds after it enrolls,
+  so the query leaves out rows made in the last minute, which a busy fleet always holds:
 
   ```sql
   select count(*) from enrollments
-  where kind = 'pod' and revoked_at is null and pod_token_renewed_at is null;
+  where kind = 'pod' and revoked_at is null and pod_token_renewed_at is null
+    and created_at < now() - interval '1 minute';
   ```
 
 - the broker has logged no `broker: pod enrollment renewed without its projected token` line for
@@ -253,6 +255,10 @@ hold:
 - the command above lists no issue pod on a worker image older than the one whose renewer sends
   the token. An old-image issue pod between role generations holds no enrollment, so it counts as
   0 and logs nothing, yet its next phase enrolls an unmarked row.
+
+That release refuses every pod renewal without a token, so it also removes what only the ratchet
+needs: the pod-UID lookup in `Renew` (`podTokenRatcheted`) and its partial index
+`enrollments_pod_token_renewed`.
 
 ## The audit record
 

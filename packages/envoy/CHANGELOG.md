@@ -221,7 +221,7 @@
   passes the projected token file. **Rollout:** any order; an older broker reads no renew body, and
   this broker accepts a token-less renewal from a pod no enrollment of which has sent one. The
   release that requires the token is safe once all three hold:
-  `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null`
+  `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null and created_at < now() - interval '1 minute'`
   answers 0; the broker has logged no token-less WARN line for one full `BROKER_LEASE_SECONDS`; and
   no issue pod runs a worker image older than the one whose renewer sends the token (an old-image
   issue pod between role generations holds no enrollment, so the count and the log miss it, yet its

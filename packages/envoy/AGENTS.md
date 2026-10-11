@@ -2040,7 +2040,8 @@ login's copy among the rows it refuses, and stays open for old-image UIDs until 
 release. A current-image pod still leaves a copied token the seconds before its own first token
 renewal. Ended rows count: a pod UID names one pod for ever, so a mark refuses nothing of another
 pod, and it keeps refusing a copy between the pod's role generations and after the pod is gone.
-That release is safe once the unset-row count is 0, no token-less
+That release is safe once the unset-row count is 0 (rows older than a minute: a pod's row is
+unmarked until its first renewal), no token-less
 WARN appears for one full `BROKER_LEASE_SECONDS`, and no issue pod runs a worker image older than
 the one whose renewer sends the token (an old-image issue pod between role generations holds no
 enrollment, so it counts as 0 and logs nothing, yet its next phase enrolls an unmarked row). No

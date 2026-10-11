@@ -505,11 +505,12 @@ func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, er
 // matters: an older broker ignores the token a newer client sends, and this broker accepts a
 // token-less renewal of a pod UID no enrollment has marked.
 // The contract release removes the token-less path once
-// `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null`
+// `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null and created_at < now() - interval '1 minute'`
 // answers 0, the broker has logged no "renewed without its projected token" line for one full
 // BROKER_LEASE_SECONDS, and no issue pod runs a worker image older than the one whose renewer sends
 // the token (an old-image issue pod between role generations holds no enrollment, so the count and
-// the log miss it, yet its next phase enrolls an unmarked row).
+// the log miss it, yet its next phase enrolls an unmarked row). That release also drops
+// podTokenRatcheted and its partial index, which only the ratchet needs.
 func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, error) {
 	withToken := podToken != ""
 	var claims PodClaims
@@ -527,11 +528,10 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 
 	var kind string
 	var subject *string
-	var tokenRenewedAt *time.Time
 	renewal := Renewal{}
-	err = tx.QueryRow(ctx, `select kind, runtime_id, slot, subject, pod_token_renewed_at from enrollments
+	err = tx.QueryRow(ctx, `select kind, runtime_id, slot, subject from enrollments
 		where id=$1 and revoked_at is null and lease_expires_at > now() for update`, id).
-		Scan(&kind, &renewal.RuntimeID, &renewal.Slot, &subject, &tokenRenewedAt)
+		Scan(&kind, &renewal.RuntimeID, &renewal.Slot, &subject)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Renewal{}, ErrNotLive
 	}
@@ -545,8 +545,6 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 		if claims.PodUID != renewal.RuntimeID || subject == nil || claims.Subject != *subject {
 			return Renewal{}, ErrPodIdentity
 		}
-	case kind == "pod" && tokenRenewedAt != nil:
-		return Renewal{}, ErrPodTokenRequired
 	case kind == "pod":
 		ratcheted, err := podTokenRatcheted(ctx, tx, renewal.RuntimeID)
 		if err != nil {
