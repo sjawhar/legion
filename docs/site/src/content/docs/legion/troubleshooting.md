@@ -243,12 +243,14 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 A restart re-adopts every process still running, but a claim with no process runs again only when
 something starts it. A worker is started by the workflow when its phase begins, and a tree's
 architect by its admission; a notice to an architect with no process waits for it rather than
-starting it. So a worker of its issue's current phase, or a tree's architect, that an operator
-suspended (`legion claims suspend`, one claim at a time or a whole fleet before a restart) or whose
-launches ran out is woken by nothing: the daemon looks healthy and the state shows the tree active,
-but the tree stops for good at the worker's phase, or at the first decision that needs its
-architect. Once a boot has re-adopted its claims, the daemon names every such claim in one error
-line, under the move that brings it back:
+starting it. A suspended worker of its issue's current phase that the daemon suspended is resumed
+by the daemon at boot. One an operator suspended (`legion claims suspend`,
+one claim at a time or a whole fleet before a restart), or whose suspension predates the release
+that records who suspended it (`suspendedBy: unknown`), is not; neither is a tree's architect,
+whoever suspended it, nor a claim whose launches ran out. Each of those is woken by nothing: the
+daemon looks healthy and the state shows the tree active, but the tree stops for good at the
+worker's phase, or at the first decision that needs its architect. Once a boot has re-adopted its
+claims, the daemon names every such claim in one error line, under the move that brings it back:
 
 ```text
 {"level":"ERROR","msg":"legion daemon started with claims nothing will wake","project":"WIDGETS","count":3,"resume":["WIDGETS-12 architect","WIDGETS-12 implementer"],"needsWorkflowStart":["WIDGETS-14 architect"]}

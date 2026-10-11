@@ -205,7 +205,8 @@ func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 		stored[c.Token] = c
 	}
 
-	got, err := Stranded(context.Background(), nil, &strandedStore{issues: issues, claims: stored}, claims)
+	store := &strandedStore{issues: issues, slots: slotsOf("LEGION-1", "LEGION-2", "LEGION-3", "LEGION-4"), claims: stored}
+	got, err := Stranded(context.Background(), nil, store, claims)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)
 	}
