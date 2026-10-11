@@ -169,13 +169,6 @@ func (c Claim) RuleHoldError() error {
 	return fmt.Errorf("the claim is suspended by %s; it waits for the operator's resume: %w", by, ErrHeldByOperator)
 }
 
-// OperatorHolds is whether an operator's suspension holds the claim: it is suspended by the
-// operator, or the operator's suspension is held for its agent's turn. The daemon resumes and
-// starts nothing on such a claim; only the operator's own resume or delivery runs it again.
-func (c Claim) OperatorHolds() bool {
-	return c.State == StateSuspended && c.SuspendedBy == SuspendedByOperator || c.SuspensionHeldBy == SuspendedByOperator
-}
-
 // ClaimView is a claim as its machine last published it (Machine.View), with what only the decision
 // in flight knows.
 type ClaimView struct {

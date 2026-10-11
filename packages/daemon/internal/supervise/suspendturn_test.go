@@ -101,7 +101,7 @@ func TestTheDaemonsSuspensionWaitsForTheTurnPastTheStopTimeout(t *testing.T) {
 	if err := h.handle(RequestSuspend{Claim: testToken, Reason: "the operator suspended it", By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("the operator's suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
-	if c := h.claim(); c.SuspensionHeldBy != SuspendedByOperator || !c.OperatorHolds() {
+	if c := h.claim(); c.SuspensionHeldBy != SuspendedByOperator || !c.RuleHolds() {
 		t.Fatalf("the claim reports %+v, want the operator's suspension held", c)
 	}
 	h.advance(testStop - time.Second)

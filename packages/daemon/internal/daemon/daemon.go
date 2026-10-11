@@ -1291,16 +1291,12 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	})
 	if workflow != nil {
 		group.Go(func() error { return workflow.run(serving) })
-		// The boot fact is durable (ApplyFact commits its start rows with its processed event), but
-		// runs beside the already-started API server: a slow census of claims never delays /healthz
-		// or repeats LEGION-653's boot-time deadlock. A shutdown cancels an in-flight census without
-		// making an otherwise clean daemon stop fail; the next boot owns its own durable fact.
+		// The boot fact runs beside the already-started API server, so a slow census of claims
+		// never delays /healthz or repeats LEGION-653's boot-time deadlock. A failure while the
+		// daemon serves is retried (runBooted); only the daemon's stop ends it unapplied.
 		group.Go(func() error {
-			err := workflow.booted(serving, bootID)
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return nil
-			}
-			return err
+			workflow.runBooted(serving, bootID)
+			return nil
 		})
 	}
 	if keeper != nil {

@@ -390,9 +390,7 @@ Closing the terminal leaves the project without one, and the daemon logs
    legion claims resume --config legion.yaml --operator-token-file operator-token --claim <unknown-claim>
    ```
 
-   Resume every `unknown` claim that was not deliberately drained. The daemon's boot report lists
-   the suspended phase owners and tree architects among them, the ones whose trees cannot move
-   until they are resumed.
+   Resume every `unknown` claim that was not deliberately drained.
 5. **Restart the controller** with the new binary and plugins.
 
 ## Observe
