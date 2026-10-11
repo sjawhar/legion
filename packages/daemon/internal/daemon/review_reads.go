@@ -43,9 +43,12 @@ type githubReview struct {
 // It reads in every phase, not only while a review round is open, because the workflow records a
 // deciding review as the pull request's newest (record.PullRequest.ReviewSeen) whatever phase the
 // issue is in and lets it decide only an open round: a review submitted while the work is in
-// implementing or testing, or in a round CI's red ended, is recorded and decides nothing, so no later
-// round takes it as its own decision. A read made only while a round is open would leave such a
-// review unrecorded and apply it to the next round instead.
+// implementing or testing, or in a round CI's red ended, that the read finds before the next round
+// opens is recorded and decides nothing, so that round does not take it as its own decision. One the
+// daemon first hears of after the next round opened - its webhook lost and the round opened within
+// the pass's two minutes, or longer while reads fail - can still decide that round, as a webhook
+// delivered late can; the read opens no window the webhook does not already have. A read made only
+// while a round is open would apply every such review to the next round.
 //
 // Nothing beyond the workflow's own order keeps the read and the webhook from deciding twice. Both
 // carry GitHub's review id and submission time, so whichever copy is applied first records the
@@ -111,11 +114,14 @@ func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubre
 // without an id or a submission time, which the workflow could not order, is an error, as is a
 // failed permission read; either applies nothing.
 //
-// Each review is judged once, as a webhook's is judged once when it is delivered: a review whose
-// author the workflow did not let decide is kept as refused (refusedReviews) and never judged
-// again, so an account given write access after its review was judged cannot turn that review into
-// a later round's decision, which its webhook could not either. A read that failed judged nothing,
-// and the next pass asks again.
+// A review is judged once per daemon process, for the read's own judgements, as a webhook's is
+// judged once when it is delivered: a review whose author the workflow did not let decide is kept as
+// refused (refusedReviews) and not judged again by this process, so an account given write access
+// after the read judged its review cannot turn that review into a later round's decision, which its
+// webhook could not either. The set is held in memory, so after a restart the first pass judges a
+// review not yet recorded again, with the permission GitHub gives then; and the read judges once
+// more a review its webhook's delivery refused, since the workflow records nothing for a review
+// that decides nothing. A read that failed judged nothing, and the next pass asks again.
 func (w *workflowRuntime) reviewToApply(ctx context.Context, pr record.PullRequest, reviews []githubReview) (intake.PullRequestReview, bool, error) {
 	var candidates []intake.PullRequestReview
 	for _, listed := range reviews {

@@ -397,11 +397,11 @@ func TestADecidingReviewBetweenRoundsDecidesNoLaterRound(t *testing.T) {
 	}
 }
 
-// The read judges whether a review's author may decide once, as a webhook's review is judged once
-// when it is delivered: an outsider's approval of the head is refused on the first pass, and after
-// GitHub starts giving that account write access - past the permission answer's own window - the
-// next pass neither asks about it again nor lets the approval end the round. Its webhook, judged
-// at delivery, would not have ended it either.
+// Within one daemon process the read judges whether a review's author may decide once, as a
+// webhook's review is judged once when it is delivered: an outsider's approval of the head is
+// refused on the first pass, and after GitHub starts giving that account write access - past the
+// permission answer's own window - the next pass neither asks about it again nor lets the approval
+// end the round. Its webhook, judged at delivery, would not have ended it either.
 func TestTheReadJudgesEachReviewOnce(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	seedCapture(t, pool, phase.Reviewing, "needs_review", completedReviewer("review-1"))

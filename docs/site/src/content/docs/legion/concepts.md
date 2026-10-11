@@ -153,8 +153,9 @@ Legion uses GitHub's own review mechanisms rather than labels:
   reviews with the implement App every two minutes, so a review whose webhook never arrived still
   counts within one read. Either way the newest deciding review counts, and counts once: a review
   the daemon already applied, by webhook or by read, decides nothing again. A review submitted while
-  no round is open (the work is being implemented or tested) decides no round, the next one
-  included.
+  no round is open (the work is being implemented or tested) decides no later round when the daemon
+  reads it before the next round opens. One it first hears of after that round opened can still
+  decide it, as a webhook delivered late can.
 - **CI** on the pull request's head counts: red checks while testing or reviewing, or once the
   issue awaits its merge, send the issue back to the implementer, naming the failing checks. Once
   the issue awaits its merge, only a red of the head's own counts: `READY` found the head's own
