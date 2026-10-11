@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -847,9 +848,15 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 }
 
 // autoMergeDisable disarms pull request payload.Number as the implement App, which armed it
-// (ghautomerge.Disarm): whatever was armed before the row was queued is turned off, and a later
-// READY's arm is left alone.
+// (ghautomerge.Disarm), deciding by the record when it runs, never by when the row was queued:
+// while the issue awaits its merge, the merger's READY commit is the head whose arm is kept, and
+// any other head is disarmed. A row queued by a withdrawal the issue has since come back from so
+// leaves the READY that followed armed.
 func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, payload record.AutoMergeDisable) error {
+	keep, err := r.readyHeadToKeep(ctx, row.Issue)
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(ctx, autoMergeDisableTimeout)
 	defer cancel()
 	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
@@ -857,13 +864,38 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 		return fmt.Errorf("mint implement App token: %w", err)
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}
-	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, row.CreatedAt)
+	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, keep)
 	if err != nil {
 		return err
 	}
 	r.log.Info("outbox disarmed a pull request", "row", row.ID, "issue", row.Issue, "number", payload.Number,
-		"missing", disarmed.Missing, "autoMergeDisabled", disarmed.AutoMerge, "dequeued", disarmed.Queue)
+		"missing", disarmed.Missing, "kept", disarmed.Kept, "autoMergeDisabled", disarmed.AutoMerge, "dequeued", disarmed.Queue)
 	return nil
+}
+
+// readyHeadToKeep is the head whose arm issue's READY covers: the merger's READY commit while the
+// issue awaits its merge, and none in any other phase, where no arm is legitimate.
+func (r *outbox) readyHeadToKeep(ctx context.Context, issue string) (string, error) {
+	var keep string
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		current, err := r.records.Issue(ctx, tx, issue)
+		if err != nil || current == nil || current.Phase != phase.AwaitingMerge {
+			return err
+		}
+		phases, err := r.records.Phases(ctx, tx, issue)
+		if err != nil {
+			return err
+		}
+		for _, row := range phases {
+			if row.Role == claim.RoleMerger {
+				keep = row.HandoffCommit
+			}
+		}
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("read the READY head %s awaits: %w", issue, err)
+	}
+	return keep, nil
 }
 
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {

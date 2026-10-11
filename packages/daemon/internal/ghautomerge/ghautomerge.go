@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -14,8 +13,11 @@ import (
 
 // Disarmed is what Disarm found and turned off.
 type Disarmed struct {
-	// Missing is GitHub answering NOT_FOUND for the pull request: there is nothing to disarm.
+	// Missing is GitHub answering NOT_FOUND for the pull request itself: there is nothing to disarm.
 	Missing bool
+	// Kept is the pull request's head being the READY head Disarm was told to keep: whatever is
+	// armed there is that READY's, and is left as it is.
+	Kept bool
 	// AutoMerge is an auto-merge Disarm disabled.
 	AutoMerge bool
 	// Queue is a merge-queue entry Disarm removed.
@@ -24,7 +26,7 @@ type Disarmed struct {
 
 const read = `query PullRequestAutoMerge($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) { id autoMergeRequest { enabledAt } mergeQueueEntry { enqueuedAt } }
+    pullRequest(number: $number) { id headRefOid autoMergeRequest { enabledAt } mergeQueueEntry { enqueuedAt } }
   }
 }`
 
@@ -35,27 +37,27 @@ const (
 
 // Disarm turns off what would merge pull request number of repo without a person, through github,
 // a GraphQL client (githubrest.GraphQLAPI): its auto-merge where GitHub has it enabled, and its
-// merge-queue entry where it has one. It reads both first, so a pull request with neither is left
-// alone and a retried Disarm changes nothing. An auto-merge enabled, or a queue entry made, after
-// since is left alone too: since is when the disarm was decided, and only a later READY armed it.
-// A pull request GitHub answers NOT_FOUND for is Missing, not an error.
-func Disarm(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, since time.Time) (Disarmed, error) {
+// merge-queue entry where it has one. It decides by the pull request's state when it runs, never
+// by when anything was armed: GitHub enqueues an armed pull request only once its checks pass, so a
+// queue entry can postdate the arm it belongs to. keep is the READY head an arm is legitimate for,
+// empty when none is: while the pull request's head on GitHub is keep, nothing is touched (Kept).
+// Otherwise everything armed is turned off. It reads first, so a pull request with nothing armed
+// is left alone and a retried Disarm changes nothing. A NOT_FOUND at the pull request is Missing,
+// not an error; one anywhere else, such as a repository the token cannot see, is an error.
+func Disarm(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, keep string) (Disarmed, error) {
 	var answer struct {
 		Repository struct {
 			PullRequest *struct {
-				ID               string `json:"id"`
-				AutoMergeRequest *struct {
-					EnabledAt time.Time `json:"enabledAt"`
-				} `json:"autoMergeRequest"`
-				MergeQueueEntry *struct {
-					EnqueuedAt time.Time `json:"enqueuedAt"`
-				} `json:"mergeQueueEntry"`
+				ID               string    `json:"id"`
+				HeadRefOid       string    `json:"headRefOid"`
+				AutoMergeRequest *struct{} `json:"autoMergeRequest"`
+				MergeQueueEntry  *struct{} `json:"mergeQueueEntry"`
 			} `json:"pullRequest"`
 		} `json:"repository"`
 	}
 	err := github.GraphQL(ctx, read, map[string]any{"owner": repo.Owner(), "name": repo.Name(), "number": number}, &answer)
 	var failed *githubrest.GraphQLError
-	if errors.As(err, &failed) && failed.NotFound() {
+	if errors.As(err, &failed) && failed.NotFoundAt("repository", "pullRequest") {
 		return Disarmed{Missing: true}, nil
 	}
 	if err != nil {
@@ -65,14 +67,17 @@ func Disarm(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 	if pull == nil {
 		return Disarmed{Missing: true}, nil
 	}
+	if keep != "" && pull.HeadRefOid == keep {
+		return Disarmed{Kept: true}, nil
+	}
 	var disarmed Disarmed
-	if request := pull.AutoMergeRequest; request != nil && !request.EnabledAt.After(since) {
+	if pull.AutoMergeRequest != nil {
 		if err := github.GraphQL(ctx, disable, map[string]any{"id": pull.ID}, nil); err != nil {
 			return disarmed, fmt.Errorf("disable the auto-merge of pull request #%d of %s: %w", number, repo, err)
 		}
 		disarmed.AutoMerge = true
 	}
-	if entry := pull.MergeQueueEntry; entry != nil && !entry.EnqueuedAt.After(since) {
+	if pull.MergeQueueEntry != nil {
 		if err := github.GraphQL(ctx, dequeue, map[string]any{"id": pull.ID}, nil); err != nil {
 			return disarmed, fmt.Errorf("take pull request #%d of %s out of the merge queue: %w", number, repo, err)
 		}

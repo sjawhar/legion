@@ -112,20 +112,24 @@ review posted without a completion leaves the issue in reviewing until you finis
   when that role has no live holder; the answer's `note` says when READY was published on a pull
   request a person already merged, whose head can no longer change, or on a base that requires no
   check, which the packet itself also says.
-- **The merger submits the merge the moment READY is accepted.** In the same turn, before anything
-  else, it runs `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` with
-  its pane's plain `gh`: `<n>` the pull request number, `<head>` the full sha of the current head
-  READY named. A repository with a merge queue enqueues the pull request; one without arms
-  auto-merge; one whose rules are already satisfied merges at once. `--match-head-commit` has
-  GitHub refuse the request when the head has moved since READY read it. The repository's required
-  reviews and checks decide when it lands: the merger makes no merge by hand and bypasses no
-  rule. It then tells the architect with `envoy_publish` to its encoded role token what the
-  command answered — enqueued, auto-merge enabled, or merged — and the head. On any READY refusal
-  it submits nothing, since an armed request would merge through the gate the refusal names; a
-  READY the design gate refused is submitted later, on the architect's word, once the gate opens,
-  and that turn runs only `gh`. A `gh pr merge` GitHub refuses is reported to the architect with
-  its message; a person can still merge after READY. The packet's second line records the step,
-  `Merge: submitted on acceptance with gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`.
+- **The merger submits the merge the moment READY is accepted, unless the answer says a person
+  merges it.** In the same turn, before anything else, it runs
+  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` with its pane's
+  plain `gh`: `<n>` the pull request number, `<head>` the full sha of the current head READY named.
+  A repository with a merge queue enqueues the pull request; one without arms auto-merge; one whose
+  rules are already satisfied merges at once. `--match-head-commit` has GitHub refuse the request
+  when the head has moved since READY read it. The repository's required reviews and checks decide
+  when it lands: the merger makes no merge by hand and bypasses no rule. It then tells the
+  architect with `envoy_publish` to its encoded role token what the command answered — enqueued,
+  auto-merge enabled, or merged — and the head. When the answer's `note` begins
+  `MANUAL_MERGE_REQUIRED:` (the pull request touches a path the project's `merge.by_hand` names),
+  READY stands but the merger submits nothing: it tells the architect the note and the head, and a
+  person merges under the repository's rules. On any READY refusal it submits nothing, since an
+  armed request would merge through the gate the refusal names; a READY the design gate refused is
+  submitted later, on the architect's word, once the gate opens, and that turn runs only `gh`. A
+  `gh pr merge` GitHub refuses is reported to the architect with its message; a person can still
+  merge after READY. The packet's second line records the step,
+  `Merge: submit on normal acceptance with gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`.
 - **The daemon disarms a merge no READY covers.** Auto-merge stays enabled across pushes, and
   `--match-head-commit` is checked only when it is enabled, so the daemon itself disables the pull
   request's auto-merge and takes it out of a merge queue, as the implement App, on any push but one

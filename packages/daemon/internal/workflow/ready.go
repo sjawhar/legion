@@ -41,8 +41,8 @@ func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issu
 // (TriggerChecksRed, withdrawReady): GitHub checks --match-head-commit only when auto-merge is
 // enabled, so the arm would otherwise merge a head no review approved. The issue goes back to
 // implementing with its implementer started and the architect told, and the new head comes back
-// through testing, review and a new READY. A tree that lingers takes no transition, and the
-// disarm is queued all the same. A push landing on the READY head changes nothing.
+// through testing, review and a new READY. A tree that lingers takes no transition, as merged
+// leaves it, so its pull request is only disarmed. A push landing on the READY head changes nothing.
 func (e *Engine) withdrawMovedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
 	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
 	if err != nil {
@@ -51,21 +51,22 @@ func (e *Engine) withdrawMovedReady(ctx context.Context, tx pgx.Tx, issue record
 	if merger.HandoffCommit != "" && merger.HandoffCommit == pr.HeadSHA {
 		return nil
 	}
+	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
+	if err != nil {
+		return err
+	}
+	if lingers {
+		return e.disarm(ctx, tx, issue.Key, pr)
+	}
 	reason := fmt.Sprintf("its head moved from %s, the head READY named, to %s, which no review approved", merger.HandoffCommit, pr.HeadSHA)
-	if err := e.transition(ctx, tx, issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason); err != nil {
-		return err
-	}
-	after, err := e.store.Issue(ctx, tx, issue.Key)
-	if err != nil || after == nil || after.Phase != phase.AwaitingMerge {
-		return err
-	}
-	return e.disarm(ctx, tx, issue.Key, pr)
+	return e.transition(ctx, tx, issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason)
 }
 
 // disarm queues the disarm of pr's merge (record.AutoMergeDisable): arming is legitimate only for
 // the READY head of an awaiting_merge pull request, so every head move but one landing on that
-// head, every READY withdrawal and every re-entry disarms. The executor turns off only what was
-// armed before the row was queued, and changes nothing on a pull request never armed.
+// head, every READY withdrawal and every re-entry disarms. The executor decides by the record when
+// it runs, so it keeps the arm of a READY the issue has reached since, and it changes nothing on a
+// pull request never armed.
 func (e *Engine) disarm(ctx context.Context, tx pgx.Tx, issue string, pr *record.PullRequest) error {
 	return e.enqueue(ctx, tx, issue, record.AutoMergeDisable{Number: pr.Number})
 }

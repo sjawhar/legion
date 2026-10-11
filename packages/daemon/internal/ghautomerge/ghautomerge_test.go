@@ -10,21 +10,21 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 )
 
-// github is GitHub's GraphQL API for acme/widgets#42 as Disarm reads and changes it: whether the
-// pull request exists, when its auto-merge was enabled and when it entered a merge queue (empty
-// for neither), and every mutation Disarm sent.
+// github is GitHub's GraphQL API for acme/widgets#42 as Disarm reads and changes it: what its read
+// cannot find ("pullRequest", "repository", or empty when it finds the pull request), the pull
+// request's head, whether its auto-merge is enabled and whether it has a merge-queue entry, and
+// every mutation Disarm sent.
 type github struct {
-	mu         sync.Mutex
-	missing    bool
-	enabledAt  string
-	enqueuedAt string
-	mutations  []string
+	mu            sync.Mutex
+	notFound      string
+	head          string
+	armed, queued bool
+	mutations     []string
 }
 
 func (g *github) serve(t *testing.T) string {
@@ -45,65 +45,69 @@ func (g *github) serve(t *testing.T) string {
 		switch {
 		case strings.Contains(request.Query, "disablePullRequestAutoMerge"):
 			g.mutations = append(g.mutations, fmt.Sprintf("disable %v", request.Variables["id"]))
-			g.enabledAt = ""
+			g.armed = false
 			_, _ = w.Write([]byte(`{"data":{"disablePullRequestAutoMerge":{"clientMutationId":null}}}`))
 		case strings.Contains(request.Query, "dequeuePullRequest"):
 			g.mutations = append(g.mutations, fmt.Sprintf("dequeue %v", request.Variables["id"]))
-			g.enqueuedAt = ""
+			g.queued = false
 			_, _ = w.Write([]byte(`{"data":{"dequeuePullRequest":{"clientMutationId":null}}}`))
+		case g.notFound == "pullRequest":
+			// GitHub's own answer for a pull request number the repository does not have.
+			_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","path":["repository","pullRequest"],"message":"Could not resolve to a PullRequest with the number of 42."}]}`))
+		case g.notFound == "repository":
+			// GitHub's answer for a repository the token cannot see.
+			_, _ = w.Write([]byte(`{"data":{"repository":null},"errors":[{"type":"NOT_FOUND","path":["repository"],"message":"Could not resolve to a Repository with the name 'acme/widgets'."}]}`))
 		default:
 			if request.Variables["owner"] != "acme" || request.Variables["name"] != "widgets" || request.Variables["number"] != float64(42) {
 				t.Errorf("read of %v, want acme/widgets#42", request.Variables)
 			}
-			if g.missing {
-				// GitHub's own answer for a pull request number the repository does not have.
-				_, _ = w.Write([]byte(`{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","path":["repository","pullRequest"],"message":"Could not resolve to a PullRequest with the number of 42."}]}`))
-				return
-			}
 			autoMerge, entry := "null", "null"
-			if g.enabledAt != "" {
-				autoMerge = fmt.Sprintf(`{"enabledAt":%q}`, g.enabledAt)
+			if g.armed {
+				autoMerge = `{"enabledAt":"2026-10-11T12:00:00Z"}`
 			}
-			if g.enqueuedAt != "" {
-				entry = fmt.Sprintf(`{"enqueuedAt":%q}`, g.enqueuedAt)
+			if g.queued {
+				entry = `{"enqueuedAt":"2026-10-11T12:05:00Z"}`
 			}
-			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"id":"PR_42","autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`, autoMerge, entry)
+			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"id":"PR_42","headRefOid":%q,"autoMergeRequest":%s,"mergeQueueEntry":%s}}}}`, g.head, autoMerge, entry)
 		}
 	}))
 	t.Cleanup(server.Close)
 	return server.URL
 }
 
-// Disarm turns off what would merge the pull request without a person: auto-merge where GitHub
-// has it enabled, and the pull request's merge-queue entry where it has one. It leaves alone a pull
-// request with neither, one GitHub answers NOT_FOUND for, and an auto-merge or queue entry made
-// after the disarm was decided (since), which a later READY armed and this disarm must not undo. A
-// second Disarm of the same pull request changes nothing.
-func TestDisarmTurnsOffOnlyWhatWasArmedBeforeIt(t *testing.T) {
-	since := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
-	const before, after = "2026-10-11T11:00:00Z", "2026-10-11T13:00:00Z"
+// Disarm turns off what would merge the pull request without a person, by the pull request's state
+// when it runs: while the pull request's head is the READY head it was told to keep, nothing is
+// touched; otherwise auto-merge is disabled where GitHub has it enabled and the merge-queue entry
+// removed where it has one, however late GitHub made that entry. A pull request with nothing armed,
+// or one GitHub answers NOT_FOUND for at the pull request, is left alone. A second Disarm changes
+// nothing.
+func TestDisarmTurnsOffEverythingArmedUnlessTheHeadIsTheKeptREADYHead(t *testing.T) {
 	for _, tc := range []struct {
-		name                  string
-		missing               bool
-		enabledAt, enqueuedAt string
-		want                  []string
-		wantDisarmed          Disarmed
+		name          string
+		notFound      string
+		armed, queued bool
+		keep          string
+		want          []string
+		wantDisarmed  Disarmed
 	}{
-		{"auto-merge enabled before", false, before, "", []string{"disable PR_42"}, Disarmed{AutoMerge: true}},
-		{"in the merge queue since before", false, "", before, []string{"dequeue PR_42"}, Disarmed{Queue: true}},
-		{"neither", false, "", "", nil, Disarmed{}},
-		{"a pull request GitHub does not have", true, "", "", nil, Disarmed{Missing: true}},
-		{"auto-merge enabled after", false, after, "", nil, Disarmed{}},
-		{"in the merge queue since after", false, "", after, nil, Disarmed{}},
+		{"auto-merge enabled, no READY to keep", "", true, false, "", []string{"disable PR_42"}, Disarmed{AutoMerge: true}},
+		{"in the merge queue, no READY to keep", "", false, true, "", []string{"dequeue PR_42"}, Disarmed{Queue: true}},
+		// In a merge-queue repository GitHub enqueues an armed pull request only once its checks
+		// pass, so an arm's queue entry can be made after the disarm was decided: it goes too.
+		{"armed and its queue entry made since", "", true, true, "", []string{"disable PR_42", "dequeue PR_42"}, Disarmed{AutoMerge: true, Queue: true}},
+		{"armed for a READY the head moved past", "", true, true, "ready", []string{"disable PR_42", "dequeue PR_42"}, Disarmed{AutoMerge: true, Queue: true}},
+		{"armed at the READY head it was told to keep", "", true, true, "head", nil, Disarmed{Kept: true}},
+		{"nothing armed", "", false, false, "", nil, Disarmed{}},
+		{"a pull request GitHub does not have", "pullRequest", false, false, "", nil, Disarmed{Missing: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			g := &github{missing: tc.missing, enabledAt: tc.enabledAt, enqueuedAt: tc.enqueuedAt}
+			g := &github{notFound: tc.notFound, head: "head", armed: tc.armed, queued: tc.queued}
 			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-			got, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, since)
+			got, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, tc.keep)
 			if err != nil || got != tc.wantDisarmed {
 				t.Fatalf("Disarm = %+v, %v; want %+v", got, err, tc.wantDisarmed)
 			}
-			if again, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, since); err != nil || again.AutoMerge || again.Queue {
+			if again, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, tc.keep); err != nil || again.AutoMerge || again.Queue {
 				t.Fatalf("a second Disarm = %+v, %v; want nothing left to disarm", again, err)
 			}
 			g.mu.Lock()
@@ -112,5 +116,17 @@ func TestDisarmTurnsOffOnlyWhatWasArmedBeforeIt(t *testing.T) {
 				t.Fatalf("mutations %v, want %v", g.mutations, tc.want)
 			}
 		})
+	}
+}
+
+// A NOT_FOUND anywhere but at the pull request, such as a repository the implement App cannot see,
+// is no answer about the pull request: Disarm fails, so its row retries and the failure is logged,
+// rather than finishing as though there were nothing to disarm.
+func TestDisarmFailsWhenGitHubCannotFindTheRepository(t *testing.T) {
+	g := &github{notFound: "repository"}
+	client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
+	got, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "")
+	if err == nil || got.Missing {
+		t.Fatalf("Disarm of a repository GitHub cannot find = %+v, %v; want an error, not Missing", got, err)
 	}
 }

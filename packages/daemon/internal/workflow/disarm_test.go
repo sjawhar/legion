@@ -100,6 +100,29 @@ func TestAReenteredChildsPullRequestIsDisarmedAndStaysDisarmedOnPush(t *testing.
 	}
 }
 
+// A tree that lingers after its close takes no transition, so a push past an awaiting child's READY
+// head leaves the child in awaiting_merge, and its arm, which would otherwise merge the moved head,
+// is disarmed all the same.
+func TestAPushPastTheREADYHeadInALingeringTreeDisarmsWithoutATransition(t *testing.T) {
+	pool := migratedPool(t)
+	until := time.Now().Add(time.Hour)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-207", Tree: "LEGION-207", Project: "LEGION", Title: "root", Phase: phase.Done, Generation: 1, Status: "done", Rank: "U", LingerUntil: &until})
+	parent := "LEGION-207"
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-207", Parent: &parent, Project: "LEGION", Title: "child",
+		Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "V"})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
+	applyRefusingNothing(t, pool, readyEngine(""),
+		intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "moved"})
+	if got := issuePhase(t, pool); got != phase.AwaitingMerge {
+		t.Fatalf("the lingering tree's child is in %s, want it left in awaiting_merge", got)
+	}
+	if got, want := autoMergeDisables(t, pool), []record.AutoMergeDisable{{Number: 42}}; !slices.Equal(got, want) {
+		t.Fatalf("auto-merge disables %v, want %v", got, want)
+	}
+}
+
 // A READY withdrawn because the head's own CI turned red, or because the head started conflicting
 // with its base, sends the issue back to implementing: an auto-merge armed for that READY must not
 // outlive it, so the withdrawal queues a disarm too.

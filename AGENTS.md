@@ -185,9 +185,10 @@ merge queue enqueues it; a repository without one arms auto-merge), and the repo
 reviews and checks decide when it merges. A head that moves before submission is not armed: the
 merger builds a new READY packet. GitHub checks the head match only when auto-merge is enabled, and
 arming is right only for an awaiting issue's READY head, so the daemon queues an
-`auto_merge_disable` outbox row (auto-merge disabled and the merge-queue entry removed, as the
-implement App, sparing anything armed after the row was queued) on every other push and when a
-child is set back to `todo`. When a push moves the head past the one READY named, the head's own CI
+`auto_merge_disable` outbox row on every other push and when a child is set back to `todo`. The row
+decides when it runs: it keeps the arm only while the issue awaits its merge and the pull request's
+head is the merger's READY commit, and otherwise disables auto-merge and removes the merge-queue
+entry, as the implement App. When a push moves the head past the one READY named, the head's own CI
 turns red before the merge, or the head starts conflicting with its base (GitHub computes no merge
 ref for a conflicting head and runs no checks on it at all), the daemon sends the issue back to
 `implementing`, disarms the pull request, posts the READY's withdrawal on the Dispatch issue, and

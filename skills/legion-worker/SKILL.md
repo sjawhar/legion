@@ -305,8 +305,9 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 - **The merge gate**, in order: the tester's evidence green → the reviewer's approval of the head
   → retro → the merger's READY → the merge → the implementer's production check. On READY's
   acceptance the merger submits the pull request with
-  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`, and the
-  repository's required reviews and checks decide when it lands
+  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`, unless the
+  answer's note begins `MANUAL_MERGE_REQUIRED:`, where a person merges it; the repository's
+  required reviews and checks decide when it lands
   (`skill://legion-worker/references/merge-gate.md`). The reviewer's submissions, retro's commit,
   the merger's READY and its submission, and the production check follow the same reference.
 - **No surface reaches the changed path** is a report to the architect, never a reason to
