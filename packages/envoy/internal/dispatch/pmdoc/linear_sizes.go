@@ -23,3 +23,7 @@ const (
 	// elements one upload may make allow of them.
 	updateShapeTarget = 128 << 10
 )
+
+// alternatingBlocks are the documents TestUpdateIsLinearInTheBlockCount replaces every other block
+// of: 16,384 blocks is about the most paragraphs the 65,536 elements one upload may make allow.
+var alternatingBlocks = []int{4_096, 16_384}

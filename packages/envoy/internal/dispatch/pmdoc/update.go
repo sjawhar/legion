@@ -2,7 +2,9 @@ package pmdoc
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"unicode/utf16"
 	"unsafe"
 
@@ -83,13 +85,9 @@ func updateChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, want []*Node
 		}
 
 		leftElement, leftMatches := leftY.(*crdt.YXmlElement)
-		if leftMatches {
-			leftMatches = !leftP.isText() && leftElement.NodeName == leftP.element.Type
-		}
+		leftMatches = leftMatches && sameKind(leftY, leftP)
 		rightElement, rightMatches := rightY.(*crdt.YXmlElement)
-		if rightMatches {
-			rightMatches = !rightP.isText() && rightElement.NodeName == rightP.element.Type
-		}
+		rightMatches = rightMatches && sameKind(rightY, rightP)
 
 		if leftMatches && rightMatches {
 			leftFactor := computeChildEqualityFactor(leftElement, leftP.element)
@@ -117,9 +115,13 @@ func updateChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, want []*Node
 			// that could not match either: the right end, which decided nothing here, is the same
 			// for each. The run is deleted and its replacements inserted in one call each, which
 			// writes what replacing them one at a time wrote - each replacement lands before the
-			// run's first deleted child - without walking the fragment once per child.
+			// run's first deleted child. ygo's Delete and Insert each walk the fragment from its
+			// start to the index they are given (leftChildAt, deleteChildRange), so each run costs
+			// a walk to its index: a document whose replaced children stand apart, every other
+			// block changing type, costs a walk per replaced child, as it did before runs were
+			// batched.
 			run := 1
-			for left+run < len(ychildren)-right && left+run < len(pchildren)-right && !pairCouldMatch(ychildren[left+run], pchildren[left+run]) {
+			for left+run < len(ychildren)-right && left+run < len(pchildren)-right && !sameKind(ychildren[left+run], pchildren[left+run]) {
 				run++
 			}
 			frag.Delete(txn, left, run)
@@ -143,9 +145,9 @@ func updateChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, want []*Node
 	return insertPChildren(txn, frag, left, pchildren[left:len(pchildren)-right])
 }
 
-// pairCouldMatch reports whether updateChildren's loop could keep ychild for pchild: a text for
-// a text, or an element of the node's type.
-func pairCouldMatch(ychild any, pchild normalizedChild) bool {
+// sameKind reports whether updateChildren can keep ychild for pchild: a text for a text, or an
+// element of the node's type.
+func sameKind(ychild any, pchild normalizedChild) bool {
 	switch y := ychild.(type) {
 	case *crdt.YXmlText:
 		return pchild.isText()
@@ -162,7 +164,9 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 	}
 	current := Attrs(element.GetAttributeValues())
 	wantAttrs := liveAttrs(want)
-	for key, value := range wantAttrs {
+	// Attribute changes are written in name order, as createTypeFromElementNode writes them.
+	for _, key := range slices.Sorted(maps.Keys(wantAttrs)) {
+		value := wantAttrs[key]
 		if value == nil {
 			if _, ok := current[key]; ok {
 				element.DeleteAttribute(txn, key)
@@ -173,7 +177,7 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 			element.SetAttributeValue(txn, key, yjsAttributeValue(value))
 		}
 	}
-	for key := range current {
+	for _, key := range slices.Sorted(maps.Keys(current)) {
 		if value, ok := wantAttrs[key]; !ok || value == nil {
 			element.DeleteAttribute(txn, key)
 		}
@@ -221,17 +225,20 @@ func liveAttrs(node *Node) Attrs {
 // insertPChildren creates the Yjs type of each of children and inserts them into frag at index in
 // one call. ygo's fragment insert walks the fragment's children to index (leftChildAt), and an
 // element no document holds yet copies the children it buffers on every insert, so inserting a
-// fragment's children one at a time took time quadratic in their number (LEGION-465). One call
-// walks once, and writes what one insert per child at consecutive indexes wrote: each child's
-// origin is the child before it, and its right origin the child that stood at index. It is how
-// y-prosemirror writes a fragment's new children (updateYFragment's tail insert, and
-// createTypeFromElementNode's).
+// fragment's n children one at a time took n walks, time quadratic in n (LEGION-465). One call
+// walks to index once, and writes what one insert per child at consecutive indexes wrote: each
+// child's origin is the child before it, and its right origin the child that stood at index. It is
+// how y-prosemirror writes a fragment's new children (updateYFragment's tail insert, and
+// createTypeFromElementNode's). A call still walks to index, so its cost grows with index as well
+// as with children.
 func insertPChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, index int, children []normalizedChild) error {
 	if len(children) == 0 {
 		return nil
 	}
-	// ygo's node interface is unexported, so the slice is typed from one Children returns.
-	nodes := frag.Children()[:0:0]
+	// ygo's node interface is unexported, so the slice is typed from what Children returns on a
+	// detached element: an empty slice, from no walk. Children of frag itself would walk every item
+	// it holds.
+	nodes := slices.Grow(crdt.NewYXmlElement("paragraph").Children(), len(children))
 	for _, child := range children {
 		if child.isText() {
 			text, err := createTypeFromTextNodes(txn, child.text)
@@ -273,8 +280,11 @@ func createTypeFromElementNode(txn *crdt.Transaction, node *Node) (*crdt.YXmlEle
 		return nil, fmt.Errorf("%w: text is not an element", ErrSchema)
 	}
 	element := crdt.NewYXmlElement(node.Type)
-	for key, value := range liveAttrs(node) {
-		if value != nil && key != "ychange" {
+	attrs := liveAttrs(node)
+	// Attributes are written in name order, so the update an element makes does not depend on map
+	// iteration order.
+	for _, key := range slices.Sorted(maps.Keys(attrs)) {
+		if value := attrs[key]; value != nil && key != "ychange" {
 			element.SetAttributeValue(txn, key, yjsAttributeValue(value))
 		}
 	}

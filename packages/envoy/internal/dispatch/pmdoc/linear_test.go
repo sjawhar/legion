@@ -2,14 +2,16 @@ package pmdoc
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
 	"github.com/reearth/ygo/crdt"
+
+	"github.com/sjawhar/envoy/internal/cputest"
 )
 
 // Parse and Render finish in time linear in the text on the shapes that cost quadratic time
@@ -198,16 +200,29 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 	})
 }
 
-// Writing a tree of many blocks into a document takes time linear in its blocks (LEGION-465).
-// Update inserted the children a fragment gains one index at a time, and ygo's fragment insert walks
-// the fragment's children to the index it is given - an element no document holds yet copies the
-// children it has buffered instead - so n blocks took about n²/2 steps. On one machine at a load
-// of 140 to 200, seeding 16,384 one-word paragraphs took 2.1 s of CPU and 65,536 took 36 s, a quote
-// of 21,844 rules 4.3 s, and replacing a quote of 21,844 empty headings with a quote of as many
-// rules 11 s through the upload route. Nothing in Update bounds the blocks: a rebuild from the
-// latest version writes a stored rendering whole, whatever it weighs, so the seed of paragraphs
-// runs to the mebibyte a document may hold (updateSeedTarget). Each write's own CPU time is
-// measured, as TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText measures a parse's.
+// Writing a tree of many blocks into a document takes time linear in its blocks when the blocks it
+// adds or replaces stand together (LEGION-465). Update inserted the children a fragment gains one
+// index at a time, and ygo's fragment insert walks the fragment's children to the index it is given
+// - an element no document holds yet copies the children it has buffered instead - so n blocks
+// took about n²/2 steps. On one machine at a load of 140 to 200, seeding 16,384 one-word
+// paragraphs took 2.1 s of CPU and 65,536 took 36 s, a quote of 21,844 rules 4.3 s, and replacing
+// a quote of 21,844 empty headings with a quote of as many rules 11 s through the upload route.
+// Nothing in Update bounds the blocks: a rebuild from the latest version writes a stored rendering
+// whole, whatever it weighs, so the seed of paragraphs runs to the mebibyte a document may hold
+// (updateSeedTarget). Each write's own CPU time is measured, as
+// TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText measures a parse's.
+//
+// Replaced blocks that stand apart are not linear. ygo's Delete and Insert walk the fragment from
+// its start to the index each is given (crdt/yxml.go leftChildAt, deleteChildRange, in the pinned
+// sjawhar/ygo v1.51.3-sami.1), and a replaced block between two kept ones is a run of its own, so a
+// document whose every other block changes type costs a walk per replaced block, as it did before
+// runs were batched. That shape is held to ygo's own walks instead: Update may take no more than
+// alternatingAllowance times what a Delete and an Insert at each replaced index take on the same
+// document in the same process. On one machine at a load of 105 to 121, back to back, it took
+// 134 ms and 5.83 s at 4,096 and 16,384 blocks (2.1 and 1.6 times ygo's walks), main's Update
+// 112 ms and 5.65 s (1.6 and 1.6 times); the write that typed its batch from the live fragment's
+// children, walking the whole fragment once more per replaced block, took 936 ms at 4,096 (12.7
+// times).
 func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 	for _, test := range []struct {
 		name, from, to string
@@ -239,7 +254,59 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 			})
 		})
 	}
+	t.Run("replacing every other block", func(t *testing.T) {
+		for _, blocks := range alternatingBlocks {
+			fastest := func(what string, op func() time.Duration) time.Duration {
+				best := time.Duration(math.MaxInt64)
+				for range sampleCount {
+					best = min(best, timedWithDeadline(t, fmt.Sprintf("%s at %d blocks", what, blocks), perCallDeadline, op))
+				}
+				return best
+			}
+			// Headings and paragraphs alternate, and every block becomes a paragraph: every heading
+			// is a run of its own, between two paragraphs Update keeps.
+			from := func() (*crdt.Doc, *crdt.YXmlFragment) {
+				doc := crdt.New()
+				fragment := doc.GetXmlFragment("prosemirror")
+				writeUpdate(t, doc, fragment, repeatedBlocks(t, "#\n\na\n\n", blocks/2))
+				return doc, fragment
+			}
+			want := repeatedBlocks(t, "a\n\n", blocks)
+			update := fastest("replacing every other block", func() time.Duration {
+				doc, fragment := from()
+				before := processCPUTime()
+				writeUpdate(t, doc, fragment, want)
+				took := processCPUTime() - before
+				if got, err := Read(fragment); err != nil || !got.Equal(want) {
+					t.Fatalf("replacing every other block: %d blocks read back otherwise (%v)", blocks, err)
+				}
+				return took
+			})
+			walks := fastest("ygo's walks to every other block", func() time.Duration {
+				doc, fragment := from()
+				before := processCPUTime()
+				doc.Transact(func(txn *crdt.Transaction) {
+					for index := 0; index < blocks; index += 2 {
+						fragment.Delete(txn, index, 1)
+						fragment.InsertElement(txn, index, crdt.NewYXmlElement("paragraph"))
+					}
+				})
+				return processCPUTime() - before
+			})
+			if update > alternatingAllowance*walks {
+				t.Fatalf("replacing every other block of %d took %s, %.1f times the %s ygo's own Delete and Insert at those indexes take (at most %d)", blocks, update.Round(time.Millisecond), float64(update)/float64(walks), walks.Round(time.Millisecond), alternatingAllowance)
+			}
+			t.Logf("replacing every other block of %d: %s, %.1f times ygo's walks (%s, at most %d)", blocks, update.Round(time.Millisecond), float64(update)/float64(walks), walks.Round(time.Millisecond), alternatingAllowance)
+		}
+	})
 }
+
+// alternatingAllowance is how many times ygo's own index walks replacing every other block may
+// take (TestUpdateIsLinearInTheBlockCount). Update's work beside the walks - building each block
+// and comparing the trees - grows linearly while the walks grow quadratically, so the ratio falls
+// as the document grows: 1.6 to 2.6 at the sizes the test runs, main's Update included, against
+// 12.7 for a write that walks the fragment once more per replaced block.
+const alternatingAllowance = 4
 
 // repeatedBlocks is the tree of unit written blocks times, read as a stored rendering is, which no
 // element limit stops.
@@ -274,20 +341,14 @@ const growthAllowance = 4
 const sampleCount = 3
 
 // processCPUTime is this process's total CPU time, user and system, since it started
-// (syscall.Getrusage(RUSAGE_SELF)), not wall time - immune to another process's contention for
-// the same cores, which is LEGION-569/571's whole flake history (the file-level comment above has
-// the fuller account). No test in this package calls t.Parallel (there is no t.Parallel()
-// anywhere under internal/dispatch/pmdoc), so ordinarily at most one measured call runs at a time,
-// and this process's CPU delta across one call is that call's own cost plus whatever GC work its
+// (cputest.Process), not wall time - immune to another process's contention for the same cores,
+// which is LEGION-569/571's whole flake history (the file-level comment above has the fuller
+// account). No test in this package calls t.Parallel (there is no t.Parallel() anywhere under
+// internal/dispatch/pmdoc), so ordinarily at most one measured call runs at a time, and this
+// process's CPU delta across one call is that call's own cost plus whatever GC work its
 // allocations trigger meanwhile. leakedCallGuard (below) is what keeps that true even once a call
 // has missed its own deadline and gone on running in the background.
-func processCPUTime() time.Duration {
-	var usage syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
-		panic(fmt.Sprintf("getrusage(RUSAGE_SELF): %v", err))
-	}
-	return time.Duration(usage.Utime.Nano()+usage.Stime.Nano()) * time.Nanosecond
-}
+func processCPUTime() time.Duration { return cputest.Process() }
 
 // leaking counts how many of each what (growsLinearly's shape-and-size label) are currently
 // running past their own deadline - a count, not a single flag, so two concurrently leaking calls

@@ -7,9 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/cputest"
 )
 
 // Saving a document takes time linear in a pathological run over the tested ladder sizes
@@ -70,13 +71,16 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 			})
 		})
 	}
-	// Replacing a document of many short blocks with as many others takes time linear in its blocks
-	// (LEGION-465): pmdoc wrote each new block at its own index, walking the document to it, so the
-	// replacement grew with the square of its blocks. A quote of n headings replaced with a quote of
-	// n rules took 34 ms of server CPU at 682 blocks and 10.5 s at 21,844, the most one write's
-	// element limit allows of it, before the fix, and 27 ms and 1.5 s after it, on one machine at a
-	// load of 309 to 343. Each rung is timed in this process's CPU (serverCPU), since a rung's wall
-	// time at these sizes is mostly the request's own cost and the runner's load.
+	// Replacing a document of many short blocks with as many others, every block changing type,
+	// takes time linear in its blocks (LEGION-465): pmdoc wrote each new block at its own index,
+	// walking the document to it, so the replacement grew with the square of its blocks. A quote of
+	// n headings replaced with a quote of n rules took 34 ms of server CPU at 682 blocks and 10.5 s
+	// at 21,844, the most one write's element limit allows of it, before the fix, and 27 ms and
+	// 1.5 s after it, on one machine at a load of 309 to 343. Replaced blocks that stand apart, kept
+	// blocks between them, still cost a walk each in ygo (pmdoc's TestUpdateIsLinearInTheBlockCount).
+	// Each rung is timed in this process's CPU (cputest.Process), since a rung's wall time at these
+	// sizes is mostly the request's own cost and the runner's load. No test in this package calls
+	// t.Parallel.
 	t.Run("replacing many blocks", func(t *testing.T) {
 		const from, to = "> #\n", "> ***\n"
 		growsLinearly(t, "replacing a quote of headings with a quote of rules", []int{682 * len(to), 5_461 * len(to), 21_844 * len(to)}, func(size int) time.Duration {
@@ -84,9 +88,9 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 			documents++
 			name := fmt.Sprintf("many-blocks-%d.md", documents)
 			for index, body := range []string{strings.Repeat(from, blocks), strings.Repeat(to, blocks)} {
-				before := serverCPU()
+				before := cputest.Process()
 				response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": name}, "body.md", "text/markdown", []byte(body), "alice")
-				took := serverCPU() - before
+				took := cputest.Process() - before
 				if response.Code != http.StatusCreated {
 					t.Fatalf("upload %d blocks of %q: status=%d body=%.200s", blocks, body[:len(from)], response.Code, response.Body.String())
 				}
@@ -188,17 +192,6 @@ func checkLinearGrowth(t *testing.T, what string, firstSize int, firstTook time.
 			what, took.Round(time.Millisecond), sizeText(size), ratio, firstTook.Round(time.Millisecond), sizeText(firstSize), growth, growthAllowance*growth)
 	}
 	t.Logf("%s: %s at %s, %s at %s, %.1f times for an input %d times larger (at most %d)", what, firstTook.Round(time.Millisecond), sizeText(firstSize), took.Round(time.Millisecond), sizeText(size), ratio, growth, growthAllowance*growth)
-}
-
-// serverCPU is this process's CPU time, user and system: the test server runs in it, so its growth
-// across a request is that request's work and the garbage collection it caused, and not the
-// runner's load. No test in this package calls t.Parallel.
-func serverCPU() time.Duration {
-	var usage syscall.Rusage
-	if err := syscall.Getrusage(syscall.RUSAGE_SELF, &usage); err != nil {
-		panic(fmt.Sprintf("getrusage(RUSAGE_SELF): %v", err))
-	}
-	return time.Duration(usage.Utime.Nano() + usage.Stime.Nano())
 }
 
 func sizeText(size int) string {

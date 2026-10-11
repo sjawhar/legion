@@ -11,3 +11,7 @@ const (
 	updateSeedTarget  = 128 << 10
 	updateShapeTarget = 16 << 10
 )
+
+// alternatingBlocks is the race build's pair: smaller, as its other targets are, but past the few
+// hundred blocks where Update's fixed costs outweigh ygo's walks.
+var alternatingBlocks = []int{2_048, 4_096}
