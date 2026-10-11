@@ -1,4 +1,5 @@
 {
+  "note": "Go's (?i) folds U+212A (Kelvin sign) and U+017F (long s) to k and s, where JavaScript's /i does not, so on a detail holding either the daemon masks more than the plugin, by design: the daemon's cleaning is the one the store and the state keep. No case here holds either.",
   "patterns": [
     {
       "pattern": "url-userinfo",
@@ -356,6 +357,12 @@
     },
     {
       "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside a credential",
+      "detail": "GET https://api.example/v1?key=ab\u009bcd&q=1 failed",
+      "want": "GET https://api.example/v1?key=***&q=1 failed"
+    },
+    {
+      "pattern": "cleanup",
       "name": "a Unicode space and a next line, each a delimiter",
       "detail": "401:\u0085invalid Bearer\u2003abc123 for mcp.example",
       "want": "401: invalid Bearer *** for mcp.example"
@@ -418,7 +425,7 @@
       "pattern": "cleanup",
       "name": "a JWT right after an unterminated ESC [",
       "detail": "token \u001b[eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
-      "want": "token [*** expired"
+      "want": "token *** expired"
     },
     {
       "pattern": "cleanup",
@@ -436,13 +443,13 @@
       "pattern": "cleanup",
       "name": "a GitHub token after an unterminated ESC [ with a parameter and a space",
       "detail": "token \u001b[0 ghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
-      "want": "token [0 ghp_*** expired"
+      "want": "token ghp_*** expired"
     },
     {
       "pattern": "cleanup",
       "name": "an Authorization header right after an unterminated ESC [",
       "detail": "req \u001b[ Authorization: Basic dXNlcjpwYXNz",
-      "want": "req [ Authorization: Basic ***"
+      "want": "req Authorization: Basic ***"
     },
     {
       "pattern": "cleanup",
@@ -455,6 +462,138 @@
       "name": "a query credential right after an unterminated ESC [",
       "detail": "GET /x\u001b[?token=qSecret123 401",
       "want": "GET /x oken=*** 401"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token glued to an ESC [ parameter",
+      "detail": "token \u001b[1ghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token hp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a bearer credential glued to an ESC [ parameter",
+      "detail": "401: \u001b[0Bearer abc123secret",
+      "want": "401: earer ***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT glued to an ESC [ parameter",
+      "detail": "token \u001b[1eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token right after an erase-line sequence",
+      "detail": "token \u001b[Kghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token as grep --color=always prints it",
+      "detail": "token \u001b[01;31m\u001b[Kghp_\u001b[m\u001b[KEXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token grep coloured in the middle",
+      "detail": "token ghp_EXAMPLEtoken0123456789\u001b[01;31m\u001b[Kabcdefghijklmn\u001b[m\u001b[K expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour sequence inside a GitHub token, early",
+      "detail": "ghp_EXAMPLEtok\u001b[1men0123456789abcdefghijk",
+      "want": "ghp_***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour reset inside a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123456789abcd\u001b[0mefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour sequence with several parameters inside a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123456789abcdef\u001b[38;5;196mghijklmn\u001b[0m expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour reset right after a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123456789abcdefghijklmn\u001b[0m expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour reset inside a JWT's signature",
+      "detail": "token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbm\u001b[0mF0dXJlSECRET expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour sequence inside a bearer credential",
+      "detail": "401: Bearer abc123\u001b[1msecretTail rejected",
+      "want": "401: Bearer *** rejected"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour sequence inside an x-api-key value",
+      "detail": "x-api-key: abc123\u001b[1msecretTail rejected",
+      "want": "x-api-key: *** rejected"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour reset inside a provider key",
+      "detail": "key sk-proj-EXAMPLEkey0123456789ab\u001b[0mcdefghSECRET",
+      "want": "key sk-***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside a bearer credential",
+      "detail": "401 invalid Bearer abc123\u009bsecret456",
+      "want": "401 invalid Bearer ***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123456789abcdef\u009bghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside a JWT",
+      "detail": "token eyJhbGciOiJSUzI1NiJ9.eyJzdWIi\u009bOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer early in a GitHub token",
+      "detail": "token ghp_EXAMPLEtok\u009ben0123456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer before digits inside a provider key, each digit counted",
+      "detail": "key sk-EXAMPLEkey01\u009b23456789abcdef end",
+      "want": "key sk-*** end"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer early in a bearer credential",
+      "detail": "Bearer abc\u009bdefSecret0123 end",
+      "want": "Bearer *** end"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside a Google API key",
+      "detail": "maps AIzaSyEXAMPLEkey01\u009b23456789abcdefghijklm x",
+      "want": "maps AIza*** x"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 colour sequence between an Authorization label and its value",
+      "detail": "Authorization:\u009b1mBearer abcSecret",
+      "want": "Authorization:***"
     },
     {
       "pattern": "cleanup",

@@ -786,7 +786,11 @@ describe("cleanDetail", () => {
     const problems: string[] = [];
     for (const { pattern, name, pad, detail } of redaction.patterns) {
       const whole = cleanDetail(detail);
-      for (let letters = 1024 - Buffer.byteLength(detail) - 16; letters <= 1024 + 8; letters++) {
+      for (
+        let letters = Math.max(0, 1024 - Buffer.byteLength(detail) - 16);
+        letters <= 1024 + 8;
+        letters++
+      ) {
         const padding = "a".repeat(letters);
         const once = cleanDetail(`${padding} ${detail}`);
         const label = `${pattern}: ${name}, pushed by ${letters} letters`;

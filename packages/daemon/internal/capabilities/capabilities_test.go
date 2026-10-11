@@ -330,7 +330,7 @@ func TestCleanDetailKeepsWhatCameBeforeTheCutAndIsIdempotent(t *testing.T) {
 	readFixture(t, "capability-redaction.json", &fixture)
 	for _, testCase := range fixture.Patterns {
 		whole := cleanDetail(testCase.Detail)
-		for letters := MaxReportDetail - len(testCase.Detail) - 16; letters <= MaxReportDetail+8; letters++ {
+		for letters := max(0, MaxReportDetail-len(testCase.Detail)-16); letters <= MaxReportDetail+8; letters++ {
 			padding := strings.Repeat("a", letters)
 			once := cleanDetail(padding + " " + testCase.Detail)
 			label := fmt.Sprintf("%s: %s, pushed by %d letters", testCase.Pattern, testCase.Name, letters)

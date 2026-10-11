@@ -409,12 +409,23 @@ const CHECKS: Readonly<Record<LiveCapability, Check>> = {
 /** The longest detail a row carries, in UTF-8 bytes: the daemon's `capabilities.MaxReportDetail`. */
 const MAX_DETAIL_BYTES = 1024;
 
-/** What `cleanDetail` holds a control character as while it redacts: a noncharacter, which no text
- * carries, so it stands for nothing else. */
+/** What `cleanDetail` holds a control character as while it redacts, what it holds U+009B as, and
+ * what its second reading holds a control sequence's introducer as: the daemon's `held`,
+ * `c1Introducer` and `opener`. */
 const HELD = "\uffff";
+const C1_INTRODUCER = "\ufffe";
+const OPENER = "\ufdd0";
 
-/** An ANSI control sequence once its escape is held: the daemon's `heldSequence`. */
-const HELD_SEQUENCE = /\uffff\[[0-?]*[!-)+-/]*[@-~]/g;
+/** `cleanDetail`'s readings of held text after the first, in order: the daemon's `heldReadings`. */
+const HELD_READINGS: readonly (readonly [RegExp, string])[] = [
+  [/(?:\uffff\[|\ufffe)[0-?]*[!-)+-/]*/g, OPENER],
+  [/\ufdd0[@-~]?/g, HELD],
+  [/\uffff/g, " "],
+];
+
+/** `C1_INTRODUCER`, held alone, or a held escape with the `[`, parameters and letter that complete a
+ * control sequence: the daemon's `heldSequence`, as regular-expression source. */
+const HELD_SEQUENCE = String.raw`\ufffe|\uffff(?:\[[0-?]*[A-Za-z])?`;
 
 /** Go's `unicode.IsSpace`, the space runes the daemon's cleanup splits on. */
 function isSpace(code: number): boolean {
@@ -449,11 +460,13 @@ function truncateUtf8(text: string, max: number): string {
 /**
  * The credential shapes `cleanDetail` replaces, as the daemon's `credentialRules` in
  * `packages/daemon/internal/capabilities` and in its order, which its comment explains; the shared
- * fixture names each with an example. A value class takes `HELD`, and a separator a space or
- * `HELD`. The userinfo rule starts only where a run of scheme characters starts, and the JWT rule
- * only where a run of base64url characters starts or right after a percent or `\u` escape, as the
- * daemon's prefix groups do, so a long run that never completes a match is read once rather than
- * once per start: JavaScriptCore backtracks, where the daemon's RE2 does not.
+ * fixture names each with an example. A value class runs across a `HELD_SEQUENCE`, and a separator
+ * takes a space or `HELD`. The userinfo rule starts only where a run of scheme characters starts,
+ * and the JWT rule only where a run of base64url characters and held sequences starts or right
+ * after a percent or `\u` escape: its lookbehinds skip a start after held, or after a held `[` and
+ * its parameters, where the daemon's rule matches that prefix and gives it back. So a long run that
+ * never completes a match is read once rather than once per start: JavaScriptCore backtracks, where
+ * the daemon's RE2 does not.
  */
 const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   [/(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^ /?#]+@/gi, "$1***@"],
@@ -461,24 +474,51 @@ const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
     /([?&](?:token|key|secret|password|access_token|accesstoken|refresh_token|id_token|auth_token|private_token|api_key|apikey|client_secret|sig|signature|x-amz-security-token|x-amz-signature|x-goog-signature)=)[^ &#"'<>]+/gi,
     "$1***",
   ],
-  [/\b(password[ \uffff]*=[ \uffff]*)(?:(')(?:[^'\\]|\\.)*('?)|[^ &#"'<>]+)/gi, "$1$2***$3"],
   [
-    /(authorization\\?["']?[ \uffff]*[:=][ \uffff]*)(?:(\\["'](?:(?:bearer|basic|token|digest)[ \uffff]+)?)[^"'\\]+|(["'](?:(?:bearer|basic|token|digest)[ \uffff]+)?)(?:[^"'\\]|\\.)+|(\[?(?:(?:bearer|basic|token|digest)[ \uffff]+)?)[^)\]}>]+)/gi,
+    /\b(password[ \ufffe\uffff]*=[ \ufffe\uffff]*)(?:(')(?:[^'\\]|\\.)*('?)|[^ &#"'<>]+)/gi,
+    "$1$2***$3",
+  ],
+  [
+    /(authorization\\?["']?[ \ufffe\uffff]*[:=][ \ufffe\uffff]*)(?:(\\["'](?:(?:bearer|basic|token|digest)[ \ufffe\uffff]+)?)[^"'\\]+|(["'](?:(?:bearer|basic|token|digest)[ \ufffe\uffff]+)?)(?:[^"'\\]|\\.)+|(\[?(?:(?:bearer|basic|token|digest)[ \ufffe\uffff]+)?)[^)\]}>]+)/gi,
     "$1$2$3$4***",
   ],
   [
-    /((?:api-key|ocp-apim-subscription-key|x-subscription-token)\\?["']?[ \uffff]*[:=][ \uffff]*\\?["']?)[A-Za-z0-9._~+/=*-][A-Za-z0-9._~+/=*\uffff-]*/gi,
+    new RegExp(
+      String.raw`((?:api-key|ocp-apim-subscription-key|x-subscription-token)\\?["']?[ \ufffe\uffff]*[:=][ \ufffe\uffff]*\\?["']?)(?:[A-Za-z0-9._~+/=*-]|${HELD_SEQUENCE})+`,
+      "gi"
+    ),
     "$1***",
   ],
-  [/(\\?["'](?:api_key|access_token)\\?["'][ \uffff]*:[ \uffff]*\\?["'])[^"'\\]+/gi, "$1***"],
-  [/\b(bearer[ \uffff]+)[A-Za-z0-9._~+/=*-][A-Za-z0-9._~+/=*\uffff-]*/gi, "$1***"],
-  [/\b(gh[pousr]_|github_pat_)[A-Za-z0-9._\uffff-]{20,}/g, "$1***"],
   [
-    /(?:(?<![A-Za-z0-9_\uffff-])|(?<=%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}))eyJ[A-Za-z0-9_\uffff-]{8,}\.[A-Za-z0-9_\uffff-]{8,}\.[A-Za-z0-9_\uffff-]*/g,
+    /(\\?["'](?:api_key|access_token)\\?["'][ \ufffe\uffff]*:[ \ufffe\uffff]*\\?["'])[^"'\\]+/gi,
+    "$1***",
+  ],
+  [
+    new RegExp(
+      String.raw`\b(bearer[ \ufffe\uffff]+)(?:[A-Za-z0-9._~+/=*-]|${HELD_SEQUENCE})+`,
+      "gi"
+    ),
+    "$1***",
+  ],
+  [
+    new RegExp(String.raw`\b(gh[pousr]_|github_pat_)(?:[A-Za-z0-9._-]|${HELD_SEQUENCE}){20,}`, "g"),
+    "$1***",
+  ],
+  [
+    new RegExp(
+      String.raw`(?=eyJ)(?:(?<![A-Za-z0-9_\ufffe\uffff-])(?<!\uffff\[[0-?]*)|(?<=%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}))eyJ(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE})*`,
+      "g"
+    ),
     "***",
   ],
-  [/\b(sk-|dsp_|ya29\.|xox[a-z]-|glpat-|npm_)[A-Za-z0-9_\uffff-]{20,}/g, "$1***"],
-  [/\b(AIza)[A-Za-z0-9_\uffff-]{35,}/g, "$1***"],
+  [
+    new RegExp(
+      String.raw`\b(sk-|dsp_|ya29\.|xox[a-z]-|glpat-|npm_)(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){20,}`,
+      "g"
+    ),
+    "$1***",
+  ],
+  [new RegExp(String.raw`\b(AIza)(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){35,}`, "g"), "$1***"],
   [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, "$1***"],
 ];
 
@@ -500,12 +540,18 @@ function redactCredentials(text: string): string {
   return line;
 }
 
+/** `text` without its last code point, a surrogate pair's two halves together. */
+function withoutLastCodePoint(text: string): string {
+  const last = text.charCodeAt(text.length - 1);
+  return text.slice(0, last >= 0xdc00 && last <= 0xdfff && text.length > 1 ? -2 : -1);
+}
+
 /**
  * A detail as the daemon's `cleanDetail` (`packages/daemon/internal/capabilities`) keeps it, in its
  * steps, which its comment explains, and held to the same shared fixture: one line, every
- * credential redacted, cut at 1024 UTF-8 bytes. Every space rune is a space and every other control
- * character is held; the rules run with each held on its own, then, when anything was held, again
- * with each whole ANSI control sequence and every other held character a space, each time until a
+ * credential redacted, cut at 1024 UTF-8 bytes. Every space rune is a space, U+009B is held as
+ * `C1_INTRODUCER`, and every other control character (and each marker itself) is held; the rules
+ * run on that, then, when anything was held, on each of `HELD_READINGS` in turn, each time until a
  * pass changes nothing. After a cut, trailing space goes, then trailing words, and within a last
  * word trailing characters, while the rules would still change what is left, but never the last
  * character; so cleaning what this returns gives it back unchanged, and a cut never empties a
@@ -515,15 +561,19 @@ function redactCredentials(text: string): string {
  */
 export function cleanDetail(text: string): string {
   let marked = "";
-  for (const char of text.replaceAll("\u009b", "\u001b[")) {
+  for (const char of text) {
     const code = char.codePointAt(0) ?? 0;
-    // Go's unicode.IsControl: C0, DEL and C1.
-    const control = code < 0x20 || (code >= 0x7f && code < 0xa0);
-    marked += isSpace(code) ? " " : control ? HELD : char;
+    // Go's unicode.IsControl (C0, DEL and C1), and the three markers themselves.
+    const control =
+      code < 0x20 || (code >= 0x7f && code < 0xa0) || code === 0xfffe || code === 0xfdd0;
+    marked += isSpace(code) ? " " : code === 0x9b ? C1_INTRODUCER : control ? HELD : char;
   }
   let redacted = redactCredentials(marked);
-  if (marked.includes(HELD)) {
-    redacted = redactCredentials(redacted.replace(HELD_SEQUENCE, " ").replaceAll(HELD, " "));
+  if (marked.includes(HELD) || marked.includes(C1_INTRODUCER)) {
+    for (const [pattern, replacement] of HELD_READINGS) {
+      const read = redacted.replace(pattern, replacement);
+      if (read !== redacted) redacted = redactCredentials(read);
+    }
   }
   const line = redacted
     .split(" ")
@@ -533,8 +583,7 @@ export function cleanDetail(text: string): string {
   if (cut.length < line.length) {
     while (redactCredentials(cut) !== cut) {
       const space = cut.lastIndexOf(" ");
-      cut =
-        space > 0 ? cut.slice(0, space) : cut.slice(0, -([...cut.slice(-2)].at(-1)?.length ?? 1));
+      cut = space > 0 ? cut.slice(0, space) : withoutLastCodePoint(cut);
     }
   }
   return cut;
