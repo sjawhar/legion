@@ -196,7 +196,7 @@ func provisionRequest(t *testing.T) Request {
 		StateDir:         state,
 		Repo:             ghrepo.MustParse("acme/widgets"),
 		Issue:            "WIDGETS-42",
-		CredentialHelper: "!/opt/legion/bin/legion credential",
+		CredentialHelper: GitHubCredentialHelper,
 		Source:           FromGitHub("test-installation-token", state),
 		Log:              func(line string) { t.Logf("provisioning logged: %s", line) },
 	}
@@ -558,7 +558,7 @@ func TestProvisionFromAFeedHoldsNoCredential(t *testing.T) {
 		readOnly(t, fetch.Feed)
 		before := len(run.Calls())
 		working, err := Provision(context.Background(), run, Request{
-			StateDir: state, Repo: ghrepo.MustParse("acme/widgets"), Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(fetch.Feed),
+			StateDir: state, Repo: ghrepo.MustParse("acme/widgets"), Issue: issue, CredentialHelper: GitHubCredentialHelper, Source: FromFeed(fetch.Feed),
 			Log: func(line string) { t.Logf("provisioning logged: %s", line) },
 		})
 		if err != nil {
@@ -602,7 +602,7 @@ func TestProvisionFromAFeedKeepsABookmarkPushedAfterTheSnapshot(t *testing.T) {
 	run := newLocalRunner(t)
 	state := filepath.Join(t.TempDir(), "state")
 	request := func(issue, feed string) Request {
-		return Request{StateDir: state, Repo: ghrepo.MustParse("acme/widgets"), Issue: issue, CredentialHelper: "!/opt/legion/bin/legion credential", Source: FromFeed(feed),
+		return Request{StateDir: state, Repo: ghrepo.MustParse("acme/widgets"), Issue: issue, CredentialHelper: GitHubCredentialHelper, Source: FromFeed(feed),
 			Log: func(line string) { t.Logf("provisioning logged: %s", line) }}
 	}
 	first := fetchRequest(t)

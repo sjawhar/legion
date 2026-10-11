@@ -19,7 +19,7 @@ func TestReleaseRefusesALocatorOfAnotherClaim(t *testing.T) {
 		Project: "omp", StateDir: t.TempDir(), StreamAddress: "unix:///s", DaemonURL: "http://127.0.0.1:1",
 		EnvoyURL: "http://127.0.0.1:2", OmpInvocation: "omp", StopGrace: time.Second, ProbeInterval: time.Second,
 		AdoptTimeout: time.Second, Conns: fake.NewConns(), Environ: []string{"PATH=" + os.Getenv("PATH")},
-		Executable: func() (string, error) { return "/opt/legion", nil },
+		Executable: func() (string, error) { return "/opt/legion", nil }, GitHubCredential: staticCredential,
 	})
 	if err != nil {
 		t.Fatal(err)

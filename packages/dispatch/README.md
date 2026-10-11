@@ -91,6 +91,45 @@ DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslm
   bun run e2e
 ```
 
+## Local instance
+
+`bun run dispatch:local`, from the repository root or from this package, brings up a seeded
+Dispatch signed in as a person, to prove a change to a surface only a human acts on (the Inbox and
+its snooze, the Agents page and its direct messages, a broadcast) with no production step. It is
+the end-to-end harness, left running: it builds the SPA, starts every listener the Playwright
+config starts (the fake Envoy, the plain-HTTP proxy, the fake GitHub, the fake secrets broker and
+`e2e/run-server.sh`) on the same ports, empties the database, seeds `e2e/workspace.ts`, checks over
+HTTP that a cookie from the dev sign-in route reads `/auth/whoami`, the Inbox, the broadcasts and
+the agents, and prints:
+
+- the URL that opens the dashboard signed in as `alice` (and one for `bob`),
+- the seeded broadcast's page,
+- the agent bearer (`e2e-token`) a local Oh My Pi session reaches this instance with,
+- the database, the fake Envoy's session list and its reseed endpoint,
+- the command that runs a spec against it.
+
+Open exactly the printed `127.0.0.1` origin: `localhost` is another `Host`, and the server refuses
+it (`421 HOST_MISMATCH`). Ctrl-C stops every process it started, and so does a failure at any
+step; the database's container stays.
+
+Its inputs are the harness's own. `DATABASE_URL`, when set, is used as given: it must be a single
+`postgres://` URL whose host (its `host` query parameter when it has one, as for libpq) is
+`127.0.0.1`, `localhost`, `[::1]` or a Unix socket directory, and it is truncated and reseeded on
+every start. Unset, the command runs `packages/envoy/scripts/dev-postgres.sh`, which creates,
+starts or reuses the `dispatch-pg` container, and creates database `dispatch_local` in it once.
+That script refuses a `dispatch-pg` on any image but its pinned pgvector one, since Dispatch's
+migrations need the `vector` extension, and prints the commands that move the container's data
+volume onto that image, quoted so they paste as they read. The harness ports
+(`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `PLAIN_HTTP_PORT`, `FAKE_GITHUB_PORT`,
+`FAKE_BROKER_PORT`) move the instance, and the command refuses before anything starts when one is
+taken. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C ends a psql in flight too.
+
+A spec runs against the instance with the printed command, which sets
+`DISPATCH_E2E_REUSE_SERVERS=1` and the same `DATABASE_URL`; each spec empties the database and the
+fake Envoy, so restart the command to reseed it. `bun run build:web` while it runs refreshes the
+SPA, which the server reads from `web/dist` on each request. `docker rm -f dispatch-pg` removes the
+container and every database in it.
+
 ## Acceptance run against the deployed image
 
 The `dispatch.acceptance.compose.yml` Compose file builds a Dispatch image from this tree and runs

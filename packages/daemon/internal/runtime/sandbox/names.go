@@ -14,13 +14,19 @@ import (
 // The pod's own paths. The issue's volume is mounted whole at TreeRoot in workspace-init and each
 // role launcher, and sessions stay on it. Each role container has its own launcher token
 // projection at LauncherDir, and its own memory-backed LauncherPrivateDir, where its launcher
-// writes the generation's boot token and launch credentials, and StateDir.
+// writes the generation's boot token and launch credentials, and StateDir. GHConfigDir is an issue
+// pod's role container's GH_CONFIG_DIR: the read-only projection of its role Secret's two gh files
+// (GitHubHostsKey as ghconfig.HostsFile, GitHubConfigKey as ghconfig.ConfigFile), mounted in that
+// role's container alone, which its plain `gh` and the clone's `gh auth git-credential` helper
+// read the role's App token from. The kubelet rewrites a whole-volume Secret projection in place
+// when the Secret changes, so the refresher's Secret update is what the next gh runs with.
 const (
 	TreeRoot           = "/legion"
 	SessionsSubPath    = "sessions"
 	LauncherDir        = "/var/run/legion/launcher"
 	LauncherPrivateDir = "/var/run/legion/private"
 	LauncherTokenFile  = "LAUNCHER_TOKEN"
+	GHConfigDir        = "/var/run/legion/gh"
 	ProvisionDir       = "/var/run/legion/provision"
 	FeedDir            = "/var/run/legion/feed"
 	StateDir           = "/var/run/legion/state"
@@ -58,8 +64,6 @@ const (
 	// legionPlugin is the packed pi-legion the image carries, whose package.json names its
 	// extension, skills and the daemon API contract it speaks.
 	legionPlugin = "/opt/legion/pi-legion"
-	// workerBin is where workspace-init installs the gh shim on the issue's volume.
-	workerBin = TreeRoot + "/worker-bin"
 	// initTempDir is the workspace-fetch container's TMPDIR, an in-memory volume of its own:
 	// `workspace-init fetch` keeps its one-shot credential there, off every volume another
 	// container mounts.
@@ -81,6 +85,15 @@ const (
 	bootTokenKey      = "LEGION_BOOT_TOKEN"
 	provisionTokenKey = "LEGION_PROVISION_TOKEN"
 	dispatchTokenKey  = "DISPATCH_TOKEN"
+)
+
+// The keys of a role's Secret that carry its GitHub credential beside the launcher token: the
+// rendered hosts.yml and config.yml (ghconfig.Rendered), written for every role of an issue pod
+// and never for the controller's, which has no App. credentialFromSecret hashes the launcher token
+// alone, so the refresher rewrites these two without changing the launcher's binding.
+const (
+	GitHubHostsKey  = "github-hosts"
+	GitHubConfigKey = "github-config"
 )
 
 // The labels every object of a claim carries: the Sandbox, its pod template (the only place the
