@@ -94,7 +94,11 @@ Sign in, then open **Settings**:
   pipeline has no such step, and the page then omits its card), and the PR-checks workflow's
   roll-up job, which only reports the other jobs' result and which the failing-jobs table leaves
   out. Saving checks that the GitHub App can read the repository. Until it is set, the
-  [Delivery](/legion/dispatch/delivery/) page shows the same form.
+  [Delivery](/legion/dispatch/delivery/) page shows the same form. Every save, of any field,
+  starts the delivery import over: what is already stored stays on both pages, the freshness line
+  reads "never checked" until the next five-minute pass, that pass lists the last 28 days from
+  GitHub again, and the re-listing of each run's branch and event walks those 28 days a day per
+  pass, about 28 passes in all.
 - **Agent tokens**: make a token for each agent you run.
   [Dispatch for agents](/legion/dispatch/for-agents/#connecting-an-agent) covers the rest.
 

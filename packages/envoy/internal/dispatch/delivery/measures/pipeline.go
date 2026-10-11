@@ -263,7 +263,8 @@ func jobTimings(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Deli
 // PRChecks is the PR-checks workflow's Pipeline numbers (pipeline.py:113-167): run, every run's
 // wall time from its start to its completion and its outcome; slowest, the SlowestJobs jobs with
 // SlowestMinResults timed results by their seven-day median, slowest first, then by name; and
-// failing, every job that failed in a run completed in the FailingWindow before now, most failures
+// failing, every job that failed in a run completed in the FailingWindow up to now (a run that
+// completed after now, which a pinned `at` in the past can read, is not counted), most failures
 // first, then by name. The failing tally reads only runs that ended in success or failure (a
 // cancelled run's jobs are not the prototype's to count) and only their jobs that did, and leaves
 // out rollupJob (none when empty) and every summary or guard job (delivery.IsSummaryOrGuardJob).
@@ -307,7 +308,7 @@ func failingJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Del
 	var recent []delivery.DeliveryRun
 	for _, run := range runs {
 		outcome, ok := OutcomeOf(run.Conclusion)
-		if ok && outcome.timed() && run.CompletedAt != nil && !run.CompletedAt.Before(horizon) {
+		if ok && outcome.timed() && run.CompletedAt != nil && !run.CompletedAt.Before(horizon) && !run.CompletedAt.After(now) {
 			recent = append(recent, run)
 		}
 	}

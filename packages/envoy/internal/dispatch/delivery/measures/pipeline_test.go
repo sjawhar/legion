@@ -273,6 +273,26 @@ func TestFailingJobsWithoutARollupLeaveNothingOut(t *testing.T) {
 	}
 }
 
+// TestFailingJobsStopAtNow: the failing-jobs table covers the 24 hours before now and nothing
+// after it, so a pinned `at` in the past never counts a run that completed later that day.
+func TestFailingJobsStopAtNow(t *testing.T) {
+	c := failingFixture()
+	// Completed at 12:30 on Oct 2, half an hour after pipelineNow.
+	c.add(6, 32, 20, "failure", 12, job("build / unit", 19, "failure"), job("lint", 5, "failure"), job("typecheck", 3, "failure"))
+	_, _, failing := PRChecks(c.runs, c.jobs, pipelineDays, pipelineNow, "checks-complete")
+
+	byName := map[string]FailingJob{}
+	for _, f := range failing {
+		byName[f.Name] = f
+	}
+	if unit := byName["build / unit"]; unit.Failures != 2 || unit.Results != 3 || unit.LastRunURL != runURL(2) {
+		t.Errorf("build / unit = %+v, want 2 failures of 3 results, last in run 2 (run 6 completed after now)", unit)
+	}
+	if _, listed := byName["typecheck"]; listed {
+		t.Errorf("typecheck is listed, but its only failure in the window is run 6's, after now: %+v", failing)
+	}
+}
+
 // TestPRChecksJobCellsCountOnlyTimedJobsOfTimedRuns: a job's samples come only from runs that
 // ended in success or failure, and only from jobs that did (the prototype never stores the rest,
 // github_source.py:287-299, loop.py:241), so the cancelled run's build / unit row and the skipped

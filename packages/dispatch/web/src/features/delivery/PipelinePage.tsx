@@ -9,9 +9,12 @@
 // xl:grid-cols-6` less its `px-4` page padding) measured on the page's own width rather than the
 // viewport, since beside Dispatch's sidebar the viewport rule put six cards in too little room for
 // their figures; a pipeline whose settings name no staging end-to-end gate (or no staging deploy)
-// omits that card; the prototype's note on runs whose jobs are not fetched yet is gone, since
-// Dispatch stores a run's jobs with the run; the failing-jobs note names the roll-up job by its
-// role, since the job's name is a setting; and the colours are the theme's tokens.
+// omits that card; the prototype's note counting runs whose jobs are not fetched yet is gone, so a
+// run whose jobs are not stored (intake and reconcile write a run and its jobs separately, and a
+// run whose jobs listing GitHub refuses is marked jobs-unfetchable and never gets any) counts in
+// the PR CI card and adds nothing to the two job tables, unremarked; the failing-jobs note names
+// the roll-up job by its role, since the job's name is a setting; and the colours are the theme's
+// tokens.
 //
 // `?at=` is the test and screenshot hook: the page forwards it to the route, which then names the
 // seven days ending on at's day and looks back 24 hours from it, so a fixture dated in the past
