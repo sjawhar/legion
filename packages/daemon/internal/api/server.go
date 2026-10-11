@@ -211,6 +211,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 	mux.HandleFunc("POST /legion/v1/claims/exit", s.exit)
 	mux.HandleFunc("POST /legion/v1/grants", s.grant)
 	mux.HandleFunc("POST /legion/v1/controller/secret", s.controllerSecret)
+	mux.HandleFunc("POST /legion/v1/controller/github-credential", s.controllerGitHubCredential)
 	mux.HandleFunc("POST /legion/v1/handoff/complete", s.handoffComplete)
 	mux.HandleFunc("POST /legion/v1/issues/status", s.issueStatus)
 	mux.HandleFunc("POST /legion/v1/gates/register", s.gateRegister)

@@ -17,7 +17,11 @@ package ghconfig
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -116,4 +120,50 @@ type Rendered struct {
 // expiry carried through for the log.
 func Render(token, app string, expiresAt time.Time) Rendered {
 	return Rendered{Hosts: Hosts(token), Config: Config, App: app, ExpiresAt: expiresAt}
+}
+
+// Write brings dir, a role's GH_CONFIG_DIR, to rendered: the directory made 0700 if it is gone,
+// config.yml written once when absent or different, and hosts.yml replaced — a temporary file in
+// the directory (0600, as os.CreateTemp makes it) renamed over it, so the gh reading it never sees
+// a half-written file — only when its content differs. It reports whether hosts.yml changed. It is
+// the one writer of a role's gh directory: the tmux runtime calls it at spawn and at each refresh
+// tick, and `legion controller start` calls it for the operator-launched controller's directory.
+func Write(dir string, rendered Rendered) (changed bool, err error) {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return false, err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return false, err
+	}
+	config := filepath.Join(dir, ConfigFile)
+	if current, err := os.ReadFile(config); err != nil || string(current) != rendered.Config {
+		if err := os.WriteFile(config, []byte(rendered.Config), 0o600); err != nil {
+			return false, err
+		}
+	}
+	hosts := filepath.Join(dir, HostsFile)
+	current, err := os.ReadFile(hosts)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return false, err
+	}
+	if err == nil && bytes.Equal(current, []byte(rendered.Hosts)) {
+		return false, nil
+	}
+	temporary, err := os.CreateTemp(dir, "."+HostsFile+"-")
+	if err != nil {
+		return false, err
+	}
+	temporaryPath := temporary.Name()
+	defer func() { _ = os.Remove(temporaryPath) }()
+	if _, err := temporary.WriteString(rendered.Hosts); err != nil {
+		_ = temporary.Close()
+		return false, err
+	}
+	if err := temporary.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Rename(temporaryPath, hosts); err != nil {
+		return false, err
+	}
+	return true, nil
 }

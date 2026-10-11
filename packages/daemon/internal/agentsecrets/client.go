@@ -121,14 +121,20 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("broker answered %d %s: %s", e.Status, e.Code, e.Message)
 }
 
-// Permanent is a refusal a retry cannot change: every 4xx but 429. A client-side NO_MACHINE_CREDENTIAL
-// (Status 0) is never permanent — the caller retries once the pending login is approved.
+// Permanent is a refusal a retry cannot change: every 4xx but 429 and POD_TOKEN_EXPIRED. A
+// client-side NO_MACHINE_CREDENTIAL (Status 0) is never permanent — the caller retries once the
+// pending login is approved — and neither is an expired pod token, which the pod's current token
+// replaces under the same key (TokenExpired).
 func (e *APIError) Permanent() bool {
-	return e.Status >= 400 && e.Status < 500 && e.Status != http.StatusTooManyRequests
+	return e.Status >= 400 && e.Status < 500 && e.Status != http.StatusTooManyRequests && !e.TokenExpired()
 }
 
+// TokenExpired is the broker refusing the pod token presented because it has expired
+// (POD_TOKEN_EXPIRED): the key stands, and the pod's current token enrolls it.
+func (e *APIError) TokenExpired() bool { return e.Code == "POD_TOKEN_EXPIRED" }
+
 // IsPermanent reports whether err is a permanent broker refusal. A transport failure, a 5xx, a
-// 429, and a pending machine login are all transient.
+// 429, an expired pod token and a pending machine login are all transient.
 func IsPermanent(err error) bool {
 	var api *APIError
 	return errors.As(err, &api) && api.Permanent()

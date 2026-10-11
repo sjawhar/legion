@@ -48,7 +48,8 @@ sheet from the bottom.
 
 To comment, select some text. A bar appears with three actions:
 
-- **Comment** opens a comment on the selection.
+- **Comment** opens a comment on the selection. `Ctrl+Alt+M` (`⌘+⌥+M` on a Mac) does the same
+  from the keyboard.
 - **Suggest** proposes replacement text for the selection.
 - **Ask** opens a question on the selection, with an urgency, options, and **Allow multiple**.
 

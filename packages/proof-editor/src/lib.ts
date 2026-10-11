@@ -84,7 +84,7 @@ import {
 
 import { dispatchMarkPlugins, remarkDispatchMarksPlugin, dispatchMarkHandler } from './dispatch-marks';
 import type { MarkAction, SelectionBarActionKind } from './dispatch-marks';
-import { dispatchActionBarPlugin } from './dispatch-action-bar';
+import { commentOnSelection, dispatchActionBarPlugin } from './dispatch-action-bar';
 import { registerPopoverHookInstance } from './dispatch-popover-hook';
 import { dispatchMarkEventsPlugin } from './dispatch-mark-events';
 import { remarkSoftBreakAsSpace } from './dispatch-soft-breaks';
@@ -175,6 +175,10 @@ export interface ProofEditorHandle extends TypedBlockCommands {
   /** Replaces a provisional record mark with a fresh one of `kind` over the same text, as the
    *  margin composer's kind switch needs; a refusal names why nothing changed. */
   retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome;
+  /** Starts a comment on the current selection exactly as the selection bar's Comment button
+   *  does, `onMarkAction` included, and answers whether it did: false for an empty selection and
+   *  while the document is read-only, where the bar offers no Comment. */
+  commentOnSelection(): boolean;
   /** Scrolls a mark's anchor into view and pulses it. Works for both the
    *  unified marks system and dispatchAsk marks: both render `data-id`. */
   focusMark(markId: string): void;
@@ -448,6 +452,9 @@ export async function createProofEditor(
     },
     retypeMark(markId: string, kind: SelectionBarActionKind): RetypeOutcome {
       return retypeRecordMark(view, markId, kind, opts.user.name);
+    },
+    commentOnSelection(): boolean {
+      return commentOnSelection(view);
     },
     focusMark(markId: string): void {
       const escaped = cssEscapeAttrValue(markId);
