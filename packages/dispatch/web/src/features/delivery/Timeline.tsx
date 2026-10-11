@@ -1,7 +1,12 @@
 import type { ECharts } from "echarts";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 
-import type { DeliveryComponent, DeliveryPR, DeliveryRun } from "../../api/types";
+import type {
+  DeliveryComponent,
+  DeliveryPR,
+  DeliveryRun,
+  DeliverySessionGroup,
+} from "../../api/types";
 import { borderDefault, brushBand, surfaceBg, textMutedOnCanvas } from "../../theme/classes";
 import { useMediaQuery } from "../shell/useDialog";
 import { type ColorFacet, colorKeyFor, PLACEHOLDER_COLOR } from "./lib/colorScale";
@@ -52,6 +57,7 @@ interface Props {
   lanes: boolean;
   filters: Filters;
   components: Readonly<Record<string, DeliveryComponent>>;
+  sessionGroups: readonly DeliverySessionGroup[];
   onSelect: (selection: TimelineSelection) => void;
   onBrush: (range: { start: string; end: string }) => void;
 }
@@ -97,6 +103,7 @@ export function Timeline({
   lanes,
   filters,
   components,
+  sessionGroups,
   onSelect,
   onBrush,
 }: Props): ReactNode {
@@ -127,8 +134,9 @@ export function Timeline({
   onBrushRef.current = onBrush;
 
   const laneList = useMemo(
-    () => foldLanes(prs, { colorBy, lanes, filters, width: containerWidth, components }),
-    [prs, colorBy, lanes, filters, containerWidth, components]
+    () =>
+      foldLanes(prs, { colorBy, lanes, filters, width: containerWidth, components, sessionGroups }),
+    [prs, colorBy, lanes, filters, containerWidth, components, sessionGroups]
   );
 
   // Maps every original colorKeyFor() value (including ones folded into "Other") to the lane it's

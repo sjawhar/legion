@@ -1,8 +1,9 @@
 // The timeline's columns with swimlanes on, and the brush window a drag sets. Pure: no React, no
 // ECharts.
-import type { DeliveryComponent, DeliveryPR } from "../../../api/types";
+import type { DeliveryComponent, DeliveryPR, DeliverySessionGroup } from "../../../api/types";
 import { type ColorFacet, colorKeyFor } from "./colorScale";
 import { type Filters, PLACEHOLDER_LABELS, shortRepoLabel } from "./facets";
+import { parentAgentLabel } from "./parentAgent";
 
 // Layout constants shared between the echarts grid and the plain-HTML lane header row above it,
 // so lane columns line up exactly between the two. Wide enough for hour-level axis labels
@@ -34,6 +35,8 @@ export interface LaneOptions {
   /** The chart's width in pixels, which sets how many lanes fit. */
   width: number;
   components: Readonly<Record<string, DeliveryComponent>>;
+  /** The response's session groups, which label a group's Parent agent lane. */
+  sessionGroups: readonly DeliverySessionGroup[];
 }
 
 /** The merges' columns: one "Merges" column with swimlanes off; with them on, one per value of
@@ -42,7 +45,7 @@ export interface LaneOptions {
  *  value ("No issue" and the like), always shown and always last. A facet with values selected in
  *  its own filter shows exactly those, never folded. */
 export function foldLanes(prs: readonly DeliveryPR[], options: LaneOptions): Lane[] {
-  const { colorBy, lanes, filters, width, components } = options;
+  const { colorBy, lanes, filters, width, components, sessionGroups } = options;
   if (!lanes) return [{ key: MERGES_LANE, label: "Merges", count: prs.length }];
   const counts = new Map<string, number>();
   for (const pr of prs) {
@@ -55,6 +58,7 @@ export function foldLanes(prs: readonly DeliveryPR[], options: LaneOptions): Lan
     if (placeholder !== undefined) return placeholder;
     if (colorBy === "component") return components[key]?.title ?? key;
     if (colorBy === "repo") return shortRepoLabel(allKeys, key);
+    if (colorBy === "parentAgent") return parentAgentLabel(key, sessionGroups);
     return key;
   };
   const byPriorityThenCount = (a: [string, number], b: [string, number]) =>

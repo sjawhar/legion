@@ -424,6 +424,7 @@ export function DeliveryPage(): ReactNode {
                       onSelect={setSelection}
                       prs={shownPRs}
                       runs={data.runs}
+                      sessionGroups={data.session_groups}
                       waiting={waitingMerges}
                       window={activeWindow}
                     />
@@ -436,6 +437,7 @@ export function DeliveryPage(): ReactNode {
                       onSelectRun={(id) => setSelection({ kind: "deploy", id })}
                       prs={shownPRs}
                       selectedId={selection?.kind === "pr" ? selection.id : undefined}
+                      sessionGroups={data.session_groups}
                     />
                   )}
                 </div>
@@ -445,6 +447,7 @@ export function DeliveryPage(): ReactNode {
                   prs={data.prs}
                   runs={data.runs}
                   selection={drillDownSelection}
+                  sessionGroups={data.session_groups}
                 />
               </div>
             </>

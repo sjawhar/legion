@@ -1,9 +1,22 @@
 import { expect, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import type { ComponentProps } from "react";
 
 import type { DeliveryTimelineResponse } from "../../api/types";
 import { FacetPanel } from "./FacetPanel";
 import type { Filters } from "./lib/facets";
+
+/** The panel as the page renders it, under a query client: Edit groups opens an editor that
+ *  saves through it. */
+function renderPanel(props: ComponentProps<typeof FacetPanel>) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <FacetPanel {...props} />
+    </QueryClientProvider>
+  );
+}
 
 const noFilters: Filters = {
   repo: [],
@@ -65,7 +78,7 @@ function optionNames(listbox: string): (string | null)[] {
 }
 
 test("a facet's options sort by count, read placeholders in words, and say a parent includes its sub-components", () => {
-  render(<FacetPanel data={data} filters={noFilters} onChange={() => {}} />);
+  renderPanel({ data, filters: noFilters, onChange: () => {} });
   try {
     fireEvent.click(screen.getByRole("button", { name: /^Component/ }));
     expect(optionNames("Component options")).toEqual([
@@ -82,13 +95,7 @@ test("a facet's options sort by count, read placeholders in words, and say a par
 });
 
 test("a facet's trigger names the facet and what is picked", () => {
-  render(
-    <FacetPanel
-      data={data}
-      filters={{ ...noFilters, component: ["ACME/api"] }}
-      onChange={() => {}}
-    />
-  );
+  renderPanel({ data, filters: { ...noFilters, component: ["ACME/api"] }, onChange: () => {} });
   try {
     expect(screen.getByRole("button", { name: "Component: 1 selected" })).toBeDefined();
     expect(screen.getByRole("button", { name: "Parent agent: Any parent agent" })).toBeDefined();
@@ -118,7 +125,7 @@ test("a group's Parent agent value reads as its name, and Edit groups opens the 
     session_titles: { s1: "Planner one", s2: "Planner two", s3: "Reviewer" },
     session_pr_counts: { s1: 2, s2: 1, s3: 1 },
   };
-  render(<FacetPanel data={grouped} filters={noFilters} onChange={() => {}} />);
+  renderPanel({ data: grouped, filters: noFilters, onChange: () => {} });
   try {
     fireEvent.click(screen.getByRole("button", { name: /^Parent agent/ }));
     expect(optionNames("Parent agent options")).toEqual(["Release crew, 3 PRs", "Reviewer, 1 PR"]);
