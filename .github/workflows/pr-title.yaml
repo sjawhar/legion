@@ -5,18 +5,18 @@ name: PR Title
 # made every body edit — a pull request body is edited several times per Legion round — re-run
 # lint, typecheck and test at an unchanged head. `synchronize` stays because a required check
 # needs a run at every head. The comment events run check-pr-text.sh again whenever an issue
-# comment, review or review comment is posted or edited, since each is public on the pull
-# request's page, and when a comment is deleted, so the check a deleted comment failed passes again
-# without a re-run (a submitted review cannot be deleted; editing its body is its `edited`). GitHub
-# sends an issue's comments on the same issue_comment event as a pull request's, so the job skips an
-# issue's.
+# comment, review or review comment is posted, edited or deleted, since each is public on the pull
+# request's page and deleting one is how a hit is fixed (a submitted review cannot be deleted;
+# editing its body is its `edited`). GitHub sends an issue's comments on the same issue_comment
+# event as a pull request's, so the job skips an issue's.
 #
 # Where GitHub shows a run's result: a pull_request, pull_request_review or
 # pull_request_review_comment run reports `pr-title` on the pull request's head, which main's
 # ruleset requires, so a review or review comment that names something private blocks the merge
-# until it is fixed; an issue_comment run reports on the default branch's latest commit, so an issue
-# comment fails its own run there, and the head's required check fails at its next run, since every
-# run reads every comment.
+# until it is deleted or edited, and the run its deletion or edit starts reports there too. An
+# issue_comment run reports on the default branch's latest commit, so an issue comment fails its
+# own run there; the head's required check reads it at the head's next pull_request or review run,
+# since every run reads every comment, and passes again at the next such run after its deletion.
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
