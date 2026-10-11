@@ -14,13 +14,20 @@ import (
 // settlement stays, as CheckedHead's: it is the new head's too once every push between them is
 // known to change only .legion/ (HeadVerdict), and a settlement for another head replaces it
 // (SettlementFor). The pushes it keeps are keptPushes'.
+//
+// HeadCounted names the head the count last counted, and the attempt it marks runs on through every
+// head pushed on top of it until one is pushed onto a green verdict, which clears it: a push onto a
+// head CI has not judged yet, or onto a red that counts nothing, is the same attempt, not a new
+// one. Only a counted head is ever named, so ApplyPush's take-back never undoes a count it did not
+// make.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	pending := headPush(pr.Pushes, pr.HeadSHA, headSHA)
 	pr.Pushes = keptPushes(pr.Pushes, headSHA)
-	if HeadVerdict(pr) == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)) {
+	switch verdict := HeadVerdict(pr); {
+	case verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)):
 		pr.FixAttempts++
 		pr.HeadCounted = headSHA
-	} else {
+	case verdict == "green":
 		pr.HeadCounted = ""
 	}
 	if pending != nil && !pending.HandoffOnly {
@@ -309,15 +316,17 @@ func ConflictWithdrawsReady(pr record.PullRequest) bool {
 }
 
 // FixAttemptCapHolds says whether the red verdict standing for the head is one the fix-attempt cap
-// holds: the pull request's fix attempts are at cap, and the head is the one whose push the count
-// last counted (HeadCounted), a push onto a red verdict. That head is the loop the cap bounds, so
-// its red no longer sends the work back from testing or reviewing by itself, however often it
-// returns - a re-run failing again, a red after the head read green - and the architect decides
-// what follows (workflow's decideChecks and reviewRound). Any other head is not that loop: a code
-// head pushed onto a green verdict raised no count, so its red is new, and a head a handoff-only
-// push left sends nothing back of its own (RedSendsBack). A green head is the fix that worked.
+// holds: the pull request's fix attempts are at cap, and the head belongs to the attempt the count
+// last counted (HeadCounted): the counted head itself, or a head pushed on top of it before any
+// push landed on a green verdict (AdvancePullRequestHead). That attempt is the loop the cap bounds,
+// so its red no longer sends the work back from testing or reviewing by itself, however often it
+// returns - a re-run failing again, a red after the head read green, a second push before CI
+// settled - and the architect decides what follows (workflow's decideChecks and reviewRound). A
+// head pushed onto a green verdict is not that loop: it raised no count and left the attempt, so its
+// red is new. A head a handoff-only push left sends nothing back of its own (RedSendsBack). A green
+// head is the fix that worked.
 func FixAttemptCapHolds(pr record.PullRequest, cap int) bool {
-	return cap > 0 && pr.FixAttempts >= cap && pr.HeadCounted != "" && pr.HeadCounted == pr.HeadSHA && HeadVerdict(pr) == "red"
+	return cap > 0 && pr.FixAttempts >= cap && pr.HeadCounted != "" && HeadVerdict(pr) == "red"
 }
 
 // BlockFixAttempt marks and reports one exhausted fix-attempt count when the verdict that stands

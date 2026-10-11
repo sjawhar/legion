@@ -172,7 +172,11 @@ type PullRequest struct {
 	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
 	// and said which head it replaced, which carry an approval across, and the pushes whose heads
 	// have not arrived yet. A push that may change code is spent once its head arrives.
-	Pushes      []ClassifiedPush
+	Pushes []ClassifiedPush
+	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
+	// across every head pushed on top of it until one is pushed onto a green verdict
+	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
+	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.

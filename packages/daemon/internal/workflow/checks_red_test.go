@@ -426,8 +426,8 @@ func TestAConflictRecordedBeforeAwaitingMergeIsWithdrawnOnTheFirstReadAfterReady
 	}
 }
 
-// At max_fix_attempts the daemon stops sending the work back from testing or reviewing on CI red at
-// the head the count last counted, and the architect decides what comes next
+// At max_fix_attempts the daemon stops sending the work back from testing or reviewing on CI red
+// within the attempt the count last counted, and the architect decides what comes next
 // (skill://legion-architect's pr-blocked row): the red verdict that finds the count exhausted is
 // posted on the issue and told to the architect once, and the issue stays in its phase. Every later
 // red at that head stays there too, and tells nothing new: a re-run that fails again, a red that
@@ -553,14 +553,18 @@ func TestAnExhaustedFixAttemptCountStillTakesTheReviewersRequestForChanges(t *te
 	}
 }
 
-// The cap bounds the loop it counts: pushes onto a red verdict. A code head pushed onto a green one
-// - the implementer's answer to a request for changes after a re-run turned the counted head green
-// - raises no count, so a red there in testing is new and not the loop's: it sends the work back
-// with a checks-red, as below the cap, whether or not the count was already reported. The next push
-// onto that red raises the count and is reported then. A red reaching a handoff-only head from the
-// counted code head it replaced is the loop's: it sends nothing back (a handoff head never does),
-// and it reports the count once, as a red at the counted head itself would.
-func TestARedAtACodeHeadTheExhaustedCountNeverCoveredSendsTheWorkBack(t *testing.T) {
+// The cap bounds the loop it counts: pushes onto a red verdict, and every head pushed on top of the
+// counted one before a green verdict judged it. A code head pushed onto a green one - the
+// implementer's answer to a request for changes after a re-run turned the counted head green -
+// raises no count and leaves that attempt, so a red there in testing is new and not the loop's: it
+// sends the work back with a checks-red, as below the cap, whether or not the count was already
+// reported. The next push onto that red raises the count and is reported then. A code head pushed
+// while the counted head had no verdict yet, directly or over a handoff-only head, is still the
+// counted attempt: its red is held and reports the count once, so a second push before CI settles
+// never slips a round past the cap. A red reaching a handoff-only head from the counted code head
+// it replaced is the loop's too: it sends nothing back (a handoff head never does), and it reports
+// the count once, as a red at the counted head itself would.
+func TestAnExhaustedFixAttemptCountHoldsTheCountedAttemptUntilAHeadIsPushedOntoGreen(t *testing.T) {
 	const required, implementer = "pr-checks-result", "legion-implementer[bot]"
 	settlement := func(head string, attempt int, failing ...string) intake.Fact {
 		return settledAt(head, required, attempt, failing...)
@@ -582,6 +586,13 @@ func TestARedAtACodeHeadTheExhaustedCountNeverCoveredSendsTheWorkBack(t *testing
 			phase.Implementing, 1, 0},
 		{"a handoff head over the counted head, the counted head's red carried to it", 0,
 			[]intake.Fact{syncedTo("h3t"), pushedFromTo("h3", "h3t", ".legion/LEGION-208/test.json", testReviewApp), settlement("h3", 1, required)},
+			phase.Testing, 0, 1},
+		{"a code head pushed before the counted head was judged", 0,
+			[]intake.Fact{syncedTo("h4"), pushedFromTo("h3", "h4", "src/widget.go", implementer), settlement("h4", 1, required)},
+			phase.Testing, 0, 1},
+		{"a code head pushed over a handoff head before the counted head was judged", 0,
+			[]intake.Fact{syncedTo("h3t"), pushedFromTo("h3", "h3t", ".legion/LEGION-208/implement.json", implementer),
+				syncedTo("h4"), pushedFromTo("h3t", "h4", "src/widget.go", implementer), settlement("h4", 1, required)},
 			phase.Testing, 0, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

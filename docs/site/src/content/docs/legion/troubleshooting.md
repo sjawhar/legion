@@ -293,10 +293,10 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
   architect decides what happens next, often with a question to you.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
-  stayed red through three fix attempts. Red CI at the head that ran the count out no longer sends
-  the work back by itself, so the issue waits in testing or review for the architect, or for a
-  worker's own decision such as a reviewer's request for changes. A `READY` is still withdrawn on
-  red CI.
+  stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
+  counted head and any head pushed on top of it before CI judged one green) no longer sends the work
+  back by itself, so the issue waits in testing or review for the architect, or for a worker's own
+  decision such as a reviewer's request for changes. A `READY` is still withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a

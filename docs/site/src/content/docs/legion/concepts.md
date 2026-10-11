@@ -90,8 +90,8 @@ reviewer answers each of the bot's threads (accepting it with a reason, or reque
 the daemon resolve the ones it accepted, and re-runs the failed run; its approval of the head ends
 the round once the head reads green. Any other red required workflow, a test or lint workflow, sends
 the issue back as a red required check does, and so does every red required workflow when the
-project declares none. The other exception is red CI in testing or review at the head whose push
-ran out the project's `max_fix_attempts`, which waits for the architect
+project declares none. The other exception is red CI in testing or review within the fix attempt
+that ran out the project's `max_fix_attempts`, which waits for the architect
 ([review signalling](#review-signalling)). Red CI on the head of an issue in `awaiting_merge` sends
 it back too, at any fix-attempt count, when the head's own checks or required workflow runs are red,
 review workflows included: the work returns through testing, review and `READY`, since GitHub will
@@ -187,12 +187,14 @@ Legion uses GitHub's own review mechanisms rather than labels:
   the issue and tells the architect; neither stops a worker. Every move back to an earlier phase
   counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
   daemon's own move when CI turns red or the head starts conflicting with its base. Once
-  `max_fix_attempts` runs out, CI red at the head whose push ran it out no longer sends the work
-  back from testing or review by itself: the issue stays in its phase through every red at that
-  head until the architect moves it, or a worker's own decision does (a tester's fail, a review's
-  request for changes). A head pushed onto green CI raises no count, so its red sends the work back
-  as usual, and the next push onto a red raises the count and is told again. A `READY` is withdrawn
-  on red CI at any count (below).
+  `max_fix_attempts` runs out, CI red within the attempt that ran it out - the head whose push was
+  counted, and every head pushed on top of it before CI judged a head green - no longer sends the
+  work back from testing or review by itself: the issue stays in its phase through every red in that
+  attempt until the architect moves it, or a worker's own decision does (a tester's fail, a review's
+  request for changes). A head pushed onto green CI raises no count and leaves the attempt, so its
+  red sends the work back as usual; a head pushed before CI judged the one under it raises no count
+  either, but stays in the attempt. The next push onto a red raises the count and is told again. A
+  `READY` is withdrawn on red CI at any count (below).
 
 ## READY and the human merge
 

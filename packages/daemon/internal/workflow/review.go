@@ -108,13 +108,15 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 // next push is a counted fix attempt, as any new head on a red verdict is
 // (classify.AdvancePullRequestHead).
 //
-// At an exhausted fix-attempt count, a red at the head the count last counted sends nothing back
-// from testing or reviewing (classify.FixAttemptCapHolds): the architect decides what follows. A
-// red at any other head moves the issue as below the cap. In awaiting_merge a red always withdraws
-// the READY, whatever the count: no implementer loops there for the cap to bound, and a READY must
-// not stand on a head GitHub will not merge. The count is posted and told to the architect once
-// (classify.BlockFixAttempt), by the first red at that count that sent nothing back: a red that sent
-// the work back is told by its checks-red, and the next push onto it raises the count.
+// At an exhausted fix-attempt count, a red within the attempt the count last counted - the counted
+// head, or a head pushed on top of it before any push landed on a green verdict - sends nothing back
+// from testing or reviewing (classify.FixAttemptCapHolds): the architect decides what follows. A red
+// at a head pushed onto green moves the issue as below the cap. In awaiting_merge a red always
+// withdraws the READY, whatever the count: no implementer loops there for the cap to bound, and a
+// READY must not stand on a head GitHub will not merge. The count is posted and told to the
+// architect once (classify.BlockFixAttempt), by the first red at that count that sent nothing back:
+// a red that sent the work back is told by its checks-red, and the next push onto it raises the
+// count.
 func (e *Engine) decideChecks(ctx context.Context, tx pgx.Tx, pr *record.PullRequest, prior record.PullRequest, by string) error {
 	if err := e.store.PutPullRequest(ctx, tx, *pr); err != nil {
 		return err

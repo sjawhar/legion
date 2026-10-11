@@ -30,6 +30,32 @@ func TestApplyPushTakesBackOnlyTheCurrentHandoffOnlyCount(t *testing.T) {
 	}
 }
 
+// The counted mark names the head the count last counted, and stays across every head pushed on
+// top of it until one is pushed onto a green verdict: a push onto a head CI has not judged yet is the
+// same attempt, not a new one, so it is neither counted nor clears the mark. A head that was not
+// counted takes nothing back when its late push turns out handoff-only.
+func TestTheCountedMarkStaysUntilAHeadIsPushedOntoGreen(t *testing.T) {
+	counted := AdvancePullRequestHead(record.PullRequest{HeadSHA: "h3", CheckedHead: "h3", Failing: []string{"ci"}, Required: []string{"ci"}, FixAttempts: 2}, "h4")
+	if counted.FixAttempts != 3 || counted.HeadCounted != "h4" {
+		t.Fatalf("a push onto red = %#v, want counted h4", counted)
+	}
+	unjudged := AdvancePullRequestHead(counted, "h5")
+	if unjudged.FixAttempts != 3 || unjudged.HeadCounted != "h4" {
+		t.Fatalf("a push onto unjudged h4 = %#v, want the count and the mark on h4 kept", unjudged)
+	}
+	if !FixAttemptCapHolds(record.PullRequest{HeadSHA: "h5", CheckedHead: "h5", Failing: []string{"ci"}, Required: []string{"ci"}, FixAttempts: 3, HeadCounted: "h4"}, 3) {
+		t.Fatal("a red at h5, pushed onto unjudged h4, was not held at the exhausted count")
+	}
+	if got := ApplyPush(unjudged, record.ClassifiedPush{SHA: "h5", Before: "h4", HandoffOnly: true}); got.FixAttempts != 3 || got.HeadCounted != "h4" {
+		t.Fatalf("h5's late handoff-only push = %#v, want nothing taken back: h5 was not counted", got)
+	}
+	unjudged.CheckedHead, unjudged.Failing, unjudged.CheckRuns = "h5", []string{}, []record.AttemptRun{{Name: "ci", ID: 1}}
+	onGreen := AdvancePullRequestHead(unjudged, "h6")
+	if onGreen.FixAttempts != 3 || onGreen.HeadCounted != "" {
+		t.Fatalf("a push onto green h5 = %#v, want the count kept and the mark cleared", onGreen)
+	}
+}
+
 func TestApplySettlementUsesTheExportedSettlementClassifiers(t *testing.T) {
 	prior := record.PullRequest{HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "unit", ID: 1}}}
 	got, applied := ApplySettlement(prior, SettlementCandidate{
