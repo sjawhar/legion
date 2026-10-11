@@ -17,20 +17,28 @@ const strandedRoleRunBatchSize = 200
 
 // Stranded is every claim of s's issues that nothing will wake, by issue and then role. A claim is
 // stranded when its issue's tree runs — the tree's root holds an admission slot and does not
-// linger, the rule admittedRoot applies — no start the outbox still holds will wake it (StartFor,
-// the rule promotion reads), and it is suspended or failed and one of:
+// linger, the rule admittedRoot applies — nothing will wake it, and it is suspended or failed and
+// one of:
 //
 //   - A worker of its issue's phase: the role RoleFor gives the phase its worker works
 //     (workingPhase), which a held issue keeps from the phase it left. Only a start of that phase
-//     retries a failed worker, and that start has run. A suspended one is stranded only when an
-//     operator suspended it, or its source predates migration 0038 (supervise's RuleMayResume): the
-//     daemon resumes one it or its own exit suspended by rule, at boot (DaemonBooted) and at the
-//     phase's next start. An operator's suspend waits for the agent's turn to end, so it leaves no
-//     task a delivery would resume the claim for.
+//     retries a failed worker, so one is stranded once no such start is queued (StartFor, the rule
+//     promotion reads). A suspended one is stranded only when its suspension holds for the
+//     operator: an operator suspended it, or its source predates migration 0038 (supervise's
+//     RuleHolds). The daemon resumes one it or its own exit suspended by rule, at boot
+//     (DaemonBooted) and at the phase's next start.
 //   - Its tree's architect: only its tree's admission starts it, whoever suspended it. A notice to a
 //     suspended one is held until it holds its role again, which nothing in the daemon brings
 //     about, and a notice to a failed one finishes undelivered (the notice executor). Its tree
-//     moves through its phases without it, and stops at the first decision that needs it.
+//     moves through its phases without it, and stops at the first decision that needs it. One
+//     the daemon or its own exit suspended, or one that failed, is stranded once no admission start
+//     is queued (StartFor).
+//
+// A suspension that holds for the operator is stranded whatever starts are queued for it: each one
+// waits, on its row's backoff, until the operator resumes the claim (the outbox's start answers
+// supervise.ErrHeldByOperator), so a queued start wakes nothing. The claim is held by the hold
+// itself, whatever task it kept: the stop timeout takes a confirmed task back for the resume, and
+// an unconfirmed phase task stays through the suspension (supervise's settle).
 //
 // The operator's resume (`legion claims resume`) brings back a suspended one. A failed one ignores
 // resume and deliver: only a workflow start retries it, its architect's retry of the held phase for
@@ -114,7 +122,7 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 		}
 		for _, candidate := range batch {
 			run := runs[candidate.claim.Token]
-			if StartFor(run, candidate.root, candidate.issue.Generation, candidate.current) {
+			if candidate.claim.RuleHolds() || StartFor(run, candidate.root, candidate.issue.Generation, candidate.current) {
 				stranded = append(stranded, candidate.claim)
 			}
 		}

@@ -280,7 +280,9 @@ The list names only claims of trees that hold an admission slot, and leaves out 
 something will still start: a worker whose phase is not its own is started again when its phase
 comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
 while every slot was taken waits for admission to start it once one frees. Do not resume that
-architect by hand: it would run outside the admission cap.
+architect by hand: it would run outside the admission cap. A claim an operator suspended, or whose
+`suspendedBy` is `unknown`, is listed even when a workflow start is queued for it: that start
+waits for the operator's resume.
 
 ## A pod does not come up
 

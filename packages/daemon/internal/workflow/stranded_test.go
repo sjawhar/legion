@@ -104,6 +104,7 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		strandedIssue("LEGION-8", "LEGION-7", phase.ProductionCheck),
 		strandedIssue("LEGION-9", "LEGION-404", phase.Planning),
 		waiting,
+		strandedIssue("LEGION-11", "LEGION-11", phase.Testing),
 	}
 
 	implementer := strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleImplementer, supervise.StateSuspended)
@@ -112,14 +113,22 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 	failedArchitect := strandedClaim(t, "LEGION-6", "LEGION-6", claim.RoleArchitect, supervise.StateFailed)
 	// A notice to a suspended tree architect waits for it, and nothing in the daemon resumes it.
 	suspendedArchitect := strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleArchitect, supervise.StateSuspended)
-	// The tester's start for testing is queued and will resume it.
-	startQueued := strandedClaim(t, "LEGION-4", "LEGION-4", claim.RoleTester, supervise.StateSuspended)
+	// The failed tester's start for testing is queued, and its retry relaunches it.
+	startQueued := strandedClaim(t, "LEGION-4", "LEGION-4", claim.RoleTester, supervise.StateFailed)
 	startQueued.LastStartRow = 10
-	// The architect's admission start, which names no phase, is queued and will resume it.
+	// The architect the daemon suspended has its admission start queued, which names no phase and
+	// resumes it by rule.
 	architectStartQueued := strandedClaim(t, "LEGION-4", "LEGION-4", claim.RoleArchitect, supervise.StateSuspended)
-	// The merger's start is queued, but a suspend written after it still acts and undoes it.
-	startUndone := strandedClaim(t, "LEGION-5", "LEGION-5", claim.RoleMerger, supervise.StateSuspended)
+	architectStartQueued.SuspendedBy = supervise.SuspendedByDaemon
+	// The failed merger's start is queued, but a suspend written after it still acts and undoes it.
+	startUndone := strandedClaim(t, "LEGION-5", "LEGION-5", claim.RoleMerger, supervise.StateFailed)
 	startUndone.LastStartRow = 10
+	// An operator's suspension holds until the operator resumes the claim: a start queued for it
+	// waits (supervise's RuleHolds), so it wakes neither the architect nor the tester.
+	operatorArchitect := strandedClaim(t, "LEGION-5", "LEGION-5", claim.RoleArchitect, supervise.StateSuspended)
+	operatorArchitect.SuspendedBy = supervise.SuspendedByOperator
+	operatorTester := strandedClaim(t, "LEGION-11", "LEGION-11", claim.RoleTester, supervise.StateSuspended)
+	operatorTester.SuspendedBy = supervise.SuspendedByOperator
 	claims := []supervise.Claim{
 		failedArchitect,
 		implementer,
@@ -133,6 +142,8 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		startQueued,
 		architectStartQueued,
 		startUndone,
+		operatorArchitect,
+		operatorTester,
 		// A tree that lingers holds its members, and its re-admission starts them again.
 		strandedClaim(t, "LEGION-7", "LEGION-7", claim.RoleArchitect, supervise.StateFailed),
 		strandedClaim(t, "LEGION-7", "LEGION-8", claim.RoleImplementer, supervise.StateSuspended),
@@ -150,7 +161,7 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 	}
 	s := &strandedStore{
 		issues: issues,
-		slots:  slotsOf("LEGION-1", "LEGION-3", "LEGION-4", "LEGION-5", "LEGION-6"),
+		slots:  slotsOf("LEGION-1", "LEGION-3", "LEGION-4", "LEGION-5", "LEGION-6", "LEGION-11"),
 		claims: stored,
 		queued: map[claim.Token][]record.QueuedSupervise{
 			startQueued.Token:          {{ID: 11, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-4", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
@@ -159,6 +170,8 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 				{ID: 11, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleMerger, Generation: 2, Phase: phase.Merging}},
 				{ID: 12, Request: record.SuperviseRequest{Op: "suspend", Tree: "LEGION-5", Role: claim.RoleMerger, Generation: 2}},
 			},
+			operatorArchitect.Token: {{ID: 14, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleArchitect, Generation: 2}}},
+			operatorTester.Token:    {{ID: 15, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-11", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
 		},
 	}
 
@@ -167,7 +180,7 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		t.Fatalf("Stranded: %v", err)
 	}
 
-	want := []supervise.Claim{suspendedArchitect, implementer, retro, failedReviewer, startUndone, failedArchitect}
+	want := []supervise.Claim{suspendedArchitect, implementer, operatorTester, retro, failedReviewer, operatorArchitect, startUndone, failedArchitect}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("stranded = %v, want %v", names(got), names(want))
 	}
