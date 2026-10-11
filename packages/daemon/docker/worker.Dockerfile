@@ -16,12 +16,11 @@
 # explicit loads twice; the pod lane's probe refuses an image whose pi-envoy does), and
 # @bopstack/pi-codegraph (from npm, pinned), the one plugin linked into the isolated OMP profile
 # `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
-# /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the
-# debian:trixie-slim runtime base — jj's git backend requires it); gh; trixie's socat, which carries a
-# connection over `kubectl exec` to a port inside the pod (the runtime stage says why); what the
-# capability check (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires
-# of the image: the Go toolchain at go.work's version (go and gofmt, /opt/go), gopls,
-# typescript-language-server with
+# /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
+# git backend requires it); gh; trixie's socat, which carries a connection over `kubectl exec` to a
+# loopback port inside the pod (the runtime stage says why); what the capability check
+# (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
+# toolchain at go.work's version (go and gofmt, /opt/go), gopls, typescript-language-server with
 # TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget
 # and chromium (the browser Oh My Pi finds on PATH); and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and corepack's
@@ -455,8 +454,10 @@ ARG PI_CODEGRAPH_VERSION
 # fontconfig-config requires one, fonts-dejavu-core first), and its Recommends stay out with everyone
 # else's — the setuid sandbox (chromium-sandbox) and fonts-liberation among them; Oh My Pi never uses
 # the sandbox, launching the browser with --no-sandbox --disable-setuid-sandbox.
-# socat: carries a connection over `kubectl exec` to a port inside the pod (a dev server an agent
-# runs), the only way in from outside: under gVisor `kubectl port-forward` reaches no listener.
+# socat: a pipe that carries a connection over `kubectl exec` to a port the pod listens on at 127.0.0.1
+# (a dev server an agent runs), which under gVisor `kubectl port-forward` cannot reach. python3 or
+# bash's /dev/tcp over the same exec works too; a listener on 0.0.0.0 is also reachable on the pod IP
+# inside the cluster, unless the deployment's NetworkPolicy denies that ingress.
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
 # creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step

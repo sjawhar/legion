@@ -42,12 +42,13 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   (bookworm's 2.39.5 made every `jj git clone` in the init container fail), so the build also proves the
   image's jj accepts its git with a network-free `jj git clone` of a scratch bare repository before the
   probes run, and its last step refuses a git anywhere but `/usr/bin/git`;
-- `socat` from Debian trixie's archive, at `/usr/bin/socat`: the byte pipe that carries a connection
-  over `kubectl exec` to a port inside the pod, such as a dev server an agent runs
-  (`kubectl -n legion exec -i <pod> -c <role> -- socat - TCP:127.0.0.1:<port>`). It is the only way in
-  from outside: under gVisor `kubectl port-forward` reaches no listener in the pod, since the kubelet
-  dials the pod's host-side network namespace while the pod's sockets live in gVisor's own network
-  stack;
+- `socat` from Debian trixie's archive, at `/usr/bin/socat`: a byte pipe that carries a connection over
+  `kubectl exec` to a port the pod listens on at `127.0.0.1`, such as a dev server an agent runs
+  (`kubectl -n legion exec -i <pod> -c <role> -- socat - TCP:127.0.0.1:<port>`). `kubectl port-forward`
+  reaches no listener in the pod under gVisor: the kubelet dials the pod's host-side network namespace,
+  while the pod's sockets live in gVisor's own network stack. socat is one such pipe; `python3` or bash's
+  `/dev/tcp` over the same `kubectl exec` works too. A listener bound to `0.0.0.0` is also reachable on
+  the pod IP from inside the cluster, unless the deployment's NetworkPolicy denies that ingress;
 - a generic toolchain for the repositories the workers work, specific to none of them: `uv` and `uvx`;
   `node`, `npm`, `npx` and `corepack` from Node 24 LTS, with `pnpm`, `pnpx`, `yarn` and `yarnpkg` linked
   to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); the Go toolchain
