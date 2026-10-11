@@ -12,7 +12,10 @@
 # Three roots are set todo under admission_cap 2. Tree 1 runs the whole workflow with real agents to
 # `done`, through one changes-requested review round whose thread the reviewer opens, lingers, and
 # closes; while its planner holds, the driver files two children under it, each in an issue pod and
-# on a volume of its own, then closes one as done and parks the other in backlog. Tree 2 runs
+# on a volume of its own, then closes one as done and parks the other in backlog, sets it todo again
+# so the daemon resumes its parked planner by rule, and parks it once more. Its architect is
+# suspended from the operator shell while its implementer completes, and stays held until the
+# operator resumes it. Tree 2 runs
 # through its planner beside tree 1, carrying the repository-configuration fixture, and is then moved
 # to backlog. Tree 3 is admitted when tree 2 leaves the line, supplies the held phase the controller
 # checkpoint needs, and is taken out from an operator shell. Tree 4 is admitted once tree 3 has left,
@@ -773,6 +776,13 @@ claim_session_text() {
   file=$(claim_session_file "$issue" "$role") || return 1
   pod=$(claim_sandbox "$issue" "$role") || return 1
   pod_exec "$pod" "$role" cat -- "$file"
+}
+# planning_tasks ISSUE counts the planning tasks in ISSUE's planner session: the user messages the
+# daemon's deliveries leave, `Issue: <ISSUE>. Phase: planning.` among their words, never a line the
+# agent wrote itself.
+planning_tasks() {
+  claim_session_text "$1" planner | jq -R -s -r --arg issue "$1" \
+    '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "user" and (.message.content | tostring | contains("Issue: " + $issue + ". Phase: planning.")))] | length'
 }
 workspace_jj() {
   local issue=$1 pod
@@ -2682,6 +2692,47 @@ assert_one_bound_pvc "$child2" " after its backlog"
 note "at $(date -u +%FT%TZ) $child2 is in backlog: Sandbox $child2_pod Suspended, no pod, PVC ${found%% *} Bound (kept until the tree closes)"
 pass
 
+begin child-reentered
+# Resume by rule (LEGION-683), live: the daemon resumes a suspended claim that owns its issue's
+# current phase when the daemon, not an operator, suspended it. Child 2 left the workflow at
+# child-release with its planner suspended by the daemon. Set back to todo, it re-enters under tree 1
+# at its next generation, and that run's planning start resumes the planner by rule: the daemon logs
+# `supervise: resuming by rule` for it, once, naming the daemon's suspension; the planner relaunches
+# its own session with no `suspendedBy`; and the new run's planning task reaches that session, the
+# second after the first run's. The proof human then parks child 2 again, so the later checkpoints
+# find it as child-release left it, its planner suspended by the daemon once more.
+reentry_planner=$(claim_token "$child2" planner)
+reentry_was=$(claim_by_token "$reentry_planner") || fail "legion claims shows no planner claim $reentry_planner on $child2"
+jq -e '.state == "suspended" and .suspendedBy == "daemon"' <<<"$reentry_was" >/dev/null ||
+  fail "$child2's parked planner is $(jq -c '{state, suspendedBy}' <<<"$reentry_was"), want suspended by the daemon"
+reentry_mark=$(wc -l <"$daemon_log")
+set_status "$child2" todo
+# reentry_resumed: the planner runs again on the session it kept, with no suspension recorded.
+reentry_resumed() {
+  claim_by_token "$reentry_planner" | jq -e --argjson was "$reentry_was" '(.state | IN("ready", "idle", "working"))
+    and .suspendedBy == null and .locator != null and .session == $was.session and .sessionFile == $was.sessionFile' >/dev/null
+}
+on_issue "$child2" until_true 900 "$child2's planner, its issue set back to todo, to be resumed on its own session" reentry_resumed
+reentry_rule=$(tail -n "+$((reentry_mark + 1))" "$daemon_log" |
+  jq -R -c --arg c "$reentry_planner" 'fromjson? | select(.msg == "supervise: resuming by rule" and .claim == $c) | {time, rule, suspendedBy}')
+reentry_rules=$(grep -c . <<<"$reentry_rule" || true)
+if [ "$reentry_rules" != 1 ] || ! jq -e '.suspendedBy == "daemon"' <<<"$reentry_rule" >/dev/null; then
+  fail "the daemon logged $reentry_rules rule resumes of $reentry_planner, want one of a claim the daemon suspended: $reentry_rule"
+fi
+reentry_task_delivered() { [ "$(planning_tasks "$child2")" -ge 2 ]; }
+on_issue "$child2" until_true 600 "the re-entered run's planning task to reach $child2's planner session" reentry_task_delivered
+reentry_tasks=$(planning_tasks "$child2") || fail "$child2's planner session could not be read after its resume"
+[ "$reentry_tasks" = 2 ] || fail "$child2's resumed planner session holds $reentry_tasks planning tasks, want the first run's and the re-entered run's"
+note "$child2 set back to todo: the daemon resumed its planner $reentry_planner by rule ($reentry_rule) on its session $(jq -r .session <<<"$reentry_was"), suspendedBy daemon before and none after, and its session holds the re-entered run's planning task"
+set_status "$child2" backlog
+until_true 900 "$child2's Sandbox to be Suspended and its pod gone after its second backlog" child2_parked
+assert_one_bound_pvc "$child2" " after its second backlog"
+reentry_parked=$(claim_by_token "$reentry_planner") || fail "legion claims shows no planner claim $reentry_planner on $child2"
+jq -e '.state == "suspended" and .suspendedBy == "daemon"' <<<"$reentry_parked" >/dev/null ||
+  fail "$child2's planner after its second backlog is $(jq -c '{state, suspendedBy}' <<<"$reentry_parked"), want suspended by the daemon"
+note "$child2 parked again: Sandbox $child2_pod Suspended, no pod, PVC ${found%% *} Bound, its planner suspended by the daemon"
+pass
+
 begin repository-configuration
 # Tree 2's pods carry the repository's own configuration (push_fixture). Each marker names a loading
 # path the pod's agent loaded, as an agent in any checkout does. The markers live in the
@@ -2726,10 +2777,6 @@ begin finished-idle-planner-death
 planner2=$(claim_token "$tree2" planner)
 planner2_claim() { claim_by_token "$planner2"; }
 planner2_idle_without_task() { planner2_claim | jq -e '.state == "idle" and .pending == null'; }
-planner2_task_deliveries() {
-  claim_session_text "$tree2" planner | jq -R -s -r --arg issue "$tree2" \
-    '[split("\n")[] | fromjson? | select(.type == "message" and .message.role == "user" and (.message.content | tostring | contains("Issue: " + $issue + ". Phase: planning.")))] | length'
-}
 on_tree "$tree2" until_true 300 "tree 2's completed planner idle with no task" planner2_idle_without_task
 on_tree "$tree2" wait_for_worker "$tree2" implementer
 planner_before=$(planner2_claim)
@@ -2739,7 +2786,7 @@ planner_pod_uid=$(jq -r '.locator.sandbox.podUid // empty' <<<"$planner_before")
 [ -n "$planner_session" ] && [ -n "$planner_incarnation" ] && [ -n "$planner_pod_uid" ] ||
   fail "tree 2's completed planner has no recorded session, incarnation and pod uid: $planner_before"
 printf '%s\n' "$planner_before" >"$evidence/finished-idle-planner-before.json"
-planner_tasks_before=$(planner2_task_deliveries) || fail "tree 2's planner session could not be read before its death"
+planner_tasks_before=$(planning_tasks "$tree2") || fail "tree 2's planner session could not be read before its death"
 [ "$planner_tasks_before" = 1 ] ||
   fail "tree 2's completed planner has $planner_tasks_before planning task deliveries, want one: $planner_before"
 end_claim_process "$tree2" planner kill
@@ -2757,7 +2804,7 @@ issue_phase "$tree2" implementing >/dev/null ||
   fail "tree 2 left implementing, or is held, after its completed planner was relaunched: $(daemon_state | jq -c --arg issue "$tree2" '.issues[$issue]')"
 issue_worker_live "$tree2" implementer >/dev/null ||
   fail "tree 2's implementer is not live after its completed planner was relaunched: $(claim_view "$tree2" implementer)"
-planner_tasks_after=$(planner2_task_deliveries) || fail "tree 2's planner session could not be read after its relaunch"
+planner_tasks_after=$(planning_tasks "$tree2") || fail "tree 2's planner session could not be read after its relaunch"
 [ "$planner_tasks_after" = "$planner_tasks_before" ] ||
   fail "tree 2's relaunched planner got $planner_tasks_after planning task deliveries, want $planner_tasks_before"
 note "tree 2's completed planner ($planner_session, process $planner_incarnation in pod $planner_pod_uid) was killed at its launcher PID 1 once and relaunched on its session as process $(jq -r .locator.incarnation <<<"$planner_after") in the same pod, $(jq -r .state <<<"$planner_after") with no task; tree 2 stayed implementing with its implementer live"
@@ -2793,6 +2840,21 @@ note "legion status moved tree 2 to backlog, its pods gone; tree 3 ($tree3) admi
 pass
 
 begin tree-moved
+# An operator's suspension holds (LEGION-683): tree 1's architect is suspended from the operator
+# shell before its implementer completes, so the completion's phase-finished notice finds no holder.
+# The daemon resumes no claim an operator suspended and a notice resumes nothing, so the architect
+# stays suspended, `suspendedBy: operator`, at the same generation while the row waits; the
+# operator's resume then relaunches it and the held notice arrives. Each operator request that
+# changed the claim logs one `api: operator request` line naming its route and the claim.
+held_architect=$(claim_token "$tree1" architect)
+held_needle=$(notice_needle phase-finished "$tree1")
+held_before=$(notice_deliveries "$tree1" architect "$held_needle")
+held_mark=$(wc -l <"$daemon_log")
+held=$(claims_cli suspend --json --wait 10m --claim "$held_architect") || fail "the operator's suspend of $tree1's architect $held_architect failed: $held"
+jq -e '.state == "suspended" and .suspendedBy == "operator"' <<<"$held" >/dev/null ||
+  fail "the operator's suspend left $held_architect $(jq -c '{state, suspendedBy}' <<<"$held"), want suspended by the operator"
+held_generation=$(jq -r .generation <<<"$held")
+note "the operator suspended $tree1's architect $held_architect at generation $held_generation; its session held $held_before phase-finished notices"
 send_agent "$tree1" implementer "Stage 4b proof implementation operation: make the smallest one-file change described by this issue in your $repo workspace, commit it on legion/$tree1, open its pull request, record the required implementation proof and handoff, then call the legion tool's handoff_complete. Do not merge."
 on_tree "$tree1" until_true 1200 "implementer pull request on legion/$tree1" sh -c \
   "timeout 60 gh -R '$repo' pr list --head 'legion/$tree1' --state open --json number | jq -e 'length == 1' >/dev/null"
@@ -2802,6 +2864,35 @@ assert_handoff_committer "$tree1" implementer implementing 0
 smoke_file=$(pull_request_product_files)
 on_tree "$tree1" wait_for_worker "$tree1" tester
 record_resident "$tree1" tester || fail "tree 1's tester has no session and pod to keep: $(claim_view "$tree1" tester)"
+# held_waits: the daemon log, since the suspend, has the phase-finished row waiting for the
+# architect, which holds no role.
+held_waits() {
+  tail -n "+$((held_mark + 1))" "$daemon_log" | jq -R -e --arg issue "$tree1" --arg architect "$held_architect" \
+    'fromjson? | select(.msg == "outbox row waits" and .kind == "notice" and .issue == $issue and ((.error // "") | contains($architect + " holds no role")))' >/dev/null
+}
+on_tree "$tree1" until_true 600 "$tree1's phase-finished notice to wait for its operator-suspended architect" held_waits
+held_still() {
+  claim_by_token "$held_architect" | jq -e --argjson generation "$held_generation" \
+    '.state == "suspended" and .suspendedBy == "operator" and .generation == $generation' >/dev/null
+}
+for ((held_i = 0; held_i < 24; held_i++)); do
+  held_still || fail "$tree1's operator-suspended architect did not stay held while its notice waited: $(claim_by_token "$held_architect" | jq -c '{state, suspendedBy, generation}')"
+  sleep 5
+done
+held_rule=$(tail -n "+$((held_mark + 1))" "$daemon_log" | jq -R -c --arg c "$held_architect" 'fromjson? | select(.msg == "supervise: resuming by rule" and .claim == $c)')
+[ -z "$held_rule" ] || fail "the daemon resumed the operator-suspended architect by rule: $held_rule"
+note "$tree1's phase-finished notice waited and its architect stayed suspended by the operator at generation $held_generation for 120 s, resumed by no rule"
+held_resumed=$(claims_cli resume --json --claim "$held_architect") || fail "the operator's resume of $held_architect failed: $held_resumed"
+on_tree "$tree1" until_true 900 "the operator-resumed architect $held_architect to be live" claim_live "$held_architect"
+claim_by_token "$held_architect" | jq -e '.suspendedBy == null' >/dev/null ||
+  fail "the resumed architect still records $(claim_by_token "$held_architect" | jq -c '{suspendedBy}')"
+held_delivered() { [ "$(notice_deliveries "$tree1" architect "$held_needle")" -gt "$held_before" ]; }
+on_tree "$tree1" until_true 600 "the held phase-finished notice to reach $tree1's resumed architect" held_delivered
+held_routes=$(tail -n "+$((held_mark + 1))" "$daemon_log" | jq -R -r --arg c "$held_architect" 'fromjson? | select(.msg == "api: operator request" and .claim == $c) | .route')
+[ "$held_routes" = "POST /legion/v1/operator/claims/{token}/suspend
+POST /legion/v1/operator/claims/{token}/resume" ] ||
+  fail "the daemon logged operator request lines for $held_architect with routes '$(tr '\n' ' ' <<<"$held_routes")', want one suspend and then one resume"
+note "the operator's resume relaunched $held_architect and the held notice arrived ($(notice_deliveries "$tree1" architect "$held_needle") phase-finished notices now); the daemon logged one api: operator request line for the suspend and one for the resume"
 # The adoption on top of a described commit: the tester's @ is a new empty change authored by the
 # reviewer App, and the implementer's handoff commit keeps its author.
 adoption=$(workspace_jj "$tree1" log -r '@|@-' --no-graph -T 'if(empty, "empty", "change") ++ "|" ++ author.name() ++ "\n"')
@@ -4228,12 +4319,21 @@ release_smoke_main
 smoke_main_cleaning=
 note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit; the production check and the sign-off closed $tree1"
 # The close is what stops the roles the tree kept live: each claim of tree 1 is suspended, its
-# session kept for a re-admission to resume.
+# session kept for a re-admission to resume. The daemon's suspension of a role in a turn waits for
+# that turn to end, however long it takes, so the wait is long, and a role still unsuspended when it
+# runs out is named with whether its suspension is held for a turn.
 tree1_roles_suspended() {
   local role
   for role in architect planner implementer tester reviewer merger; do issue_worker_state "$tree1" "$role" suspended || return 1; done
 }
-until_true 300 "the close to suspend every role of $tree1" tree1_roles_suspended
+tree1_roles_unsuspended() {
+  note "tree 1's claims not yet suspended: $(claims_cli list --json | jq -c --arg i "$tree1" '[.claims[] | select(.issue == $i and .state != "suspended")
+    | {role, state, suspensionHeld: (.suspensionHeld // false), pending: (.pending.phase // null)}]')"
+  limit_pending_blocked
+}
+timeout_hook=tree1_roles_unsuspended
+until_true 1800 "the close to suspend every role of $tree1" tree1_roles_suspended
+timeout_hook=limit_pending_blocked
 note "the close suspended the architect, planner, implementer, tester, reviewer and merger of $tree1"
 # The daemon's done released the claim tree 1's architect took on its root issue (LEGION-392).
 dispatch_events "$tree1" | jq -e 'any(.[]; .type == "issue.claimed" and .actor.kind == "session")' >/dev/null ||
