@@ -350,30 +350,40 @@ func failingJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.Del
 	return failing
 }
 
-// DeployJob is the timing of the job named name in runs (pipeline.py:170-185): its outcome, its
-// minutes from its start to its completion when timed, and the day its run started. The caller
-// passes the deploy workflow's push runs on main started in the shown days; a run without the job,
-// or whose job is not counted, adds nothing.
-func DeployJob(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, name string, days []string) DeployJobTiming {
-	var samples []Sample
-	for _, run := range runs {
-		// A run never repeats a job name (delivery_run_jobs' key), so at most one matches.
-		index := slices.IndexFunc(jobsByRun[run.RunID], func(job delivery.DeliveryRunJob) bool { return job.Name == name })
-		if index < 0 {
-			continue
-		}
-		job := jobsByRun[run.RunID][index]
-		outcome, ok := OutcomeOf(job.Conclusion)
-		if !ok {
-			continue
-		}
-		sample := Sample{Day: utcDay(run.StartedAt), Outcome: outcome}
-		if outcome.timed() {
-			sample.Minutes = elapsedMinutes(job.StartedAt, job.CompletedAt)
-		}
-		samples = append(samples, sample)
+// DeployJobs is the timing of each job named in names, read from runs in one pass
+// (pipeline.py:170-185): each matching job's outcome, its minutes from its start to its completion
+// when timed, and the day its run started. The caller passes the deploy workflow's push runs on
+// main started in the shown days; a run without a named job, or whose job is not counted, adds
+// nothing to it, and every name gets a timing, all of its days empty when no run lists it.
+func DeployJobs(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, names []string, days []string) map[string]DeployJobTiming {
+	samples := make(map[string][]Sample, len(names))
+	for _, name := range names {
+		samples[name] = nil
 	}
-	return DeployJobTiming{Job: name, Timing: ComputeTiming(samples, days)}
+	for _, run := range runs {
+		runDay := utcDay(run.StartedAt)
+		// A run never repeats a job name (delivery_run_jobs' key), so each name matches at most once.
+		for _, job := range jobsByRun[run.RunID] {
+			named, followed := samples[job.Name]
+			if !followed {
+				continue
+			}
+			outcome, ok := OutcomeOf(job.Conclusion)
+			if !ok {
+				continue
+			}
+			sample := Sample{Day: runDay, Outcome: outcome}
+			if outcome.timed() {
+				sample.Minutes = elapsedMinutes(job.StartedAt, job.CompletedAt)
+			}
+			samples[job.Name] = append(named, sample)
+		}
+	}
+	timings := make(map[string]DeployJobTiming, len(names))
+	for name, jobSamples := range samples {
+		timings[name] = DeployJobTiming{Job: name, Timing: ComputeTiming(jobSamples, days)}
+	}
+	return timings
 }
 
 // leadTimeCell is minutes' count, median, p90 and longest (pipeline.ts:21-29), unrounded.

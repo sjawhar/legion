@@ -330,7 +330,8 @@ const (
 )
 
 // TestDeployJobTimingsFollowEachNamedJob is test_pipeline.py:161-177 with its four push runs: the
-// caller's store query already dropped the workflow_dispatch run.
+// caller's store query already dropped the workflow_dispatch run. One pass over the runs times
+// every named job, and a name no run lists still gets its empty days.
 func TestDeployJobTimingsFollowEachNamedJob(t *testing.T) {
 	var runs []delivery.DeliveryRun
 	jobsByRun := map[int64][]delivery.DeliveryRunJob{}
@@ -345,15 +346,22 @@ func TestDeployJobTimingsFollowEachNamedJob(t *testing.T) {
 		jobsByRun[id] = rows
 	}
 
-	e2e := DeployJob(runs, jobsByRun, stagingE2EJob, pipelineDays)
+	timings := DeployJobs(runs, jobsByRun, []string{stagingE2EJob, stagingApplyJob, productionApplyJob, "never-run / job"}, pipelineDays)
+	if len(timings) != 4 {
+		t.Fatalf("timings = %d, want one per name", len(timings))
+	}
+	e2e := timings[stagingE2EJob]
 	if e2e.Job != stagingE2EJob {
 		t.Errorf("staging_e2e.job = %q, want %q", e2e.Job, stagingE2EJob)
 	}
 	assertCell(t, "staging_e2e.days[6]", e2e.Days[6].Cell, 2, new(55.0), new(67.0), 1, 1, 1, new(0.5))
-	apply := DeployJob(runs, jobsByRun, stagingApplyJob, pipelineDays)
-	assertCell(t, "staging_apply.days[6]", apply.Days[6].Cell, 3, new(8.0), new(8.8), 3, 0, 0, new(1.0))
-	production := DeployJob(runs, jobsByRun, productionApplyJob, pipelineDays)
-	assertCell(t, "production_apply.total", production.Total, 1, new(9.0), new(9.0), 1, 0, 0, new(1.0))
+	assertCell(t, "staging_apply.days[6]", timings[stagingApplyJob].Days[6].Cell, 3, new(8.0), new(8.8), 3, 0, 0, new(1.0))
+	assertCell(t, "production_apply.total", timings[productionApplyJob].Total, 1, new(9.0), new(9.0), 1, 0, 0, new(1.0))
+	never := timings["never-run / job"]
+	if never.Job != "never-run / job" || len(never.Days) != 7 {
+		t.Errorf("never-run timing = {job %q, %d days}, want its name and 7 days", never.Job, len(never.Days))
+	}
+	assertCell(t, "never-run.total", never.Total, 0, nil, nil, 0, 0, 0, nil)
 }
 
 func assertLeadTimeCell(t *testing.T, name string, got LeadTimeCell, n int, median, p90, maximum *float64) {

@@ -1,6 +1,6 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
@@ -406,6 +406,37 @@ test("an unconfigured delivery points at the settings that set it up", async () 
     renderPage();
     const link = await screen.findByRole("link", { name: "Set up the delivery timeline" });
     expect(link.getAttribute("href")).toBe("/delivery");
+  } finally {
+    getDeliveryPipeline.mockRestore();
+  }
+});
+
+test("while the read is out the page says it is loading, and shows nothing else", async () => {
+  const pending = new Promise<DeliveryPipelineResponse>(() => {});
+  const getDeliveryPipeline = spyOn(api, "getDeliveryPipeline").mockReturnValue(pending);
+  try {
+    renderPage();
+    expect(await screen.findByText("Loading pipeline…")).toBeDefined();
+    expect(screen.queryByText("PR CI")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+  } finally {
+    getDeliveryPipeline.mockRestore();
+  }
+});
+
+test("a failed read says so with Retry, and Retry reads again", async () => {
+  const getDeliveryPipeline = spyOn(api, "getDeliveryPipeline")
+    .mockRejectedValueOnce(new ApiError(503, { code: "UNAVAILABLE", error: "try later" }))
+    .mockResolvedValueOnce(PIPELINE);
+  try {
+    renderPage();
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("Couldn't load the pipeline.");
+    expect(screen.queryByRole("link", { name: "Set up the delivery timeline" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await screen.findByText("PR CI");
+    expect(getDeliveryPipeline).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole("alert")).toBeNull();
   } finally {
     getDeliveryPipeline.mockRestore();
   }

@@ -31,7 +31,6 @@ import type {
 } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import {
-  approvalPill,
   borderDefault,
   dangerText,
   linkText,
@@ -49,6 +48,7 @@ import { formatAge } from "./lib/freshness";
 import { SourceFreshness } from "./SourceFreshness";
 import { Sparkbars } from "./Sparkbars";
 import { SpreadBars } from "./SpreadBars";
+import { TargetBadge } from "./TargetBadge";
 
 const CARD = `flex min-w-0 flex-col gap-1.5 rounded border px-3 py-2 ${surfaceBg} ${borderDefault}`;
 
@@ -402,22 +402,11 @@ function LeadTimeCard(props: {
   const total = timing.total;
   const judgedValue = judged === "longest" ? total.max_minutes : total.median_minutes;
   const met = judgedValue === null ? null : judgedValue < target;
-  const [badge, state] =
-    met === null
-      ? ["no data", "draft" as const]
-      : met
-        ? ["target met", "approved" as const]
-        : ["target missed", "changes_requested" as const];
   return (
     <div className={CARD} data-metric={props.metric}>
       <div className="flex items-start justify-between gap-2">
         <CardTitle detail={props.detail} title={props.title} />
-        <span
-          className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium whitespace-nowrap ${approvalPill[state]}`}
-          data-target-met={met === null ? "none" : String(met)}
-        >
-          {badge}
-        </span>
+        <TargetBadge met={met} metLabel="target met" missedLabel="target missed" />
       </div>
       <div className="grid grid-cols-2 gap-2">
         <Figure

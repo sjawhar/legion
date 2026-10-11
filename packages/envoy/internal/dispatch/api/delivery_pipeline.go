@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -53,15 +52,12 @@ func (s *server) getDeliveryPipeline(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	at := time.Now().UTC()
-	if query := r.URL.Query(); query.Has("at") {
-		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(query.Get("at")))
-		if err != nil {
-			writeError(w, "INVALID_QUERY", http.StatusBadRequest, "at must be an RFC3339 timestamp")
-			return
-		}
-		at = parsed.UTC()
+	at, err := parseOptionalRFC3339(r.URL.Query(), "at", time.Now().UTC())
+	if err != nil {
+		writeError(w, "INVALID_QUERY", http.StatusBadRequest, err.Error())
+		return
 	}
+	at = at.UTC()
 	settings, ok := s.deliverySettings(w, r)
 	if !ok {
 		return
@@ -116,20 +112,27 @@ func (s *server) deliveryPipelineAt(ctx context.Context, settings delivery.Deliv
 		rollup = *settings.PRChecksRollupJobName
 	}
 	run, slowest, failing := measures.PRChecks(checks.Runs, checks.Jobs, days, at, rollup)
-	deployJob := func(name *string) *measures.DeployJobTiming {
+	names := []string{settings.ProductionJobName}
+	for _, name := range []*string{settings.StagingE2EJobName, settings.StagingApplyJobName} {
+		if name != nil {
+			names = append(names, *name)
+		}
+	}
+	deployJobs := measures.DeployJobs(deploys.Runs, deploys.Jobs, names, days)
+	optional := func(name *string) *measures.DeployJobTiming {
 		if name == nil {
 			return nil
 		}
-		return new(measures.DeployJob(deploys.Runs, deploys.Jobs, *name, days))
+		return new(deployJobs[*name])
 	}
 	mergeToProduction, openedToMerge := measures.LeadTimes(population.measuresPRs(), days)
 	return deliveryPipelineResponse{
 		Days:              days,
 		ComputedAt:        time.Now().UTC(),
 		PRChecks:          deliveryPipelinePRChecks{Run: run, SlowestJobs: slowest, FailingJobs: failing},
-		StagingE2E:        deployJob(settings.StagingE2EJobName),
-		StagingApply:      deployJob(settings.StagingApplyJobName),
-		ProductionApply:   measures.DeployJob(deploys.Runs, deploys.Jobs, settings.ProductionJobName, days),
+		StagingE2E:        optional(settings.StagingE2EJobName),
+		StagingApply:      optional(settings.StagingApplyJobName),
+		ProductionApply:   deployJobs[settings.ProductionJobName],
 		MergeToProduction: mergeToProduction,
 		OpenedToMerge:     openedToMerge,
 		Targets:           measures.DefaultTargets,
