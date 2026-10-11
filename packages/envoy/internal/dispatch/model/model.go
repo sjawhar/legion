@@ -583,10 +583,18 @@ type Version struct {
 	Summary   *string   `json:"summary"`
 	Authors   []Actor   `json:"authors"`
 	CreatedAt time.Time `json:"created_at"`
-	Size      *int      `json:"size,omitempty"`
-	MIME      *string   `json:"mime,omitempty"`
-	SHA256    *string   `json:"sha256,omitempty"`
+	// Size is how many bytes the version stores: a file's or an image's bytes, or a document's
+	// markdown, the rendering the version recorded.
+	Size   *int    `json:"size,omitempty"`
+	MIME   *string `json:"mime,omitempty"`
+	SHA256 *string `json:"sha256,omitempty"`
 }
+
+// VersionSize is the SQL a version's Size is selected with, over artifact_versions aliased v. A
+// file or image row records its size; a document row holds its markdown, whose length octet_length
+// takes from the stored value's header, so reading a document's size neither renders the document
+// nor reads its markdown, out of TOAST or otherwise.
+const VersionSize = `coalesce(v.size, octet_length(v.markdown))`
 
 // Ask is a question with either a human answer or a recorded closure reason.
 type Ask struct {
@@ -664,6 +672,12 @@ type AskEditPrevious struct {
 	Options  []AskOption `json:"options"`
 	Multiple bool        `json:"multiple"`
 	Urgency  string      `json:"urgency"`
+}
+
+// NewAskEditPrevious is the mutable content ask asks as it stands: what an edit records as the
+// ask's previous content, and what a copied ask block is compared with.
+func NewAskEditPrevious(ask Ask) AskEditPrevious {
+	return AskEditPrevious{Question: ask.Question, Options: ask.Options, Multiple: ask.Multiple, Urgency: ask.Urgency}
 }
 
 // AskEdit is one recorded rewording of an ask, read back from its ask.edited
@@ -1030,6 +1044,10 @@ type CommentEventPayload struct {
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
 	// so the outbox can deduplicate without consulting the live session registry.
+	// SuppressedAuthors names the sessions the author routes skip because a mention delivers the
+	// comment to them: on a reply, its thread's root author when mentioned; on a new comment not
+	// in an ask's thread, every session a mention resolved to, since the outbox reads the
+	// document's authors only when it publishes.
 	SuppressRoute            bool     `json:"suppress_route"`
 	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`

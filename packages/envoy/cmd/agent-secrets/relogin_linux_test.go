@@ -70,9 +70,9 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	enrolled, err := helper.Call(sock, helper.Request{Op: "enroll-box", RuntimeID: "self-box-" + t.Name(), Thumbprint: thumbprint}, 10*time.Second)
+	enrolled, err := helper.Call(sock, helper.Request{Op: "enroll-session-key", RuntimeID: "self-box-" + t.Name(), Thumbprint: thumbprint}, 10*time.Second)
 	if err != nil || !enrolled.OK {
-		t.Fatalf("enroll-box with the approved login's credential: %+v %v", enrolled, err)
+		t.Fatalf("enroll-session-key with the approved login's credential: %+v %v", enrolled, err)
 	}
 	keyDir := writeKeyDir(t, boxKey, enrolled.EnrollmentID)
 	stdout, stderr, exit := runAgentSecrets(t, binary, rig.URL, keyDir, nil, "request", "TEST_AUTO_SECRET", "--json")
@@ -80,7 +80,7 @@ func TestLoginStatusFollowsTheCredentialTheHelperHolds(t *testing.T) {
 	if err := json.Unmarshal([]byte(stdout), &granted); exit != 0 || err != nil || granted.State != "granted" || granted.GrantID == nil {
 		t.Fatalf("request TEST_AUTO_SECRET from the box: exit %d, stdout %q, stderr %q; want it granted at once", exit, stdout, stderr)
 	}
-	wantGrant := "grant: " + *granted.GrantID + " (request " + granted.RequestID + ", expires "
+	wantGrant := "grant: " + *granted.GrantID + " (request " + granted.RequestID + ", until this session ends)"
 	if stdout, stderr, exit := runAgentSecrets(t, binary, rig.URL, keyDir, nil, "self"); exit != 0 || !strings.Contains(stdout, wantGrant) {
 		t.Fatalf("self after the grant: exit %d, stdout %q, stderr %q; want a line starting %q", exit, stdout, stderr, wantGrant)
 	}
@@ -194,8 +194,8 @@ func refuseTheHeldCredential(t *testing.T, rig *brokertest.Rig, srv *helper.Serv
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp, err := helper.Call(sock, helper.Request{Op: "enroll-box", RuntimeID: "box-" + t.Name(), Thumbprint: thumbprint}, 10*time.Second); err != nil || resp.OK {
-		t.Fatalf("enroll-box with an expired credential: %+v %v; want the broker's refusal", resp, err)
+	if resp, err := helper.Call(sock, helper.Request{Op: "enroll-session-key", RuntimeID: "box-" + t.Name(), Thumbprint: thumbprint}, 10*time.Second); err != nil || resp.OK {
+		t.Fatalf("enroll-session-key with an expired credential: %+v %v; want the broker's refusal", resp, err)
 	}
 	if srv.Broker.HasCredential() {
 		t.Fatal("the broker's refusal must clear the launcher credential")

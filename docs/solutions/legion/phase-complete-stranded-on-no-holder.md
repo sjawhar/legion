@@ -10,7 +10,7 @@ tags:
   - catch-up
   - envoy
 date: 2026-09-12
-status: active
+status: superseded by LEGION-631 — `legion handoff complete` and an agent's `legion state` are gone; a completion is the `legion` tool's `handoff_complete`, and the recovery steps' `legion state` reads are the tool's `read_record`
 module: daemon
 related_issues:
   - "LEGION-13"

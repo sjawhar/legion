@@ -174,7 +174,7 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 		Request:         compactRequest,
 		Approver:        approver,
 		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-", Operator: ""},
-		LifetimeSeconds: int(s.CredentialLifetime.Seconds()),
+		LifetimeSeconds: new(int(s.CredentialLifetime.Seconds())),
 		RulesVersion:    s.Policy.Get().Version,
 		ExpiresAt:       now.Add(s.PendingTTL).UTC().Truncate(time.Second),
 		Code:            code,
@@ -296,8 +296,11 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 			op := login
 			operator = &op
 		}
+		if body.LifetimeSeconds == nil {
+			return "", "", fmt.Errorf("machine login record has no credential lifetime")
+		}
 		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operator, service, detail.Identifier, obj.Thumbprint, jwk, recordID,
-			time.Now().Add(time.Duration(body.LifetimeSeconds)*time.Second))
+			time.Now().Add(time.Duration(*body.LifetimeSeconds)*time.Second))
 		if store.IsUniqueViolation(err) {
 			return "", "", ErrKeyHoldsLiveCredential
 		}

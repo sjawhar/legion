@@ -15,6 +15,11 @@ import (
 // answer and is sent again at no charge.
 var ErrPromptRefused = errors.New("runtime: the agent refused the prompt")
 
+// ErrTokenRefused is the agent's shim answering AgentSecretsToken without a token: it could not
+// read its projected token, or it was built before the request and Oh My Pi refused the frame as
+// an unknown command. Asking the same shim again changes neither.
+var ErrTokenRefused = errors.New("runtime: the shim did not read its projected token")
+
 // Conn is one agent's live connection, as everything above the transport sees it: a way to ask
 // the agent to do something, and nothing more. The facts that come back — the acknowledgement,
 // the turn starting, the turn ending, the connection closing — are events on the stream, never
@@ -46,6 +51,10 @@ type Conn interface {
 	// AgentSecretsEnrollment hands the agent's shim the secrets broker's enrollment id for its
 	// process, which the shim keeps beside the key it generated.
 	AgentSecretsEnrollment(ctx context.Context, enrollmentID string) error
+	// AgentSecretsToken asks the agent's shim to read its projected service-account token again
+	// and returns it as the mount holds it now. A shim that cannot is ErrTokenRefused; every other
+	// error is transport.
+	AgentSecretsToken(ctx context.Context) (string, error)
 	// Sequence is the order the connection was registered in: one registered later has a larger
 	// sequence, so a caller can tell a connection newer than another.
 	Sequence() uint64

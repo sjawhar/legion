@@ -75,8 +75,8 @@ Two decisions stay with people:
   specific version in Dispatch. A later version of the spec closes the gate again until someone
   approves it. The gate is on by default; a deployment can turn it off.
 - **The merge.** The merger checks that every check and workflow the base branch requires has
-  passed, then posts `READY` on the Dispatch issue. A person merges the pull request under the
-  repository's own rules. Legion never merges.
+  passed, posts `READY` on the Dispatch issue, and submits the pull request for merge. The
+  repository's own rules decide when it lands.
 
 The coordinator runs its agents as Oh My Pi sessions, either in tmux panes on one host or as Agent
 Sandbox pods in a Kubernetes cluster.
@@ -94,10 +94,11 @@ An approval request appears in that person's Dispatch Inbox, labelled as a secre
 machine login, together with the reason the agent gave. The person approves or denies it there, and
 Dispatch relays the decision to the broker under the signed-in person's own identity. The broker
 holds no Dispatch credential: Dispatch reads the pending requests from the broker and sends back
-each decision. A grant is short-lived, and `agent-secrets NAME -- <command>` runs a command with
-the granted value in that command's environment rather than printing it. People create and change
-the secrets themselves, in AWS Secrets Manager under their own AWS sign-in, with
-`agent-secrets secret`, which has the broker serve each change at once.
+each decision. A grant lasts until its session ends, or for the shorter lifetime its request named,
+and `agent-secrets NAME -- <command>` runs a command with the granted value in that command's
+environment rather than printing it. People create and change the secrets themselves, in AWS
+Secrets Manager under their own AWS sign-in, with `agent-secrets secret`, which has the broker
+serve each change at once.
 
 ## Envoy: the events between them
 
@@ -122,7 +123,7 @@ only where an event goes; what to do about it is the coordinator's and the agent
    changes sends it back to the implementer, and through the tester again.
 6. Once the reviewer approves, the retrospective runs. The merger then confirms the required checks
    and posts `READY` on the issue.
-7. A person merges the pull request.
+7. The merger submits the pull request for merge, and it lands under the repository's own rules.
 8. The implementer drives the change in production and records what it observed on the pull
    request and the issue. The architect signs off, and the issue is Done.
 

@@ -1,6 +1,9 @@
 package claim
 
-import "net/http"
+import (
+	"net/http"
+	"time"
+)
 
 // RegisterRequest is the first call an agent makes: the Oh My Pi plugin reads the boot token off
 // the 0600 file the daemon named on its pane and posts it with the session it actually became.
@@ -16,7 +19,8 @@ type RegisterRequest struct {
 }
 
 // RegisterResponse is what the agent learns about itself: the claim it holds, where it holds it,
-// and the secret its later calls authenticate with. The secret is minted per registration and the
+// the secret its later calls authenticate with, and the task agents its role's prompts dispatch,
+// which its capability report measures (LEGION-663). The secret is minted per registration and the
 // capability hash is persisted before the response is written, so a daemon that restarts one
 // instruction later still recognises this agent. A session that registers with the controller
 // capability holds no claim and gets api.ControllerRegisterResponse instead.
@@ -27,16 +31,39 @@ type RegisterResponse struct {
 	Role       Role   `json:"role"`
 	Generation uint64 `json:"generation"`
 	Secret     string `json:"secret"`
+	// PromptAgents is the sorted names of every task agent the role's prompts dispatch; never
+	// null on the wire, so a role whose prompts name none answers an empty list.
+	PromptAgents []string `json:"promptAgents"`
 }
 
 // ReadyRequest says the agent has finished booting and can be prompted. It is a separate call
 // from the registration because registration is the plugin's first act and readiness is its last:
 // the role claim on Envoy, the session attribution, and the tool gate all happen in between.
+// Capabilities is what the session measured of the live capability rows while it booted
+// (LEGION-663); the controller's ready carries none.
 type ReadyRequest struct {
-	ClaimToken Token  `json:"claimToken"`
-	SessionID  string `json:"sessionId"`
-	Secret     string `json:"secret"`
-	Generation uint64 `json:"generation"`
+	ClaimToken   Token             `json:"claimToken"`
+	SessionID    string            `json:"sessionId"`
+	Secret       string            `json:"secret"`
+	Generation   uint64            `json:"generation"`
+	Capabilities *CapabilityReport `json:"capabilities,omitempty"`
+}
+
+// CapabilityReport is what a session measured of the live capability rows at boot (LEGION-663):
+// when it measured, how long the measuring took, and one row per capability it checked. The
+// daemon normalises the rows (capabilities.Normalize) before it keeps them.
+type CapabilityReport struct {
+	MeasuredAt time.Time       `json:"measuredAt"`
+	ElapsedMs  int             `json:"elapsedMs"`
+	Rows       []CapabilityRow `json:"rows"`
+}
+
+// CapabilityRow is one live row as the session measured it: the capability's name
+// (capabilities.Name), whether the check passed, and the fact the check found either way.
+type CapabilityRow struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail"`
 }
 
 // ExitRequest is the agent reporting its own end, with the reason it ended. An exit the daemon

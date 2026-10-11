@@ -75,12 +75,19 @@ export type {
   DeliveryComponent,
   DeliveryDailyPoint,
   DeliveryDeployFlagCounts,
+  DeliveryDeployJobTiming,
   DeliveryFacet,
+  DeliveryFailingJob,
   DeliveryFlagCounts,
   DeliveryJobConclusion,
+  DeliveryJobTiming,
   DeliveryKpiStatus,
+  DeliveryLeadTimeCell,
+  DeliveryLeadTimeDay,
+  DeliveryLeadTimeTiming,
   DeliveryMeasures,
   DeliveryMeasuresResponse,
+  DeliveryPipelineResponse,
   DeliveryPR,
   DeliveryRun,
   DeliveryRunDetail,
@@ -92,6 +99,9 @@ export type {
   DeliverySpread,
   DeliveryTargets,
   DeliveryTimelineResponse,
+  DeliveryTiming,
+  DeliveryTimingCell,
+  DeliveryTimingDay,
   DeliveryUnownedIssue,
   DeliveryWaitingPR,
   DispatchEvent,
@@ -211,7 +221,9 @@ export interface CredentialRecord {
   identifiers: string[];
   service: string | null;
   reason: string;
-  lifetime_seconds: number;
+  /** How many seconds the grant or credential lasts once approved; null for a grant that lasts
+   *  until its session ends. */
+  lifetime_seconds: number | null;
   rules_version: string;
   expires_at: string;
   requested_at: string;
@@ -235,7 +247,8 @@ interface CredentialGrantFields {
   grant_id: string;
   enrollment: CredentialEnrollment;
   names: string[];
-  expires_at: string;
+  /** When it expires; null for a grant that lasts until its session ends. */
+  expires_at: string | null;
   created_at: string;
 }
 /** A grant the policy gave a session the viewer operates without asking: no one approved it, so it

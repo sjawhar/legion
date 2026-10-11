@@ -113,7 +113,7 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 	case authLauncher:
 		subject, err := s.proofSubject(r)
 		switch {
-		case errors.Is(err, proof.ErrInvalid):
+		case errors.Is(err, proof.ErrInvalid), errors.Is(err, proof.ErrNotLive):
 			writeError(w, http.StatusUnauthorized, "LAUNCHER_INVALID", "the launcher credential is not valid")
 			return caller{}, false
 		case err != nil:
@@ -131,23 +131,36 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 		}
 		return caller{launcher: cred}, true
 	case authProof:
-		subject, err := s.proofSubject(r)
-		switch {
-		case errors.Is(err, proof.ErrInvalid):
-			writeError(w, http.StatusUnauthorized, "PROOF_INVALID", err.Error())
-			return caller{}, false
-		case err != nil:
-			writeUnavailable(w, "DATABASE_UNAVAILABLE", "verify proof", err)
-			return caller{}, false
-		}
-		if subject.EnrollmentID == "" {
-			writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "this route needs a session proof, not a launcher proof")
-			return caller{}, false
-		}
-		return caller{enrollment: subject.EnrollmentID}, true
+		return s.sessionCaller(w, r, "PROOF_INVALID", "proof invalid: not live")
+	case authRenewProof:
+		return s.sessionCaller(w, r, "ENROLLMENT_NOT_LIVE", "enrollment is not live")
 	}
 	writeInternal(w, "authenticate", fmt.Errorf("route has unknown authentication %d", auth))
 	return caller{}, false
+}
+
+// sessionCaller authenticates a session proof for authenticate, answering a proof whose
+// enrollment is no longer live with notLiveCode and notLiveMessage: PROOF_INVALID on every
+// session route but renew, which alone answers ENROLLMENT_NOT_LIVE so a pod renewer can stop.
+// Every other bad proof is PROOF_INVALID on both.
+func (s *server) sessionCaller(w http.ResponseWriter, r *http.Request, notLiveCode, notLiveMessage string) (caller, bool) {
+	subject, err := s.proofSubject(r)
+	switch {
+	case errors.Is(err, proof.ErrNotLive):
+		writeError(w, http.StatusUnauthorized, notLiveCode, notLiveMessage)
+		return caller{}, false
+	case errors.Is(err, proof.ErrInvalid):
+		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", err.Error())
+		return caller{}, false
+	case err != nil:
+		writeUnavailable(w, "DATABASE_UNAVAILABLE", "verify proof", err)
+		return caller{}, false
+	}
+	if subject.EnrollmentID == "" {
+		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "this route needs a session proof, not a launcher proof")
+		return caller{}, false
+	}
+	return caller{enrollment: subject.EnrollmentID}, true
 }
 
 // proofSubject verifies r's Proof header and returns who it authenticates, unwrapped: authLauncher

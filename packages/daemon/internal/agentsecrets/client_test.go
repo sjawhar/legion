@@ -742,14 +742,17 @@ func TestEnrollWithAValidBodyMissingEnrollmentIDNamesItWithNoWrappedNil(t *testi
 
 func TestEnrollRefusalsCarryTheCodeAndPermanence(t *testing.T) {
 	for _, tc := range []struct {
-		status    int
-		code      string
-		permanent bool
+		status       int
+		code         string
+		permanent    bool
+		tokenExpired bool
 	}{
-		{http.StatusForbidden, "POD_IDENTITY_MISMATCH", true},
-		{http.StatusConflict, "ALREADY_ENROLLED", true},
-		{http.StatusTooManyRequests, "RATE_LIMITED", false},
-		{http.StatusServiceUnavailable, "DATABASE", false},
+		{http.StatusForbidden, "POD_IDENTITY_MISMATCH", true, false},
+		// The same key enrolls with the pod's current token, so it is not permanent.
+		{http.StatusForbidden, "POD_TOKEN_EXPIRED", false, true},
+		{http.StatusConflict, "ALREADY_ENROLLED", true, false},
+		{http.StatusTooManyRequests, "RATE_LIMITED", false, false},
+		{http.StatusServiceUnavailable, "DATABASE", false, false},
 	} {
 		broker, c := newIssuedClient(t)
 		broker.enrollAnswers = []enrollAnswer{{status: tc.status, body: `{"code":"` + tc.code + `","error":"why"}`}}
@@ -758,8 +761,9 @@ func TestEnrollRefusalsCarryTheCodeAndPermanence(t *testing.T) {
 		if !errors.As(err, &api) {
 			t.Fatalf("%d: err %v is not an *APIError", tc.status, err)
 		}
-		if api.Status != tc.status || api.Code != tc.code || api.Message != "why" || api.Permanent() != tc.permanent || IsPermanent(err) != tc.permanent {
-			t.Fatalf("%d: %+v permanent=%t", tc.status, api, api.Permanent())
+		if api.Status != tc.status || api.Code != tc.code || api.Message != "why" || api.Permanent() != tc.permanent || IsPermanent(err) != tc.permanent ||
+			api.TokenExpired() != tc.tokenExpired {
+			t.Fatalf("%d %s: %+v permanent=%t tokenExpired=%t", tc.status, tc.code, api, api.Permanent(), api.TokenExpired())
 		}
 	}
 }

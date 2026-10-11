@@ -97,7 +97,7 @@ test("revoking a machine login refreshes Live grants", async () => {
   const grant: CredentialGrant = {
     approver: null,
     created_at: "2026-10-03T12:05:00Z",
-    enrollment: { kind: "box", operator: "ada@example.com", runtime_id: "box-1", slot: null },
+    enrollment: { kind: "session", operator: "ada@example.com", runtime_id: "box-1", slot: null },
     expires_at: "2026-10-03T13:05:00Z",
     grant_id: "grant-1",
     granted: "automatic",
@@ -217,6 +217,47 @@ test("a service's login someone else approved is listed by its service and its a
       expect(section.queryByText("legion-daemon on cluster.example.com")).toBeNull()
     );
     expect(section.getByText("devbox.example.com")).toBeDefined();
+  } finally {
+    cleanup();
+    confirm.mockRestore();
+    getMachineLogins.mockRestore();
+    revokeMachineLogin.mockRestore();
+  }
+});
+
+// Two logins of one service from machines reporting one host name read alike but for their
+// credential ids, which every enrollment a login made names: each row shows its own, and Revoke on
+// the row a credential id picks ends that login and no other.
+test("two logins of one service on one host are told apart by their credential ids, and Revoke ends the one picked by its id", async () => {
+  const copy: MachineLogin = {
+    ...daemon,
+    approved_by: "mallory@example.com",
+    credential_id: "cred-copy",
+    issued_at: "2026-10-03T10:00:00Z",
+  };
+  let live = [daemon, copy];
+  const getMachineLogins = spyOn(api, "getMachineLogins").mockImplementation(async () => ({
+    credentials: live,
+  }));
+  const revokeMachineLogin = spyOn(api, "revokeMachineLogin").mockImplementation(async (id) => {
+    live = live.filter((login) => login.credential_id !== id);
+  });
+  const confirm = spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    renderPage();
+    const section = within(await screen.findByRole("region", { name: "Machine logins" }));
+    expect(await section.findAllByText("legion-daemon on cluster.example.com")).toHaveLength(2);
+    const copyRow = section.getByText("cred-copy").closest("tr") as HTMLElement;
+    expect(within(copyRow).getByText("mallory@example.com")).toBeDefined();
+    const daemonRow = section.getByText("cred-daemon").closest("tr") as HTMLElement;
+    expect(within(daemonRow).getByText("bob@example.com")).toBeDefined();
+
+    fireEvent.click(within(copyRow).getByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-copy"));
+    await waitFor(() => expect(section.queryByText("cred-copy")).toBeNull());
+    expect(section.getByText("cred-daemon")).toBeDefined();
+    expect(revokeMachineLogin).toHaveBeenCalledTimes(1);
   } finally {
     cleanup();
     confirm.mockRestore();

@@ -2,7 +2,9 @@ package pmdoc
 
 import (
 	"fmt"
+	"maps"
 	"reflect"
+	"slices"
 	"unicode/utf16"
 	"unsafe"
 
@@ -83,13 +85,9 @@ func updateChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, want []*Node
 		}
 
 		leftElement, leftMatches := leftY.(*crdt.YXmlElement)
-		if leftMatches {
-			leftMatches = !leftP.isText() && leftElement.NodeName == leftP.element.Type
-		}
+		leftMatches = leftMatches && sameKind(leftY, leftP)
 		rightElement, rightMatches := rightY.(*crdt.YXmlElement)
-		if rightMatches {
-			rightMatches = !rightP.isText() && rightElement.NodeName == rightP.element.Type
-		}
+		rightMatches = rightMatches && sameKind(rightY, rightP)
 
 		if leftMatches && rightMatches {
 			leftFactor := computeChildEqualityFactor(leftElement, leftP.element)
@@ -113,11 +111,24 @@ func updateChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, want []*Node
 			}
 			right++
 		default:
-			frag.Delete(txn, left, 1)
-			if err := insertPChild(txn, frag, left, leftP); err != nil {
+			// Neither end matches, so the left child is replaced, and so is every child after it
+			// that could not match either: the right end, which decided nothing here, is the same
+			// for each. The run is deleted and its replacements inserted in one call each, which
+			// writes what replacing them one at a time wrote - each replacement lands before the
+			// run's first deleted child. ygo's Delete and Insert each walk the fragment from its
+			// start to the index they are given (leftChildAt, deleteChildRange), so each run costs
+			// a walk to its index: a document whose replaced children stand apart, every other
+			// block changing type, costs a walk per replaced child, as it did before runs were
+			// batched.
+			run := 1
+			for left+run < len(ychildren)-right && left+run < len(pchildren)-right && !sameKind(ychildren[left+run], pchildren[left+run]) {
+				run++
+			}
+			frag.Delete(txn, left, run)
+			if err := insertPChildren(txn, frag, left, pchildren[left:left+run]); err != nil {
 				return err
 			}
-			left++
+			left += run
 		}
 	}
 
@@ -131,12 +142,20 @@ func updateChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, want []*Node
 	if deleteCount > 0 {
 		frag.Delete(txn, left, deleteCount)
 	}
-	for index := left; index < len(pchildren)-right; index++ {
-		if err := insertPChild(txn, frag, index, pchildren[index]); err != nil {
-			return err
-		}
+	return insertPChildren(txn, frag, left, pchildren[left:len(pchildren)-right])
+}
+
+// sameKind reports whether updateChildren can keep ychild for pchild: a text for a text, or an
+// element of the node's type.
+func sameKind(ychild any, pchild normalizedChild) bool {
+	switch y := ychild.(type) {
+	case *crdt.YXmlText:
+		return pchild.isText()
+	case *crdt.YXmlElement:
+		return !pchild.isText() && y.NodeName == pchild.element.Type
+	default:
+		return false
 	}
-	return nil
 }
 
 func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node) error {
@@ -145,7 +164,9 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 	}
 	current := Attrs(element.GetAttributeValues())
 	wantAttrs := liveAttrs(want)
-	for key, value := range wantAttrs {
+	// Attribute changes are written in name order, as createTypeFromElementNode writes them.
+	for _, key := range slices.Sorted(maps.Keys(wantAttrs)) {
+		value := wantAttrs[key]
 		if value == nil {
 			if _, ok := current[key]; ok {
 				element.DeleteAttribute(txn, key)
@@ -156,7 +177,7 @@ func updateElement(txn *crdt.Transaction, element *crdt.YXmlElement, want *Node)
 			element.SetAttributeValue(txn, key, yjsAttributeValue(value))
 		}
 	}
-	for key := range current {
+	for _, key := range slices.Sorted(maps.Keys(current)) {
 		if value, ok := wantAttrs[key]; !ok || value == nil {
 			element.DeleteAttribute(txn, key)
 		}
@@ -201,20 +222,43 @@ func liveAttrs(node *Node) Attrs {
 	return attrs
 }
 
-func insertPChild(txn *crdt.Transaction, frag *crdt.YXmlFragment, index int, child normalizedChild) error {
-	if child.isText() {
-		text, err := createTypeFromTextNodes(txn, child.text)
+// emptyChildren is an empty slice of ygo's unexported node type, which insertPChildren's batch must
+// be to pass to YXmlFragment.Insert. It comes from Children of a detached element, which returns
+// its buffered children, none, without walking any document; Children of the fragment being
+// written would walk every item it holds. The element is never inserted anywhere, so its type name
+// is never read. It is built once, so a batch allocates only its own nodes.
+var emptyChildren = crdt.NewYXmlElement("paragraph").Children()
+
+// insertPChildren creates the Yjs type of each of children and inserts them into frag at index in
+// one call. ygo's fragment insert walks the fragment's children to index (leftChildAt), and an
+// element no document holds yet copies the children it buffers on every insert, so inserting a
+// fragment's n children one at a time took n walks, time quadratic in n (LEGION-465). One call
+// walks to index once, and writes what one insert per child at consecutive indexes wrote: each
+// child's origin is the child before it, and its right origin the child that stood at index. It is
+// how y-prosemirror writes a fragment's new children (updateYFragment's tail insert, and
+// createTypeFromElementNode's). A call still walks to index, so its cost grows with index as well
+// as with children.
+func insertPChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, index int, children []normalizedChild) error {
+	if len(children) == 0 {
+		return nil
+	}
+	nodes := slices.Grow(slices.Clip(emptyChildren), len(children))
+	for _, child := range children {
+		if child.isText() {
+			text, err := createTypeFromTextNodes(txn, child.text)
+			if err != nil {
+				return err
+			}
+			nodes = append(nodes, text)
+			continue
+		}
+		element, err := createTypeFromElementNode(txn, child.element)
 		if err != nil {
 			return err
 		}
-		frag.InsertText(txn, index, text)
-		return nil
+		nodes = append(nodes, element)
 	}
-	element, err := createTypeFromElementNode(txn, child.element)
-	if err != nil {
-		return err
-	}
-	frag.InsertElement(txn, index, element)
+	frag.Insert(txn, index, nodes...)
 	return nil
 }
 
@@ -240,15 +284,16 @@ func createTypeFromElementNode(txn *crdt.Transaction, node *Node) (*crdt.YXmlEle
 		return nil, fmt.Errorf("%w: text is not an element", ErrSchema)
 	}
 	element := crdt.NewYXmlElement(node.Type)
-	for key, value := range liveAttrs(node) {
-		if value != nil && key != "ychange" {
+	attrs := liveAttrs(node)
+	// Attributes are written in name order, so the update an element makes does not depend on map
+	// iteration order.
+	for _, key := range slices.Sorted(maps.Keys(attrs)) {
+		if value := attrs[key]; value != nil && key != "ychange" {
 			element.SetAttributeValue(txn, key, yjsAttributeValue(value))
 		}
 	}
-	for index, child := range normalizePNodeContent(node.Children) {
-		if err := insertPChild(txn, &element.YXmlFragment, index, child); err != nil {
-			return nil, err
-		}
+	if err := insertPChildren(txn, &element.YXmlFragment, 0, normalizePNodeContent(node.Children)); err != nil {
+		return nil, err
 	}
 	return element, nil
 }

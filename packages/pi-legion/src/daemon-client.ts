@@ -6,15 +6,14 @@ import {
   LegionEmptyResponse,
   LegionErrorResponse,
   LegionGateRegisterRequest,
-  LegionGitCredentialResponse,
-  LegionGitHubTokenResponse,
-  LegionGrantCredentialRequest,
   LegionGrantRequest,
   LegionGrantResponse,
   LegionHandoffCompleteRequest,
+  LegionHandoffCompleteResponse,
   LegionIssueStatusRequest,
   LegionPhaseBackwardRequest,
   LegionPhaseRetryRequest,
+  type LegionReadyRequest,
   LegionRegisterResponse,
   type LegionRegistration,
   LegionRootCloseRequest,
@@ -48,16 +47,17 @@ export interface RegisterInput {
   readonly pluginContract: number;
 }
 
-/** `claim.ReadyRequest`: the claim the registration issued, authenticated by its secret. */
-export interface ReadyInput {
+/** `claim.ReadyRequest`: the claim the registration issued, authenticated by its secret, and the
+ * session's report of the six live capability rows (`src/capability-report.ts`, contract 21); the
+ * controller's ready carries none. */
+export type ReadyInput = z.input<typeof LegionReadyRequest>;
+
+/** `claim.ExitRequest`: the agent reporting its own end, and why. */
+export interface ExitInput {
   readonly claimToken: string;
   readonly sessionId: string;
   readonly secret: string;
   readonly generation: number;
-}
-
-/** `claim.ExitRequest`: the agent reporting its own end, and why. */
-export interface ExitInput extends ReadyInput {
   readonly reason: string;
 }
 
@@ -75,18 +75,9 @@ export interface LegionDaemonClient {
   readonly controllerGrant: (
     input: z.input<typeof LegionControllerGrantRequest>
   ) => Promise<z.output<typeof LegionGrantResponse>>;
-  readonly githubToken: (
-    input: z.input<typeof LegionGrantCredentialRequest>
-  ) => Promise<z.output<typeof LegionGitHubTokenResponse>>;
-  readonly gitCredential: (
-    input: z.input<typeof LegionGrantCredentialRequest>
-  ) => Promise<z.output<typeof LegionGitCredentialResponse>>;
-  readonly provisioningCredential: (
-    input: z.input<typeof LegionGrantCredentialRequest>
-  ) => Promise<z.output<typeof LegionGitHubTokenResponse>>;
   readonly handoffComplete: (
     input: z.input<typeof LegionHandoffCompleteRequest>
-  ) => Promise<z.output<typeof LegionEmptyResponse>>;
+  ) => Promise<z.output<typeof LegionHandoffCompleteResponse>>;
   readonly issueStatus: (
     input: z.input<typeof LegionIssueStatusRequest>
   ) => Promise<z.output<typeof LegionEmptyResponse>>;
@@ -255,24 +246,13 @@ export function createLegionDaemonClient(
     grant: (input) => post("/legion/v1/grants", LegionGrantRequest, LegionGrantResponse, input),
     controllerGrant: (input) =>
       post("/legion/v1/grants", LegionControllerGrantRequest, LegionGrantResponse, input),
-    githubToken: (input) =>
-      post("/legion/v1/gh-token", LegionGrantCredentialRequest, LegionGitHubTokenResponse, input),
-    gitCredential: (input) =>
-      post(
-        "/legion/v1/git-credential",
-        LegionGrantCredentialRequest,
-        LegionGitCredentialResponse,
-        input
-      ),
-    provisioningCredential: (input) =>
-      post(
-        "/legion/v1/provisioning-credential",
-        LegionGrantCredentialRequest,
-        LegionGitHubTokenResponse,
-        input
-      ),
     handoffComplete: (input) =>
-      post("/legion/v1/handoff/complete", LegionHandoffCompleteRequest, LegionEmptyResponse, input),
+      post(
+        "/legion/v1/handoff/complete",
+        LegionHandoffCompleteRequest,
+        LegionHandoffCompleteResponse,
+        input
+      ),
     issueStatus: (input) =>
       post("/legion/v1/issues/status", LegionIssueStatusRequest, LegionEmptyResponse, input),
     gateRegister: (input) =>

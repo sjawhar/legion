@@ -42,15 +42,43 @@ function listOrEmpty(text: string): string {
   return LIST_ENTRY_CHARACTER.test(text) ? text : "";
 }
 
+/** An optional field's text as the request sends it: trimmed, or `null` when it holds nothing. */
+function textOrNull(text: string): string | null {
+  const trimmed = text.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
 /** The fields as typed: the two lists are the textareas' text, split only when saved. */
 interface Draft {
   deploy_repo: string;
   deploy_workflow_path: string;
   production_job_name: string;
+  staging_e2e_job_name: string;
+  staging_apply_job_name: string;
+  pr_checks_rollup_job_name: string;
   pr_checks_workflow_path: string;
   population_authors: string;
   excluded_repos: string;
 }
+
+/** The three optional job names the Pipeline page follows, in the order the form lists them. */
+const PIPELINE_JOB_FIELDS = [
+  {
+    key: "staging_e2e_job_name",
+    label: "Staging end-to-end job",
+    placeholder: "The staging end-to-end job, as a deploy run lists it (optional)",
+  },
+  {
+    key: "staging_apply_job_name",
+    label: "Staging deploy job",
+    placeholder: "The staging deploy job (optional)",
+  },
+  {
+    key: "pr_checks_rollup_job_name",
+    label: "PR checks roll-up job",
+    placeholder: "The PR-checks roll-up job the failing-jobs table leaves out (optional)",
+  },
+] as const;
 
 interface DeliverySettingsFormProps {
   /** The record when the caller already holds the answer, and the form then reads nothing: the
@@ -61,15 +89,17 @@ interface DeliverySettingsFormProps {
 
 /**
  * The delivery timeline's configuration record as a form: the deploy repository, its deploy and
- * pull-request-check workflow paths, the deploy workflow's production job, and the population's
- * authors and excluded repositories. The two lists take one entry per line (a comma or a space
- * also separates entries). The fields start from the stored record (`initial`, or the record the
- * form reads), and empty, with placeholders saying what each holds, when there is none. A required
- * field holding only whitespace (a list, only separators) is empty, so the browser refuses it
- * before any request. Save replaces the whole record; the server first checks that the GitHub App
- * can read the deploy repository, and a refusal shows under the form as the server wrote it. A
- * save refreshes the record and every delivery timeline read, so the Delivery page, which renders
- * this form in place of a timeline it cannot read yet, shows the timeline once the save succeeds.
+ * pull-request-check workflow paths, the deploy workflow's production job, the three optional job
+ * names the Pipeline page follows (the staging end-to-end gate, the staging deploy and the
+ * PR-checks roll-up), and the population's authors and excluded repositories. The two lists take
+ * one entry per line (a comma or a space also separates entries). The fields start from the stored
+ * record (`initial`, or the record the form reads), and empty, with placeholders saying what each
+ * holds, when there is none. A required field holding only whitespace (a list, only separators)
+ * is empty, so the browser refuses it before any request; an optional job name left empty saves
+ * `null`. Save replaces the whole record; the server first checks that the GitHub App can read the
+ * deploy repository, and a refusal shows under the form as the server wrote it. A save refreshes
+ * the record and every delivery read, so the Delivery page, which renders this form in place of a
+ * timeline it cannot read yet, shows the timeline once the save succeeds.
  */
 export function DeliverySettingsForm({ initial }: DeliverySettingsFormProps): ReactNode {
   const settings = useQuery({ ...deliverySettingsQuery(), enabled: initial === undefined });
@@ -107,6 +137,9 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
     population_authors: record?.population_authors.join("\n") ?? "",
     pr_checks_workflow_path: record?.pr_checks_workflow_path ?? "",
     production_job_name: record?.production_job_name ?? "",
+    pr_checks_rollup_job_name: record?.pr_checks_rollup_job_name ?? "",
+    staging_apply_job_name: record?.staging_apply_job_name ?? "",
+    staging_e2e_job_name: record?.staging_e2e_job_name ?? "",
   }));
   const save = useMutation({
     mutationFn: (input: DeliverySettingsInput) => api.putDeliverySettings(input),
@@ -126,6 +159,9 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
         population_authors: listEntries(draft.population_authors),
         pr_checks_workflow_path: draft.pr_checks_workflow_path.trim(),
         production_job_name: draft.production_job_name.trim(),
+        pr_checks_rollup_job_name: textOrNull(draft.pr_checks_rollup_job_name),
+        staging_apply_job_name: textOrNull(draft.staging_apply_job_name),
+        staging_e2e_job_name: textOrNull(draft.staging_e2e_job_name),
       })
     );
   };
@@ -179,6 +215,23 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
               reusable workflow's job reads &lt;caller&gt; / &lt;job&gt;.
             </p>
           </div>
+          {PIPELINE_JOB_FIELDS.map(({ key, label, placeholder }) => (
+            <label className={settingsFieldLabel} htmlFor={`${id}-${key}`} key={key}>
+              {label}
+              <input
+                aria-describedby={`${id}-pipeline-jobs-hint`}
+                className={settingsMonoInput}
+                id={`${id}-${key}`}
+                onChange={(event) => setDraft({ ...draft, [key]: event.target.value })}
+                placeholder={placeholder}
+                value={draft[key]}
+              />
+            </label>
+          ))}
+          <p className={`text-xs ${textMutedOnCanvas}`} id={`${id}-pipeline-jobs-hint`}>
+            Leave empty if the pipeline has no such step; the Pipeline page omits that card. With no
+            roll-up job the failing-jobs table leaves nothing out.
+          </p>
           <label className={settingsFieldLabel} htmlFor={`${id}-pr-checks-workflow`}>
             PR checks workflow
             <input

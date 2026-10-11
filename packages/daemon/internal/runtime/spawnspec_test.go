@@ -16,7 +16,7 @@ func spawnSpec() SpawnSpec {
 		Role:       claim.RoleTester,
 		Generation: 2,
 		BootToken:  "boot-secret",
-		Env:        map[string]string{"JJ_USER": "legion-tester", "GH_CONFIG_DIR": "/state/gh"},
+		Env:        map[string]string{"JJ_USER": "legion-tester", "TZ": "UTC"},
 		Secrets:    map[string]string{"ENVOY_TOKEN": "envoy-secret"},
 		Prompt:     PromptParts{RolePromptPaths: []string{"/roles/tester.md"}},
 		Repository: ghrepo.MustParse("sjawhar/legion"),
@@ -27,7 +27,9 @@ func spawnSpec() SpawnSpec {
 // cluster — above all one that would put a variable the runtime owns, or a credential, into the
 // agent's environment as a plain value.
 func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
-	owned := map[string]bool{"LEGION_TREE": true, "LEGION_BOOT_TOKEN_FILE": true}
+	// Every runtime owns the agent's gh configuration: the directory its gh reads the role's App
+	// token from, and the token variables it empties so nothing outranks that file.
+	owned := map[string]bool{"LEGION_TREE": true, "LEGION_BOOT_TOKEN_FILE": true, "GH_CONFIG_DIR": true, "GH_TOKEN": true}
 	for _, tc := range []struct {
 		name   string
 		mutate func(*SpawnSpec)
@@ -51,6 +53,8 @@ func TestValidateSpawnSpecRefusesWhatNoRuntimeCouldHonour(t *testing.T) {
 		{"no role prompt", func(s *SpawnSpec) { s.Prompt.RolePromptPaths = nil }, "spawn legion-omp-legion-43-tester: no role prompt"},
 		{"an Env name that is not a variable name", func(s *SpawnSpec) { s.Env["BAD NAME"] = "x" }, `spawn legion-omp-legion-43-tester: Env name "BAD NAME" is not an environment variable name`},
 		{"a variable the runtime sets", func(s *SpawnSpec) { s.Env["LEGION_TREE"] = "OTHER-1" }, "spawn legion-omp-legion-43-tester: Env sets LEGION_TREE, which the runtime sets itself"},
+		{"the gh configuration directory the runtime sets", func(s *SpawnSpec) { s.Env["GH_CONFIG_DIR"] = "/home/me/.config/gh" }, "spawn legion-omp-legion-43-tester: Env sets GH_CONFIG_DIR, which the runtime sets itself"},
+		{"a gh token the runtime empties", func(s *SpawnSpec) { s.Env["GH_TOKEN"] = "ghp_x" }, "spawn legion-omp-legion-43-tester: Env sets GH_TOKEN, which the runtime sets itself"},
 		{"a credential as a value", func(s *SpawnSpec) { s.Env["ANTHROPIC_API_KEY"] = "sk-x" }, "spawn legion-omp-legion-43-tester: Env carries ANTHROPIC_API_KEY, a credential-shaped name; a secret travels in Secrets, as a file"},
 		{"a secret name that is not a variable name", func(s *SpawnSpec) { s.Secrets["BAD NAME"] = "x" }, `spawn legion-omp-legion-43-tester: secret "BAD NAME" is not an environment variable name`},
 		{"a secret whose pointer the runtime owns", func(s *SpawnSpec) { s.Secrets["LEGION_BOOT_TOKEN"] = "x" }, "spawn legion-omp-legion-43-tester: secret LEGION_BOOT_TOKEN's pointer LEGION_BOOT_TOKEN_FILE is a variable the runtime sets itself"},

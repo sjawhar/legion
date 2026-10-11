@@ -185,6 +185,14 @@ export function Sidebar({
               selected={location.pathname === "/delivery"}
               to="/delivery"
             />
+            <RailRow
+              badge={undefined}
+              detail="CI and deploy step timings"
+              label="Pipeline"
+              onNavigate={onNavigate}
+              selected={location.pathname === "/pipeline"}
+              to="/pipeline"
+            />
           </ul>
         </section>
         {pinned.data.length === 0 ? null : (

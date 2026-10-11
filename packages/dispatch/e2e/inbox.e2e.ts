@@ -899,7 +899,7 @@ test("a pending credential request naming a running session links to it, in the 
         approver: "alice",
         decided: null,
         enrollment: {
-          kind: "host",
+          kind: "session",
           operator: "alice",
           runtime_id: "host-alice:123:0",
           slot: null,
@@ -966,7 +966,7 @@ test("a pending credential request naming only the request's session id shows it
         approver: "alice",
         decided: null,
         enrollment: {
-          kind: "host",
+          kind: "session",
           operator: "alice",
           runtime_id: "host-alice:456:0",
           slot: null,

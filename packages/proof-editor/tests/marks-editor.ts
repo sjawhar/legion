@@ -2,7 +2,11 @@ import { undoDepth } from "@milkdown/kit/prose/history";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { prosemirrorToYXmlFragment, yUndoPluginKey } from "y-prosemirror";
 import * as Y from "yjs";
-import { createProofEditor, type ProofEditorHandle } from "../src/lib";
+import {
+  type CreateProofEditorOptions,
+  createProofEditor,
+  type ProofEditorHandle,
+} from "../src/lib";
 import { createHeadlessProof } from "../src/lib-headless.js";
 import { withDomWindow } from "./dom-window";
 
@@ -21,13 +25,15 @@ export interface MarksEditor {
 /**
  * Runs `run` against the editor `createProofEditor` builds - Milkdown's presets, the collab
  * binding with both undo managers, and every plugin of the stack - in happy-dom, configured as
- * Dispatch's margin configures it, over a Y.Doc seeded with `markdown`. The real stack matters:
+ * Dispatch's margin configures it, over a Y.Doc seeded with `markdown`; `options` adds to or
+ * overrides that configuration (an `onMarkAction`, `readOnly`). The real stack matters:
  * plugins such as commonmark's hard-break mark cleaner append transactions after a mark write, and
  * only the whole stack shows what reaches each undo manager.
  */
 export async function withMarksEditor(
   markdown: string,
-  run: (editor: MarksEditor) => void | Promise<void>
+  run: (editor: MarksEditor) => void | Promise<void>,
+  options: Partial<CreateProofEditorOptions> = {}
 ): Promise<void> {
   const { parseMarkdown } = await createHeadlessProof();
   const ydoc = new Y.Doc();
@@ -40,6 +46,7 @@ export async function withMarksEditor(
       onMarkHover: () => {},
       user: { color: "#0369a1", name: "alice" },
       ydoc,
+      ...options,
     });
     const { view } = handle;
     try {

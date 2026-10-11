@@ -7,7 +7,10 @@ import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
  * key top-down through the stack: the first scope holding a matching binding wins, and while
  * a `dialog` scope is on the stack it is the only scope consulted. `keys` follows tinykeys' string
  * syntax — `"g i"` is a chord, `"$mod+k"` matches Meta or Control, `"Shift+P"` a shifted
- * letter, `"?"` the character an unshifted or shifted key produces.
+ * letter, `"?"` the character an unshifted or shifted key produces. A combo is matched by the
+ * character its key types, so a reader on AZERTY or Dvorak presses the letter a shortcut names
+ * wherever it sits; on a Mac, one that holds `Alt` also matches by the key's position (`KeyM` for
+ * `m`), because Option changes the character: `$mod+Alt+m` types `µ` there.
  */
 
 export type KeymapScope =
@@ -18,6 +21,7 @@ export type KeymapScope =
   | "architecture"
   | "board"
   | "issue"
+  | "document"
   | "agents";
 
 export interface KeyBinding {
@@ -33,17 +37,19 @@ export interface KeyBinding {
   /** Whether the binding applies right now; `false` neither fires nor shadows lower scopes. */
   when?: () => boolean;
   /** Fires while a control that takes typed text has focus: a `TEXTAREA`, a `SELECT`, a
-   *  contentEditable element, or a text-entry `INPUT`. */
+   *  contentEditable element, or a text-entry `INPUT`. The key then reaches every such control,
+   *  so a binding that belongs to only some of them says which in its `when`: the document's
+   *  `$mod+Alt+m` runs only while its editor has focus and a selection, never from a comment
+   *  composer or any other field. */
   inEditable?: boolean;
   /** Whether `⌘K` offers this binding as an action. The default is `true` for a binding with one
    *  key or none that is not `inEditable`, and `false` otherwise. A row presses only its first
    *  key, and a binding with several keys may pick what it does by the key pressed (the arrows,
    *  `1`–`9`), so one whose keys all do the same thing says `true`. An `inEditable` binding's key
-   *  is one that has to work while the reader types, which today is Escape or `$mod+k`, and both
-   *  mean something else inside the palette (Escape closes it; `$mod+k` is its own key), so such
-   *  a binding is a row only when it says `true`. Keys that walk a list with the row in hand set
-   *  `false`, as does a second key for an action that already has a row; any other binding that
-   *  sets it says why beside it. */
+   *  is one that has to work while the reader types - Escape, `$mod+k`, the document's
+   *  `$mod+Alt+m` - and is a row only when it says `true`: Escape closes the palette, and `$mod+k`
+   *  is its own key. Keys that walk a list with the row in hand set `false`, as does a second key
+   *  for an action that already has a row; any other binding that sets it says why beside it. */
   palette?: boolean;
 }
 
@@ -66,8 +72,11 @@ export interface KeymapAction {
 }
 
 export const DIALOG_SCOPE: KeymapScope = "dialog";
+const IS_MAC = navigator.userAgent.includes("Mac");
 /** How `$mod` is shown to the reader: the Command glyph on a Mac, `Ctrl` elsewhere. */
-export const MOD_KEY_LABEL = navigator.userAgent.includes("Mac") ? "⌘" : "Ctrl";
+export const MOD_KEY_LABEL = IS_MAC ? "⌘" : "Ctrl";
+/** How `Alt` is shown to the reader: the Option glyph on a Mac, `Alt` elsewhere. */
+export const ALT_KEY_LABEL = IS_MAC ? "⌥" : "Alt";
 const CHORD_TIMEOUT_MS = 1000;
 
 interface KeyCombo {
@@ -81,6 +90,8 @@ interface KeyCombo {
 
 interface KeyPress {
   altKey: boolean;
+  /** The physical key (`KeyM`), whatever character the layout and modifiers make it type. */
+  code: string;
   ctrlKey: boolean;
   key: string;
   metaKey: boolean;
@@ -144,12 +155,22 @@ function keysOf(binding: KeyBinding): readonly string[] {
   return typeof binding.keys === "string" ? [binding.keys] : binding.keys;
 }
 
-function matchesCombo(combo: KeyCombo, press: KeyPress): boolean {
-  const sameKey =
+/** The physical key a letter or digit names, by its place on a US keyboard: `KeyM` for `m`,
+ *  `Digit1` for `1`. */
+function physicalCode(key: string): string | undefined {
+  if (/^[a-z]$/i.test(key)) {
+    return `Key${key.toUpperCase()}`;
+  }
+  return /^[0-9]$/.test(key) ? `Digit${key}` : undefined;
+}
+
+function matchesCombo(combo: KeyCombo, press: KeyPress, isMac: boolean): boolean {
+  const sameCharacter =
     press.key.length === 1
       ? press.key.toLowerCase() === combo.key.toLowerCase()
       : press.key === combo.key;
-  if (!sameKey || combo.alt !== press.altKey) {
+  const samePosition = combo.alt && isMac && press.code === physicalCode(combo.key);
+  if (!(sameCharacter || samePosition) || combo.alt !== press.altKey) {
     return false;
   }
   // A single non-letter character (`?`, `/`, `1`) already encodes whether Shift was held.
@@ -223,6 +244,8 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 export interface KeymapOptions {
+  /** Whether Alt combos may match a physical key; production follows the browser's Mac identity. */
+  isMac?: boolean;
   /** Timer seam for the chord timeout; tests drive it without real waits. */
   clearTimeout?: (handle: number) => void;
   setTimeout?: (callback: () => void, ms: number) => number;
@@ -238,7 +261,9 @@ export interface Keymap {
    * only if the binding is still registered and its `when()` still holds when the row is chosen.
    */
   actions(): KeymapAction[];
-  /** Every registered binding with its `when()` evaluated now — the source for `?`. */
+  /** Every registered binding with its `when()` evaluated now — the source for `?`. One component
+   *  mounted twice registers its bindings twice (an issue's hidden Spec beside another of its
+   *  documents), and they are one row, enabled when either instance's `when()` holds. */
   describe(): KeyBindingDescription[];
   handleKeyDown(event: KeyboardEvent): void;
   /** The keys typed so far of an unfinished chord (`"g"`), or `""`. */
@@ -254,6 +279,7 @@ interface Resolution {
 }
 
 export function createKeymap(options: KeymapOptions = {}): Keymap {
+  const isMac = options.isMac ?? IS_MAC;
   const schedule = options.setTimeout ?? ((callback, ms) => window.setTimeout(callback, ms));
   const unschedule = options.clearTimeout ?? ((handle) => window.clearTimeout(handle));
   const strict = options.strict ?? false;
@@ -327,7 +353,7 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
         for (const chord of registration.chords) {
           if (
             chord.length < presses.length ||
-            !presses.every((press, index) => matchesCombo(chord[index] as KeyCombo, press))
+            !presses.every((press, index) => matchesCombo(chord[index] as KeyCombo, press, isMac))
           ) {
             continue;
           }
@@ -398,13 +424,24 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
       return offered;
     },
     describe() {
-      return registrations.map(({ binding, scope }) => ({
-        enabled: binding.when?.() !== false,
-        id: binding.id,
-        keys: keysOf(binding),
-        label: binding.label,
-        scope,
-      }));
+      const described = new Map<string, KeyBindingDescription>();
+      for (const { binding, scope } of registrations) {
+        const enabled = binding.when?.() !== false;
+        const key = `${scope}\u0000${binding.id}`;
+        const seen = described.get(key);
+        if (seen === undefined) {
+          described.set(key, {
+            enabled,
+            id: binding.id,
+            keys: keysOf(binding),
+            label: binding.label,
+            scope,
+          });
+        } else {
+          seen.enabled ||= enabled;
+        }
+      }
+      return [...described.values()];
     },
     handleKeyDown(event) {
       if (event.defaultPrevented || event.isComposing || MODIFIER_KEYS[event.key] === true) {
@@ -413,6 +450,7 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
       const editable = isEditableTarget(event.target);
       const press: KeyPress = {
         altKey: event.altKey,
+        code: event.code,
         ctrlKey: event.ctrlKey,
         key: event.key,
         metaKey: event.metaKey,

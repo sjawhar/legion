@@ -54,11 +54,9 @@ import (
 // room closes, as the server shuts down, and daily; what grows between those is bounded by how
 // long a room stays open, not by how many versions or replies it has had.
 
-// growth is what one write leaves a document, as refuseGrowth weighs it.
+// growth is what one write leaves a document, as refuseGrowth weighs it. The live state it leaves
+// is checked apart (refuseUndecodable), once the write has let go of the tree before it.
 type growth struct {
-	// fork is the transaction's copy of the live document the write leaves, which
-	// refuseUndecodable checks.
-	fork *crdt.Doc
 	// before and after are the document's renderings before the write and after it, and unchanged
 	// whether they are the same.
 	before, after string
@@ -79,7 +77,8 @@ type growth struct {
 // weighRendering. A rendering the write left as it was - an anchor mark, a margin record, an
 // attribute no rendering carries - is not measured again, and one that changed only the server's
 // state of a typed block (serverState) is taken whatever the measures say of it. Every write is
-// still refused when the live state it leaves could not be decoded.
+// then still refused when the live state it leaves could not be decoded (refuseUndecodable, which
+// applyLive runs next).
 func refuseGrowth(g growth) error {
 	if err := g.margin.refusal(); err != nil {
 		return err
@@ -92,7 +91,7 @@ func refuseGrowth(g growth) error {
 			return err
 		}
 	}
-	return refuseUndecodable(g.fork)
+	return nil
 }
 
 // weighRendering is the refusal of after, a document's rendering once a write has run, against

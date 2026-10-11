@@ -304,7 +304,7 @@ func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.Outgoi
 		select e.to_kind, e.to_id,
 		       a.id::text, a.issue_key, coalesce(a.project_key, ''), a.session_id, coalesce(a.ref_key, ''), coalesce(a.slug, ''), coalesce(a.name, ''), coalesce(a.kind, ''), coalesce(a.is_primary, false),
 		       coalesce(a.created_by, '{}'::jsonb), coalesce(a.created_at, timestamptz 'epoch'),
-		       coalesce(v.number, 0), coalesce(v.named, false), v.summary, coalesce(v.authors, '[]'::jsonb), coalesce(v.created_at, timestamptz 'epoch'), v.size, v.mime, v.sha256
+		       coalesce(v.number, 0), coalesce(v.named, false), v.summary, coalesce(v.authors, '[]'::jsonb), coalesce(v.created_at, timestamptz 'epoch'), `+model.VersionSize+`, v.mime, v.sha256
 		from graph_edges e
 		left join artifacts a on e.to_kind = 'artifact' and a.ref_key = e.to_id
 		left join artifact_versions v on v.artifact_id = a.id

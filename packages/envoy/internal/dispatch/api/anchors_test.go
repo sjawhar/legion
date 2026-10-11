@@ -332,8 +332,9 @@ func TestSuggestionAcceptKeepsTheCalloutItLandsIn(t *testing.T) {
 
 // Two paragraphs over a word of an answered ask's question land inside the ask, as ProseMirror's
 // fit puts them there: the ask's content rule allows a question of several paragraphs. The ask
-// keeps its id, its options, its row and its answer. A fit that climbed out of the ask would split
-// it, leaving the answered row on "Which" and the options under a minted id as a new open ask "?".
+// keeps its id, its options, its row and its answer, and, being decided, its wording: settlement
+// writes the question it was answered on back into the block. A fit that climbed out of the ask
+// would split it, leaving the options under a minted id as a new open ask "?" beside it.
 func TestSuggestionAcceptKeepsTheAskItLandsIn(t *testing.T) {
 	handler, _ := blockAskHandler(t)
 	issue, askID := seedBlockAsk(t, handler, "Two paragraphs in a question", "decision", transportAsk, "Which transport?")
@@ -364,9 +365,12 @@ func TestSuggestionAcceptKeepsTheAskItLandsIn(t *testing.T) {
 	}
 	ask := readBlockAsk(t, handler, askID)
 	if ask.BlockID == nil || *ask.BlockID != "decision" || ask.State != "answered" || len(ask.Options) != 2 ||
-		ask.Question != "Which\n\none\n\ntwo\n\n?" {
+		ask.Question != "Which transport?" {
 		t.Fatalf("the answered ask after the accept: block=%v state=%q options=%d question=%q",
 			ask.BlockID, ask.State, len(ask.Options), ask.Question)
+	}
+	if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); !strings.Contains(text, "\nWhich transport?\n") {
+		t.Fatalf("the document after the accept holds no decided question written back:\n%s", text)
 	}
 }
 
@@ -430,7 +434,8 @@ func TestSuggestionAcceptRewritesOnlyTheTypedBlockUnderItsOwnID(t *testing.T) {
 // A replacement that rewrites a typed block under its own id and carries other blocks beside it
 // rewrites the block in place and writes the other blocks where they stand in the replacement, as
 // main stores it, wherever the block sits: at the top level, in a list item or in a quote. An
-// answered ask rewritten this way keeps its row and its answer.
+// answered ask rewritten this way keeps its row, its answer and the question it was answered on,
+// which settlement writes back into its block.
 func TestSuggestionAcceptRewritesATypedBlockInPlaceBesideOtherBlocks(t *testing.T) {
 	const (
 		ask     = ":::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nWhich one?\n:::\n"
@@ -452,9 +457,9 @@ func TestSuggestionAcceptRewritesATypedBlockInPlaceBesideOtherBlocks(t *testing.
 		{name: "an ask and a paragraph after it", spec: "Intro.\n\n" + ask, replaceWith: newAsk + "\nTail.\n", want: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nReworded?\n:::\n\nTail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 		{name: "an ask in a list item and a paragraph after it", spec: inList(ask), replaceWith: newAsk + "\nTail.\n", want: "- Lead.\n\n  :::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n  Reworded?\n  :::\n\n  Tail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 		{name: "an ask in a quote and a paragraph after it", spec: inQuote(ask), replaceWith: newAsk + "\nTail.\n", want: "> :::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"open\"}\n> Reworded?\n> :::\n>\n> Tail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
-		{name: "an answered ask and a paragraph after it", spec: "Intro.\n\n" + ask, replaceWith: newAsk + "\nTail.\n", answered: true, want: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"<t>\" selected=\"[]\" answer=\"Go.\"}\nReworded?\n:::\n\nTail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
-		{name: "an answered ask in a list item and a paragraph after it", spec: inList(ask), replaceWith: newAsk + "\nTail.\n", answered: true, want: "- Lead.\n\n  :::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"<t>\" selected=\"[]\" answer=\"Go.\"}\n  Reworded?\n  :::\n\n  Tail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
-		{name: "an answered ask in a quote and a paragraph after it", spec: inQuote(ask), replaceWith: newAsk + "\nTail.\n", answered: true, want: "> :::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"<t>\" selected=\"[]\" answer=\"Go.\"}\n> Reworded?\n> :::\n>\n> Tail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
+		{name: "an answered ask and a paragraph after it", spec: "Intro.\n\n" + ask, replaceWith: newAsk + "\nTail.\n", answered: true, want: "Intro.\n\n:::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"<t>\" selected=\"[]\" answer=\"Go.\"}\nWhich one?\n:::\n\nTail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
+		{name: "an answered ask in a list item and a paragraph after it", spec: inList(ask), replaceWith: newAsk + "\nTail.\n", answered: true, want: "- Lead.\n\n  :::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"<t>\" selected=\"[]\" answer=\"Go.\"}\n  Which one?\n  :::\n\n  Tail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
+		{name: "an answered ask in a quote and a paragraph after it", spec: inQuote(ask), replaceWith: newAsk + "\nTail.\n", answered: true, want: "> :::ask{#a1 urgency=\"med\" multiple=\"false\" state=\"answered\" answered_by=\"alice\" answered_at=\"<t>\" selected=\"[]\" answer=\"Go.\"}\n> Which one?\n> :::\n>\n> Tail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 		{name: "a callout and a paragraph after it", spec: "Intro.\n\n" + callout, replaceWith: newNote + "\nTail.\n", want: "Intro.\n\n:::callout{#c1 kind=\"warning\" title=\"\"}\nReworded?\n:::\n\nTail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 		{name: "a callout in a list item and a paragraph after it", spec: inList(callout), replaceWith: newNote + "\nTail.\n", want: "- Lead.\n\n  :::callout{#c1 kind=\"warning\" title=\"\"}\n  Reworded?\n  :::\n\n  Tail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
 		{name: "a callout in a quote and a paragraph after it", spec: inQuote(callout), replaceWith: newNote + "\nTail.\n", want: "> :::callout{#c1 kind=\"warning\" title=\"\"}\n> Reworded?\n> :::\n>\n> Tail.\n\n:::ask{#after-accept urgency=\"low\" multiple=\"false\" state=\"open\"}\nMarker after-accept?\n:::\n"},
@@ -507,17 +512,21 @@ func TestSuggestionAcceptRewritesATypedBlockInPlaceBesideOtherBlocks(t *testing.
 			if got != test.want {
 				t.Fatalf("document after the accept = %q, want %q", got, test.want)
 			}
+			wantQuestion := "Reworded?"
+			if test.answered {
+				wantQuestion = "Which one?"
+			}
 			if askID != "" {
 				if held := blockAskID(t, handler, issue.Key, "a1"); held != askID {
 					t.Fatalf("block a1 holds ask %s after the accept, want %s", held, askID)
 				}
-				if ask := readBlockAsk(t, handler, askID); ask.Question != "Reworded?" {
-					t.Fatalf("the ask's question after the accept = %q, want %q", ask.Question, "Reworded?")
+				if ask := readBlockAsk(t, handler, askID); ask.Question != wantQuestion {
+					t.Fatalf("the ask's question after the accept = %q, want %q", ask.Question, wantQuestion)
 				}
 			}
 			if test.answered {
 				if ask := readBlockAsk(t, handler, askID); ask.State != "answered" || ask.Answer == nil ||
-					ask.Answer.Text == nil || *ask.Answer.Text != "Go." || ask.Question != "Reworded?" {
+					ask.Answer.Text == nil || *ask.Answer.Text != "Go." {
 					t.Fatalf("the answered ask after the accept: state=%q answer=%+v question=%q", ask.State, ask.Answer, ask.Question)
 				}
 			}

@@ -3,6 +3,8 @@ package supervise
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -653,7 +655,9 @@ func waitFor(t *testing.T, what string, ch <-chan string) string {
 var errBoom = errors.New("boom")
 
 // fakeEnroller is the broker as the machine sees it: it records every enrollment and revocation,
-// mints ids, and fails what the test told it to.
+// mints ids, and fails what the test told it to. It verifies the pod token's expiry against now
+// as the broker does (enroll.Service.Create): an expired token is refused POD_TOKEN_EXPIRED and
+// one whose expiry cannot be read POD_IDENTITY_MISMATCH.
 type fakeEnroller struct {
 	mu          sync.Mutex
 	enrollments []PodEnrollment
@@ -661,7 +665,9 @@ type fakeEnroller struct {
 	enrollErr   error
 	revokeErr   error
 	revokeFails int // Revoke fails this many times, then succeeds
+	calls       int // every Revoke call, failed or not
 	next        int
+	now         func() time.Time
 }
 
 func (f *fakeEnroller) Enroll(_ context.Context, e PodEnrollment) (string, error) {
@@ -669,6 +675,13 @@ func (f *fakeEnroller) Enroll(_ context.Context, e PodEnrollment) (string, error
 	defer f.mu.Unlock()
 	if f.enrollErr != nil {
 		return "", f.enrollErr
+	}
+	expires, ok := tokenExpiry(e.PodToken)
+	switch {
+	case !ok:
+		return "", permanentErr{"broker answered 403 POD_IDENTITY_MISMATCH: the projected token does not identify this pod"}
+	case !expires.After(f.now()):
+		return "", expiredTokenErr{"broker answered 403 POD_TOKEN_EXPIRED: the projected token has expired (oidc: token expired at " + expires.UTC().Format(time.RFC3339) + ")"}
 	}
 	f.enrollments = append(f.enrollments, e)
 	f.next++
@@ -678,6 +691,7 @@ func (f *fakeEnroller) Enroll(_ context.Context, e PodEnrollment) (string, error
 func (f *fakeEnroller) Revoke(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	if f.revokeFails > 0 {
 		f.revokeFails--
 		return errors.New("broker unreachable")
@@ -701,17 +715,56 @@ func (f *fakeEnroller) revocations() []string {
 	return slices.Clone(f.revoked)
 }
 
+func (f *fakeEnroller) revokeCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
 type permanentErr struct{ msg string }
 
 func (e permanentErr) Error() string   { return e.msg }
 func (e permanentErr) Permanent() bool { return true }
 
-var testIdentity = &AgentSecretsIdentity{Thumbprint: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs", PodToken: "eyJhbGciOiJSUzI1NiJ9.e30.sig"}
+// podToken is a projected service-account token as the shim reads it from its mount, expiring at
+// expires: the broker verifies all of it, and nothing on the daemon's side reads more than its exp.
+func podToken(expires time.Time) string {
+	payload, err := json.Marshal(struct {
+		Exp int64 `json:"exp"`
+	}{expires.Unix()})
+	if err != nil {
+		panic(err)
+	}
+	return "eyJhbGciOiJSUzI1NiJ9." + base64.RawURLEncoding.EncodeToString(payload) + ".sig"
+}
+
+// tokenExpiry is the exp claim of a token podToken made, as the broker reads it once verified.
+func tokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(raw, &claims) != nil || claims.Exp == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0), true
+}
+
+// testIdentity is a hello's identity whose token outlives every test that does not move the clock
+// an hour.
+var testIdentity = &AgentSecretsIdentity{Thumbprint: "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs", PodToken: podToken(epoch.Add(time.Hour))}
 
 // withSecrets gives the harness a broker; hello sends the identity with every hello from then on.
 func (h *harness) withSecrets() *fakeEnroller {
 	h.t.Helper()
-	f := &fakeEnroller{}
+	f := &fakeEnroller{now: h.clock.Now}
 	h.deps.Secrets = f
 	h.start(h.store.load(h.token))
 	return f
@@ -721,8 +774,14 @@ func (h *harness) withSecrets() *fakeEnroller {
 // with its connection in the directory, as connect (`:501`) registers it.
 func (h *harness) helloWithIdentity() {
 	h.t.Helper()
+	h.helloWithToken(testIdentity.PodToken)
+}
+
+// helloWithToken is helloWithIdentity with the projected token the shim read at this hello.
+func (h *harness) helloWithToken(token string) {
+	h.t.Helper()
 	h.conns.Register(h.token, h.conn)
-	h.must(StreamHello{Claim: h.token, Generation: h.generation(), AgentSecrets: testIdentity})
+	h.must(StreamHello{Claim: h.token, Generation: h.generation(), AgentSecrets: &AgentSecretsIdentity{Thumbprint: testIdentity.Thumbprint, PodToken: token}})
 }
 
 // exit is the agent reporting its own end, fenced on the claim's generation and session.
