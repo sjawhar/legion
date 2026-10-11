@@ -1983,14 +1983,14 @@ two slots, so the binary is never rolled back past it once a slotted enrollment 
 expiry, a pod UID named) for both `Create` and `Renew`, before either opens a transaction. A pod's
 `POST /v1/enrollments/{id}/renew` carries its current token as `pod_token`, which must name the
 enrollment's pod UID and recorded subject (`403 POD_IDENTITY_MISMATCH`); a box's or host's carries
-none (`400 POD_TOKEN_OFF_POD`). `Create` sets a pod row's `pod_token_renewed_at` (migration 0012),
-so a renewal without the token is `403 POD_TOKEN_REQUIRED` from the first; only the pod rows 0012
-found start null and renew without one, logged at WARN, until their first renewal carrying it sets
-the column. 0012 is forward-only too: an older broker inserts pod rows with the column null, and
-so lets them renew without a token. A pod enrollment is ended only by the launcher credential that
-made it (`DELETE` by any other is `403 NOT_ENROLLING_CREDENTIAL`), so a Legion daemon that logs in
-again (a restart, or its login's expiry) leaves its earlier login's pods to their leases or to a
-revoke of that login.
+none, and any token on either renewal is the same identity mismatch. `Create` sets a pod row's
+`pod_token_renewed_at`, so a renewal without the token is `403 POD_TOKEN_REQUIRED` from the first;
+only the pod rows 0012 found start null and renew without one, logged at WARN, until their first
+renewal carrying it sets the column. 0012 is forward-only too: an older broker inserts pod rows
+with the column null, and so lets them renew without a token. A pod enrollment is ended only by the
+launcher credential that made it (`DELETE` by any other is `403 NOT_ENROLLING_CREDENTIAL`), so a
+Legion daemon that logs in again (a restart, or its login's expiry) leaves its earlier login's pods
+to their leases or to a revoke of that login.
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or

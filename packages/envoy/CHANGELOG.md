@@ -175,7 +175,7 @@
   enrollment alive past the token's expiry. The pod enrollments that exist when migration 0012 runs
   still renew without a token, logged as `broker: pod enrollment renewed without its projected
   token`, until their first renewal with one; the hole stays open for those until they end. A box's
-  renewal carrying a token is `400 POD_TOKEN_OFF_POD`. **Rollout:** ship the worker image whose
+  or host's renewal carrying a token is `403 POD_IDENTITY_MISMATCH`. **Rollout:** ship the worker image whose
   `agent-secrets renew` sends the token first, and deploy this broker only once no issue pod runs an
   older image, since an image change does not replace a running issue pod and a pod this broker
   enrolls is refused without the token. The new client renews against an older broker, which reads

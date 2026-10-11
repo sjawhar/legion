@@ -159,7 +159,9 @@ func TestAPodEnrollmentThatPredatesTheTokenCheckRenewsWithoutItUntilItFirstRenew
 }
 
 // TestABoxRenewsWithoutAPodTokenAndRefusesOne: a box or host session renews on its key's proof
-// alone, as before, and a pod token on its renewal is refused rather than ignored.
+// alone, as before. A pod token on its renewal is POD_IDENTITY_MISMATCH rather than silently
+// accepted: an invalid token, a token on a broker without a pod verifier, and a valid token for
+// the wrong enrollment all have one refusal.
 func TestABoxRenewsWithoutAPodTokenAndRefusesOne(t *testing.T) {
 	svc := newService(t)
 	issuer, key := withPodVerifier(t, svc)
@@ -173,7 +175,7 @@ func TestABoxRenewsWithoutAPodTokenAndRefusesOne(t *testing.T) {
 	if err != nil || renewal.WithoutPodToken {
 		t.Fatalf("Renew(box) = %+v, %v; want a plain renewal", renewal, err)
 	}
-	if _, err := svc.Renew(ctx, box.ID.String(), mintPodToken(t, issuer, key, renewAccount, "box-renew")); !errors.Is(err, ErrPodTokenOffPod) {
-		t.Fatalf("Renew(box, with a pod token) = %v, want ErrPodTokenOffPod", err)
+	if _, err := svc.Renew(ctx, box.ID.String(), mintPodToken(t, issuer, key, renewAccount, "box-renew")); !errors.Is(err, ErrPodIdentity) {
+		t.Fatalf("Renew(box, with a pod token) = %v, want ErrPodIdentity", err)
 	}
 }

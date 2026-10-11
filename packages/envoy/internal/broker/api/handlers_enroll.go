@@ -190,10 +190,8 @@ func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
 		return
 	case errors.Is(err, enroll.ErrPodTokenRequired):
+		slog.Warn("broker: pod enrollment renewal refused: projected token required", "enrollment", id)
 		writeError(w, http.StatusForbidden, "POD_TOKEN_REQUIRED", err.Error())
-		return
-	case errors.Is(err, enroll.ErrPodTokenOffPod):
-		writeError(w, http.StatusBadRequest, "POD_TOKEN_OFF_POD", err.Error())
 		return
 	case err != nil:
 		writeInternal(w, "renew enrollment", err)

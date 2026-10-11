@@ -38,7 +38,6 @@ var (
 	// the one that enrolled it (Revoke).
 	ErrNotEnrollingCredential = errors.New("only the machine login that enrolled a pod may end its enrollment")
 	ErrPodTokenRequired       = errors.New("a pod enrollment's renewal must carry its projected token")
-	ErrPodTokenOffPod         = errors.New("only a pod enrollment's renewal carries a projected token")
 )
 
 type Credential struct {
@@ -465,13 +464,15 @@ func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, er
 }
 
 // Renew extends a live enrollment's lease by Lease. The caller's session proof says only that it
-// holds the enrollment's key; a pod enrollment's renewal also proves the pod is still running:
-// podToken is the pod's current projected service-account token, verified as Create verifies it
-// (verifyPodToken, before the row is locked) and required to name the pod UID (runtime_id) and
-// the service-account subject the enrollment recorded at Create, else ErrPodIdentity and the lease
-// stays where it was. A token copied out of a pod therefore renews nothing once it expires, and a
-// token from another pod or account never renews this one. A box or host renews on its proof
-// alone, and a pod token on its renewal is ErrPodTokenOffPod.
+// holds the enrollment's key; a pod enrollment's renewal proves only that its renewer holds an
+// unexpired token the issuer minted for that pod: no API-server call proves the pod still exists,
+// so a deleted pod's enrollment can outlive it for the token's remaining life (at most 3600
+// seconds) plus one lease. podToken is verified as Create verifies it (verifyPodToken, before the
+// row is locked) and required to name the pod UID (runtime_id) and the service-account subject the
+// enrollment recorded at Create, else ErrPodIdentity and the lease stays where it was. A token
+// copied out of a pod therefore renews nothing once it expires, and a token from another pod or
+// account never renews this one. A box or host renews on its proof alone; a token on either renewal
+// is ErrPodIdentity.
 //
 // Every pod enrollment Create makes starts with pod_token_renewed_at set, so a renewal without the
 // token is ErrPodTokenRequired from the first. Compatibility: the rows migration 0012 found, pod
@@ -516,7 +517,7 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 	}
 	switch {
 	case kind != "pod" && withToken:
-		return Renewal{}, ErrPodTokenOffPod
+		return Renewal{}, ErrPodIdentity
 	case kind == "pod" && withToken:
 		if claims.PodUID != renewal.RuntimeID || subject == nil || claims.Subject != *subject {
 			return Renewal{}, ErrPodIdentity

@@ -321,7 +321,8 @@ func TestOnlyTheLoginThatEnrolledAPodDeletesItsEnrollment(t *testing.T) {
 // pod's own current token it is 200; with no body it is 403 POD_TOKEN_REQUIRED, from the first
 // renewal of an enrollment this broker made. A pod enrollment that predates the token check (the
 // rows migration 0012 found) renews with no body, and the broker logs each such renewal, naming
-// it, until it first renews with its token. A box sending a pod token is 400 POD_TOKEN_OFF_POD.
+// it, until it first renews with its token. A box sending a pod token is 403
+// POD_IDENTITY_MISMATCH.
 func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 	ts := newTestServer(t)
 	cred, credKey := ts.mintServiceLauncherCredential(t)
@@ -348,8 +349,25 @@ func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 
 	t.Run("a pod's own token renews, and no token is refused from the first renewal", func(t *testing.T) {
 		id, podUID, key := enrollPod(t)
+		var records []slog.Record
+		previous := slog.Default()
+		slog.SetDefault(slog.New(capturingHandler{records: &records}))
+		t.Cleanup(func() { slog.SetDefault(previous) })
 		if status, code := renew(t, key, id, nil); status != http.StatusForbidden || code != "POD_TOKEN_REQUIRED" {
 			t.Fatalf("renew with no body, a pod this broker enrolled = %d %s, want 403 POD_TOKEN_REQUIRED", status, code)
+		}
+		slog.SetDefault(previous)
+		warned := 0
+		for _, r := range records {
+			attrs := map[string]string{}
+			r.Attrs(func(a slog.Attr) bool { attrs[a.Key] = a.Value.String(); return true })
+			if r.Level == slog.LevelWarn && r.Message == "broker: pod enrollment renewal refused: projected token required" &&
+				attrs["enrollment"] == id {
+				warned++
+			}
+		}
+		if warned != 1 {
+			t.Fatalf("WARN lines naming the token-less refusal's enrollment = %d of 1 (%d records)", warned, len(records))
 		}
 		for name, token := range map[string]string{
 			"another pod's token":             ts.podToken(t, workerAccount, uuid.NewString()),
@@ -409,11 +427,8 @@ func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 			t.Fatalf("enroll the box = %d %s, want 201", status, body)
 		}
 		id := decode[wireEnrolled](t, body).EnrollmentID
-		if status, code := renew(t, key, id, map[string]any{"pod_token": ts.podToken(t, workerAccount, uuid.NewString())}); status != http.StatusBadRequest || code != "POD_TOKEN_OFF_POD" {
-			t.Fatalf("a box's renew carrying a pod token = %d %s, want 400 POD_TOKEN_OFF_POD", status, code)
-		}
-		if status, code := renew(t, key, id, nil); status != http.StatusOK {
-			t.Fatalf("a box's renew with no body = %d %s, want 200", status, code)
+		if status, code := renew(t, key, id, map[string]any{"pod_token": ts.podToken(t, workerAccount, uuid.NewString())}); status != http.StatusForbidden || code != "POD_IDENTITY_MISMATCH" {
+			t.Fatalf("a box's renew carrying a pod token = %d %s, want 403 POD_IDENTITY_MISMATCH", status, code)
 		}
 	})
 }
