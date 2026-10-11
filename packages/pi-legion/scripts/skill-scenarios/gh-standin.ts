@@ -1,14 +1,14 @@
 #!/usr/bin/env bun
-// Stand-in for `gh`, and for every `legion` subcommand that talks to GitHub, on a skill scenario's
-// PATH. Each call is recorded to $SKILL_SCENARIO_RUN/calls.jsonl (argv, the contents of any file or
-// stdin it hands GitHub a body through, its exit status, and the pull request body it kept, if
-// any), then answered from the first route in $SKILL_SCENARIO_RUN/fixtures.json whose regex matches
-// "<as> <argv...>". A call no route matches answers `gh: Not Found (HTTP 404)` and exits 1. Nothing
-// is sent anywhere. `--json a,b` picks fields and `--jq`/`-q` runs jq, as gh does. A pull request
-// body edit (`gh pr edit --body`, `--body-file`, or a PATCH through `gh api`) is kept: every route
-// answering with an object that has a `body` then answers with the new one, as GitHub's next read
-// would, and the call's record carries it as `body`.
-//   gh-standin.ts <gh|legion> <args...>
+// Stand-in for `gh` on a skill scenario's PATH. Each call is recorded to
+// $SKILL_SCENARIO_RUN/calls.jsonl (argv, the contents of any file or stdin it hands GitHub a body
+// through, its exit status, and the pull request body it kept, if any), then answered from the
+// first route in $SKILL_SCENARIO_RUN/fixtures.json whose regex matches "gh <argv...>". A call no
+// route matches answers `gh: Not Found (HTTP 404)` and exits 1. Nothing is sent anywhere.
+// `--json a,b` picks fields and `--jq`/`-q` runs jq, as gh does. A pull request body edit (`gh pr
+// edit --body`, `--body-file`, or a PATCH through `gh api`) is kept: every route answering with an
+// object that has a `body` then answers with the new one, as GitHub's next read would, and the
+// call's record carries it as `body`.
+//   gh-standin.ts gh <args...>
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { z } from "zod";
 

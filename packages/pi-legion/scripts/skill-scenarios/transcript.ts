@@ -5,9 +5,9 @@ import path from "node:path";
 import { z } from "zod";
 
 /** An Oh My Pi session transcript line: a message, whose assistant content holds each tool call
- * whole (`toolCall`: id, tool name, arguments) and whose tool results name the call they answer.
- * Its `tool_execution_start` entries keep only the first 200 characters of the arguments, so
- * nothing here reads them. */
+ * whole (`toolCall`: id, tool name, arguments) and whose tool results name the call they answer
+ * and whether the tool refused it (`isError`). Its `tool_execution_start` entries keep only the
+ * first 200 characters of the arguments, so nothing here reads them. */
 export const SessionEntry = z.looseObject({
   type: z.string().optional(),
   timestamp: z.string().optional(),
@@ -16,6 +16,7 @@ export const SessionEntry = z.looseObject({
       role: z.string().optional(),
       toolName: z.string().optional(),
       toolCallId: z.string().optional(),
+      isError: z.boolean().optional(),
       content: z
         .array(
           z.looseObject({

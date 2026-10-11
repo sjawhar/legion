@@ -51,6 +51,9 @@
 - `@sjawhar/pi-envoy` now bundles the `dispatch` command (LEGION-588) instead of registering
   native Dispatch tools. Its sibling `@sjawhar/pi-legion` declares daemon API contract 17, which
   makes the daemon's role prompts name that command; install both packages from the same commit.
+- The `dispatch` skill's "Following" and its asks reference say what reaches a session directly
+  besides its asks: a person's reply to a comment it started, and a person's new comment on a
+  document it wrote, which Dispatch now delivers to the document's writers (LEGION-681).
 
 - `legion.daemonApiVersion` is 13 (LEGION-583). Contract 13 adds an optional `push` bool to the
   claim form of `POST /legion/v1/grants`: the extension sends `push: true` only for a bash command

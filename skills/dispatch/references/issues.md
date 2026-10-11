@@ -23,7 +23,7 @@ last day, and no pull request moving on GitHub (an owner working there leaves no
 The order keeper sweeps those. Never write the status of an issue that carries the `legion`
 label, or of any issue under one: the Legion daemon writes those statuses. A status your session
 writes on the root of a tree Legion is running is set back and the tree's architect told who wrote
-it; only a person in the dashboard, or `legion status`, stops that tree. On an issue under one, a
+it; only a person in the dashboard, the controller's `set_status`, or the operator stops that tree. On an issue under one, a
 status that takes it out of the flow parks that issue and stops its workers.
 
 One agent keeps the backlog's order against those priorities. Setting an

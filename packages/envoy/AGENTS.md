@@ -37,7 +37,7 @@ events to the right session.
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
-| Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves it as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`); `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once |
+| Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, its clock `?at=` or now; `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
@@ -336,6 +336,18 @@ to the document: settlement weighs each such answer and leaves out the ones the 
 room for (`withholdAnswers`). A joined
 operation never writes the room: it runs on the transaction's fork of the room's document
 (`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
+A document no room holds is forked from the store (`coldFork`) and loads no room until the
+committed write is published, so a cold edit holds one copy of the document rather than a room
+beside its fork; an upload's version on such a fork takes out the stored updates through the head
+that read loaded and no in-flight credit. A browser's room load takes no lock the write holds, so
+a room that loads while `coldFork` reads the store is forked from instead and the stored copy is
+dropped undecoded, and one that loads later is forked from at the write's next operation. Every
+mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading
+its own; `applyLive` lets that tree go before the one check that decodes a second copy of the
+state (`refuseUndecodable`); and a write drops its fork and rendering once it commits, before its
+publish loads the room (`releaseFork`), since a pooled connection's context can keep the write
+reachable long after it answered (LEGION-504). The `nodeToken` hash streams the token's encoding
+(`pmdoc.WriteTokenJSON`) rather than holding it whole.
 The handler ends the transaction with
 `ledger.Commit`, which records each settlement credit with the document content and takes each
 version's authors back out of that record, commits, credits the writes' actor to their rooms,
@@ -1928,14 +1940,26 @@ the synchronous listener call records the sent or failed attempt instead of blin
   notifying comment-thread or message-reply event without an `ask_id` keeps the author routes:
   a comment reply's
   thread-root author and its direct parent author when different; a message reply's direct parent
-  author; and, for a bare resolve or reopen, the resolved comment's own root author. An author
-  route is skipped for a human author and for a session replying to its own thread.
+  author; for a bare resolve or reopen, the resolved comment's own root author; and for a new
+  comment on a document (no `reply_to`, no `ask_id`) and its edit, every session the document
+  credits - the one that created it (`artifacts.created_by`) and every one a version lists
+  (`artifact_versions.authors`), read in one query (`loadDocumentSessionAuthors`) - so a person's
+  comment on a passage, on a whole document or as a suggestion reaches the agent that wrote the
+  document. That document is the anchor's (`anchor.artifact_id`) for a comment on a passage of an
+  issue's document, and the event's own for a project document; a comment on an issue's
+  conversation names no document and reaches no author. An author route is skipped for a human
+  author, who has no topic, for the event's own actor, so a session commenting on a document it
+  wrote is never told of its own comment, and for a session the comment's mentions already reach
+  (`suppressed_authors`: on a new comment every session a mention resolved to, so a mentioned
+  writer hears the comment once; on a reply only the thread's root author when mentioned). An
+  agent's comment notifies nobody (`notify` is false), so it takes no author route at all.
   `ask.follower_added` and `ask.follower_removed` also route directly to the session they name,
   since a newly added follower is not subscribed to the issue topic by default.
 - Dispatch document events use `notifications.dispatch.document.<PROJECT>.<slug>.<type>` and
   are retained in JetStream. Consumers subscribe or tail that document topic directly; a document
   has no delivery route, so the same author routes above are the only way an involved session
-  learns about a human reply, resolution, reopening, or edit on its ask or comment thread.
+  learns about a human reply, resolution, reopening, or edit on its ask or comment thread, or a
+  human's new comment on a document it wrote.
 - Dispatch project events use `notifications.dispatch.project.<PROJECT>.<type>` and are retained in JetStream. They have no issue route; project, repository-setting, and user-interface state consumers refresh from the event stream.
 - Direct agent topics use `notifications.agent.<session_id>`.
 - Role topics use `notifications.role.<role>` and are normally published to,
@@ -1972,7 +1996,9 @@ credential, runtime id and slot: `POST /v1/enrollments` takes an optional pod-on
 same way) naming one of several independent identities in one pod. The launcher whose proof
 authenticates the enrollment chooses the slot; a session's proof cannot enroll anything
 (`401 LAUNCHER_INVALID`). So each slot of a pod holds its own key, lease, requests and grants,
-while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
+while a pod's `runtime_id` stays the pod UID its token proves. A pod token past its expiry is
+`403 POD_TOKEN_EXPIRED`, naming that expiry, and any other token that does not prove the pod is
+`403 POD_IDENTITY_MISMATCH`. Omitted or `""` is the runtime's
 one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
 ALREADY_ENROLLED`, and the policy never sees the slot: a pod is a requester with no operator, whose

@@ -24,11 +24,13 @@ type Scheduling struct {
 	PriorityClass string
 }
 
-// Tools are absolute paths inside the worker image. GH, Git, and JJ reach the agent as
-// LEGION_GH_PATH, LEGION_GIT_PATH, and LEGION_JJ_PATH; Legion is the `legion` every container
-// runs (/opt/legion/bin/legion), whose directory also leads the pod's PATH. AgentSecrets is
-// the `agent-secrets` client (/opt/legion/bin/agent-secrets), which the shim runs only for a
-// pod the runtime enrolls with the secrets broker (Options.AgentSecrets).
+// Tools are absolute paths inside the worker image. Legion is the `legion` every container runs
+// (/opt/legion/bin/legion), whose directory also leads the pod's PATH. AgentSecrets is the
+// `agent-secrets` client (/opt/legion/bin/agent-secrets), which the shim runs only for a pod the
+// runtime enrolls with the secrets broker (Options.AgentSecrets). GH, Git, and JJ reach no agent: a
+// tree agent's gh, git and jj are the ones its PATH resolves in the image, and its credential is
+// the gh files under GH_CONFIG_DIR, so the three serve only CheckPod's refusal of an operator's
+// mount at, under, or above a path the image owns (operatorpod.go).
 type Tools struct{ GH, Git, JJ, Legion, AgentSecrets string }
 
 // Pod is what the operator adds to every pod Legion runs, the image probe's included
@@ -147,6 +149,14 @@ type Options struct {
 	// AdoptTimeout bounds a working-copy adoption (slow_command_timeout_seconds).
 	AdoptTimeout time.Duration
 	Tokens       ProvisionTokens
+	// GitHubCredential is the daemon's function for a role's gh files
+	// (runtime.GitHubCredential): hosts.yml and config.yml rendered from the role's App token. It
+	// is called for every launcher role when the pod's role Secrets are written
+	// (writeLauncherSecrets), and again for each by the refresher (refreshGitHubCredentials), which
+	// rewrites the Secret when the render changed: every workflow role of an issue pod and the
+	// controller's, which acts as the review App. Required: configure refuses nil as it refuses a
+	// nil Tokens.
+	GitHubCredential runtime.GitHubCredential
 	// Conns is the worker stream listener: Suspend's and Release's shutdown frames, and
 	// AdoptWorkingCopy, go through it.
 	Conns runtime.Conns

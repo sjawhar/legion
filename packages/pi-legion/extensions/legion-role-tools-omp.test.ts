@@ -11,14 +11,13 @@ import {
   toolResultsIn,
 } from "@legion/pi-shared/test/omp-harness";
 
-// Acceptance 1 of LEGION-630 on the real Oh My Pi: no Legion role is refused a tool. A root
-// architect runs `jj log` and reads `/proc/self/cgroup`; it, a reviewer and a merger each write,
-// read and `edit` a scratch file in the issue workspace, and every result reaches the model as a
-// success. The one rule the tool_call hook keeps (extensions/legion.ts, LEGION-45) is the control
-// that proves the hook is live in each pane: `jj undo` is refused with the reason that every
-// Legion issue workspace shares the jj operation log. Only the real binary shows how the host
-// turns a hook's `block` into the tool result the model sees, and that its own tools (bash,
-// write, read, the hashline edit) run unrefused under the extension.
+// Acceptance 1 of LEGION-630, and LEGION-631's deletion of the tool_call hook, on the real Oh My
+// Pi: no Legion role is refused a tool, and nothing a pane runs is refused. A root architect runs
+// `jj log` and reads `/proc/self/cgroup`; it, a reviewer and a merger each write, read and `edit`
+// a scratch file in the issue workspace, then run `jj undo --help` — the command the deleted
+// operation-log rule refused — and every result reaches the model as a success, the last one
+// jj's own usage text. Only the real binary shows that its own tools (bash, write, read, the
+// hashline edit) run unrefused under the extension.
 // LEGION_TEST_OMP names the binary: the fork pin in the repository's .omp-pin, which CI's
 // pi-legion job installs (.github/actions/install-omp) before its `bun test` runs this file; on
 // the devbox, `mise where <pin>`/bin/omp. A run without one skips, except on GitHub Actions,
@@ -79,8 +78,8 @@ async function toolsPane(
       },
       prepare: async ({ workspace, bin }) => {
         // The pane's PATH is the harness's fixed one plus `bin`, and CI's jj lives in ~/.local/bin
-        // (.github/actions/install-jj): the jj this test process finds is linked beside the
-        // stand-in `legion`, so the pane's `jj log` runs the one that made its workspace.
+        // (.github/actions/install-jj): the jj this test process finds is linked into `bin`, so
+        // the pane's `jj log` runs the one that made its workspace.
         const jj = Bun.which("jj");
         if (jj === null) throw new Error("jj is not on PATH");
         await symlink(jj, path.join(bin, "jj"));
@@ -98,7 +97,8 @@ function call(name: string, input: Record<string, unknown>): Block {
 }
 
 /** The turns every pane runs, one tool call each: write, read and edit the scratch file, then the
- * `jj undo` control, then the settling reply. Paths are relative to the workspace, the pane's cwd. */
+ * `jj undo --help` control, then the settling reply. Paths are relative to the workspace, the
+ * pane's cwd. */
 const SCRATCH_TURNS: readonly Reply[] = [
   [call("write", { path: "scratch.txt", content: "first line\n" })],
   [call("read", { path: "scratch.txt" })],
@@ -110,7 +110,7 @@ const SCRATCH_TURNS: readonly Reply[] = [
     const header = read.text.split("\n")[0] ?? "";
     return [call("edit", { input: `${header}\nPUT 1.=1:\n+edited line` })];
   },
-  [call("bash", { command: 'jj -R "$LEGION_WORKSPACE" undo' })],
+  [call("bash", { command: "jj undo --help" })],
   // The phase-stall follow-up (src/phase-stall.ts) sends a phase worker whose run settles
   // without a handoff one more turn, unless its last reply starts WAITING: so the settling reply
   // does, and the run ends on the scripted turns alone.
@@ -121,27 +121,24 @@ const SCRATCH_TURNS: readonly Reply[] = [
 const REFUSALS = ["block", "refused"];
 
 /**
- * Asserts the pane's `count` tool results: every one before the control is a success that names
- * no refusal, the control (the last) is the operation-log refusal the model saw, the edit landed
- * on disk, and no handoff ran. Returns the results for the case's own assertions.
+ * Asserts the pane's `count` tool results: every one is a success that names no refusal, the
+ * control (the last) is jj's own usage text for `jj undo`, and the edit landed on disk. Returns
+ * the results for the case's own assertions.
  */
-async function expectOnlyControlRefused(pane: LegionPane, count: number): Promise<ToolResult[]> {
+async function expectEverySucceeded(pane: LegionPane, count: number): Promise<ToolResult[]> {
   const results = pane.toolResults();
   expect(results).toHaveLength(count);
-  for (const result of results.slice(0, -1)) {
+  for (const result of results) {
     expect(result.is_error).toBe(false);
     for (const refusal of REFUSALS) expect(result.text).not.toContain(refusal);
   }
-  const control = results.at(-1);
-  expect(control?.is_error).toBe(true);
-  expect(control?.text).toContain("every Legion issue workspace shares");
+  expect(results.at(-1)?.text).toContain("Usage: jj undo");
   expect(await readFile(path.join(pane.workspace, "scratch.txt"), "utf8")).toBe("edited line\n");
-  expect((await pane.legionLog()).filter((line) => line.startsWith("handoff"))).toEqual([]);
   return results;
 }
 
 test.skipIf(omp === undefined && !onActions)(
-  "a root architect runs jj log, reads /proc/self/cgroup, and writes, reads and edits a file; only jj undo is refused",
+  "a root architect runs jj log, reads /proc/self/cgroup, and writes, reads and edits a file; jj undo --help runs",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
     const pane = await toolsPane(omp, { role: "architect", root: true }, [
@@ -149,7 +146,7 @@ test.skipIf(omp === undefined && !onActions)(
       [call("bash", { command: "cat /proc/self/cgroup" })],
       ...SCRATCH_TURNS,
     ]);
-    const [jjLog, cgroup] = await expectOnlyControlRefused(pane, 6);
+    const [jjLog, cgroup] = await expectEverySucceeded(pane, 6);
     // The commit the test described, so the log is the workspace's and not an error's text.
     expect(jjLog?.text).toContain("role tools scratch");
     // A cgroup line: `hierarchy:controllers:path`, under either cgroup version.
@@ -159,21 +156,21 @@ test.skipIf(omp === undefined && !onActions)(
 );
 
 test.skipIf(omp === undefined && !onActions)(
-  "a reviewer writes, reads and edits a file; only jj undo is refused",
+  "a reviewer writes, reads and edits a file; jj undo --help runs",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
     const pane = await toolsPane(omp, { role: "reviewer", root: false }, SCRATCH_TURNS);
-    await expectOnlyControlRefused(pane, 4);
+    await expectEverySucceeded(pane, 4);
   },
   120_000
 );
 
 test.skipIf(omp === undefined && !onActions)(
-  "a merger writes, reads and edits a file; only jj undo is refused",
+  "a merger writes, reads and edits a file; jj undo --help runs",
   async () => {
     if (omp === undefined) throw new Error("LEGION_TEST_OMP is unset on GitHub Actions");
     const pane = await toolsPane(omp, { role: "merger", root: false }, SCRATCH_TURNS);
-    await expectOnlyControlRefused(pane, 4);
+    await expectEverySucceeded(pane, 4);
   },
   120_000
 );

@@ -41,6 +41,8 @@ const (
 	TypeHello2                       = "hello2"
 	TypeAgentSecretsEnrollment       = "agent-secrets-enrollment"
 	TypeAgentSecretsEnrollmentResult = "agent-secrets-enrollment-result"
+	TypeAgentSecretsToken            = "agent-secrets-token"
+	TypeAgentSecretsTokenResult      = "agent-secrets-token-result"
 	TypeLauncherHello                = "launcher_hello"
 	TypeLauncherHelloAck             = "launcher_hello_ack"
 	TypeLauncherState                = "launcher_state"
@@ -86,7 +88,8 @@ type Hello struct {
 // AgentSecretsHello is the pod's session identity as the shim reports it: the base64url SHA-256
 // JWK thumbprint of the P-256 key `agent-secrets keygen` wrote into the pod's key directory, and
 // the projected service-account token for the broker's audience, read from its mount at the
-// hello. The daemon relays both to the broker and keeps neither past the enrollment.
+// hello. The daemon relays both to the broker and keeps neither past the enrollment; it asks for
+// the token again (AgentSecretsToken) when the hello's would expire before it enrolls.
 type AgentSecretsHello struct {
 	Thumbprint string `json:"thumbprint"`
 	PodToken   string `json:"podToken"`
@@ -113,6 +116,23 @@ type AgentSecretsEnrollmentResult struct {
 	ID    string `json:"id"`
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+}
+
+// AgentSecretsToken asks the shim to read its projected token again: the kubelet rewrites the
+// file before the token expires, and a token read at the hello can expire before the daemon
+// enrolls with it. The shim answers AgentSecretsTokenResult with the same ID. A shim built before
+// this frame forwards it to OMP, which answers it as an unknown command.
+type AgentSecretsToken struct {
+	ID string `json:"id"`
+}
+
+// AgentSecretsTokenResult answers AgentSecretsToken: the token as the shim just read it, or why it
+// could not.
+type AgentSecretsTokenResult struct {
+	ID       string `json:"id"`
+	OK       bool   `json:"ok"`
+	PodToken string `json:"podToken,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 // LauncherHello authenticates a role launcher independently from its child shim. The daemon
@@ -305,6 +325,8 @@ func (r Raw) FrameType() string                        { return r.Type }
 func (Hello2) FrameType() string                       { return TypeHello2 }
 func (AgentSecretsEnrollment) FrameType() string       { return TypeAgentSecretsEnrollment }
 func (AgentSecretsEnrollmentResult) FrameType() string { return TypeAgentSecretsEnrollmentResult }
+func (AgentSecretsToken) FrameType() string            { return TypeAgentSecretsToken }
+func (AgentSecretsTokenResult) FrameType() string      { return TypeAgentSecretsTokenResult }
 func (LauncherHello) FrameType() string                { return TypeLauncherHello }
 func (LauncherHelloAck) FrameType() string             { return TypeLauncherHelloAck }
 func (LauncherState) FrameType() string                { return TypeLauncherState }
@@ -384,6 +406,16 @@ func (f AgentSecretsEnrollment) MarshalJSON() ([]byte, error) {
 func (f AgentSecretsEnrollmentResult) MarshalJSON() ([]byte, error) {
 	type plain AgentSecretsEnrollmentResult
 	return marshalFrame(TypeAgentSecretsEnrollmentResult, plain(f))
+}
+
+func (f AgentSecretsToken) MarshalJSON() ([]byte, error) {
+	type plain AgentSecretsToken
+	return marshalFrame(TypeAgentSecretsToken, plain(f))
+}
+
+func (f AgentSecretsTokenResult) MarshalJSON() ([]byte, error) {
+	type plain AgentSecretsTokenResult
+	return marshalFrame(TypeAgentSecretsTokenResult, plain(f))
 }
 
 func (f LauncherHello) MarshalJSON() ([]byte, error) {
@@ -526,6 +558,14 @@ func (f AgentSecretsEnrollment) Validate() error {
 	return nil
 }
 
+// Validate refuses a token request with no request id: the daemon is its only sender.
+func (f AgentSecretsToken) Validate() error {
+	if f.ID == "" {
+		return fmt.Errorf("%w: agent-secrets-token carries no id", ErrMalformedFrame)
+	}
+	return nil
+}
+
 // Decode reads one line as a frame. A type this package models decodes to its own Go type; any
 // other object — including one with no type at all — decodes to Raw, because the shim is a
 // bridge and a frame it does not understand still has somewhere to go. Only a line that is not a
@@ -576,6 +616,10 @@ func Decode(line []byte) (Frame, error) {
 		return decodeInto[AgentSecretsEnrollment](trimmed)
 	case TypeAgentSecretsEnrollmentResult:
 		return decodeInto[AgentSecretsEnrollmentResult](trimmed)
+	case TypeAgentSecretsToken:
+		return decodeInto[AgentSecretsToken](trimmed)
+	case TypeAgentSecretsTokenResult:
+		return decodeInto[AgentSecretsTokenResult](trimmed)
 	case TypeLauncherHello:
 		return decodeInto[LauncherHello](trimmed)
 	case TypeLauncherHelloAck:

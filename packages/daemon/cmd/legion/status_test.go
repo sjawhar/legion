@@ -16,13 +16,17 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/api"
 )
 
-func TestStatusIssueRequiresControllerGrant(t *testing.T) {
-	t.Setenv("LEGION_GRANT", "")
-	t.Setenv("LEGION_GRANT_FILE", "")
-	var out, errb bytes.Buffer
-	code := run(context.Background(), []string{"legion", "status", "LEGION-208", "todo"}, &out, &errb)
-	if code != 1 || !strings.Contains(errb.String(), "LEGION_GRANT_FILE") {
-		t.Fatalf("status issue = %d, stderr %q; want missing controller grant refusal", code, errb.String())
+// `legion status <issue> <status>` is the operator's: without --operator-token-file it is a usage
+// error naming the flag, and the daemon is never reached — no grant is read from the environment.
+func TestStatusIssueRequiresTheOperatorTokenFile(t *testing.T) {
+	d := newControllerDaemon(t)
+	t.Setenv("LEGION_DAEMON_URL", d.url)
+	code, out, errb := issueStatus(t, "LEGION-208", "todo")
+	if want := "legion status: --operator-token-file is required"; code != 2 || out != "" || !strings.Contains(errb, want) {
+		t.Fatalf("legion status = %d, stdout %q, stderr %q; want a usage error saying %q", code, out, errb, want)
+	}
+	if n := len(d.requests()); n != 0 {
+		t.Fatalf("%d requests reached the daemon, want none", n)
 	}
 }
 
@@ -42,11 +46,10 @@ func issueStatus(t *testing.T, args ...string) (int, string, string) {
 
 // From an operator shell, the operator's bearer buys a controller grant through the grants
 // route's operator form, and the grant sets the status: two requests, the bearer on the first
-// only. A grant file in the environment is not read.
+// only.
 func TestStatusWithTheOperatorTokenFileMintsAGrantAndSetsTheStatus(t *testing.T) {
 	d := newControllerDaemon(t)
 	tokenFile := writeFile(t, "operator-token", controllerOperatorToken+"\n")
-	t.Setenv("LEGION_GRANT_FILE", filepath.Join(t.TempDir(), "absent"))
 	t.Setenv("LEGION_DAEMON_URL", "http://127.0.0.1:1")
 
 	code, out, errb := issueStatus(t, "LEGSMOKE-3", "backlog", "--operator-token-file", tokenFile, "--port", strconv.Itoa(d.port))
@@ -141,49 +144,13 @@ func TestStatusRefusesAGroupReadableOperatorTokenFile(t *testing.T) {
 	}
 }
 
-// Inside a controller session the grant file the extension wrote serves, at the daemon the
-// session names; no bearer is sent.
-func TestStatusInAControllerSessionPresentsTheGrantFile(t *testing.T) {
-	d := newControllerDaemon(t)
-	// The grant the extension would have minted for this command.
-	var minted api.GrantResponse
-	request, err := http.NewRequest(http.MethodPost, d.url+"/legion/v1/grants", strings.NewReader("{}"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	request.Header.Set("Authorization", "Bearer "+controllerOperatorToken)
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer response.Body.Close()
-	if err := json.NewDecoder(response.Body).Decode(&minted); err != nil {
-		t.Fatal(err)
-	}
-	grantFile := filepath.Join(t.TempDir(), "legion-demo-controller-grant")
-	if err := os.WriteFile(grantFile, []byte(minted.GrantID+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("LEGION_GRANT_FILE", grantFile)
-	t.Setenv("LEGION_DAEMON_URL", d.url)
-
-	code, _, errb := issueStatus(t, "LEGSMOKE-4", "todo")
-	if code != 0 {
-		t.Fatalf("legion status = %d, stderr %q", code, errb)
-	}
-	requests := d.requests()
-	if last := requests[len(requests)-1]; last.path != "/legion/v1/issues/status" || last.authorization != "" {
-		t.Fatalf("last request = %s auth %q", last.path, last.authorization)
-	}
-	if got := d.dispatch.writes; !slices.Equal(got, []string{"LEGSMOKE-4=todo"}) {
-		t.Fatalf("Dispatch was asked for %v, want LEGSMOKE-4=todo", got)
-	}
-}
-
+// Each usage error is its own, not the missing flag's: a status outside the three, a stray
+// argument, and a flag without its value are refused with exit 2 even with the token file given.
 func TestStatusIssueUsage(t *testing.T) {
+	tokenFile := writeFile(t, "operator-token", controllerOperatorToken+"\n")
 	for _, args := range [][]string{
-		{"LEGSMOKE-3", "done"},
-		{"LEGSMOKE-3", "backlog", "extra"},
+		{"LEGSMOKE-3", "done", "--operator-token-file", tokenFile},
+		{"LEGSMOKE-3", "backlog", "extra", "--operator-token-file", tokenFile},
 		{"LEGSMOKE-3", "backlog", "--operator-token-file"},
 	} {
 		code, _, errb := issueStatus(t, args...)

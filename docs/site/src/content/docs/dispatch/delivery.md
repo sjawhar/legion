@@ -1,14 +1,15 @@
 ---
 title: Delivery
-description: The Delivery page's timeline and measures, what each figure counts, the targets, and the measures route an agent reads.
+description: The Delivery page's timeline and measures, the Pipeline page's step timings, what each figure counts, the targets, and the routes an agent reads.
 sidebar:
   order: 7
 ---
 
 The **Delivery** page shows how work reaches production. A timeline of every merge, deploy and
 failed run sits under a panel of delivery measures. Both read the facts Dispatch stores from
-GitHub, and both follow the same window and filters. Until the deploy repository and its
-workflows are set in **Settings → Delivery timeline**, the page shows that form instead.
+GitHub, and both follow the same window and filters. The **Pipeline** page beside it shows how
+long each step of CI and the deploy takes, day by day. Until the deploy repository and its
+workflows are set in **Settings → Delivery timeline**, the Delivery page shows that form instead.
 
 ![The Delivery page's measures panel: six target cards over a strip of headline numbers](/legion/media/dispatch/delivery-measures.png)
 
@@ -78,3 +79,46 @@ timeline. The page and the route compute from the same stored facts on every req
 always agree. `flags_source` says whether recorded flags fed the change failure rate; `none`
 means no flags are recorded yet. The [HTTP API reference](/legion/dispatch/reference/api/) lists
 it with every other route.
+
+## Pipeline
+
+The **Pipeline** page (`/pipeline`, **Pipeline** in the sidebar under **Delivery**) shows how
+long each step between a pull request and production takes, and how often it succeeds, over the
+last seven UTC days. Today is the last day, drawn faded because it is not over. The page follows
+neither the Delivery page's window nor its filters.
+
+![The Pipeline page: six timing cards over the slowest-jobs and failing-jobs tables](/legion/media/dispatch/pipeline.png)
+
+Each run counts on the day it started, and each job on its run's day. Only a result that ended in
+success or failure is timed; a timed-out result is a failure. A cancelled run or job is counted
+beside the timed ones and kept out of the success rate, and anything else (skipped, still
+running) is not counted at all. Success is success over success plus failure. Times are wall
+clock; a step's median and 90th percentile are rounded to a tenth of a minute.
+
+- **PR CI**: runs of the pull-request checks workflow on a pull request (GitHub's
+  `pull_request` event; merge-queue runs are not counted), from the run's start to its
+  completion.
+- **Staging end-to-end gate**, **Deploy to staging** and **Deploy to production**: the deploy
+  workflow's jobs named in **Settings → Delivery timeline**, in its push runs on `main`. A run
+  started by hand, or on another branch, is not counted. The first two are optional settings; a
+  pipeline that names neither has no such card.
+- **Merge to production**: the delivery lead time, by the day each pull request merged. A pull
+  request still waiting has none yet. It is judged on the seven days' longest change: the target
+  is under 45 minutes for every change.
+- **PR open to merge**: every merged pull request, deployed or not, by the day it merged. It is
+  judged on the seven days' median: the target is a median under 60 minutes.
+
+**PR CI: slowest jobs** ranks the checks workflow's jobs by their seven-day median, slowest first,
+and shows five. A job needs 50 timed results in the seven days to be ranked, so a rarely run job
+cannot top the table on a handful of results. Only jobs of runs that ended in success or failure
+are counted.
+
+**PR CI: jobs that failed in the last 24 hours** lists every job that failed in a run completed in
+the last day, most failures first, with how many of its results there failed and a link to the run
+of its latest failure. A cancelled run's jobs are not counted, and neither is the roll-up job
+named in **Settings → Delivery timeline**, which only reports the other jobs' result and fails
+whenever any of them does, nor a notification or guard step.
+
+For agents, `GET /api/v1/delivery/pipeline` answers the same numbers. Its optional `at`
+(RFC 3339) names the day the seven days end on and the moment the failing jobs look back from;
+left out, it is now. Any signed-in person or agent token reads it.

@@ -14,9 +14,8 @@ lifecycle action. Every code or repository mutation is a phase worker's, which y
 than do, and the daemon starts every phase worker itself. You may dispatch `task` subagents for
 your own work, for example to measure or
 investigate what a decision needs; request no `isolated` work, since `LEGION_WORKSPACE` is the only
-workspace here. A subagent claims no Legion role and mints no grant of its own, so its GitHub reads
-and writes work only within 60 seconds of your own last credentialed call; code changes stay the
-phase workers'.
+workspace here. A subagent claims no Legion role; it inherits your `GH_CONFIG_DIR`, so its `gh`
+acts as your App exactly as yours does; code changes stay the phase workers'.
 
 ## Ownership
 
@@ -39,8 +38,8 @@ artifact), written in plain words for a reader who has not seen the code (`skill
 release under an open root gate, so its planner may already be reading it. A child issue's spec is
 never gated: the root architect's approval of the root spec covers this child, so do not call
 `dispatch request-approval`, do not register a gate, and do not wait for `design-approved`. During a
-live session, react only to delivered wakes; after revival, start from your issue record in
-`legion state`.
+live session, react only to delivered wakes; after revival, start from your issue record, the
+`legion` tool's `read_record`.
 
 Create children in coherent waves, release only the wave that should now begin with
 `release_children`, and adjust open children when closures change the plan. Park between

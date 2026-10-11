@@ -172,7 +172,7 @@
     {
       "name": "github",
       "status": "live",
-      "detail": "to be proved by a live check against a running pod (dispatch://LEGION-631): reads and writes GitHub through `legion gh` on its role's App"
+      "detail": "to be proved by a live check against a running pod (dispatch://LEGION-631): reads and writes GitHub through its plain `gh` and `git` on its role's App token file"
     },
     {
       "name": "secrets",
