@@ -66,4 +66,3 @@ func TestTheControllersPromptIsItsRolePartThenItsLaunchsPart(t *testing.T) {
 		})
 	}
 }
-
