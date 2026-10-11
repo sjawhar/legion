@@ -3,15 +3,15 @@
 // client is agent-secrets's own thin HTTP client for the broker routes it needs, as the broker's
 // HTTP API reference (https://sjawhar.github.io/legion/broker/reference/api/) defines them. Session routes
 // — everything but enrollment issuance/revocation and launcher-credential issuance — are signed
-// per call through a Signer (proofsource.go: an agent box or pod's own key, or a host session's
+// per call through a Signer (proofsource.go: an agent box or pod's own key, or a machine session's
 // agent-secrets-helper), producing exactly the Proof header internal/broker/proof.Verifier
 // expects. CreateRequest additionally needs a signed credential-request object (record.Sign)
 // embedded in its body, since the broker carries authorization_details and
 // reason inside that signed object rather than as plain top-level JSON fields; building it is
-// also a Signer responsibility (Signer.SignRequestObject), since a host session's key never
+// also a Signer responsibility (Signer.SignRequestObject), since a machine session's key never
 // leaves agent-secrets-helper.
 // Enrollment issuance/revocation and launcher-credential issuance are helper-socket operations
-// (see cmdEnrollHelper/cmdUnenrollHelper in main.go, cmdMachineLogin in machine.go, and
+// (see cmdEnrollHelper/cmdUnenrollHelper in enroll.go, cmdMachineLogin in machine.go, and
 // internal/broker/helper): no route here ever carries a bearer launcher token, and POST/GET
 // /v1/launcher-credentials still carry no credential at all (a launcher has none yet). The
 // operator routes (/v1/operator/*) are signed with a launcher proof the helper's sign-launcher op
@@ -136,6 +136,7 @@ type createRequestBody struct {
 	SessionID *string `json:"session_id"`
 }
 
+// CreateRequest builds and signs a credential-request object carrying one
 // agent_secret authorization_detail per requested name and lifetimeSeconds, the grant's lifetime
 // (nil for until the session ends) (Signer.SignRequestObject, audience == the broker's own base
 // URL), then calls POST /v1/requests with that object nested in the body and the outer call still

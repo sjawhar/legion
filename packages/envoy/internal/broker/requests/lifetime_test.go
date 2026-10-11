@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/policy"
+	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
@@ -102,6 +104,22 @@ func TestATTLGrantEndsAfterItsLifetime(t *testing.T) {
 	}
 }
 
+// beforeMigration13 moves request requestID (and its grant, when it has one) to before migration
+// 0013 was applied, as a broker of that release wrote it: it asked for no lifetime and recorded
+// the release's fixed 43200 seconds. The expiry is left as it was.
+func beforeMigration13(t *testing.T, m *Machine, requestID string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, statement := range []string{
+		`update requests set created_at = (select applied_at from broker_schema_migrations where version=13) - interval '1 hour' where id=$1`,
+		`update grants set created_at = (select applied_at from broker_schema_migrations where version=13) - interval '1 hour' where request_id=$1`,
+	} {
+		if _, err := m.Store.Pool.Exec(ctx, statement, requestID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 // TestANoTTLRequestReusesAnUnexpiredPreMigrationGrant pins the one rollout bridge: before
 // migration 0013, a no-TTL request recorded the former 12-hour default and its grant has an
 // expiry. A running session asking again without --ttl keeps that grant and its original expiry,
@@ -114,6 +132,7 @@ func TestANoTTLRequestReusesAnUnexpiredPreMigrationGrant(t *testing.T) {
 	if err != nil || old.GrantID == nil {
 		t.Fatalf("Create(pre-migration AUTO_TOKEN) = %+v, %v; want a grant", old, err)
 	}
+	beforeMigration13(t, m, old.ID)
 	var before time.Time
 	if err := m.Store.Pool.QueryRow(ctx, `select expires_at from grants where id=$1`, *old.GrantID).Scan(&before); err != nil {
 		t.Fatal(err)
@@ -129,6 +148,51 @@ func TestANoTTLRequestReusesAnUnexpiredPreMigrationGrant(t *testing.T) {
 	}
 	if !after.Equal(before) {
 		t.Fatalf("pre-migration grant expiry changed from %s to %s; want it left as approved", before, after)
+	}
+}
+
+// TestANoTTLRequestDoesNotReuseAPostMigration12HourGrant: the bridge reaches only grants written
+// before migration 0013. A grant asked for with --ttl 12h after the deploy records the same 43200
+// seconds, and is a lifetime that session chose; a request without --ttl is never handed it.
+func TestANoTTLRequestDoesNotReuseAPostMigration12HourGrant(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+
+	twelve, err := m.Create(ctx, enr, signRequestFor(t, m, key, 43200, "AUTO_TOKEN"), "")
+	if err != nil || twelve.GrantID == nil {
+		t.Fatalf("Create(AUTO_TOKEN --ttl 12h) = %+v, %v; want a grant", twelve, err)
+	}
+	fresh, err := m.Create(ctx, enr, signRequest(t, m, key, "no TTL", "AUTO_TOKEN"), "")
+	if err != nil || fresh.ID == twelve.ID || fresh.GrantID == nil || *fresh.GrantID == *twelve.GrantID || fresh.LifetimeSeconds != nil {
+		t.Fatalf("Create(no TTL) after a post-migration --ttl 12h grant = %+v, %v; want a new grant with no lifetime, not %s reused", fresh, err, twelve.ID)
+	}
+}
+
+// TestANoTTLRequestJoinsAPreMigrationPendingRequest: a request still pending at the deploy recorded
+// the old release's 43200 seconds. The same session asking again for the same names without
+// --ttl, as an older client's retry does, joins it rather than being refused REQUEST_PENDING; a
+// pending request written after the deploy with --ttl 12h is never joined by a request without one.
+func TestANoTTLRequestJoinsAPreMigrationPendingRequest(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+
+	old, err := m.Create(ctx, enr, signRequestFor(t, m, key, 43200, "DEEL_API_KEY"), "")
+	if err != nil || old.State != "pending" {
+		t.Fatalf("Create(pre-migration DEEL_API_KEY) = %+v, %v; want pending", old, err)
+	}
+	beforeMigration13(t, m, old.ID)
+	joined, err := m.Create(ctx, enr, signRequest(t, m, key, "no TTL after migration", "DEEL_API_KEY"), "")
+	if err != nil || joined.ID != old.ID || !joined.Coalesced {
+		t.Fatalf("Create(no TTL) beside a pre-migration pending request = %+v, %v; want request %s joined", joined, err, old.ID)
+	}
+
+	m2, enr2, key2, _ := newFixture(t)
+	twelve, err := m2.Create(ctx, enr2, signRequestFor(t, m2, key2, 43200, "DEEL_API_KEY"), "")
+	if err != nil || twelve.State != "pending" {
+		t.Fatalf("Create(DEEL_API_KEY --ttl 12h) = %+v, %v; want pending", twelve, err)
+	}
+	if refused, err := m2.Create(ctx, enr2, signRequest(t, m2, key2, "no TTL", "DEEL_API_KEY"), ""); !errors.Is(err, ErrRequestPending) {
+		t.Fatalf("Create(no TTL) beside a post-migration --ttl 12h pending request = %+v, %v; want ErrRequestPending", refused, err)
 	}
 }
 
@@ -150,6 +214,34 @@ func TestAPendingRequestWithAnotherLifetimeIsRefused(t *testing.T) {
 	var count int
 	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from requests where enrollment_id=$1 and state='pending'`, enr).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("pending requests = %d, %v; want one", count, err)
+	}
+}
+
+// TestARequestOverlappingAPendingOneIsRefused: one pending request holds each of its names for its
+// session, whatever lifetime either asks for. A superset of a pending request's names, and a
+// subset of them, each name the pending request instead of opening a second card for its approver.
+func TestARequestOverlappingAPendingOneIsRefused(t *testing.T) {
+	for name, tc := range map[string]struct{ pending, overlapping []string }{
+		"a superset of the pending names": {[]string{"DEEL_API_KEY"}, []string{"DEEL_API_KEY", "STRIPE_KEY"}},
+		"a subset of the pending names":   {[]string{"DEEL_API_KEY", "STRIPE_KEY"}, []string{"DEEL_API_KEY"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			m, enr, key, _ := newFixture(t)
+			retag(t, m, policytest.Secret("STRIPE_KEY", fixtureOperator, policy.TierHuman, "stripe-v1"))
+			ctx := context.Background()
+			first, err := m.Create(ctx, enr, signRequest(t, m, key, "first", tc.pending...), "")
+			if err != nil || first.State != "pending" {
+				t.Fatalf("Create(%v) = %+v, %v; want pending", tc.pending, first, err)
+			}
+			second, err := m.Create(ctx, enr, signRequest(t, m, key, "overlapping", tc.overlapping...), "")
+			if !errors.Is(err, ErrRequestPending) || !strings.Contains(err.Error(), first.ID) {
+				t.Fatalf("Create(%v) beside pending %v = %+v, %v; want ErrRequestPending naming %s", tc.overlapping, tc.pending, second, err, first.ID)
+			}
+			var count int
+			if err := m.Store.Pool.QueryRow(ctx, `select count(*) from requests where enrollment_id=$1 and state='pending'`, enr).Scan(&count); err != nil || count != 1 {
+				t.Fatalf("pending requests = %d, %v; want one", count, err)
+			}
+		})
 	}
 }
 

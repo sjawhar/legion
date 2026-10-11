@@ -22,7 +22,7 @@ import (
 
 // Request is the client's one line. Op is register, sign, sign-request, sign-launcher,
 // unregister, sessions, login, login-status, enroll-session-key or unenroll-session-key; an older
-// CLI's enroll-box and unenroll-box are answered as the last two (legacySessionKeyOps). A field
+// CLI's enroll-box and unenroll-box are answered as the last two (oldCLISessionKeyOps). A field
 // the helper does not read is ignored, so that CLI's "kind" costs nothing.
 type Request struct {
 	Op              string   `json:"op"`

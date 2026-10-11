@@ -199,11 +199,15 @@ reason of at most 400 characters. The broker evaluates every name
   `MIXED_APPROVERS`; request them separately.
 - When every name is automatic, the request is granted at once.
 - Otherwise it is **pending**, and the broker writes a credential-request record for the approver to
-  decide. An identical request from the same session while one is pending joins it rather than
-  asking twice. The broker's answer names the approver the record names, and `agent-secrets`
-  prints it, so the agent can tell that person. The record fixes its approver when the request is
-  made, and the request stays in that person's Inbox after the secret's tags change, though they
-  may then be unable to approve it ([what an owner change does](#approvals)).
+  decide. A session has at most one pending request for each secret: an identical request from the
+  same session while one is pending (the same names and the same lifetime, or none) joins it
+  rather than asking twice, and any other request naming one of its secrets, with or without
+  `--ttl`, is refused `REQUEST_PENDING`, naming the pending request. The session waits for that
+  request to be decided, or cancels it (`agent-secrets cancel`) and asks again. The broker's answer
+  names the approver the record names, and `agent-secrets` prints it, so the agent can tell that
+  person. The record fixes its approver when the request is made, and the request stays in that
+  person's Inbox after the secret's tags change, though they may then be unable to approve it
+  ([what an owner change does](#approvals)).
 
 A granted request yields a **grant**: the session's right to read those values until the grant
 ends. A grant lasts until its session ends, unless the request asks for a shorter lifetime

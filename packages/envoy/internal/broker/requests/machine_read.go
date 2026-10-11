@@ -8,12 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5"
 	"slices"
 	"sort"
-	"strconv"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -255,17 +255,20 @@ type pendingRequestRow struct {
 	ID       string
 	Lifetime *int
 	Names    []string
+	// Legacy is a request written before migration 0013 (writtenBeforeMigration13), which asked
+	// for no lifetime and recorded the release's fixed one.
+	Legacy bool
 }
 
 // pendingRequest returns the oldest pending request for any name sorted names shares. Create holds
 // every matching name's advisory lock before it asks, so a concurrent request cannot pass the
 // lookup and open another record for that name.
 func pendingRequest(ctx context.Context, q querier, enrollmentID string, sorted []string) (pendingRequestRow, error) {
-	rows, err := q.Query(ctx, `select r.id, r.lifetime_seconds, array_agg(s.name order by s.name)
+	rows, err := q.Query(ctx, `select r.id, r.lifetime_seconds, array_agg(s.name order by s.name), `+writtenBeforeMigration13("r")+`
 		from requests r join request_secrets s on s.request_id=r.id
 		where r.enrollment_id=$1 and r.state='pending' and exists (
 			select 1 from request_secrets matching where matching.request_id=r.id and matching.name = any($2)
-		) group by r.id, r.lifetime_seconds order by min(r.created_at)`, enrollmentID, sorted)
+		) group by r.id, r.lifetime_seconds, r.created_at order by min(r.created_at)`, enrollmentID, sorted)
 	if err != nil {
 		return pendingRequestRow{}, err
 	}
@@ -274,10 +277,17 @@ func pendingRequest(ctx context.Context, q querier, enrollmentID string, sorted 
 		return pendingRequestRow{}, rows.Err()
 	}
 	var pending pendingRequestRow
-	if err := rows.Scan(&pending.ID, &pending.Lifetime, &pending.Names); err != nil {
+	if err := rows.Scan(&pending.ID, &pending.Lifetime, &pending.Names, &pending.Legacy); err != nil {
 		return pendingRequestRow{}, err
 	}
 	return pending, rows.Err()
+}
+
+// joins answers whether a request asking for lifetime joins this pending request: the same
+// lifetime, or, for a request asking for none, one written before migration 0013, which asked for
+// none and recorded the release's fixed lifetime.
+func (p pendingRequestRow) joins(lifetime *int) bool {
+	return sameLifetime(p.Lifetime, lifetime) || (lifetime == nil && p.Legacy)
 }
 
 func sameLifetime(a, b *int) bool {
@@ -317,15 +327,24 @@ func matchingRequest(ctx context.Context, q querier, query, enrollmentID string,
 	return "", rows.Err()
 }
 
-// legacyDefaultGrantLifetimeSeconds was every grant's fixed lifetime before migration 0013.
-// A request naming no lifetime keeps one unexpired grant from that release as it was approved,
-// including its expiry, rather than prompting again. This bridge goes 12 hours after deployment:
-// no such grant remains unexpired then.
-const legacyDefaultGrantLifetimeSeconds = 43200
+// writtenBeforeMigration13 is the SQL predicate that request alias was written before migration
+// 0013 (grants until the session ends) was applied, recording that release's fixed 43200-second
+// lifetime although it asked for none. A request without a lifetime takes such a request's live
+// grant, keeping its expiry, and joins it while it is pending, so a session running across the
+// deploy neither asks its approver again nor is refused. The request's own time decides, since it
+// is the row that recorded the old default: a request pending at the deploy and approved after it
+// is covered too. No request written after the deploy matches, so a later --ttl 12h request is
+// never taken for one, and the bridge ends on its own, with nothing to remove: such a request
+// waits at most 12 hours and its grant lasts 12 more, so none matches a day after the deploy.
+func writtenBeforeMigration13(alias string) string {
+	return "(" + alias + ".lifetime_seconds = 43200 and " + alias +
+		".created_at < (select applied_at from broker_schema_migrations where version = 13))"
+}
 
 // reuseLiveGrant answers Create's own "request (or reuse the live grant)" contract: an exact
 // name-set match (never a subset or superset — the same matching rule coalescing uses for pending
-// requests), asking for the same lifetime, against a still-live grant (not revoked, not expired)
+// requests), asking for the same lifetime (or, asking for none, a request written before
+// migration 0013: writtenBeforeMigration13), against a still-live grant (not revoked, not expired)
 // under this enrollment is returned as-is, with no new request row and no new record, as long as
 // the policy it was decided under is still current and no granted name is a service's
 // (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts), or the current
@@ -339,8 +358,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 		join request_secrets s on s.request_id=r.id
 		join grants g on g.request_id=r.id
 		where r.enrollment_id=$1 and (
-			r.lifetime_seconds is not distinct from $2
-			or ($2 is null and r.lifetime_seconds=`+strconv.Itoa(legacyDefaultGrantLifetimeSeconds)+` and g.expires_at is not null)
+			r.lifetime_seconds is not distinct from $2 or ($2::int is null and `+writtenBeforeMigration13("r")+`)
 		) and r.state='granted' and g.revoked_at is null and `+grantUnexpired("g")+`
 		group by r.id`, enr.ID, lifetime, sortedCopy(names))
 	if err != nil || id == "" {

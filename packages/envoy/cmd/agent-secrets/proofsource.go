@@ -5,7 +5,7 @@
 // authorization_details and reason inside
 // that signed object, not plain top-level fields). An agent box or pod has its own key on tmpfs
 // under AGENT_SECRETS_KEY_DIR and signs both directly for its own enrollment id (fileSigner); a
-// host session has no key of its own and asks
+// machine session has no key of its own and asks
 // agent-secrets-helper, over AGENT_SECRETS_HELPER_SOCK, which signs only for processes that
 // descend from a registered session root (helperSigner) — the session's key never leaves the
 // helper process, so building the request object is also the helper's job in that mode.
@@ -61,7 +61,7 @@ func (f *fileSigner) SignRequestObject(audience string, names []string, reason s
 }
 
 // helperSigner asks agent-secrets-helper, over its unix socket, to sign for this process's
-// registered host session. The helper resolves the session (and its enrollment id) from the
+// registered machine session. The helper resolves the session (and its enrollment id) from the
 // caller's own pid — nothing here names an enrollment id at all. audience is ignored: the
 // helper signs a request object against its own configured broker URL, not a value this
 // (untrusted, merely locally-scoped) peer supplies — the same trust boundary the Sign method
@@ -71,7 +71,7 @@ type helperSigner struct {
 	sock string
 }
 
-// errNoCredential is what a host session gets from a helper that holds no launcher credential
+// errNoCredential is what a machine session gets from a helper that holds no launcher credential
 // (NO_CREDENTIAL): after every reboot or helper restart, until the operator logs the machine in,
 // the helper enrolls no one, so the session has no broker identity. identity prints it, and
 // reportError prints it the same way for every command that meets it.

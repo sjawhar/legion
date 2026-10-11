@@ -139,7 +139,7 @@ func TestAnOperatorCredentialEnrollsItsOwnOperator(t *testing.T) {
 }
 
 // TestOperatorCredentialRefusesPodEnrollment is the regression for review finding 2: an operator
-// credential enrols boxes and host sessions only, per Create's doc comment. Matching operator and
+// credential enrols boxes and machine sessions only, per Create's doc comment. Matching operator and
 // an otherwise-valid pod token must still be refused for kind: pod.
 func TestOperatorCredentialRefusesPodEnrollment(t *testing.T) {
 	svc := newService(t)

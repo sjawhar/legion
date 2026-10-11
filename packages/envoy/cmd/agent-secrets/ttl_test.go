@@ -14,10 +14,13 @@ import (
 
 // ttlBroker is a fake broker for --ttl: POST /v1/requests verifies the signed request object
 // against its own URL, records the lifetime it signed, and answers by the first secret's name —
-// and OLD_APPROVED_GRANTED answer as a broker from before lifetime_seconds (no such field).
-// OLD_APPROVED_GRANTED is an existing human-approved grant reused by that broker; the client must
-// leave it alone when it refuses the mismatched lifetime. OTHER_GRANTED names a lifetime of its
-// own. It serves values for every grant, and counts each grant revoke and request cancel.
+// TTL_GRANTED and TTL_PENDING echo the lifetime, while OLD_GRANTED, OLD_PENDING, OLD_COALESCED,
+// OLD_DENIED and OLD_APPROVED_GRANTED answer as a broker from before lifetime_seconds (no such
+// field). OLD_APPROVED_GRANTED is an existing human-approved grant reused by that broker, and
+// OLD_COALESCED a request an earlier call left pending, which that broker answers `coalesced`
+// whatever --ttl asked; the client must leave both alone when it refuses the mismatched lifetime.
+// OTHER_GRANTED names a lifetime of its own. It serves values for every grant, and counts each
+// grant revoke and request cancel.
 type ttlBroker struct {
 	srv *httptest.Server
 
@@ -70,11 +73,14 @@ func newTTLBroker(t *testing.T) *ttlBroker {
 		switch name {
 		case "TTL_GRANTED":
 			answer["lifetime_seconds"] = echoed
-		case "TTL_PENDING", "OLD_PENDING":
+		case "TTL_PENDING", "OLD_PENDING", "OLD_COALESCED":
 			answer["state"], answer["grant_id"], answer["record_id"], answer["approver"] = "pending", nil, "rec-1", "ada@example.com"
 			answer["secrets"] = []map[string]string{{"name": name, "decision": "approval"}}
 			if name == "TTL_PENDING" {
 				answer["lifetime_seconds"] = echoed
+			}
+			if name == "OLD_COALESCED" {
+				answer["coalesced"] = true
 			}
 		case "OLD_GRANTED":
 		case "OLD_APPROVED_GRANTED":
@@ -192,7 +198,9 @@ func TestABadTTLExitsTwo(t *testing.T) {
 // grants without the lifetime and does not refuse the request, so the grant would outlive what
 // --ttl asked for. When the answer names no lifetime, or another one, the CLI revokes the grant it
 // was given (or cancels the request still waiting for approval), exits 1 saying why, and prints
-// no answer and runs nothing. A denied request made nothing to end, and still exits 77.
+// no answer and runs nothing. What an earlier call made is never ended: an existing approved grant
+// and a pending request the answer says this call joined (`coalesced`) are left alone, and the
+// exit names them. A denied request made nothing to end, and still exits 77.
 func TestATTLTheBrokerDidNotGiveEndsWhatTheRequestMade(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	b := newTTLBroker(t)
@@ -211,6 +219,8 @@ func TestATTLTheBrokerDidNotGiveEndsWhatTheRequestMade(t *testing.T) {
 		{"exec form granted another lifetime", []string{"OTHER_GRANTED", "--ttl", "2m", "--", "sh", "-c", "echo ran-the-child"}, 1, "grant-other_granted", "", "a lifetime of 43200s", ""},
 		{"request pending with no lifetime", []string{"request", "OLD_PENDING", "--ttl", "2m"}, 1, "", "req-old_pending", "the request was ended", ""},
 		{"exec form pending with no lifetime", []string{"OLD_PENDING", "--ttl", "2m", "--wait", "1s", "--", "sh", "-c", "echo ran-the-child"}, 1, "", "req-old_pending", "the request was ended", ""},
+		{"request joined a pending request with no lifetime", []string{"request", "OLD_COALESCED", "--ttl", "2m"}, 1, "", "", "the existing pending request req-old_coalesced", ""},
+		{"exec form joined a pending request with no lifetime", []string{"OLD_COALESCED", "--ttl", "2m", "--wait", "1s", "--", "sh", "-c", "echo ran-the-child"}, 1, "", "", "the existing pending request req-old_coalesced", ""},
 		{"request denied", []string{"request", "OLD_DENIED", "--ttl", "2m"}, exitDenied, "", "", "", "lifetime"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

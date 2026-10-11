@@ -1972,7 +1972,7 @@ the synchronous listener call records the sent or failed attempt instead of blin
 The secrets broker (`cmd/broker`, `internal/broker/`) issues secret grants, each lasting until its
 session ends or for the shorter lifetime its request signed,
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
-client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
+client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
 its environment. Its `secret` forms are how a person manages the agent secrets themselves, in
@@ -2020,7 +2020,9 @@ older helper, which answers `unknown op enroll-session-key`, its `enroll-box`/`u
 release runs); the helper answers an older CLI's `enroll-box`/`unenroll-box` as the kind-free pair
 and logs `a client asked a legacy op` (`helper/server.go`, `oldCLISessionKeyOps`: gone once
 dotfiles' pin is at this release and no helper has logged that line for 30 days); and
-`enroll --helper` accepts agentbox's `--kind box` but refuses every other `--kind`.
+`enroll --helper` accepts agentbox's `--kind box` but refuses every other `--kind`
+(`cmd/agent-secrets/enroll.go`, `cmdEnroll`: gone once dotfiles' pin is legion-envoy 10 or later
+and `scripts/agentbox` on dotfiles' main passes no `--kind`).
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
@@ -2211,7 +2213,7 @@ against `secrets.Local` and a fake STS and broker (`secret_test.go`), and `secre
 runs create, delete, restore and retag against `brokertest.NewRig`'s real broker.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
-`enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
+`enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a machine session's helper), beside `AGENT_SECRETS_URL`.
 Unset, each falls back to its launcher's path, `$XDG_RUNTIME_DIR/agent-secrets` and the
 `helper.sock` inside it, used only when that file is there; a pod sets its variables and has no
 `XDG_RUNTIME_DIR`. The exec form's command keeps exactly those three variables, so an
@@ -2514,13 +2516,17 @@ already-approval-needing name in the same request is refused `400 MIXED_APPROVER
 the request object's `lifetime_seconds` (`record.ValidLifetime`: 1 to the int32 the column holds;
 refused on a machine login), or, when it names none, until its session ends (`grants.expires_at`
 null, migration 0013; `requests.grantUnexpired` is the one liveness test). Reuse matches the
-lifetime, except a no-lifetime request keeps an unexpired grant with the pre-migration 43200-second
-default until 12 hours after deployment; it never extends that grant's expiry. A pending request
-holds each of its secret names for its session: an identical request coalesces (`coalesced: true`),
-and another lifetime or overlapping name is `409 REQUEST_PENDING` naming the request already in the
-approver's Inbox. `POST /v1/requests` and `GET /v1/requests/{id}` echo `lifetime_seconds` (null
-for none), which the CLI checks against its `--ttl`, revoking a new grant or cancelling its pending
-request when a broker or helper from before the claim dropped it; when every name is decided
+lifetime, except that a no-lifetime request takes the live grant of a request written before
+migration 0013 was applied (`requests.writtenBeforeMigration13`: lifetime 43200 and `created_at`
+before migration 13's `applied_at`), keeping its expiry. A pending request holds each of its secret
+names for its session: an identical request coalesces (`coalesced: true`), as does a no-lifetime
+request beside such a pre-migration pending request, and another lifetime or an overlapping name,
+with or without `--ttl`, is `409 REQUEST_PENDING` naming the request already in the approver's
+Inbox. No row written after the deploy matches, so the bridge ends on its own a day after it.
+`POST /v1/requests` and `GET /v1/requests/{id}` echo `lifetime_seconds` (null for none), which the
+CLI checks against its `--ttl`, revoking the grant or cancelling the pending request this call made
+when a broker or helper from before the claim dropped it, and never touching a reused approved
+grant or a pending request it joined (`coalesced`); when every name is decided
 (`granted`/`denied`) with nothing pending, the request and, if granted, its grant are written with
 no record.
 `Create` and `Get` answer that record's approver (`approver` on `POST /v1/requests` and
@@ -2717,7 +2723,7 @@ checks the same things: `alg` exactly ES256, the embedded JWK's thumbprint match
 signature, `iat` skew, `htm`/`htu`, and `jti` replay. `internal/broker/requests.Sweeper` is the one
 thing that moves state without a human: every `BROKER_SWEEP_SECONDS` tick it first ends every
 enrollment whose lease has lapsed (`enroll.Service.EndLapsed`: a gone pod, a box whose launcher
-stopped renewing, a host session whose helper died), as a revoke ends one, so its grants are
+stopped renewing, a machine session whose helper died), as a revoke ends one, so its grants are
 revoked and its pending requests cancelled and dropped from the approver's list, with an
 `enrollment.expired` audit row and one log line each; then it expires overdue pending
 `agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending

@@ -2,100 +2,14 @@
 package main
 
 import (
-	"context"
-	"flag"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
-	"github.com/sjawhar/envoy/internal/broker/record"
 )
-
-// ttlFlag is --ttl's usage line, the request form's and the exec form's alike.
-const ttlFlag = "how long the grant lasts, a whole number of seconds such as 2m or 90s; unset, it lasts until this session ends"
-
-// ttlSeconds is --ttl's value as the whole seconds a request object signs: nil when flags never
-// set it, and an error for a value that is not a positive whole number of seconds or is past the
-// most the broker records (record.ValidLifetime), so `--ttl 0` is refused rather than read as
-// unset.
-func ttlSeconds(flags *flag.FlagSet, ttl time.Duration) (*int, error) {
-	set := false
-	flags.Visit(func(f *flag.Flag) { set = set || f.Name == "ttl" })
-	if !set {
-		return nil, nil
-	}
-	if ttl%time.Second != 0 || !record.ValidLifetime(int(min(ttl/time.Second, math.MaxInt32+1))) {
-		return nil, fmt.Errorf("--ttl %s is not a whole number of seconds from 1s to %ds", ttl, math.MaxInt32)
-	}
-	seconds := int(ttl / time.Second)
-	return &seconds, nil
-}
-
-// grantedLifetime checks that the broker gave result's grant the lifetime --ttl asked for. A
-// broker or agent-secrets-helper from before --ttl drops the lifetime without refusing the
-// request, and the grant would then last longer than asked. A mismatched result this invocation
-// made is ended before it can release a secret; an existing approved grant is never revoked. This
-// check stays: a client can meet an older broker or helper on every future independent rollout.
-func grantedLifetime(ctx context.Context, c *client, signer Signer, result RequestResult, ttl *int) error {
-	if ttl == nil || result.State == "denied" || (result.LifetimeSeconds != nil && *result.LifetimeSeconds == *ttl) {
-		return nil
-	}
-	given := "no lifetime"
-	if result.LifetimeSeconds != nil {
-		given = fmt.Sprintf("a lifetime of %ds", *result.LifetimeSeconds)
-	}
-	ended := "nothing"
-	switch {
-	case result.GrantID != nil && result.RecordID != nil:
-		ended = "the existing grant " + *result.GrantID
-	case result.GrantID != nil:
-		if err := c.RevokeGrant(ctx, signer, *result.GrantID); err != nil {
-			return fmt.Errorf("the broker gave request %s %s, not --ttl %ds, and revoking its grant %s failed: %w", result.RequestID, given, *ttl, *result.GrantID, err)
-		}
-		ended = "its grant " + *result.GrantID
-	case result.State == "pending":
-		if err := c.CancelRequest(ctx, signer, result.RequestID); err != nil {
-			return fmt.Errorf("the broker gave request %s %s, not --ttl %ds, and cancelling it failed: %w", result.RequestID, given, *ttl, err)
-		}
-		ended = "the request"
-	}
-	return fmt.Errorf("the broker gave request %s %s, not --ttl %ds, so %s was ended: the broker or this machine's agent-secrets-helper is from before --ttl; restart the helper on the pinned release, or request without --ttl", result.RequestID, given, *ttl, ended)
-}
-func readTrimmed(path string) (string, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("read %s: %w", path, err)
-	}
-	return strings.TrimSpace(string(data)), nil
-}
-
-// writeFileAtomic writes data to path by renaming a finished temporary file into place, so no
-// reader ever sees path half-written: a call waiting out a box's enrollment (awaitEnrollment)
-// reads key.pem and enrollment the moment each appears.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name()) // a no-op once the rename has taken it
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), path)
-}
 
 // ---------------------------------------------------------------------------
 // enroll / unenroll (a session key a launcher holds, through the local agent-secrets-helper)
@@ -117,6 +31,11 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	flags := newFlagSet("enroll", stderr)
+	// --kind box is accepted because dotfiles' scripts/agentbox passes it on every box it enrolls,
+	// and must until its pinned agent-secrets is legion-envoy 10 or later: an agent-secrets before
+	// that refuses `enroll --helper` without --kind box. Any other --kind is refused. The flag goes
+	// once dotfiles' pin is legion-envoy 10 or later and scripts/agentbox on dotfiles' main passes
+	// no --kind.
 	kind := flags.String("kind", "", `"box" (accepted for agentbox compatibility)`)
 	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")

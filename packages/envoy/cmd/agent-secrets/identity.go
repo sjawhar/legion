@@ -2,7 +2,7 @@
 //
 // Where this process's session identity lives, and `agent-secrets identity`, the one local test
 // of whether it has one. An agent box or pod keeps its key under AGENT_SECRETS_KEY_DIR (file
-// mode); a host session asks agent-secrets-helper over AGENT_SECRETS_HELPER_SOCK (helper mode).
+// mode); a machine session asks agent-secrets-helper over AGENT_SECRETS_HELPER_SOCK (helper mode).
 // A process can be inside its session with neither variable set — omp's eval kernel starts every
 // run with a filtered environment that drops AGENT_SECRETS_* — so each falls back to the path its
 // launcher uses: a box's key dir is $XDG_RUNTIME_DIR/agent-secrets (scripts/agentbox mounts it

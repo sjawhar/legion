@@ -57,9 +57,11 @@
   seconds from 1s to 2147483647s; `0`, a fraction of a second or anything else exits 2 before any
   broker call. `POST /v1/requests` and `GET /v1/requests/{id}` answer the `lifetime_seconds` the
   grant got (null for none), and the CLI checks it: a broker or helper from before `--ttl`, which
-  drops the claim and grants for longer, has its grant revoked or its pending request cancelled at
-  once, and the command exits 1 naming why, running nothing. A request with `--ttl` never reuses a
-  live grant of another lifetime, and coalesces only with an identical one.
+  drops the claim and grants for longer, has the grant or pending request this call made revoked or
+  cancelled at once, and the command exits 1 naming why, running nothing. What an earlier call
+  made is left alone and named: an approved grant such a broker reuses, and a pending request it
+  answers this call joined (`coalesced`). A request with `--ttl` never reuses a live grant of
+  another lifetime.
 - A pending secret request names whom it waits on. `POST /v1/requests` and
   `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
   names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than
@@ -216,15 +218,29 @@
   `0001-01-01T00:00:00Z` for it, and nothing else changes for that client. Dispatch's credential
   page shows **Until the session ends** and Live grants **When the session ends**. A broker before
   this migration cannot read a grant with no expiry, so roll forward rather than back.
+  A running session keeps what it was given across the deploy: a request without a lifetime takes
+  the live grant of a request written before this migration (which recorded the old fixed 43200
+  seconds), keeping its expiry, and joins such a request while it is still pending. Only rows
+  written before migration 13 was applied match, so a later `--ttl 12h` request is never taken for
+  one, and nothing matches a day after the deploy.
+- **Breaking:** a session has at most one pending request for each secret. `POST /v1/requests`
+  answers a request naming a secret one of the session's pending requests names, with another set of
+  names or another lifetime, `409 REQUEST_PENDING`, naming the pending request; `agent-secrets`
+  exits 1 with that message. This holds for requests without `--ttl` too: a request for `A` and `B`
+  while one for `A` waits used to open a second record for the approver, and is now refused. The
+  identical request (the same names and the same lifetime, or none) still joins the pending one,
+  answered with that request and `coalesced: true`. Wait for the named request to be decided, or
+  `agent-secrets cancel` it and ask again.
 - The helper's `enroll-box` and `unenroll-box` ops are `enroll-session-key` and
-  `unenroll-session-key`, which name no kind, and `agent-secrets enroll --helper` takes no `--kind`.
+  `unenroll-session-key`, which name no kind, and `agent-secrets enroll --helper` needs no `--kind`.
   Every older client keeps working: the helper still answers `enroll-box` and `unenroll-box`, from
   an `agent-secrets` before this release, as the new pair, logging `a client asked a legacy op`;
   this `agent-secrets` asks a helper before this release, which answers
   `unknown op enroll-session-key`, its `enroll-box` and `unenroll-box` instead, saying so on
-  stderr; and `enroll --helper --kind box`, which dotfiles' agentbox passes, enrolls as before,
-  while any other `--kind` exits 2 naming the flag, as every `--kind` but `box` did before. An
-  `enroll` without `--helper` is refused for that first, whatever `--kind` it carries, as before.
+  stderr; and `enroll --helper --kind box`, which dotfiles' agentbox passes, enrolls as before
+  until dotfiles pins this release and agentbox stops passing it, while any other `--kind` exits 2
+  naming the flag, as every `--kind` but `box` did before. An `enroll` without `--helper` is
+  refused for that first, whatever `--kind` it carries, as before.
 - `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
   naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
   Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not

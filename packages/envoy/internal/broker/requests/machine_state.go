@@ -285,7 +285,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 			return Request{}, err
 		}
 		if pending.ID != "" {
-			if slices.Equal(pending.Names, sorted) && sameLifetime(pending.Lifetime, lifetime) {
+			if slices.Equal(pending.Names, sorted) && pending.joins(lifetime) {
 				if err := tx.Commit(ctx); err != nil {
 					return Request{}, err
 				}
