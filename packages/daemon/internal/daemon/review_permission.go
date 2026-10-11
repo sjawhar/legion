@@ -43,14 +43,14 @@ type permissionKey struct{ repository, login string }
 // account than the author (GitHub resolves some logins to another user) is not either, and logged.
 //
 // GitHub is not asked about the review App's own reviews, which decide by its login alone
-// (workflow's decidesRound), nor about a review on a pull request the daemon does not record, which
+// (workflow's DecidesRound), nor about a review on a pull request the daemon does not record, which
 // the workflow drops; both are answered false. An account answered no write access stands so for
 // reviewPermissionTTL; write access is never kept (reviewPermissionTTL's comment).
 //
 // An account GitHub does not know on the repository is answered `404`: no write access, logged,
 // and the review decides nothing. A `403` that is not GitHub's rate limit is no write access too,
 // but it says the review App's installation may not read collaborators at all, so no author but
-// the review App decides until that is fixed: it is logged at error, naming the installation. A
+// the review App decides while it lasts: it is logged at error, naming the installation. A
 // rate limit is returned as an intake.RetryLater naming the wait GitHub asks for, which intake
 // waits out before the review's delivery is tried again, and is held: while it stands, every
 // account with no answer kept is answered with the wait left and no call is made, since GitHub
@@ -134,7 +134,7 @@ func (w *workflowRuntime) readPermission(ctx context.Context, repository ghrepo.
 				"repo", repository.String(), "login", login, "status", refused.Status)
 			return false, nil
 		case refused.Status == http.StatusForbidden:
-			w.log.Error("workflow: GitHub refuses the review App's installation a review author's repository permission, so the review decides nothing; no review but the review App's decides a round until the installation may read the repository's collaborators",
+			w.log.Error("workflow: GitHub refuses the review App's installation a review author's repository permission, so the review decides nothing; while the installation may not read the repository's collaborators, no review but the review App's decides a round",
 				"app", appauth.Review, "bot", lease.Identity.Name, "installation_owner", repository.Owner(), "repo", repository.String(), "login", login, "status", refused.Status, "body", refused.Body)
 			return false, nil
 		}

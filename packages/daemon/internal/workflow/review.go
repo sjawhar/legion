@@ -201,14 +201,16 @@ const reviewWorkflowsToAdjudicate = "; only declared review workflows are red, s
 // changes (stuckAs).
 const answerSkew = 10 * time.Second
 
-// decidesRound says whether review may decide a review round: the review App submitted it, or its
-// author has write access or higher to the repository, which intake read from GitHub before the
-// fact reached this transaction (intake.PullRequestReview.AuthorCanWrite). On a public repository
-// any account can review a pull request, so anyone else's review decides nothing. GitHub's 404, or
-// a 403 that is not its rate limit, reads as no write access; any other failed read is retried
-// before the review reaches here. The review App is recognised by its login, since GitHub gives an
-// App's bot account no collaborator permission of its own, so the daemon never asks about it.
-func (e *Engine) decidesRound(review intake.PullRequestReview) bool {
+// DecidesRound says whether review's author may decide a review round: the review App submitted it,
+// or its author has write access or higher to the repository, which intake read from GitHub before
+// the fact reached this transaction (intake.ResolveAuthorCanWrite, for a webhook's review and the
+// daemon's own read of a pull request's reviews alike). On a public repository any account can
+// review a pull request, so anyone else's review decides nothing. GitHub's 404, or a 403 that is not
+// its rate limit, reads as no write access; any other failed read is retried before the review
+// reaches here. The review App is recognised by its login, since GitHub gives an App's bot account
+// no collaborator permission of its own, so the daemon never asks about it. The daemon's read of a
+// pull request's reviews asks this too, so it applies only a review this engine would take.
+func (e *Engine) DecidesRound(review intake.PullRequestReview) bool {
 	return e.byReviewApp(review.Author) || review.AuthorCanWrite
 }
 
@@ -241,12 +243,12 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 		before, by = round{}, byAnswer
 	}
 	// Only changes_requested and approved decide anything, and only from the review App or an
-	// account with write access to the repository (decidesRound). Any other review orders nothing
+	// account with write access to the repository (DecidesRound). Any other review orders nothing
 	// either, so a comment written after a decision but delivered before it, or an outsider's
 	// review, cannot make the decision look old.
 	state := strings.ToLower(fact.State)
 	decides := fact.Decides()
-	if decides && !e.decidesRound(fact) {
+	if decides && !e.DecidesRound(fact) {
 		e.logOnCommit(ctx, "workflow: a review decides nothing: its author is neither the review App nor an account with write access to the repository",
 			"issue", issue.Key, "pull_request", pr.Number, "author", fact.Author, "state", state)
 		decides = false
@@ -264,7 +266,7 @@ func (e *Engine) review(ctx context.Context, tx pgx.Tx, fact intake.PullRequestR
 	// from an earlier round - records nothing. A review without an id is ordered by when it
 	// arrives.
 	if fact.ID != 0 {
-		order := record.ReviewOrder{SubmittedAt: fact.SubmittedAt, ID: fact.ID}
+		order := fact.Order()
 		if !order.After(pr.ReviewSeen) {
 			return intake.Result{}, nil
 		}
@@ -330,7 +332,7 @@ type stuckCause int
 
 const (
 	// stuckUndecided: no review decided it. A COMMENT decides nothing, and neither does a review in
-	// any state but approved or changes_requested, nor one decidesRound does not count.
+	// any state but approved or changes_requested, nor one DecidesRound does not count.
 	stuckUndecided stuckCause = iota + 1
 	// stuckApprovedRed: its approval stands on CI red at the reviewer's own head.
 	stuckApprovedRed
