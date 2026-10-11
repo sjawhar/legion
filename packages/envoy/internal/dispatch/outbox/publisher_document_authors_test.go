@@ -124,6 +124,27 @@ func TestACommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 			wantAgents: []string{"notifications.agent.session-writer"},
 		},
 		{
+			name: "a comment on a project image reaches no document author",
+			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
+				creator, err := json.Marshal(writer)
+				if err != nil {
+					t.Fatalf("encode image creator: %v", err)
+				}
+				var image string
+				if err := database.Pool.QueryRow(context.Background(), `
+					insert into artifacts (project_key, slug, name, kind, created_by)
+					values ('TT', 'diagram', 'diagram.png', 'image', $1)
+					returning id::text
+				`, creator).Scan(&image); err != nil {
+					t.Fatalf("create image: %v", err)
+				}
+				return model.Event{ArtifactID: new(image), Project: "TT", Type: "comment.created", Actor: alice, Payload: map[string]any{
+					"id": "00000000-0000-0000-0000-000000000014",
+				}}, "diagram"
+			},
+			wantAgents: []string{},
+		},
+		{
 			name: "every session the document credits is reached once, the creator first",
 			arrange: func(t *testing.T, database *store.Store) (model.Event, string) {
 				doc := seedDocument(t, database, new("T-1"), "notes", writer,

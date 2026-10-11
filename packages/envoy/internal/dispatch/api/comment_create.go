@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -438,11 +439,7 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			}
 		}
 	case input.AskID == nil:
-		for _, mention := range mentions {
-			if mention.SessionID != nil && !slices.Contains(suppressedAuthors, *mention.SessionID) {
-				suppressedAuthors = append(suppressedAuthors, *mention.SessionID)
-			}
-		}
+		suppressedAuthors = slices.Sorted(maps.Keys(mentionedSessions))
 	}
 	turn := threadTarget.replyTurn(actor, input.Turn)
 	var rowID string

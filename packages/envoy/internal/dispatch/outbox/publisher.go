@@ -396,6 +396,7 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 // (publishFollowerRoutes). The event's own actor is skipped, and so is a session the comment's
 // mentions already reach (suppressed_authors).
 func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
+	suppressedAuthors := payloadStringSet(event.Payload, "suppressed_authors")
 	seen := map[string]bool{}
 	var targets []string
 	consider := func(author model.Actor, found bool) {
@@ -406,7 +407,7 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 			return
 		}
 		seen[author.ID] = true
-		if _, suppressed := payloadStringSet(event.Payload, "suppressed_authors")[author.ID]; suppressed {
+		if _, suppressed := suppressedAuthors[author.ID]; suppressed {
 			return
 		}
 		targets = append(targets, author.ID)
@@ -450,7 +451,11 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 			return err
 		}
 	} else if (event.Type == "comment.created" || event.Type == "comment.edited") && payloadString(event.Payload, "ask_id") == "" {
-		if document := commentedDocument(event); document != "" {
+		document, err := commentedDocument(ctx, deps, event)
+		if err != nil {
+			return err
+		}
+		if document != "" {
 			authors, err := loadDocumentSessionAuthors(ctx, deps, document)
 			if err != nil {
 				return err
@@ -491,21 +496,32 @@ func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.
 	return decodeAuthor(authorJSON, "comment", commentID)
 }
 
-// commentedDocument is the document a comment event is on: its anchor's for a comment on a passage
-// (of an issue's document or a project document), otherwise the event's own document for a comment
-// on a whole project document, and "" for a comment on an issue's conversation, which is on none.
-func commentedDocument(event model.Event) string {
+// commentedDocument resolves the document a comment event is on: its anchor's for a comment on a
+// passage (of an issue's document or a project document), otherwise the event's own artifact for a
+// comment on a whole project document. It returns "" for a comment on an issue's conversation or
+// for an image or file, which have no document-author route.
+func commentedDocument(ctx context.Context, deps Deps, event model.Event) (string, error) {
+	document := ""
 	if values, ok := event.Payload.(map[string]any); ok {
-		if anchor, ok := values["anchor"].(map[string]any); ok {
-			if id, _ := anchor["artifact_id"].(string); id != "" {
-				return id
-			}
+		document = payloadString(values["anchor"], "artifact_id")
+	}
+	if document == "" && event.ArtifactID != nil {
+		document = *event.ArtifactID
+	}
+	if document == "" {
+		return "", nil
+	}
+	var isDocument bool
+	if err := deps.Store.Pool.QueryRow(ctx, `select kind = 'doc' from artifacts where id = $1`, document).Scan(&isDocument); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
 		}
+		return "", fmt.Errorf("load commented artifact %q: %w", document, err)
 	}
-	if event.ArtifactID != nil {
-		return *event.ArtifactID
+	if !isDocument {
+		return "", nil
 	}
-	return ""
+	return document, nil
 }
 
 // loadDocumentSessionAuthors lists, in one query, the sessions a document credits: the one that
@@ -520,10 +536,11 @@ func loadDocumentSessionAuthors(ctx context.Context, deps Deps, artifactID strin
 		with credited as (
 			select a.created_by as author, 0 as number, 0::bigint as position
 			from artifacts a
-			where a.id = $1
+			where a.id = $1 and a.kind = 'doc'
 			union all
 			select credit.author, v.number, credit.position
 			from artifact_versions v
+			join artifacts a on a.id = v.artifact_id and a.kind = 'doc'
 			cross join lateral jsonb_array_elements(nullif(v.authors, 'null'::jsonb))
 				with ordinality as credit(author, position)
 			where v.artifact_id = $1
