@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -11,7 +12,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/config"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
+	"github.com/sjawhar/envoy/internal/dispatch/embedqueue"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -38,8 +42,14 @@ var subcommands = []subcommand{
 	{"redeliver-webhooks", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
 		return redeliverWebhooks(ctx, args, env, stdout)
 	}},
+	{"backfill-embeddings", func(ctx context.Context, _ []string, env settingValues, stdout, _ io.Writer) int {
+		return backfillEmbeddings(ctx, env.get("DATABASE_URL"), stdout)
+	}},
 	{"census", func(ctx context.Context, _ []string, env settingValues, stdout, stderr io.Writer) int {
 		return census(ctx, env.get("DATABASE_URL"), stdout, stderr)
+	}},
+	{"backfill-files", func(ctx context.Context, args []string, env settingValues, stdout, _ io.Writer) int {
+		return backfillFiles(ctx, args, env.get("DATABASE_URL"), strings.TrimSpace(env.get("DISPATCH_FILE_STORE_BUCKET")), stdout)
 	}},
 	{"settings", func(_ context.Context, _ []string, _ settingValues, stdout, stderr io.Writer) int {
 		if err := writeSettings(stdout); err != nil {
@@ -145,6 +155,66 @@ func backfillAnchorBlocks(ctx context.Context, databaseURL string, out io.Writer
 	return 0
 }
 
+// backfillFiles moves every uploaded file's bytes from Postgres into the bucket
+// DISPATCH_FILE_STORE_BUCKET names (files.BackfillRows); with --verify-only it reads back every
+// file already moved and checks it against its row's hash, moving nothing (files.VerifyRows); with
+// --restore, the rollback, it writes every moved file's bytes back into its row from the bucket
+// (files.RestoreRows). Each pass names the rows it could not do and goes on past them, exits 1
+// when any failed, and can be run again at any time; the server serves a row from its bytes
+// whenever it holds them.
+func backfillFiles(ctx context.Context, args []string, databaseURL, bucket string, out io.Writer) int {
+	flags := flag.NewFlagSet("backfill-files", flag.ContinueOnError)
+	flags.SetOutput(out)
+	verifyOnly := flags.Bool("verify-only", false, "read back every file already moved and check it against its row's hash, moving nothing")
+	restore := flags.Bool("restore", false, "write every moved file's bytes back into its row from the bucket: the rollback")
+	if err := flags.Parse(args); err != nil {
+		return 2
+	}
+	if flags.NArg() > 0 {
+		fmt.Fprintf(out, "backfill-files: unexpected argument %q; the flags are --verify-only and --restore\n", flags.Arg(0))
+		return 2
+	}
+	if *verifyOnly && *restore {
+		fmt.Fprintln(out, "backfill-files: --verify-only and --restore cannot both be set")
+		return 2
+	}
+	if bucket == "" {
+		fmt.Fprintln(out, "backfill-files: DISPATCH_FILE_STORE_BUCKET is required")
+		return 1
+	}
+	database, ok := openMigrated(ctx, "backfill-files", databaseURL, out)
+	if !ok {
+		return 1
+	}
+	defer database.Pool.Close()
+	fileStore, err := files.NewS3(ctx, bucket)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-files: %v\n", err)
+		return 1
+	}
+	if err := fileStore.Healthy(ctx); err != nil {
+		fmt.Fprintf(out, "backfill-files: the bucket is not reachable: %v\n", err)
+		return 1
+	}
+	pass, verb := files.BackfillRows, "moved"
+	switch {
+	case *verifyOnly:
+		pass, verb = files.VerifyRows, "verified"
+	case *restore:
+		pass, verb = files.RestoreRows, "restored"
+	}
+	report, err := pass(ctx, database.Pool, fileStore, out)
+	fmt.Fprintf(out, "backfill-files: %s=%d bytes=%d failed=%d\n", verb, report.Done, report.Bytes, len(report.Failed))
+	if err != nil {
+		fmt.Fprintf(out, "backfill-files: stopped: %v\n", err)
+		return 1
+	}
+	if len(report.Failed) > 0 {
+		return 1
+	}
+	return 0
+}
+
 // loadServerURL resolves the dashboard origin exactly as the server does, for a subcommand
 // that parses reference text.
 func loadServerURL(env settingValues) string {
@@ -184,6 +254,46 @@ func rebuildRefs(ctx context.Context, databaseURL, serverURL string, out io.Writ
 		return 1
 	}
 	writeRebuildRefsReport(out, report)
+	return 0
+}
+
+// backfillEmbeddings enqueues and embeds meaning-search vectors for content this Dispatch was
+// already carrying before LEGION-549 (embedqueue.Backfill); a fresh write is covered by its own
+// table's trigger (0072-0076) the moment Bedrock credentials reach the process, so this is a
+// one-time catch-up, not something the server runs itself. Resumable: rerunning it (after an
+// interrupt, or to pick up a kind this Dispatch grew after an earlier run finished) continues
+// from each kind's own checkpoint rather than rescanning rows it already enqueued.
+func backfillEmbeddings(ctx context.Context, databaseURL string, out io.Writer) int {
+	database, ok := openMigrated(ctx, "backfill-embeddings", databaseURL, out)
+	if !ok {
+		return 1
+	}
+	defer database.Pool.Close()
+	embedder, err := embed.New(ctx)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-embeddings: %v\n", err)
+		return 1
+	}
+	// Rate-limited exactly as the server's own embedqueue poller is: this
+	// command is background catch-up work, and a standalone run of it must leave the account's
+	// Bedrock quota the same headroom for a concurrently running server's live search as the
+	// poller itself does, not saturate it as a raw, unpaced client would.
+	report, err := embedqueue.Backfill(ctx, embedqueue.Deps{Store: database, Embedder: embed.NewRateLimitedEmbedder(embedder)}, out)
+	if err != nil {
+		fmt.Fprintf(out, "backfill-embeddings: %v\n", err)
+		return 1
+	}
+	fmt.Fprintf(out, "backfill-embeddings: done - enqueued=%v embedded=%d failed=%d dead=%d pending=%d\n",
+		report.Enqueued, report.Embedded, report.Failed, report.Dead, report.Pending)
+	if report.Dead > 0 {
+		fmt.Fprintf(out, "backfill-embeddings: %d row(s) dead-lettered after repeated permanent failures; a future write to the same content revives it, or reset manually: update embeddings set dead = false, confirmed_failures = 0 where dead\n", report.Dead)
+	}
+	if report.Pending > 0 {
+		fmt.Fprintf(out, "backfill-embeddings: %d row(s) still pending (interrupted before finishing); rerun to continue\n", report.Pending)
+	}
+	if report.Dead > 0 || report.Pending > 0 {
+		return 1
+	}
 	return 0
 }
 

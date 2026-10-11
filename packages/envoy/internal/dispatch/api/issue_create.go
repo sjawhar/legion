@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
+	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/rank"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
@@ -136,6 +138,11 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	if !projectKeyPattern.MatchString(input.Project) || input.Title == "" {
 		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "project and title are required")
+		return
+	}
+	// Before the duplicate check, which reads the new title against every title in the project.
+	if length := len16(input.Title); length > contracts.IssueTitleMax {
+		capExceeded(w, "title", length, contracts.IssueTitleMax)
 		return
 	}
 	if usingDefaultProject {
@@ -304,7 +311,12 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	specChanges, err := refs.ReplaceCounted(r.Context(), tx, "artifact", artifactID, markdown, s.deps.ServerURL)
+	// The version row exists now, so the count names it (LEGION-542).
+	if err := docs.RecordTaskProgressMarkdown(r.Context(), tx, artifactID, markdown); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	specChanges, err := s.deps.Docs.IndexDocumentReferences(documentCtx, artifactID, 1, markdown)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -342,6 +354,15 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 	s.publish(event)
 	if advice != nil && input.Spec != nil && strings.TrimSpace(*input.Spec) != "" {
 		advice.documentBlocks = readDocumentBlocks(markdown)
+	}
+	// LEGION-550: offered after the write committed and bounded by writeSuggestionTimeout, so a
+	// slow or down search never holds up an issue creation that already succeeded. Tied to
+	// advice's own success since both ride the same response field; a write-advice failure is
+	// already rare and logged, and losing suggestions alongside it is an accepted trade (see the
+	// PR's hardening ledger).
+	if advice != nil {
+		source := suggestionSource{kind: "issue", issueKey: key, actor: actor}
+		advice.Suggestions = s.computeAndPersistSuggestions(r.Context(), input.Project, input.Title+"\n"+markdown, source)
 	}
 	WriteJSON(w, http.StatusCreated, withAdvice(issue, advice))
 }

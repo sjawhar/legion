@@ -36,7 +36,12 @@ A pinned agent stays in the main list whatever its state.
 
 ### Filters
 
-Above the list, three filters narrow it: **Machine**, **Role**, and **Directory contains**.
+Above the list, three filters narrow it: **Machine**, **Role**, and a search box. Typing in the
+search box keeps the sessions whose title, directory, machine, session id, or the key of an issue
+one of its open asks names, together hold every word typed, in any order and case; pressing `/`
+anywhere on the page focuses the box. A non-empty search also opens the two folded groups below,
+so a match hidden in one of them still shows; clearing the search returns each fold to the state
+you left it in. The search survives a reload through the page's address.
 
 ## Sending to one agent
 
@@ -112,6 +117,10 @@ at the end of the page, so you can still read what it said.
 **Open** on an agent's row shows its conversation as it happens, at `/agents/<session>/live`.
 
 - The header shows whether the session is connected, and its machine and directory.
+- When the session reports which model it's running, the header shows it, and each assistant turn
+  shows the model that produced it. It updates as the session switches models, and a label too
+  long for its space truncates, showing the full name on hover. Claude Code and OpenCode sessions
+  don't publish this today, so their view is unchanged.
 - The agent's turns stream in while the page is open. They are relayed, not stored.
 - Your messages to the agent, and its replies through Dispatch, are stored and shown in the same
   thread. A reply through Dispatch is labelled **Reply via Dispatch**.

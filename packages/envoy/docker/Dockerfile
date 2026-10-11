@@ -6,7 +6,7 @@
 # bundler output differs across Bun releases, so a published SPA must not be built by whatever
 # 1.x is newest that day. .github/scripts/check-bun-version.sh keeps this equal to .bun-version.
 ARG BUN_VERSION=1.3.14
-FROM oven/bun:${BUN_VERSION} AS web
+FROM mirror.gcr.io/oven/bun:${BUN_VERSION} AS web
 
 WORKDIR /repo
 
@@ -18,6 +18,8 @@ COPY patches patches
 COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/envoy-client/package.json packages/envoy-client/package.json
 COPY packages/pi-envoy/package.json packages/pi-envoy/package.json
+COPY packages/pi-legion/package.json packages/pi-legion/package.json
+COPY packages/pi-shared/package.json packages/pi-shared/package.json
 COPY packages/envoy-plugin/package.json packages/envoy-plugin/package.json
 COPY packages/claude-envoy/package.json packages/claude-envoy/package.json
 COPY packages/dispatch/package.json packages/dispatch/package.json
@@ -35,7 +37,7 @@ RUN cd packages/contracts && bun run gen:go
 RUN cd packages/dispatch && bun run build:web
 
 # Go version must match go.mod.
-FROM golang:1.26.8-alpine AS build
+FROM mirror.gcr.io/library/golang:1.26.8-alpine AS build
 
 WORKDIR /src
 
@@ -86,7 +88,7 @@ RUN if [ -n "$LEGION_COMMIT" ] && ! printf '%s' "$LEGION_COMMIT" | grep -Eqx '[0
 
 # Minimal runtime — static binary, no shell needed.
 # curl is included for HEALTHCHECK and operational debugging.
-FROM debian:bookworm-slim
+FROM mirror.gcr.io/library/debian:bookworm-slim
 
 LABEL org.opencontainers.image.source=https://github.com/sjawhar/legion
 
@@ -101,6 +103,11 @@ COPY --from=build /out/envoy-broker /usr/local/bin/envoy-broker
 COPY --from=build /out/agent-secrets /usr/local/bin/agent-secrets
 COPY --from=build /out/THIRD_PARTY_NOTICES /usr/share/doc/legion/THIRD_PARTY_NOTICES
 COPY --from=web --chown=envoy:envoy /repo/packages/dispatch/web/dist /srv/dispatch-web
+# The Amazon RDS CA bundle, for a secrets broker that signs in to an RDS database by IAM token to
+# name as BROKER_DATABASE_URL's sslrootcert. It sits outside every file and directory Go's
+# crypto/x509 reads the system roots from (/etc/ssl/certs among them), so no binary here trusts an
+# RDS CA for any other connection; the smoke test (internal/smoke/rdsbundle_test.go) checks both.
+COPY packages/envoy/docker/rds-global-bundle.pem /etc/ssl/rds/global-bundle.pem
 
 # The same commit envoy-dispatch reports on /healthz, as the image's own label. Its presence is how
 # a deploy check knows the pinned image serves /healthz's commit and schema_version (the

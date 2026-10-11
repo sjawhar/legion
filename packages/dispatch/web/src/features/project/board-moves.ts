@@ -4,7 +4,7 @@ import { useCallback, useState } from "react";
 import { ApiError, api } from "../../api/client";
 import { boardMoveMutationKey } from "../../api/queries";
 import type { IssueSummary, UpdateIssueInput } from "../../api/types";
-import { type IssueStatus, moveIssue } from "./board-model";
+import { type IssueStatus, moveIssue, moveIssueToLane, type PriorityLane } from "./board-model";
 import { projectIssuesQueryKey } from "./issue-filters";
 
 export const staleBoardMessage =
@@ -37,6 +37,14 @@ export function useBoardMoves(
 ): {
   error: string | undefined;
   moveCard: (key: string, targetStatus: IssueStatus, insertionIndex: number) => Promise<void>;
+  /** The lane-aware twin of `moveCard`, for a board grouped into swimlanes: moving a card into
+   *  another lane reassigns its priority along with its status and rank. */
+  moveCardToLane: (
+    key: string,
+    targetStatus: IssueStatus,
+    targetLane: PriorityLane,
+    insertionIndex: number
+  ) => Promise<void>;
 } {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
@@ -47,14 +55,15 @@ export function useBoardMoves(
     scope: { id: `board:${project}` },
   });
   const { mutateAsync } = patch;
-  const moveCard = useCallback(
-    async (key: string, targetStatus: IssueStatus, insertionIndex: number) => {
-      const queryKey = projectIssuesQueryKey(project, labels);
-      const previous = queryClient.getQueryData<IssueSummary[]>(queryKey);
-      if (previous === undefined) {
-        return;
-      }
-      const moved = moveIssue(previous, key, targetStatus, insertionIndex, isVisible);
+  const queryKey = projectIssuesQueryKey(project, labels);
+  /** Commits an already-computed move: optimistic write, PATCH, rollback-and-refetch on
+   *  failure, refetch on success - the one tail `moveCard` and `moveCardToLane` share. */
+  const commit = useCallback(
+    async (
+      key: string,
+      moved: { issues: IssueSummary[]; input: UpdateIssueInput } | undefined,
+      previous: IssueSummary[]
+    ) => {
       if (moved === undefined) {
         return;
       }
@@ -81,7 +90,40 @@ export function useBoardMoves(
         await queryClient.invalidateQueries({ queryKey });
       }
     },
-    [isVisible, labels, mutateAsync, project, queryClient]
+    [labels, mutateAsync, project, queryClient, queryKey]
   );
-  return { error, moveCard };
+  const moveCard = useCallback(
+    async (key: string, targetStatus: IssueStatus, insertionIndex: number) => {
+      const previous = queryClient.getQueryData<IssueSummary[]>(queryKey);
+      if (previous === undefined) {
+        return;
+      }
+      await commit(
+        key,
+        moveIssue(previous, key, targetStatus, insertionIndex, isVisible),
+        previous
+      );
+    },
+    [commit, isVisible, queryClient, queryKey]
+  );
+  const moveCardToLane = useCallback(
+    async (
+      key: string,
+      targetStatus: IssueStatus,
+      targetLane: PriorityLane,
+      insertionIndex: number
+    ) => {
+      const previous = queryClient.getQueryData<IssueSummary[]>(queryKey);
+      if (previous === undefined) {
+        return;
+      }
+      await commit(
+        key,
+        moveIssueToLane(previous, key, targetStatus, targetLane, insertionIndex, isVisible),
+        previous
+      );
+    },
+    [commit, isVisible, queryClient, queryKey]
+  );
+  return { error, moveCard, moveCardToLane };
 }

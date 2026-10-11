@@ -16,8 +16,9 @@ import path from "node:path";
  * `kind: "main"`, and a single slot would hand a subagent whichever of them last started or
  * switched. The key is OMP's own subagent layout — a subagent's transcript sits inside a
  * directory named after its parent's transcript file minus `.jsonl`, the same layout the subagent
- * check's transcript fallback reads (`transcriptSaysSubagent` in `src/subagent-session.ts`) — so a
- * subagent resolves its own parent by walking that layout up.
+ * check's transcript fallback reads (`transcriptSaysSubagent` in
+ * `@legion/pi-shared/subagent-session`) — so a subagent resolves its own parent by walking that
+ * layout up.
  */
 const ENVOY_SESSIONS = Symbol.for("legion.pi-envoy.envoy-session");
 

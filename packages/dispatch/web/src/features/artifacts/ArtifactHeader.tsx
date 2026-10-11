@@ -22,8 +22,14 @@ import {
 import { ApprovalChip } from "../doc/ApprovalChip";
 import { ConnectionDot } from "../doc/ConnectionDot";
 import type { DocumentToolbar } from "../doc/ProofDocument";
+import { shortSessionId } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { buildIssuePath, buildProjectPath, documentRoute } from "../refs/routes";
+import {
+  buildIssuePath,
+  buildProjectPath,
+  buildReferencePath,
+  documentRoute,
+} from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 
 export function artifactVersionUrl(artifactID: string, version: number): string {
@@ -76,6 +82,10 @@ export function ArtifactHeader({
   const [highlighted, setHighlighted] = useState(highlight);
   const navigate = useNavigate();
   const versions = versionsNewestFirst(toolbar?.versions ?? artifact.versions);
+  // An artifact of an agent's conversation (a picture sent in a direct message) belongs to no
+  // issue or project; its page is under the agent's session.
+  const agentRoute = documentRoute(artifact);
+  const agentSession = agentRoute.kind === "agent-artifact" ? agentRoute.session : undefined;
 
   useEffect(() => {
     if (!highlight) {
@@ -96,7 +106,14 @@ export function ArtifactHeader({
         data-testid="artifact-header"
       >
         <div className="min-w-0">
-          {artifact.issue_key === null ? (
+          {agentSession !== undefined ? (
+            <Link
+              to="/agents"
+              className={`inline-flex min-h-11 items-center text-sm font-semibold ${linkText} ${linkHoverText}`}
+            >
+              Agent {shortSessionId(agentSession)}
+            </Link>
+          ) : artifact.issue_key === null ? (
             <Link
               to={buildProjectPath({ kind: "documents", project: artifact.project })}
               className={`inline-flex min-h-11 items-center text-sm font-semibold ${linkText} ${linkHoverText}`}
@@ -104,11 +121,14 @@ export function ArtifactHeader({
               Project {artifact.project}
             </Link>
           ) : null}
-          <div className="flex min-w-0 items-center gap-1">
-            <h2 className={`truncate text-lg font-semibold ${textPrimaryOnSurface}`}>
+          {/* `items-start` keeps the copy button beside the first line of a title that wraps. The
+              button (44 px, 32 px from `md`) is taller than one `text-lg` line (28 px), so a
+              negative margin of half the difference centres its icon on that first line. */}
+          <div className="flex min-w-0 items-start gap-1">
+            <h2 className={`min-w-0 break-words text-lg font-semibold ${textPrimaryOnSurface}`}>
               {artifact.name}
             </h2>
-            <CopyRefButton route={documentRoute(artifact, version)} />
+            <CopyRefButton className="-my-2 md:-my-0.5" route={documentRoute(artifact, version)} />
           </div>
           {artifact.approval === undefined ? null : (
             <div className="mt-1">
@@ -127,37 +147,25 @@ export function ArtifactHeader({
                   aria-label="Version"
                   className={`min-h-11 min-w-0 max-w-56 truncate rounded border px-2 py-2 font-normal ${inputClasses(true)}`}
                   onChange={(event) => {
-                    const nextVersion = event.target.value;
+                    // Both path builders read `version: undefined` as the unversioned route.
+                    const picked =
+                      event.target.value === "" ? undefined : Number(event.target.value);
                     navigate(
-                      artifact.issue_key === null
-                        ? buildProjectPath(
-                            nextVersion === ""
-                              ? {
-                                  kind: "document",
-                                  project: artifact.project,
-                                  slug: artifact.slug,
-                                }
-                              : {
-                                  kind: "document",
-                                  project: artifact.project,
-                                  slug: artifact.slug,
-                                  version: Number(nextVersion),
-                                }
-                          )
-                        : buildIssuePath(
-                            nextVersion === ""
-                              ? {
-                                  key: artifact.issue_key,
-                                  kind: "artifact",
-                                  slug: artifact.slug,
-                                }
-                              : {
-                                  key: artifact.issue_key,
-                                  kind: "artifact",
-                                  slug: artifact.slug,
-                                  version: Number(nextVersion),
-                                }
-                          )
+                      agentSession !== undefined
+                        ? buildReferencePath(documentRoute(artifact, picked))
+                        : artifact.issue_key === null
+                          ? buildProjectPath({
+                              kind: "document",
+                              project: artifact.project,
+                              slug: artifact.slug,
+                              version: picked,
+                            })
+                          : buildIssuePath({
+                              key: artifact.issue_key,
+                              kind: "artifact",
+                              slug: artifact.slug,
+                              version: picked,
+                            })
                     );
                   }}
                   value={version ?? ""}
@@ -195,7 +203,7 @@ export function ArtifactHeader({
                       {showDiff ? "Show version" : "Diff vs current"}
                     </button>
                   )}
-                  <ConnectionDot connection={toolbar.connection} />
+                  <ConnectionDot connection={toolbar.connection} pending={toolbar.pending} />
                 </div>
               </div>
             )}

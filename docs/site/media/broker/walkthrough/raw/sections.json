@@ -2,82 +2,82 @@
   {
     "file": "t1-login.cast",
     "marks": {
-      "typing": 1.351,
-      "code": 3.866
+      "typing": 1.35,
+      "code": 4.245
     },
-    "wallSeconds": 6.902
+    "wallSeconds": 7.515
   },
   {
-    "actSeconds": 16.979,
+    "actSeconds": 17.581,
     "file": "b1-machine.webm",
     "marks": {
-      "page": 0.745,
-      "typing": 3.085,
-      "record": 6.663,
-      "approve": 11.385,
-      "result": 11.451
+      "page": 1.352,
+      "typing": 3.938,
+      "record": 7.152,
+      "approve": 11.754,
+      "result": 11.932
     },
-    "resultSimilarityAtEnd": 0.985466,
-    "resultSimilarityBeforeEnd": 0.986179,
-    "wallSeconds": 18.919
+    "resultSimilarityAtEnd": 0.994413,
+    "resultSimilarityBeforeEnd": 0.994414,
+    "wallSeconds": 22.696
   },
   {
     "file": "t2-session.cast",
     "marks": {
-      "status-typing": 1.452,
-      "issued": 4.278,
-      "register-typing": 5.78,
-      "self-typing": 11.433,
-      "self": 13.215
+      "status-typing": 1.348,
+      "issued": 4.255,
+      "register-typing": 5.755,
+      "self-typing": 10.945,
+      "self": 12.705
     },
-    "wallSeconds": 20.194
+    "wallSeconds": 19.868
   },
   {
     "file": "t3-request.cast",
     "marks": {
-      "typing": 1.38,
-      "waiting": 10.745
+      "typing": 1.39,
+      "waiting": 10.284
     },
-    "wallSeconds": 14.302
+    "wallSeconds": 13.868
   },
   {
-    "actSeconds": 19.364,
+    "actSeconds": 18.545,
     "file": "b2-approve.webm",
     "marks": {
-      "inbox": 0.872,
-      "record": 5.806,
-      "approve": 13.114,
-      "result": 13.284
+      "inbox": 1.629,
+      "record": 5.738,
+      "approve": 13.487,
+      "result": 13.608
     },
-    "resultSimilarityAtEnd": 0.98018,
-    "resultSimilarityBeforeEnd": 0.98018,
-    "wallSeconds": 20.917
+    "resultSimilarityAtEnd": 0.990233,
+    "resultSimilarityBeforeEnd": 0.990233,
+    "wallSeconds": 21.475
   },
   {
     "file": "t4-ran.cast",
     "marks": {
-      "approve": 14.582,
-      "key": 20.229,
-      "status-typing": 24.73,
-      "status-word": 26.356,
-      "status-typed": 29.437,
-      "decided": 29.912
+      "approve": 15.153,
+      "key": 20.561,
+      "status-typing": 25.759,
+      "status-word": 27.461,
+      "status-typed": 30.084,
+      "decided": 30.698
     },
-    "wallSeconds": 34.216
+    "wallSeconds": 34.912
   },
   {
-    "actSeconds": 17.593,
+    "actSeconds": 17.503,
     "file": "b3-grants.webm",
     "marks": {
-      "record": 0.622,
-      "settings": 3.222,
-      "grants": 3.28,
-      "row": 4.477,
-      "revoke": 8.056,
-      "result": 11.854
+      "record": 0.807,
+      "settings": 3.374,
+      "grants": 3.515,
+      "row": 4.718,
+      "revoke": 8.208,
+      "result": 11.7
     },
-    "resultSimilarityAtEnd": 0.995585,
-    "resultSimilarityBeforeEnd": 0.995745,
-    "wallSeconds": 19.638
+    "resultSimilarityAtEnd": 0.994748,
+    "resultSimilarityBeforeEnd": 0.994744,
+    "wallSeconds": 20.747
   }
 ]

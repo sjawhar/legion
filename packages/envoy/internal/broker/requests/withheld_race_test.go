@@ -32,8 +32,9 @@ func lateAutomaticGrants(t *testing.T, m *Machine) int {
 
 // TestCreateAndRevokeByApproverUnderLoadNeverDeadlockOrFail races Create, RevokeByApprover,
 // RevokeGrant, Values and ApplyDecision on a few sessions. No call may fail with a deadlock (40P01)
-// or an error outside the refusals each one answers, and no automatic grant of a withheld name may
-// be written after the withhold that covers it committed.
+// or an error outside the refusals each one answers, including REQUEST_PENDING when another
+// in-flight request already holds one of the secret names. No automatic grant of a withheld name
+// may be written after the withhold that covers it committed.
 func TestCreateAndRevokeByApproverUnderLoadNeverDeadlockOrFail(t *testing.T) {
 	m, enr0, key0, operator := newFixture(t)
 	withSharedToken(t, m)
@@ -41,7 +42,7 @@ func TestCreateAndRevokeByApproverUnderLoadNeverDeadlockOrFail(t *testing.T) {
 	ids := []string{enr0}
 	keys := map[string]*ecdsa.PrivateKey{enr0: key0}
 	for i := range 5 {
-		id, k := newEnrollment(t, m.Store, "box", fmt.Sprintf("box-load-%d-%s", i, t.Name()), new(fixtureOperator), nil)
+		id, k := newEnrollment(t, m.Store, "session", fmt.Sprintf("box-load-%d-%s", i, t.Name()), new(fixtureOperator), nil)
 		ids = append(ids, id)
 		keys[id] = k
 	}
@@ -59,8 +60,8 @@ func TestCreateAndRevokeByApproverUnderLoadNeverDeadlockOrFail(t *testing.T) {
 		case errors.As(err, &pgErr) && pgErr.Code == "40P01":
 			deadlocks++
 			failures = append(failures, fmt.Sprintf("%s: DEADLOCK %v", op, err))
-		case errors.Is(err, ErrGrantNotLive), errors.Is(err, ErrMixedApprovers), errors.Is(err, ErrTerminal),
-			errors.Is(err, ErrExpired), errors.Is(err, record.ErrNotApprover), errors.Is(err, pgx.ErrNoRows):
+		case errors.Is(err, ErrGrantNotLive), errors.Is(err, ErrMixedApprovers), errors.Is(err, ErrRequestPending),
+			errors.Is(err, ErrTerminal), errors.Is(err, ErrExpired), errors.Is(err, record.ErrNotApprover), errors.Is(err, pgx.ErrNoRows):
 		default:
 			failures = append(failures, fmt.Sprintf("%s: %v", op, err))
 		}
@@ -82,7 +83,7 @@ func TestCreateAndRevokeByApproverUnderLoadNeverDeadlockOrFail(t *testing.T) {
 				switch (w + r) % 5 {
 				case 0:
 					if req.GrantID != nil {
-						check("RevokeByApprover", m.RevokeByApprover(ctx, *req.GrantID, operator))
+						check("RevokeByApprover", m.RevokeByApprover(ctx, *req.GrantID, operator, record.HumanActor(operator)))
 					}
 				case 1:
 					if req.GrantID != nil {
@@ -102,7 +103,7 @@ func TestCreateAndRevokeByApproverUnderLoadNeverDeadlockOrFail(t *testing.T) {
 					listed, err := m.GrantsForApprover(ctx, operator)
 					check("GrantsForApprover", err)
 					for _, g := range listed {
-						check("RevokeByApprover(listed)", m.RevokeByApprover(ctx, g.GrantID, operator))
+						check("RevokeByApprover(listed)", m.RevokeByApprover(ctx, g.GrantID, operator, record.HumanActor(operator)))
 					}
 				}
 			}
@@ -140,7 +141,7 @@ func TestReverseLockOrderAgainstRevokeByApproverDeadlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	done := make(chan error, 1)
-	go func() { done <- m.RevokeByApprover(ctx, *auto.GrantID, operator) }()
+	go func() { done <- m.RevokeByApprover(ctx, *auto.GrantID, operator, record.HumanActor(operator)) }()
 	storetest.AwaitLockWaiters(t, m.Store.Pool, tx, 1)
 	_, txErr := tx.Exec(ctx, `select 1 from enrollments where id=$1 for no key update`, enr)
 	if txErr != nil {
@@ -169,7 +170,7 @@ func TestRequestsRacingTheWithholdOnFreshSessions(t *testing.T) {
 	outcomes := map[string]int{}
 	var failures []string
 	for s := range sessions {
-		enr, key := newEnrollment(t, m.Store, "box", fmt.Sprintf("box-race-%d-%s", s, t.Name()), new(fixtureOperator), nil)
+		enr, key := newEnrollment(t, m.Store, "session", fmt.Sprintf("box-race-%d-%s", s, t.Name()), new(fixtureOperator), nil)
 		auto, err := m.Create(ctx, enr, signRequest(t, m, key, "seed", "AUTO_TOKEN"), "")
 		if err != nil || auto.GrantID == nil {
 			t.Fatalf("seed Create = %+v, %v", auto, err)
@@ -199,7 +200,7 @@ func TestRequestsRacingTheWithholdOnFreshSessions(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			if err := m.RevokeByApprover(ctx, *auto.GrantID, operator); err != nil {
+			if err := m.RevokeByApprover(ctx, *auto.GrantID, operator, record.HumanActor(operator)); err != nil {
 				mu.Lock()
 				failures = append(failures, fmt.Sprintf("session %d revoke: %v", s, err))
 				mu.Unlock()
@@ -218,7 +219,7 @@ func TestRequestsRacingTheWithholdOnFreshSessions(t *testing.T) {
 	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from grants g
 		join request_secrets rs on rs.request_id=g.request_id and rs.name='AUTO_TOKEN' and rs.decision='automatic'
 		join withheld_secrets w on w.enrollment_id=g.enrollment_id and w.name='AUTO_TOKEN'
-		where g.revoked_at is null and g.expires_at > now()`).Scan(&survivors); err != nil {
+		where g.revoked_at is null and `+grantUnexpired("g")).Scan(&survivors); err != nil {
 		t.Fatal(err)
 	}
 	if survivors > 0 {

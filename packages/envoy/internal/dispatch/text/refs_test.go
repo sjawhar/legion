@@ -216,3 +216,49 @@ func TestExtractParsesComponentReferences(t *testing.T) {
 		t.Fatalf("Extract() = %#v; want %#v", got, want)
 	}
 }
+
+// An artifact an agent's conversation owns is addressed under the session id, as written, with an
+// optional version, inside a picture's syntax as anywhere else; its dashboard page names the same
+// artifact, and writing the reference back from what was parsed reads the same artifact again. An
+// id holding a `/`, `?`, `#` or whitespace, or an empty one, names nothing.
+func TestExtractParsesAgentArtifactReferences(t *testing.T) {
+	const server = "https://dispatch.example"
+	want := Ref{Kind: "artifact", Session: "01a1058e-f14f", ID: "shot-png"}
+	for _, body := range []string{
+		"dispatch://agent/01a1058e-f14f/artifact/shot-png",
+		"dispatch://agent/01a1058e-f14f/artifact/shot-png@v3",
+		"![shot.png](dispatch://agent/01a1058e-f14f/artifact/shot-png@v1)",
+		server + "/agents/01a1058e-f14f/artifacts/shot-png",
+		server + "/agents/01a1058e-f14f/artifacts/shot-png?v=3",
+	} {
+		got := Extract(body, server)
+		if len(got) != 1 || got[0] != want {
+			t.Errorf("Extract(%q) = %#v; want %#v", body, got, want)
+			continue
+		}
+		written := "dispatch://agent/" + got[0].Session + "/artifact/" + got[0].ID
+		if again := Extract(written, server); len(again) != 1 || again[0] != want {
+			t.Errorf("Extract(%q), written back from %q, = %#v; want %#v", written, body, again, want)
+		}
+	}
+	for _, body := range []string{
+		"dispatch://agent/a/b/artifact/shot-png",
+		"dispatch://agent//artifact/shot-png",
+		"dispatch://agent/a?b/artifact/shot-png",
+		"dispatch://agent/a#b/artifact/shot-png",
+		"dispatch://agent/abc/artifact/Shot-png",
+		"dispatch://agent/abc/artifact/shot-png@v0",
+		"dispatch://agent/abc/artifact/shot-png/comment/c1",
+		"dispatch://agent/abc",
+		server + "/agents/a%2Fb/artifacts/shot-png",
+		server + "/agents/a%20b/artifacts/shot-png",
+		server + "/agents/abc/artifacts/shot-png?v=0",
+		server + "/agents/abc/artifacts/shot-png?comment=c1",
+	} {
+		for _, ref := range Extract(body, server) {
+			if ref.Kind != "url" {
+				t.Errorf("Extract(%q) cites %#v; want nothing", body, ref)
+			}
+		}
+	}
+}

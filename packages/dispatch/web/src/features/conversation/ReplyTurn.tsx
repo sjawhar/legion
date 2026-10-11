@@ -73,7 +73,7 @@ export function ReplyTurn({
   current?: boolean;
   delivery?: ReplyDelivery;
   onReply?: () => void;
-  quote?: { readonly text: string; readonly to?: string };
+  quote?: { readonly author: string | undefined; readonly excerpt: string; readonly to?: string };
   /** Holds the Reply button while the composer it would address is busy with a send. */
   replyDisabled?: boolean;
   turnID: string;
@@ -99,9 +99,12 @@ export function ReplyTurn({
           <Timestamp at={at} />
         </p>
         {quote === undefined ? null : (
-          <ReplyQuote className="mb-1" to={quote.to}>
-            {quote.text}
-          </ReplyQuote>
+          <ReplyQuote
+            author={quote.author}
+            className="mb-1"
+            excerpt={quote.excerpt}
+            to={quote.to}
+          />
         )}
         {body}
         {delivery === undefined ? null : (

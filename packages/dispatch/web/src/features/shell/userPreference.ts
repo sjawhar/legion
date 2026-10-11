@@ -7,6 +7,7 @@ export type UserPreference =
   | "agents.pinned"
   | "inbox.view"
   | "project.board-edges"
+  | "project.board-lanes"
   | "project.issue-filters"
   | "project.issue-view"
   | "shell.margin"

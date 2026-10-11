@@ -1,3 +1,4 @@
+import { ISSUE_TITLE_MAX } from "@legion/contracts";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type FormEvent,
@@ -11,7 +12,7 @@ import {
 } from "react";
 import { Link } from "react-router-dom";
 
-import { api, apiErrorMessage } from "../../api/client";
+import { api, apiErrorCodeIn, apiErrorMessage } from "../../api/client";
 import { mergeIssue } from "../../api/issue-cache";
 import { userStateQuery } from "../../api/queries";
 import type { Artifact, IssueDetails, UserIssueState, UserState } from "../../api/types";
@@ -64,6 +65,7 @@ import { GitHubLink } from "./GitHubLink";
 import { IssueComponentsLine } from "./IssueComponentsLine";
 import { IssueLabels } from "./IssueLabels";
 import { PriorityEditor } from "./PriorityControl";
+import { ProgressChips } from "./ProgressChips";
 import { stateForIssue } from "./pins";
 import { UnreachableRouteMarker } from "./RouteReach";
 import { SubscribedAgents } from "./SubscribedAgents";
@@ -72,6 +74,8 @@ import type { IssuePriorityWrite } from "./useIssuePriority";
 
 const routeHint =
   "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";
+
+const titleRefusals = new Set(["CAP_EXCEEDED", "ISSUE_CLOSED"]);
 
 export function IssueHeader({
   documentArtifact,
@@ -283,6 +287,15 @@ export function IssueHeader({
   // like a route validation error, instead of the generic update failure line.
   const parentSaveFailed = updateIssue.isError && updateIssue.variables?.parent !== undefined;
   const parentError = apiErrorMessage(updateIssue.error, "Could not save parent.");
+  // A title Dispatch refused (CAP_EXCEEDED past ISSUE_TITLE_MAX, ISSUE_CLOSED) shows its reason
+  // with no Retry, since the same title is refused every time; any other failure keeps the generic
+  // line and its Retry.
+  const titleRefusal =
+    updateIssue.isError &&
+    updateIssue.variables?.title !== undefined &&
+    apiErrorCodeIn(updateIssue.error, titleRefusals)
+      ? updateIssue.error.message
+      : null;
   const routeLabel = `Messages default to ${drafts.route === "" ? "no route" : drafts.route}`;
   const issueReference = buildDispatchReference({ key: issue.key, kind: "issue" });
   const referencesPanelId = useId();
@@ -340,6 +353,7 @@ export function IssueHeader({
                 aria-label="Issue title"
                 className={`min-w-0 flex-1 rounded-lg border px-2 py-1 text-[22px] leading-7 font-semibold tracking-tight outline-none md:py-0 ${borderTransparent} ${bgTransparent} ${textPrimaryOnSurface} ${borderStrongHover} ${focusBorder}`}
                 disabled={isClosed}
+                maxLength={ISSUE_TITLE_MAX}
                 onBlur={() => {
                   drafts.requestTitleSubmit();
                   setEditingTitle(false);
@@ -357,9 +371,6 @@ export function IssueHeader({
                 value={drafts.title}
               />
             ) : (
-              // The clamp lives on the inner span, not here: `overflow: hidden` clips at the
-              // padding edge, so a clamped element with vertical padding shows the top of the
-              // line it cut - fragments of a third line under the ellipsis.
               <h1
                 className={`min-w-0 flex-1 break-words rounded-lg border px-2 py-1 text-[22px] leading-7 font-semibold tracking-tight md:py-0 ${borderTransparent} ${textPrimaryOnSurface} ${
                   isClosed ? "" : `cursor-text ${borderStrongHover}`
@@ -381,9 +392,8 @@ export function IssueHeader({
                   }
                 }}
                 tabIndex={isClosed ? -1 : 0}
-                title={issue.title}
               >
-                <span className="line-clamp-2">{drafts.title}</span>
+                {drafts.title}
               </h1>
             )}
             <PinButton
@@ -430,6 +440,9 @@ export function IssueHeader({
             disabled={isClosed || updateIssue.isPending}
             issueKey={issue.key}
           />
+          {/* Progress is state about how far the work has got, like the status and the claim,
+              so it sits in this wrapping row with them; the metadata rail below clips. */}
+          <ProgressChips bar progress={issue.progress} />
           {documentArtifact === undefined ? null : (
             <ApprovalChip
               artifact={documentArtifact}
@@ -754,6 +767,10 @@ export function IssueHeader({
         parentSaveFailed ? (
           <p className={`mt-1 text-sm ${dangerText}`} id="issue-parent-error">
             {parentError}
+          </p>
+        ) : titleRefusal !== null ? (
+          <p className={`mt-1 text-sm ${dangerText}`} id="issue-title-error" role="alert">
+            {titleRefusal}
           </p>
         ) : (
           <QueryError

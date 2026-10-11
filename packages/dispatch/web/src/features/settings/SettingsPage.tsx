@@ -19,10 +19,12 @@ import {
 } from "../../theme/classes";
 import { GrantsSection } from "../credentials/GrantsSection";
 import { credentialPendingQuery } from "../credentials/pending";
+import { DeliverySettingsForm } from "../delivery/DeliverySettingsForm";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentTokensSection } from "./AgentTokensSection";
 import { ArchitectureSourcesSection } from "./ArchitectureSourcesSection";
 import {
+  ownerRepoPattern,
   settingsFieldLabel,
   settingsMonoInput,
   settingsSectionGap,
@@ -223,7 +225,7 @@ export function SettingsPage(): ReactNode {
                     className={settingsMonoInput}
                     id="repository"
                     onChange={(event) => setRepository(event.target.value)}
-                    pattern="[^/\s]+/[^/\s]+"
+                    pattern={ownerRepoPattern}
                     placeholder="owner/repo"
                     required
                     value={repository}
@@ -263,6 +265,19 @@ export function SettingsPage(): ReactNode {
           ) : null}
         </section>
         <ArchitectureSourcesSection />
+        <section aria-labelledby="delivery-timeline-heading">
+          <h2
+            className={`text-xl font-semibold ${textPrimaryOnCanvas}`}
+            id="delivery-timeline-heading"
+          >
+            Delivery timeline
+          </h2>
+          <p className={`mt-1 text-sm ${textSecondaryOnCanvas}`}>
+            Which repository deploys, and whose merged pull requests the Delivery page counts.
+            Saving verifies the Dispatch GitHub App can read the deploy repository.
+          </p>
+          <DeliverySettingsForm />
+        </section>
       </div>
     </section>
   );

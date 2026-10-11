@@ -23,6 +23,8 @@ const schema = new Schema({
         answered_at: { default: undefined },
         answered_by: { default: undefined },
         blockId: { default: null },
+        copied_from: { default: undefined },
+        copied_from_document: { default: undefined },
         invalid: { default: undefined },
         multiple: { default: false },
         selected: { default: undefined },
@@ -113,7 +115,7 @@ function reply(body: string): Comment {
 }
 
 function threadRead(of: Ask, replies: Comment[] = []): AskRead {
-  return { ask: of, edits: [], followers: [], replies };
+  return { ask: of, answers: [], edits: [], followers: [], replies };
 }
 
 // The block reaches the API only through the shared card; each test says what the server answers.
@@ -220,6 +222,127 @@ test.each([
     // The reference copy control lives in the card's metadata line, once.
     expect(card.section.querySelectorAll('[aria-label^="Copy reference"]')).toHaveLength(1);
     expect(within(hosted).getByRole("button", { name: /^Copy reference/ })).toBeDefined();
+  } finally {
+    card.unmount();
+  }
+});
+
+test.each([
+  ["open", "open there"],
+  ["answered", "answered there"],
+  ["resolved", "resolved there"],
+] as const)("a block copied from a %s ask names its source's document and state from its own attributes", (state, there) => {
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/artifact/plan",
+      state,
+    }),
+  });
+  try {
+    const link = card.header.getByRole("link", { name: "CORE-1 plan" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan#b-b-1");
+    expect(card.header.getByText(/Copied from/).textContent).toBe(
+      `Copied from CORE-1 plan, ${there}`
+    );
+    // No ask of its own: no composer, the block's attributes record what its source shows.
+    expect(card.footer.queryByLabelText("Your answer")).toBeNull();
+    expect(getAsk).not.toHaveBeenCalled();
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a block copied from an issue's spec links to the spec", () => {
+  const card = renderCard({
+    indexed: false,
+    node: askNode({ copied_from: "ask-source", copied_from_document: "dispatch://CORE-1/spec" }),
+  });
+  try {
+    const link = card.header.getByRole("link", { name: "the spec" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/spec#b-b-1");
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a project document's copied block links to its source under the project", () => {
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE/artifact/plan",
+    }),
+    owner: { project: "CORE", slug: "notes" },
+  });
+  try {
+    const link = card.header.getByRole("link", { name: "CORE/plan" });
+    expect(link.getAttribute("href")).toBe("/projects/CORE/documents/plan#b-b-1");
+  } finally {
+    card.unmount();
+  }
+});
+
+test("three copied blocks render their sources without reading one ask", () => {
+  const cards = ["open", "answered", "resolved"].map((state) =>
+    renderCard({
+      indexed: false,
+      node: askNode({
+        copied_from: `ask-${state}`,
+        copied_from_document: "dispatch://CORE-1/spec",
+        state,
+      }),
+    })
+  );
+  try {
+    for (const card of cards) {
+      expect(card.header.getByRole("link", { name: "the spec" })).toBeDefined();
+    }
+    expect(getAsk).not.toHaveBeenCalled();
+  } finally {
+    for (const card of cards) card.unmount();
+  }
+});
+
+test("a copy whose source was answered after it settled shows the answer settlement wrote into it", () => {
+  // Answering the source settles its copies again, which writes the answer into each copied block.
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      answer: "After the fix lands.",
+      answered_at: new Date(Date.now() - 60_000).toISOString(),
+      answered_by: "bob",
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/artifact/plan",
+      selected: ["Ship"],
+      state: "answered",
+    }),
+  });
+  try {
+    expect(card.header.getByText(/Copied from/).textContent).toBe(
+      "Copied from CORE-1 plan, answered there"
+    );
+    expect(card.section.querySelector("[data-dispatch-ask-answer]")?.textContent).toBe(
+      "After the fix lands."
+    );
+    expect(card.footer.queryByLabelText("Your answer")).toBeNull();
+    expect(getAsk).not.toHaveBeenCalled();
+  } finally {
+    card.unmount();
+  }
+});
+
+test("a block with an ask of its own names no source, whatever its attributes hold", () => {
+  const card = renderCard({
+    node: askNode({
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/spec",
+      state: "open",
+    }),
+  });
+  try {
+    expect(card.header.queryByText(/Copied from/)).toBeNull();
   } finally {
     card.unmount();
   }
@@ -387,11 +510,8 @@ test("Ask back on an issue document's decision posts a clarification on the issu
       { ask_id: "ask-1", body: "Ship to which environment?" },
     ]);
     expect(answerAsk).not.toHaveBeenCalled();
-    // The composer clears for the next turn and the exchange shows, folded, under the block.
+    // The composer clears for the next turn and the exchange stays visible under the block.
     await waitFor(() => expect(field.value).toBe(""));
-    const disclosure = await card.footer.findByRole("button", { name: "1 reply" });
-    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
-    fireEvent.click(disclosure);
     await waitFor(() => expect(card.footer.getByText("Ship to which environment?")).toBeDefined());
     // A clarification is not an answer: the composer is still here.
     expect(card.footer.getByRole("button", { name: "Answer" })).toBeDefined();
@@ -456,17 +576,15 @@ test("a question-shaped answer with no option chosen offers Ask back instead, as
   }
 });
 
-test("an existing exchange shows folded under an open decision with its count", async () => {
+test("an existing exchange shows its newest replies under an open decision", async () => {
   const card = renderCard({
     node: askNode({ urgency: "med" }),
     thread: threadRead(ask, [reply("Ship where?"), reply("To staging first.")]),
   });
   try {
-    const disclosure = await card.footer.findByRole("button", { name: "2 replies" });
-    expect(card.footer.queryByText("Ship where?")).toBeNull();
-    fireEvent.click(disclosure);
-    expect(card.footer.getByText("Ship where?")).toBeDefined();
+    await waitFor(() => expect(card.footer.getByText("Ship where?")).toBeDefined());
     expect(card.footer.getByText("To staging first.")).toBeDefined();
+    expect(card.footer.queryByRole("button", { name: /Show .* more/ })).toBeNull();
   } finally {
     card.unmount();
   }
@@ -492,7 +610,7 @@ test("an answered decision hosts the shared record: who answered and when, the c
     await waitFor(() =>
       expect(within(record).getByText("Ship it after the fix lands.")).toBeDefined()
     );
-    expect(await card.footer.findByRole("button", { name: "1 reply" })).toBeDefined();
+    expect(await card.footer.findByText("Ship where?")).toBeDefined();
     // The record has no metadata line, so the block header keeps the reference copy control.
     expect(card.header.getByRole("button", { name: /^Copy reference/ })).toBeDefined();
   } finally {
@@ -521,7 +639,6 @@ test("a reply written in Markdown keeps its paragraphs and list inside the block
     thread: threadRead(ask, [reply("Two things first:\n\n- the branch\n- the tag\n\nThen ship.")]),
   });
   try {
-    fireEvent.click(await card.footer.findByRole("button", { name: "1 reply" }));
     const body = await waitFor(() => {
       const found = card.footer.getByText("Then ship.").closest(".dispatch-markdown");
       if (found === null) throw new Error("the reply body is not a MarkdownBody");

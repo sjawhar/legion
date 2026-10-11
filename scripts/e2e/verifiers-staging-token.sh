@@ -126,11 +126,11 @@ echo "  issuer=$issuer"
 # An issuer of the same shape that answers 404: what a misconfigured deployment looks like.
 absent_issuer="${issuer%/*}/00000000000000000000000000000000"
 
-echo "== postgres:16 and nats:2.10 on ephemeral loopback ports"
+echo "== pgvector/pgvector (pinned digest) and nats:2.10 on ephemeral loopback ports"
 docker rm -f "$pg_name" "$nats_name" >/dev/null 2>&1 || docker ps >/dev/null # a missing container is fine; a broken docker is not
 trap cleanup EXIT
 docker run -d --name "$pg_name" -e POSTGRES_USER=dispatch -e POSTGRES_PASSWORD=dispatch \
-  -e POSTGRES_DB=dispatch -p 127.0.0.1::5432 postgres:16 >/dev/null
+  -e POSTGRES_DB=dispatch -p 127.0.0.1::5432 pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
 docker run -d --name "$nats_name" -p 127.0.0.1::4222 -p 127.0.0.1::8222 nats:2.10 -js -m 8222 >/dev/null
 # Over TCP, not the container's unix socket: the entrypoint's bootstrap phase answers on the
 # socket while nothing listens on 5432 yet, and a client that connects then is reset.

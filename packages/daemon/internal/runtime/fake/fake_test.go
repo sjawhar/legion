@@ -110,8 +110,10 @@ func TestSpawnAnswersTheScriptAndOtherwiseMintsALocatorThatValidates(t *testing.
 	scripted := runtime.Locator{
 		Runtime:     runtime.RuntimeSandbox,
 		Claim:       "legion-omp-LEGION-208-tester",
-		Incarnation: "pod-uid",
-		Sandbox:     &runtime.SandboxLocator{Namespace: "legion", Name: "sandbox-1"},
+		Incarnation: "pod-uid/1",
+		Sandbox: &runtime.SandboxLocator{
+			Namespace: "legion", Name: "legion-omp-legion-208", PodUID: "pod-uid", Container: "tester", Generation: 1,
+		},
 	}
 	refusal := errors.New("no pane could be opened")
 	fake.ScriptSpawn(SpawnResult{Locator: scripted}, SpawnResult{Err: refusal})

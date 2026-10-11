@@ -2,8 +2,8 @@ import { useQuery } from "@tanstack/react-query";
 
 import { ApiError } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
+import { askQuery, commentQuery, messageQuery } from "../refs/reference-target";
 import { buildIssuePath, documentItemPath, type IssueRoute } from "../refs/routes";
-import { askQuery, commentQuery, messageQuery } from "../refs/Unfurl";
 
 /** The item routes: `/issues/KEY/asks|comments|messages/<id>`. */
 export type ItemRoute = Extract<IssueRoute, { id: string }>;
@@ -58,7 +58,13 @@ export function useItemLanding(
         }
       : route.kind === "ask"
         ? {
-            artifactID: ask.data?.ask.anchor?.artifact_id ?? ask.data?.ask.block_artifact?.id,
+            // An approval ask carries no anchor or block of its own, but it names the document
+            // it asks about (`approval.artifact_id`); landing there, with the ask in the
+            // margin, beats falling through to the Conversation turn below.
+            artifactID:
+              ask.data?.ask.anchor?.artifact_id ??
+              ask.data?.ask.block_artifact?.id ??
+              ask.data?.ask.approval?.artifact_id,
             blockID: ask.data?.ask.block_id ?? undefined,
             item: ask.data?.ask,
             query: ask,

@@ -5,6 +5,8 @@ import type {
   AgentStreamToolResult,
 } from "@legion/contracts";
 
+import { dispatchMetadata } from "./dispatch-marks";
+
 /**
  * The live conversation a session is streaming, assembled from frames that arrive in whatever
  * order the session's own concurrent handlers produced them.
@@ -52,6 +54,7 @@ export function isRenderableFrame(frame: AgentStreamFrame): boolean {
   if (message === undefined || message === null) return false;
   if (typeof message.id !== "string" || typeof message.at !== "number") return false;
   if (message.role !== "user" && message.role !== "assistant") return false;
+  if (message.model !== undefined && typeof message.model !== "string") return false;
   if (!Array.isArray(message.parts)) return false;
   return message.parts.every((part) => {
     if (part.type === "text") return typeof part.text === "string";
@@ -155,7 +158,28 @@ export function toThreadMessages(state: AgentConversation): ThreadMessageLike[] 
             : ({ reason: "stop", type: "complete" } as const),
         }
       : {}),
+    // The model that produced this assistant turn, read back by AgentThread's renderer
+    // (LEGION-548); absent when the publishing host reported none.
+    ...(message.role === "assistant" && message.model !== undefined
+      ? { metadata: dispatchMetadata({ model: message.model }) }
+      : {}),
   }));
+}
+
+/**
+ * The model the session is currently running, for the live view's header: the most recent
+ * assistant turn's own report, whatever it is. A session whose client never reports one (Claude
+ * Code, OpenCode) shows nothing here rather than a guess. `state.messages` is kept sorted
+ * ascending by `at` (`applyFrame`), so walking from the end finds the newest assistant entry
+ * first; `Array.prototype.findLast` would read the same way but needs ES2023, past this
+ * package's ES2022 `lib`.
+ */
+export function currentModel(state: AgentConversation): string | undefined {
+  for (let index = state.messages.length - 1; index >= 0; index -= 1) {
+    const message = state.messages[index];
+    if (message?.role === "assistant") return message.model;
+  }
+  return undefined;
 }
 
 /** Whether the session is mid-turn, which is what shows the composer a running thread. */

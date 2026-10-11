@@ -148,7 +148,7 @@ func samples(t *testing.T) map[string][]Event {
 		"StreamLateRefusal":    {StreamLateRefusal{}},
 		"PromptAcked":          {PromptAcked{}},
 		"PromptRefused":        {PromptRefused{}},
-		"TreeVolumeLost":       {TreeVolumeLost{}},
+		"IssueVolumeLost":      {IssueVolumeLost{}},
 		"RequestSpawn":         {RequestSpawn{}},
 		"RequestRegister":      {RequestRegister{}},
 		"RequestReady":         {RequestReady{}},
@@ -156,6 +156,7 @@ func samples(t *testing.T) map[string][]Event {
 		"RequestResume":        {RequestResume{}},
 		"RequestStop":          {RequestStop{}},
 		"RequestTreeClose":     {RequestTreeClose{}},
+		"RequestIssueClose":    {RequestIssueClose{}},
 		"RequestOperatorClose": {RequestOperatorClose{}},
 		"RequestRetry":         {RequestRetry{}},
 		"RequestDeliver":       {RequestDeliver{}},
@@ -283,8 +284,8 @@ func fenced(ev Event, c Claim) Event {
 		return PromptRefused{Claim: c.Token, Generation: c.Generation, DeliveryID: c.Pending.ID, Err: errBoom}
 	case Timer:
 		return Timer{Claim: c.Token, Kind: ev.Kind, Generation: c.Generation, Seq: 7777, DeliveryID: c.Pending.ID}
-	case TreeVolumeLost:
-		return TreeVolumeLost{Claim: c.Token}
+	case IssueVolumeLost:
+		return IssueVolumeLost{Claim: c.Token}
 	case RequestSpawn:
 		return RequestSpawn{Claim: c.Token}
 	case RequestRegister:

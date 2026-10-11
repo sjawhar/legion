@@ -94,20 +94,25 @@ fi
 
 # The operator bearer, as the 0600 file operator_token_file names, and the OMP the daemon resolves
 # at boot (LEGION_OMP_PATH): a stub that answers the plugin gate's load probe (`omp models
-# --extension <probe> --json`) as a loaded pi-legion-envoy does — loaded, and from the package
-# whose manifest the gate read — says why anything else should never have run, and fails it. The
-# gate's contract probe reads the manifest where Oh My Pi finds it under the pane's HOME and
-# default profile: the daemon runs with HOME=$work/home and neither profile variable, and the
-# manifest there is the checkout's own, so it declares the contract this checkout's daemon
-# requires. The gate also asks the load probe for the task agents and skills the role prompts name
-# (LEGION_PROMPT_AGENTS, LEGION_PROMPT_SKILLS) and whether each of those agents' models resolves
-# (LEGION_AGENT_MODELS), and the stub answers that they all resolve.
+# --extension <probe> --json`) as a pane that loads pi-legion beside pi-envoy does — pi-legion
+# loaded, from the package whose manifest the gate read, speaking Envoy plugin interface 1, and
+# pi-envoy publishing interface 1 from a file an @sjawhar/pi-envoy manifest owns (the gate holds
+# the Envoy entry's file to a manifest of that name) — says why anything else should never have
+# run, and fails it. The gate's contract probe reads the pi-legion manifest where Oh My Pi finds it
+# under the pane's HOME and default profile: the daemon runs with HOME=$work/home and neither
+# profile variable, and the manifest there is the checkout's own, so it declares the contract this
+# checkout's daemon requires. The gate also asks the load probe for the task agents and skills the
+# role prompts name (LEGION_PROMPT_AGENTS, LEGION_PROMPT_SKILLS) and whether each of those agents'
+# models resolves (LEGION_AGENT_MODELS), and the stub answers that they all resolve.
 (umask 077 && printf 'stage1-operator-%s\n' "$project" >"$work/operator-token")
 cat >"$work/omp" <<'EOF'
 #!/bin/sh
 if [ "$1" = models ]; then
   echo LEGION_PLUGIN_LOADED=yes >&2
-  echo "LEGION_PLUGIN_LOADED_FROM=file://$HOME/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy/dist/legion.js" >&2
+  echo "LEGION_PLUGIN_LOADED_FROM=file://$HOME/.omp/plugins/node_modules/@sjawhar/pi-legion/dist/legion.js" >&2
+  echo LEGION_PLUGIN_ENVOY_INTERFACE=1 >&2
+  echo LEGION_ENVOY_INTERFACE=1 >&2
+  echo "LEGION_ENVOY_LOADED_FROM=file://$HOME/.omp/plugins/node_modules/@sjawhar/pi-envoy/dist/envoy.js" >&2
   [ -n "${LEGION_PROMPT_AGENTS:-}" ] && echo LEGION_PROMPT_AGENTS=resolved >&2
   [ -n "${LEGION_PROMPT_AGENTS:-}" ] && [ -z "${LEGION_SKIP_AGENT_MODELS:-}" ] && echo LEGION_AGENT_MODELS=resolved >&2
   [ -n "${LEGION_PROMPT_SKILLS:-}" ] && echo LEGION_PROMPT_SKILLS=resolved >&2
@@ -118,9 +123,10 @@ exit 1
 EOF
 chmod 0755 "$work/omp"
 export LEGION_OMP_PATH="$work/omp"
-plugin="$work/home/.omp/plugins/node_modules/@sjawhar/pi-legion-envoy"
-mkdir -p "$plugin"
-jq '{name, version, legion}' "$root/packages/pi-envoy/package.json" >"$plugin/package.json"
+plugins="$work/home/.omp/plugins/node_modules/@sjawhar"
+mkdir -p "$plugins/pi-legion" "$plugins/pi-envoy"
+jq '{name, version, legion}' "$root/packages/pi-legion/package.json" >"$plugins/pi-legion/package.json"
+jq '{name, version}' "$root/packages/pi-envoy/package.json" >"$plugins/pi-envoy/package.json"
 pane_home=(env -u OMP_PROFILE -u PI_PROFILE HOME="$work/home")
 
 cat >"$work/legion.yaml" <<EOF
@@ -166,6 +172,18 @@ jq -e --arg p "$project" \
   '.daemon.project == $p and .daemon.boots == 1 and .admission.cap == 4 and (.issues | length) == 0' \
   "$work/state1.json" || {
   echo "the first boot's state is not the project, boot 1, cap 4 and no issues stage 1 promises"
+  exit 1
+}
+# The deployment's capability report rides the same document (LEGION-578): every row of the table,
+# and under tmux with nothing decided the resource-limits row open with the legion.yaml line that
+# records a decision — a report, never a refusal, so the daemon served it — and the pool-capacity
+# row present, since the tmux runtime runs no probe pod.
+jq -e '(.capabilities | length) == 20
+  and (.capabilities | map(select(.name == "resource-limits" and .status == "open"
+    and .configLine == "capabilities.decided.resource-limits: \"<reason>\"")) | length) == 1
+  and (.capabilities | map(select(.name == "pool-capacity" and .status == "present")) | length) == 1' \
+  "$work/state1.json" || {
+  echo "the state does not carry the 20-row capability report with resource-limits open and pool-capacity present under tmux"
   exit 1
 }
 "$work/legion" legions --json |

@@ -177,15 +177,16 @@ func (c *Client) RevokeByApprover(ctx context.Context, grantID, approver string)
 	return c.do(ctx, http.MethodPost, "/v1/grants/"+url.PathEscape(grantID)+"/revoke-by-approver", body)
 }
 
-// MachineLogins lists the machine logins the named person approved that can still reach a secret:
-// their own machines' and any service's, unexpired or expired with a session still running.
+// MachineLogins lists the machine logins the named person may revoke that can still reach a
+// secret: their own machines', and every service's whoever approved it, unexpired or expired with
+// a session still running.
 func (c *Client) MachineLogins(ctx context.Context, approver string) (json.RawMessage, error) {
 	query := url.Values{"approver": {approver}}
 	return c.do(ctx, http.MethodGet, "/v1/launcher-credentials?"+query.Encode(), nil)
 }
 
-// RevokeMachineLogin relays a person's revoke of a machine login; the broker refuses anyone but
-// the person who approved it.
+// RevokeMachineLogin relays a person's revoke of a machine login; the broker allows anyone signed
+// in for a service's login, and only the person who approved it for a person's machine login.
 func (c *Client) RevokeMachineLogin(ctx context.Context, credentialID, approver string) (json.RawMessage, error) {
 	body, err := Decision{Approver: approver}.body()
 	if err != nil {

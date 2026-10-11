@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -34,6 +35,9 @@ type specs struct {
 	// designGate is the project's design gate policy (gates.design), which a tree's root architect
 	// is told after its addressing (DesignGateFragment).
 	designGate config.DesignGate
+	// reviewWorkflows is the project's review_workflows, which a reviewer is told after its
+	// addressing (ReviewWorkflowsFragment).
+	reviewWorkflows []string
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
@@ -47,8 +51,12 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 // SpawnSpec is the launch's secrets (launchSecrets: the Envoy bearer and the NATS nkey seed, each
 // when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
 // deployment instructions — and its repository; for a claim whose workspace was lost with its
-// session, the issue's branch the recreated workspace is recovered from.
+// session, the issue's branch the recreated workspace is recovered from. The controller's launch
+// (controllerSpawnSpec) is its own.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
+	if c.Role == claim.RoleController {
+		return s.controllerSpawnSpec()
+	}
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
 		return runtime.SpawnSpec{}, err
@@ -59,6 +67,9 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	}
 	if claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) {
 		addressing += " " + DesignGateFragment(s.designGate)
+	}
+	if c.Role == claim.RoleReviewer {
+		addressing += " " + ReviewWorkflowsFragment(s.reviewWorkflows)
 	}
 	env := map[string]string{}
 	if s.identity != nil {
@@ -82,6 +93,30 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
 	}
 	return spec, nil
+}
+
+// controllerSpawnSpec is the daemon's controller's launch (`controller: daemon`): its role part and
+// the headless part, the project's design gate policy as its addressing — what `legion controller
+// start` tells the operator's controller — the deployment instructions and the launch secrets. It
+// has no repository and no git identity: the controller works Dispatch, never a checkout, and
+// commits nothing.
+func (s specs) controllerSpawnSpec() (runtime.SpawnSpec, error) {
+	if s.prompts == nil {
+		return runtime.SpawnSpec{}, errors.New("the daemon prompt bundle was not constructed at boot")
+	}
+	paths, err := s.prompts.ControllerPromptPaths(true)
+	if err != nil {
+		return runtime.SpawnSpec{}, err
+	}
+	return runtime.SpawnSpec{
+		Env:     map[string]string{},
+		Secrets: maps.Clone(s.secrets),
+		Prompt: runtime.PromptParts{
+			RolePromptPaths:            paths,
+			Addressing:                 DesignGateFragment(s.designGate),
+			DeploymentInstructionsPath: s.instructions,
+		},
+	}, nil
 }
 
 // rolePromptPaths keeps an explicit operator prompt as a narrow test override. Every ordinary
@@ -108,7 +143,7 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 // the model never hand-encodes one. It names no merge queue: the merger publishes nothing — the
 // daemon posts the READY packet and publishes it to `projects.<KEY>.merge_queue_role` itself
 // (workflow.Engine.ready, prompts/go/merger.md). It is exported for the rigs under
-// packages/pi-envoy/scripts, which tell a worker what a pane is told.
+// packages/pi-legion/scripts, which tell a worker what a pane is told.
 func AddressingFragment(project string, c supervise.Claim) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
 	if err != nil {
@@ -125,4 +160,15 @@ func AddressingFragment(project string, c supervise.Claim) (string, error) {
 // the architect is in its Go role part (prompts/go/architect-root.md).
 func DesignGateFragment(policy config.DesignGate) string {
 	return fmt.Sprintf("Design gate policy: `gates.design: %s`.", policy)
+}
+
+// ReviewWorkflowsFragment is the sentence a reviewer is told after its addressing: the required
+// workflows this project declares as review workflows (`projects.<KEY>.review_workflows`), the
+// "Review workflows" line its Go role part reads (prompts/go/reviewer.md). A red only they make is
+// the reviewer's round's to adjudicate; any other red required workflow is a failing check.
+func ReviewWorkflowsFragment(workflows []string) string {
+	if len(workflows) == 0 {
+		return "Review workflows: this project declares none (`review_workflows`)."
+	}
+	return "Review workflows: this project declares `" + strings.Join(workflows, "`, `") + "` (`review_workflows`)."
 }

@@ -46,7 +46,7 @@ var errSourceMoved = errors.New("the architecture source changed during the sync
 
 // Importer imports one project's architecture model from its configured
 // source. Every trigger — the five-minute ticker, the Settings Refresh button,
-// and the dispatch_architecture_sync tool — funnels through Sync, and syncs of
+// and the `dispatch architecture-sync` command — funnels through Sync, and syncs of
 // one project are serialized by a per-project mutex (the server is one
 // process), so two refreshes of the same project cannot interleave their
 // projections.

@@ -1,9 +1,9 @@
 package supervise
 
-// A claim's session lives on its tree's volume. When workspace-init finds that volume lost — no
+// A claim's session lives on its issue's volume. When workspace-init finds that volume lost — no
 // clone and no session file, exit 3 — the session is gone, and resuming it would fail the same way
 // on every attempt. That one fact is the exception to the same-agent rule: the claim relaunches as
-// a fresh session, and the tree's other claims drop the sessions the same volume held.
+// a fresh session, and the issue's other claims drop the sessions the same volume held.
 
 import (
 	"testing"
@@ -11,11 +11,11 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-const lostDetail = "the tree volume was lost: pod legion-legion-208-architect (uid u2) Failed: " +
+const lostDetail = "the issue's volume was lost: pod legion-legion-208-architect (uid u2) Failed: " +
 	"init container workspace-init terminated (Error, exit code 3)"
 
 // resumedHarness is a machine over c that has suspended its recorded session and is resuming it;
-// told records every claim the machine reports its tree volume lost for.
+// told records every claim the machine reports its issue's volume lost for.
 func resumedHarness(t *testing.T, c Claim) (*harness, *[]Claim) {
 	t.Helper()
 	h := newHarnessOf(t, c)
@@ -34,7 +34,7 @@ func (h *harness) gone(detail string) {
 	h.must(RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: runtime.Gone, At: h.clock.Now(), Detail: detail}})
 }
 
-// goneWithWorkspaceLost is the runtime's verdict that the process never started because its tree
+// goneWithWorkspaceLost is the runtime's verdict that the process never started because its issue's
 // volume was lost: the field, not the wording of the detail beside it.
 func (h *harness) goneWithWorkspaceLost(detail string) {
 	h.t.Helper()
@@ -66,8 +66,8 @@ func TestAWorkspaceLostGoneRelaunchesAFreshSessionOnce(t *testing.T) {
 	if stored := h.store.load(rootToken); !stored.WorkspaceLost || stored.Session != "" || stored.SessionFile != "" || stored.Generation != generation+1 {
 		t.Errorf("stored %+v, want the lost session dropped at generation %d", stored, generation+1)
 	}
-	if len(*told) != 1 || (*told)[0].Token != rootToken || (*told)[0].Tree != "LEGION-208" {
-		t.Errorf("told %+v, want the root's lost tree volume reported once", *told)
+	if len(*told) != 1 || (*told)[0].Token != rootToken || (*told)[0].Issue != "LEGION-208" {
+		t.Errorf("told %+v, want the root's lost volume reported once", *told)
 	}
 
 	h.connect()
@@ -103,7 +103,7 @@ func TestAGoneWithoutTheWorkspaceLostVerdictStillResumesTheSession(t *testing.T)
 	}
 }
 
-// A claim of the tree that runs no process drops the session the lost volume held: its next launch
+// A claim of the issue that runs no process drops the session the lost volume held: its next launch
 // — whenever it comes, across a restart too — is a fresh session, never a resume that would find the
 // session missing beside a clone the root already recreated and fail until its budget ran out.
 func TestAClaimWithNoProcessDropsTheSessionTheLostVolumeHeld(t *testing.T) {
@@ -129,7 +129,7 @@ func TestAClaimWithNoProcessDropsTheSessionTheLostVolumeHeld(t *testing.T) {
 			tc.end(h)
 			h.wantState(tc.state)
 
-			h.must(TreeVolumeLost{Claim: testToken})
+			h.must(IssueVolumeLost{Claim: testToken})
 
 			if c := h.claim(); c.Session != "" || c.SessionFile != "" || !c.WorkspaceLost {
 				t.Errorf("claim %+v, want its session dropped and its workspace lost", c)
@@ -147,14 +147,14 @@ func TestAClaimWithNoProcessDropsTheSessionTheLostVolumeHeld(t *testing.T) {
 	}
 }
 
-// A claim resuming its session when the tree's volume is found lost drops it too: its process will
+// A claim resuming its session when the issue's volume is found lost drops it too: its process will
 // not find the session, and the relaunch after it is fresh.
 func TestABootingResumeDropsTheSessionTheLostVolumeHeld(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateSuspended)
 	h.must(RequestResume{Claim: testToken})
 
-	h.must(TreeVolumeLost{Claim: testToken})
+	h.must(IssueVolumeLost{Claim: testToken})
 	h.gone("pod legion-legion-209-implementer (uid u2) Failed: init container workspace-init terminated (Error, exit code 1)")
 
 	if last := h.rt.Calls()[len(h.rt.Calls())-1]; last.Method != "Spawn" || last.Spec.ResumeSessionFile != "" {
@@ -173,7 +173,7 @@ func TestAClaimWhoseAgentRegisteredKeepsItsSession(t *testing.T) {
 			h := newHarness(t)
 			h.reach(state)
 
-			h.must(TreeVolumeLost{Claim: testToken})
+			h.must(IssueVolumeLost{Claim: testToken})
 
 			if c := h.claim(); c.Session != session || c.SessionFile != sessionFile || c.WorkspaceLost {
 				t.Errorf("claim %+v, want its session kept", c)
@@ -181,4 +181,21 @@ func TestAClaimWhoseAgentRegisteredKeepsItsSession(t *testing.T) {
 			h.wantState(state)
 		})
 	}
+}
+
+func TestFreshRoleReportsLossOfAnotherRolesIssueSessions(t *testing.T) {
+	h := newHarness(t)
+	var reported []Claim
+	h.deps.VolumeLost = func(c Claim) { reported = append(reported, c) }
+	h.start(h.store.load(h.token))
+	h.reach(StateLaunching)
+	h.goneWithWorkspaceLost(lostDetail)
+	if got := h.claim(); !got.WorkspaceLost || got.SessionFile != "" {
+		t.Fatalf("fresh sibling did not recover confirmed issue storage loss: %+v", got)
+	}
+	if len(reported) != 1 || reported[0].Issue != h.claim().Issue {
+		t.Fatalf("fresh sibling did not invalidate the issue's retained sessions: %+v", reported)
+	}
+	h.wantBudgets(Budgets{})
+	h.wantState(StateLaunching)
 }

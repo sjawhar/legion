@@ -23,7 +23,9 @@ export function eventDescription(event: Event): string {
     case "ask.resolved":
       return describeAskResolution(event.payload.resolution);
     case "ask.answered":
-      return `Ask answered: ${event.payload.question}`;
+      return event.payload.previous_answer === undefined
+        ? `Ask answered: ${event.payload.question}`
+        : `Answer changed: ${event.payload.question}`;
     case "ask.edited":
       return `Ask edited: ${event.payload.question}`;
     case "ask.handed_back":

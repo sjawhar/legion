@@ -554,7 +554,7 @@ func TestOutboxTreeCloseRowEndsTheTreesRootClaim(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create root claim: %v", err)
 	}
-	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
+	runner := &outbox{pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
 
 	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation, Linger: issue.Generation}, time.Now())); err != nil {
 		t.Fatalf("stop the root at its tree's close: %v", err)
@@ -603,7 +603,7 @@ func TestTheWorkflowsTreeCloseIsNotPutToTheOperatorsPredicate(t *testing.T) {
 	}
 
 	// The workflow's own close of that same tree goes through and releases the root.
-	runner := &outbox{pool: pool, records: records, supervisor: sup, tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
+	runner := &outbox{pool: pool, records: records, supervisor: sup, trees: outboxTreeStore(t, pool, issue.Tree), tokens: outboxTokens{}, project: "legion", stateDir: t.TempDir(), repo: ghrepo.MustParse("acme/widgets")}
 	if err := runner.execute(context.Background(), mustOutboxRow(t, issue.Key, record.SuperviseRequest{
 		Op: "tree_close", Tree: issue.Tree, Role: claim.RoleArchitect, Generation: issue.Generation, Linger: issue.Generation,
 	}, time.Now())); err != nil {
@@ -711,7 +711,8 @@ func TestAWorkflowTaskIsDroppedAfterItsRetryRewritesTheDelivery(t *testing.T) {
 
 // A start whose task meets the claim's own pending delivery — a claim a retry relaunched still
 // holds the task it was relaunched with, until that turn ends — waits: the row stays and runs again
-// on the outbox's backoff, and the wait is logged at debug, never as a failed row.
+// on the outbox's backoff, and its first attempt is logged as a wait (wait.ErrWaiting), never as a
+// failed row.
 func TestOutboxStartWaitingOnThePendingDeliveryIsNotAFailure(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
@@ -749,8 +750,8 @@ func TestOutboxStartWaitingOnThePendingDeliveryIsNotAFailure(t *testing.T) {
 	if strings.Contains(logs.String(), "level=ERROR") {
 		t.Errorf("logged a failure for a wait:\n%s", logs.String())
 	}
-	if !strings.Contains(logs.String(), "level=DEBUG") || !strings.Contains(logs.String(), "pending delivery") {
-		t.Errorf("logged no debug line naming the pending delivery:\n%s", logs.String())
+	if !strings.Contains(logs.String(), `level=INFO msg="outbox row waits" row=1 kind=supervise`) || !strings.Contains(logs.String(), "a delivery is already pending") {
+		t.Errorf("logged no wait line naming the pending delivery:\n%s", logs.String())
 	}
 	if rows := outboxRows(t, pool); rows != 1 {
 		t.Errorf("outbox rows = %d, want the start kept to run again", rows)

@@ -17,6 +17,9 @@ type pendingEntry struct {
 	Identifiers []string `json:"identifiers"`
 	// When it was asked.
 	RequestedAt time.Time `json:"requested_at"`
+	// The session this request names, read independently of each other (LEGION-587); see
+	// recordSessionResp (handlers_ui_records.go), this row's exact shape here too.
+	Session recordSessionResp `json:"session"`
 }
 
 // pendingResponse is GET /v1/pending's answer.
@@ -37,7 +40,10 @@ func (s *server) listPending(w http.ResponseWriter, r *http.Request) {
 	}
 	entries := make([]pendingEntry, len(rows))
 	for i, row := range rows {
-		entries[i] = pendingEntry{RecordID: row.RecordID, Kind: row.Kind, Identifiers: row.Identifiers, RequestedAt: row.RequestedAt}
+		entries[i] = pendingEntry{
+			RecordID: row.RecordID, Kind: row.Kind, Identifiers: row.Identifiers, RequestedAt: row.RequestedAt,
+			Session: sessionResp(row.Session),
+		}
 	}
 	writeJSON(w, http.StatusOK, pendingResponse{Pending: entries})
 }

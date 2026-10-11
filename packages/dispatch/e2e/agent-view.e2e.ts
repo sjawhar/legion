@@ -1,3 +1,4 @@
+import { AGENT_STREAM_LIMITS, capAgentStreamText } from "@legion/contracts";
 import { expect, type Page, test } from "@playwright/test";
 
 import { agentRow, type FakeSession, getSentMessages, setLiveSessions } from "./agents";
@@ -83,7 +84,7 @@ const replay = {
   v: 1,
 };
 
-function assistantFrame(seq: number, text: string, streaming: boolean): object {
+function assistantFrame(seq: number, text: string, streaming: boolean, model?: string): object {
   return {
     kind: "message",
     message: {
@@ -92,6 +93,7 @@ function assistantFrame(seq: number, text: string, streaming: boolean): object {
       parts: [{ text, type: "text" }],
       role: "assistant",
       streaming,
+      ...(model === undefined ? {} : { model }),
     },
     seq,
     v: 1,
@@ -369,7 +371,7 @@ test("a session's replies to a direct message are unread until the live view sho
   });
   const session = { id: planner.session_id, kind: "session" as const };
   await replyToMessageDelivery(asked.id, { attempt: 1, body: "Switching to it now." }, session);
-  // A follow-up, as dispatch_message sends it.
+  // A follow-up, as `dispatch message` sends it.
   await replyToMessageDelivery(asked.id, { attempt: 1, body: "Done: it is at /dash." }, session, {
     followUp: true,
   });
@@ -569,6 +571,58 @@ test("on a phone the live view never scrolls the page, keeps its header and comp
     // and the gutter follow the visual viewport's bottom in page coordinates, offsetTop included.
     await raiseKeyboard(page, 500, 120);
     await lowerKeyboard(page);
+  } finally {
+    await context.close();
+  }
+});
+
+// A session's reported model, capped at AGENT_STREAM_LIMITS.modelChars before it ever leaves
+// pi-envoy (packages/pi-envoy/src/agent-stream.ts), is still an unbroken identifier with no
+// spaces: on a 390 px phone it does not fit the header pill or the turn's own label, and without
+// an ellipsis it forced the whole page to scroll sideways rather than wrapping.
+test("a capped model name ends in an ellipsis on a phone, in the header and on the turn, and never forces the page to scroll sideways", async ({
+  browser,
+}, testInfo) => {
+  test.skip(
+    !PHONE_PROJECTS.includes(testInfo.project.name),
+    "the phone layout runs on the phone projects"
+  );
+  const longModel = capAgentStreamText(
+    `anthropic/${"x".repeat(300)}`,
+    AGENT_STREAM_LIMITS.modelChars
+  );
+  await publishAgentStreamFrame(
+    planner.session_id,
+    {
+      frames: [assistantFrame(1, "Switching models.", false, longModel)],
+      session_id: planner.session_id,
+      v: 1,
+    },
+    "replay"
+  );
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+  try {
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto(`/agents/${planner.session_id}/live`);
+    const pill = page.getByTestId("agent-session-model");
+    const label = page.getByTestId("agent-message-model");
+    await expect(pill).toBeVisible();
+    await expect(label).toBeVisible();
+    // The pill is a flex container, so its `title` sits on the inner TruncatedText span
+    // (AGENTS.md's rule for a flex host); the turn label is a plain block, so it carries
+    // `title` itself, the same way GitHubLink.tsx's block host does.
+    await expect(pill.locator("span")).toHaveAttribute("title", longModel);
+    await expect(label).toHaveAttribute("title", longModel);
+    const pillBox = await pill.boundingBox();
+    const labelBox = await label.boundingBox();
+    expect(pillBox?.width).toBeLessThanOrEqual(390);
+    expect(labelBox?.width).toBeLessThanOrEqual(390);
+    const widths = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth,
+    }));
+    expect(widths.scrollWidth).toBe(widths.clientWidth);
   } finally {
     await context.close();
   }

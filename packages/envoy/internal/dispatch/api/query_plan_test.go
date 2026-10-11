@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/explaintest"
 )
 
 // Ask reads resolve their opening event and edit history by the payload id. Both
@@ -110,7 +112,7 @@ func assertPlanAvoidsSequentialRelation(t *testing.T, ctx context.Context, tx qu
 	if len(plans) != 1 {
 		t.Fatalf("explain plans = %#v, want one plan", plans)
 	}
-	if planNodeSeqScansRelation(t, plans[0].Plan, relation) {
+	if explaintest.SeqScansRelation(t, plans[0].Plan, relation) {
 		t.Fatalf("query plan sequentially scans %s; want an index scan:\n%s", relation, planJSON)
 	}
 }

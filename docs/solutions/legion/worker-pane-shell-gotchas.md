@@ -13,7 +13,7 @@ tags:
   - jq
   - jaq
 date: 2026-09-12
-status: active
+status: superseded by LEGION-631 — the grant file, `LEGION_GRANT`, `legion gh`, `legion credential`, `legion push` (with its `pushTTL`), `legion handoff write|read|complete` and an agent's `legion state` are all gone; a pane's `gh` and `git` are plain and act as the role's App from `GH_CONFIG_DIR`, a push is plain `jj git push --bookmark legion/<KEY>`, a handoff is a file the worker writes, commits and pushes whose carrying commit the `legion` tool's `handoff_complete` finds in the pane and reports (the daemon reads no handoff file), and an issue record is read with its `read_record`, while the jj, jq/jaq, bun-test and Envoy sections stand
 module: legion
 related_issues:
   - "LEGION-9"
@@ -153,6 +153,16 @@ load average was 889 on 32 cores, and every credential-helper call inside it 403
 command is at fault; wait for the load to fall and re-run the single push. Do not add a retry loop around it — a
 loop that redeems a fresh grant per attempt only works because each attempt is a new bash call, and that is the
 model re-issuing the command, not a script.
+
+**Update (LEGION-583): `legion push` itself now gets a longer grant.** The pi-envoy extension
+judges a bash command that invokes `legion push` — alone, as a compound command's one segment, or
+a pipeline's last stage — and mints that one grant with `credential.pushTTL` (5 minutes) instead of
+the ordinary 60 seconds: the LEGION-17 case above, a push alone and first in its call outliving the
+grant on a loaded box, is what this closes. The hook mints one grant for the whole bash call, so a
+slow command *ahead of* the push in the same call benefits too — `slow_thing && legion push` gets
+the 5-minute grant for both, not the ordinary 60 seconds, since the push anywhere in the call is
+what the hook looks for. A push alone in its own later call, with the slow command in an earlier,
+separate call, still needs that earlier call to finish inside its own 60 seconds.
 
 **The fix (pi-envoy 1.20.1; LEGION-54, after LEGION-12's pull request #974).** Before each of your bash commands
 runs, the hook mints the grant and writes it to the file `$LEGION_GRANT_FILE` names — a 0600 file under
@@ -325,9 +335,11 @@ changes that.
 
 What still works, and what to do:
 
-- **The `eval` tool and file tools are unaffected.** Probe the port from `eval` (`socket.connect(("127.0.0.1", 13370))`)
-  or start a supervised watcher through `hub` that polls the port and prints a marker when it opens, then `hub wait` on
-  that marker. Do not spin in a foreground loop.
+- **The `eval` tool and file tools are unaffected.** Probe the port from `eval`
+  (`socket.connect(("127.0.0.1", 13370))`) between other work. A watcher started from the shell does
+  not help: a supervised service starts as a `bash` call (with `name`), and an `async` job is a
+  `bash` call too, so the hook mints a grant from the daemon for each and it fails like any other
+  bash call until the daemon is back. Do not spin in a foreground loop.
 - **The `legion` tool's `handoff_write` needs no daemon** (it writes `.legion/<phase>.json` under the workspace and
   mints nothing), and neither does a local `jj` commit. During the outage commit the handoff through an `eval`
   subprocess carrying the pane's exact environment, read from `/proc/<omp-pid>/environ` of this session's own `omp`

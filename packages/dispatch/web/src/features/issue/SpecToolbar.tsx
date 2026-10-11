@@ -67,7 +67,7 @@ export function SpecToolbar({
       >
         Name
       </button>
-      <ConnectionDot connection={toolbar.connection} />
+      <ConnectionDot connection={toolbar.connection} pending={toolbar.pending} />
       <CopyRefButton route={reference} />
       {version === undefined ? (
         <>

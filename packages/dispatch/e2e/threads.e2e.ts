@@ -18,7 +18,7 @@ import { asUser } from "./users";
 // "bob" names the session that opened the ask - authenticated over the API with
 // the agent bearer token, not a human's signed-in session - so its own reply
 // (clause 2 below) exercises the same "agent replies live" path a real Legion
-// session would use via dispatch_comment(reply_to_ask).
+// session would use via `dispatch comment --reply-to-ask`.
 const bobSession = {
   actor: { kind: "session" as const, id: "e2e-session-bob", origin: { tmux: "dispatch:1.3" } },
   as: "agent" as const,
@@ -128,20 +128,23 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await threadAfterAnswer.getByRole("button", { name: "Reply" }).click();
   await expect(threadAfterAnswer.getByText("Shipping now.")).toBeVisible();
 
-  // All three - the first reply, the answer, and the second reply - render
-  // under the question, and the two replies keep their chronological order.
+  // The newest reply is first.
   const replies = threadAfterAnswer.locator("li");
   await expect(replies).toHaveCount(2);
-  await expect(replies.nth(0)).toContainText("Any blockers first?");
-  await expect(replies.nth(1)).toContainText("Shipping now.");
+  await expect(replies.nth(0)).toContainText("Shipping now.");
+  await expect(replies.nth(1)).toContainText("Any blockers first?");
   await expect(margin.getByText(/Answered by/)).toBeVisible();
 
   // The asking session replies over the API (bearer auth, its own comment on
   // the ask). Alice's already-open page shows it live over SSE, no reload.
   await createComment(issue.key, { ask_id: ask.id, body: "Thanks, merging." }, bobSession);
   await expect(threadAfterAnswer.getByText("Thanks, merging.")).toBeVisible();
+  await expect(replies).toHaveCount(2);
+  await expect(replies.nth(0)).toContainText("Thanks, merging.");
+  await expect(replies.nth(1)).toContainText("Shipping now.");
+  await threadAfterAnswer.getByRole("button", { name: "Show 1 more reply" }).click();
   await expect(replies).toHaveCount(3);
-  await expect(replies.nth(2)).toContainText("Thanks, merging.");
+  await expect(replies.nth(2)).toContainText("Any blockers first?");
 
   await alice.close();
 });

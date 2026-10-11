@@ -1,0 +1,30 @@
+# Written by the Go `legion` (packages/daemon/internal/podsafety) ahead of every other settings
+# overlay a Legion role's Oh My Pi is given, pod or pane alike, and the one overlay Legion writes at
+# all: the two keys supervise.Machine.Quiesce's own promise depends on, holding the workspace Oh My
+# Pi reads and writes to a single role's turn at a time. Every Legion role runs `omp --mode rpc`,
+# and the pinned fork turns both of these on by default for that protocol. Oh My Pi ranks every
+# overlay above the settings of the repository the agent works in, and a later overlay above an
+# earlier one, so a repository cannot turn these back on and the operator's own overlay, named after
+# this one, can. Nothing else of a repository's settings is held off, and it names no model,
+# provider, or route: those are the operator's.
+#
+# bash.autoBackground.enabled lets a bash call left running past its own threshold move to a
+# background job a takeover's abort no longer reaches once it has moved — only the turn asking it
+# to finish does. async.enabled is the wider door to the same gap: with it on, the thermonuclear
+# review pair a reviewer dispatches without `blocking: true` runs as background jobs the RPC abort
+# does not own, and its async result starts a new reviewer turn beside whatever claims the issue
+# next — which a CI-red takeover can be, mid-review, exactly the turn boundary Quiesce exists to
+# hold. Off, both stay inside the turn that started them, so the abort that ends the turn ends them
+# too (LEGION-462 found the bash case live, legion-smoke LEGSMOKE-463, at commit 80d0c82b: the
+# proof's own long `/usr/bin/sleep` outlived the interrupt once it had been running about a minute).
+#
+# A pod's shim writes it under the pod's state directory (podsafety.Apply, `legion worker-shim
+# --pod-safety`); tmux has neither Sandbox's pod isolation nor an overlay of its own otherwise, so
+# it writes the same file and names it first in a pane's PI_CONFIG_FILES (runtime/tmux). Quiesce
+# itself is runtime-agnostic, and an issue's roles share one host workspace there too
+# (workspace/config.go) — the same guarantee, the same two keys, wherever a role runs.
+bash:
+  autoBackground:
+    enabled: false
+async:
+  enabled: false

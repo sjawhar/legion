@@ -91,6 +91,7 @@ func (s *server) loadInboxAskThreads(ctx context.Context, q queryer, askIDs []st
 		threads[askID] = inboxAskThread{
 			Replies:   []model.Comment{},
 			Edits:     []model.AskEdit{},
+			Answers:   []model.AskAnswer{},
 			Followers: []model.AskFollower{},
 		}
 	}

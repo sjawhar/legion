@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import * as MarkdownBody from "../refs/MarkdownBody";
+import * as markdownEngine from "../refs/markdown-engine";
 import {
   DeploymentResilience,
   importWhenOnline,
@@ -34,7 +34,7 @@ function navigateEvent(
 }
 
 test("warms the block schema and headless Markdown renderer once after the first paint", async () => {
-  const warm = spyOn(MarkdownBody, "warmMarkdownRenderer").mockResolvedValue(undefined);
+  const warm = spyOn(markdownEngine, "warmMarkdownRenderer").mockResolvedValue(undefined);
   const view = render(<DeploymentResilience />);
 
   try {

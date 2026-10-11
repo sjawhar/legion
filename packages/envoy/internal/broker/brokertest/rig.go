@@ -41,7 +41,7 @@ const uiToken = "brokertest-ui-token-0123456789ab"
 const podAudience = "legion-broker-pod"
 
 // Rig is a live broker HTTP server (real handlers, real Postgres) plus a direct handle to its
-// store — enough to drive a machine login, a box or host enrollment, and an agent-secret request
+// store — enough to drive a machine login, a session enrollment, and an agent-secret request
 // end to end over genuine HTTP, and to reach into the store directly for what the API itself has
 // no route to do (e.g. forcing a launcher credential's expiry). A human decision is a UI-route
 // call naming Operator as the approver, the body Dispatch's server sends.
@@ -56,6 +56,9 @@ type Rig struct {
 	// OperatorFile field.
 	OperatorFile string
 	Store        *store.Store
+	// Secrets is the secrets.Local standing in for Secrets Manager, which a test writes to as a
+	// person would, before asking the broker to reread a secret.
+	Secrets *secrets.Local
 	// podIssuer and podKey back MintPodToken: a local OIDC issuer this Rig's own pod verifier
 	// (wired into its enroll.Service by NewRig) trusts, and the signing key MintPodToken mints
 	// under.
@@ -111,8 +114,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
-		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local},
-		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
+		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local}, PendingTTL: 12 * time.Hour,
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
@@ -125,7 +127,8 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	api.Register(mux, api.Deps{
 		PublicURL: srv.URL, UIToken: uiToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: cur, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
 	})
 
 	operatorFile := filepath.Join(t.TempDir(), "operator")
@@ -136,6 +139,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	return &Rig{
 		URL: srv.URL, Operator: operator, OperatorFile: operatorFile,
 		Store:     st,
+		Secrets:   local,
 		podIssuer: issuer, podKey: podKey,
 	}
 }

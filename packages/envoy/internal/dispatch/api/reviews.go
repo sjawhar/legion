@@ -335,7 +335,7 @@ func (s *server) createArtifactReview(w http.ResponseWriter, r *http.Request) {
 		if state == "changes_requested" {
 			selected = approvalOptionRequestChanges
 		}
-		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, nil, nil))
+		answered, answeredEvents, err := s.closeAskTx(r.Context(), tx, open.ID, actor, answerTransition(actor, []string{selected}, reason, answerOptions{}))
 		if err != nil {
 			s.writeHandlerError(w, err)
 			return
@@ -363,11 +363,8 @@ func (s *server) requestArtifactApproval(w http.ResponseWriter, r *http.Request)
 		Actor   *model.Actor `json:"actor"`
 		Summary *string      `json:"summary"`
 	}
-	if r.ContentLength != 0 {
-		if err := decodeJSON(r, &input); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+	if !s.decodeOptionalJSON(w, r, &input) {
+		return
 	}
 	// A summary is trimmed and must hold text, so "" below means the request named none.
 	var summary string

@@ -55,10 +55,23 @@ func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testi
 		"no review login":        {appauth.Implement: "legion-implementer[bot]"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := openWorkflow(context.Background(), cfg, nil, "project-id", log, tokens)
+			_, err := openWorkflow(context.Background(), cfg, nil, "project-id", log, tokens, "")
 			if err == nil || !strings.Contains(err.Error(), "the workflow needs two different Apps") {
 				t.Fatalf("openWorkflow = %v, want the two-Apps refusal", err)
 			}
 		})
+	}
+}
+
+// The boot mint hands back the review App's bot login — the login the engine judges a push's pusher
+// against — from the lease it minted.
+func TestMintAtBootReturnsTheReviewAppLogin(t *testing.T) {
+	tokens := loginTokens{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"}
+	login, err := mintAtBoot(context.Background(), tokens, "acme", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("mintAtBoot: %v", err)
+	}
+	if login != "legion-reviewer[bot]" {
+		t.Fatalf("mintAtBoot = %q, want the review App's login %q", login, "legion-reviewer[bot]")
 	}
 }

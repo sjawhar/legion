@@ -141,3 +141,36 @@ func TestTheControllerTickWakesARegisteredControllerWhateverTheSlots(t *testing.
 		assertControllerNotices(t, pool, tickNotice)
 	})
 }
+
+// The tick is the controller's turn for the day's report, so it alone carries the daemon's open
+// capabilities (ReportCapabilities): the names the registered function answers, as the deployment
+// stands when the tick is queued; a todo wake carries none, and a tick before the daemon registers
+// the function, or when it answers none, carries none either.
+func TestTheTickAloneCarriesTheOpenCapabilities(t *testing.T) {
+	t.Run("a tick names the gaps, a todo wake does not", func(t *testing.T) {
+		pool := migratedPool(t)
+		admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		admission.ReportCapabilities(func() []string { return []string{"secrets", "resource-limits"} })
+		registerController(t, pool)
+		apply(t, pool, admission, "todo-1", unlabelledTodo("LEGION-1"), engineStub{})
+		tick(t, pool, admission, "tick-1")
+		assertControllerNotices(t, pool, []effect{
+			{kind: record.OutboxKindControllerNotice, issue: "LEGION-1", payload: record.ControllerNotice{Kind: record.TodoNotice}},
+			{kind: record.OutboxKindControllerNotice, issue: testProject, payload: record.ControllerNotice{Kind: record.TickNotice, OpenCapabilities: []string{"secrets", "resource-limits"}}},
+		})
+	})
+	t.Run("no gap, and no function registered", func(t *testing.T) {
+		for name, report := range map[string]func() []string{"none open": func() []string { return nil }, "not registered": nil} {
+			t.Run(name, func(t *testing.T) {
+				pool := migratedPool(t)
+				admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+				if report != nil {
+					admission.ReportCapabilities(report)
+				}
+				registerController(t, pool)
+				tick(t, pool, admission, "tick-1")
+				assertControllerNotices(t, pool, []effect{{kind: record.OutboxKindControllerNotice, issue: testProject, payload: record.ControllerNotice{Kind: record.TickNotice}}})
+			})
+		}
+	})
+}

@@ -1,0 +1,22 @@
+-- packages/envoy/internal/broker/store/migrations/0011_credential_requests_approver.up.sql
+-- LEGION-575 raised GET /v1/pending's call frequency from sporadic (a page load, a stream
+-- reconnect, a focus past 30 s stale) to a steady one request every 15 s per open Dispatch tab
+-- (every page, since BlockedOnYou mounts it too). requests.Machine.PendingForApprover
+-- (requests/machine_read.go) filters credential_requests by approver with no supporting index, so
+-- every call was one sequential scan of the whole table: measured on all ten broker migrations
+-- with 300,000 seeded rows, 336 ms for a 10-row answer. This index lets both disjuncts of the
+-- query's OR (the agent_secret branch's `approver in ($1, $2)`, the launcher_credential branch's
+-- `approver=$1`) become a BitmapOr over one index instead, 69 ms at the same scale, and
+-- proportional to one approver's own history rather than every request anyone has ever made.
+--
+-- The launcher_credential branch's NOT EXISTS over credential_request_events needs no new index:
+-- credential_request_decision (0005_credential_requests.up.sql), the partial unique index on
+-- (record_id) where event in ('approved','denied','expired','cancelled'), already covers it once
+-- that predicate is spelled literally instead of bound as a parameter (requests/machine_read.go's
+-- pendingForApproverQuery, alongside this migration).
+--
+-- Plain create index, which holds off writes to credential_requests while it builds: the runner
+-- applies every migration in one transaction, where CONCURRENTLY is refused, and the table is
+-- small enough that the build is brief (0008_lookup_indexes.up.sql takes the same approach for the
+-- same reason).
+create index credential_requests_approver on credential_requests (approver);

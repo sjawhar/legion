@@ -53,8 +53,8 @@ func newDevrelayTestServer(t *testing.T) string {
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 	reqMachine := &requests.Machine{
 		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local},
-		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
-		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
+		PendingTTL: 12 * time.Hour,
+		Audience:   srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{
@@ -65,7 +65,8 @@ func newDevrelayTestServer(t *testing.T) string {
 	api.Register(mux, api.Deps{
 		PublicURL: srv.URL, UIToken: testUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: cur, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
 	})
 	return srv.URL
 }
@@ -141,7 +142,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 	machineKey := newKey(t)
 	loginRequest, err := record.Sign(machineKey, brokerURL, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: "devrelay-test-host"},
-	}, "", testApprover, time.Now())
+	}, "", testApprover, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign(machine login): %v", err)
 	}
@@ -173,7 +174,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, body = req(t, http.MethodPost, brokerURL+"/v1/enrollments", map[string]string{"Proof": launcherProof},
-		map[string]any{"kind": "box", "runtime_id": "box-devrelay-test", "operator": testApprover, "thumbprint": thumbprint})
+		map[string]any{"kind": "session", "runtime_id": "session-devrelay-test", "operator": testApprover, "thumbprint": thumbprint})
 	if status != http.StatusCreated {
 		t.Fatalf("POST /v1/enrollments = %d: %s", status, body)
 	}
@@ -187,7 +188,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 	// --- request: the box asks for the approval-required secret ---
 	compact, err := record.Sign(sessionKey, brokerURL, []record.AuthorizationDetail{
 		{Type: "agent_secret", Identifier: "AGENT_SECRETS_PROOF_APPROVAL", Actions: []string{"inject"}},
-	}, "devrelay main_test", "", time.Now())
+	}, "devrelay main_test", "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}

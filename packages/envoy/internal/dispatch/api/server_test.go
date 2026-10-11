@@ -26,7 +26,9 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/api/apitest"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -75,6 +77,12 @@ type testServerOptions struct {
 	// agentStream is the live agent conversation relay; nil is the deployment with no NATS,
 	// where the viewer route answers 503.
 	agentStream agentstream.Source
+	// embedder wires meaning search (LEGION-549); nil (every test but search_meaning_test.go's
+	// own) is the deployment with no Cohere key, where search answers keyword-only.
+	embedder embed.Embedder
+	// files is the uploaded-file store; nil keeps every upload's bytes in Postgres, as a
+	// deployment with no bucket does.
+	files files.Store
 }
 
 // headerIdentity is the test header identity that records each named person in the database.
@@ -154,6 +162,8 @@ func newTestServer(t *testing.T, options testServerOptions) (http.Handler, *stor
 		EnvoyTimeout:     options.envoyTimeout,
 		OIDC:             options.oidc,
 		AgentStream:      options.agentStream,
+		Embedder:         options.embedder,
+		Files:            options.files,
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
@@ -170,36 +180,13 @@ func directServer(deps Deps) *server {
 	return &server{deps: deps}
 }
 
-// waitForDatabaseLocks waits until want backends are queued behind a lock that holder's
-// transaction owns, directly or behind an earlier waiter (a second row-lock waiter is
-// blocked by the first, which holds the tuple lock). It polls through holder's own
-// connection: the handlers under test drain the shared pool while they wait on that
-// lock, and a poll that needed a pool connection of its own would deadlock with them
-// once the pool is exhausted. It reads pg_locks, not pg_stat_activity, whose view is
-// frozen for the rest of a transaction once read.
+// waitForDatabaseLocks waits up to 2 s for want backends to queue behind a lock that holder's
+// transaction owns (storetest.WaitForLockWaiters), and fails the test when they never do.
 func waitForDatabaseLocks(t *testing.T, holder pgx.Tx, want int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		var count int
-		if err := holder.QueryRow(context.Background(), `
-			with recursive waiting(pid) as (
-				select pid from pg_locks
-				where not granted and pg_backend_pid() = any(pg_blocking_pids(pid))
-				union
-				select blocked.pid from pg_locks blocked, waiting
-				where not blocked.granted and waiting.pid = any(pg_blocking_pids(blocked.pid))
-			)
-			select count(*) from waiting
-		`).Scan(&count); err != nil {
-			t.Fatalf("inspect database locks: %v", err)
-		}
-		if count >= want {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if queued := storetest.WaitForLockWaiters(t, holder, want, 2*time.Second); queued < want {
+		t.Fatalf("waiting database locks: wanted at least %d operations queued behind the held lock, saw %d", want, queued)
 	}
-	t.Fatalf("waiting database locks: wanted at least %d operations queued behind the held lock", want)
 }
 
 func awaitResponse(t *testing.T, responses <-chan *httptest.ResponseRecorder) *httptest.ResponseRecorder {
@@ -327,6 +314,40 @@ func decodeBody[T any](t *testing.T, response *httptest.ResponseRecorder) T {
 		t.Fatalf("decode response body %q: %v", response.Body.String(), err)
 	}
 	return value
+}
+
+// overCapCases are texts just past a cap of limit UTF-16 units, the one-character-over case and
+// one counted in UTF-16 units, each with the length the refusal names.
+func overCapCases(limit int) map[string]struct {
+	text   string
+	length int
+} {
+	return map[string]struct {
+		text   string
+		length int
+	}{
+		"one character over": {strings.Repeat("a", limit+1), limit + 1},
+		// 501 characters outside the Basic Multilingual Plane are 1,002 UTF-16 units.
+		"counted in UTF-16 units": {strings.Repeat("😀", limit/2+1), limit + 2},
+	}
+}
+
+// assertCapExceeded requires response to be the 400 CAP_EXCEEDED capExceededError writes for a
+// field of length units past a cap of limit, followed by "; hint" when hint is not empty.
+func assertCapExceeded(t *testing.T, request string, response *httptest.ResponseRecorder, field string, length, limit int, hint string) {
+	t.Helper()
+	want := fmt.Sprintf("%s is %d characters over the %d-character limit (%d/%d)", field, length-limit, limit, length, limit)
+	if hint != "" {
+		want += "; " + hint
+	}
+	body := response.Body.String()
+	refusal := decodeBody[struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}](t, response)
+	if response.Code != http.StatusBadRequest || refusal.Code != "CAP_EXCEEDED" || refusal.Error != want {
+		t.Fatalf("%s: status=%d body=%.300s, want 400 CAP_EXCEEDED %q", request, response.Code, body, want)
+	}
 }
 
 func TestCreateProjectIssueAndReadPrimaryDocument(t *testing.T) {
@@ -481,12 +502,22 @@ func TestDocumentTextReportsUnavailableService(t *testing.T) {
 	}
 }
 
+// failingLoadStore is a store that cannot serve any read of a document: a room's load, a cold
+// read's stamp, or its load.
 type failingLoadStore struct {
 	docs.VersionedStore
 }
 
 func (failingLoadStore) Load(context.Context, string) (persistence.LoadResult, error) {
 	return persistence.LoadResult{}, errors.New("persistence unavailable")
+}
+
+func (failingLoadStore) DocumentStamp(context.Context, string) (docs.DocumentStamp, error) {
+	return docs.DocumentStamp{}, errors.New("persistence unavailable")
+}
+
+func (failingLoadStore) LoadDocument(context.Context, string) (docs.LoadedDocument, error) {
+	return docs.LoadedDocument{}, errors.New("persistence unavailable")
 }
 
 func TestDocumentEditRejectsInvalidOperationField(t *testing.T) {

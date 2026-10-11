@@ -1621,6 +1621,130 @@ test("a pick in the paste's own task cannot move the upload", async () => {
   }
 });
 
+/** The server's answer to an upload of `name` as `slug`, at `version`. */
+function uploaded(slug: string, name: string, version: number) {
+  return {
+    artifact: { kind: "image", name, slug } as never,
+    version: { number: version } as never,
+  };
+}
+
+// A pasted picture is part of what is sent: the composer writes the image syntax at the version
+// the upload made, so the message shows the picture inline. Any other file stays a reference
+// (the test above).
+test("a pasted picture is written as an inline picture of its version", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue(
+    uploaded("shot-png", "shot.png", 3)
+  );
+  const { view } = renderComposer();
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Look" } });
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    fireEvent.paste(field, { clipboardData: { files: [file] } });
+
+    await waitFor(() =>
+      expect(field.value).toBe("Look ![shot.png](dispatch://CORE-1/artifact/shot-png@v3)")
+    );
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ issue: "CORE-1" });
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
+// A picture still uploading is not yet in the draft, so a send then would go without it: Send
+// names the upload and takes no press, Ctrl+Enter sends nothing, and the send once it lands
+// carries the picture.
+test("a send waits for a pasted picture still uploading, by Send and by Ctrl+Enter", async () => {
+  const { promise: landed, resolve: land } = Promise.withResolvers<void>();
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockImplementation(async () => {
+    await landed;
+    return uploaded("shot-png", "shot.png", 1);
+  });
+  const createComment = spyOn(api, "createComment").mockResolvedValue(createdComment);
+  const { view } = renderComposer();
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Look" } });
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+    fireEvent.paste(field, { clipboardData: { files: [file] } });
+
+    const send = await screen.findByRole("button", { name: "Uploading file…" });
+    expect(send.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(send);
+    fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
+    // A send's mutation function runs a task after the press (`pressSend`).
+    const { promise: settled, resolve: settle } = Promise.withResolvers<void>();
+    setTimeout(settle, 20);
+    await settled;
+    expect(createComment).not.toHaveBeenCalled();
+
+    land();
+    const body = "Look ![shot.png](dispatch://CORE-1/artifact/shot-png@v1)";
+    await waitFor(() => expect(field.value).toBe(body));
+    fireEvent.keyDown(field, { ctrlKey: true, key: "Enter" });
+    await waitFor(() => expect(createComment).toHaveBeenCalledWith("CORE-1", { body }));
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+    createComment.mockRestore();
+  }
+});
+
+// A direct message on the Agents page belongs to no issue: its pictures belong to the agent's
+// conversation, and are addressed under the agent's session.
+test("a picture dropped into a direct message uploads to the agent's conversation", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue(
+    uploaded("face-png", "face [1].png", 1)
+  );
+  const { view } = renderComposer({ agents: [], owner: { kind: "session", sessionId: "ses-1" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "face [1].png", {
+      type: "image/png",
+    });
+    fireEvent.drop(field, { dataTransfer: { files: [file] } });
+
+    await waitFor(() => expect(uploadArtifact).toHaveBeenCalledTimes(1));
+    expect(uploadArtifact.mock.calls[0]?.[0]).toEqual({ session: "ses-1" });
+    // A bracket in the file name would end the caption, so it is escaped.
+    await waitFor(() =>
+      expect(field.value).toBe("![face \\[1\\].png](dispatch://agent/ses-1/artifact/face-png@v1)")
+    );
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
+// The server stores a picture only for PNG, JPEG, GIF and WebP bytes, and a model is shown those
+// four; an SVG is a file to both, so the composer writes it as a plain reference rather than a
+// picture the artifact page would not draw.
+test("a pasted SVG is written as a plain reference, not a picture", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue(
+    uploaded("diagram-svg", "diagram.svg", 1)
+  );
+  const { view } = renderComposer({ agents: [], owner: { kind: "issue", issueKey: "CORE-1" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    const file = new File(["<svg xmlns='http://www.w3.org/2000/svg'/>"], "diagram.svg", {
+      type: "image/svg+xml",
+    });
+    fireEvent.paste(field, { clipboardData: { files: [file] } });
+
+    await waitFor(() => expect(uploadArtifact).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(field.value).toBe("dispatch://CORE-1/artifact/diagram-svg"));
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
 const threadReplyKey: MutationKey = ["conversation-composer", "CORE-1", "thread-card", "root"];
 
 /** A host that takes its reply composer off the page and puts it back, as a thread collapsing and

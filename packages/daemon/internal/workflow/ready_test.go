@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -15,7 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-const readyPacket = "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)\n\nno file changes above the approved head"
+const readyPacket = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)\n\nA docs/solutions/legion/retro-LEGION-208.md\nD .legion/LEGION-208/review.json"
 
 // The daemon, not the merger, tells the human a pull request is ready to merge: the merger's READY
 // completion carries the packet as its summary, and merging -> awaiting_merge posts it verbatim on
@@ -125,6 +126,146 @@ func TestAnApprovalVoidsAREADYTheGateRefusedWithNoPacketAndTellsTheArchitect(t *
 	}
 }
 
+// A READY refused with no design gate registered at all names no pending version — the issues
+// table takes only a positive one — but the merger's phase row still carries the refused
+// completion's packet. Registering the gate is what the root architect does next; when that
+// registration itself opens the gate (gates.design: off, or Dispatch already shows the version
+// approved), the kept READY is released the moment it is registered, with no second READY from
+// the merger.
+func TestAREADYRefusedAtVersionZeroIsPostedWhenRegistrationOpensTheGate(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	engine := testEngine(config.DesignGateOff, nil)
+	apply := applyFacts(t, pool, engine)
+
+	result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"})
+	if result.Refusal == nil || result.Refusal.Code != "DESIGN_GATE_CLOSED" {
+		t.Fatalf("ApplyFact READY = %#v, want the version-0 refusal", result)
+	}
+	var pending *int
+	if err := pool.QueryRow(t.Context(), "select ready_pending_version from issues where key = 'LEGION-208'").Scan(&pending); err != nil || pending != nil {
+		t.Fatalf("ready_pending_version after the refusal = %v, %v; want none: the issues table takes only a positive version", pending, err)
+	}
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages after the refusal = %q, want none", got)
+	}
+
+	apply("register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 1})
+	assertPhase(t, pool, phase.AwaitingMerge)
+	if got := messageBodies(t, pool); len(got) != 1 || got[0] != readyPacket {
+		t.Fatalf("Dispatch messages after registration = %q, want the kept READY packet once", got)
+	}
+}
+
+// The same READY refused at version 0, but under an armed gate: registering the spec closes the
+// gate at its own version (nobody has approved it yet), so the kept READY still waits. Approving
+// that registered version is what releases it, the same way an approval releases a refusal that
+// named a known version.
+func TestAREADYRefusedAtVersionZeroIsPostedWhenTheRegisteredVersionIsApproved(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	apply := applyFacts(t, pool, readyEngine("merge-queue"))
+
+	result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"})
+	if result.Refusal == nil || result.Refusal.Code != "DESIGN_GATE_CLOSED" {
+		t.Fatalf("ApplyFact READY = %#v, want the version-0 refusal", result)
+	}
+
+	apply("register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 1})
+	assertPhase(t, pool, phase.Merging)
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages after registration = %q, want none: version 1 is not approved yet", got)
+	}
+
+	apply("approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 1})
+	assertPhase(t, pool, phase.AwaitingMerge)
+	if got := messageBodies(t, pool); len(got) != 1 || got[0] != readyPacket {
+		t.Fatalf("Dispatch messages after the approval = %q, want the kept READY packet once", got)
+	}
+	if got := mergeQueuePublishes(t, pool); len(got) != 1 || got[0].Packet != readyPacket {
+		t.Fatalf("merge queue publishes = %v, want the kept packet once", got)
+	}
+}
+
+// The real-world trigger for a version-0 refusal: a tree is re-admitted after it finished or
+// lingered (admit.Admission.readmit), which clears the tree's one design-gate row with
+// record.ClearTreeGeneration while a member a previous run left in phase.Merging keeps its own
+// generation and phase. A merger that completes a READY before the new architect registers the
+// gate again is refused at version 0. Registering the gate this time does not open it — nobody has
+// approved the newly registered version yet — but the human already approved it before, so the
+// gate-seed outbox's read of Dispatch (daemon/outbox.go's seedGate) reports that approval as an
+// ordinary DispatchArtifact approval event, not registration opening the gate inline, and that
+// approval event is what releases the kept READY.
+func TestAREADYRefusedAtVersionZeroAfterReAdmissionIsPostedWhenDispatchReportsTheAlreadyApprovedVersion(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 1, ApprovedVersion: new(1)})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	apply := applyFacts(t, pool, readyEngine("merge-queue"))
+
+	// The root is re-admitted (set back to todo after it finished or lingered): the tree's gate
+	// is cleared exactly as admit.Admission.readmit clears it, leaving the merger's own phase and
+	// generation untouched.
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		return record.NewStore().ClearTreeGeneration(context.Background(), tx, "LEGION-208")
+	})
+	var gateGone bool
+	if err := pool.QueryRow(t.Context(), "select not exists(select 1 from design_gates where issue = 'LEGION-208')").Scan(&gateGone); err != nil || !gateGone {
+		t.Fatalf("design_gates row after re-admission = gone:%v, %v; want it cleared", gateGone, err)
+	}
+
+	result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"})
+	if result.Refusal == nil || result.Refusal.Code != "DESIGN_GATE_CLOSED" {
+		t.Fatalf("ApplyFact READY after re-admission = %#v, want the version-0 refusal", result)
+	}
+
+	apply("register", intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "artifact-208", Version: 2})
+	assertPhase(t, pool, phase.Merging)
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages after registration = %q, want none: version 2 is not approved yet", got)
+	}
+
+	apply("gate-seed-approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2})
+	assertPhase(t, pool, phase.AwaitingMerge)
+	if got := messageBodies(t, pool); len(got) != 1 || got[0] != readyPacket {
+		t.Fatalf("Dispatch messages after the already-approved version is reported = %q, want the kept READY packet once", got)
+	}
+}
+
+// A refusal that names a known version still releases exactly as before: registering a later
+// document version at the root changes nothing for it until that later version is itself
+// approved, and only the approval of the version the refusal is waiting on (or later) releases it.
+func TestAREADYRefusedAtAKnownVersionStillReleasesOnlyOnItsApproval(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "U"})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 4})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim"})
+	apply := applyFacts(t, pool, readyEngine("merge-queue"))
+
+	result := apply("ready", intake.HandoffComplete{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merger-claim", Generation: 1, Ready: true, Summary: readyPacket, Commit: "head"})
+	if result.Refusal == nil || result.Refusal.Code != "DESIGN_GATE_CLOSED" {
+		t.Fatalf("ApplyFact READY = %#v, want the refusal naming version 4", result)
+	}
+	var pending *int
+	if err := pool.QueryRow(t.Context(), "select ready_pending_version from issues where key = 'LEGION-208'").Scan(&pending); err != nil || pending == nil || *pending != 4 {
+		t.Fatalf("ready_pending_version after the refusal = %v, %v; want 4", pending, err)
+	}
+
+	apply("version-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactVersion, Version: 5})
+	assertPhase(t, pool, phase.Merging)
+	if got := messageBodies(t, pool); len(got) != 0 {
+		t.Fatalf("Dispatch messages after a newer unapproved version = %q, want none", got)
+	}
+
+	apply("approval-5", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 5})
+	assertPhase(t, pool, phase.AwaitingMerge)
+	if got := messageBodies(t, pool); len(got) != 1 || got[0] != readyPacket {
+		t.Fatalf("Dispatch messages after the approval = %q, want the kept READY packet once", got)
+	}
+}
+
 // A READY the gate refused belongs to that merging phase. When the merger sends the issue back
 // (its head must return to review), the refusal is void at once: the approval that arrives while
 // the next merger verifies does not move the issue on, posts nothing, and has no void READY to
@@ -226,12 +367,13 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 }
 
 // Linger holds every member of a closed tree where it stood, whichever path a fact takes: no
-// approval, green checks, red checks that exhaust max_fix_attempts, changes requested, reviewer's
-// comment on a round no review decided, backward move, retry of a held phase or failed claim moves
-// a member, counts a review round, posts or notifies, or starts a worker, whose start would
-// resume a suspended claim inside a tree that has left the workflow. A worker's own request is
-// refused, so it is told nothing moved. A merge is the one fact GitHub never sends again: it moves
-// the child on to its production check, and still starts nobody.
+// approval, green checks, red checks that send a head back or exhaust max_fix_attempts, a
+// conflicting head awaiting merge, changes requested, reviewer's comment on a round no review
+// decided, backward move, retry of a held phase or failed claim moves a member, counts a review
+// round, posts or notifies, or starts a worker, whose start would resume a suspended claim inside
+// a tree that has left the workflow. A worker's own request is refused, so it is told nothing
+// moved. A merge is the one fact GitHub never sends again: it moves the child on to its production
+// check, and still starts nobody.
 func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 	hold := record.Hold{From: phase.Testing}
 	for _, tc := range []struct {
@@ -246,17 +388,21 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 		{name: "a merge at awaiting_merge", at: phase.AwaitingMerge, want: phase.ProductionCheck,
 			fact: intake.PullRequestMerged{Repo: "sjawhar/legion", Number: 42, MergeSHA: "merge"}},
 		{name: "an approval of a green head", at: phase.Reviewing, pr: record.PullRequest{CheckedHead: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}},
-			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head"}},
+			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "approved", CommitID: "head", HeadSHA: "head", Author: testReviewApp}},
 		{name: "green checks on an approved head", at: phase.Reviewing, decision: &record.ReviewDecision{State: "approved", Head: "head"},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Failing: []string{}}},
 		{name: "green checks on an approval the head does not carry", at: phase.Reviewing, decision: &record.ReviewDecision{State: "approved", Head: "older"},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, Generation: 1, Snapshot: "green-1", Failing: []string{}}},
 		{name: "the reviewer's comment on a round no review decided", at: phase.Reviewing, pr: record.PullRequest{CheckedHead: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}},
-			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", HeadSHA: "head", Author: "legion-reviewer[bot]", Body: "a thought"}},
+			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", HeadSHA: "head", Author: testReviewApp, Body: "a thought"}},
 		{name: "red checks at max_fix_attempts", at: phase.Testing, pr: record.PullRequest{FixAttempts: 3},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}},
+		{name: "red checks that send a code head back", at: phase.Testing,
+			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}},
+		{name: "a conflicting head at awaiting_merge", at: phase.AwaitingMerge,
+			fact: intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting}},
 		{name: "changes requested at the round cap", at: phase.Reviewing,
-			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Body: "fix it"}},
+			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Author: testReviewApp, Body: "fix it"}},
 		{name: "the worker's backward move", at: phase.Testing, refusal: "TREE_LINGERING",
 			fact: intake.BackwardMove{Issue: "LEGION-209", Requester: claim.RoleTester, To: phase.Implementing, Reason: "the head changed"}},
 		{name: "the architect's retry of a held phase", at: phase.Held, hold: &hold,
@@ -287,9 +433,7 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 				row.Issue, row.Claim = "LEGION-209", claim.Token(string(row.Role)+"-claim")
 				seedPhase(t, pool, row)
 			}
-			engine := readyEngine("")
-			engine.cfg.ReviewAppLogin = "legion-reviewer[bot]"
-			apply := applyFacts(t, pool, engine)
+			apply := applyFacts(t, pool, readyEngine(""))
 
 			apply("close-root", intake.DispatchIssue{Key: "LEGION-208", Seq: 2, Type: "issue.closed", Status: "done", Title: "root", Rank: "U"})
 			result := apply("fact", tc.fact)
@@ -323,7 +467,7 @@ func refusalCode(result intake.Result) string {
 
 func readyEngine(mergeQueue string) *Engine {
 	return New(record.NewStore(), Config{
-		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour,
+		Project: "LEGION", DesignGate: config.DesignGateRootIssues, MergeQueueRole: mergeQueue, Linger: time.Hour, ReviewAppLogin: testReviewApp,
 		Clock: func() time.Time { return time.Date(2026, 9, 25, 0, 0, 0, 0, time.UTC) },
 	}, nil)
 }

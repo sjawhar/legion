@@ -87,25 +87,26 @@ func TestRequiredReadsARulesetsRequiredWorkflowsBesideItsChecks(t *testing.T) {
 }
 
 // A required workflow stands as its latest run on the head that a pull request event started: a
-// rerun after a failure is what GitHub judges, a run a push started is not the pull request's, a
-// run of the same path in another repository is another workflow, and a workflow with no such run
-// is missing. The runs come a hundred to a page, GitHub naming the next page in the Link header as
-// it does for this list, and a run on the second page counts.
+// rerun after a failure is what GitHub judges, its run's id and newest attempt naming it, a run a
+// push started is not the pull request's, a run of the same path in another repository is another
+// workflow, and a workflow with no such run is missing, with no run named. The runs come a hundred
+// to a page, GitHub naming the next page in the Link header as it does for this list, and a run on
+// the second page counts.
 func TestWorkflowsJudgesEachRequiredWorkflowByItsLatestPullRequestRun(t *testing.T) {
-	run := func(id int, path, event, status, conclusion string, repository int) string {
-		return fmt.Sprintf(`{"id":%d,"path":%q,"event":%q,"status":%q,"conclusion":%s,"repository":{"id":%d}}`, id, path, event, status, conclusion, repository)
+	run := func(id, attempt int, path, event, status, conclusion string, repository int) string {
+		return fmt.Sprintf(`{"id":%d,"run_attempt":%d,"path":%q,"event":%q,"status":%q,"conclusion":%s,"repository":{"id":%d}}`, id, attempt, path, event, status, conclusion, repository)
 	}
 	pages := map[string][]string{
 		"": {
-			run(10, ".github/workflows/review.yml", "pull_request", "completed", `"failure"`, 4242),
-			run(11, ".github/workflows/review.yml", "push", "completed", `"failure"`, 4242),
-			run(12, ".github/workflows/lint.yml", "pull_request", "completed", `"failure"`, 4242),
-			run(13, ".github/workflows/lint.yml", "push", "completed", `"success"`, 4242),
-			run(14, ".github/workflows/build.yml", "pull_request", "completed", `"success"`, 9999),
+			run(10, 1, ".github/workflows/review.yml", "pull_request", "completed", `"failure"`, 4242),
+			run(11, 1, ".github/workflows/review.yml", "push", "completed", `"failure"`, 4242),
+			run(12, 1, ".github/workflows/lint.yml", "pull_request", "completed", `"failure"`, 4242),
+			run(13, 1, ".github/workflows/lint.yml", "push", "completed", `"success"`, 4242),
+			run(14, 1, ".github/workflows/build.yml", "pull_request", "completed", `"success"`, 9999),
 		},
 		"2": {
-			run(20, ".github/workflows/review.yml", "pull_request", "completed", `"success"`, 4242),
-			run(21, ".github/workflows/e2e.yml", "pull_request_target", "in_progress", "null", 4242),
+			run(20, 2, ".github/workflows/review.yml", "pull_request", "completed", `"success"`, 4242),
+			run(21, 1, ".github/workflows/e2e.yml", "pull_request_target", "in_progress", "null", 4242),
 		},
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -127,11 +128,11 @@ func TestWorkflowsJudgesEachRequiredWorkflowByItsLatestPullRequestRun(t *testing
 		{Path: ".github/workflows/review.yml", RepositoryID: 4242},
 	}
 	got, err := Workflows(context.Background(), githubrest.Client{Token: "token", API: server.URL + "/repos/acme/widgets"}, "head", workflows)
-	want := []classify.Standing{
-		{Name: ".github/workflows/build.yml", Result: classify.Missing},
-		{Name: ".github/workflows/e2e.yml", Result: classify.Pending},
-		{Name: ".github/workflows/lint.yml", Result: "failure"},
-		{Name: ".github/workflows/review.yml", Result: classify.Success},
+	want := []WorkflowRun{
+		{Workflow: workflows[0], Result: classify.Missing},
+		{Workflow: workflows[1], Result: classify.Pending, Run: 21, Attempt: 1},
+		{Workflow: workflows[2], Result: "failure", Run: 12, Attempt: 1},
+		{Workflow: workflows[3], Result: classify.Success, Run: 20, Attempt: 2},
 	}
 	if err != nil || !slices.Equal(got, want) {
 		t.Fatalf("Workflows = %+v, %v; want %+v", got, err, want)

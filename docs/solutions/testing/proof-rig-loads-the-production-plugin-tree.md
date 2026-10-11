@@ -113,8 +113,9 @@ exempt — which is the acceptance-5 "no credential in any transcript" check aut
 
 - Clear `standin.log` and `seen-grants.log`, and remove the previous run's grant file from
   `state/secrets/`, before each leg; the analyzer pairs mints to calls in order.
-- Run the stand-in and each leg under a supervised process (`hub start` / `hub wait`), never a
-  foreground loop; a leg is two to three minutes and the deadline is twenty.
+- Run the stand-in as a supervised service (a `bash` call with `name`, its output at
+  `proc://<name>`) and each leg as an `async` `bash` job you `wait` on, never a foreground loop; a
+  leg is two to three minutes and the deadline is twenty.
 - `run.ts`'s deadline is a cleared `setTimeout`. A pending `Bun.sleep(20 min)` racing the agent's
   end kept the process alive seventeen minutes after the report was printed, which blocks any
   wait on the process.

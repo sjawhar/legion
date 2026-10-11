@@ -19,6 +19,8 @@ on:
       - "patches/**"
       - "packages/envoy-client/package.json"
       - "packages/pi-envoy/package.json"
+      - "packages/pi-legion/package.json"
+      - "packages/pi-shared/package.json"
       - "packages/envoy-plugin/package.json"
       - "packages/claude-envoy/package.json"
       - "docs/site/package.json"
@@ -29,6 +31,7 @@ on:
       - "scripts/go-third-party-notices.sh"
       - "scripts/assemble-third-party-notices.sh"
       - ".github/go-release-targets.json"
+      - ".github/agent-secrets-client-targets.json"
   workflow_dispatch:
 
 # Every job declares its own permissions (build, docker, release below); nothing runs under this
@@ -102,6 +105,10 @@ jobs:
     env:
       # The listener image the smoke test runs against, built by the step below.
       ENVOY_SMOKE_IMAGE: legion-envoy-smoke:${{ github.sha }}
+      # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
+      # clean up, and its image (testcontainers/ryuk, on Docker Hub) would be one more registry
+      # pull the smoke test could fail on.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     outputs:
       digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -109,7 +116,18 @@ jobs:
         with:
           persist-credentials: false
       - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+        with:
+          image: mirror.gcr.io/tonistiigi/binfmt:latest
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          # provenance-add-gha (true by default on the docker-container driver) stages
+          # $GITHUB_EVENT_PATH's full JSON into any provenance predicate a build below computes,
+          # attached to the pushed image or not. false here keeps every build this builder runs —
+          # smoke and publish alike — free of that, regardless of each build's own provenance
+          # setting. image= is the driver's own default BuildKit image, through the mirror.
+          driver-opts: |
+            provenance-add-gha=false
+            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: packages/envoy/go.mod
@@ -131,10 +149,9 @@ jobs:
       - name: Build the listener image the smoke test runs against
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         env:
-          # This build never pushes, and this workflow has no pull_request trigger (push to main
-          # and workflow_dispatch only), so neither an attestation nor an event payload can leak
-          # today. Hardened anyway, identically to the publish step below and to
-          # worker-image.yaml, against a future change reopening either.
+          # This build never pushes, so no attestation of its own is ever published; the
+          # metadata-file's own copy of the predicate is suppressed anyway, identically to the
+          # publish step below, in case a future change starts pushing from here too.
           BUILDX_METADATA_PROVENANCE: disabled
           DOCKER_BUILD_SUMMARY: "false"
         with:
@@ -146,11 +163,10 @@ jobs:
             LEGION_COMMIT=${{ github.sha }}
           tags: ${{ env.ENVOY_SMOKE_IMAGE }}
       # 5m bounds only what the test does: start both containers behind the test's own 60 s
-      # health wait, and assert. This job sets no TESTCONTAINERS_RYUK_DISABLED and pre-pulls
-      # nothing, so unlike envoy-smoke it also pulls NATS and Ryuk from Docker Hub here,
-      # unretried. envoy-smoke has measured 1.82 s, 3.16 s and 1.88 s, and a loaded devbox
-      # 2.2–20.7 s across four runs; the bound is deliberate headroom over those plus two
-      # pulls, not a build budget.
+      # health wait, and assert. This job pre-pulls nothing, so unlike envoy-smoke it also pulls
+      # NATS (testnats.Image) here, unretried. envoy-smoke has measured 1.82 s, 3.16 s and
+      # 1.88 s, and a loaded devbox 2.2–20.7 s across four runs; the bound is deliberate headroom
+      # over those plus that pull, not a build budget.
       - name: Container smoke test (testcontainers)
         run: go test -tags smoke -v -timeout 5m ./internal/smoke/
         working-directory: packages/envoy
@@ -162,20 +178,23 @@ jobs:
       - id: build
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         env:
-          # provenance: false below only stops the attestation attaching to the pushed image: the
-          # action unconditionally logs buildx's own --metadata-file content (`##[group]Metadata`),
-          # whose buildx.build.provenance key still carries this job's full GitHub Actions event
-          # context at its "min" default, confirmed live even with provenance: false and
-          # DOCKER_BUILD_SUMMARY unset. BUILDX_METADATA_PROVENANCE=disabled drops that key from
-          # the metadata file entirely; DOCKER_BUILD_SUMMARY=false additionally drops the
-          # separate build-summary artifact and page.
+          # mode=min attaches a BuildKit SLSA provenance attestation to the pushed image, which
+          # the deployment's post-apply verification reads
+          # (buildDefinition.externalParameters.request.root.request.args["vcs:revision"]) to map
+          # the pinned digest back to the legion commit it was built from; provenance: false
+          # attached none. The driver's provenance-add-gha=false above, not this "min" level by
+          # itself, is what keeps this predicate free of the GitHub Actions event.
+          # BUILDX_METADATA_PROVENANCE=disabled still drops the action's own copy of the predicate
+          # from the job log's `##[group]Metadata` output, and DOCKER_BUILD_SUMMARY=false still
+          # drops the separate build-summary artifact and page; neither affects what mode=min
+          # attaches to the pushed image.
           BUILDX_METADATA_PROVENANCE: disabled
           DOCKER_BUILD_SUMMARY: "false"
         with:
           context: .
           file: packages/envoy/docker/Dockerfile
           platforms: linux/amd64,linux/arm64
-          provenance: false
+          provenance: mode=min
           push: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -193,6 +212,9 @@ jobs:
     needs: [build, docker]
     if: github.ref == 'refs/heads/main'
     concurrency:
+      # Only one run at a time by design, and a pending run GitHub drops in favor of a newer one
+      # loses nothing: "Determine publication" below walks forward through already-published
+      # commits for `latest` and bumps the version from the last tag to HEAD, not this commit alone.
       group: release-envoy-listener
       cancel-in-progress: false
     runs-on: ubuntu-24.04
@@ -213,6 +235,9 @@ jobs:
           fetch-depth: 0
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+        with:
+          driver-opts: |
+            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - name: Determine publication
         id: publish
@@ -350,9 +375,10 @@ jobs:
           VERSION=$(.github/scripts/release-bump.sh "$CURRENT" "${LATEST_TAG}..HEAD" \
             --patch-path scripts/third-party-notices.ts --patch-path scripts/go-third-party-notices.sh \
             --patch-path scripts/assemble-third-party-notices.sh --patch-path .github/go-release-targets.json \
+            --patch-path .github/agent-secrets-client-targets.json \
             -- packages/envoy/ packages/contracts/ scripts/third-party-notices.ts \
             scripts/go-third-party-notices.sh scripts/assemble-third-party-notices.sh \
-            .github/go-release-targets.json)
+            .github/go-release-targets.json .github/agent-secrets-client-targets.json)
 
           if [ "$VERSION" = "empty" ]; then
             echo "should_release=false" >> "$GITHUB_OUTPUT"
@@ -425,22 +451,27 @@ jobs:
       # (packages/envoy/cmd/agent-secrets-helper): the same
       # legion-envoy-v* release also ships these for a host to install with mise's
       # github backend, in the layout its installer expects — bin/agent-secrets,
-      # bin/agent-secrets-helper. They are built here, after the release tag is decided
-      # above, so the tag is stamped into both: `--version` prints it and the helper's
+      # bin/agent-secrets-helper. A linux archive, agent-secrets-<arch>.tar.gz for each
+      # architecture the envoy key of .github/go-release-targets.json names, holds both; a
+      # darwin archive, agent-secrets-darwin-<arch>.tar.gz for each target
+      # .github/agent-secrets-client-targets.json names, holds bin/agent-secrets alone, since the helper's
+      # build constraints admit linux only: a laptop runs the CLI, never the helper.
+      # They are built here, after the release tag is decided
+      # above, so the tag is stamped into each binary: `--version` prints it and the helper's
       # startup line carries it, which is how a restart onto a release is checked. The
       # build job runs before the tag exists, and deciding it earlier would move it out of
       # this job's concurrency group, which is what keeps two runs from taking one tag.
       # CGO_ENABLED=0 matches the existing agent-secrets builds
       # (packages/envoy/docker/Dockerfile, packages/daemon/docker/worker.Dockerfile):
       # without it, a same-arch build (amd64 here) links dynamically against the
-      # runner's glibc instead of producing a static binary. The archive is wrapped
+      # runner's glibc instead of producing a static binary. Each archive is wrapped
       # in one top-level "agent-secrets" directory (agent-secrets/bin/...) rather
       # than bin/... directly: mise's github backend auto-strips exactly one leading
       # directory from an asset shaped like that, so the installed tree still ends
-      # up bin/agent-secrets, bin/agent-secrets-helper; a bare bin/... top level
+      # up bin/agent-secrets (and bin/agent-secrets-helper on linux); a bare bin/... top level
       # would itself be the one directory mise strips, flattening the binaries to
       # the install root instead. agent-secrets/THIRD_PARTY_NOTICES, beside bin/, is
-      # the license of every Go module the two binaries compile in
+      # the license of every Go module the archive's binaries compile in
       # (scripts/go-third-party-notices.sh, run with the build's own environment),
       # and fails the build when one cannot be determined.
       - name: Build agent-secrets binaries
@@ -461,10 +492,22 @@ jobs:
               "out/$arch/agent-secrets/THIRD_PARTY_NOTICES" ./cmd/agent-secrets ./cmd/agent-secrets-helper
             tar czf "../../agent-secrets-assets/agent-secrets-$arch.tar.gz" -C "out/$arch" agent-secrets
           done
+          for target in $(jq -r '.["agent-secrets-client"][]' ../../.github/agent-secrets-client-targets.json); do
+            os=${target%/*}
+            arch=${target#*/}
+            dir="out/$os-$arch"
+            mkdir -p "$dir/agent-secrets/bin"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -buildvcs=false \
+              -ldflags "-X github.com/sjawhar/envoy/internal/buildversion.tag=$TAG" \
+              -o "$dir/agent-secrets/bin/agent-secrets" ./cmd/agent-secrets
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" ../../scripts/go-third-party-notices.sh \
+              "$dir/agent-secrets/THIRD_PARTY_NOTICES" ./cmd/agent-secrets
+            tar czf "../../agent-secrets-assets/agent-secrets-$os-$arch.tar.gz" -C "$dir" agent-secrets
+          done
         working-directory: packages/envoy
       # Build provenance for the host binaries a mise pin installs, so `gh attestation verify
-      # agent-secrets-<arch>.tar.gz --repo sjawhar/legion` can check a downloaded asset against
-      # this workflow run. The release below uploads these exact files.
+      # agent-secrets-<asset>.tar.gz --repo sjawhar/legion` can check a downloaded asset, linux or
+      # darwin, against this workflow run. The release below uploads these exact files.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         if: steps.publish.outputs.should_release == 'true'
         with:

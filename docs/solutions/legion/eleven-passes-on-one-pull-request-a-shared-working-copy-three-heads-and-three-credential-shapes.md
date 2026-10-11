@@ -97,7 +97,8 @@ two diffs.** Compute both sides against their own fork points, `diff` the two ou
 the non-markdown lines in the rebase comment. If they are empty or a handful of lines you can
 explain, the approval is a confirmation; if not, it is a round. And **retro commits after
 approval**, so approved ≠ current by design — the merger's `jj diff --from <approved> --to <tip>
---summary` must list only `docs/solutions/` paths, which is why nothing else may move in retro.
+--summary` must list only `docs/solutions/` paths and retro's removal of `.legion/<issue>/`, which
+is why nothing else may move in retro.
 
 ## 3. One active phase per issue, from the worker's seat
 

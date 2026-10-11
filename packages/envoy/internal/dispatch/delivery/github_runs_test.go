@@ -1,0 +1,418 @@
+package delivery
+
+import (
+	"context"
+	"net/http"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+)
+
+// expiringTokens makes fake mint installation tokens that live 250 ms, under githubapp's own
+// five-minute renewal margin, so the client mints one each time it is asked for a token, and
+// counts every request that carries a token past its expiry, which it answers as GitHub does:
+// 401 Bad credentials. A handler that returns true has answered.
+func expiringTokens(t *testing.T, fake *fakeGitHub) (refuse func(http.ResponseWriter, *http.Request) bool, expired *atomic.Int64) {
+	t.Helper()
+	fake.tokenLifetime = 250 * time.Millisecond
+	expired = &atomic.Int64{}
+	return func(w http.ResponseWriter, r *http.Request) bool {
+		if !fake.tokenExpired(r) {
+			return false
+		}
+		expired.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+		mustEncode(t, w, map[string]any{"message": "Bad credentials"})
+		return true
+	}, expired
+}
+
+// TestListWorkflowRunsAsksForATokenPerPage: a walk whose pages outlast the installation token its
+// first page used goes on with a new one and never sends an expired token. A reconcile walk over a
+// busy repository runs past a token's hour, and GitHub answers the next page 401 Bad credentials.
+// The first page here is answered after its token has expired.
+func TestListWorkflowRunsAsksForATokenPerPage(t *testing.T) {
+	fake := newFakeGitHub(t)
+	refuse, expired := expiringTokens(t, fake)
+	fake.handle("GET /repos/acme/widgets/actions/workflows/deploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		if refuse(w, r) {
+			return
+		}
+		switch r.URL.Query().Get("page") {
+		case "1":
+			time.Sleep(400 * time.Millisecond)
+			mustEncode(t, w, map[string]any{"total_count": 15, "workflow_runs": repeatRunItems(10, 1)})
+		default:
+			mustEncode(t, w, map[string]any{"total_count": 15, "workflow_runs": repeatRunItems(5, 11)})
+		}
+	})
+	runs, err := collectWorkflowRuns(t.Context(), fake.newTestClient(), "acme", "widgets", "deploy.yml",
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("ListWorkflowRuns across a token's expiry: %v", err)
+	}
+	if len(runs) != 15 || expired.Load() != 0 {
+		t.Fatalf("listed %d runs, want 15; %d requests carried an expired token, want none", len(runs), expired.Load())
+	}
+}
+
+// TestListWorkflowRunJobsAsksForATokenPerPage: a run's jobs pages, too, each ask for a token, so a
+// page answered after the previous page's token expired is asked for with a new one.
+func TestListWorkflowRunJobsAsksForATokenPerPage(t *testing.T) {
+	fake := newFakeGitHub(t)
+	refuse, expired := expiringTokens(t, fake)
+	fake.handle("GET /repos/acme/widgets/actions/runs/7/jobs", func(w http.ResponseWriter, r *http.Request) {
+		if refuse(w, r) {
+			return
+		}
+		switch r.URL.Query().Get("page") {
+		case "1":
+			time.Sleep(400 * time.Millisecond)
+			mustEncode(t, w, map[string]any{"total_count": runJobsPageSize + 5, "jobs": repeatJobItems(runJobsPageSize)})
+		default:
+			mustEncode(t, w, map[string]any{"total_count": runJobsPageSize + 5, "jobs": repeatJobItems(5)})
+		}
+	})
+	jobs, err := ListWorkflowRunJobs(t.Context(), fake.newTestClient(), "acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("ListWorkflowRunJobs across a token's expiry: %v", err)
+	}
+	if len(jobs) != runJobsPageSize+5 || expired.Load() != 0 {
+		t.Fatalf("listed %d jobs, want %d; %d requests carried an expired token, want none", len(jobs), runJobsPageSize+5, expired.Load())
+	}
+}
+
+func TestListWorkflowRunsMapsRunShapes(t *testing.T) {
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/workflows/.github%2Fworkflows%2Fdeploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		mustEncode(t, w, map[string]any{
+			"total_count": 3,
+			"workflow_runs": []map[string]any{
+				{
+					// A run with exactly one associated pull request.
+					"id": 1, "head_sha": "sha1", "html_url": "https://github.com/acme/widgets/actions/runs/1",
+					"status": "completed", "conclusion": "success", "head_branch": "main", "event": "push",
+					"run_started_at": "2024-01-01T00:00:00Z", "created_at": "2024-01-01T00:00:00Z",
+					"updated_at":    "2024-01-01T00:10:00Z",
+					"head_commit":   map[string]any{"timestamp": "2023-12-31T23:55:00Z"},
+					"pull_requests": []map[string]any{{"number": 7}},
+				},
+				{
+					// A run with zero associated pull requests (e.g. a push run).
+					"id": 2, "head_sha": "sha2", "html_url": "https://github.com/acme/widgets/actions/runs/2",
+					"status": "completed", "conclusion": "failure", "head_branch": "", "event": "",
+					"run_started_at": "2024-01-01T01:00:00Z", "created_at": "2024-01-01T01:00:00Z",
+					"updated_at":    "2024-01-01T01:05:00Z",
+					"head_commit":   map[string]any{"timestamp": "2024-01-01T00:59:00Z"},
+					"pull_requests": []map[string]any{},
+				},
+				{
+					// A run with more than one associated pull request, and a conclusion the
+					// delivery_runs schema's check constraint does not accept.
+					"id": 3, "head_sha": "sha3", "html_url": "https://github.com/acme/widgets/actions/runs/3",
+					"status": "completed", "conclusion": "neutral",
+					"run_started_at": "2024-01-01T02:00:00Z", "created_at": "2024-01-01T02:00:00Z",
+					"updated_at":    "2024-01-01T02:05:00Z",
+					"head_commit":   map[string]any{"timestamp": "2024-01-01T01:59:00Z"},
+					"pull_requests": []map[string]any{{"number": 8}, {"number": 9}},
+				},
+			},
+		})
+	})
+	client := fake.newTestClient()
+
+	runs, err := collectWorkflowRuns(t.Context(), client, "acme", "widgets", ".github/workflows/deploy.yml",
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("ListWorkflowRuns: %v", err)
+	}
+	if len(runs) != 3 {
+		t.Fatalf("len(runs) = %d, want 3", len(runs))
+	}
+
+	one := runs[0]
+	if one.RunID != 1 || one.HeadSHA != "sha1" || one.URL != "https://github.com/acme/widgets/actions/runs/1" {
+		t.Fatalf("run 1 = %+v", one)
+	}
+	if !one.HeadCommitAt.Equal(*ptrTime("2023-12-31T23:55:00Z")) {
+		t.Fatalf("run 1 HeadCommitAt = %v", one.HeadCommitAt)
+	}
+	if !one.StartedAt.Equal(*ptrTime("2024-01-01T00:00:00Z")) {
+		t.Fatalf("run 1 StartedAt = %v", one.StartedAt)
+	}
+	if one.CompletedAt == nil || !one.CompletedAt.Equal(*ptrTime("2024-01-01T00:10:00Z")) {
+		t.Fatalf("run 1 CompletedAt = %v", one.CompletedAt)
+	}
+	if one.Conclusion == nil || *one.Conclusion != "success" {
+		t.Fatalf("run 1 Conclusion = %v, want success", one.Conclusion)
+	}
+	if one.PRNumber == nil || *one.PRNumber != 7 {
+		t.Fatalf("run 1 PRNumber = %v, want 7 (exactly one associated PR)", one.PRNumber)
+	}
+	if one.HeadBranch == nil || *one.HeadBranch != "main" || one.Event == nil || *one.Event != "push" {
+		t.Fatalf("run 1 HeadBranch, Event = %v, %v, want main, push", one.HeadBranch, one.Event)
+	}
+
+	zero := runs[1]
+	if zero.PRNumber != nil {
+		t.Fatalf("run 2 PRNumber = %v, want nil (zero associated PRs)", zero.PRNumber)
+	}
+	if zero.HeadBranch != nil || zero.Event != nil {
+		t.Fatalf("run 2 HeadBranch, Event = %v, %v, want nil for GitHub's empty strings", zero.HeadBranch, zero.Event)
+	}
+
+	many := runs[2]
+	if many.PRNumber != nil {
+		t.Fatalf("run 3 PRNumber = %v, want nil (more than one associated PR)", many.PRNumber)
+	}
+	if many.HeadBranch != nil || many.Event != nil {
+		t.Fatalf("run 3 HeadBranch, Event = %v, %v, want nil when GitHub sends neither", many.HeadBranch, many.Event)
+	}
+	if many.Conclusion == nil || *many.Conclusion != "neutral" {
+		t.Fatalf("run 3 Conclusion = %v, want the raw GitHub value 'neutral' to pass through unfiltered", many.Conclusion)
+	}
+}
+
+func TestListWorkflowRunsPaginatesAcrossPages(t *testing.T) {
+	fake := newFakeGitHub(t)
+	var pagesSeen []string
+	fake.handle("GET /repos/acme/widgets/actions/workflows/deploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		pagesSeen = append(pagesSeen, page)
+		switch page {
+		case "1":
+			mustEncode(t, w, map[string]any{"total_count": 120, "workflow_runs": repeatRunItems(100, 1)})
+		case "2":
+			mustEncode(t, w, map[string]any{"total_count": 120, "workflow_runs": repeatRunItems(20, 101)})
+		default:
+			t.Fatalf("unexpected page %q", page)
+		}
+	})
+	client := fake.newTestClient()
+
+	runs, err := collectWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("ListWorkflowRuns: %v", err)
+	}
+	if len(runs) != 120 {
+		t.Fatalf("len(runs) = %d, want 120", len(runs))
+	}
+	if len(pagesSeen) != 2 || pagesSeen[0] != "1" || pagesSeen[1] != "2" {
+		t.Fatalf("pages fetched = %v, want [1 2]", pagesSeen)
+	}
+	// Each page asks for its token; under GitHub's hour the cached one answers the second ask.
+	if mints := fake.tokenMints.Load(); mints != 1 {
+		t.Fatalf("minted %d installation tokens over two pages, want 1", mints)
+	}
+}
+
+func repeatRunItems(n int, startID int64) []map[string]any {
+	items := make([]map[string]any, n)
+	for i := range n {
+		id := startID + int64(i)
+		items[i] = map[string]any{
+			"id": id, "head_sha": "sha", "html_url": "u", "status": "in_progress", "conclusion": nil,
+			"run_started_at": "2024-01-01T00:00:00Z", "created_at": "2024-01-01T00:00:00Z",
+			"updated_at": "2024-01-01T00:00:00Z", "head_commit": map[string]any{"timestamp": "2024-01-01T00:00:00Z"},
+			"pull_requests": []map[string]any{},
+		}
+	}
+	return items
+}
+
+func TestListWorkflowRunsHalvesOnOverflowWithoutGapOrOverlap(t *testing.T) {
+	fake := newFakeGitHub(t)
+	type window struct{ since, until string }
+	var windows []window
+	fake.handle("GET /repos/acme/widgets/actions/workflows/deploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		created := r.URL.Query().Get("created")
+		parts := strings.SplitN(created, "..", 2)
+		if len(parts) != 2 {
+			t.Fatalf("created %q is not a..b", created)
+		}
+		windows = append(windows, window{parts[0], parts[1]})
+
+		if created == "2024-01-01T00:00:00Z..2024-01-02T00:00:00Z" {
+			mustEncode(t, w, map[string]any{"total_count": 1001, "workflow_runs": repeatRunItems(100, 1)})
+			return
+		}
+		mustEncode(t, w, map[string]any{"total_count": 1, "workflow_runs": repeatRunItems(1, 1)})
+	})
+	client := fake.newTestClient()
+
+	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	runs, err := collectWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml", since, until)
+	if err != nil {
+		t.Fatalf("ListWorkflowRuns: %v", err)
+	}
+	if len(runs) != 2 {
+		t.Fatalf("len(runs) = %d, want 2 (one per half)", len(runs))
+	}
+	if len(windows) != 3 {
+		t.Fatalf("requests made = %d, want 3 (original + two halves)", len(windows))
+	}
+	// GitHub's created:A..B qualifier is inclusive on BOTH ends, so the second half must start
+	// one second after the midpoint (GitHub's own query granularity), not at the midpoint itself
+	// -- otherwise a run created exactly at the midpoint would be counted in both halves.
+	mid := since.Add(until.Sub(since) / 2)
+	first, second := windows[1], windows[2]
+	if first.since != since.UTC().Format(time.RFC3339) || first.until != mid.UTC().Format(time.RFC3339) {
+		t.Fatalf("first half = %+v, want [%s, %s]", first, since.UTC().Format(time.RFC3339), mid.UTC().Format(time.RFC3339))
+	}
+	wantSecondSince := mid.Add(time.Second).UTC().Format(time.RFC3339)
+	if second.since != wantSecondSince || second.until != until.UTC().Format(time.RFC3339) {
+		t.Fatalf("second half = %+v, want [%s, %s]", second, wantSecondSince, until.UTC().Format(time.RFC3339))
+	}
+}
+
+func TestListWorkflowRunsUpstream404IsWrapped(t *testing.T) {
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/workflows/deploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	client := fake.newTestClient()
+
+	_, err := collectWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("ListWorkflowRuns: err = %v, want an error naming the 404 status", err)
+	}
+}
+
+func TestListWorkflowRunsUpstream500IsWrapped(t *testing.T) {
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/workflows/deploy.yml/runs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	client := fake.newTestClient()
+
+	_, err := collectWorkflowRuns(t.Context(), client, "acme", "widgets", "deploy.yml",
+		time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC))
+	if err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("ListWorkflowRuns: err = %v, want an error naming the 500 status", err)
+	}
+}
+
+func TestListWorkflowRunJobsMapsEveryField(t *testing.T) {
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/runs/42/jobs", func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("filter"); got != "latest" {
+			t.Errorf("jobs request filter = %q, want latest", got)
+		}
+		mustEncode(t, w, map[string]any{
+			"total_count": 2,
+			"jobs": []map[string]any{
+				{"name": "build", "conclusion": "success", "started_at": "2024-01-01T00:00:00Z", "completed_at": "2024-01-01T00:05:00Z"},
+				{"name": "deploy", "conclusion": "skipped", "started_at": nil, "completed_at": nil},
+			},
+		})
+	})
+	client := fake.newTestClient()
+
+	jobs, err := ListWorkflowRunJobs(t.Context(), client, "acme", "widgets", 42)
+	if err != nil {
+		t.Fatalf("ListWorkflowRunJobs: %v", err)
+	}
+	if len(jobs) != 2 {
+		t.Fatalf("len(jobs) = %d, want 2", len(jobs))
+	}
+	if jobs[0].Name != "build" || jobs[0].Conclusion == nil || *jobs[0].Conclusion != "success" {
+		t.Fatalf("jobs[0] = %+v", jobs[0])
+	}
+	if jobs[0].StartedAt == nil || !jobs[0].StartedAt.Equal(*ptrTime("2024-01-01T00:00:00Z")) {
+		t.Fatalf("jobs[0].StartedAt = %v", jobs[0].StartedAt)
+	}
+	if jobs[1].Name != "deploy" || jobs[1].Conclusion == nil || *jobs[1].Conclusion != "skipped" {
+		t.Fatalf("jobs[1] = %+v", jobs[1])
+	}
+	if jobs[1].StartedAt != nil || jobs[1].CompletedAt != nil {
+		t.Fatalf("jobs[1] in-progress job carries a time: %+v", jobs[1])
+	}
+}
+
+func TestListWorkflowRunJobsPaginatesAcrossPages(t *testing.T) {
+	fake := newFakeGitHub(t)
+	var pagesSeen []string
+	fake.handle("GET /repos/acme/widgets/actions/runs/7/jobs", func(w http.ResponseWriter, r *http.Request) {
+		page := r.URL.Query().Get("page")
+		pagesSeen = append(pagesSeen, page)
+		switch page {
+		case "1":
+			mustEncode(t, w, map[string]any{"total_count": 110, "jobs": repeatJobItems(100)})
+		case "2":
+			mustEncode(t, w, map[string]any{"total_count": 110, "jobs": repeatJobItems(10)})
+		default:
+			t.Fatalf("unexpected page %q", page)
+		}
+	})
+	client := fake.newTestClient()
+
+	jobs, err := ListWorkflowRunJobs(t.Context(), client, "acme", "widgets", 7)
+	if err != nil {
+		t.Fatalf("ListWorkflowRunJobs: %v", err)
+	}
+	if len(jobs) != 110 {
+		t.Fatalf("len(jobs) = %d, want 110", len(jobs))
+	}
+	if len(pagesSeen) != 2 || pagesSeen[0] != "1" || pagesSeen[1] != "2" {
+		t.Fatalf("pages fetched = %v, want [1 2]", pagesSeen)
+	}
+	if mints := fake.tokenMints.Load(); mints != 1 {
+		t.Fatalf("minted %d installation tokens over two pages, want 1", mints)
+	}
+}
+
+func repeatJobItems(n int) []map[string]any {
+	items := make([]map[string]any, n)
+	for i := range n {
+		items[i] = map[string]any{"name": "job", "conclusion": "success", "started_at": "2024-01-01T00:00:00Z", "completed_at": "2024-01-01T00:01:00Z"}
+	}
+	return items
+}
+
+func TestListWorkflowRunJobsUpstream404IsWrapped(t *testing.T) {
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/runs/404/jobs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	client := fake.newTestClient()
+
+	_, err := ListWorkflowRunJobs(t.Context(), client, "acme", "widgets", 404)
+	if err == nil || !strings.Contains(err.Error(), "404") {
+		t.Fatalf("ListWorkflowRunJobs: err = %v, want an error naming the 404 status", err)
+	}
+}
+
+func TestListWorkflowRunJobsUpstream500IsWrapped(t *testing.T) {
+	fake := newFakeGitHub(t)
+	fake.handle("GET /repos/acme/widgets/actions/runs/500/jobs", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	client := fake.newTestClient()
+
+	_, err := ListWorkflowRunJobs(t.Context(), client, "acme", "widgets", 500)
+	if err == nil || !strings.Contains(err.Error(), "500") {
+		t.Fatalf("ListWorkflowRunJobs: err = %v, want an error naming the 500 status", err)
+	}
+}
+
+// collectWorkflowRuns is ListWorkflowRuns for a test that wants every run at once rather than one
+// window at a time, with the full 1,000-result window the GitHub cap allows (reconcile's own
+// runsWindow is smaller, and its per-window progress is reconcile_test.go's subject, not this
+// file's).
+func collectWorkflowRuns(ctx context.Context, client *githubapp.Client, owner, repo, workflowPath string, since, until time.Time) ([]FetchedRun, error) {
+	var runs []FetchedRun
+	err := ListWorkflowRuns(ctx, client, owner, repo, workflowPath, since, until, githubResultCap, func(_ time.Time, window []FetchedRun) error {
+		runs = append(runs, window...)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return runs, nil
+}

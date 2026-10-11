@@ -24,6 +24,7 @@ type inboxDocument struct {
 type inboxAskThread struct {
 	Replies   []model.Comment     `json:"replies"`
 	Edits     []model.AskEdit     `json:"edits"`
+	Answers   []model.AskAnswer   `json:"answers"`
 	Followers []model.AskFollower `json:"followers"`
 }
 

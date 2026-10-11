@@ -10,6 +10,8 @@ on:
       - "packages/contracts/package.json"
       - "packages/envoy-client/package.json"
       - "packages/pi-envoy/package.json"
+      - "packages/pi-legion/package.json"
+      - "packages/pi-shared/package.json"
       - "packages/envoy-plugin/package.json"
       - "packages/claude-envoy/package.json"
       - "packages/proof-editor/package.json"
@@ -24,7 +26,11 @@ on:
       - "packages/envoy-client/**"
       - "packages/contracts/**"
       - "packages/pi-envoy/**"
+      - "packages/pi-legion/**"
+      - "packages/pi-shared/**"
       - "skills/**"
+      # The two plugins' shared prepack, which stages each one's skills and writes its notices.
+      - "scripts/pi-plugin-prepack.sh"
       # The notices each artifact ships: the bundles', the Go binaries' and the worker image's, and
       # the Go archives' target list.
       - "scripts/third-party-notices.ts"
@@ -38,11 +44,14 @@ on:
   workflow_dispatch:
 
 # Every job declares its own permissions (changes, legion, worker_image, worker_image_release_note,
-# envoy_plugin, pi_envoy below); nothing runs under this workflow-level default, so it stays empty
-# rather than becoming an unreviewed grant to a job added later with no block of its own.
+# envoy_plugin, pi_envoy, pi_legion below); nothing runs under this workflow-level default, so it
+# stays empty rather than becoming an unreviewed grant to a job added later with no block of its own.
 permissions: {}
 
 concurrency:
+  # Only one run at a time by design, and a pending run GitHub drops in favor of a newer one
+  # loses nothing: `changes`' base step below diffs since the last *successful* run, not this
+  # run's commit alone, so the next run picks up every commit a dropped run skipped.
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
@@ -57,6 +66,7 @@ jobs:
       legion: ${{ steps.filter.outputs.legion }}
       envoy_plugin: ${{ steps.filter.outputs.envoy_plugin }}
       pi_envoy: ${{ steps.filter.outputs.pi_envoy }}
+      pi_legion: ${{ steps.filter.outputs.pi_legion }}
       worker_image: ${{ steps.filter.outputs.worker_image }}
     steps:
       # Full history, for the base step's ancestry check.
@@ -131,18 +141,42 @@ jobs:
               - 'packages/contracts/**'
               - 'skills/**'
               - 'scripts/third-party-notices.ts'
+            # The two Oh My Pi plugins, each with the workspace packages its bundle inlines, the
+            # skills scripts/pi-plugin-prepack.sh stages into its tarball (the Envoy plugin's four,
+            # the Legion plugin's eight: the partition that script holds), and the two scripts the
+            # pack runs.
             pi_envoy:
               - 'packages/pi-envoy/**'
+              - 'packages/pi-shared/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
-              - 'skills/**'
+              - 'skills/dispatch/**'
+              - 'skills/dispatch-first/**'
+              - 'skills/dispatch-brainstorming/**'
+              - 'skills/envoy/**'
               - 'scripts/third-party-notices.ts'
+              - 'scripts/pi-plugin-prepack.sh'
+            pi_legion:
+              - 'packages/pi-legion/**'
+              - 'packages/pi-shared/**'
+              - 'packages/envoy-client/**'
+              - 'packages/contracts/**'
+              - 'skills/legion-architect/**'
+              - 'skills/legion-controller/**'
+              - 'skills/legion-oracle/**'
+              - 'skills/legion-retro/**'
+              - 'skills/legion-worker/**'
+              - 'skills/ce-simplify-code/**'
+              - 'skills/thermonuclear-code-quality/**'
+              - 'skills/thermonuclear-deep-review/**'
+              - 'scripts/third-party-notices.ts'
+              - 'scripts/pi-plugin-prepack.sh'
             # The plugin stage's frozen install needs the root manifest, lockfile, patches, and each
             # root-workspace manifest. Keep this explicit because a workspace can affect Bun's
             # install without its source becoming part of the worker image. The OMP pin, the
             # context's .dockerignore and the called workflow change the image too. With legion
-            # (which holds the Dockerfile, packages/daemon/docker, and the notices scripts) and
-            # pi_envoy this covers every file worker.Dockerfile builds from;
+            # (which holds the Dockerfile, packages/daemon/docker, and the notices scripts),
+            # pi_envoy and pi_legion this covers every file worker.Dockerfile builds from;
             # .github/scripts/check-image-trigger-paths.sh fails the build when it misses one.
             worker_image:
               - 'package.json'
@@ -151,6 +185,8 @@ jobs:
               - 'packages/contracts/package.json'
               - 'packages/envoy-client/package.json'
               - 'packages/pi-envoy/package.json'
+              - 'packages/pi-legion/package.json'
+              - 'packages/pi-shared/package.json'
               - 'packages/envoy-plugin/package.json'
               - 'packages/claude-envoy/package.json'
               - 'packages/proof-editor/package.json'
@@ -313,16 +349,20 @@ jobs:
     if: >-
       always() && (needs.legion.result == 'success' || needs.legion.result == 'skipped') &&
       (needs.changes.outputs.legion == 'true' || needs.changes.outputs.pi_envoy == 'true' ||
-      needs.changes.outputs.worker_image == 'true' || github.event_name == 'workflow_dispatch')
+      needs.changes.outputs.pi_legion == 'true' || needs.changes.outputs.worker_image == 'true' ||
+      github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/worker-image.yaml
     # No `secrets:`: the called workflow reads only GITHUB_TOKEN, which it receives automatically;
     # `inherit` would hand DEPLOY_KEY and every other repository secret to a job that runs a
-    # PR-authored Dockerfile. This job's permissions must cover every scope worker-image.yaml's own
-    # `permissions:` block declares. The release note, the one step needing contents: write, is
-    # worker_image_release_note below.
+    # PR-authored Dockerfile. This job's permissions must cover every scope worker-image.yaml's
+    # `permissions:` blocks declare: its workflow-level block (the build) and its `attest` job's
+    # (id-token and attestations: write, for the image's GitHub attestation). The release note, the
+    # one step needing contents: write, is worker_image_release_note below.
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     with:
       legion_version: ${{ needs.legion.outputs.version }}
 
@@ -496,23 +536,31 @@ jobs:
       - name: Determine next version
         id: version
         run: |
-          # prepack.sh copies skills/ into dist/skills, which every Oh My Pi session loads as the
-          # plugin's skills, so a commit there releases whatever its type. Its notices generator is
-          # another shipped build input, so it gets the same patch release.
-          PREV_TAG=$(git tag -l 'pi-legion-envoy-v*' --sort=-v:refname | head -1)
+          # scripts/pi-plugin-prepack.sh copies this plugin's four skills into dist/skills, which
+          # every Oh My Pi session loads as the plugin's skills, so a commit there releases whatever
+          # its type. Its notices generator and the prepack itself are shipped build inputs too, so
+          # they get the same patch release.
+          PREV_TAG=$(git tag -l 'pi-envoy-v*' --sort=-v:refname | head -1)
           if [ -z "$PREV_TAG" ]; then
-            # When no release tag exists, seed from the published npm version so
-            # an already-published version is never recomputed. Once a release
-            # tags successfully, this branch stops running.
+            # When no release tag exists, seed from the published npm version so an
+            # already-published version is never recomputed. The seed is the version line this
+            # package continues, @sjawhar/pi-legion-envoy, which it was split from: its own name
+            # on npm holds only a placeholder 0.0.0 until this job's first publish, so reading it
+            # would restart the line at 0.x. Once a release tags successfully, this branch stops
+            # running.
             PREV_VERSION=$(npm view @sjawhar/pi-legion-envoy version 2>/dev/null || echo "0.0.0")
             RANGE=HEAD
           else
-            PREV_VERSION="${PREV_TAG#pi-legion-envoy-v}"
+            PREV_VERSION="${PREV_TAG#pi-envoy-v}"
             RANGE="${PREV_TAG}..HEAD"
           fi
           VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "$RANGE" \
-            --patch-path skills/ --patch-path scripts/third-party-notices.ts \
-            -- packages/pi-envoy/ packages/envoy-client/ packages/contracts/ skills/ scripts/third-party-notices.ts)
+            --patch-path skills/dispatch/ --patch-path skills/dispatch-first/ \
+            --patch-path skills/dispatch-brainstorming/ --patch-path skills/envoy/ \
+            --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh \
+            -- packages/pi-envoy/ packages/pi-shared/ packages/envoy-client/ packages/contracts/ \
+            skills/dispatch/ skills/dispatch-first/ skills/dispatch-brainstorming/ skills/envoy/ \
+            scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh)
 
           if [ "$VERSION" = "empty" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
@@ -529,7 +577,7 @@ jobs:
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "Bumping pi-legion-envoy-v${PREV_VERSION} -> pi-legion-envoy-v${VERSION}"
+          echo "Bumping pi-envoy-v${PREV_VERSION} -> pi-envoy-v${VERSION}"
 
       - name: Set release version
         if: steps.version.outputs.skip != 'true'
@@ -538,18 +586,15 @@ jobs:
             packages/pi-envoy/package.json > tmp.json \
             && mv tmp.json packages/pi-envoy/package.json
 
-      - name: Point extensions at the packed bundles
+      - name: Point extensions at the packed bundle
         if: steps.version.outputs.skip != 'true'
         run: |
-          # The committed manifest keeps source paths (extensions/*.ts) so
-          # repo checkouts (dev sessions) load sources without a build. The
-          # published tarball ships only self-contained dist bundles, both
-          # envoy.js and legion.js: legion.ts is inert without
-          # LEGION_TREE/LEGION_ROLE/LEGION_CONTROLLER in the environment, so
-          # every installed session loading it is safe; the Legion daemon
-          # relies on this single installed copy instead of a repo checkout.
+          # The committed manifest keeps the source path (extensions/envoy.ts) so repo checkouts
+          # (dev sessions) load the source without a build. The published tarball ships only the
+          # self-contained dist bundle, and scripts/pi-plugin-prepack.sh refuses to pack any other
+          # omp.extensions.
           cp packages/pi-envoy/package.json "$RUNNER_TEMP/pi-envoy-manifest.json"
-          jq '.omp.extensions = ["dist/envoy.js","dist/legion.js"]' \
+          jq '.omp.extensions = ["dist/envoy.js"]' \
             packages/pi-envoy/package.json > tmp.json \
             && mv tmp.json packages/pi-envoy/package.json
 
@@ -561,7 +606,7 @@ jobs:
       - name: Publish to npm
         if: steps.version.outputs.skip != 'true'
         run: |
-          if npm view "@sjawhar/pi-legion-envoy@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+          if npm view "@sjawhar/pi-envoy@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
             echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
           else
             npm publish ./*.tgz --access public --provenance
@@ -580,14 +625,14 @@ jobs:
         run: |
           .github/scripts/release-push.sh tag packages/pi-envoy \
             "chore: release pi-envoy v${{ steps.version.outputs.version }} [skip ci]" \
-            "pi-legion-envoy-v${{ steps.version.outputs.version }}"
+            "pi-envoy-v${{ steps.version.outputs.version }}"
 
       - name: Create GitHub release
         if: steps.version.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          tag="pi-legion-envoy-v${{ steps.version.outputs.version }}"
+          tag="pi-envoy-v${{ steps.version.outputs.version }}"
           if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             echo "Release $tag already exists; reusing it"
           else
@@ -602,3 +647,156 @@ jobs:
       - name: Push version bump
         if: steps.version.outputs.skip != 'true'
         run: .github/scripts/release-push.sh push-main packages/pi-envoy "${{ steps.version.outputs.version }}"
+
+  pi_legion:
+    # After pi_envoy, never beside it: both jobs end in `release-push.sh push-main`, whose rebase
+    # repair resolves a conflict only in the one manifest of the package being released, so two
+    # bump commits racing from different packages would fail the later push. A skipped pi_envoy
+    # (nothing of its own to release) still lets this run.
+    needs: [changes, pi_envoy]
+    if: >-
+      always() && (needs.pi_envoy.result == 'success' || needs.pi_envoy.result == 'skipped') &&
+      (needs.changes.outputs.pi_legion == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    # contents: write creates the GitHub release (`gh release create`, below); id-token: write is
+    # the OIDC token npm trusted publishing exchanges for the publish credential (the registry
+    # records `trustedPublisher: github` for this package; no NPM_TOKEN is set) and that also signs
+    # provenance (`npm publish --provenance`). The tag push and version-bump commit use the deploy
+    # key, not either scope.
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ssh-key: ${{ secrets.DEPLOY_KEY }}
+          fetch-depth: 0
+
+      - uses: ./.github/actions/setup-bun
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Determine next version
+        id: version
+        run: |
+          # scripts/pi-plugin-prepack.sh copies this plugin's eight skills into dist/skills, which
+          # a Legion pane's prompts load, so a commit there releases whatever its type. Its notices
+          # generator and the prepack itself are shipped build inputs too, so they get the same
+          # patch release.
+          PREV_TAG=$(git tag -l 'pi-legion-v*' --sort=-v:refname | head -1)
+          if [ -z "$PREV_TAG" ]; then
+            # When no release tag exists, seed from the published npm version so an
+            # already-published version is never recomputed. The seed is the version line this
+            # package continues, @sjawhar/pi-legion-envoy, which it was split from: its own name
+            # on npm holds only a placeholder 0.0.0 until this job's first publish, so reading it
+            # would restart the line at 0.x. Once a release tags successfully, this branch stops
+            # running.
+            PREV_VERSION=$(npm view @sjawhar/pi-legion-envoy version 2>/dev/null || echo "0.0.0")
+            RANGE=HEAD
+          else
+            PREV_VERSION="${PREV_TAG#pi-legion-v}"
+            RANGE="${PREV_TAG}..HEAD"
+          fi
+          VERSION=$(.github/scripts/release-bump.sh "$PREV_VERSION" "$RANGE" \
+            --patch-path skills/legion-architect/ --patch-path skills/legion-controller/ \
+            --patch-path skills/legion-oracle/ --patch-path skills/legion-retro/ \
+            --patch-path skills/legion-worker/ --patch-path skills/ce-simplify-code/ \
+            --patch-path skills/thermonuclear-code-quality/ --patch-path skills/thermonuclear-deep-review/ \
+            --patch-path scripts/third-party-notices.ts --patch-path scripts/pi-plugin-prepack.sh \
+            -- packages/pi-legion/ packages/pi-shared/ packages/envoy-client/ packages/contracts/ \
+            skills/legion-architect/ skills/legion-controller/ skills/legion-oracle/ skills/legion-retro/ \
+            skills/legion-worker/ skills/ce-simplify-code/ skills/thermonuclear-code-quality/ \
+            skills/thermonuclear-deep-review/ scripts/third-party-notices.ts scripts/pi-plugin-prepack.sh)
+
+          if [ "$VERSION" = "empty" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No release published::No commits in tracked paths since ${PREV_TAG:-beginning}"
+            echo "**No release published** — No commits in tracked paths since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$VERSION" = "none" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice title=No release published::No version-bumping commits since ${PREV_TAG:-beginning}"
+            echo "**No release published** — No version-bumping commits since ${PREV_TAG:-beginning}" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "Bumping pi-legion-v${PREV_VERSION} -> pi-legion-v${VERSION}"
+
+      - name: Set release version
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          jq --arg v "${{ steps.version.outputs.version }}" '.version = $v' \
+            packages/pi-legion/package.json > tmp.json \
+            && mv tmp.json packages/pi-legion/package.json
+
+      - name: Point extensions at the packed bundle
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          # The committed manifest keeps the source path (extensions/legion.ts) so repo checkouts
+          # (dev sessions) load the source without a build. The published tarball ships only the
+          # self-contained dist bundle, and scripts/pi-plugin-prepack.sh refuses to pack any other
+          # omp.extensions. legion.ts is inert without LEGION_TREE/LEGION_ROLE/LEGION_CONTROLLER in
+          # the environment, so every installed session loading it is safe; the Legion daemon
+          # relies on this single installed copy instead of a repo checkout.
+          cp packages/pi-legion/package.json "$RUNNER_TEMP/pi-legion-manifest.json"
+          jq '.omp.extensions = ["dist/legion.js"]' \
+            packages/pi-legion/package.json > tmp.json \
+            && mv tmp.json packages/pi-legion/package.json
+
+      - name: Pack extension
+        if: steps.version.outputs.skip != 'true'
+        run: rm -f ./*.tgz && bun pm pack
+        working-directory: packages/pi-legion
+
+      - name: Publish to npm
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          if npm view "@sjawhar/pi-legion@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+            echo "npm already has ${{ steps.version.outputs.version }}; skipping publish"
+          else
+            npm publish ./*.tgz --access public --provenance
+          fi
+        working-directory: packages/pi-legion
+
+      - name: Restore committed manifest
+        if: always() && steps.version.outputs.skip == 'false'
+        run: |
+          if [ -f "$RUNNER_TEMP/pi-legion-manifest.json" ]; then
+            mv "$RUNNER_TEMP/pi-legion-manifest.json" packages/pi-legion/package.json
+          fi
+
+      - name: Commit and tag
+        if: steps.version.outputs.skip != 'true'
+        run: |
+          .github/scripts/release-push.sh tag packages/pi-legion \
+            "chore: release pi-legion v${{ steps.version.outputs.version }} [skip ci]" \
+            "pi-legion-v${{ steps.version.outputs.version }}"
+
+      - name: Create GitHub release
+        if: steps.version.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="pi-legion-v${{ steps.version.outputs.version }}"
+          if gh release view "$tag" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Release $tag already exists; reusing it"
+          else
+            gh release create "$tag" \
+              packages/pi-legion/*.tgz \
+              --repo "${{ github.repository }}" \
+              --title "Pi Legion v${{ steps.version.outputs.version }}" \
+              --generate-notes \
+              --verify-tag
+          fi
+
+      - name: Push version bump
+        if: steps.version.outputs.skip != 'true'
+        run: .github/scripts/release-push.sh push-main packages/pi-legion "${{ steps.version.outputs.version }}"

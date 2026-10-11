@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 )
 
@@ -124,11 +125,17 @@ func projectedToken(pod Pod) (fixtureToken, error) {
 }
 
 // pod-baseline: the agent the root's shim started runs on Legion's pod baseline (internal/
-// podsafety): the baseline overlay on the pod's state volume is PI_CONFIG_FILES' first element,
-// ahead of the operator's; each baseline variable the operator left unset is set, and the
-// operator's own are kept; the shim itself runs on the operator's value alone. Then the image's Oh
-// My Pi, under the agent's environment, reads remote compaction off in a repository whose
-// .omp/config.yml turns it on.
+// podsafety): the turn-scoping overlay on the pod's state volume is PI_CONFIG_FILES' first element,
+// ahead of the operator's; PI_CONFIG_DIR and OMP_SESSION_STORAGE, which the operator left unset,
+// are set, and the operator's own variables are kept; neither OTEL_SDK_DISABLED nor PI_AUTO_QA,
+// which no baseline sets any more, is there; the agent's XDG_STATE_HOME is the architect's own
+// (roleStateHome; the root claim is the architect), and the shim made Oh My Pi's profile directory
+// under it (podsafety.EnsureStateHome) before Oh My Pi started, since Oh My Pi reads the variable
+// only where that directory exists; the shim itself (the agent's parent; the container's PID 1 is
+// its launcher) runs on the operator's value alone. Then the image's Oh My Pi, under the agent's
+// environment, reads a repository's remote compaction endpoint as the repository set it, reads
+// bash.autoBackground.enabled off though the repository turns it on, and reads an operator
+// overlay's endpoint over the repository's once one named after the agent's overlays sets it.
 func (r *liveRig) checkPodBaseline() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -146,14 +153,20 @@ func (r *liveRig) checkPodBaseline() error {
 	if err != nil {
 		return err
 	}
-	shim, err := r.procEnviron(root, "1")
+	shimPid, err := r.shimPid(root, pid)
 	if err != nil {
 		return err
 	}
-	overlay := path.Join(StateDir, podsafety.OverlayFile)
+	shim, err := r.procEnviron(root, shimPid)
+	if err != nil {
+		return err
+	}
+	overlay := path.Join(StateDir, podsafety.TurnScopeFile)
+	stateHome := roleStateHome(claim.RoleArchitect)
 	want := map[string]string{
-		"PI_CONFIG_FILES":   overlay + ":" + operatorOverlays,
-		"OTEL_SDK_DISABLED": "true", "PI_AUTO_QA": "0", "PI_CONFIG_DIR": ".omp", "OMP_SESSION_STORAGE": "file",
+		"PI_CONFIG_FILES": overlay + ":" + operatorOverlays,
+		"PI_CONFIG_DIR":   ".omp", "OMP_SESSION_STORAGE": "file",
+		"XDG_STATE_HOME": stateHome,
 	}
 	for name, value := range r.pod.Env {
 		if name != "PI_CONFIG_FILES" {
@@ -166,10 +179,21 @@ func (r *liveRig) checkPodBaseline() error {
 		}
 		note("operator", "/proc/%s/environ (the agent): %s=%s", pid, name, agent[name])
 	}
-	if shim["PI_CONFIG_FILES"] != operatorOverlays {
-		return fmt.Errorf("the shim (pid 1) has PI_CONFIG_FILES=%q, want the operator's %q alone", shim["PI_CONFIG_FILES"], operatorOverlays)
+	for _, name := range []string{"OTEL_SDK_DISABLED", "PI_AUTO_QA"} {
+		if value, set := agent[name]; set {
+			return fmt.Errorf("the agent (pid %s) has %s=%q, want it unset: no baseline sets it", pid, name, value)
+		}
+		note("operator", "/proc/%s/environ (the agent): %s unset", pid, name)
 	}
-	note("operator", "/proc/1/environ (the shim): PI_CONFIG_FILES=%s, the operator's alone", shim["PI_CONFIG_FILES"])
+	profileDir := path.Join(stateHome, "omp", "profiles", "legion")
+	if _, err := r.exec(root, "test", "-d", profileDir); err != nil {
+		return fmt.Errorf("%s is no directory in the root's container (%v); the shim must make Oh My Pi's profile directory under the role's state home before Oh My Pi starts, or Oh My Pi reads no state home and its broker lock is one name across the pod", profileDir, err)
+	}
+	note("operator", "exec test -d %s: a directory, made by the shim before Oh My Pi started", profileDir)
+	if shim["PI_CONFIG_FILES"] != operatorOverlays {
+		return fmt.Errorf("the shim (pid %s) has PI_CONFIG_FILES=%q, want the operator's %q alone", shimPid, shim["PI_CONFIG_FILES"], operatorOverlays)
+	}
+	note("operator", "/proc/%s/environ (the shim): PI_CONFIG_FILES=%s, the operator's alone", shimPid, shim["PI_CONFIG_FILES"])
 	mode, err := r.exec(root, "stat", "-c", "%a", overlay)
 	if err != nil {
 		return err
@@ -178,26 +202,43 @@ func (r *liveRig) checkPodBaseline() error {
 		return fmt.Errorf("%s has mode %s, want 444", overlay, mode)
 	}
 	note("operator", "stat %s: mode %s", overlay, mode)
-	// The agent's environment, verbatim, for one `omp config get` in a scratch repository.
-	const readCompaction = `set -e
+	// One `omp config get` under the agent's environment, verbatim, in a scratch repository whose
+	// .omp/config.yml sets remote compaction and turns autoBackground on. With "operator" as $3 a
+	// scratch operator overlay setting the endpoint is named after the agent's own overlays, where
+	// the fixture's overlay stands (the fixture's, the production example, names no endpoint).
+	const read = `set -e
+export SETTING=$2
 repo=$(mktemp -d)
 mkdir "$repo/.omp"
-printf 'compaction:\n  remoteEndpoint: https://repository.example/compact\n' >"$repo/.omp/config.yml"
+printf 'compaction:\n  remoteEndpoint: https://repository.example/compact\nbash:\n  autoBackground:\n    enabled: true\n' >"$repo/.omp/config.yml"
+printf 'compaction:\n  remoteEndpoint: https://operator.example/compact\n' >"$repo/operator.yml"
+OVERLAYS=$(tr '\0' '\n' <"/proc/$1/environ" | sed -n 's/^PI_CONFIG_FILES=//p')
+[ "$3" != operator ] || OVERLAYS="$OVERLAYS:$repo/operator.yml"
+export OVERLAYS
 cd "$repo"
-xargs -0 sh -c 'exec env -i "$@" omp config get compaction.remoteEndpoint --json' agent-env <"/proc/$1/environ"`
-	out, err := r.exec(root, "sh", "-c", readCompaction, "read-compaction", pid)
-	if err != nil {
-		return err
-	}
-	var setting struct {
-		Value any `json:"value"`
-	}
-	if err := json.Unmarshal([]byte(out), &setting); err != nil {
-		return fmt.Errorf("omp config get printed %q: %w", out, err)
-	}
-	note("operator", "omp config get compaction.remoteEndpoint --json, the agent's environment, a repository enabling it: %s", out)
-	if setting.Value != "" {
-		return fmt.Errorf("compaction.remoteEndpoint reads %v under the agent's environment, want the baseline's \"\"", setting.Value)
+xargs -0 sh -c 'exec env -i "$@" PI_CONFIG_FILES="$OVERLAYS" omp config get "$SETTING" --json' agent-env <"/proc/$1/environ"`
+	for _, tc := range []struct {
+		setting, overlays string
+		want              any
+	}{
+		{"compaction.remoteEndpoint", "agent", "https://repository.example/compact"},
+		{"bash.autoBackground.enabled", "agent", false},
+		{"compaction.remoteEndpoint", "operator", "https://operator.example/compact"},
+	} {
+		out, err := r.exec(root, "sh", "-c", read, "read-setting", pid, tc.setting, tc.overlays)
+		if err != nil {
+			return err
+		}
+		var setting struct {
+			Value any `json:"value"`
+		}
+		if err := json.Unmarshal([]byte(out), &setting); err != nil {
+			return fmt.Errorf("omp config get %s printed %q: %w", tc.setting, out, err)
+		}
+		note("operator", "omp config get %s --json, the agent's environment (overlays: the %s's), a repository setting it: %s", tc.setting, tc.overlays, out)
+		if setting.Value != tc.want {
+			return fmt.Errorf("%s reads %v under the agent's environment (overlays: the %s's), want %v", tc.setting, setting.Value, tc.overlays, tc.want)
+		}
 	}
 	return nil
 }
@@ -219,7 +260,7 @@ func (r *liveRig) procEnviron(c *liveClaim, pid string) (map[string]string, erro
 
 // provider-key: the root's shim hands its agent the providers Secret's key (--provider-env-dir) and
 // never holds it: the agent's environment carries the Secret's value under the variable
-// provider_keys names, and the shim's (pid 1) carries no such variable.
+// provider_keys names, and the shim's (the agent's parent) carries no such variable.
 func (r *liveRig) checkProviderKey() error {
 	root := r.claim("root")
 	if err := r.ensureRunning(root); err != nil {
@@ -242,7 +283,11 @@ func (r *liveRig) checkProviderKey() error {
 	if err != nil {
 		return err
 	}
-	shim, err := r.procEnviron(root, "1")
+	shimPid, err := r.shimPid(root, pid)
+	if err != nil {
+		return err
+	}
+	shim, err := r.procEnviron(root, shimPid)
 	if err != nil {
 		return err
 	}
@@ -251,9 +296,9 @@ func (r *liveRig) checkProviderKey() error {
 	}
 	note("operator", "/proc/%s/environ (the agent): %s equals secret %s's key %s (%d bytes, not printed)", pid, liveProviderKey, secret, liveProvidersSecretKey, len(value))
 	if held, ok := shim[liveProviderKey]; ok {
-		return fmt.Errorf("the shim (pid 1) holds %s (%d bytes), want the agent's environment alone to", liveProviderKey, len(held))
+		return fmt.Errorf("the shim (pid %s) holds %s (%d bytes), want the agent's environment alone to", shimPid, liveProviderKey, len(held))
 	}
-	note("operator", "/proc/1/environ (the shim): no %s", liveProviderKey)
+	note("operator", "/proc/%s/environ (the shim): no %s", shimPid, liveProviderKey)
 	return nil
 }
 
@@ -266,6 +311,17 @@ func (r *liveRig) agentPid(c *liveClaim) (string, error) {
 	}
 	if pid == "" || strings.ContainsAny(pid, " \n") {
 		return "", fmt.Errorf("the pod runs %q stub agents, want one pid", pid)
+	}
+	return pid, nil
+}
+
+// shimPid is the pid of the `legion worker-shim` that started the agent at pid agent, its parent.
+// A role container's PID 1 is its `legion launcher`, which starts a shim for each generation.
+func (r *liveRig) shimPid(c *liveClaim, agent string) (string, error) {
+	const findShim = `parent=$(sed -n 's/^PPid:[[:space:]]*//p' "/proc/$1/status") && tr '\0' '\n' <"/proc/$parent/cmdline" | grep -qx worker-shim && echo "$parent"`
+	pid, err := r.exec(c, "sh", "-c", findShim, "shim", agent)
+	if err != nil {
+		return "", fmt.Errorf("the agent's (pid %s) parent is no legion worker-shim: %w", agent, err)
 	}
 	return pid, nil
 }

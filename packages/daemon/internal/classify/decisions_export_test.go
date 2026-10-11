@@ -30,6 +30,56 @@ func TestApplyPushTakesBackOnlyTheCurrentHandoffOnlyCount(t *testing.T) {
 	}
 }
 
+// The counted mark names the head the count last counted, and stays across every head pushed on
+// top of it until one is pushed onto a green verdict: a push onto a head CI has not judged yet is the
+// same attempt, not a new one, so it is neither counted nor clears the mark. A head that was not
+// counted takes nothing back when its late push turns out handoff-only.
+func TestTheCountedMarkStaysUntilAHeadIsPushedOntoGreen(t *testing.T) {
+	counted := AdvancePullRequestHead(record.PullRequest{HeadSHA: "h3", CheckedHead: "h3", Failing: []string{"ci"}, Required: []string{"ci"}, FixAttempts: 2}, "h4")
+	if counted.FixAttempts != 3 || counted.HeadCounted != "h4" {
+		t.Fatalf("a push onto red = %#v, want counted h4", counted)
+	}
+	unjudged := AdvancePullRequestHead(counted, "h5")
+	if unjudged.FixAttempts != 3 || unjudged.HeadCounted != "h4" {
+		t.Fatalf("a push onto unjudged h4 = %#v, want the count and the mark on h4 kept", unjudged)
+	}
+	if !FixAttemptCapHolds(record.PullRequest{HeadSHA: "h5", CheckedHead: "h5", Failing: []string{"ci"}, Required: []string{"ci"}, FixAttempts: 3, HeadCounted: "h4"}, 3) {
+		t.Fatal("a red at h5, pushed onto unjudged h4, was not held at the exhausted count")
+	}
+	if got := ApplyPush(unjudged, record.ClassifiedPush{SHA: "h5", Before: "h4", HandoffOnly: true}); got.FixAttempts != 3 || got.HeadCounted != "h4" {
+		t.Fatalf("h5's late handoff-only push = %#v, want nothing taken back: h5 was not counted", got)
+	}
+	unjudged.CheckedHead, unjudged.Failing, unjudged.CheckRuns = "h5", []string{}, []record.AttemptRun{{Name: "ci", ID: 1}}
+	onGreen := AdvancePullRequestHead(unjudged, "h6")
+	if onGreen.FixAttempts != 3 || onGreen.HeadCounted != "" {
+		t.Fatalf("a push onto green h5 = %#v, want the count kept and the mark cleared", onGreen)
+	}
+}
+
+// An uncounted push onto a red inside the counted attempt - the review App's red tests, or a
+// handoff-only push - leaves the attempt's mark where it stood, whichever of the push webhook and
+// the synchronize arrives first: synchronize first counts the head until its push is classified,
+// and the push's take-back restores the mark that count replaced.
+func TestAnUncountedPushOntoAMarkedRedKeepsTheMarkInEitherOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name, paths string
+		byReviewApp bool
+	}{
+		{"the review App's red tests", "src/widget_test.go", true},
+		{"a handoff-only push", ".legion/LEGION-208/test.json", false},
+	} {
+		for _, pushFirst := range []bool{true, false} {
+			marked := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
+				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, FixAttempts: 3, BlockedAttempts: 3, HeadCounted: "h2"}
+			got := arrive(marked, "h3", tc.paths, tc.byReviewApp, pushFirst)
+			if got.FixAttempts != 3 || got.BlockedAttempts != 3 || got.HeadCounted != "h2" || got.HeadCountedBefore != "" {
+				t.Errorf("%s, push first %v: fixAttempts=%d blockedAttempts=%d headCounted=%q headCountedBefore=%q, want 3, 3, \"h2\" and \"\"",
+					tc.name, pushFirst, got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.HeadCountedBefore)
+			}
+		}
+	}
+}
+
 func TestApplySettlementUsesTheExportedSettlementClassifiers(t *testing.T) {
 	prior := record.PullRequest{HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "unit", ID: 1}}}
 	got, applied := ApplySettlement(prior, SettlementCandidate{
@@ -58,11 +108,58 @@ func TestBlockFixAttemptPublishesOnlyOncePerExhaustedCount(t *testing.T) {
 // A red sends the tree back only while it stands for the head: a red a code push left behind, whose
 // head no longer carries it, sends nothing back.
 func TestRedSendsBackOnlyOnTheRedThatStandsForTheHead(t *testing.T) {
-	if !RedSendsBack(record.PullRequest{HeadSHA: "head", CheckedHead: "head", Failing: []string{"ci"}, Required: []string{"ci"}}) {
+	if !RedSendsBack(record.PullRequest{HeadSHA: "head", CheckedHead: "head", Failing: []string{"ci"}, Required: []string{"ci"}}, nil) {
 		t.Fatal("the head's own red did not send the tree back")
 	}
-	if RedSendsBack(record.PullRequest{HeadSHA: "fix", CheckedHead: "head", Failing: []string{"ci"}, Required: []string{"ci"}}) {
+	if RedSendsBack(record.PullRequest{HeadSHA: "fix", CheckedHead: "head", Failing: []string{"ci"}, Required: []string{"ci"}}, nil) {
 		t.Fatal("a red that no longer stands for the head sent the tree back")
+	}
+}
+
+// A red that only the review workflows the project declares make is the reviewer's round's to
+// decide, so it sends nothing back; a red required workflow the project does not declare - a test
+// or lint workflow - is a failing check, and sends the tree back as a red required check does,
+// alone or beside a declared one. With no review workflow declared, every red required workflow
+// sends it back. A required check still pending or with no result is not red, so a review
+// workflow's red beside it is still the review workflows' alone.
+func TestRedSendsBackLeavesOnlyADeclaredReviewWorkflowsRedToTheReviewer(t *testing.T) {
+	const review, tests = ".github/workflows/review.yml", ".github/workflows/tests.yml"
+	declared := []string{review}
+	code := func(failing []string, cancelled []string, runs []record.AttemptRun, workflows ...record.RequiredWorkflow) record.PullRequest {
+		return record.PullRequest{HeadSHA: "head", CheckedHead: "head", Failing: failing, Cancelled: cancelled, CheckRuns: runs, Required: []string{"ci"},
+			Workflows: workflows, WorkflowsHead: "head"}
+	}
+	green := []record.AttemptRun{{Name: "ci", ID: 1}}
+	for _, tc := range []struct {
+		name                            string
+		pr                              record.PullRequest
+		declared                        []string
+		onlyWorkflows, onlyReview, back bool
+	}{
+		{"the review workflow failed beside a green check", code([]string{}, nil, green, record.RequiredWorkflow{Path: review, Result: "failure"}), declared, true, true, false},
+		{"the review workflow timed out beside a check with no result", code([]string{}, nil, nil, record.RequiredWorkflow{Path: review, Result: "timed_out"}), declared, true, true, false},
+		{"the review workflow failed beside a cancelled check", code([]string{}, []string{"ci"}, nil, record.RequiredWorkflow{Path: review, Result: "failure"}), declared, true, true, false},
+		{"the review workflow failed beside a green undeclared one", code([]string{}, nil, green,
+			record.RequiredWorkflow{Path: review, Result: "failure"}, record.RequiredWorkflow{Path: tests, Result: Success}), declared, true, true, false},
+		{"an undeclared required workflow failed beside a green check", code([]string{}, nil, green, record.RequiredWorkflow{Path: tests, Result: "failure"}), declared, true, false, true},
+		{"the review workflow and an undeclared one failed", code([]string{}, nil, green,
+			record.RequiredWorkflow{Path: review, Result: "failure"}, record.RequiredWorkflow{Path: tests, Result: "failure"}), declared, true, false, true},
+		{"the review workflow failed with none declared", code([]string{}, nil, green, record.RequiredWorkflow{Path: review, Result: "failure"}), nil, true, false, true},
+		{"the required check failed beside a green review workflow", code([]string{"ci"}, nil, green, record.RequiredWorkflow{Path: review, Result: Success}), declared, false, false, true},
+		{"the required check and the review workflow failed", code([]string{"ci"}, nil, green, record.RequiredWorkflow{Path: review, Result: "failure"}), declared, false, false, true},
+		{"the review workflow still running beside a green check", code([]string{}, nil, green, record.RequiredWorkflow{Path: review, Result: Pending}), declared, false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := RedOnlyByWorkflows(tc.pr); got != tc.onlyWorkflows {
+				t.Errorf("RedOnlyByWorkflows = %t, want %t", got, tc.onlyWorkflows)
+			}
+			if got := RedOnlyByReviewWorkflows(tc.pr, tc.declared); got != tc.onlyReview {
+				t.Errorf("RedOnlyByReviewWorkflows = %t, want %t", got, tc.onlyReview)
+			}
+			if got := RedSendsBack(tc.pr, tc.declared); got != tc.back {
+				t.Errorf("RedSendsBack = %t, want %t", got, tc.back)
+			}
+		})
 	}
 }
 

@@ -1,10 +1,9 @@
-import { connect } from "node:net";
 import { fileURLToPath } from "node:url";
 import { defineConfig, devices } from "@playwright/test";
 import { baseUrl } from "./api";
-import { usesFakeBroker } from "./harness-broker";
-import { harnessPorts } from "./harness-ports";
+import { harnessListeners } from "./harness-listeners";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
+import { takenPorts } from "./port-probe";
 
 // The plain-HTTP project's origin is a proxy on PLAIN_HTTP_PORT, reached by a host name Chromium
 // maps to loopback. The page is a non-loopback plain-HTTP origin, while the proxy forwards to the
@@ -14,30 +13,13 @@ import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
 // fails on loopback by design.
 const plainHttpSpecs = /plain-http-(origin|proxy)\.e2e\.ts/;
 const startsOwnServers = !process.env.PLAYWRIGHT_BASE_URL;
-const fakeBroker = fileURLToPath(new URL("./fake-broker.ts", import.meta.url));
-const fakeEnvoy = fileURLToPath(new URL("./fake-envoy.ts", import.meta.url));
-const fakeGithub = fileURLToPath(new URL("./fake-github.ts", import.meta.url));
-const plainHttpProxy = fileURLToPath(new URL("./plain-http-proxy.ts", import.meta.url));
-const runServer = fileURLToPath(new URL("./run-server.sh", import.meta.url));
 
-// Every listener this config can start, with its port beside that port's variable, both from
-// e2e/harness-ports.ts. A deployed run (PLAYWRIGHT_BASE_URL) starts only those marked `deployed`:
-// its Dispatch server is already up, and the fake GitHub serves only a server this run starts. The
-// fake broker is started exactly when the harness switch points this run's server at it
-// (e2e/harness-broker.ts), never for a deployed run. The port probe and `webServer` both read
-// `startedListeners`, so a listener is probed exactly when it is started.
-const listeners = [
-  { ...harnessPorts.fakeEnvoy, command: `bun ${fakeEnvoy}`, deployed: true },
-  { ...harnessPorts.plainHttp, command: `bun ${plainHttpProxy}`, deployed: true },
-  { ...harnessPorts.fakeGithub, command: `bun ${fakeGithub}`, deployed: false },
-  ...(usesFakeBroker
-    ? [{ ...harnessPorts.fakeBroker, command: `bun ${fakeBroker}`, deployed: false }]
-    : []),
-  { ...harnessPorts.dispatch, command: `bash ${runServer}`, deployed: false },
-];
+// The rows of e2e/harness-listeners.ts this run starts: every one for a local run, the `deployed`
+// ones for a deployed run. The port probe and `webServer` both read `startedListeners`, so a
+// listener is probed exactly when it is started.
 const startedListeners = startsOwnServers
-  ? listeners
-  : listeners.filter((listener) => listener.deployed);
+  ? harnessListeners
+  : harnessListeners.filter((listener) => listener.deployed);
 
 // `DISPATCH_E2E_REUSE_SERVERS=1` runs the suite against a harness the caller started and left
 // listening on the five harness ports. Unset or empty starts this run's own servers and refuses a
@@ -56,24 +38,6 @@ function resolveReuseServers(): boolean {
 }
 
 const reuseServers = resolveReuseServers();
-
-// Playwright's own port predicate (playwright@1.63.0 `lib/runner/index.js:958-977`): a port counts
-// as used when either `127.0.0.1` or `::1` accepts a connection. A probe that dialled only
-// `127.0.0.1` would miss a listener bound on `::1` alone — what a docker-published port binds —
-// and leave that case to Playwright's backstop, which names no variable.
-async function isPortUsed(port: number): Promise<boolean> {
-  const dial = (host: string) => {
-    const { promise, resolve } = Promise.withResolvers<boolean>();
-    const connection = connect(port, host)
-      .on("error", () => resolve(false))
-      .on("connect", () => {
-        connection.end();
-        resolve(true);
-      });
-    return promise;
-  };
-  return (await Promise.all([dial("127.0.0.1"), dial("::1")])).includes(true);
-}
 
 // A listing run starts no web server: `listMode` builds only a load task and a report-begin task
 // (`lib/runner/index.js:6946-6949`), where an ordinary run's in-process load sits at `:6952`,
@@ -108,10 +72,8 @@ function isListMode(argv: readonly string[]): boolean {
 // so `process.send` is a function there and undefined in the CLI that starts the servers;
 // `TEST_WORKER_INDEX` cannot discriminate them, because the loader never sets it.
 if (!reuseServers && typeof process.send !== "function" && !isListMode(process.argv)) {
-  const used = await Promise.all(startedListeners.map((listener) => isPortUsed(listener.port)));
-  const taken = startedListeners.filter((_, index) => used[index]);
-  if (taken.length > 0) {
-    const ports = taken.map((listener) => `${listener.port} (${listener.variable})`).join(", ");
+  const ports = await takenPorts(startedListeners);
+  if (ports !== undefined) {
     const variables = startedListeners.map((listener) => listener.variable).join("/");
     const remedy = startsOwnServers
       ? `move this run to free ports with ${variables} and to its own DATABASE_URL, since the ` +
@@ -147,8 +109,8 @@ export default defineConfig({
   // Runs once the web servers are up and before any row: it refuses a target that does not read
   // this run's fake Envoy (e2e/preflight.ts).
   globalSetup: fileURLToPath(new URL("./preflight.ts", import.meta.url)),
-  webServer: startedListeners.map(({ command, port }) => ({
-    command,
+  webServer: startedListeners.map(({ argv, port }) => ({
+    command: argv.join(" "),
     port,
     reuseExistingServer: reuseServers,
   })),
@@ -160,29 +122,32 @@ export default defineConfig({
       use: { ...devices["iPhone 13"], browserName: "chromium" },
     },
     // A caret beside a collaborator's cursor behaves per engine, the issue picker's keyboard-step
-    // rule rests on each engine dispatching a closed select's `change` in the key's own task, and
-    // deep links meet each engine's chunk cancellation and the margin hold's frame and scroll order.
-    // So those three specs also run in WebKit.
+    // rule rests on each engine dispatching a closed select's `change` in the key's own task, deep
+    // links meet each engine's chunk cancellation and the margin hold's frame and scroll order,
+    // and IndexedDB-backed document recovery must run in the engines people use. So those specs
+    // also run in WebKit.
     {
       name: "webkit",
-      testMatch: /(collab-cursor|deep-links|keyboard-agents-picker)\.e2e\.ts/,
+      testMatch: /(collab-cursor|deep-links|keyboard-agents-picker|offline-edits)\.e2e\.ts/,
       use: { ...devices["Desktop Safari"] },
     },
-    // The live view's phone layout (its keyboard cap, gutter and scroll locks), and what the
-    // Conversation's floating pills cover on a phone, also run in WebKit, the engine iOS Safari
-    // uses; only those rows, since the rest of each spec is engine-agnostic.
+    // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
+    // pill's ellipsis (the two engines lay out a flex child's min-width differently), and what
+    // the Conversation's floating pills cover on a phone, also run in WebKit, the engine iOS
+    // Safari uses; only those rows, since the rest of each spec is engine-agnostic.
     {
       name: "webkit-iphone",
       testMatch: /(agent-view|phone-conversation)\.e2e\.ts/,
-      grep: /on a phone the live view|a document-scrolling route|covers none of/,
+      grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name/,
       use: { ...devices["iPhone 13"] },
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
-    // and the issue picker's keyboard-step rule rests on the engine's select dispatch, so those two
-    // specs also run in Firefox, and the whole deep-links spec for the reason given above.
+    // the issue picker's keyboard-step rule rests on the engine's select dispatch, and offline
+    // document recovery owns browser storage. Those specs, and the whole deep-links spec, run in
+    // Firefox too.
     {
       name: "firefox",
-      testMatch: /(code-line-replace|deep-links|keyboard-agents-picker)\.e2e\.ts/,
+      testMatch: /(code-line-replace|deep-links|keyboard-agents-picker|offline-edits)\.e2e\.ts/,
       use: { ...devices["Desktop Firefox"] },
     },
     {

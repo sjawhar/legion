@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 const architectToken = claim.Token("legion-legion-legion-208-architect")
@@ -368,6 +369,105 @@ func TestTheOperatorClosesATreeNoWorkflowIssueBacks(t *testing.T) {
 				t.Fatalf("releases = %+v, want the root released once", releases)
 			}
 		})
+	}
+}
+
+// A tree without a workflow issue has no outbox row. Once every claim stopped, the operator route
+// reserves the tree's cleanup, has the runtime release the tree and confirms the reservation; it
+// never invents a workflow record merely to get cleanup.
+func TestOperatorCloseReleasesTheTreeAndConfirmsItsCleanupWithoutAWorkflowRecord(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if cleanups := h.runtime.CallsOf("CleanupTree"); len(cleanups) != 1 || cleanups[0].Tree != "LEGION-208" {
+		t.Fatalf("tree releases = %+v, want LEGION-208 released once", cleanups)
+	}
+	if started, confirmed := h.treeCleanup("LEGION-208"); !started || !confirmed {
+		t.Fatalf("tree cleanup started %t, confirmed %t; want it confirmed", started, confirmed)
+	}
+}
+
+// A failed release is not a successful close: the route tells the operator its durable cleanup is
+// pending, the reservation stays unconfirmed, and the same close asked again resumes it.
+func TestOperatorCloseSurfacesAFailedReleaseAndItsRetryResumesIt(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.runtime.FailCleanupTree(errors.New("foreground Sandbox delete conflicted"))
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusInternalServerError || !strings.Contains(recorder.Body.String(), "durable resource cleanup is pending") {
+		t.Fatalf("close after a failed release = %d %s, want 500 naming durable cleanup pending", recorder.Code, recorder.Body)
+	}
+	if started, confirmed := h.treeCleanup("LEGION-208"); !started || confirmed {
+		t.Fatalf("after the failed release: cleanup started %t, confirmed %t; want reserved and unconfirmed", started, confirmed)
+	}
+	h.runtime.FailCleanupTree(nil)
+	recorder = h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("retried close = %d, want 200; body %s", recorder.Code, recorder.Body)
+	}
+	if started, confirmed := h.treeCleanup("LEGION-208"); !started || !confirmed {
+		t.Fatalf("after the retried close: cleanup started %t, confirmed %t; want it confirmed", started, confirmed)
+	}
+}
+
+// While the tree's cleanup is reserved, nothing of the tree is admitted or launched: a new operator
+// root is refused naming the cleanup, and a worker of the tree is never stored.
+func TestOperatorSpawnsWaitForTheirTreesReservedCleanup(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	h.runtime.FailCleanupTree(errors.New("foreground Sandbox delete conflicted"))
+	h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil)
+	spawns := len(h.runtime.CallsOf("Spawn"))
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "waiting for durable cleanup") {
+		t.Fatalf("root spawn during the reserved cleanup = %d %s, want 409 naming the cleanup", recorder.Code, recorder.Body)
+	}
+	worker := SpawnRequest{Tree: "LEGION-208", Issue: "LEGION-209", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."}
+	if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", worker); recorder.Code/100 == 2 {
+		t.Fatalf("worker spawn during the reserved cleanup = %d, want it refused; body %s", recorder.Code, recorder.Body)
+	}
+	if now := len(h.runtime.CallsOf("Spawn")); now != spawns {
+		t.Fatalf("spawns during the reserved cleanup = %d, want none", now-spawns)
+	}
+	var stored int
+	if err := h.store.Pool().QueryRow(h.ctx, `select count(*) from claims where token = 'legion-legion-legion-209-implementer'`).Scan(&stored); err != nil || stored != 0 {
+		t.Fatalf("the refused worker left %d claim rows (err %v)", stored, err)
+	}
+}
+
+// Only a reserved cleanup is the wait a 409 names. A root the operator cannot open for another
+// reason, here a tree whose lifecycle the workflow holds, is that failure, not "waiting for durable
+// cleanup": nothing the operator waits on would ever let it through.
+func TestOperatorSpawnOfATreeTheWorkflowHoldsIsNotAWaitForCleanup(t *testing.T) {
+	h := newHarness(t)
+	if _, err := h.store.OpenTreeLifecycle(h.ctx, testProject, "LEGION-208", treelifecycle.AuthorityWorkflow); err != nil {
+		t.Fatal(err)
+	}
+	recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	if recorder.Code != http.StatusInternalServerError || strings.Contains(recorder.Body.String(), "waiting for durable cleanup") ||
+		!strings.Contains(recorder.Body.String(), "current authority is workflow") {
+		t.Fatalf("operator root spawn of a workflow tree = %d %s, want 500 naming the workflow's authority", recorder.Code, recorder.Body)
+	}
+	if spawns := h.runtime.CallsOf("Spawn"); len(spawns) != 0 {
+		t.Fatalf("spawns = %d, want none", len(spawns))
+	}
+}
+
+// A close asked again after its tree's cleanup confirmed reserves nothing and releases nothing: it
+// answers as the finished close it is.
+func TestOperatorCloseAfterConfirmedCleanupAnswersWithoutCleaning(t *testing.T) {
+	h := newHarness(t)
+	h.operator(http.MethodPost, "/legion/v1/operator/claims", spawnBody())
+	for range 2 {
+		if recorder := h.operator(http.MethodPost, "/legion/v1/operator/claims/"+string(architectToken)+"/close", nil); recorder.Code != http.StatusOK {
+			t.Fatalf("close = %d, want 200; body %s", recorder.Code, recorder.Body)
+		}
+	}
+	if cleanups := h.runtime.CallsOf("CleanupTree"); len(cleanups) != 1 {
+		t.Fatalf("tree releases = %d, want the first close's one", len(cleanups))
 	}
 }
 

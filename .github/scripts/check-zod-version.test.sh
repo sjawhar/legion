@@ -47,7 +47,7 @@ JSON
 JSON
   cat > "$root/packages/pi-envoy/package.json" <<'JSON'
 {
-  "name": "@sjawhar/pi-legion-envoy",
+  "name": "@sjawhar/pi-envoy",
   "devDependencies": {
     "zod": "4.3.6"
   }

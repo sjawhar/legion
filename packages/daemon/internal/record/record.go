@@ -12,6 +12,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // AttemptRun is the latest check-run id the daemon observed for one check name.
@@ -98,9 +99,11 @@ type PhaseRow struct {
 	// HandoffCommit it survives the next phase's start, so a completion reporting it again is known
 	// to carry no handoff written since.
 	LastHandoff string
-	// Decision is the review round's decision, on the reviewer's row: the newest review GitHub
-	// reported for the round that carried one, kept until the round ends, since the reviewer's
-	// completion can come after the review it posted. Nil until a review decides.
+	// Decision is the review round's decision, on the reviewer's row: the newest review the
+	// reviewer's own review-App session (told from any other review-App session's by its Legion
+	// footer) or an account with write access to the repository submitted for the round that carried
+	// one (workflow's DecidesRound), kept until the round ends, since the reviewer's completion can
+	// come after the review it posted. Nil until a review decides.
 	Decision *ReviewDecision
 	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until
 	// then. The reviewer's orders the reviews its round receives against the completion (workflow's
@@ -170,8 +173,17 @@ type PullRequest struct {
 	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
 	// and said which head it replaced, which carry an approval across, and the pushes whose heads
 	// have not arrived yet. A push that may change code is spent once its head arrives.
-	Pushes      []ClassifiedPush
+	Pushes []ClassifiedPush
+	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
+	// across every head pushed on top of it until one is pushed onto a green verdict
+	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
+	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
+	// HeadCountedBefore is the mark HeadCounted held before the count that set it. A count made
+	// before its head's push arrived is taken back when that push proves handoff-only or the review
+	// App's (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
+	// which of the push and the head's arrival GitHub delivers first.
+	HeadCountedBefore string
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool
@@ -187,26 +199,39 @@ type PullRequest struct {
 	// head whose settlement is recorded (classify.HeadChecks). A reopen keeps both, with Required.
 	Workflows     []RequiredWorkflow
 	WorkflowsHead string
-	// ReviewSeen is the newest deciding review (changes requested or approved) GitHub reported for
-	// the pull request: a deciding review not after it was submitted before one already processed,
-	// and records nothing. A comment decides nothing and leaves it as it is. It lasts as long as the
-	// pull request's record: across rounds, a reopen, and a new generation while the pull request
-	// is open; a new generation deletes one that is not.
+	// ReviewSeen is the newest deciding review (changes requested or approved, from the review App
+	// or an account with write access to the repository) GitHub reported for the pull request: a
+	// deciding review not after it was submitted before one already processed, and records nothing.
+	// A comment, or anyone else's review, decides nothing and leaves it as it is. It lasts as long
+	// as the pull request's record: across rounds, a reopen, and a new generation while the pull
+	// request is open; a new generation deletes one that is not.
 	ReviewSeen ReviewOrder
 	State      PullRequestState
+	// Mergeability is GitHub's lazily computed verdict for whether this head can be merged into
+	// its base branch without a conflict, as the daemon's periodic required-checks read of
+	// GitHub's /pulls/{number} last found it (daemon.readRequiredChecks), decoding GitHub's
+	// nullable `mergeable` field: MergeabilityUnknown while GitHub is still computing it (never a
+	// transient conflict - GitHub reports no checks run on a mergeability GitHub has not computed
+	// yet, either), MergeabilityMergeable once GitHub can merge the head automatically, and
+	// MergeabilityConflicting once it cannot. "" means the read has never run.
+	Mergeability Mergeability
 }
 
 // RequiredWorkflow is one workflow the base branch requires, named by its path, and the result of
 // its latest run on a head as the daemon read it (requiredchecks.Workflows): success, pending,
-// missing (the head has no run of it), or the conclusion it failed with.
+// missing (the head has no run of it), or the conclusion it failed with. Run and Attempt are that
+// run's id and attempt, both zero when the head has no run of it: a re-run keeps its run's id and
+// raises its attempt, so a re-run that ends as the run did before is still a new read.
 type RequiredWorkflow struct {
-	Path   string `json:"path"`
-	Result string `json:"result"`
+	Path    string `json:"path"`
+	Result  string `json:"result"`
+	Run     int64  `json:"run,omitempty"`
+	Attempt int    `json:"attempt,omitempty"`
 }
 
 // RequiredReadUnchanged says whether a read of what the base branch requires is what pr records:
-// names is its required check set, and workflows its required workflows' run results, read at
-// head. Nil Required is a set never read, never the same as a read one, even an empty one.
+// names is its required check set, and workflows its required workflows' runs and their results,
+// read at head. Nil Required is a set never read, never the same as a read one, even an empty one.
 func (pr PullRequest) RequiredReadUnchanged(names []string, workflows []RequiredWorkflow, head string) bool {
 	return pr.Required != nil && slices.Equal(pr.Required, names) && slices.Equal(pr.Workflows, workflows) && pr.WorkflowsHead == head
 }
@@ -218,6 +243,17 @@ const (
 	PullRequestOpen   PullRequestState = "open"
 	PullRequestMerged PullRequestState = "merged"
 	PullRequestClosed PullRequestState = "closed"
+)
+
+// Mergeability is GitHub's lazily computed verdict for whether a pull request's head can be
+// merged into its base without a conflict, decoded from GitHub's nullable `mergeable` field
+// (daemon.readRequiredChecks). "" (the zero value) means the daemon has never read it.
+type Mergeability string
+
+const (
+	MergeabilityUnknown     Mergeability = "UNKNOWN"
+	MergeabilityMergeable   Mergeability = "MERGEABLE"
+	MergeabilityConflicting Mergeability = "CONFLICTING"
 )
 
 // DesignGate records the current document version and the version a human approved, if any.
@@ -267,6 +303,11 @@ type Store interface {
 	PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest) error
 	// SessionClaimsTree says whether the agent session holds a claim in the tree.
 	SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, session string) (bool, error)
+	// ClaimSession is the session claims records for token, "" and no error when the token holds
+	// no row. The workflow reads it for the reviewer's claim (PhaseRow.Claim) to tell the
+	// reviewer's own review from another review-App session's by the Legion footer each carries
+	// (PullRequestReview.LegionSession).
+	ClaimSession(ctx context.Context, tx pgx.Tx, token claim.Token) (string, error)
 	// ClearGeneration drops the facts one generation of an issue owns: a merged or closed pull
 	// request, the fix-attempt counts and planned mark of a still-open one (the next generation runs on the same
 	// branch and pull request), its design gate, each role's handoff, review rounds, verdict and
@@ -279,6 +320,10 @@ type Store interface {
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
 	ReleaseSlot(ctx context.Context, tx pgx.Tx, issue string) error
+	// OpenTreeLifecycle binds an admission fact's root start rows to one durable tree epoch before
+	// the fact commits. A reserved cleanup returns treelifecycle.ErrCleanupReserved without
+	// admitting work.
+	OpenTreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error)
 	// ControllerRegistered says whether a session holds the current controller registration of the
 	// Dispatch project key project (controller.Record.Registered's rule), reading the controllers
 	// table under the project token (claim.ProjectToken) `legion controller start` mints under.

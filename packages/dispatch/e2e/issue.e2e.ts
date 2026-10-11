@@ -15,6 +15,7 @@ import {
 import { recordClipboard } from "./clipboard";
 import { needsYouCards } from "./editor";
 import { clearIssueCreator, resetDatabase } from "./seed";
+import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
 test.beforeEach(async () => {
@@ -821,8 +822,6 @@ test("issue header gives the title the row's free space beside a short details l
       const header = document.querySelector("[data-testid=issue-header]") as HTMLElement;
       const style = getComputedStyle(header);
       return {
-        clipped:
-          heading.scrollHeight > heading.clientHeight || heading.scrollWidth > heading.clientWidth,
         contentWidth:
           header.clientWidth -
           Number.parseFloat(style.paddingLeft) -
@@ -837,7 +836,11 @@ test("issue header gives the title the row's free space beside a short details l
       await page.setViewportSize({ height: 800, width });
       await page.goto(`/issues/${issue.key}`);
       await expect(title).toHaveText("Header keeps its title readable");
-      expect((await measureTitle()).clipped, `title clipped at ${width}px`).toBe(false);
+      const measured = await measureTitle();
+      expect(
+        measured.width,
+        `title ${measured.width}px of a ${measured.contentWidth}px card at ${width}px`
+      ).toBeGreaterThanOrEqual(measured.contentWidth / 2);
       if (width === 1024) {
         const shot = testInfo.outputPath("issue-header-title-1024.png");
         await page.screenshot({ path: shot });
@@ -872,7 +875,6 @@ test("issue header gives the title the row's free space beside a short details l
         await expect(page.getByRole("button", { name: "Subscribers: 1" })).toBeVisible();
         const measured = await measureTitle();
         const label = `${width}px ${withLink ? "with" : "without"} the GitHub link`;
-        expect(measured.clipped, `title clipped at ${label}`).toBe(false);
         expect(
           measured.width,
           `title ${measured.width}px of a ${measured.contentWidth}px card at ${label}`
@@ -1023,51 +1025,39 @@ test("issue header reassigns through the Assignee picker; a personal token's iss
   }
 });
 
-test("a clamped title shows two lines and no fragment of the third", async ({
+test("an issue's whole title wraps at every width, whether prose or one unbroken word", async ({
   browser,
 }, testInfo) => {
-  test.skip(testInfo.project.name !== "iphone", "the clamp only bites where the title wraps");
   await createProject({ key: "CORE", name: "Core" });
-  const issue = await createIssue({
-    project: "CORE",
-    title:
-      "Whole-app visual polish pass: information hierarchy and a coherent conversation across every document surface",
-  });
+  // Five repeats of a 48-character sentence, cut to exactly 200: the length the spec names. It
+  // ends mid-sentence on a letter, so the server trims nothing and the page shows all 200.
+  const title200 = "Dispatch cuts off titles that are far too long. ".repeat(5).slice(0, 200);
+  const prose = await createIssue({ project: "CORE", title: title200 });
+  expect(prose.title).toHaveLength(200);
+  // A single unbroken 100-character string: no space for the browser to break on, so wrapping
+  // depends on `break-words` rather than the ordinary word-wrap every other title gets for free.
+  const title100 = "supercalifragilisticexpialidocious".repeat(3).slice(0, 100);
+  expect(title100).toHaveLength(100);
+  expect(title100).not.toContain(" ");
+  const oneWord = await createIssue({ project: "CORE", title: title100 });
 
   const context = await asUser(browser, "alice");
   try {
     const page = await context.newPage();
-    await page.goto(`/issues/${issue.key}`);
-    const title = page.getByRole("heading", { level: 1 });
-    await expect(title).toBeVisible();
-    // How many lines of the title a reader can see: the line boxes that start above the bottom of
-    // whatever clips them. A clamped element with vertical padding clips below the line it cut, so
-    // the top of the third line was drawn inside that padding.
-    // Polled, not sampled once: the clamp is a layout the browser settles into, and a single
-    // immediate measurement caught the frame before it (1 run in 9 locally).
-    await expect
-      .poll(() =>
-        title.evaluate((element) => {
-          const text = element.firstChild?.firstChild ?? element.firstChild;
-          if (text === null || text === undefined) {
-            return -1;
-          }
-          const range = document.createRange();
-          range.selectNodeContents(text);
-          let clip: Element | null = text.parentElement;
-          while (clip !== null && getComputedStyle(clip).overflowY === "visible") {
-            clip = clip.parentElement;
-          }
-          if (clip === null) {
-            return -1;
-          }
-          const box = clip.getBoundingClientRect();
-          const bottom = box.bottom - Number.parseFloat(getComputedStyle(clip).borderBottomWidth);
-          return Array.from(range.getClientRects()).filter((rect) => rect.top < bottom - 0.5)
-            .length;
-        })
-      )
-      .toBe(2);
+    for (const issue of [prose, oneWord]) {
+      await page.goto(`/issues/${issue.key}`);
+      const title = page.getByRole("heading", { level: 1 });
+      await expect(title).toHaveText(issue.title);
+      // Whole means nothing between the title and the document clips it: no clamp, ellipsis, or
+      // box shorter or narrower than the text it holds, at the width this project renders.
+      await assertWhole(title);
+      // The one unbroken word wraps rather than pushing the page wider than the viewport.
+      await assertPageFits(page);
+      await page.screenshot({
+        path: testInfo.outputPath(`issue-title-${issue.key}-whole.png`),
+        fullPage: true,
+      });
+    }
   } finally {
     await context.close();
   }

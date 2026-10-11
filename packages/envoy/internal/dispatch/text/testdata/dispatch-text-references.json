@@ -149,5 +149,43 @@
   {
     "body": "Broken: **dispatch://CORE-1x**, dispatch://CORE-1_suffix, `dispatch://core-1`, ~~dispatch://CORE~~ and _dispatch://CORE-0_.",
     "refs": []
+  },
+  {
+    "body": "Pasted: dispatch://agent/01a1058e-f14f-7684-87eb-3dc885955551/artifact/shot-png here.",
+    "refs": [
+      "dispatch://agent/01a1058e-f14f-7684-87eb-3dc885955551/artifact/shot-png"
+    ]
+  },
+  {
+    "body": "Pasted: dispatch://agent/01a1058e-f14f-7684-87eb-3dc885955551/artifact/shot-png@v3 here.",
+    "refs": [
+      "dispatch://agent/01a1058e-f14f-7684-87eb-3dc885955551/artifact/shot-png@v3"
+    ]
+  },
+  {
+    "body": "See https://dispatch.test/agents/01a1058e-f14f-7684-87eb-3dc885955551/artifacts/shot-png?v=3 here.",
+    "refs": [
+      "dispatch://agent/01a1058e-f14f-7684-87eb-3dc885955551/artifact/shot-png@v3"
+    ]
+  },
+  {
+    "body": "Not an owner: dispatch://agent/a/b/artifact/shot-png here.",
+    "refs": []
+  },
+  {
+    "body": "Pasted: dispatch://agent/pi.worker_2~a:b@host/artifact/shot-png here.",
+    "refs": [
+      "dispatch://agent/pi.worker_2~a:b@host/artifact/shot-png"
+    ]
+  },
+  {
+    "body": "See https://dispatch.test/agents/a%7Cb/artifacts/shot-png here.",
+    "refs": []
+  },
+  {
+    "body": "![shot.png](dispatch://LEGION-1/artifact/shot-png@v1)",
+    "refs": [
+      "dispatch://LEGION-1/artifact/shot-png@v1"
+    ]
   }
 ]

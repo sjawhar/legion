@@ -77,6 +77,6 @@ writePage({
   title: "HTTP API",
   description:
     "Every route Dispatch serves under /api/v1: method, path, who may call it, and what it does.",
-  source: "packages/envoy/internal/dispatch/api/routes_table.go",
+  sources: ["packages/envoy/internal/dispatch/api/routes_table.go"],
   body: () => render(readRoutes()),
 });

@@ -10,6 +10,7 @@ import { MachineLoginPage } from "./MachineLoginPage";
 import { MachineLoginsSection } from "./MachineLoginsSection";
 
 const devbox: MachineLogin = {
+  approved_by: "ada@example.com",
   credential_id: "cred-devbox",
   expired: false,
   expires_at: "2026-10-10T12:00:00Z",
@@ -18,6 +19,7 @@ const devbox: MachineLogin = {
   service: null,
 };
 const laptop: MachineLogin = {
+  approved_by: "ada@example.com",
   credential_id: "cred-laptop",
   expired: false,
   expires_at: "2026-10-09T08:00:00Z",
@@ -25,7 +27,10 @@ const laptop: MachineLogin = {
   issued_at: "2026-10-02T08:00:00Z",
   service: null,
 };
+/** The Legion daemon's login, which someone other than the viewer approved: anyone signed in
+ *  approves, lists and revokes a service's login. */
 const daemon: MachineLogin = {
+  approved_by: "bob@example.com",
   credential_id: "cred-daemon",
   expired: false,
   expires_at: "2026-10-10T09:00:00Z",
@@ -35,6 +40,7 @@ const daemon: MachineLogin = {
 };
 /** The devbox's previous login: expired, but a box it started still renews with its own key. */
 const stale: MachineLogin = {
+  approved_by: "ada@example.com",
   credential_id: "cred-stale",
   expired: true,
   expires_at: "2026-10-03T11:00:00Z",
@@ -66,7 +72,7 @@ test("an expired login whose sessions still run is listed and marked so, and Rev
 
   try {
     renderPage();
-    const section = within(await screen.findByRole("region", { name: "Your machine logins" }));
+    const section = within(await screen.findByRole("region", { name: "Machine logins" }));
     const marked = await section.findByText("expired, sessions still running");
     const staleRow = marked.closest("tr") as HTMLElement;
     expect(within(staleRow).getByText("devbox.example.com")).toBeDefined();
@@ -91,7 +97,7 @@ test("revoking a machine login refreshes Live grants", async () => {
   const grant: CredentialGrant = {
     approver: null,
     created_at: "2026-10-03T12:05:00Z",
-    enrollment: { kind: "box", operator: "ada@example.com", runtime_id: "box-1", slot: null },
+    enrollment: { kind: "session", operator: "ada@example.com", runtime_id: "box-1", slot: null },
     expires_at: "2026-10-03T13:05:00Z",
     grant_id: "grant-1",
     granted: "automatic",
@@ -121,7 +127,7 @@ test("revoking a machine login refreshes Live grants", async () => {
     );
     const liveGrants = within(await screen.findByRole("region", { name: "Live grants" }));
     expect(await liveGrants.findByText("WORKER_TOKEN")).toBeDefined();
-    const section = within(screen.getByRole("region", { name: "Your machine logins" }));
+    const section = within(screen.getByRole("region", { name: "Machine logins" }));
 
     fireEvent.click(await section.findByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-devbox"));
@@ -148,7 +154,7 @@ test("the machine-login page lists the viewer's machine logins, and Revoke ends 
 
   try {
     renderPage();
-    const section = within(await screen.findByRole("region", { name: "Your machine logins" }));
+    const section = within(await screen.findByRole("region", { name: "Machine logins" }));
     const devboxRow = (await section.findByText("devbox.example.com")).closest("tr");
     expect(devboxRow).not.toBeNull();
     expect(section.getByText("laptop.example.com")).toBeDefined();
@@ -179,7 +185,7 @@ test("the machine-login page lists the viewer's machine logins, and Revoke ends 
   }
 });
 
-test("a service's login the viewer approved is listed by its service, and its Revoke says its pods end", async () => {
+test("a service's login someone else approved is listed by its service and its approver, and its Revoke says its pods end", async () => {
   let live = [daemon, devbox];
   const getMachineLogins = spyOn(api, "getMachineLogins").mockImplementation(async () => ({
     credentials: live,
@@ -191,12 +197,14 @@ test("a service's login the viewer approved is listed by its service, and its Re
 
   try {
     renderPage();
-    const section = within(await screen.findByRole("region", { name: "Your machine logins" }));
+    const section = within(await screen.findByRole("region", { name: "Machine logins" }));
     const daemonRow = (await section.findByText("legion-daemon on cluster.example.com")).closest(
       "tr"
     );
     expect(daemonRow).not.toBeNull();
-    expect(section.getByText("devbox.example.com")).toBeDefined();
+    expect(within(daemonRow as HTMLElement).getByText("bob@example.com")).toBeDefined();
+    const devboxRow = section.getByText("devbox.example.com").closest("tr");
+    expect(within(devboxRow as HTMLElement).getByText("ada@example.com")).toBeDefined();
 
     fireEvent.click(within(daemonRow as HTMLElement).getByRole("button", { name: "Revoke" }));
     expect(confirm.mock.calls).toEqual([
@@ -209,6 +217,47 @@ test("a service's login the viewer approved is listed by its service, and its Re
       expect(section.queryByText("legion-daemon on cluster.example.com")).toBeNull()
     );
     expect(section.getByText("devbox.example.com")).toBeDefined();
+  } finally {
+    cleanup();
+    confirm.mockRestore();
+    getMachineLogins.mockRestore();
+    revokeMachineLogin.mockRestore();
+  }
+});
+
+// Two logins of one service from machines reporting one host name read alike but for their
+// credential ids, which every enrollment a login made names: each row shows its own, and Revoke on
+// the row a credential id picks ends that login and no other.
+test("two logins of one service on one host are told apart by their credential ids, and Revoke ends the one picked by its id", async () => {
+  const copy: MachineLogin = {
+    ...daemon,
+    approved_by: "mallory@example.com",
+    credential_id: "cred-copy",
+    issued_at: "2026-10-03T10:00:00Z",
+  };
+  let live = [daemon, copy];
+  const getMachineLogins = spyOn(api, "getMachineLogins").mockImplementation(async () => ({
+    credentials: live,
+  }));
+  const revokeMachineLogin = spyOn(api, "revokeMachineLogin").mockImplementation(async (id) => {
+    live = live.filter((login) => login.credential_id !== id);
+  });
+  const confirm = spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    renderPage();
+    const section = within(await screen.findByRole("region", { name: "Machine logins" }));
+    expect(await section.findAllByText("legion-daemon on cluster.example.com")).toHaveLength(2);
+    const copyRow = section.getByText("cred-copy").closest("tr") as HTMLElement;
+    expect(within(copyRow).getByText("mallory@example.com")).toBeDefined();
+    const daemonRow = section.getByText("cred-daemon").closest("tr") as HTMLElement;
+    expect(within(daemonRow).getByText("bob@example.com")).toBeDefined();
+
+    fireEvent.click(within(copyRow).getByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-copy"));
+    await waitFor(() => expect(section.queryByText("cred-copy")).toBeNull());
+    expect(section.getByText("cred-daemon")).toBeDefined();
+    expect(revokeMachineLogin).toHaveBeenCalledTimes(1);
   } finally {
     cleanup();
     confirm.mockRestore();
@@ -246,7 +295,7 @@ test("a machine login approved on the page joins the list", async () => {
 
   try {
     renderPage();
-    const section = within(await screen.findByRole("region", { name: "Your machine logins" }));
+    const section = within(await screen.findByRole("region", { name: "Machine logins" }));
     expect(await section.findByText("No live machine logins.")).toBeDefined();
 
     fireEvent.change(screen.getByLabelText("Code shown on the machine"), {

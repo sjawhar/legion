@@ -148,6 +148,7 @@ export function MarginAskCard({
       <AskCard
         ask={ask}
         artifactSlug={artifactSlug}
+        documentLink={false}
         owner={owner.kind === "document" ? owner : undefined}
         variant="compact"
       />

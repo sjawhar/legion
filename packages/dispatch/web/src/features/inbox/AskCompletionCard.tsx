@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 
-import type { Ask, AskEdit, AskResolution } from "../../api/types";
+import type { Ask, AskAnswer, AskEdit, AskResolution } from "../../api/types";
 import {
   badgeLow,
   calloutSuccessBg,
@@ -21,6 +21,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { AskAnchorHeader } from "./AskAnchorLink";
+import { AskApprovalLink } from "./AskApprovalLink";
 import { AskOptionList } from "./AskOptionList";
 
 export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): ReactNode {
@@ -58,6 +59,40 @@ export function AskEditHistory({ ask, edits }: { ask: Ask; edits: AskEdit[] }): 
   );
 }
 
+/** Earlier answers to an ask whose answer was changed, oldest first. */
+export function AskAnswerHistory({ answers }: { answers: AskAnswer[] }): ReactNode {
+  const earlier = answers.slice(0, -1);
+  const latest = answers.at(-1);
+  if (earlier.length === 0 || latest === undefined) return null;
+  return (
+    <div className={`mt-2 text-xs ${calloutSuccessTimestampText}`}>
+      <p>
+        Changed <Timestamp at={latest.at} />
+      </p>
+      <details className="mt-1">
+        <summary className={`cursor-pointer font-medium underline ${textPrimaryOnSuccessCallout}`}>
+          {earlier.length === 1
+            ? "Show 1 earlier answer"
+            : `Show ${earlier.length} earlier answers`}
+        </summary>
+        <div className="mt-2 space-y-3">
+          {earlier.map((previous) => (
+            <div key={previous.at}>
+              {previous.selected.length === 0 ? null : <p>{previous.selected.join(", ")}</p>}
+              {previous.text === null || previous.text === "" ? null : (
+                <MarkdownBody markdown={previous.text} />
+              )}
+              <p className="mt-1">
+                {previous.user} · <Timestamp at={previous.at} />
+              </p>
+            </div>
+          ))}
+        </div>
+      </details>
+    </div>
+  );
+}
+
 export function OrphanedAnchorNotice({
   artifactSlug,
   ask,
@@ -90,15 +125,21 @@ export function OrphanedAnchorNotice({
 }
 
 function AnsweredAsk({
+  answers,
   artifactSlug,
   ask,
+  documentLink,
   edits,
   frame,
+  onChangeAnswer,
 }: {
+  answers: AskAnswer[];
   artifactSlug: string | undefined;
   ask: Ask;
+  documentLink: boolean;
   edits: AskEdit[];
   frame: AskFrame;
+  onChangeAnswer?: () => void;
 }): ReactNode {
   const { answer } = ask;
   // A chosen "Other" answer carries no real option (answer.selected is empty) but still has
@@ -120,6 +161,11 @@ function AnsweredAsk({
         </div>
       )}
       <p className={`mt-1 text-xs ${calloutSuccessTimestampText}`}>{actorLabel(ask.author)}</p>
+      {ask.kind === "approval" && documentLink ? (
+        <p className={`mt-1 text-sm font-medium ${textPrimaryOnSuccessCallout}`}>
+          <AskApprovalLink ask={ask} />
+        </p>
+      ) : null}
       <AskEditHistory ask={ask} edits={edits} />
       <AskOptionList options={ask.options} selected={answer?.selected ?? []} />
       {otherText !== null && otherText !== "" ? (
@@ -144,16 +190,28 @@ function AnsweredAsk({
           <span className="font-semibold">{answer.user}</span> <Timestamp at={answer.at} />
         </p>
       )}
+      <AskAnswerHistory answers={answers} />
+      {onChangeAnswer === undefined ? null : (
+        <button
+          className={`mt-2 min-h-11 text-sm font-semibold underline ${textPrimaryOnSuccessCallout}`}
+          onClick={onChangeAnswer}
+          type="button"
+        >
+          Change answer
+        </button>
+      )}
     </article>
   );
 }
 
 function ResolvedAsk({
   ask,
+  documentLink,
   edits,
   frame,
 }: {
   ask: Ask & { resolution: AskResolution };
+  documentLink: boolean;
   edits: AskEdit[];
   frame: AskFrame;
 }): ReactNode {
@@ -176,6 +234,11 @@ function ResolvedAsk({
         {resolution.kind === "retracted" ? "Retracted" : "Resolved"}
       </span>
       <p className={`mt-1 text-xs ${textMutedOnSurface}`}>{actorLabel(ask.author)}</p>
+      {ask.kind === "approval" && documentLink ? (
+        <p className={`mt-1 text-sm ${linkText} ${linkHoverText}`}>
+          <AskApprovalLink ask={ask} />
+        </p>
+      ) : null}
       <AskOptionList options={ask.options} selected={[]} />
       <AskEditHistory ask={ask} edits={edits} />
       <p className={`mt-2 text-xs ${textMutedOnSurface}`}>
@@ -190,30 +253,50 @@ function ResolvedAsk({
 export type AskFrame = "card" | "block";
 
 interface AskCompletionCardProps {
+  /** Every real answer, oldest first, from the ask's thread read. */
+  answers?: AskAnswer[];
   artifactSlug: string | undefined;
   ask: Ask;
+  /** Whether an approval ask's completed record also links its document and version; mirrors
+   *  `AskCardProps.documentLink`. */
+  documentLink?: boolean;
   edits: AskEdit[];
   frame?: AskFrame;
+  /** Shown only to the person who gave the current, non-approval answer. */
+  onChangeAnswer?: () => void;
 }
 
 export function AskCompletionCard({
+  answers = [],
   artifactSlug,
   ask,
+  documentLink = true,
   edits,
   frame = "card",
+  onChangeAnswer,
 }: AskCompletionCardProps): ReactNode {
   if (ask.state === "resolved") {
     if (ask.resolution === undefined) {
       throw new Error("resolved ask is missing its resolution");
     }
-    return <ResolvedAsk ask={{ ...ask, resolution: ask.resolution }} edits={edits} frame={frame} />;
+    return (
+      <ResolvedAsk
+        ask={{ ...ask, resolution: ask.resolution }}
+        documentLink={documentLink}
+        edits={edits}
+        frame={frame}
+      />
+    );
   }
   return (
     <AnsweredAsk
+      answers={answers}
       artifactSlug={artifactSlug}
       ask={{ ...ask, answer: ask.answer }}
+      documentLink={documentLink}
       edits={edits}
       frame={frame}
+      onChangeAnswer={onChangeAnswer}
     />
   );
 }

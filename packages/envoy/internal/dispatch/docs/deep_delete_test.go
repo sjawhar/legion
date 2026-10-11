@@ -5,18 +5,14 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
-	gws "github.com/gorilla/websocket"
 	"github.com/reearth/ygo/crdt"
 	ygsync "github.com/reearth/ygo/sync"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/stacktest"
 )
 
@@ -42,42 +38,67 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 		httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 		t.Cleanup(httpServer.Close)
 
-		peer := newDeepPeer(t, httpServer.URL, artifactID)
-		fragment := peer.doc.GetXmlFragment(fragmentName)
+		peer := connectPeer(t, httpServer.URL, artifactID, "alice")
+		// The peer writes on the room's document, as a browser does once the room has sent it, so
+		// the chain's root always lands beside the seeded paragraph.
+		waitForPeerDocument(t, peer, "before\n")
+		fragment := peer.Doc.GetXmlFragment(fragmentName)
 		root := crdt.NewYXmlElement("blockquote")
-		opening := peer.send(t, func(txn *crdt.Transaction) { fragment.InsertElement(txn, 0, root) })
+		if _, err := peer.Send(func(txn *crdt.Transaction) { fragment.InsertElement(txn, 0, root) }); err != nil {
+			t.Fatalf("send the chain's root: %v", err)
+		}
+		// The delete is written on the peer's document as it stands here, holding the chain's root
+		// and the paragraph beside it but none of the chain, so the peer sends the same delete an
+		// ordinary client would and this test process does not walk the chain itself. The root's
+		// own update is not enough: it names the paragraph as the root's right origin, so a
+		// document holding that update alone parks the root and its delete deletes nothing.
+		opening := crdt.EncodeStateAsUpdateV1(peer.Doc, nil)
 		deepest := root
 		for grown := 1; grown < levels; {
 			batch := min(levelsPerUp, levels-grown)
-			peer.send(t, func(txn *crdt.Transaction) {
+			if _, err := peer.Send(func(txn *crdt.Transaction) {
 				for range batch {
 					child := crdt.NewYXmlElement("blockquote")
 					deepest.InsertElement(txn, 0, child)
 					deepest = child
 				}
-			})
+			}); err != nil {
+				t.Fatalf("grow the chain: %v", err)
+			}
 			grown += batch
 		}
+		// The room takes the peer's updates one at a time, in order, so it holds the whole chain
+		// once its clock for the peer's client reaches the peer's own. The delete's wait below
+		// then times the delete alone, not the batches still queued ahead of it.
+		client := peer.Doc.ClientID()
+		sent := peer.Doc.StateVector().Clock(client)
+		live := service.srv.GetDoc(artifactID)
 		waitFor(t, 30*time.Second, "the room to hold the nested chain", func() bool {
-			_, err := service.Text(context.Background(), artifactID)
-			return errors.Is(err, ErrDocSchema)
+			return live.StateVector().Clock(client) == sent
 		})
+		if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocSchema) {
+			t.Fatalf("the room holding the chain reads as %v, want %v", err, ErrDocSchema)
+		}
 
-		// The delete is written on a document holding the chain's root alone, so the peer sends
-		// the same delete an ordinary client would and this test process does not walk the chain
-		// itself.
 		deleter := crdt.New()
 		if err := crdt.ApplyUpdateV1(deleter, opening, nil); err != nil {
 			t.Fatalf("open the deleting document: %v", err)
 		}
 		deleterFragment := deleter.GetXmlFragment(fragmentName)
+		if held := deleterFragment.Len(); held != 2 {
+			t.Fatalf("the deleting document holds %d blocks, want the chain's root and the paragraph", held)
+		}
+		// ygo hands an observer an update for every transaction, one that changed nothing
+		// included, so the delete is checked by what it left.
 		deletion := docstest.Transact(deleter, func(txn *crdt.Transaction) {
 			deleterFragment.Delete(txn, 0, 1)
 		})
-		if deletion == nil {
-			t.Fatal("deleting the chain's root produced no update")
+		if held := deleterFragment.Len(); held != 1 {
+			t.Fatalf("deleting the chain's root left %d blocks, want the paragraph alone", held)
 		}
-		peer.write(t, ygsync.EncodeUpdate(deletion))
+		if err := peer.Write(ygsync.EncodeUpdate(deletion)); err != nil {
+			t.Fatalf("send the chain's delete: %v", err)
+		}
 
 		waitFor(t, 30*time.Second, "the room to read back as the document it was", func() bool {
 			text, err := service.Text(context.Background(), artifactID)
@@ -90,58 +111,4 @@ func TestDeletingADeeplyNestedLiveTreeNeedsNoStackPerLevel(t *testing.T) {
 			t.Fatalf("the delete failed the live room: %v", state.failed)
 		}
 	})
-}
-
-// deepPeer is a writable document connection that sends the updates its own transactions make and
-// drains everything the room sends, so the room never blocks writing to it. Its reader answers the
-// room's sync step 1 while the test sends updates, and gorilla/websocket panics on two writes at
-// once, so every write goes through writes.
-type deepPeer struct {
-	doc        *crdt.Doc
-	connection *gws.Conn
-	artifactID string
-	writes     sync.Mutex
-}
-
-func newDeepPeer(t *testing.T, serverURL, artifactID string) *deepPeer {
-	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(serverURL, "http") + "/ws/doc/" + artifactID +
-		"?schema_version=" + strconv.Itoa(pmdoc.SchemaVersion())
-	connection, response, err := gws.DefaultDialer.Dial(wsURL, http.Header{"X-Dispatch-User": []string{"alice"}})
-	if err != nil {
-		t.Fatalf("connect document peer: response=%#v err=%v", response, err)
-	}
-	t.Cleanup(func() { _ = connection.Close() })
-	peer := &deepPeer{doc: crdt.New(), connection: connection, artifactID: artifactID}
-	go peer.drain()
-	return peer
-}
-
-// drain reads the room's messages, applying each sync message and answering its sync step 1, as a
-// browser's provider does, until the connection closes.
-func (p *deepPeer) drain() {
-	docstest.Drain(p.connection, p.doc, p.sendFrame, nil)
-}
-
-// send runs change in one transaction and sends the update it produced, as a keystroke does.
-func (p *deepPeer) send(t *testing.T, change func(*crdt.Transaction)) []byte {
-	t.Helper()
-	update := docstest.Transact(p.doc, change)
-	if update == nil {
-		t.Fatal("a peer transaction produced no update")
-	}
-	p.write(t, ygsync.EncodeUpdate(update))
-	return update
-}
-
-func (p *deepPeer) write(t *testing.T, syncMessage []byte) {
-	t.Helper()
-	if err := p.sendFrame(syncMessage); err != nil {
-		t.Fatalf("send peer update: %v", err)
-	}
-}
-
-// sendFrame writes one framed sync message, one writer at a time.
-func (p *deepPeer) sendFrame(syncMessage []byte) error {
-	return docstest.WriteFrame(&p.writes, p.connection, p.artifactID, syncMessage)
 }

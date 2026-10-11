@@ -1,12 +1,9 @@
 package api
 
 import (
-	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -30,27 +27,6 @@ type GrantRequest struct {
 type GrantResponse struct {
 	GrantID   string `json:"grantId"`
 	ExpiresAt string `json:"expiresAt"`
-}
-
-// GrantCredentialRequest is the only request accepted by the routes that redeem a grant.
-type GrantCredentialRequest struct {
-	GrantID string `json:"grantId"`
-}
-
-// GitHubTokenResponse is the token `legion gh` receives for its one child process.
-type GitHubTokenResponse struct {
-	Token    string `json:"token"`
-	AppLogin string `json:"appLogin"`
-	// LegionAppLogins, on gh-token alone, is the login of each role App this daemon leases for the
-	// repository owner, keyed by its App role: the accounts Legion's own roles post as
-	// (legionAppLogins).
-	LegionAppLogins map[appauth.AppRole]string `json:"legionAppLogins,omitempty"`
-}
-
-// GitCredentialResponse is the logical credential a git helper writes in the credential protocol.
-type GitCredentialResponse struct {
-	Username string `json:"username"`
-	Password string `json:"password"`
 }
 
 // Failure is the refusal shape for the credential and workflow routes. Its stable code lets a CLI
@@ -129,96 +105,6 @@ func (s *server) claimGrant(w http.ResponseWriter, r *http.Request, req GrantReq
 
 const timeFormat = "2006-01-02T15:04:05.999999999Z07:00"
 
-func (s *server) githubToken(w http.ResponseWriter, r *http.Request) {
-	grant, ok := s.redeemRepositoryGrant(w, r)
-	if !ok {
-		return
-	}
-	lease, ok := s.leaseForGrant(w, r, grant, appauth.AppRoleFor(grant.Role))
-	if !ok {
-		return
-	}
-	logins := s.legionAppLogins(r.Context())
-	// The logins are read after the grant's claim was checked, so the claim is checked again before
-	// the token leaves, as leaseForGrant checks it after its own await.
-	if !s.claimHolds(grant) {
-		writeFailure(w, http.StatusForbidden, "GRANT_REVOKED", grantRevoked)
-		return
-	}
-	writeJSON(w, http.StatusOK, GitHubTokenResponse{Token: lease.Token, AppLogin: lease.Identity.Name, LegionAppLogins: logins})
-}
-
-// legionAppLogins is the login of each role App the daemon leases for the repository owner, keyed
-// by its App role: the accounts Legion's own roles post as. `legion threads resolve` keeps their
-// threads out of its bot-thread rule and takes the review App's Accepted: on a thread a bot outside
-// them opened. It is nil when any App's identity cannot be read: the command then cannot tell a
-// Legion App from any other bot, and a bot's thread closes only on its opener's Accepted:. The
-// failure turns that rule off for the answer, so it is logged, at most once a minute, since every
-// `legion gh` call in every pane asks for a token.
-func (s *server) legionAppLogins(ctx context.Context) map[appauth.AppRole]string {
-	logins := map[appauth.AppRole]string{}
-	for _, role := range appauth.Roles {
-		lease, err := s.tokens.Token(ctx, role, s.githubOwner)
-		if err != nil || lease.Identity.Name == "" {
-			s.loginsWarnedMu.Lock()
-			if time.Since(s.loginsWarned) >= time.Minute {
-				s.loginsWarned = time.Now()
-				s.log.Warn("api: could not read a Legion App's login, so legion threads resolve applies no bot-thread rule for this answer (logged at most once a minute)", "role", role, "error", err)
-			}
-			s.loginsWarnedMu.Unlock()
-			return nil
-		}
-		logins[role] = lease.Identity.Name
-	}
-	return logins
-}
-
-func (s *server) gitCredential(w http.ResponseWriter, r *http.Request) {
-	grant, ok := s.redeemRepositoryGrant(w, r)
-	if !ok {
-		return
-	}
-	lease, ok := s.leaseForGrant(w, r, grant, appauth.AppRoleFor(grant.Role))
-	if !ok {
-		return
-	}
-	response := GitCredentialResponse{Username: "x-access-token", Password: lease.Token}
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	_, _ = fmt.Fprintf(w, "username=%s\npassword=%s\n", response.Username, response.Password)
-}
-
-func (s *server) provisioningCredential(w http.ResponseWriter, r *http.Request) {
-	grant, ok := s.redeemRepositoryGrant(w, r)
-	if !ok {
-		return
-	}
-	if grant.Role != claim.RoleArchitect {
-		writeFailure(w, http.StatusForbidden, "ARCHITECT_REQUIRED", "provisioning credentials require the tree architect")
-		return
-	}
-	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement)
-	if !ok {
-		return
-	}
-	writeJSON(w, http.StatusOK, GitHubTokenResponse{Token: lease.Token, AppLogin: lease.Identity.Name})
-}
-
-func (s *server) redeemRepositoryGrant(w http.ResponseWriter, r *http.Request) (credential.Grant, bool) {
-	var req GrantCredentialRequest
-	if !readBody(w, r, &req) || !requireFailureFields(w, field{"grantId", req.GrantID}) {
-		return credential.Grant{}, false
-	}
-	grant, ok := s.redeem(w, req.GrantID)
-	if !ok {
-		return credential.Grant{}, false
-	}
-	if grant.Controller {
-		writeFailure(w, http.StatusForbidden, "CONTROLLER_HAS_NO_REPOSITORY", "controller grants have no repository")
-		return credential.Grant{}, false
-	}
-	return grant, true
-}
-
 // redeem is every route's one grant check. A grant serves each request of the command it was
 // minted for until it expires, and a claim grant only while its claim is supervised under the
 // registration that minted it; the credential routes check that again after their GitHub await.
@@ -246,7 +132,10 @@ func (s *server) claimHolds(grant credential.Grant) bool {
 	return supervised && s.grants.StillMatches(grant, machine.Claim())
 }
 
-func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant credential.Grant, role appauth.AppRole) (appauth.Lease, bool) {
+// appLease is the GitHub App token mint every credential route needs: the token source and
+// repository owner must be configured, and the mint itself must succeed. logRole names the role
+// in the error log line; it carries no secret.
+func (s *server) appLease(w http.ResponseWriter, r *http.Request, role appauth.AppRole, logRole string) (appauth.Lease, bool) {
 	if s.tokens == nil {
 		writeFailure(w, http.StatusInternalServerError, "GITHUB_TOKEN_SOURCE_UNAVAILABLE", "GitHub token source is unavailable")
 		return appauth.Lease{}, false
@@ -257,8 +146,19 @@ func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant cre
 	}
 	lease, err := s.tokens.Token(r.Context(), role, s.githubOwner)
 	if err != nil {
-		s.log.Error("api: mint GitHub App token", "role", grant.Role, "owner", s.githubOwner, "error", err)
+		s.log.Error("api: mint GitHub App token", "role", logRole, "owner", s.githubOwner, "error", err)
 		writeFailure(w, http.StatusBadGateway, "GITHUB_TOKEN_FAILED", "GitHub token exchange failed")
+		return appauth.Lease{}, false
+	}
+	return lease, true
+}
+
+// leaseForGrant is appLease for a claim's grant: the mint runs first since it is the slow step,
+// then the grant's claim must still hold the capability that minted it, so a claim revoked while
+// the mint was in flight is caught before its token is handed back.
+func (s *server) leaseForGrant(w http.ResponseWriter, r *http.Request, grant credential.Grant, role appauth.AppRole) (appauth.Lease, bool) {
+	lease, ok := s.appLease(w, r, role, string(grant.Role))
+	if !ok {
 		return appauth.Lease{}, false
 	}
 	if !s.claimHolds(grant) {

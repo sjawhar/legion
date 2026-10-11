@@ -10,3 +10,10 @@ func IsTreeRoot(issue, tree string) bool { return issue == tree }
 func IsTreeArchitect(role Role, issue, tree string) bool {
 	return role == RoleArchitect && IsTreeRoot(issue, tree)
 }
+
+// IsController is whether a claim is the project controller's: on the controller role, with no
+// issue and no tree. IsTreeRoot alone would call such a claim its own tree's root, since its empty
+// issue equals its empty tree, so every caller that sorts claims by tree asks this first.
+func IsController(role Role, issue, tree string) bool {
+	return role == RoleController && issue == "" && tree == ""
+}

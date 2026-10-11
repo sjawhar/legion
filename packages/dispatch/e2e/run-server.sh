@@ -49,6 +49,25 @@ elif [ -n "$DISPATCH_E2E_AGENT_SECRETS_URL" ]; then
   )
 fi
 
+# The file store, read before the sweep below: DISPATCH_E2E_FILE_STORE_ENDPOINT names an
+# S3-compatible server the caller started (CI starts one; a developer may), and
+# DISPATCH_E2E_FILE_STORE_BUCKET the bucket it holds, so every upload and download the dashboard
+# makes goes through the store as production's does. Unset, uploads stay in Postgres. The SDK's
+# own variables point it at the server: an IP-literal endpoint (with `localhost` the SDK addresses
+# the bucket as a subdomain), a region, static keys the server ignores, and no metadata service.
+file_store_env=()
+if [ -n "${DISPATCH_E2E_FILE_STORE_ENDPOINT:-}" ]; then
+  : "${DISPATCH_E2E_FILE_STORE_BUCKET:?DISPATCH_E2E_FILE_STORE_BUCKET must accompany DISPATCH_E2E_FILE_STORE_ENDPOINT}"
+  file_store_env=(
+    DISPATCH_FILE_STORE_BUCKET="$DISPATCH_E2E_FILE_STORE_BUCKET"
+    AWS_ENDPOINT_URL_S3="$DISPATCH_E2E_FILE_STORE_ENDPOINT"
+    AWS_REGION=us-east-1
+    AWS_ACCESS_KEY_ID=e2e
+    AWS_SECRET_ACCESS_KEY=e2e
+    AWS_EC2_METADATA_DISABLED=true
+  )
+fi
+
 mapfile -t inherited < <(compgen -e)
 for name in "${inherited[@]}"; do
   case "$name" in
@@ -81,6 +100,7 @@ cd "$(dirname "$0")/../../envoy"
 flock ./.dispatch-e2e.lock go build -o ./dispatch-e2e ./cmd/dispatch
 exec env \
   "${broker_env[@]}" \
+  "${file_store_env[@]}" \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \

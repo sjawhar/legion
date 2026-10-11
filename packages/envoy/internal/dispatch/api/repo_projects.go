@@ -18,7 +18,7 @@ type rowScanner interface {
 }
 
 func (s *server) listRepoProjects(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.requireHuman(w, r); !ok {
+	if !s.requireAuthenticated(w, r) {
 		return
 	}
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
@@ -49,20 +49,21 @@ func (s *server) listRepoProjects(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
-	if !ok {
-		return
-	}
 	repo, err := repoProjectPath(r)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	var input struct {
-		Project string `json:"project"`
+		Project string       `json:"project"`
+		Actor   *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
+	if !ok {
 		return
 	}
 	input.Project = strings.TrimSpace(input.Project)
@@ -112,7 +113,13 @@ func (s *server) putRepoProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) deleteRepoProject(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
+	var input struct {
+		Actor *model.Actor `json:"actor"`
+	}
+	if !s.decodeOptionalJSON(w, r, &input) {
+		return
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
 	if !ok {
 		return
 	}

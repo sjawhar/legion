@@ -1,6 +1,6 @@
 ---
 name: dispatch-first
-description: "Use in any session with Dispatch tools, before planning, filing an issue, asking a human, posting a finding, or starting work that someone may already track or have decided."
+description: "Use in any session with the dispatch command, before planning, filing an issue, asking a human, posting a finding, or starting work that someone may already track or have decided."
 ---
 
 # Dispatch first
@@ -11,21 +11,25 @@ answered, costs that human the time to notice it and splits the history across t
 
 ## Search before you act
 
-Before you plan, file an issue, ask, post a finding or start work, search Dispatch. Every word of
+Before you plan, file an issue, ask, post a finding or start work, search Dispatch with the `dispatch` command in your shell (`dispatch --help` lists every command). Every word of
 the query must match, so each word you add can only lose hits: search with two or three words, the
 thing and what is wrong with it, as a user would name them. Never paste a draft.
 
-```ts
-dispatch_search({ query: "broadcast send order" })
-dispatch_search({ query: "reviewer threads OR review comments" })
+```bash
+dispatch search --query 'broadcast send order'
+dispatch search --query 'reviewer threads OR review comments'
 ```
 
 When a query finds nothing, drop a word before you add one. Try two or three wordings (the
 component's name, the symptom, the fix) before you conclude that nothing exists. Open every hit
-that could be yours with `dispatch_read`, then its parent (the `child_of` row under `Links:`); the
+that could be yours with `dispatch read`, then its parent (the `child_of` row under `Links:`); the
 parent's children and the issue's `Components:` line show where the rest of that work lives.
 
 ## What to do with what you find
+
+Filing an issue or opening an ask also searches for you: the result's `advice.suggestions` names
+likely duplicates or a decision that may already settle it. Treat a hit there the same as one you
+found yourself.
 
 - **The work is already tracked: extend that issue.** Put the finding on it (a comment, a message,
   or an edit to its spec) instead of filing another. File a new issue only when no hit covers the
@@ -34,7 +38,7 @@ parent's children and the issue's `Components:` line show where the rest of that
   it where you rely on it (`dispatch://KEY/ask/<id>`) instead of asking again.
 - **You met a duplicate: close it.** Keep the issue that holds the spec and the discussion, carry
   over anything only the duplicate has, then close the duplicate with a reason that names the
-  survivor: `dispatch_issue_update({ issue, status: "done", reason: "Duplicate of dispatch://KEY." })`.
+  survivor: `dispatch issue-update --issue <KEY> --status done --reason 'Duplicate of dispatch://KEY.'`.
   When the duplicate carries the `legion` label, or another session or a human holds its claim,
   comment on it naming the survivor instead of closing it.
 - **Every ask and message stands on its own.** The person who answers sees only that text: put the
@@ -46,7 +50,7 @@ parent's children and the issue's `Components:` line show where the rest of that
 A design conversation with a person, or the implementation plan that follows one, uses
 `skill://dispatch-brainstorming`: read it before your first design question on a change, the spec,
 or that plan. It replaces superpowers' `brainstorming` and `writing-plans` here, even when the user
-invokes one by name. A Legion architect's own issue spec follows `skill://legion-architect`.
+invokes one by name. Before a spec's first version and each approval request, have a fresh read-only subagent (on Oh My Pi, `task(agent="scout")`, or whatever read-only agent the host bundles) check it against the code, the human's words and any command output a claim rests on, and resolve what it flags. A Legion architect's own issue spec follows `skill://legion-architect`, and its fresh reader in that Legion session is the Legion plugin's `plan-gap-analyst` agent.
 
 ## Load the full skill before you write
 

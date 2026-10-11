@@ -65,3 +65,23 @@ export async function pasteFile(field: Locator, name: string, text: string): Pro
     { name, text }
   );
 }
+
+/** A 1x1 PNG, the smallest picture a browser draws. */
+const ONE_PIXEL_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+/** Pastes a PNG named `name` into `field`, as the clipboard hands a screenshot to it (the same
+ *  explicit `DataTransfer` as `pasteFile`). */
+export async function pastePicture(field: Locator, name: string): Promise<void> {
+  await field.evaluate(
+    (node, file) => {
+      const bytes = Uint8Array.from(atob(file.base64), (char) => char.charCodeAt(0));
+      const data = new DataTransfer();
+      data.items.add(new File([bytes], file.name, { type: "image/png" }));
+      const paste = new Event("paste", { bubbles: true, cancelable: true });
+      Object.defineProperty(paste, "clipboardData", { value: data });
+      node.dispatchEvent(paste);
+    },
+    { base64: ONE_PIXEL_PNG, name }
+  );
+}

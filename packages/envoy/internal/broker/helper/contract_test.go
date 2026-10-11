@@ -148,9 +148,9 @@ func contractDecode[T any](t *testing.T, body []byte) T {
 // TestContractLoginApprovalEnrollSignAndExpiry drives helper.Broker/Server against a real broker
 // (brokertest.NewRig) end to end: Broker.Login -> a human approves the pending machine login
 // through the real UI routes, by its typed code and the operator's login -> LoginStatus reaches
-// issued -> EnrollBox mints a live enrollment -> a session register (the existing path) enrolls
-// kind host -> sign produces a proof the real broker's own /v1/enrollments/self accepts -> the
-// launcher credential is expired by direct SQL -> the next EnrollBox names the login command
+// issued -> EnrollSessionKey mints a live enrollment -> a session register (the existing path)
+// enrolls kind session -> sign produces a proof the real broker's own /v1/enrollments/self
+// accepts -> the launcher credential is expired by direct SQL -> the next EnrollSessionKey names the login command
 // again. It also proves the machine key, the session key, and every proof this test produced
 // never touch disk (neither an arbitrary $HOME nor the registry's own persisted sessions.json
 // state file) or a log line.
@@ -180,7 +180,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 		t.Fatalf("installed credential id %v, want %s", cred, credentialID)
 	}
 
-	// --- EnrollBox: a live enrollment ---
+	// --- EnrollSessionKey: a live enrollment ---
 	boxKey, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
@@ -189,15 +189,15 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	boxEnrollmentID, _, err := b.EnrollBox(context.Background(), "box-"+t.Name(), boxThumbprint, nil)
+	boxEnrollmentID, _, err := b.EnrollSessionKey(context.Background(), "box-"+t.Name(), boxThumbprint, nil)
 	if err != nil {
-		t.Fatalf("EnrollBox: %v", err)
+		t.Fatalf("EnrollSessionKey: %v", err)
 	}
 	if boxEnrollmentID == "" {
-		t.Fatal("EnrollBox returned no enrollment id")
+		t.Fatal("EnrollSessionKey returned no enrollment id")
 	}
 
-	// --- a session register (the existing path) enrolls kind host ---
+	// --- a session register (the existing path) enrolls kind session ---
 	reg := cr.call(t, Request{Op: "register", WaitSeconds: 10})
 	if !reg.OK || reg.State != "enrolled" || reg.EnrollmentID == "" || reg.Operator != cr.broker.Operator {
 		t.Fatalf("register: %+v", reg)
@@ -217,8 +217,8 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 		t.Fatalf("GET /v1/enrollments/self (real broker) = %d: %s", status, body)
 	}
 	self := contractDecode[contractSelfResponse](t, body)
-	if self.EnrollmentID != reg.EnrollmentID || self.Kind != "host" || self.Operator != cr.broker.Operator {
-		t.Fatalf("self = %+v, want enrollment_id=%s kind=host operator=%s", self, reg.EnrollmentID, cr.broker.Operator)
+	if self.EnrollmentID != reg.EnrollmentID || self.Kind != "session" || self.Operator != cr.broker.Operator {
+		t.Fatalf("self = %+v, want enrollment_id=%s kind=session operator=%s", self, reg.EnrollmentID, cr.broker.Operator)
 	}
 
 	// --- expire the credential by direct SQL; the broker needs no restart: expiry is read from
@@ -228,7 +228,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 		t.Fatalf("expire launcher credential: %v", err)
 	}
 
-	// --- the next EnrollBox names the login command ---
+	// --- the next EnrollSessionKey names the login command ---
 	secondKey, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
@@ -237,9 +237,9 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refused := cr.call(t, Request{Op: "enroll-box", RuntimeID: "box-2-" + t.Name(), Thumbprint: secondThumbprint})
-	if refused.OK || refused.Code != CodeEnrollFailed || !strings.Contains(refused.Error, "agent-secrets launcher login") {
-		t.Fatalf("enroll-box after expiry: %+v, want %s naming the login command", refused, CodeEnrollFailed)
+	refused := cr.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-2-" + t.Name(), Thumbprint: secondThumbprint})
+	if refused.OK || refused.Code != CodeEnrollFailed || !strings.Contains(refused.Error, "agent-secrets machine login") {
+		t.Fatalf("enroll-session-key after expiry: %+v, want %s naming the login command", refused, CodeEnrollFailed)
 	}
 	if b.cred.Load() != nil {
 		t.Fatal("an expired credential (401 LAUNCHER_INVALID) must clear the in-memory credential")
@@ -333,7 +333,7 @@ func TestContractARefusedLauncherCredentialIsAnErrorAndTheHelperKeepsServing(t *
 	if reg := cr.call(t, Request{Op: "register"}); !reg.OK || reg.EnrollmentID != "" {
 		t.Fatalf("register after the credential expired: %+v; want OK and not enrolled", reg)
 	}
-	const cannotEnroll = `level=ERROR msg="session cannot enroll: the helper holds no launcher credential; run: agent-secrets launcher login, and have a human approve it"`
+	const cannotEnroll = `level=ERROR msg="session cannot enroll: the helper holds no launcher credential; run: agent-secrets machine login, and have a human approve it"`
 	deadline := time.Now().Add(10 * time.Second)
 	for !strings.Contains(cr.logBuf.String(), cannotEnroll) {
 		if time.Now().After(deadline) {
@@ -342,7 +342,7 @@ func TestContractARefusedLauncherCredentialIsAnErrorAndTheHelperKeepsServing(t *
 		time.Sleep(20 * time.Millisecond)
 	}
 	log := cr.logBuf.String()
-	refused := `level=ERROR msg="the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)" credential_id=` + credentialID + " code=LAUNCHER_INVALID"
+	refused := `level=ERROR msg="the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); cleared: no session can enroll until a human approves a new machine login (run: agent-secrets machine login)" credential_id=` + credentialID + " code=LAUNCHER_INVALID"
 	why := `why="the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch)"`
 	if !strings.Contains(log, refused) || !strings.Contains(log, why) {
 		t.Fatalf("log:\n%s\nwant %s, and the session's error naming %s", log, refused, why)
@@ -407,7 +407,7 @@ func TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt(t *te
 		t.Fatalf("revoke the machine login = %d: %s", status, body)
 	}
 
-	refused := `level=ERROR msg="the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)" credential_id=` + credentialID + " code=LAUNCHER_INVALID"
+	refused := `level=ERROR msg="the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch); cleared: no session can enroll until a human approves a new machine login (run: agent-secrets machine login)" credential_id=` + credentialID + " code=LAUNCHER_INVALID"
 	deadline := time.Now().Add(15 * time.Second)
 	for !strings.Contains(cr.logBuf.String(), refused) {
 		if time.Now().After(deadline) {
@@ -417,13 +417,51 @@ func TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt(t *te
 	}
 	log := cr.logBuf.String()
 	if !strings.Contains(log, `msg="renew refused; revoking the lapsed enrollment before enrolling again"`) ||
-		!strings.Contains(log, "code=PROOF_INVALID enrollment_id="+reg.EnrollmentID) {
-		t.Fatalf("log:\n%s\nwant the session's renew refused PROOF_INVALID for %s", log, reg.EnrollmentID)
+		!strings.Contains(log, "code=ENROLLMENT_NOT_LIVE enrollment_id="+reg.EnrollmentID) {
+		t.Fatalf("log:\n%s\nwant the session's renew refused ENROLLMENT_NOT_LIVE for %s", log, reg.EnrollmentID)
 	}
 	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.CredentialHeld || !status.LoginRefused || status.CredentialDropped != dropRefused || status.LoginState != "expired" {
 		t.Fatalf("login-status after the revoke: %+v; want expired, refused by the broker, none held", status)
 	}
 	if sessions := cr.call(t, Request{Op: "sessions"}); !sessions.OK || len(sessions.Sessions) != 1 || sessions.Sessions[0].State != "enrolling" {
 		t.Fatalf("sessions after the revoke: %+v; want the one session, no longer enrolled", sessions)
+	}
+}
+
+// TestContractSignLauncherProvesTheOperatorRoutes: a launcher proof sign-launcher signs for the
+// operator's shell is one the real broker's operator routes accept. GET /v1/operator/machines
+// answers this machine's own login, the held credential on this helper's host; and since the proof
+// names its method and URL, the broker refuses one replayed against another route.
+func TestContractSignLauncherProvesTheOperatorRoutes(t *testing.T) {
+	cr := newContractRig(t)
+	b := cr.srv.Broker
+	code, err := b.Login(context.Background(), cr.srv.Hostname)
+	if err != nil {
+		t.Fatalf("Broker.Login: %v", err)
+	}
+	credentialID := cr.broker.DecideMachineLogin(t, code, true)
+	waitForIssued(t, b)
+
+	signed := cr.call(t, Request{Op: "sign-launcher", Method: http.MethodGet, URL: cr.broker.URL + "/v1/operator/machines"})
+	if !signed.OK || signed.Proof == "" {
+		t.Fatalf("sign-launcher: %+v", signed)
+	}
+	status, body := cr.broker.Req(t, http.MethodGet, "/v1/operator/machines", map[string]string{"Proof": signed.Proof}, nil)
+	if status != http.StatusOK {
+		t.Fatalf("GET /v1/operator/machines (real broker) = %d: %s", status, body)
+	}
+	machines := contractDecode[struct {
+		Credentials []struct {
+			CredentialID string `json:"credential_id"`
+			Host         string `json:"host"`
+		} `json:"credentials"`
+	}](t, body)
+	if len(machines.Credentials) != 1 || machines.Credentials[0].CredentialID != credentialID || machines.Credentials[0].Host != cr.srv.Hostname {
+		t.Fatalf("machines = %s, want this machine's login %s on %s alone", body, credentialID, cr.srv.Hostname)
+	}
+
+	grants := cr.call(t, Request{Op: "sign-launcher", Method: http.MethodGet, URL: cr.broker.URL + "/v1/operator/grants"})
+	if status, body := cr.broker.Req(t, http.MethodGet, "/v1/operator/machines", map[string]string{"Proof": grants.Proof}, nil); status != http.StatusUnauthorized {
+		t.Fatalf("a proof for /v1/operator/grants sent to /v1/operator/machines = %d: %s, want 401", status, body)
 	}
 }

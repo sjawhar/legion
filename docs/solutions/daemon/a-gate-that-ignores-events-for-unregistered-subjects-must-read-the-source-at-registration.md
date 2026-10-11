@@ -22,10 +22,10 @@ related_issues:
 
 The design gate is event-driven: `artifact.approved` for the registered document at its current
 version opens it. The reducer correctly ignores an approval for a document no gate names yet —
-nothing else could match it. Dispatch never re-emits that approval: `dispatch_request_approval`
+nothing else could match it. Dispatch never re-emits that approval: `dispatch request-approval`
 on an already-approved document answers "already approved" and opens nothing. So a human who
 approved the spec from the document header while the architect was still writing, or who answered
-the Inbox question during the model turn between `dispatch_request_approval` and `register_gate`,
+the Inbox question during the model turn between `dispatch request-approval` and `register_gate`,
 produced an approval the daemon threw away, and the architect parked forever on a wake that could
 not come. The ask-based gate this replaced had the same window; the reviewer found it in round 1
 (the one blocking thread on PR #975).
@@ -55,7 +55,7 @@ read must leave nothing recorded, so the caller's retry is a clean second attemp
 Corollaries that mattered here:
 
 - **Do not fix ordering by reordering the skill.** Calling `register_gate` before
-  `dispatch_request_approval` would close the Inbox window and leave the document-header window
+  `dispatch request-approval` would close the Inbox window and leave the document-header window
   open. The read closes both.
 - **Seed through the source's own semantics.** Dispatch's `approval.state` already distinguishes
   `approved` (at the latest version) from `stale` (an older version); the seed mirrors the

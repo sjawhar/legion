@@ -29,7 +29,7 @@ import (
 // its credential (drop), because the broker refused it with 401 LAUNCHER_INVALID (clearOnInvalid)
 // or it reached the expiry the broker named (watchExpiry). It never auto-relogins; a login is a
 // human ceremony.
-const noCredentialMsg = "no machine credential; run: agent-secrets launcher login"
+const noCredentialMsg = "no machine credential; run: agent-secrets machine login"
 
 var errNoCredential = errors.New(noCredentialMsg)
 
@@ -56,7 +56,7 @@ type machineCredential struct {
 // login's was, unless that login is still pending. "expired" is the word the dotfiles launcher
 // gate matches and the one an older client prints its refusal line for, and an older client must
 // never read "issued" for a credential the helper no longer holds. A login pending at the drop
-// that then settles is recorded after it, so it reports its own outcome, which `launcher login`
+// that then settles is recorded after it, so it reports its own outcome, which `machine login`
 // prints. "expired" is otherwise a pending login nobody approved in time.
 type loginState struct {
 	Code, PendingID, State string    // the most recent login; State: pending|issued|denied|expired
@@ -183,7 +183,7 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 		return "", err
 	}
 	details := []record.AuthorizationDetail{{Type: record.KindLauncherCredential, Identifier: hostname}}
-	compact, err := record.Sign(key, b.URL, details, "", operator, time.Now())
+	compact, err := record.Sign(key, b.URL, details, "", operator, nil, time.Now())
 	if err != nil {
 		return "", err
 	}
@@ -350,7 +350,7 @@ func (b *Broker) watchExpiry(cred *machineCredential) {
 	}
 	select {
 	case <-time.After(time.Until(cred.expiresAt.Add(-lead))):
-		b.logger().Warn("the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets launcher login, and have a human approve it",
+		b.logger().Warn("the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets machine login, and have a human approve it",
 			"credential_id", cred.id, "expires_at", cred.expiresAt.Format(time.RFC3339), "in", time.Until(cred.expiresAt).Round(time.Second))
 	case <-cred.gone:
 		return
@@ -445,7 +445,7 @@ func (b *Broker) drop(cred *machineCredential, why string, attrs ...any) bool {
 		return false
 	}
 	close(cred.gone)
-	b.logger().Error(why+"; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets launcher login)",
+	b.logger().Error(why+"; cleared: no session can enroll until a human approves a new machine login (run: agent-secrets machine login)",
 		append([]any{"credential_id", cred.id}, attrs...)...)
 	return true
 }
@@ -458,45 +458,39 @@ func (b *Broker) logger() *slog.Logger {
 	return b.Log
 }
 
-// Enroll registers the session's key as kind host. 201 is a new enrollment; 200 is the live one
-// for the same credential, kind, runtime_id and thumbprint (the contract's idempotent enroll).
+// Enroll registers the session's key. 201 is a new enrollment; 200 is the live one for the same
+// credential, kind, runtime_id and thumbprint (the contract's idempotent enroll).
 func (b *Broker) Enroll(ctx context.Context, s *Session) (string, time.Time, error) {
-	url := b.URL + "/v1/enrollments"
-	compact, cred, err := b.launcherProof(http.MethodPost, url)
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	operator, err := b.readOperator()
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	body, err := json.Marshal(enrollBody{Kind: "host", RuntimeID: s.RuntimeID, Operator: operator, Thumbprint: s.Thumbprint})
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return "", time.Time{}, err
-	}
-	req.Header.Set("Proof", compact)
-	req.Header.Set("Content-Type", "application/json")
-	var out leaseReply
-	if err := b.do(req, []int{http.StatusOK, http.StatusCreated}, &out); err != nil {
-		return "", time.Time{}, b.clearOnInvalid(cred, err)
-	}
-	if out.EnrollmentID == "" {
-		return "", time.Time{}, fmt.Errorf("broker returned no enrollment_id")
-	}
-	return out.EnrollmentID, out.LeaseExpiresAt, nil
+	return b.enroll(ctx, s.RuntimeID, s.Thumbprint, nil, "host")
 }
 
-// EnrollBox registers a box's key as kind box: a pass-through broker call with no backing
-// registry Session (a box enrollment is not a registry session), so it takes the box's
-// runtime_id, thumbprint and optional session_id directly instead of a *Session. Otherwise
-// identical to Enroll: same fail-closed check when there is no machine credential yet, same
-// launcher proof, same error-propagating readOperator() (never the cosmetic Operator()), same
-// idempotent 200/201 handling, same 401 LAUNCHER_INVALID handling.
-func (b *Broker) EnrollBox(ctx context.Context, runtimeID, thumbprint string, sessionID *string) (string, time.Time, error) {
+// EnrollSessionKey registers a key the helper does not hold, one a launcher enrolls for a session
+// on this machine (a box's, a container's): a pass-through broker call with no registry Session,
+// so it takes the key's runtime_id, thumbprint and optional session_id directly. Otherwise it is
+// Enroll: the same fail-closed check when there is no machine credential yet, the same launcher
+// proof, the same 200/201 handling and the same 401 LAUNCHER_INVALID handling.
+func (b *Broker) EnrollSessionKey(ctx context.Context, runtimeID, thumbprint string, sessionID *string) (string, time.Time, error) {
+	return b.enroll(ctx, runtimeID, thumbprint, sessionID, "box")
+}
+
+// enroll enrolls a key as kind session. A broker from before that kind (every release before
+// the one that records one kind of machine session) answers it 400 INVALID_KIND, and enroll asks
+// it once more with legacyKind, the kind that broker knew the enrollment by: host for the
+// helper's own sessions, box for a key a launcher brings. That retry goes once the production
+// broker records the session kind.
+func (b *Broker) enroll(ctx context.Context, runtimeID, thumbprint string, sessionID *string, legacyKind string) (string, time.Time, error) {
+	id, lease, err := b.enrollAs(ctx, "session", runtimeID, thumbprint, sessionID)
+	var be *BrokerError
+	if errors.As(err, &be) && be.Status == http.StatusBadRequest && be.Code == "INVALID_KIND" {
+		return b.enrollAs(ctx, legacyKind, runtimeID, thumbprint, sessionID)
+	}
+	return id, lease, err
+}
+
+// enrollAs is one POST /v1/enrollments naming kind, signed with the current machine credential;
+// it reads the operator with readOperator, which propagates its error, never the cosmetic
+// Operator().
+func (b *Broker) enrollAs(ctx context.Context, kind, runtimeID, thumbprint string, sessionID *string) (string, time.Time, error) {
 	url := b.URL + "/v1/enrollments"
 	compact, cred, err := b.launcherProof(http.MethodPost, url)
 	if err != nil {
@@ -506,7 +500,7 @@ func (b *Broker) EnrollBox(ctx context.Context, runtimeID, thumbprint string, se
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	body, err := json.Marshal(enrollBody{Kind: "box", RuntimeID: runtimeID, Operator: operator, Thumbprint: thumbprint, SessionID: sessionID})
+	body, err := json.Marshal(enrollBody{Kind: kind, RuntimeID: runtimeID, Operator: operator, Thumbprint: thumbprint, SessionID: sessionID})
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -563,13 +557,6 @@ func (b *Broker) Revoke(ctx context.Context, enrollmentID string) error {
 		return b.clearOnInvalid(cred, err)
 	}
 	return nil
-}
-
-// UnenrollBox deletes a box enrollment and every grant under it — Revoke under another name,
-// exported because it's called directly by the box-enrollment socket op rather than through the
-// session-revoke path. 204 and 404 both mean done.
-func (b *Broker) UnenrollBox(ctx context.Context, enrollmentID string) error {
-	return b.Revoke(ctx, enrollmentID)
 }
 
 func (b *Broker) do(req *http.Request, ok []int, out any) error {

@@ -12,7 +12,8 @@ import (
 )
 
 // gateRegistered records the gate an architect registered for its root, and logs it. With the
-// design gate off it is approved at once, and an open gate advances the admitted tree.
+// design gate off it is approved at once, and an open gate advances the admitted tree and releases
+// any READY the gate refused, including one refused before any gate was registered.
 func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.GateRegistered) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil {
@@ -37,6 +38,9 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 		return intake.Result{}, err
 	}
 	if err := e.advanceAdmittedTree(ctx, tx, *issue, gate); err != nil {
+		return intake.Result{}, err
+	}
+	if err := e.advancePendingReady(ctx, tx, fact.Issue, gate); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, nil

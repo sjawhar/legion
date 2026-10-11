@@ -8,28 +8,32 @@ events and sends them to the current Claude Code session as supported
 
 - `.mcp.json` launches the committed bundle `dist/envoy-channel.js` (built from
   `bin/envoy-channel.ts`; see "The bundle" below). It declares the experimental `claude/channel`
-  capability, so Claude Code accepts its event notifications; it also exposes Envoy messaging and
-  native Dispatch tools through that same MCP server.
+  capability, so Claude Code accepts its event notifications; it also exposes the Envoy messaging
+  tools through that same MCP server.
+- `bin/dispatch` is the `dispatch` command, which Claude Code puts on the Bash tool's `PATH` while
+  the plugin is enabled; it runs the committed bundle `dist/dispatch.js`. Agents reach Dispatch
+  through it (see "Dispatch" below).
 - `.omp-plugin/plugin.json` declares an empty `mcpServers`, so Oh My Pi starts no server from this
   plugin: the channel server needs Claude Code's session identity and exits without it, and an omp
-  session already gets Envoy and Dispatch from `@sjawhar/pi-legion-envoy`. omp reads that manifest
+  session already gets Envoy and Dispatch from `@sjawhar/pi-envoy`. omp reads that manifest
   before `.claude-plugin/plugin.json` and a manifest `mcpServers` replaces `.mcp.json` instead of
   merging with it; Claude Code reads only `.claude-plugin/plugin.json`, so it still launches the
   server. Omitting the key would not work — omp would fall through to `.mcp.json`. Skills are
   unaffected: both harnesses resolve them from `.claude-plugin/plugin.json`.
 - `hooks/hooks.json` runs `dist/session-hook.js open-asks` on every `SessionStart` (startup,
-  resume, clear, compact, fork). It records the current session id for the channel server and puts
-  the session's open Dispatch asks into the model's context (`Dispatch authored-ask summary:`;
-  `unavailable: <reason>` when Dispatch cannot be reached; nothing when Dispatch is not
-  configured). With Dispatch configured, `dist/session-hook.js dispatch-first` puts the
-  `dispatch-first` skill into the context of every session on the same `SessionStart` events and of
-  each subagent (`SubagentStart`), as a hook of its own so neither output crowds the other past
-  Claude Code's 10,000-character hook limit. On a resume or fork Claude Code adds it only when the
-  transcript does not already hold the same text, so a session keeps one copy, and one opened
-  before the skill shipped gets it.
+  resume, clear, compact, fork). It writes `export DISPATCH_HOST=claude` to `CLAUDE_ENV_FILE` once,
+  which Claude Code sources into every later Bash command of the session, records the current
+  session id for the channel server, and puts the session's open Dispatch asks into the model's
+  context (`Dispatch authored-ask summary:`; `unavailable: <reason>` when Dispatch cannot be
+  reached; nothing when Dispatch is not configured). With Dispatch configured,
+  `dist/session-hook.js dispatch-first` puts the `dispatch-first` skill into the context of every
+  session on the same `SessionStart` events and of each subagent (`SubagentStart`), as a hook of
+  its own so neither output crowds the other past Claude Code's 10,000-character hook limit. On a
+  resume or fork Claude Code adds it only when the transcript does not already hold the same text,
+  so a session keeps one copy, and one opened before the skill shipped gets it.
 - The channel server subscribes directly to `notifications.agent.<session_id>` and to every topic
-  followed by `envoy_subscribe` or a successful Dispatch mutation. It renders every envelope with
-  the shared `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
+  followed by `envoy_subscribe`. It renders every envelope with the shared
+  `@legion/envoy-client/delivery` renderer and never exposes raw envelope bytes.
 - A forwarded role-lane envelope (one that still names its `notifications.role.<role>` topic while
   arriving on the direct subject) receives its empty receipt immediately after the server accepts
   the event into its ordered MCP notification queue. That confirms adapter acceptance, not that
@@ -41,10 +45,7 @@ events and sends them to the current Claude Code session as supported
 - A targeted Dispatch delivery the shared renderer rejects is never shown to the model: when it
   names a message, the server posts `Invalid Dispatch targeted delivery frame` to
   `POST /api/v1/messages/{id}/reply` so the attempt fails visibly; otherwise it is logged and dropped.
-- No Dispatch write subscribes the session to an issue. A write that makes the session follow an
-  ask (`details.follows.ask`) tells the model once per ask
-  `Following ask <id> on <issue>: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on <issue>: envoy_subscribe <topic>.`
-  A resumed server rebuilds the interests its session id already registered. `envoy_list` reports
+- A resumed server rebuilds the interests its session id already registered. `envoy_list` reports
   the union of live NATS subscriptions and registry interests with each topic's `source` (`live`,
   `registry`, `both`).
 - `envoy_role_set` persists the held role in `${CLAUDE_PLUGIN_DATA}/roles/<session-id>.json`.
@@ -85,19 +86,25 @@ Claude Code drops invalid meta keys, so the server filters them before writing t
 | `expects_reply` | Optional Envoy reply expectation. |
 | `in_reply_to` | Optional correlated inbound event id. |
 
-## Dispatch and Envoy tools
+## Envoy tools
 
-The server exposes the shared Envoy messaging contract, including `envoy_inbox` and
-`envoy_role_get`. When Dispatch is configured, it additionally exposes the twenty-one native tools:
-`dispatch_issue`, `dispatch_issue_update`, `dispatch_claim`, `dispatch_ask`, `dispatch_edit_ask`, `dispatch_resolve_ask`, `dispatch_resolve_comment`,
-`dispatch_follow`, `dispatch_comment`, `dispatch_suggest`, `dispatch_message`, `dispatch_doc_edit`,
-`dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`, `dispatch_read`,
-`dispatch_search`, `dispatch_issues`, `dispatch_architecture_sync`, `dispatch_open_asks`, and `dispatch_whoami`.
+The server exposes the shared Envoy messaging contract, all ten `envoy_*` tools of
+`envoyToolSpecs`, `envoy_inbox` and `envoy_role_get` among them. It exposes no Dispatch tool: a
+`dispatch_*` call is an unknown tool.
 
-Dispatch configuration follows `@legion/envoy-client/dispatch-config`: set `dispatch.enabled`,
-`dispatch.serverUrl`, and `dispatch.token` in envoy.json, or provide `DISPATCH_URL` and
-`DISPATCH_TOKEN`. The resolved configuration is re-read on every Dispatch tool call. A successful
-mutation follows its event topic; reads do not add a subscription.
+## Dispatch
+
+Agents reach Dispatch through the `dispatch` command in Bash: `dispatch --help` lists the
+commands, `dispatch <command> --help` each one's flags, and the `dispatch` skill teaches them. The
+command runs as the Claude Code session that called it: the `open-asks` hook names the host
+(`DISPATCH_HOST=claude`), and the command reads the session id from `CLAUDE_CODE_SESSION_ID`,
+which Claude Code sets fresh in every Bash command and moves to the new id on `/clear`, so a
+`DISPATCH_SESSION_ID` inherited from a parent session is ignored. A write that makes the session
+follow an ask prints `Following ask <id> on <issue>: …` once per ask, after its result; a result
+longer than 25,000 characters is written to a file the output names. The configuration follows
+`@legion/envoy-client/dispatch-config`: set `dispatch.enabled`, `dispatch.serverUrl`, and
+`dispatch.token` in envoy.json, or provide `DISPATCH_URL` and `DISPATCH_TOKEN`; it is read on every
+call.
 
 Dispatch asks remain on native Dispatch. Channel notifications are one-way ingress, not a remote
 human approval surface.
@@ -105,8 +112,8 @@ human approval surface.
 ## Skills
 
 The plugin ships four skills, `claude-envoy:envoy`, `claude-envoy:dispatch`,
-`claude-envoy:dispatch-first` and `claude-envoy:dispatch-brainstorming`, which teach the tools
-above. `skills/` holds one relative symlink per skill into the repository-root `skills/`, which
+`claude-envoy:dispatch-first` and `claude-envoy:dispatch-brainstorming`, which teach the Envoy
+tools and the `dispatch` command. `skills/` holds one relative symlink per skill into the repository-root `skills/`, which
 stays their only source; Claude Code copies each target into the plugin cache at install. With
 Dispatch configured, the `dispatch-first` hook also puts `dispatch-first` into the model's context
 on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentStart`, as the
@@ -125,18 +132,32 @@ a standalone Claude Code session needs it.
 The marketplace installs this package's git tree into Claude Code's plugin cache with no
 `node_modules`: `workspace:*` dependencies cannot resolve there, and Claude Code skips its automatic
 dependency install because the package has no lockfile of its own (the monorepo's lives at the
-root). So the two executables ship as committed single-file Bun bundles, `dist/envoy-channel.js`
-and `dist/session-hook.js`, with every dependency inlined (`@legion/contracts`,
+root). So the three executables ship as committed single-file Bun bundles, `dist/envoy-channel.js`,
+`dist/session-hook.js` and `dist/dispatch.js` (the `dispatch` command, built from
+`@legion/envoy-client`'s `bin/dispatch.ts`), with every dependency inlined (`@legion/contracts`,
 `@legion/envoy-client`, `@modelcontextprotocol/sdk`, `nats`, `zod` and theirs; the package version
 is inlined from `package.json`, so the MCP server, `plugin.json`, and `package.json` spell one
 version). `dist/THIRD_PARTY_NOTICES` beside them carries the license of every third-party package
 they inline, written from Bun's metafile by `scripts/third-party-notices.ts` at the repository root.
 
-- `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, minification disabled: whitespace and identifiers stay readable so independent changes merge at line level; syntax stays off because Bun 1.3.14's constant folding can truncate concatenated string literals in CI builds; no sourcemap), notices included.
+- `bun run build` rebuilds `dist/` (`Bun.build`, target `bun`, `minify: false`, no sourcemap), notices included. Minification is off entirely, not case by case: the partial-disable form (`{whitespace: false, identifiers: false, syntax: false}`) still routes through Bun 1.3.14's minifying code-generation path, which picks a non-deterministic CJS/ESM interop check on repeated builds of this exact module graph — on top of the syntax minifier's own separate bug, truncating constant-folded multi-operand string concatenation in CI builds, that made the partial form necessary before this. A plain `false` bypasses that whole path; whitespace and identifiers stay readable as a side effect, so independent changes still merge at line level.
 - `bun run check-dist` rebuilds into a scratch directory and fails when it differs from the
   committed files. CI runs it on the Bun version pinned in the repo-root `.bun-version`, because
-  bundler output differs across Bun releases; rebuild on that version before committing.
-- pi-envoy solves the same problem with `prepack.sh` for npm; this plugin's distribution channel is
+  the bundler's own output depends on the exact Bun build, not only the declared version. Two
+  separate, compounding causes made that check fail unpredictably: the minify setting above (a
+  non-determinism *within* one Bun build's own bundler) and a second, independent bug
+  (LEGION-568) — `bun run build`/`bun run check-dist` spawn a new "bun" process to run
+  `scripts/build.ts`, and that spawn resolves "bun" from PATH rather than reusing whichever binary
+  the caller invoked `bun run` with, so a devbox whose default Bun (a version manager's active
+  version) differs from the pin would otherwise silently bundle with that *other Bun version*
+  instead — confirmed directly between a devbox and the CI runner, same source, same lockfile,
+  same `.bun-version`. Either alone could produce this symptom; the first investigation (LEGION-548
+  round 5) found the first and mistakenly attributed a failure actually caused by the second to
+  the build machine itself. Both scripts now refuse outright when the running Bun does not match
+  the pin, rather than commit whatever that other build produced: invoke the pinned binary's own
+  path directly — not `bun run` — when a version manager's default differs from it.
+- pi-envoy solves the same problem with `scripts/pi-plugin-prepack.sh` (at the repository root, the
+  prepack of both Oh My Pi plugins) for npm; this plugin's distribution channel is
   the git repository, so its bundle lives in-tree. An npm-published plugin and a `dist` release
   branch were considered and rejected as more moving parts for the same result.
 
@@ -172,8 +193,8 @@ The plugin needs `ENVOY_NATS_URL` and reaches the listener at `ENVOY_URL`, which
 environment that launched `claude` — `.mcp.json` passes through only `CLAUDE_PROJECT_DIR`, because
 an unset `${VAR}` in `.mcp.json` is substituted as the literal text, which used to register a
 session as the literal id `${ENVOY_SESSION_ID}`. Claude Code provides `CLAUDE_CODE_SESSION_ID` and `CLAUDE_PLUGIN_DATA`; set
-`ENVOY_SESSION_ID` only to use a controlled identity for QA (the smoke does). Dispatch tools and
-the open-asks hook read `DISPATCH_URL`/`DISPATCH_TOKEN` or `envoy.json` through
+`ENVOY_SESSION_ID` only to use a controlled identity for QA (the smoke does). The `dispatch`
+command and the open-asks hook read `DISPATCH_URL`/`DISPATCH_TOKEN` or `envoy.json` through
 `@legion/envoy-client/dispatch-config`.
 
 `claude -p` can run a channel session, but it disables features that need terminal input, including

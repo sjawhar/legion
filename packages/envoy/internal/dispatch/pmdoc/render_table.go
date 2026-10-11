@@ -7,7 +7,7 @@ func (r *renderer) table(table *Node, prefix string) {
 		r.err = fmt.Errorf("%w: table requires a header row", ErrSchema)
 		return
 	}
-	grid := r.tableGrid(table)
+	grid, _ := r.tableGrid(table)
 	r.tableRow(table.Children[0], grid[0], true, prefix)
 	r.writeSyntax("\n" + prefix + "| ")
 	for i, cell := range grid[0] {
@@ -65,15 +65,17 @@ func (r *renderer) tableRow(row *Node, cells []*Node, header bool, prefix string
 // written in the first position it covers and each other one it covers as an empty cell of its
 // alignment, as the browser editor writes a spanning cell. The header row, whose width is the
 // table's to Go's parser, is as wide as the widest row, its added cells taking the alignment of the
-// first cell under them, so that no cell past it is lost. A body row keeps its own width, since
-// Parse pads a short row. A table with no span and no row wider than its header is its own rows.
+// first cell under them, so that no cell past it is lost; headerCells is how many cells the header
+// row writes before it is widened so, its own cells and the columns their colspans add. A body row
+// keeps its own width, since Parse pads a short row. A table with no span and no row wider than its
+// header is its own rows.
 // A span comes from the live tree unchecked, so the empty cells spans add are bounded per render,
 // across every table of the document (renderer.spanBudget): each column a colspan adds, each
 // position a rowspan covers below and each gap filled up to one is charged, and a span past the
 // budget adds no more cells. The cells the header is widened by are not charged (maxSpanCells), and
 // past the grid's limit a row reaches only columns where a row holds a cell. Every cell the table
 // holds is still written with its text.
-func (r *renderer) tableGrid(table *Node) [][]*Node {
+func (r *renderer) tableGrid(table *Node) (grid [][]*Node, headerCells int) {
 	covered := map[[2]int]*Node{}
 	// lastCovered is, for each row, the last column a span from a row above covers, or -1, kept so
 	// that no row scans every covered position: with that scan, 20,000 rows took 24.7 s.
@@ -88,7 +90,7 @@ func (r *renderer) tableGrid(table *Node) [][]*Node {
 		lastCovered[index] = -1
 		limit = max(limit, len(row.Children))
 	}
-	grid := make([][]*Node, len(table.Children))
+	grid = make([][]*Node, len(table.Children))
 	width := 0
 	for rowIndex, row := range table.Children {
 		kind := "table_cell"
@@ -137,7 +139,8 @@ func (r *renderer) tableGrid(table *Node) [][]*Node {
 		grid[rowIndex] = cells
 		width = max(width, len(cells))
 	}
-	for column := len(grid[0]); column < width; column++ {
+	headerCells = len(grid[0])
+	for column := headerCells; column < width; column++ {
 		var under *Node
 		for _, row := range grid[1:] {
 			if column < len(row) {
@@ -147,7 +150,7 @@ func (r *renderer) tableGrid(table *Node) [][]*Node {
 		}
 		grid[0] = append(grid[0], emptyTableCell("table_header", under))
 	}
-	return grid
+	return grid, headerCells
 }
 
 // tableSpan is how many columns or rows a cell's colspan or rowspan covers: at least one.

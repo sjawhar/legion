@@ -19,7 +19,7 @@ func (s *server) listProjectArtifacts(w http.ResponseWriter, r *http.Request) {
 	}
 	unlinked := r.URL.Query().Get("unlinked") == "true"
 	query := `
-		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
+		select ` + artifactColumns + `
 		from artifacts
 		where project_key = $1 and not is_primary`
 	if unlinked {

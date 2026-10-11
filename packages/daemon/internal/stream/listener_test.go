@@ -1,12 +1,14 @@
 package stream
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"net"
 	"os"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,8 +80,8 @@ func TestListenRefusesANonPositiveRPCTimeout(t *testing.T) {
 // is logged, the token is resolved at most once, and nothing changes — no registration, no
 // event (worker-stream-listener.ts:112-161).
 func TestHelloRejectionsCloseLogAndChangeNothing(t *testing.T) {
-	stale := &resolver{fn: func(string) (claim.Token, uint64, bool, bool) {
-		return testClaim, testGeneration - 1, true, true
+	stale := &resolver{fn: func(string) (claim.Token, uint64, bool, bool, error) {
+		return testClaim, testGeneration - 1, true, true, nil
 	}}
 	for _, test := range []struct {
 		name          string
@@ -118,6 +120,101 @@ func TestHelloRejectionsCloseLogAndChangeNothing(t *testing.T) {
 				t.Fatalf("a rejected hello emitted %#v", events)
 			}
 		})
+	}
+}
+
+// A token the daemon could not resolve — its store did not answer — is not refused: the hello says
+// nothing about the token, so the connection closes unacked with nothing written, the failed read
+// is logged once with its error, and nothing registers. The shim redials as it does after any hello
+// it gets no ack for, and a redial the store answers is acked.
+func TestAHelloTheDaemonCouldNotResolveClosesUnrefused(t *testing.T) {
+	var failed atomic.Bool
+	flaky := &resolver{fn: func(bootToken string) (claim.Token, uint64, bool, bool, error) {
+		if failed.CompareAndSwap(false, true) {
+			return "", 0, false, false, errors.New("read claim: context deadline exceeded")
+		}
+		return testClaim, testGeneration, false, true, nil
+	}}
+	h := startListener(t, harnessOptions{resolver: flaky})
+	p := dial(t, h.listener.Addr())
+	p.writeRaw(`{"type":"hello2","bootToken":"boot-token-1"}` + "\n")
+	p.awaitClosed()
+
+	lines := h.logs.Lines()
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "worker-stream: could not resolve a hello's boot token; the shim redials") ||
+		!strings.Contains(lines[0], "read claim: context deadline exceeded") {
+		t.Fatalf("logs = %q, want one line naming the failed read and no refusal", lines)
+	}
+	if _, ok := h.listener.Conn(testClaim); ok {
+		t.Fatal("a hello the daemon could not resolve registered a connection")
+	}
+
+	redial := dial(t, h.listener.Addr())
+	redial.writeRaw(`{"type":"hello2","bootToken":"boot-token-1"}` + "\n")
+	redial.expect(shimwire.TypeHelloAck)
+	if events := h.stop(); !slices.Equal(events, []Event{Hello{Claim: testClaim, Generation: testGeneration}, Closed{Claim: testClaim}}) {
+		t.Fatalf("events = %#v, want only the redial's hello and its close", events)
+	}
+	if lines := h.logs.Lines(); len(lines) != 1 {
+		t.Fatalf("logs = %q, want only the failed read", lines)
+	}
+}
+
+// Narrow, the start of the daemon's stop, closes every claim connection keep does not name, with
+// its Closed event, and keeps the ones it names; from then on a claim's hello is closed unacked,
+// unresolved and unlogged, so its shim keeps its frames for the next daemon, while a launcher's
+// hello is still answered.
+func TestNarrowKeepsTheNamedClaimsAndAnswersOnlyLaunchers(t *testing.T) {
+	const otherClaim claim.Token = "legion-acme-LEGION-2-tester"
+	two := &resolver{fn: func(bootToken string) (claim.Token, uint64, bool, bool, error) {
+		switch bootToken {
+		case testToken:
+			return testClaim, testGeneration, false, true, nil
+		case "boot-token-2":
+			return otherClaim, testGeneration, false, true, nil
+		}
+		return "", 0, false, false, nil
+	}}
+	h := startListener(t, harnessOptions{resolver: two})
+	kept := h.connect(testToken)
+	other := dial(t, h.listener.Addr())
+	other.hello("boot-token-2")
+	other.expect(shimwire.TypeHelloAck)
+	if event := h.next(); event != (Hello{Claim: otherClaim, Generation: testGeneration}) {
+		t.Fatalf("event = %#v, want the other claim's hello", event)
+	}
+	h.listener.SetLauncherResolver(func(shimwire.LauncherHello) (LauncherHandler, string) {
+		return &launcherServe{frames: make(chan shimwire.Frame, 4)}, ""
+	})
+
+	h.listener.Narrow(func(token claim.Token) bool { return token == testClaim })
+
+	other.awaitClosed()
+	if event := h.next(); event != (Closed{Claim: otherClaim}) {
+		t.Fatalf("event = %#v, want the other claim's close", event)
+	}
+	if _, ok := h.listener.Conn(testClaim); !ok {
+		t.Fatal("Narrow closed the connection of a claim it was told to keep")
+	}
+	calls := two.calls.Load()
+	redial := dial(t, h.listener.Addr())
+	redial.hello("boot-token-2")
+	redial.awaitClosed()
+	if got := two.calls.Load(); got != calls {
+		t.Fatalf("a hello after Narrow was resolved (%d calls, want %d)", got, calls)
+	}
+	launcher := dial(t, h.listener.Addr())
+	launcher.send(shimwire.LauncherHello{Token: "launcher-token", Sandbox: "legion-legion-legion-208", Role: "tester", PodUID: "pod-1", LauncherID: "l-1"})
+	launcher.expect(shimwire.TypeLauncherHelloAck)
+	kept.send(shimwire.AgentStart{})
+	if event := h.next(); event != (TurnStart{Claim: testClaim}) {
+		t.Fatalf("event = %#v, want the kept connection's frames to go on arriving", event)
+	}
+	if lines := h.logs.Lines(); len(lines) != 0 {
+		t.Fatalf("logs = %q, want nothing logged for a hello the stopping daemon does not answer", lines)
+	}
+	if events := h.stop(); !slices.Equal(events, []Event{Closed{Claim: testClaim}}) {
+		t.Fatalf("events = %#v, want only the kept connection's close at the listener's end", events)
 	}
 }
 
@@ -379,6 +476,84 @@ func TestAV1HelloIsRefusedByName(t *testing.T) {
 	}
 	if _, ok := h.listener.Conn(testClaim); ok {
 		t.Fatal("the v1 hello registered")
+	}
+}
+
+// launcherServe records the launcher connection a resolver accepted and the frames it read.
+type launcherServe struct{ frames chan shimwire.Frame }
+
+func (s *launcherServe) ServeLauncher(_ net.Conn, reader *bufio.Reader, _ *shimwire.Writer) {
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			close(s.frames)
+			return
+		}
+		frame, err := shimwire.Decode(line)
+		if err != nil {
+			close(s.frames)
+			return
+		}
+		s.frames <- frame
+	}
+}
+
+// A role launcher's hello goes to the launcher acceptor, never to the claim resolver: an accepted
+// one is acknowledged and handed its connection, and no claim connection or agent event comes of it.
+func TestALauncherHelloReachesTheLauncherAcceptorAlone(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	served := &launcherServe{frames: make(chan shimwire.Frame, 4)}
+	var got shimwire.LauncherHello
+	h.listener.SetLauncherResolver(func(hello shimwire.LauncherHello) (LauncherHandler, string) {
+		got = hello
+		return served, ""
+	})
+	p := dial(t, h.listener.Addr())
+	hello := shimwire.LauncherHello{Token: "launcher-token", Sandbox: "legion-legion-legion-208", Role: "tester", PodUID: "pod-1", LauncherID: "l-1"}
+	p.send(hello)
+	p.expect(shimwire.TypeLauncherHelloAck)
+	p.send(shimwire.LauncherState{})
+	select {
+	case frame := <-served.frames:
+		if _, ok := frame.(shimwire.LauncherState); !ok {
+			t.Fatalf("the launcher handler read %#v, want its state", frame)
+		}
+	case <-time.After(wait):
+		t.Fatal("the accepted launcher's frames never reached its handler")
+	}
+	if got != hello {
+		t.Fatalf("the acceptor saw %+v, want %+v", got, hello)
+	}
+	if _, ok := h.listener.Conn(testClaim); ok {
+		t.Fatal("a launcher hello bound a claim connection")
+	}
+	if events := h.stop(); len(events) != 0 {
+		t.Fatalf("a launcher connection emitted agent events %v", events)
+	}
+}
+
+// A launcher the acceptor refuses, or one that arrives before any acceptor is registered, is
+// closed with nothing sent and its reason logged.
+func TestARefusedLauncherHelloIsClosedAndLogged(t *testing.T) {
+	for name, tc := range map[string]struct {
+		register bool
+		reason   string
+	}{
+		"no acceptor yet":        {false, "launcher acceptor unavailable"},
+		"refused by the runtime": {true, "launcher token is not current"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := startListener(t, harnessOptions{})
+			if tc.register {
+				h.listener.SetLauncherResolver(func(shimwire.LauncherHello) (LauncherHandler, string) { return nil, tc.reason })
+			}
+			p := dial(t, h.listener.Addr())
+			p.send(shimwire.LauncherHello{Token: "stale", Sandbox: "s", Role: "tester", PodUID: "pod-1", LauncherID: "l-1"})
+			p.awaitClosed()
+			if lines := h.logs.Lines(); len(lines) != 1 || !strings.Contains(lines[0], tc.reason) {
+				t.Fatalf("log = %q, want one refusal naming %q", lines, tc.reason)
+			}
+		})
 	}
 }
 

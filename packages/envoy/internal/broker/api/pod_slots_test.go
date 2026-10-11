@@ -3,13 +3,13 @@ package api_test
 import (
 	"crypto/ecdsa"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
-	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
 const (
@@ -27,18 +27,13 @@ func (ts *testServer) podToken(t *testing.T, account, podUID string) string {
 }
 
 // mintServiceLauncherCredential is mintLauncherCredential for a service login (a launcher
-// credential detail naming service legion-daemon): the credential has no operator and enrolls pods
-// only, the shape the Legion daemon logs in with.
+// credential detail naming service legion-daemon, and no login_hint): the credential has no
+// operator and enrolls pods only, the shape the Legion daemon logs in with. testApprover approves
+// it, as any signed-in person may.
 func (ts *testServer) mintServiceLauncherCredential(t *testing.T) (credentialID string, key *ecdsa.PrivateKey) {
 	t.Helper()
 	key = newSigningKey(t)
-	compact, err := record.Sign(key, ts.URL, []record.AuthorizationDetail{
-		{Type: "launcher_credential", Identifier: "cluster.example", Service: "legion-daemon"},
-	}, "", testApprover, time.Now())
-	if err != nil {
-		t.Fatalf("record.Sign: %v", err)
-	}
-	return ts.approveMachineLogin(t, compact, testApprover), key
+	return ts.approveMachineLogin(t, signMachineLoginRequest(t, key, ts.URL, "", "cluster.example", "legion-daemon"), testApprover), key
 }
 
 type wireEnrolled struct {
@@ -134,14 +129,12 @@ func TestRolesAndGenerationsOfOnePodEnrollRequestAndReleaseIndependently(t *test
 		}
 	}
 	operatorCredential, operatorKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
-	for _, kind := range []string{"box", "host"} {
-		status, body = ts.launcher(t, operatorKey, operatorCredential, http.MethodPost, "/v1/enrollments", map[string]any{
-			"kind": kind, "runtime_id": kind + "-" + t.Name(), "operator": testApprover, "slot": "implementer-g1",
-			"thumbprint": thumbprintOf(t, newSigningKey(t)),
-		})
-		if status != http.StatusBadRequest || decode[wireError](t, body).Code != "INVALID_SLOT" {
-			t.Fatalf("%s with a slot = %d %s, want 400 INVALID_SLOT", kind, status, body)
-		}
+	status, body = ts.launcher(t, operatorKey, operatorCredential, http.MethodPost, "/v1/enrollments", map[string]any{
+		"kind": "session", "runtime_id": "session-" + t.Name(), "operator": testApprover, "slot": "implementer-g1",
+		"thumbprint": thumbprintOf(t, newSigningKey(t)),
+	})
+	if status != http.StatusBadRequest || decode[wireError](t, body).Code != "INVALID_SLOT" {
+		t.Fatalf("a session with a slot = %d %s, want 400 INVALID_SLOT", status, body)
 	}
 	status, body = ts.session(t, implementer.key, implementer.enrollmentID, http.MethodPost, "/v1/enrollments", map[string]any{
 		"kind": "pod", "runtime_id": podUID, "slot": "merger-g1", "thumbprint": thumbprintOf(t, implementer.key), "pod_token": token,
@@ -255,5 +248,30 @@ func TestRolesAndGenerationsOfOnePodEnrollRequestAndReleaseIndependently(t *test
 	}
 	if status, body := values(reviewer, grants["reviewer-g1"]); status != http.StatusOK {
 		t.Fatalf("reviewer-g1 reading its grant after implementer-g1's revoke = %d %s, want 200", status, body)
+	}
+}
+
+// An enrollment presenting the pod's own token after it expired is refused 403 POD_TOKEN_EXPIRED,
+// naming the token's expiry, so the launcher can tell a stale token, which the pod's current one
+// replaces, from POD_IDENTITY_MISMATCH, a token that is not this pod's.
+func TestAnExpiredPodTokenIsRefusedAsExpiredNamingItsExpiry(t *testing.T) {
+	ts := newTestServer(t)
+	credentialID, launcherKey := ts.mintServiceLauncherCredential(t)
+	podUID := uuid.NewString()
+	expiry := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	claims := ts.podIssuer.Claims(workerAccount, podAudience)
+	claims["iat"], claims["exp"] = expiry.Add(-10*time.Minute).Unix(), expiry.Unix()
+	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
+	expired := ts.podIssuer.Mint(t, ts.podKey, claims)
+
+	status, body := ts.launcher(t, launcherKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
+		"kind": "pod", "runtime_id": podUID, "slot": "implementer-g1", "thumbprint": thumbprintOf(t, newSigningKey(t)), "pod_token": expired,
+	})
+	refusal := decode[wireError](t, body)
+	if status != http.StatusForbidden || refusal.Code != "POD_TOKEN_EXPIRED" {
+		t.Fatalf("an expired pod token = %d %s, want 403 POD_TOKEN_EXPIRED", status, body)
+	}
+	if want := expiry.UTC().Format(time.RFC3339); !strings.Contains(refusal.Error, want) {
+		t.Fatalf("an expired pod token's refusal %q, want it to name the expiry %s", refusal.Error, want)
 	}
 }

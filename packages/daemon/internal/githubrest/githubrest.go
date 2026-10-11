@@ -9,7 +9,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 )
@@ -62,21 +65,26 @@ func GetListPages[T any](ctx context.Context, c Client, path, field string) ([]T
 }
 
 // getPages is GetPages, reading each page's items from the field of the object it answers when
-// field is not empty.
+// field is not empty. A next page on another scheme or host than the REST base's is refused, so the
+// token goes nowhere but the API it was configured for.
 func getPages[T any](ctx context.Context, c Client, path, field string) ([]T, error) {
+	base, err := url.Parse(c.API)
+	if err != nil {
+		return nil, fmt.Errorf("parse the REST base %q: %w", c.API, err)
+	}
 	separator := "?"
 	if strings.Contains(path, "?") {
 		separator = "&"
 	}
 	var all []T
-	for url := c.API + path + separator + "per_page=100"; url != ""; {
+	for target := c.API + path + separator + "per_page=100"; target != ""; {
 		var page []T
 		var object map[string]json.RawMessage
 		var into any = &page
 		if field != "" {
 			into = &object
 		}
-		next, err := c.call(ctx, http.MethodGet, url, nil, into)
+		next, err := c.call(ctx, http.MethodGet, target, nil, into)
 		if err != nil {
 			return nil, err
 		}
@@ -90,19 +98,25 @@ func getPages[T any](ctx context.Context, c Client, path, field string) ([]T, er
 			}
 		}
 		all = append(all, page...)
-		url = next
+		if next != "" {
+			nextURL, err := url.Parse(next)
+			if err != nil || nextURL.Scheme != base.Scheme || !strings.EqualFold(nextURL.Host, base.Host) {
+				return nil, fmt.Errorf("GET %s: GitHub's next page %q is not on %s://%s, the only origin sent the token", path, next, base.Scheme, base.Host)
+			}
+		}
+		target = next
 	}
 	return all, nil
 }
 
-// call sends method to url, with body as JSON when it is not nil, reads a 2xx answer into into
+// call sends method to target, with body as JSON when it is not nil, reads a 2xx answer into into
 // when into is not nil, and returns the next page's URL its Link header names, "" for none.
-func (c Client) call(ctx context.Context, method, url string, body []byte, into any) (string, error) {
+func (c Client) call(ctx context.Context, method, target string, body []byte, into any) (string, error) {
 	var payload io.Reader
 	if body != nil {
 		payload = bytes.NewReader(body)
 	}
-	request, err := http.NewRequestWithContext(ctx, method, url, payload)
+	request, err := http.NewRequestWithContext(ctx, method, target, payload)
 	if err != nil {
 		return "", err
 	}
@@ -121,8 +135,9 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 		return "", err
 	}
 	if response.StatusCode < 200 || response.StatusCode > 299 {
-		path, _, _ := strings.Cut(strings.TrimPrefix(url, c.API), "?")
-		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)), RateLimited: RateLimited(response)}
+		path := c.answerPath(request.URL)
+		return "", &Answer{Method: method, Path: path, Status: response.StatusCode, Body: strings.TrimSpace(string(answer)),
+			RateLimited: RateLimited(response, answer), RetryAfter: retryAfter(response, answer, time.Now())}
 	}
 	if into == nil {
 		return nextPage(response.Header.Get("Link")), nil
@@ -130,11 +145,70 @@ func (c Client) call(ctx context.Context, method, url string, body []byte, into 
 	return nextPage(response.Header.Get("Link")), json.Unmarshal(answer, into)
 }
 
-// RateLimited says whether response is GitHub's rate limit: a 429, or a 403 carrying
-// x-ratelimit-remaining: 0 or a retry-after.
-func RateLimited(response *http.Response) bool {
-	return response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusForbidden &&
-		(response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "")
+// answerPath is the path an Answer names for target, its query left out: the path under the
+// repository's REST base, or GitHub's whole path for a URL outside it, such as a later page GitHub
+// names under /repositories/<id>/.
+func (c Client) answerPath(target *url.URL) string {
+	if base, err := url.Parse(c.API); err == nil {
+		if rest, found := strings.CutPrefix(target.Path, base.Path); found && (rest == "" || strings.HasPrefix(rest, "/")) {
+			return rest
+		}
+	}
+	return target.Path
+}
+
+// secondaryLimitMessages are what GitHub's secondary rate limit says in the body of the 403 it can
+// answer with instead of a 429: "You have exceeded a secondary rate limit", with the older wording
+// of the same limit, "You have triggered an abuse detection mechanism", beside it.
+var secondaryLimitMessages = []string{"secondary rate limit", "abuse detection mechanism"}
+
+// RateLimited says whether response, whose body is body, is GitHub's rate limit: a 429, or a 403
+// carrying x-ratelimit-remaining: 0 or a retry-after, or one whose body says it is the secondary
+// limit, which GitHub's REST documentation allows with neither header set.
+func RateLimited(response *http.Response, body []byte) bool {
+	if response.StatusCode == http.StatusTooManyRequests {
+		return true
+	}
+	if response.StatusCode != http.StatusForbidden {
+		return false
+	}
+	if response.Header.Get("X-RateLimit-Remaining") == "0" || response.Header.Get("Retry-After") != "" {
+		return true
+	}
+	message := strings.ToLower(string(body))
+	for _, named := range secondaryLimitMessages {
+		if strings.Contains(message, named) {
+			return true
+		}
+	}
+	return false
+}
+
+// retryAfter is how long GitHub asks a caller its rate limit answered to wait before calling again,
+// as its REST documentation's "Exceeding the rate limit" says: the retry-after header's seconds,
+// else, when x-ratelimit-remaining is 0, until the x-ratelimit-reset epoch second, capped at an
+// hour, GitHub's primary rate limit's window, so a host clock behind GitHub's never stretches the
+// wait past it; else at least a minute, which is what a secondary limit named by its message alone
+// is waited. A reset this host's clock already reads as past is waited the minute too. Zero for an
+// answer that is not a rate limit.
+func retryAfter(response *http.Response, body []byte, now time.Time) time.Duration {
+	if !RateLimited(response, body) {
+		return 0
+	}
+	if seconds, err := strconv.Atoi(response.Header.Get("Retry-After")); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if response.Header.Get("X-RateLimit-Remaining") == "0" {
+		if reset, err := strconv.ParseInt(response.Header.Get("X-RateLimit-Reset"), 10, 64); err == nil {
+			if wait := time.Unix(reset, 0).Sub(now); wait > 0 {
+				if wait > time.Hour {
+					return time.Hour
+				}
+				return wait
+			}
+		}
+	}
+	return time.Minute
 }
 
 // nextPage is the URL a Link header names rel="next", "" when it names none.
@@ -150,13 +224,15 @@ func nextPage(link string) string {
 
 // Answer is a GitHub REST answer other than 2xx: the request's method and path (its query left
 // out), GitHub's HTTP status, the body GitHub sent with it, and whether it is a rate limit, which
-// every further call on the same token meets until the limit resets.
+// every further call on the same token meets until the limit resets, with how long GitHub asks the
+// caller to wait before its next call (retryAfter; zero when it is not one).
 type Answer struct {
 	Method      string
 	Path        string
 	Status      int
 	Body        string
 	RateLimited bool
+	RetryAfter  time.Duration
 }
 
 func (a *Answer) Error() string {

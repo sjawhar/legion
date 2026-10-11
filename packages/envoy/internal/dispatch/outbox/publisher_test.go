@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/asks"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/retry"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -1307,9 +1308,9 @@ func TestScanPublishesReadyEventAfterFullBatchOfPoisonRows(t *testing.T) {
 	if err := database.Pool.QueryRow(context.Background(), `select attempt_count, next_attempt_at from events where id = 1`).Scan(&attempts, &nextAttempt); err != nil {
 		t.Fatalf("read poison retry state: %v", err)
 	}
-	// Every failure schedules the next attempt at least retryBaseDelay after it, and the first
+	// Every failure schedules the next attempt at least retry.BaseDelay after it, and the first
 	// failure happened after scanStart.
-	earliest := scanStart.Add(retryBaseDelay).Truncate(time.Microsecond)
+	earliest := scanStart.Add(retry.BaseDelay).Truncate(time.Microsecond)
 	if attempts < 1 || nextAttempt == nil || nextAttempt.Before(earliest) {
 		t.Fatalf("poison retry state = attempts %d next=%v, want at least one attempt with a retry no earlier than %v", attempts, nextAttempt, earliest)
 	}
@@ -1565,4 +1566,68 @@ func waitFor(t *testing.T, timeout time.Duration, what string, condition func() 
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+func TestRunRoutesChangedDocumentAskAnswerToFollower(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	broker := events.NewBroker()
+	seedIssue(t, database, "T-1", nil)
+	var artifactID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into artifacts (project_key, slug, name, kind, created_by)
+		values ('TT', 'notes-md', 'notes.md', 'doc', '{"kind":"user","id":"alice"}')
+		returning id::text
+	`).Scan(&artifactID); err != nil {
+		t.Fatalf("create document: %v", err)
+	}
+	var askID string
+	if err := database.Pool.QueryRow(ctx, `
+		insert into asks (artifact_id, author, question)
+		values ($1, '{"kind":"session","id":"session-asker"}', 'Ship it?')
+		returning id::text
+	`, artifactID).Scan(&askID); err != nil {
+		t.Fatalf("create document ask: %v", err)
+	}
+	seedFollower(t, database, askID, "session-asker")
+	previous := model.AskAnswer{User: "alice", Selected: []string{"Hold"}, At: time.Unix(1, 0).UTC()}
+	current := model.AskAnswer{User: "alice", Selected: []string{"Ship"}, At: time.Unix(2, 0).UTC()}
+	ask := model.Ask{
+		ID:         askID,
+		ArtifactID: new(artifactID),
+		Question:   "Ship it?",
+		State:      "answered",
+		Answer:     &current,
+	}
+	event := appendEvent(t, database, broker, model.Event{
+		ArtifactID: new(artifactID),
+		Type:       "ask.answered",
+		Actor:      model.Actor{Kind: "user", ID: "alice"},
+		Payload: model.AskAnsweredEventPayload{
+			AskEventPayload: model.NewAskEventPayload(ask, model.ReferenceChanges{}),
+			PreviousAnswer:  &previous,
+		},
+	})
+	publisher := &recordingPublisher{}
+	stop := run(t, database, publisher, broker)
+	defer stop()
+
+	waitFor(t, time.Second, "changed document answer publication", func() bool {
+		return len(publisher.all()) == 2 && publishedAt(t, database, event.ID) != nil
+	})
+	follower := publisher.all()[1]
+	if follower.Topic != "notifications.agent.session-asker" || follower.InReplyTo != askID {
+		t.Fatalf("changed answer follower route = (%q, %q)", follower.Topic, follower.InReplyTo)
+	}
+	var forwarded struct {
+		Payload struct {
+			PreviousAnswer *model.AskAnswer `json:"previous_answer"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal([]byte(follower.Payload), &forwarded); err != nil {
+		t.Fatalf("decode changed answer envelope: %v", err)
+	}
+	if forwarded.Payload.PreviousAnswer == nil || forwarded.Payload.PreviousAnswer.Selected[0] != "Hold" {
+		t.Fatalf("changed answer payload = %#v", forwarded.Payload)
+	}
 }

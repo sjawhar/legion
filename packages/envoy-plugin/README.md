@@ -2,7 +2,7 @@
 
 OpenCode plugin for Legion's Envoy subsystem.
 
-This package exposes:
+This package exposes the Envoy tools:
 
 - `envoy_subscribe`
 - `envoy_unsubscribe`
@@ -12,42 +12,19 @@ This package exposes:
 - `envoy_role_set`
 - `envoy_whoami`
 - `envoy_sessions`
-- `dispatch_issue`
-- `dispatch_issue_update`
-- `dispatch_claim`
-- `dispatch_ask`
-- `dispatch_edit_ask`
-- `dispatch_resolve_ask`
-- `dispatch_resolve_comment`
-- `dispatch_follow`
-- `dispatch_comment`
-- `dispatch_suggest`
-- `dispatch_message`
-- `dispatch_doc_edit`
-- `dispatch_doc_read`
-- `dispatch_request_approval`
-- `dispatch_artifact`
-- `dispatch_read`
-- `dispatch_search`
-- `dispatch_issues`
-- `dispatch_architecture_sync`
-- `dispatch_open_asks`
-- `dispatch_whoami`
 
-The twenty-one native `dispatch_*` tools create and read Dispatch issues, asks, comments,
-documents, and artifacts, list a project's issues, sync a project's architecture model, or search all of them. They are present when `dispatch.enabled`
-resolves a server URL and bearer token from envoy.json (`~/.config/opencode/envoy.json`, merged
-with `<repo>/.opencode/envoy.json`) or the `DISPATCH_URL` and `DISPATCH_TOKEN` environment
-variables; `dispatch.enabled: true` without `dispatch.serverUrl` targets `http://localhost:8766`.
-Each issue-scoped call fills the target issue from the session working directory and stamps it with
-the OpenCode session id and title. No write subscribes the session to an issue or document: a
-session follows the asks it opens or replies to (their answers and replies reach it directly),
-`dispatch_follow` leaves or rejoins one, and every write result names the `envoy_subscribe` line
-for the whole owner.
-
-`dispatch_artifact` accepts exactly one upload source: a local `path`, or inline `content`.
-An architect can post a specification directly with
-`{ issue, name: "spec.md", content: "# Design" }`.
+Agents reach Dispatch through the `dispatch` command in their shell: `dispatch --help` lists the
+commands, `dispatch <command> --help` each one's flags, and the `dispatch` skill teaches them. The
+plugin's `shell.env` hook puts its `bin/` (the `dispatch` shim, which runs the bundled
+`dist/dispatch.js`) first on every shell command's `PATH`, sets `DISPATCH_HOST=opencode`, and sets
+`DISPATCH_SESSION_ID` and `DISPATCH_SESSION_TITLE` to the session running the command and the
+title the plugin tracks for it (each empty when OpenCode names no session or the session has no
+title yet, so a value inherited from a parent process never stands in). Dispatch is reachable when
+`dispatch.enabled` resolves a server URL and bearer token from envoy.json
+(`~/.config/opencode/envoy.json`, merged with `<repo>/.opencode/envoy.json`) or the `DISPATCH_URL`
+and `DISPATCH_TOKEN` environment variables; `dispatch.enabled: true` without `dispatch.serverUrl`
+targets `http://localhost:8766`. With Dispatch configured, every session also carries the
+`dispatch-first` skill as an instruction file.
 
 It also maintains the live session registry metadata needed for Envoy to discover OpenCode sessions and their API ports.
 

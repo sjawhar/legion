@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -65,24 +66,49 @@ type fakeGitHub struct {
 	missingBlobs map[string]bool
 	// treeReads counts tree reads, by "sha:dir".
 	treeReads []string
+	// graphQLResponse is served verbatim (as JSON) to every POST /graphql request.
+	graphQLResponse any
+	// lastGraphQLQuery/lastGraphQLVariables record the most recent GraphQL request's body, for a
+	// test to assert against.
+	lastGraphQLQuery     string
+	lastGraphQLVariables map[string]any
+	// actionsPermissions/pullRequestsPermissions map "owner/repo" to that permission, for
+	// DeliveryPermissions' tests; a repo absent from one of these maps gets "" (no permission).
+	actionsPermissions      map[string]string
+	pullRequestsPermissions map[string]string
+	// appInstallations, when non-nil, backs GET /app/installations, paginated at 100 per page; a
+	// nil value answers an empty list. appInstallationsCalls counts every call made, and
+	// appInstallationsRateLimitOnCall (1-indexed, 0 means never) makes that numbered call answer a
+	// 403 secondary rate limit instead of a real page.
+	appInstallations                []map[string]any
+	appInstallationsCalls           int
+	appInstallationsRateLimitOnCall int
 }
 
 func (f *fakeGitHub) handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /repos/{owner}/{repo}/installation", func(w http.ResponseWriter, r *http.Request) {
 		f.verifyAppJWT(r)
-		contents, ok := f.installations[r.PathValue("owner")+"/"+r.PathValue("repo")]
+		name := r.PathValue("owner") + "/" + r.PathValue("repo")
+		contents, ok := f.installations[name]
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
+		permissions := map[string]string{}
+		if contents != "" {
+			permissions["contents"] = contents
+		}
+		if actions := f.actionsPermissions[name]; actions != "" {
+			permissions["actions"] = actions
+		}
+		if pullRequests := f.pullRequestsPermissions[name]; pullRequests != "" {
+			permissions["pull_requests"] = pullRequests
+		}
 		response := map[string]any{
 			"id":          f.installationID,
 			"app_slug":    "dispatch-test",
-			"permissions": map[string]string{"contents": contents},
-		}
-		if contents == "" {
-			response["permissions"] = map[string]string{}
+			"permissions": permissions,
 		}
 		if err := json.NewEncoder(w).Encode(response); err != nil {
 			f.t.Errorf("encode installation: %v", err)
@@ -97,6 +123,32 @@ func (f *fakeGitHub) handler() http.Handler {
 			"expires_at": f.tokenExpiresAt.Format(time.RFC3339),
 		}); err != nil {
 			f.t.Errorf("encode token: %v", err)
+		}
+	})
+	mux.HandleFunc("GET /app/installations", func(w http.ResponseWriter, r *http.Request) {
+		f.verifyAppJWT(r)
+		f.appInstallationsCalls++
+		if f.appInstallationsRateLimitOnCall != 0 && f.appInstallationsCalls == f.appInstallationsRateLimitOnCall {
+			w.Header().Set("X-RateLimit-Remaining", "0")
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"message":"API rate limit exceeded"}`))
+			return
+		}
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if page < 1 {
+			page = 1
+		}
+		const perPage = 100
+		start, end := (page-1)*perPage, page*perPage
+		if start > len(f.appInstallations) {
+			start = len(f.appInstallations)
+		}
+		if end > len(f.appInstallations) {
+			end = len(f.appInstallations)
+		}
+		if err := json.NewEncoder(w).Encode(f.appInstallations[start:end]); err != nil {
+			f.t.Errorf("encode installations: %v", err)
 		}
 	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}", func(w http.ResponseWriter, r *http.Request) {
@@ -216,6 +268,24 @@ func (f *fakeGitHub) handler() http.Handler {
 			"content": wrapped.String(), "encoding": "base64", "size": len(content),
 		}); err != nil {
 			f.t.Errorf("encode blob: %v", err)
+		}
+	})
+	mux.HandleFunc("POST /graphql", func(w http.ResponseWriter, r *http.Request) {
+		requireInstallationToken(r)
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			f.t.Errorf("GraphQL request Content-Type = %q, want application/json", ct)
+		}
+		var decoded struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&decoded); err != nil {
+			f.t.Errorf("decode GraphQL request body: %v", err)
+		}
+		f.lastGraphQLQuery = decoded.Query
+		f.lastGraphQLVariables = decoded.Variables
+		if err := json.NewEncoder(w).Encode(f.graphQLResponse); err != nil {
+			f.t.Errorf("encode GraphQL response: %v", err)
 		}
 	})
 	return mux
@@ -345,6 +415,41 @@ func TestReadAcceptsAResponseAtTheLimit(t *testing.T) {
 	}
 }
 
+func TestGraphQLPostsQueryAndVariablesWithAnInstallationToken(t *testing.T) {
+	fake := &fakeGitHub{t: t}
+	fake.graphQLResponse = map[string]any{"data": map[string]any{"ok": true}}
+	client, token := newReaderFixture(t, fake)
+
+	body, status, _, err := client.GraphQL(context.Background(), token, "query($q: String!) { search(query: $q, type: ISSUE, first: 1) { issueCount } }", map[string]any{"q": "repo:acme/widgets is:pr"})
+	if err != nil {
+		t.Fatalf("GraphQL: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("GraphQL: status = %d, want 200", status)
+	}
+	var decoded struct {
+		Data struct {
+			OK bool `json:"ok"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &decoded); err != nil || !decoded.Data.OK {
+		t.Fatalf("GraphQL response = %s, want {\"data\":{\"ok\":true}}: %v", body, err)
+	}
+	if !strings.Contains(fake.lastGraphQLQuery, "search(query: $q") {
+		t.Errorf("fake received query = %q, want it to carry the search() call", fake.lastGraphQLQuery)
+	}
+	if fake.lastGraphQLVariables["q"] != "repo:acme/widgets is:pr" {
+		t.Errorf("fake received variables = %v, want q = %q", fake.lastGraphQLVariables, "repo:acme/widgets is:pr")
+	}
+}
+
+func TestGraphQLWithoutAnAppKeyIsErrNoAppKey(t *testing.T) {
+	var client *Client
+	if _, _, _, err := client.GraphQL(context.Background(), "token", "query { viewer { login } }", nil); !errors.Is(err, ErrNoAppKey) {
+		t.Fatalf("GraphQL on a nil client: err = %v, want ErrNoAppKey", err)
+	}
+}
+
 func TestCheckSourceVerifiesJWTAndResolvesInstallation(t *testing.T) {
 	fake := &fakeGitHub{
 		t:              t,
@@ -401,6 +506,44 @@ func TestContentsPermissionGatesTheCheck(t *testing.T) {
 			}
 			if err != nil {
 				t.Fatalf("contents %q: %v", test.contents, err)
+			}
+		})
+	}
+}
+
+func TestDeliveryPermissionsGatesActionsAndPullRequests(t *testing.T) {
+	for _, test := range []struct {
+		name                   string
+		actionsPermission      string
+		pullRequestsPermission string
+		wantErr                error
+	}{
+		{name: "both granted", actionsPermission: "read", pullRequestsPermission: "read"},
+		{name: "write satisfies read", actionsPermission: "write", pullRequestsPermission: "write"},
+		{name: "actions missing", actionsPermission: "", pullRequestsPermission: "read", wantErr: ErrNoActionsRead},
+		{name: "actions none", actionsPermission: "none", pullRequestsPermission: "read", wantErr: ErrNoActionsRead},
+		{name: "neither granted, actions checked first", actionsPermission: "", pullRequestsPermission: "", wantErr: ErrNoActionsRead},
+		{name: "pull requests missing", actionsPermission: "read", pullRequestsPermission: "", wantErr: ErrNoPullRequestsRead},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &fakeGitHub{
+				t:                       t,
+				installations:           map[string]string{"legion/delivery": "read"},
+				actionsPermissions:      map[string]string{"legion/delivery": test.actionsPermission},
+				pullRequestsPermissions: map[string]string{"legion/delivery": test.pullRequestsPermission},
+				installationID:          11,
+				tokenExpiresAt:          time.Now().Add(time.Hour),
+			}
+			client := newTestClient(t, fake)
+			_, err := client.DeliveryPermissions(context.Background(), "legion", "delivery")
+			if test.wantErr != nil {
+				if !errors.Is(err, test.wantErr) {
+					t.Fatalf("got %v, want %v", err, test.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 		})
 	}
@@ -620,5 +763,53 @@ func TestDirFilesEnforceMaxFileSize(t *testing.T) {
 	_, _, err = readDir(t, client, token)
 	if !errors.Is(err, ErrFileTooLarge) || !strings.Contains(err.Error(), ".dispatch/architecture/big.md") {
 		t.Fatalf("oversized listing: err=%v, want ErrFileTooLarge naming the file, refused before the blob read", err)
+	}
+}
+
+// TestListInstallationsPaginatesCachesAndDetectsARateLimit covers Qual's finding that
+// ListInstallations had no direct unit test: pagination (more than one page of 100), the
+// installationsCacheTTL cache (a second call within the TTL makes no further request), and a 403
+// secondary-rate-limit response surfacing as a *RateLimitError via CheckResponse.
+func TestListInstallationsPaginatesCachesAndDetectsARateLimit(t *testing.T) {
+	fake := &fakeGitHub{t: t, installationID: 1, tokenExpiresAt: time.Now().Add(time.Hour)}
+	for i := range 150 {
+		fake.appInstallations = append(fake.appInstallations, map[string]any{
+			"id": int64(i + 1), "app_slug": "dispatch-test",
+			"account":     map[string]any{"login": fmt.Sprintf("account-%d", i+1)},
+			"permissions": map[string]string{"contents": "read"},
+		})
+	}
+	client := newTestClient(t, fake)
+
+	installations, err := client.ListInstallations(context.Background())
+	if err != nil {
+		t.Fatalf("ListInstallations: %v", err)
+	}
+	if len(installations) != 150 {
+		t.Fatalf("len(installations) = %d, want 150 (pagination across 2 pages of 100)", len(installations))
+	}
+	if fake.appInstallationsCalls != 2 {
+		t.Fatalf("GET /app/installations calls = %d, want 2", fake.appInstallationsCalls)
+	}
+	if installations[0].AccountLogin != "account-1" || installations[149].AccountLogin != "account-150" {
+		t.Fatalf("installations[0].AccountLogin=%q installations[149].AccountLogin=%q, want account-1/account-150", installations[0].AccountLogin, installations[149].AccountLogin)
+	}
+
+	// A second call within installationsCacheTTL makes no further request.
+	if _, err := client.ListInstallations(context.Background()); err != nil {
+		t.Fatalf("ListInstallations (cached): %v", err)
+	}
+	if fake.appInstallationsCalls != 2 {
+		t.Fatalf("GET /app/installations calls after a cached call = %d, want still 2", fake.appInstallationsCalls)
+	}
+
+	// A fresh client (so the cache starts empty) hitting a rate limit on its first call surfaces
+	// a *RateLimitError.
+	rateLimited := &fakeGitHub{t: t, installationID: 1, tokenExpiresAt: time.Now().Add(time.Hour), appInstallationsRateLimitOnCall: 1}
+	rateLimitedClient := newTestClient(t, rateLimited)
+	_, err = rateLimitedClient.ListInstallations(context.Background())
+	var limited *RateLimitError
+	if !errors.As(err, &limited) {
+		t.Fatalf("ListInstallations with a 403 rate limit: err = %v, want a *RateLimitError", err)
 	}
 }

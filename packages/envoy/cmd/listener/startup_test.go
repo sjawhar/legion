@@ -12,13 +12,13 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/bus"
 	"github.com/sjawhar/envoy/internal/cistore"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/session"
 	"github.com/sjawhar/envoy/internal/store"
@@ -50,9 +50,9 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 	t.Cleanup(client.Close)
 	old, _ := durableHeldElsewhere(t, uri, "listener-"+machineID)
 
-	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), machineID,
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), machineID,
 		"ENVOY_WEBHOOKS=github", "ENVOY_GITHUB_WEBHOOK_SECRET="+secret, "ENVOY_REVIEWER_APP_ID=1")
-	listener.waitForOutput(t, "subscribe failed, retrying")
+	listener.WaitForOutput(t, "subscribe failed, retrying")
 
 	body := []byte(`{"ref":"refs/heads/main","after":"` + strings.Repeat("b", 40) + `","before":"` + strings.Repeat("a", 40) + `",` +
 		`"pusher":{"name":"example-author"},"sender":{"login":"example-author","type":"User"},` +
@@ -68,7 +68,7 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 	request.Header.Set("X-Hub-Signature-256", "sha256="+hex.EncodeToString(mac.Sum(nil)))
 	status, answer := do(t, request)
 	if status != http.StatusOK {
-		t.Fatalf("webhook while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.output.String())
+		t.Fatalf("webhook while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.Output.String())
 	}
 	message, err := client.JS().GetLastMsg(bus.Stream, "notifications.github.acme.bind-window.push.branch.main")
 	if err != nil {
@@ -83,12 +83,12 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 	}
 
 	if status, answer := callListener(t, listener.port, http.MethodGet, "/v1/sessions", ""); status != http.StatusOK {
-		t.Fatalf("GET /v1/sessions while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.output.String())
+		t.Fatalf("GET /v1/sessions while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.Output.String())
 	}
 	postListener(t, listener.port, "/v1/interests/subscribe", `{"session_id":"`+target+`","topics":[],"self_subscribed":true}`)
 	status, answer = callListener(t, listener.port, http.MethodPost, "/v1/messages/send", `{"target_session":"`+target+`","message":"sent while the durable is held"}`)
 	if status != http.StatusOK {
-		t.Fatalf("POST /v1/messages/send while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.output.String())
+		t.Fatalf("POST /v1/messages/send while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.Output.String())
 	}
 	var sent contracts.Envelope
 	if err := json.Unmarshal([]byte(answer), &sent); err != nil {
@@ -114,7 +114,7 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 	status, answer = callListener(t, listener.port, http.MethodPost, "/v1/messages/publish",
 		`{"topic":"`+contracts.RoleTopicPrefix+role+`","message":"role message while the durable is held","source_session":"ses_bind_window_sender"}`)
 	if status != http.StatusOK {
-		t.Fatalf("POST /v1/messages/publish to a role while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.output.String())
+		t.Fatalf("POST /v1/messages/publish to a role while another task holds the durable: status %d %q, want 200\n%s", status, answer, listener.Output.String())
 	}
 	select {
 	case forwarded := <-frames:
@@ -122,7 +122,7 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 			t.Fatalf("the holder received topic %q dedupe key %q, want the role forward of %s", forwarded.Topic, forwarded.DedupeKey, contracts.RoleTopicPrefix+role)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatalf("the role holder received no forward while another task holds the durable:\n%s", listener.output.String())
+		t.Fatalf("the role holder received no forward while another task holds the durable:\n%s", listener.Output.String())
 	}
 
 	// Negative control: the replacement is neither healthy nor unhealthy while it waits. Healthy
@@ -136,7 +136,7 @@ func TestTheV1APIIsServedWhileAnotherTaskHoldsTheDurable(t *testing.T) {
 	// The old task exits, which releases its binding.
 	old.Close()
 	listener.waitHealthy(t)
-	listener.waitForOutput(t, "durable bound")
+	listener.WaitForOutput(t, "durable bound")
 }
 
 // Both tasks of one machine id run during a rolling deploy, and the replacement's role lane opens
@@ -158,15 +158,15 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 		t.Fatalf("connect bus: %v", err)
 	}
 	t.Cleanup(client.Close)
-	binary := buildListener(t)
+	binary := cmdtest.Build(t, "envoy-listener")
 	uri := client.Conn.ConnectedUrl()
 	old := startListenerProcess(t, binary, uri, machineID)
 	old.waitHealthy(t)
 	replacement := startListenerProcess(t, binary, uri, machineID)
-	replacement.waitForOutput(t, "subscribe failed, retrying")
+	replacement.WaitForOutput(t, "subscribe failed, retrying")
 	t.Cleanup(func() {
 		if t.Failed() {
-			t.Logf("old task:\n%s\nreplacement:\n%s", old.output.String(), replacement.output.String())
+			t.Logf("old task:\n%s\nreplacement:\n%s", old.Output.String(), replacement.Output.String())
 		}
 	})
 
@@ -263,12 +263,10 @@ func TestARoleMessageReachesItsHolderOnceAcrossTwoTasksOfOneMachine(t *testing.T
 		t.Fatalf("the holder received %d frames for the repeated key, want 1 or 2", repeats)
 	}
 
-	if err := old.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("SIGTERM the old task: %v", err)
-	}
-	old.waitExit(t, "SIGTERM")
+	old.Terminate(t)
+	old.WaitExit(t, "SIGTERM")
 	replacement.waitHealthy(t)
-	replacement.waitForOutput(t, "durable bound")
+	replacement.WaitForOutput(t, "durable bound")
 }
 
 // receiveAsSession stands in for session sessionID's agent pump on its agent subject: it answers
@@ -311,7 +309,7 @@ func callListener(t *testing.T, port int, method, path, body string) (int, strin
 // accepts.
 func countRecords(p *listenerProcess, name string, match func(map[string]any) bool) int {
 	count := 0
-	for line := range strings.SplitSeq(p.output.String(), "\n") {
+	for line := range strings.SplitSeq(p.Output.String(), "\n") {
 		var record map[string]any
 		if json.Unmarshal([]byte(line), &record) != nil || record["msg"] != name {
 			continue
@@ -377,7 +375,7 @@ func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 		}
 	}
 
-	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "startup-legacy", githubWebhookEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), "startup-legacy", githubWebhookEnv...)
 	listener.waitHealthy(t)
 	request, err := http.NewRequest(http.MethodGet, "http://127.0.0.1:"+strconv.Itoa(listener.port)+"/v1/roles/reviewer", nil)
 	if err != nil {
@@ -385,7 +383,7 @@ func TestTheListenerStartsOverKeysAnEarlierListenerStored(t *testing.T) {
 	}
 	request.Header.Set("Authorization", "Bearer "+listenerTestToken)
 	if status, answer := do(t, request); status != http.StatusOK || !strings.Contains(answer, `"holder":"ses_live"`) {
-		t.Fatalf("GET /v1/roles/reviewer beside the earlier listener's keys: status %d %q, want 200 naming ses_live\n%s", status, answer, listener.output.String())
+		t.Fatalf("GET /v1/roles/reviewer beside the earlier listener's keys: status %d %q, want 200 naming ses_live\n%s", status, answer, listener.Output.String())
 	}
 }
 
@@ -440,7 +438,7 @@ func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
 	t.Cleanup(client.Close)
 	kv, key := seedDueCIRecord(t, client)
 
-	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "no-github-route")
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), "no-github-route")
 	listener.waitHealthy(t)
 	// The positive control, TestAListenerWithAGitHubRouteSettlesTheCIBucket, settles this seed
 	// within a few one-second ticks of turning healthy; five seconds covers them.
@@ -450,10 +448,10 @@ func TestAListenerWithoutAGitHubRouteLeavesTheCIBucketAlone(t *testing.T) {
 			consumers++
 		}
 		if consumers != 0 {
-			t.Fatalf("the CI bucket's stream has %d consumers under a listener with no GitHub route, want 0: it watches the bucket\n%s", consumers, listener.output.String())
+			t.Fatalf("the CI bucket's stream has %d consumers under a listener with no GitHub route, want 0: it watches the bucket\n%s", consumers, listener.Output.String())
 		}
 		if ciSettled(t, client) {
-			t.Fatalf("a listener with no GitHub route published a settlement on %s: it runs the CI summary loop\n%s", ciChecksSubject, listener.output.String())
+			t.Fatalf("a listener with no GitHub route published a settlement on %s: it runs the CI summary loop\n%s", ciChecksSubject, listener.Output.String())
 		}
 	}
 	entry, err := kv.Get(key)
@@ -481,12 +479,12 @@ func TestAListenerWithAGitHubRouteSettlesTheCIBucket(t *testing.T) {
 	t.Cleanup(client.Close)
 	kv, key := seedDueCIRecord(t, client)
 
-	listener := startListenerProcess(t, buildListener(t), client.Conn.ConnectedUrl(), "github-route", githubWebhookEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), client.Conn.ConnectedUrl(), "github-route", githubWebhookEnv...)
 	listener.waitHealthy(t)
 	healthy := time.Now()
 	for !ciSettled(t, client) {
 		if time.Since(healthy) > 15*time.Second {
-			t.Fatalf("a listener with the GitHub route published no settlement on %s within 15s of turning healthy\n%s", ciChecksSubject, listener.output.String())
+			t.Fatalf("a listener with the GitHub route published no settlement on %s within 15s of turning healthy\n%s", ciChecksSubject, listener.Output.String())
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -564,12 +562,12 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	registry.StopWatch()
 	client.Close()
 
-	listener := startListenerProcess(t, buildListener(t), uri, machineID, githubWebhookEnv...)
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, machineID, githubWebhookEnv...)
 	listener.waitHealthy(t)
 
 	restored := listenerJSONRecord(t, listener, "restored role claims")
 	if restored == nil {
-		t.Fatalf("internal/store's role-restore line is not a JSON record in the listener's output:\n%s", listener.output.String())
+		t.Fatalf("internal/store's role-restore line is not a JSON record in the listener's output:\n%s", listener.Output.String())
 	}
 	if restored["machine_id"] != machineID {
 		t.Fatalf("the role-restore record's machine_id = %v, want %q; a query keyed on it cannot find this restart", restored["machine_id"], machineID)
@@ -590,7 +588,7 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 			warmUp = listenerJSONRecord(t, listener, msg)
 		}
 		if warmUp == nil {
-			t.Fatalf("internal/kvwatch's %q line is not a JSON record in the listener's output:\n%s", msg, listener.output.String())
+			t.Fatalf("internal/kvwatch's %q line is not a JSON record in the listener's output:\n%s", msg, listener.Output.String())
 		}
 		if warmUp["machine_id"] != machineID {
 			t.Fatalf("the %q record's machine_id = %v, want %q", msg, warmUp["machine_id"], machineID)
@@ -604,12 +602,12 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 	}
 	textLine := regexp.MustCompile(`(?m)^\d{4}/\d{2}/\d{2} \d{2}:\d{2}:\d{2} .*envoy nats disconnected`)
 	deadline := time.Now().Add(30 * time.Second)
-	for !textLine.MatchString(listener.output.String()) {
+	for !textLine.MatchString(listener.Output.String()) {
 		if time.Now().After(deadline) {
 			if listenerJSONRecord(t, listener, "envoy nats disconnected") != nil {
-				t.Fatalf("internal/bus's disconnect line is a JSON record: the default logger was replaced, and the deployed text metric filters for publish failures, webhook refusals and dropped stream subjects no longer match:\n%s", listener.output.String())
+				t.Fatalf("internal/bus's disconnect line is a JSON record: the default logger was replaced, and the deployed text metric filters for publish failures, webhook refusals and dropped stream subjects no longer match:\n%s", listener.Output.String())
 			}
-			t.Fatalf("no disconnect line in Go's text format after the server stopped:\n%s", listener.output.String())
+			t.Fatalf("no disconnect line in Go's text format after the server stopped:\n%s", listener.Output.String())
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -619,7 +617,7 @@ func TestListenerLogsFromOtherPackagesKeepTheirHandlers(t *testing.T) {
 // msg is name, or nil when no line does.
 func listenerJSONRecord(t *testing.T, p *listenerProcess, name string) map[string]any {
 	t.Helper()
-	for line := range strings.SplitSeq(p.output.String(), "\n") {
+	for line := range strings.SplitSeq(p.Output.String(), "\n") {
 		var record map[string]any
 		if json.Unmarshal([]byte(line), &record) != nil {
 			continue

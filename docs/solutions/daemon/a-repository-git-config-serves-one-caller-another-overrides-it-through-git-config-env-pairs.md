@@ -10,7 +10,7 @@ tags:
   - kubernetes-runtime
   - git-version
 date: 2026-09-15
-status: active
+status: superseded by LEGION-631 — the override rule stands, but the clone's persisted helper is now `!gh auth git-credential`, answering from the pane's GH_CONFIG_DIR, and the pane's git redeems no grant
 module: packages/workspace, packages/daemon/src/cli/workspace-init.ts
 related_issues:
   - "LEGION-178"

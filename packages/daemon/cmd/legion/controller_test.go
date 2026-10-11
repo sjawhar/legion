@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,11 +22,15 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
+	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 const (
@@ -100,11 +105,35 @@ func newControllerDaemon(t *testing.T) *controllerDaemon {
 
 // newControllerDaemonGated is newControllerDaemon for a project whose `gates.design` is gate.
 func newControllerDaemonGated(t *testing.T, gate config.DesignGate) *controllerDaemon {
+	return newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: gate})
+}
+
+// newControllerDaemonWithTokens is newControllerDaemon whose GitHub credential route mints a
+// review App token from tokens, for the tests of the controller's GitHub credential fetch and
+// refresh loop.
+func newControllerDaemonWithTokens(t *testing.T, tokens appauth.Tokens) *controllerDaemon {
+	return newControllerDaemonWithOptions(t, controllerDaemonOptions{gate: config.DesignGateRootIssues, tokens: tokens, githubOwner: "acme"})
+}
+
+// controllerDaemonOptions configures newControllerDaemonWithOptions: the project's design gate,
+// and, for the tests of the controller's GitHub credential route, a Tokens fake and the
+// repository owner its mints need.
+type controllerDaemonOptions struct {
+	gate        config.DesignGate
+	tokens      appauth.Tokens
+	githubOwner string
+}
+
+// newControllerDaemonWithOptions is the daemon's HTTP surface as `legion controller start` and
+// `legion status` reach it: the real api.NewServer over an in-memory controller record, grants,
+// and Dispatch, on a loopback port, with every request that reached it recorded.
+func newControllerDaemonWithOptions(t *testing.T, opts controllerDaemonOptions) *controllerDaemon {
 	t.Helper()
 	d := &controllerDaemon{t: t, controller: &memoryController{}, dispatch: &statusWrites{}}
 	handler := api.NewServer("127.0.0.1", 0, api.Options{
 		Project: controllerProject, OperatorToken: controllerOperatorToken, Controller: d.controller,
-		DesignGate: gate, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		DesignGate: opts.gate, Dispatch: d.dispatch, Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Tokens: opts.tokens, GitHubOwner: opts.githubOwner,
 	}).Handler
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
@@ -158,6 +187,11 @@ type controllerOptions struct {
 	tokenContents string
 	omitToken     bool
 	exitCode      int
+	// waitForFile, when set, has the recording Oh My Pi wait until that file exists before it
+	// records argv, env, and cwd and exits with exitCode, so a test of the refresh loop keeps
+	// Oh My Pi running exactly until it has observed what it needs, whatever the machine's load,
+	// and then releases it by creating the file.
+	waitForFile string
 }
 
 func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOptions) *operatorMachine {
@@ -203,10 +237,12 @@ func newControllerStart(t *testing.T, d *controllerDaemon, opts controllerOption
 	c.write("controller.yaml", strings.Join(lines, "\n")+"\n", 0o600)
 
 	// The Oh My Pi LEGION_OMP_PATH names. As the load probe (`models --extension <probe>`) it
-	// records its environment and working directory and reports the plugin loaded from the file
-	// `loaded-from` names, or not loaded when there is none, as the probe extension does; as the
-	// controller it records its argv, environment, and working directory, and exits with the code
-	// the test asked for.
+	// records its environment and working directory and reports, as the probe extension does,
+	// pi-legion loaded from the file `loaded-from` names, or not loaded when there is none;
+	// pi-envoy publishing the interface `envoy-interface` holds (1 when absent; `none` for no
+	// pi-envoy) from the file `envoy-loaded-from` names; and the pre-split package loaded from the
+	// file `legacy-loaded-from` names, when there is one. As the controller it records its argv,
+	// environment, and working directory, and exits with the code the test asked for.
 	omp := filepath.Join(record, "omp")
 	script := fmt.Sprintf(`#!/bin/sh
 if [ "$1" = models ]; then
@@ -214,18 +250,27 @@ if [ "$1" = models ]; then
   pwd -P >%[1]s/probe-cwd
   readlink /proc/self/fd/0 >%[1]s/probe-stdin
   if [ -f %[1]s/loaded-from ]; then
-    printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=%%s\n' "$(cat %[1]s/loaded-from)" >&2
+    printf 'LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=%%s\nLEGION_PLUGIN_ENVOY_INTERFACE=1\n' "$(cat %[1]s/loaded-from)" >&2
   else
     echo LEGION_PLUGIN_LOADED=no >&2
   fi
+  interface=$(cat %[1]s/envoy-interface 2>/dev/null || echo 1)
+  if [ "$interface" = none ]; then
+    echo LEGION_ENVOY_INTERFACE=none >&2
+  else
+    printf 'LEGION_ENVOY_INTERFACE=%%s\nLEGION_ENVOY_LOADED_FROM=%%s\n' "$interface" "$(cat %[1]s/envoy-loaded-from)" >&2
+  fi
+  [ ! -f %[1]s/legacy-loaded-from ] || printf 'LEGION_LEGACY_PLUGIN_LOADED_FROM=%%s\n' "$(cat %[1]s/legacy-loaded-from)" >&2
   exit 0
 fi
+[ -f "$GH_CONFIG_DIR/hosts.yml" ] && cp "$GH_CONFIG_DIR/hosts.yml" %[1]s/hosts-at-start
+%[3]s
 for a in "$@"; do printf '%%s\0' "$a"; done >%[1]s/argv
 readlink /proc/self/fd/0 >%[1]s/stdin
 env -0 >%[1]s/env
 pwd >%[1]s/cwd
 exit %[2]d
-`, record, opts.exitCode)
+`, record, opts.exitCode, waitForFileScript(opts.waitForFile))
 	if err := os.WriteFile(omp, []byte(script), 0o700); err != nil {
 		t.Fatalf("write the recording omp: %v", err)
 	}
@@ -235,32 +280,68 @@ exit %[2]d
 	t.Setenv("OMP_PROFILE", "")
 	t.Setenv("PI_CONFIG_DIR", "")
 	t.Setenv("PI_CODING_AGENT_DIR", "")
-	t.Setenv("PATH", "/usr/bin:/bin:/opt/x/worker-bin")
+	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("LEGION_OMP_PATH", omp)
 	c.installPlugin(api.DaemonAPIVersion)
 	return c
 }
 
-// installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion-envoy manifest
-// declaring contract, and has the recording Oh My Pi load it.
+// waitForFileScript is the recording Oh My Pi's wait for file: a poll every tenth of a second,
+// bounded at two minutes so a test that never releases it still ends. Empty when file is empty,
+// so a test with no loop to wait for records and exits at once.
+func waitForFileScript(file string) string {
+	if file == "" {
+		return ""
+	}
+	return fmt.Sprintf(`i=0
+while [ "$i" -lt 1200 ] && [ ! -e %q ]; do
+  i=$((i + 1))
+  sleep 0.1
+done
+`, file)
+}
+
+// installPlugin installs, in the operator's default Oh My Pi profile, a pi-legion manifest
+// declaring contract and a pi-envoy manifest beside it, and has the recording Oh My Pi load both.
 func (c *operatorMachine) installPlugin(contract int) {
 	c.t.Helper()
 	c.loads(c.installPluginAt(filepath.Join(c.home, ".omp"), contract))
 }
 
-// loads has the recording Oh My Pi report the plugin loaded from the package directory dir, as
-// the probe extension renders it: a file URL of its dist/legion.js with a cache-busting query.
+// loads has the recording Oh My Pi report pi-legion loaded from the package directory dir, and
+// pi-envoy from the pi-envoy package beside it, as the probe extension renders each: a file URL of
+// its dist/legion.js or dist/envoy.js with a cache-busting query.
 func (c *operatorMachine) loads(dir string) {
 	c.t.Helper()
-	if err := os.WriteFile(filepath.Join(c.record, "loaded-from"), []byte("file://"+filepath.Join(dir, "dist", "legion.js")+"?mtime=1"), 0o600); err != nil {
+	c.tells("loaded-from", "file://"+filepath.Join(dir, "dist", "legion.js")+"?mtime=1")
+	c.tells("envoy-loaded-from", "file://"+filepath.Join(filepath.Dir(dir), "pi-envoy", "dist", "envoy.js")+"?mtime=1")
+}
+
+// loadsNothing has the recording Oh My Pi report pi-legion not loaded.
+func (c *operatorMachine) loadsNothing() {
+	c.t.Helper()
+	if err := os.Remove(filepath.Join(c.record, "loaded-from")); err != nil && !os.IsNotExist(err) {
 		c.t.Fatal(err)
 	}
 }
 
-// loadsNothing has the recording Oh My Pi report the plugin not loaded.
-func (c *operatorMachine) loadsNothing() {
+// loadsEnvoyAt has the recording Oh My Pi report pi-envoy publishing plugin interface version;
+// "none" is no pi-envoy loaded.
+func (c *operatorMachine) loadsEnvoyAt(version string) {
 	c.t.Helper()
-	if err := os.Remove(filepath.Join(c.record, "loaded-from")); err != nil && !os.IsNotExist(err) {
+	c.tells("envoy-interface", version)
+}
+
+// loadsLegacyFrom has the recording Oh My Pi report the pre-split package loaded from from.
+func (c *operatorMachine) loadsLegacyFrom(from string) {
+	c.t.Helper()
+	c.tells("legacy-loaded-from", from)
+}
+
+// tells writes what the recording Oh My Pi reads under name.
+func (c *operatorMachine) tells(name, value string) {
+	c.t.Helper()
+	if err := os.WriteFile(filepath.Join(c.record, name), []byte(value), 0o600); err != nil {
 		c.t.Fatal(err)
 	}
 }
@@ -271,19 +352,23 @@ func (c *operatorMachine) probeEnv() map[string]string {
 	return readEnv(c.t, filepath.Join(c.record, "probe-env"))
 }
 
-// installPluginAt installs a pi-legion-envoy manifest declaring contract under the Oh My Pi data
-// root root, and answers its package directory.
+// installPluginAt installs a pi-legion manifest declaring contract, and a pi-envoy manifest, under
+// the Oh My Pi data root root, and answers pi-legion's package directory.
 func (c *operatorMachine) installPluginAt(root string, contract int) string {
 	c.t.Helper()
-	dir := filepath.Join(root, "plugins", "node_modules", "@sjawhar", "pi-legion-envoy")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		c.t.Fatal(err)
+	plugins := filepath.Join(root, "plugins", "node_modules", "@sjawhar")
+	for name, manifest := range map[string]string{
+		"pi-legion": fmt.Sprintf(`{"name":"@sjawhar/pi-legion","version":"9.9.9","legion":{"daemonApiVersion":%d}}`, contract),
+		"pi-envoy":  `{"name":"@sjawhar/pi-envoy","version":"9.9.9"}`,
+	} {
+		if err := os.MkdirAll(filepath.Join(plugins, name), 0o700); err != nil {
+			c.t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(plugins, name, "package.json"), []byte(manifest), 0o600); err != nil {
+			c.t.Fatal(err)
+		}
 	}
-	manifest := fmt.Sprintf(`{"name":"@sjawhar/pi-legion-envoy","version":"9.9.9","legion":{"daemonApiVersion":%d}}`, contract)
-	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(manifest), 0o600); err != nil {
-		c.t.Fatal(err)
-	}
-	return dir
+	return filepath.Join(plugins, "pi-legion")
 }
 
 func (c *operatorMachine) write(name, contents string, mode os.FileMode) {
@@ -390,8 +475,8 @@ func TestControllerStartFetchesTheSecretWithTheOperatorBearer(t *testing.T) {
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	requests := d.requests()
-	if len(requests) != 1 {
-		t.Fatalf("%d requests reached the daemon, want exactly the secret request", len(requests))
+	if len(requests) != 2 {
+		t.Fatalf("%d requests reached the daemon, want the secret request and the github-credential fetch", len(requests))
 	}
 	got := requests[0]
 	if got.method != http.MethodPost || got.path != "/legion/v1/controller/secret" ||
@@ -424,9 +509,6 @@ func TestControllerStartWritesTheSecretAndTheControllersFilesUnderTheStateDirect
 	if got := modeOf(t, filepath.Join(c.defaultDir, "secrets")); got != 0o700 {
 		t.Errorf("secrets directory mode %o, want 0700", got)
 	}
-	if got := modeOf(t, filepath.Join(c.defaultDir, "worker-bin", "gh")); got != 0o700 {
-		t.Errorf("gh shim mode %o, want 0700", got)
-	}
 	if got := modeOf(t, filepath.Join(c.defaultDir, "bin", "legion")); got&0o111 == 0 {
 		t.Errorf("legion launcher mode %o, want executable", got)
 	}
@@ -442,9 +524,9 @@ func TestControllerStartWritesTheSecretAndTheControllersFilesUnderTheStateDirect
 
 // Oh My Pi runs through the launch prefix, interactive (no --mode rpc, no --resume), with one
 // --append-system-prompt holding the controller prompt, the daemon's design gate policy, and the
-// deployment instructions, and the start message as its first prompt, so the controller's first
-// turn runs with nothing typed; under the operator's own environment plus exactly the shared
-// controller environment — the secrets as file pointers, never values.
+// deployment instructions; under the operator's own environment plus exactly the shared
+// controller environment — the secrets as file pointers, never values — including
+// LEGION_CONTROLLER_START_MESSAGE, which the extension sends as the session's first turn.
 func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{})
@@ -458,19 +540,24 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 
-	controllerPrompt, err := os.ReadFile(filepath.Join(c.defaultDir, "prompts", "shared", "controller-root.md"))
-	if err != nil {
-		t.Fatalf("read the controller prompt snapshot: %v", err)
+	// The controller's role part, then the daemon's part for a controller the operator started.
+	var controllerPrompt []byte
+	for _, part := range []string{filepath.Join("shared", "controller-root.md"), filepath.Join("go", "controller-interactive.md")} {
+		body, err := os.ReadFile(filepath.Join(c.defaultDir, "prompts", part))
+		if err != nil {
+			t.Fatalf("read the controller prompt snapshot: %v", err)
+		}
+		controllerPrompt = append(controllerPrompt, body...)
 	}
 	instructions, err := os.ReadFile(filepath.Join(c.defaultDir, "deployment-instructions.md"))
 	if err != nil {
 		t.Fatalf("read the deployment instructions: %v", err)
 	}
-	// `$(cat …)` drops each file's trailing newlines, as a shell does.
+	// `$(cat …)` drops each file's trailing newlines, as a shell does. The start message travels
+	// as LEGION_CONTROLLER_START_MESSAGE, not a CLI word: argv carries only the system prompt.
 	wantArgv := []string{"--append-system-prompt",
 		strings.TrimRight(string(controllerPrompt), "\n") + "\n\nDesign gate policy: `gates.design: root-issues`.\n\n" +
-			strings.TrimRight(string(instructions), "\n"),
-		controllerStartMessage}
+			strings.TrimRight(string(instructions), "\n")}
 	if got := c.argv(); !slices.Equal(got, wantArgv) {
 		t.Fatalf("Oh My Pi's argv = %q\nwant %q", got, wantArgv)
 	}
@@ -487,28 +574,28 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		delete(added, shells)
 	}
 	secrets := filepath.Join(c.defaultDir, "secrets")
-	workerBin, bin := filepath.Join(c.defaultDir, "worker-bin"), filepath.Join(c.defaultDir, "bin")
+	bin := filepath.Join(c.defaultDir, "bin")
 	want := map[string]string{
-		"LEGION_TEST_PREFIX_RAN":        "1",
-		"LEGION_CONTROLLER":             "1",
-		"LEGION_ROLE":                   "controller",
-		"LEGION_DAEMON_URL":             d.url,
-		"LEGION_PROJECT":                "demo",
-		"LEGION_STATE_DIR":              c.defaultDir,
-		"ENVOY_NATS_URL":                "nats://a:4222,nats://b:4222",
-		"ENVOY_URL":                     "http://envoy.test:9020",
-		"PATH":                          workerBin + ":" + bin + ":/usr/bin:/bin",
-		"PI_SHELL_PREFIX":               shellprefix.For(workerBin, bin),
-		"GH_CONFIG_DIR":                 filepath.Join(c.defaultDir, "gh"),
-		"GH_TOKEN":                      "",
-		"GITHUB_TOKEN":                  "",
-		"GH_HOST":                       "",
-		"LEGION_GRANT_FILE":             filepath.Join(secrets, "legion-demo-controller-grant"),
-		"DISPATCH_URL":                  "https://dispatch.test",
-		"DISPATCH_TOKEN_FILE":           filepath.Join(c.dir, "dispatch-token"),
-		"LEGION_CONTROLLER_SECRET_FILE": filepath.Join(secrets, "legion-demo-controller"),
-		"ENVOY_TOKEN_FILE":              filepath.Join(c.dir, "envoy-token"),
-		"NATS_NKEY_SEED_FILE":           filepath.Join(c.dir, "nats-seed"),
+		"LEGION_TEST_PREFIX_RAN":          "1",
+		"LEGION_CONTROLLER":               "1",
+		"LEGION_ROLE":                     "controller",
+		"LEGION_DAEMON_URL":               d.url,
+		"LEGION_PROJECT":                  "demo",
+		"LEGION_STATE_DIR":                c.defaultDir,
+		"ENVOY_NATS_URL":                  "nats://a:4222,nats://b:4222",
+		"ENVOY_URL":                       "http://envoy.test:9020",
+		"PATH":                            bin + ":/usr/bin:/bin",
+		"PI_SHELL_PREFIX":                 shellprefix.For(bin),
+		"GH_CONFIG_DIR":                   filepath.Join(c.defaultDir, "gh"),
+		"GH_TOKEN":                        "",
+		"GITHUB_TOKEN":                    "",
+		"GH_HOST":                         "",
+		"LEGION_CONTROLLER_START_MESSAGE": daemon.ControllerStartMessage,
+		"DISPATCH_URL":                    "https://dispatch.test",
+		"DISPATCH_TOKEN_FILE":             filepath.Join(c.dir, "dispatch-token"),
+		"LEGION_CONTROLLER_SECRET_FILE":   filepath.Join(secrets, "legion-demo-controller"),
+		"ENVOY_TOKEN_FILE":                filepath.Join(c.dir, "envoy-token"),
+		"NATS_NKEY_SEED_FILE":             filepath.Join(c.dir, "nats-seed"),
 	}
 	for name := range want {
 		if old, ok := baseline[name]; ok && old == want[name] {
@@ -538,13 +625,14 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 			t.Errorf("%s is set; only its _FILE pointer may be", name)
 		}
 	}
-	// Two lines: the probe, named before it runs so a prompt or a wait can be tied to it, then the
-	// launch.
+	// Three lines: the probe, named before it runs so a prompt or a wait can be tied to it; the
+	// no-App line, since this default daemon has no Tokens; then the launch.
 	wantProbe := fmt.Sprintf("[legion] checking the controller's Oh My Pi (env 'LEGION_TEST_PREFIX_RAN=1' %s) in %s before the daemon mints a capability\n",
 		filepath.Join(c.record, "omp"), filepath.Join(c.defaultDir, "controller"))
+	wantNoApp := "[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody\n"
 	wantLog := fmt.Sprintf("[legion] starting the controller for demo against %s; state in %s\n", d.url, c.defaultDir)
-	if errb != wantProbe+wantLog {
-		t.Errorf("stderr = %q, want %q", errb, wantProbe+wantLog)
+	if errb != wantProbe+wantNoApp+wantLog {
+		t.Errorf("stderr = %q, want %q", errb, wantProbe+wantNoApp+wantLog)
 	}
 }
 
@@ -557,7 +645,7 @@ func TestControllerStartTellsTheControllerTheDaemonsDesignGatePolicy(t *testing.
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
 	argv := c.argv()
-	if len(argv) != 3 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`.\n\n") {
+	if len(argv) != 2 || !strings.Contains(argv[1], "\n\nDesign gate policy: `gates.design: off`.\n\n") {
 		t.Fatalf("Oh My Pi's argv = %q; want the system prompt to carry the off policy line", argv)
 	}
 }
@@ -619,8 +707,8 @@ func TestControllerStartDaemonURLOverridesTheFile(t *testing.T) {
 	if code, _, errb := c.run("--daemon-url", d.url+"/"); code != 0 {
 		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
 	}
-	if n := len(d.requests()); n != 1 {
-		t.Fatalf("%d requests reached the overriding daemon, want 1", n)
+	if n := len(d.requests()); n != 2 {
+		t.Fatalf("%d requests reached the overriding daemon, want the secret request and the github-credential fetch", n)
 	}
 	if got := c.env()["LEGION_DAEMON_URL"]; got != d.url {
 		t.Fatalf("LEGION_DAEMON_URL = %q, want %q", got, d.url)
@@ -787,25 +875,47 @@ func TestControllerStartRefusesLocallyBeforeTheRequest(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{})
 		c.installPlugin(api.DaemonAPIVersion - 1)
-		manifest := filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion-envoy", "package.json")
-		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
+		manifest := filepath.Join(c.home, ".omp", "plugins", "node_modules", "@sjawhar", "pi-legion", "package.json")
+		c.refused(fmt.Sprintf("pi-legion at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
 			manifest, api.DaemonAPIVersion-1, api.DaemonAPIVersion))
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
 	})
-	t.Run("an Oh My Pi that does not load the plugin", func(t *testing.T) {
-		d := newControllerDaemon(t)
-		c := newControllerStart(t, d, controllerOptions{})
-		c.loadsNothing()
-		code, _, errb := c.run()
-		for _, want := range []string{"did not load pi-legion-envoy (not installed, disabled, or unregistered)", "plugin list` under the controller's environment"} {
-			if code != 1 || !strings.Contains(errb, want) {
-				t.Fatalf("legion controller start = %d, stderr %q; want 1 and %q", code, errb, want)
+	// Each refusal of the load probe says what Oh My Pi did, launched as the controller launches
+	// it, and the remedy under the controller's environment; none names a profile, which only Oh
+	// My Pi resolves.
+	for _, testCase := range []struct {
+		name  string
+		loads func(c *operatorMachine)
+		want  []string
+	}{
+		{"an Oh My Pi that does not load the plugin", (*operatorMachine).loadsNothing,
+			[]string{"did not load pi-legion (not installed, disabled, or unregistered). Install the @sjawhar/pi-legion release built from this daemon's commit into the Oh My Pi the controller runs", "plugin list` under the controller's environment"}},
+		{"an Oh My Pi that loads the plugin but no pi-envoy", func(c *operatorMachine) { c.loadsEnvoyAt("none") },
+			[]string{"loaded pi-legion but no pi-envoy. Install the @sjawhar/pi-envoy release built from this daemon's commit into the Oh My Pi the controller runs, and check it with `cd ", "plugin list`"}},
+		{"an Oh My Pi whose pi-envoy publishes another interface", func(c *operatorMachine) { c.loadsEnvoyAt("2") },
+			[]string{"loaded pi-envoy from file://" + "@HOME/.omp/plugins/node_modules/@sjawhar/pi-envoy/dist/envoy.js?mtime=1, which publishes plugin interface 2, and a pi-legion that speaks 1. Install both releases built from this daemon's commit into the Oh My Pi the controller runs, and check them with `cd ", "plugin list`"}},
+		{"an Oh My Pi that still loads the pre-split package", func(c *operatorMachine) { c.loadsLegacyFrom("file:///plugins/legacy/dist/legion.js") },
+			[]string{"loaded @sjawhar/pi-legion-envoy from file:///plugins/legacy/dist/legion.js beside pi-legion. Run `cd ", "plugin uninstall @sjawhar/pi-legion-envoy` under the controller's environment"}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			d := newControllerDaemon(t)
+			c := newControllerStart(t, d, controllerOptions{})
+			testCase.loads(c)
+			code, _, errb := c.run()
+			for _, want := range testCase.want {
+				want = strings.ReplaceAll(want, "@HOME", c.home)
+				if code != 1 || !strings.Contains(errb, want) {
+					t.Fatalf("legion controller start = %d, stderr %q; want 1 and %q", code, errb, want)
+				}
 			}
-		}
-		c.wantNoSecretRequest()
-		c.wantNothingLaunchedOrWritten(c.defaultDir)
-	})
+			if strings.Contains(errb, "OMP profile") {
+				t.Errorf("legion controller start's refusal names a profile, which only Oh My Pi resolves: %q", errb)
+			}
+			c.wantNoSecretRequest()
+			c.wantNothingLaunchedOrWritten(c.defaultDir)
+		})
+	}
 	t.Run("an unknown key, naming it and the example", func(t *testing.T) {
 		d := newControllerDaemon(t)
 		c := newControllerStart(t, d, controllerOptions{lines: []string{
@@ -836,7 +946,7 @@ func TestControllerStartHoldsTheCopyOhMyPiLoadsToTheContract(t *testing.T) {
 		c := newControllerStart(t, d, controllerOptions{})
 		loaded := c.installPluginAt(filepath.Join(c.home, "project", ".omp"), api.DaemonAPIVersion-1)
 		c.loads(loaded)
-		c.refused(fmt.Sprintf("pi-legion-envoy at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
+		c.refused(fmt.Sprintf("pi-legion at %s (package 9.9.9) speaks daemon API contract %d; this daemon requires %d.",
 			filepath.Join(loaded, "package.json"), api.DaemonAPIVersion-1, api.DaemonAPIVersion))
 		c.wantNoSecretRequest()
 		c.wantNothingLaunchedOrWritten(c.defaultDir)
@@ -926,8 +1036,28 @@ func TestControllerStartDropsTheDaemonSeedFromTheControllersEnvironment(t *testi
 	}
 }
 
+// A start from inside a Legion pane inherits that pane's boot token, by value or by pointer. The
+// plugin takes a controller session carrying one for a controller the daemon launched (`controller:
+// daemon`), which registers with it, so neither reaches the operator's controller or its load probe.
+func TestControllerStartDropsAnInheritedBootToken(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	t.Setenv("LEGION_BOOT_TOKEN", "a-pane-boot-token")
+	t.Setenv("LEGION_BOOT_TOKEN_FILE", filepath.Join(c.dir, "boot-token"))
+	if code, _, errb := c.run(); code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	for kind, env := range map[string]map[string]string{"load probe": c.probeEnv(), "controller": c.env()} {
+		for _, name := range []string{"LEGION_BOOT_TOKEN", "LEGION_BOOT_TOKEN_FILE"} {
+			if value, set := env[name]; set {
+				t.Errorf("the %s's environment carries %s=%q", kind, name, value)
+			}
+		}
+	}
+}
+
 // `project: sjawhar/Legion`, copied from the daemon's legion.yaml, names the daemon's own token in
-// the state directory, the secret file, the grant file, and LEGION_PROJECT.
+// the state directory, the secret file and LEGION_PROJECT.
 func TestControllerStartSanitizesTheProjectAsTheDaemonDoes(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{lines: []string{
@@ -943,7 +1073,6 @@ func TestControllerStartSanitizesTheProjectAsTheDaemonDoes(t *testing.T) {
 		"LEGION_PROJECT":                "sjawharlegion",
 		"LEGION_STATE_DIR":              stateDir,
 		"LEGION_CONTROLLER_SECRET_FILE": filepath.Join(stateDir, "secrets", "legion-sjawharlegion-controller"),
-		"LEGION_GRANT_FILE":             filepath.Join(stateDir, "secrets", "legion-sjawharlegion-controller-grant"),
 	} {
 		if env[name] != want {
 			t.Errorf("%s = %q, want %q", name, env[name], want)
@@ -997,5 +1126,290 @@ func TestControllerStartUsage(t *testing.T) {
 		if code := run(context.Background(), tc.argv, &out, &errb); code != 2 || !strings.Contains(errb.String(), tc.want) {
 			t.Errorf("%v = %d, stderr %q; want exit 2 and %q", tc.argv, code, errb.String(), tc.want)
 		}
+	}
+}
+
+// controllerCredentialTokens is a Tokens fake for the controller's GitHub credential route: its
+// token is read and set under a lock, so a test can flip it between the refresh loop's ticks, or
+// have every mint fail, for the 502 case.
+type controllerCredentialTokens struct {
+	mu    sync.Mutex
+	token string
+	err   error
+}
+
+func newControllerCredentialTokens(token string) *controllerCredentialTokens {
+	return &controllerCredentialTokens{token: token}
+}
+
+func (c *controllerCredentialTokens) set(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.token = token
+}
+
+func (c *controllerCredentialTokens) failWith(err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.err = err
+}
+
+func (c *controllerCredentialTokens) Token(context.Context, appauth.AppRole, string) (appauth.Lease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.err != nil {
+		return appauth.Lease{}, c.err
+	}
+	return appauth.Lease{Token: c.token, ExpiresAt: time.Now().Add(time.Hour)}, nil
+}
+
+// requestsTo answers how many of d's recorded requests were to path.
+func requestsTo(d *controllerDaemon, path string) int {
+	n := 0
+	for _, r := range d.requests() {
+		if r.path == path {
+			n++
+		}
+	}
+	return n
+}
+
+// The controller's gh directory holds the review App's token as the daemon's credential route
+// rendered it, written before Oh My Pi starts, under GH_CONFIG_DIR, with one request made before
+// the loop.
+func TestControllerStartWritesTheControllersGitHubCredentialUnderGh(t *testing.T) {
+	tokens := newControllerCredentialTokens("ghs_first")
+	d := newControllerDaemonWithTokens(t, tokens)
+	c := newControllerStart(t, d, controllerOptions{})
+	code, _, errb := c.run()
+	if code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	ghDir := filepath.Join(c.defaultDir, "gh")
+	hosts, err := os.ReadFile(filepath.Join(ghDir, "hosts.yml"))
+	if err != nil || string(hosts) != ghconfig.Hosts("ghs_first") {
+		t.Fatalf("hosts.yml = %q, %v, want %q", hosts, err, ghconfig.Hosts("ghs_first"))
+	}
+	cfg, err := os.ReadFile(filepath.Join(ghDir, "config.yml"))
+	if err != nil || string(cfg) != ghconfig.Config {
+		t.Fatalf("config.yml = %q, %v, want %q", cfg, err, ghconfig.Config)
+	}
+	if got := c.env()["GH_CONFIG_DIR"]; got != ghDir {
+		t.Errorf("GH_CONFIG_DIR = %q, want %s", got, ghDir)
+	}
+	startHosts, err := os.ReadFile(filepath.Join(c.record, "hosts-at-start"))
+	if err != nil || string(startHosts) != ghconfig.Hosts("ghs_first") {
+		t.Fatalf("hosts.yml at Oh My Pi's start = %q, %v; want it to already hold the token", startHosts, err)
+	}
+	if n := requestsTo(d, "/legion/v1/controller/github-credential"); n != 1 {
+		t.Fatalf("%d github-credential requests, want 1", n)
+	}
+	secret, err := os.ReadFile(filepath.Join(c.defaultDir, "secrets", "legion-demo-controller"))
+	if err != nil {
+		t.Fatalf("read the secret file: %v", err)
+	}
+	wantBody, err := json.Marshal(map[string]string{"secret": string(secret)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var credentialRequest seenRequest
+	for _, r := range d.requests() {
+		if r.path == "/legion/v1/controller/github-credential" {
+			credentialRequest = r
+		}
+	}
+	if string(credentialRequest.body) != string(wantBody) {
+		t.Errorf("github-credential request body = %s, want %s", credentialRequest.body, wantBody)
+	}
+	if !strings.Contains(errb, "[legion] the controller's gh acts as the review App from "+ghDir) {
+		t.Errorf("stderr = %q; want it to name the review App and the gh directory", errb)
+	}
+	if _, err := os.Stat(filepath.Join(c.defaultDir, "github-credential.log")); err != nil {
+		t.Errorf("github-credential.log does not exist: %v", err)
+	}
+}
+
+// The refresh loop keeps the controller's gh directory fresh while Oh My Pi runs: a token the
+// daemon mints after Oh My Pi starts reaches hosts.yml before Oh My Pi exits, and the log records
+// the refresh. The recording Oh My Pi runs until the test releases it, once it has seen the second
+// token land, so the proof does not depend on the machine's speed.
+func TestControllerStartRefreshesTheGitHubCredentialWhileOhMyPiRuns(t *testing.T) {
+	old := controllerGitHubRefreshInterval
+	controllerGitHubRefreshInterval = 50 * time.Millisecond
+	t.Cleanup(func() { controllerGitHubRefreshInterval = old })
+
+	tokens := newControllerCredentialTokens("ghs_first")
+	d := newControllerDaemonWithTokens(t, tokens)
+	release := filepath.Join(t.TempDir(), "release")
+	c := newControllerStart(t, d, controllerOptions{waitForFile: release, exitCode: 7})
+
+	type result struct {
+		code int
+		errb string
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, _, errb := c.run()
+		done <- result{code, errb}
+	}()
+	hostsFile := filepath.Join(c.defaultDir, "gh", "hosts.yml")
+	// The first write holds the first token; only then does the daemon's lease change, so the
+	// loop, not the first fetch, is what carries the second token into the file.
+	testwait.Eventually(t, hostsFile+" to hold ghs_first", func() bool {
+		body, err := os.ReadFile(hostsFile)
+		return err == nil && strings.Contains(string(body), "ghs_first")
+	})
+	tokens.set("ghs_second")
+	testwait.Eventually(t, hostsFile+" to hold ghs_second", func() bool {
+		body, err := os.ReadFile(hostsFile)
+		return err == nil && strings.Contains(string(body), "ghs_second")
+	})
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("legion controller start did not return")
+	}
+	if r.code != 7 {
+		t.Fatalf("legion controller start = %d, want 7 (Oh My Pi's exit code); stderr %q", r.code, r.errb)
+	}
+	hosts, err := os.ReadFile(hostsFile)
+	if err != nil || string(hosts) != ghconfig.Hosts("ghs_second") {
+		t.Fatalf("hosts.yml = %q, %v; want the second token", hosts, err)
+	}
+	logBody, err := os.ReadFile(filepath.Join(c.defaultDir, "github-credential.log"))
+	if err != nil || !strings.Contains(string(logBody), "github credential refreshed") {
+		t.Fatalf("github-credential.log = %q, %v; want a refreshed line", logBody, err)
+	}
+}
+
+// A superseded capability (a later legion controller start) ends the refresh loop: the gh
+// directory keeps the first token, the log records the stop, and no further request reaches the
+// daemon. The recording Oh My Pi runs until the test releases it, once it has seen the stop logged
+// and the requests settle.
+func TestControllerStartStopsTheRefreshLoopWhenTheCapabilityIsSuperseded(t *testing.T) {
+	old := controllerGitHubRefreshInterval
+	controllerGitHubRefreshInterval = 50 * time.Millisecond
+	t.Cleanup(func() { controllerGitHubRefreshInterval = old })
+
+	tokens := newControllerCredentialTokens("ghs_first")
+	d := newControllerDaemonWithTokens(t, tokens)
+	release := filepath.Join(t.TempDir(), "release")
+	c := newControllerStart(t, d, controllerOptions{waitForFile: release})
+
+	done := make(chan struct{})
+	go func() {
+		c.run()
+		close(done)
+	}()
+	hostsFile := filepath.Join(c.defaultDir, "gh", "hosts.yml")
+	testwait.Eventually(t, hostsFile+" to exist", func() bool {
+		_, err := os.Stat(hostsFile)
+		return err == nil
+	})
+	// Mint a second capability, which supersedes the one this controller holds.
+	status, _, err := (operator{base: d.url, bearer: controllerOperatorToken}).do(context.Background(), http.MethodPost,
+		"/legion/v1/controller/secret", api.ControllerSecretRequest{PluginContract: api.DaemonAPIVersion})
+	if err != nil || status != http.StatusOK {
+		t.Fatalf("mint a second capability: status %d, err %v", status, err)
+	}
+	logFile := filepath.Join(c.defaultDir, "github-credential.log")
+	testwait.Eventually(t, logFile+" to hold \"github credential refresh stopped\"", func() bool {
+		body, err := os.ReadFile(logFile)
+		return err == nil && strings.Contains(string(body), "github credential refresh stopped")
+	})
+	before := requestsTo(d, "/legion/v1/controller/github-credential")
+	time.Sleep(10 * controllerGitHubRefreshInterval)
+	if after := requestsTo(d, "/legion/v1/controller/github-credential"); after != before {
+		t.Fatalf("%d further github-credential requests reached the daemon after the stop, want 0 more", after-before)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("legion controller start did not return")
+	}
+	hosts, err := os.ReadFile(hostsFile)
+	if err != nil || string(hosts) != ghconfig.Hosts("ghs_first") {
+		t.Fatalf("hosts.yml = %q, %v; want it to keep the first token", hosts, err)
+	}
+}
+
+// A daemon with no GitHub App for the project writes an empty gh directory and runs no loop,
+// stating so, and Oh My Pi still starts.
+func TestControllerStartWithNoGitHubAppWritesAnEmptyGhDirectory(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	code, _, errb := c.run()
+	if code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	ghDir := filepath.Join(c.defaultDir, "gh")
+	if got := modeOf(t, ghDir); got != 0o700 {
+		t.Errorf("gh directory mode = %o, want 0700", got)
+	}
+	if _, err := os.Stat(filepath.Join(ghDir, "hosts.yml")); !os.IsNotExist(err) {
+		t.Errorf("hosts.yml exists (%v); want none, since the daemon has no GitHub App", err)
+	}
+	if !strings.Contains(errb, "[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody\n") {
+		t.Errorf("stderr = %q; want the no-App line", errb)
+	}
+	if _, err := os.Stat(filepath.Join(c.defaultDir, "github-credential.log")); !os.IsNotExist(err) {
+		t.Errorf("github-credential.log exists (%v); want none, since no loop ran", err)
+	}
+	if n := requestsTo(d, "/legion/v1/controller/github-credential"); n != 1 {
+		t.Fatalf("%d github-credential requests, want 1", n)
+	}
+}
+
+// The state directory outlives a run, so a gh directory an earlier start wrote against a daemon
+// that had a GitHub App can still hold that run's hosts.yml. A start against a daemon with no
+// GitHub App says the controller's gh acts as nobody, so it must leave no token for gh to act
+// with: the stale hosts.yml goes, and gh answers no token (LEGION-668, found by the tester).
+func TestControllerStartWithNoGitHubAppRemovesAStaleHostsFile(t *testing.T) {
+	d := newControllerDaemon(t)
+	c := newControllerStart(t, d, controllerOptions{})
+	ghDir := filepath.Join(c.defaultDir, "gh")
+	if _, err := ghconfig.Write(ghDir, ghconfig.Render("ghs_stale_from_an_earlier_run", "review", time.Now().Add(time.Hour))); err != nil {
+		t.Fatalf("seed the stale gh directory: %v", err)
+	}
+	code, _, errb := c.run()
+	if code != 0 {
+		t.Fatalf("legion controller start = %d, stderr %q", code, errb)
+	}
+	if !strings.Contains(errb, "[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody\n") {
+		t.Fatalf("stderr = %q; want the no-App line", errb)
+	}
+	if hosts, err := os.ReadFile(filepath.Join(ghDir, "hosts.yml")); !os.IsNotExist(err) {
+		t.Errorf("hosts.yml = %q, %v; want none: the command said gh acts as nobody, but gh would act as the stale token", hosts, err)
+	}
+	if got := modeOf(t, ghDir); got != 0o700 {
+		t.Errorf("gh directory mode = %o, want 0700", got)
+	}
+}
+
+// A failed GitHub credential fetch after the mint exits 1, naming the route and the daemon's
+// sentence; Oh My Pi never ran, and the secret file stays written.
+func TestControllerStartExitsWhenTheGitHubCredentialFetchFails(t *testing.T) {
+	tokens := newControllerCredentialTokens("ghs_first")
+	tokens.failWith(errors.New("github is down"))
+	d := newControllerDaemonWithTokens(t, tokens)
+	c := newControllerStart(t, d, controllerOptions{})
+	code, _, errb := c.run()
+	want := d.url + "/legion/v1/controller/github-credential: GitHub token exchange failed\n"
+	if code != 1 || !strings.HasSuffix(errb, want) {
+		t.Fatalf("legion controller start = %d, stderr %q; want 1 and a refusal ending %q", code, errb, want)
+	}
+	if c.launched() {
+		t.Fatal("Oh My Pi was launched")
+	}
+	if _, err := os.Stat(filepath.Join(c.defaultDir, "secrets", "legion-demo-controller")); err != nil {
+		t.Errorf("the secret file does not exist (%v); want it left as controllerStart's other post-mint failures leave it", err)
 	}
 }

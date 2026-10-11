@@ -71,6 +71,7 @@ test("Unfurl reads the immutable document version named by a reference", async (
     rank: "U",
     title: "Design decision",
     open_asks: [],
+    progress: { tasks: null, children: null },
     updated_at: "2026-09-09T00:00:00Z",
   };
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
@@ -184,6 +185,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
     rank: "U",
     title: "Design decision",
     open_asks: [],
+    progress: { tasks: null, children: null },
     updated_at: "2026-09-09T00:00:00Z",
   };
   const askRead: AskRead = {
@@ -203,6 +205,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
       created_at: "2026-09-09T00:00:00Z",
       edited_at: null,
     },
+    answers: [],
     edits: [],
     followers: [],
     replies: [],
@@ -230,7 +233,7 @@ test("Unfurl unfurls a dispatch ask reference with the question, not the issue t
   }
 });
 
-test("Unfurl unfurls a dispatch comment reference with its first line, not the issue title", async () => {
+test("Unfurl unfurls a dispatch comment reference with its own words, not the issue title", async () => {
   const issue: IssueDetails = {
     route_status: null,
     route_holder: null,
@@ -257,6 +260,7 @@ test("Unfurl unfurls a dispatch comment reference with its first line, not the i
     rank: "U",
     title: "Design decision",
     open_asks: [],
+    progress: { tasks: null, children: null },
     updated_at: "2026-09-09T00:00:00Z",
   };
   const commentRead: CommentRead = {
@@ -264,7 +268,7 @@ test("Unfurl unfurls a dispatch comment reference with its first line, not the i
       id: "comment-1",
       issue_key: "CORE-1",
       author: { id: "alice", kind: "user" },
-      body: "Looks good overall.\nOne nit below.",
+      body: "**Looks** good overall.\nOne nit below.",
       anchor: null,
       reply_to: null,
       ask_id: null,
@@ -290,7 +294,9 @@ test("Unfurl unfurls a dispatch comment reference with its first line, not the i
   );
 
   try {
-    await within(view.container).findByText("Looks good overall.");
+    // The title is the comment projected to plain words: the soft-wrapped line is one
+    // paragraph (as the editor reads it), and the bold is dropped, not shown as `**`.
+    await within(view.container).findByText("Looks good overall. One nit below.");
     expect(within(view.container).queryByText("Design decision")).toBeNull();
     expect(getComment).toHaveBeenCalledWith("comment-1");
   } finally {
@@ -368,6 +374,46 @@ test("Unfurl reads a GitHub link trailed by a long closing run in one pass", () 
     expect(performance.now() - start).toBeLessThan(2000);
     expect(view.container.querySelector("section")).toBeNull();
     expect(githubRest).not.toHaveBeenCalled();
+  } finally {
+    githubRest.mockRestore();
+    view.unmount();
+  }
+});
+
+// LEGION-540. A GitHub issue's body is Markdown its author wrote: the card renders it formatted
+// and cut to its lines after rendering, never the raw source with its `**`, backticks and `-`.
+test("Unfurl renders a GitHub issue's body formatted, on one run of text, with no syntax", async () => {
+  const githubRest = spyOn(api, "githubRest").mockResolvedValue(
+    new Response(
+      JSON.stringify({
+        body: "## Steps\n\n**Crash** on `start` after [upgrading](https://example.com/notes)\n\n- open it\n- wait",
+        title: "Crash on start",
+      }),
+      { headers: { "Content-Type": "application/json" } }
+    )
+  );
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <Unfurl body="See https://github.com/owner/repository/issues/4" />
+    </QueryClientProvider>
+  );
+
+  try {
+    await within(view.container).findByText("Crash on start");
+    const body = await waitFor(() => {
+      const found = view.container.querySelector<HTMLElement>("[data-markdown-preview]");
+      if (found === null || found.querySelector("strong") === null) {
+        throw new Error("the issue body has not rendered");
+      }
+      return found;
+    });
+    expect(body.querySelector("strong")?.textContent).toBe("Crash");
+    expect(body.querySelector("code")?.textContent).toBe("start");
+    expect(body.textContent?.replace(/\s+/g, " ").trim()).toBe(
+      "Steps Crash on start after upgrading open it wait"
+    );
+    expect(body.querySelector("h2, ul, li, p")).toBeNull();
   } finally {
     githubRest.mockRestore();
     view.unmount();

@@ -7,11 +7,15 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -36,8 +40,11 @@ type Supervisor interface {
 // names the launch; the registration is that launch's machine's to accept or refuse, and an
 // accepted one is issued a secret whose hash the machine has persisted before this answers — a
 // store that refuses the write is a 500 with no secret, so no agent holds a secret the daemon
-// forgot. A token no launch minted may be the controller capability `legion controller start`
-// fetched, which registers the project's controller (registerController).
+// forgot. A launch of the daemon's own controller registers as the project's controller too
+// (registerLaunchedController), and only under `controller: daemon`. A token no launch minted may
+// be the controller capability `legion controller start` fetched, which registers the project's
+// controller (registerController), and only under `controller: operator`: a daemon that launches
+// its own controller registers no other, so such a token is the unknown one it is.
 func (s *server) register(w http.ResponseWriter, r *http.Request) {
 	var req claim.RegisterRequest
 	if !readBody(w, r, &req) || !requireFields(w,
@@ -53,6 +60,10 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !known {
+		if s.controllerLaunched {
+			writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
+			return
+		}
 		s.registerController(w, r, req)
 		return
 	}
@@ -61,10 +72,23 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, claim.InvalidBootToken.Status, claim.InvalidBootToken)
 		return
 	}
+	if m.Claim().Role == claim.RoleController {
+		if !s.controllerLaunched {
+			s.log.Warn("api: refused a launched controller's registration: this daemon leaves the controller to its operator",
+				"claim", launch.Claim, "generation", launch.Generation, "session", req.SessionID)
+			writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
+				"%s is a launch of the daemon's own controller, and this daemon leaves the controller to its operator (controller: operator)", launch.Claim)))
+			return
+		}
+		s.registerLaunchedController(w, r, req, launch, m)
+		return
+	}
 	secret := rand.Text()
-	// The decision is the machine's and runs to its end: a caller that hangs up mid-request does
-	// not get to leave a registration half-recorded.
-	err = m.Handle(context.WithoutCancel(r.Context()), supervise.RequestRegister{
+	// The decision is the machine's and runs to its end, or to the daemon's stop: a caller that hangs
+	// up mid-request does not get to leave a registration half-recorded.
+	ctx, decided := s.decision(r, launch.Claim)
+	defer decided()
+	err = m.Handle(ctx, supervise.RequestRegister{
 		Claim:          launch.Claim,
 		Generation:     launch.Generation,
 		Session:        req.SessionID,
@@ -79,17 +103,30 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 	s.log.Info("api: claim registered", "claim", c.Token, "generation", launch.Generation,
 		"session", req.SessionID, "agent", req.AgentID, "pluginContract", req.PluginContract)
 	writeJSON(w, http.StatusOK, claim.RegisterResponse{
-		ClaimToken: c.Token,
-		Tree:       c.Tree,
-		Issue:      c.Issue,
-		Role:       c.Role,
-		Generation: launch.Generation,
-		Secret:     secret,
+		ClaimToken:   c.Token,
+		Tree:         c.Tree,
+		Issue:        c.Issue,
+		Role:         c.Role,
+		Generation:   launch.Generation,
+		Secret:       secret,
+		PromptAgents: s.promptAgentsList(),
 	})
 }
 
+// promptAgentsList is Options.PromptAgents as the registration answers it: never nil, so a role
+// whose prompts dispatch no task agent reads `[]` rather than `null`.
+func (s *server) promptAgentsList() []string {
+	if len(s.promptAgents) == 0 {
+		return []string{}
+	}
+	return s.promptAgents
+}
+
 // ready is the agent saying it can be prompted; its machine sends the pending delivery, if any,
-// once the claim's connection is registered.
+// once the claim's connection is registered. A ready that carries the session's capability report
+// (LEGION-663) hands it, normalised, to Options.CapabilityReported once the claim has taken the
+// ready: what the report says is never a reason to refuse the ready — the daemon runs the session
+// and reports what it lacks — and a row the table has no live row for is dropped and logged.
 func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	var req claim.ReadyRequest
 	if !readBody(w, r, &req) || !requireFields(w,
@@ -102,17 +139,50 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
-	err := m.Handle(context.WithoutCancel(r.Context()), supervise.RequestReady{
+	ctx, decided := s.decision(r, req.ClaimToken)
+	defer decided()
+	err := m.Handle(ctx, supervise.RequestReady{
 		Claim: req.ClaimToken, Generation: req.Generation, Session: req.SessionID,
 	})
 	if err != nil {
 		s.claimFailure(w, "ready", req.ClaimToken, err)
 		return
 	}
+	c := m.Claim()
+	if req.Capabilities != nil {
+		report := s.capabilityReport(c, req)
+		if s.capabilityReported != nil {
+			s.capabilityReported(ctx, c, report)
+		}
+	}
 	if s.claimReady != nil {
-		s.claimReady(m.Claim())
+		s.claimReady(c)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// capabilityReport is the ready's capability report as the daemon keeps it: the rows normalised
+// (capabilities.Normalize), the claim's process as the reporter — or a locator naming the claim
+// alone, for a claim its machine records no process for — and the generation the ready ran at.
+func (s *server) capabilityReport(c supervise.Claim, req claim.ReadyRequest) capabilities.Report {
+	kept, dropped := capabilities.Normalize(req.Capabilities.Rows)
+	if len(dropped) > 0 {
+		s.log.Warn("api: a ready's capability report named rows the table has no live row for",
+			"claim", req.ClaimToken, "session", req.SessionID, "names", dropped)
+	}
+	locator := runtime.Locator{Claim: req.ClaimToken}
+	if c.Locator != nil {
+		locator = *c.Locator
+	}
+	return capabilities.Report{
+		Claim:      req.ClaimToken,
+		Generation: req.Generation,
+		Locator:    locator,
+		MeasuredAt: req.Capabilities.MeasuredAt,
+		ReportedAt: time.Now().UTC(),
+		ElapsedMs:  req.Capabilities.ElapsedMs,
+		Rows:       kept,
+	}
 }
 
 // exit is the agent reporting its own end: a worker's claim is released and retires, the tree's
@@ -130,7 +200,9 @@ func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
-	err := m.Handle(context.WithoutCancel(r.Context()), supervise.RequestExit{
+	ctx, decided := s.decision(r, req.ClaimToken)
+	defer decided()
+	err := m.Handle(ctx, supervise.RequestExit{
 		Claim: req.ClaimToken, Generation: req.Generation, Session: req.SessionID, Reason: req.Reason,
 	})
 	if err != nil {
@@ -171,7 +243,7 @@ func (s *server) claimFailure(w http.ResponseWriter, request string, token claim
 		writeJSON(w, http.StatusConflict, errorBody(refused.Error()))
 		return
 	}
-	s.log.Error("api: a claim request failed", "request", request, "claim", token, "error", err)
+	s.logFailure("api: a claim request failed", "request", request, "claim", token, "error", err)
 	writeJSON(w, http.StatusInternalServerError, errorBody(request+" failed: the daemon could not record it"))
 }
 

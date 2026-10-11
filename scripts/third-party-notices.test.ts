@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { thirdPartyNotices } from "./third-party-notices";
@@ -93,4 +93,44 @@ test("reads the deprecated `{ type }` license object as a declared license", asy
     license: { type: "ISC" },
   });
   expect(await thirdPartyNotices([input], root)).toContain("License: ISC");
+});
+
+test("the command lists every package any of its metafiles names, one bundle's alone included", async () => {
+  // A package that ships two bundles (an extension and a CLI) passes one metafile per build: a
+  // package only the second bundle inlines must reach the notices too.
+  const root = await mkdtemp(join(tmpdir(), "third-party-notices-"));
+  scratchDirectories.push(root);
+  for (const name of ["shared", "cli-only"]) {
+    const pkgDir = join(root, "node_modules", name);
+    await mkdir(pkgDir, { recursive: true });
+    await writeFile(
+      join(pkgDir, "package.json"),
+      JSON.stringify({ name, version: "1.0.0", license: "MIT" })
+    );
+    await writeFile(join(pkgDir, "index.js"), "export {}\n");
+  }
+  const input = (name: string) => join("node_modules", name, "index.js");
+  await writeFile(
+    join(root, "extensions.json"),
+    JSON.stringify({ inputs: { [input("shared")]: {} } })
+  );
+  await writeFile(
+    join(root, "cli.json"),
+    JSON.stringify({ inputs: { [input("shared")]: {}, [input("cli-only")]: {} } })
+  );
+
+  const run = Bun.spawnSync(
+    [
+      process.execPath,
+      join(import.meta.dir, "third-party-notices.ts"),
+      "extensions.json",
+      "cli.json",
+      "NOTICES",
+    ],
+    { cwd: root, stderr: "pipe" }
+  );
+  expect({ exit: run.exitCode, stderr: run.stderr.toString() }).toEqual({ exit: 0, stderr: "" });
+  const notices = await readFile(join(root, "NOTICES"), "utf8");
+  expect(notices).toContain("cli-only@1.0.0\nLicense: MIT");
+  expect(notices).toContain("shared@1.0.0\nLicense: MIT");
 });
