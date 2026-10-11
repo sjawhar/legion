@@ -66,6 +66,7 @@ import {
 import {
   dropInjectedUserTurn,
   endInjectedUserTurns,
+  forgetInjectedUserTurns,
   matchInjectedUserTurn,
   noteInjectedUserTurn,
   noteTypedUserTurn,
@@ -594,11 +595,13 @@ export default function envoyExtension(pi: PiApi): void {
     handledDispatchAttempts = handledAttempts(context.sessionManager.getEntries());
     // The pictures the transcript the session is now on already shows (a fork's, a handoff's, a
     // resume's, a restart's) are in the history every request sends, so they count as shown. The
-    // id the session left is no longer served, so what it was shown is forgotten, and so are the
-    // typed turns sent into it whose message has not started: the host discarded its queue.
+    // id the session left is no longer served: what it was shown is forgotten, and so are the
+    // turns sent into it (every match asks under the live id) and its typed turns already handed
+    // their pictures (`TypedPictures.dropOtherSessions` says which survive).
     markPicturesShown(shownPictures(sessionID), transcriptPictures(branch));
     if (previousSessionID !== sessionID) {
       forgetShownPictures(previousSessionID);
+      forgetInjectedUserTurns(previousSessionID);
       typedPictures.dropOtherSessions(sessionID);
     }
   };
@@ -888,9 +891,8 @@ export default function envoyExtension(pi: PiApi): void {
           // only once the host took the send: one that throws releases the claim, and the delivery
           // Dispatch retries must carry them again. `acceptedSessionID` is only the accept's and
           // its replies': what to name is read from the set of the session live once the accept
-          // answers, which a switch during it changes, and a card writes what it showed there. A
-          // person's turn writes the set of the session it is sent into, which a switch while the
-          // pictures load can change again.
+          // answers, which a switch during it changes, and what was shown joins the set of the
+          // session live once the pictures load, which the send goes into.
           const shown = shownPictures(sessionID);
           if (accepted === undefined) {
             const card = await withDeliveredPictures(
@@ -907,7 +909,7 @@ export default function envoyExtension(pi: PiApi): void {
                 triggerTurn: true,
               }
             );
-            markPicturesShown(shown, card.shown);
+            markPicturesShown(shownPictures(sessionID), card.shown);
           } else {
             const { turn } = accepted;
             // Sent exactly as Enter, or an aside, at the terminal sends it, the person's pictures
@@ -1210,8 +1212,9 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   pi.on("message_start", async (event) => {
+    // A tagged message starts in the live session's transcript, so its pictures join that set.
     const shown = typedPictures.started(event.message);
-    if (shown !== undefined) markPicturesShown(shownPictures(shown.sessionID), shown.addresses);
+    if (shown !== undefined) markPicturesShown(shownPictures(sessionID), shown);
     recordAgentStreamMessage(event.message, true);
   });
   pi.on("message_update", async (event) => {

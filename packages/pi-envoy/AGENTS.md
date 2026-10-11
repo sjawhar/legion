@@ -33,10 +33,14 @@ input's images (`source: "extension"`), as a picture pasted at the terminal reac
 turn's pictures wait under its Dispatch message id (`src/typed-pictures.ts`) until that handler
 hands them to the input with the turn's text (same text: in send order), which releases their
 bytes to the host, and count as shown only once the host's message carrying that id as its `tag`
-starts. A session change drops the turns sent into the session left, whose queued messages the
-host discarded. Dispatch accepts a message once, so a retry of one whose message went without its
-pictures arrives as a card, which carries them: a prompt the host dropped (an abort as it was
-admitted) leaves them unshown. Their limit: an extension whose `input` handler runs ahead of
+starts, a tagged message starting in the live session's transcript. A session change drops the
+turns sent into the session left that were already handed their pictures: a switch, `/new` or
+resume discards that session's queue, and a branch or a session file's move-off keeps it, so such
+a turn that starts under the new id counts nothing shown and the next delivery sends its pictures
+once more. A turn still holding its pictures stays, since its `sendUserInput` has not yet reached
+pi-envoy's `input` handler. Dispatch accepts a message once, so a retry of one whose message went
+without its pictures arrives as a card, which carries them: a prompt the host dropped (an abort as
+it was admitted) leaves them unshown. Their limit: an extension whose `input` handler runs ahead of
 pi-envoy's and rewrites the text leaves that turn without its pictures, since the text is the
 only part of the event naming the turn; they are never marked shown, so a later delivery carries
 them.
@@ -85,9 +89,11 @@ message it is comes from one process-wide record keyed by session (`matchInjecte
 `@legion/pi-shared/injected-user-turns`). A typed turn is found by the tag the host keeps on every
 message the input submits, a user message or a `skill-prompt` custom message, and by nothing else; it
 stays in the record past the run's `agent_end` until that message arrives, and goes when the host
-answers that the input submitted no message. A `sendUserMessage` turn is found by its text: the
-first user message that equals it, forgotten at the run's `agent_end`, so on such a host a Send or
-an Aside the host runs as a turn of its own after that run matches nothing. A message's identity
+answers that the input submitted no message or the session changes (`forgetInjectedUserTurns`:
+every match asks under the live id, so nothing asks under the id left again). A `sendUserMessage`
+turn is found by its text: the first user message that equals it, forgotten at the run's
+`agent_end`, so on such a host a Send or an Aside the host runs as a turn of its own after that run
+matches nothing. A message's identity
 is its host timestamp and, when the host kept one, its tag (two Sends can be stamped in the same
 millisecond): the stream keys it by that, and what the record answers for it is remembered under
 that until the run ends. The phase-stall section of `packages/pi-legion/AGENTS.md` says what a
@@ -96,7 +102,10 @@ twice: one the record missed, which the stream carries untagged; and a prompt te
 command, whose streamed user message is the expanded text while Dispatch stores what the person
 typed, and the page takes the stored copy away only when the two texts are equal
 (`AgentRuntimeThread.tsx`, a guard against a forged tag on an open bus). A `/skill:` shows once:
-the stream carries no custom message, so the page shows Dispatch's stored copy alone.
+the stream carries no custom message, so the page shows Dispatch's stored copy alone. A typed turn
+still queued across a branch or a move-off starts under the new id, untagged by the record, and
+shows once there: Dispatch stored the Send under the id it was sent to, which that page does not
+read.
 
 The stream also lists the slash commands a viewer can send (`kind: "commands"`, the last frame of
 every replay and published whenever the list changes), in the session's terminal picker's order:
@@ -113,11 +122,11 @@ host without the registry export, or one listing no session under this id, lists
 and publishes the rest. Replay always refreshes commands; attached watch pings refresh at most once
 per ten seconds. Every built-in's name and aliases are reserved before anything else is listed,
 since the host runs a built-in by either before `prompt()`; among the rest a repeated name keeps its
-first source, which is the one the host runs. A name is listed only if a person can type it: not
-empty, no whitespace, no control character. The list keeps the host-order prefix whose frame fits
-the replay's byte budget (`historyBytes`, UTF-8 bytes of JSON) on its own, and a replay leaves out
-a list that does not fit. A host without `sendUserInput` publishes no list, and its viewer offers no
-completion.
+first source, which is the one the host runs. A name is listed only if a person can type it
+(`isTypableCommandName` in `@legion/contracts`, which a viewer applies too): not empty, no
+whitespace, no control character. The list keeps the host-order prefix whose frame fits the
+replay's byte budget (`historyBytes`, UTF-8 bytes of JSON) on its own, so a replay always carries
+it. A host without `sendUserInput` publishes no list, and its viewer offers no completion.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
 (every authenticated caller's event stream carries it, and Dispatch publishes it before its own

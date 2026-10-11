@@ -21,7 +21,9 @@
   publisher applies before the frame leaves the session. Each command names its `source`
   (`builtin`, `extension`, `prompt` for a custom command, MCP prompt, file command or prompt
   template, `skill`), and a built-in only the session's own terminal runs carries `terminalOnly`
-  (LEGION-394). A viewer older than the frame ignores it.
+  (LEGION-394). `isTypableCommandName` is the one command-name rule the publisher lists a command
+  by and a viewer accepts one by: one non-empty token, no whitespace, no control character. A
+  viewer older than the frame ignores it.
 - `Version.size` is documented for document versions too: the bytes of the markdown a version
   stores, which Dispatch now answers on every document version it lists or reads, read from the
   stored row without rendering the document (LEGION-481). It stays optional, absent on a document

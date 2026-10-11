@@ -5,7 +5,7 @@ import type { ImageContent } from "@legion/pi-shared/pi-types";
 export interface TypedPictureTurn {
   /** The text the turn was sent with, which is all the host's `input` event names it by. */
   readonly body: string;
-  /** The session the turn was sent into, whose set of shown pictures it writes. */
+  /** The session the turn was sent into. */
   readonly sessionID: string;
   /** The `dispatch://` addresses of the pictures, which count as shown once its message starts. */
   readonly addresses: readonly string[];
@@ -27,14 +27,14 @@ interface Admission {
  * text alone, so a turn is handed its pictures in send order among the turns sent with the same
  * text: the map's own order. Only a turn that was handed them counts them shown when its message
  * starts; one whose text an earlier extension's handler rewrote goes without its pictures, which
- * stay unshown so that a later delivery carries them.
+ * stay unshown so that a later delivery carries them. Dispatch accepts a message once, so a turn
+ * is admitted at most once.
  */
 export class TypedPictures {
   readonly #admissions = new Map<string, Admission>();
 
   /** Holds turn `messageId`'s pictures for the host's `input` handlers, behind every other turn. */
   admit(messageId: string, turn: TypedPictureTurn): void {
-    this.#admissions.delete(messageId);
     this.#admissions.set(messageId, {
       addresses: turn.addresses,
       body: turn.body,
@@ -60,25 +60,31 @@ export class TypedPictures {
     this.#admissions.delete(messageId);
   }
 
-  /** The host's `message` started. When it carries a turn's tag, that turn is done; the session
-   *  and addresses it showed are returned when it had been handed its pictures. */
-  started(
-    message: unknown
-  ): { readonly sessionID: string; readonly addresses: readonly string[] } | undefined {
+  /** The host's `message` started. When it carries a turn's tag, that turn is done; the addresses
+   *  it showed are returned when it had been handed its pictures. The message starts in the
+   *  session live now, whose set they join. */
+  started(message: unknown): readonly string[] | undefined {
     const tag = messageTag(message);
     if (tag === undefined) return undefined;
     const admission = this.#admissions.get(tag);
     if (admission === undefined) return undefined;
     this.#admissions.delete(tag);
-    if (admission.images !== undefined) return undefined;
-    return { addresses: admission.addresses, sessionID: admission.sessionID };
+    return admission.images === undefined ? admission.addresses : undefined;
   }
 
-  /** The session is now `sessionID`: the host discarded every queued message of the one it left,
-   *  so no message carrying another session's turn will start. */
+  /**
+   * The session is now `sessionID`: another session's turns already handed their pictures go. A
+   * switch, `/new` or resume discards the queue of the session left, so such a turn's message never
+   * starts; a branch or a session file's move-off keeps the queue, and a handed turn that starts
+   * under the new id then counts nothing shown, so the next delivery naming its pictures sends
+   * them once more. A turn still holding its pictures stays: its `sendUserInput` has not reached
+   * pi-envoy's `input` handler yet, and will hand them over, withdraw the turn, or see it start.
+   */
   dropOtherSessions(sessionID: string): void {
     for (const [messageId, admission] of this.#admissions) {
-      if (admission.sessionID !== sessionID) this.#admissions.delete(messageId);
+      if (admission.sessionID !== sessionID && admission.images === undefined) {
+        this.#admissions.delete(messageId);
+      }
     }
   }
 }

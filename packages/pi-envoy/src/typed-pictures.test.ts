@@ -34,7 +34,7 @@ describe("a typed turn's pictures", () => {
     expect(pictures.handOver("Look")).toBeUndefined();
   });
 
-  test("count shown in the session they were sent into once their handed turn's message starts", () => {
+  test("count shown once their handed turn's message starts", () => {
     const pictures = new TypedPictures();
     pictures.admit("m-1", {
       addresses: ["a1"],
@@ -46,7 +46,7 @@ describe("a typed turn's pictures", () => {
 
     expect(pictures.started({ content: "Look", role: "user", timestamp: 10 })).toBeUndefined();
     expect(pictures.started(tagged("m-other"))).toBeUndefined();
-    expect(pictures.started(tagged("m-1"))).toEqual({ addresses: ["a1"], sessionID: "s1" });
+    expect(pictures.started(tagged("m-1"))).toEqual(["a1"]);
     expect(pictures.started(tagged("m-1"))).toBeUndefined();
   });
 
@@ -85,53 +85,28 @@ describe("a typed turn's pictures", () => {
     expect(pictures.started(tagged("m-1"))).toBeUndefined();
   });
 
-  test("admitted again, replace the earlier admission and wait behind the others", () => {
+  // A switch, `/new` or resume discards the queue of the session left, so a turn sent into it and
+  // already handed its pictures never starts. One still holding them is in a `sendUserInput` that
+  // has not reached pi-envoy's input handler yet, which will still ask for them.
+  test("sent into another session go when the session changes, unless still waiting to be handed over", () => {
     const pictures = new TypedPictures();
-    pictures.admit("m-1", {
-      addresses: ["a1"],
-      body: "Look",
-      images: [png("old")],
-      sessionID: "s1",
-    });
-    pictures.admit("m-2", {
-      addresses: ["a2"],
-      body: "Look",
-      images: [png("two")],
-      sessionID: "s1",
-    });
-    pictures.admit("m-1", {
-      addresses: ["a1"],
-      body: "Look",
-      images: [png("new")],
-      sessionID: "s1",
-    });
-
-    expect(pictures.handOver("Look")).toEqual([png("two")]);
-    expect(pictures.handOver("Look")).toEqual([png("new")]);
-    expect(pictures.handOver("Look")).toBeUndefined();
-  });
-
-  // The host discards every queued message when the session changes (`/new`, a resume, a
-  // switch), so no message carrying an earlier session's turn will start.
-  test("sent into another session are dropped when the session changes", () => {
-    const pictures = new TypedPictures();
-    pictures.admit("m-old", {
+    pictures.admit("m-handed", {
       addresses: ["a1"],
       body: "Old",
       images: [png("one")],
       sessionID: "s1",
     });
-    pictures.admit("m-new", {
+    pictures.admit("m-waiting", {
       addresses: ["a2"],
-      body: "New",
+      body: "Waiting",
       images: [png("two")],
-      sessionID: "s2",
+      sessionID: "s1",
     });
     pictures.handOver("Old");
     pictures.dropOtherSessions("s2");
 
-    expect(pictures.started(tagged("m-old"))).toBeUndefined();
-    expect(pictures.handOver("New")).toEqual([png("two")]);
-    expect(pictures.started(tagged("m-new"))).toEqual({ addresses: ["a2"], sessionID: "s2" });
+    expect(pictures.started(tagged("m-handed"))).toBeUndefined();
+    expect(pictures.handOver("Waiting")).toEqual([png("two")]);
+    expect(pictures.started(tagged("m-waiting"))).toEqual(["a2"]);
   });
 });

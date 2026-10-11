@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import {
   dropInjectedUserTurn,
   endInjectedUserTurns,
+  forgetInjectedUserTurns,
   matchInjectedUserTurn,
   noteInjectedUserTurn,
   noteTypedUserTurn,
@@ -108,9 +109,9 @@ describe("the user turns sent into a session", () => {
     expect(matchInjectedUserTurn("s1", second)).toBe("m-2");
   });
 
-  // A message is its host timestamp and its tag, the identity the stream keys it by. The same tag
-  // at another timestamp is another message (the same Dispatch message sent in again), which must
-  // take its own noted turn, or that turn is never found and stays in the record.
+  // A message's identity is its host timestamp and its tag, the identity the stream keys it by:
+  // the memo answers by it, so a message at another timestamp is matched against the record rather
+  // than taken from an earlier message's answer.
   test("take a noted turn for each message carrying the same tag at another timestamp", () => {
     noteTypedUserTurn("s1", "m-1");
     expect(matchInjectedUserTurn("s1", { ...user(10, "ship it"), tag: "m-1" })).toBe("m-1");
@@ -161,6 +162,20 @@ describe("the user turns sent into a session", () => {
 
     expect(envoyPluginInterface().injectedUserTurns.get("s1")?.sent).toEqual([
       { messageId: "m-2", via: "typed" },
+    ]);
+  });
+
+  // Matching always asks under the live session id (envoy.ts's stream recorder, legion.ts's
+  // phase-stall check), so once the session changes nothing asks under the id it left again.
+  test("of a session the process no longer serves are forgotten whole", () => {
+    noteTypedUserTurn("s1", "m-1");
+    noteInjectedUserTurn("s1", "ship it", "m-2");
+    noteTypedUserTurn("s2", "m-3");
+    forgetInjectedUserTurns("s1");
+
+    expect(envoyPluginInterface().injectedUserTurns.has("s1")).toBe(false);
+    expect(envoyPluginInterface().injectedUserTurns.get("s2")?.sent).toEqual([
+      { messageId: "m-3", via: "typed" },
     ]);
   });
 });

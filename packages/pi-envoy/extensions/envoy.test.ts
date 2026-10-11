@@ -640,10 +640,15 @@ type AcceptAnswer =
   | { readonly status: number; readonly code?: string }
   | { readonly reject: string };
 
-/** Dispatch's own rule for one message: the first accept succeeds and every later one is
- *  refused, since a message is taken at most once. */
-const acceptOnce = (count: number): AcceptAnswer =>
-  count === 1 ? { accepted: true } : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
+/** Dispatch's own rule for one message (`message_delivery.go`): the first accept succeeds, with
+ *  `body` as the stored body when given, and every later one is refused, since a message is taken
+ *  at most once. */
+const acceptOnce =
+  (body?: string) =>
+  (count: number): AcceptAnswer =>
+    count === 1
+      ? { accepted: true, ...(body !== undefined && { body }) }
+      : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
 
 /** The accept route's response for `answer` to an accept of `attempt`. */
 function acceptResponse(
@@ -720,7 +725,7 @@ async function bootDirectSession(
         });
         return acceptResponse(
           Number(url.pathname.split("/").at(-2)),
-          await (options.accept ?? acceptOnce)(accepts.length),
+          await (options.accept ?? acceptOnce())(accepts.length),
           url.pathname.split("/").at(-4)
         );
       }
@@ -5960,13 +5965,6 @@ describe("envoy OMP extension", () => {
       mimeType: "image/png",
     };
 
-    /** Dispatch's once-only accept of a message whose stored body is `body`: the first accept
-     *  succeeds with it, and every later one answers `ACCEPT_ALREADY_ACCEPTED`
-     *  (`message_delivery.go`). */
-    const acceptBodyOnce =
-      (body: string) =>
-      (count: number): AcceptAnswer =>
-        count === 1 ? { accepted: true, body } : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
     /** Dispatch serving LEGION-1's upload `slug`, a 10-byte PNG named shot.png. */
     const pictureRoutes =
       (slug: string) =>
@@ -6071,6 +6069,115 @@ describe("envoy OMP extension", () => {
       expect(shownPictures("ses_delivery").size).toBe(0);
     });
 
+    // The card goes into the session live once its pictures load, which a switch during the
+    // load changes again, so that session's set is the one the card's pictures join.
+    test("a card whose picture load overlaps a switch counts its picture shown in the session it went into", async () => {
+      const slug = "card-load-switch";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const picture = Promise.withResolvers<Response>();
+      const requested = Promise.withResolvers<void>();
+      const routes = pictureRoutes(slug);
+      const { agent, delivered, fixture } = await bootDirectSession(slug, {
+        accept: () => ({ code: "UNAUTHORIZED", status: 401 }),
+        dispatch: ((url: URL) => {
+          if (url.pathname === `/api/v1/artifacts/${slug}-id/versions/1`) {
+            requested.resolve();
+            return picture.promise as unknown as Response;
+          }
+          return routes(url);
+        }) as (url: URL) => Response | undefined,
+      });
+
+      agent.push(directDispatchEnvelope("steer", slug, { body }));
+      await requested.promise;
+      await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_load"));
+      picture.resolve(new Response(png, { headers: { "Content-Type": "image/png" } }));
+      // The switch's own notice is the first delivery; the card is the second.
+      await delivered(2);
+
+      expect(fixture.deliveries.at(-1)?.content).toEqual([
+        {
+          type: "text",
+          text: expect.stringContaining(`- image 1: ${address} (shot.png, image/png, 10 bytes)`),
+        },
+        image,
+      ]);
+      expect(shownPictures("ses_after_load").has(address)).toBe(true);
+      expect(shownPictures("ses_delivery").size).toBe(0);
+    });
+
+    // An admission still holding its pictures belongs to a `sendUserInput` the host has not yet
+    // asked pi-envoy's input handler about: a session change (a branch, a move-off) must leave it,
+    // or the accepted turn goes out without its pictures and Dispatch never offers it again.
+    test("a typed turn's pictures not yet handed over survive a session change, and count shown in the live session", async () => {
+      const slug = "typed-handover-across-switch";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+        {};
+      const called = Promise.withResolvers<void>();
+      const go = Promise.withResolvers<void>();
+      const images: unknown[] = [];
+      const { agent, context, fixture } = await bootDirectSession(slug, {
+        accept: () => ({ accepted: true, body }),
+        dispatch: pictureRoutes(slug),
+        sendUserInput: async (text) => {
+          called.resolve();
+          await go.promise;
+          const answer = (await handlers.input?.({ source: "extension", text }, context)) as
+            | { readonly images?: readonly unknown[] }
+            | undefined;
+          images.push(...(answer?.images ?? []));
+          return { handled: "prompt" };
+        },
+      });
+      handlers.input = fixture.handlers.get("input");
+
+      agent.push(directDispatchEnvelope("steer", slug, { body }));
+      await called.promise;
+      await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_branched"));
+      go.resolve();
+      for (let index = 0; index < 10 && images.length === 0; index += 1) {
+        await Promise.resolve();
+      }
+
+      expect(images).toEqual([image]);
+      await fixture.handlers.get("message_start")?.(
+        {
+          message: {
+            content: [{ text: body, type: "text" }],
+            role: "user",
+            tag: DIRECT_MESSAGE_ID,
+            timestamp: 10,
+          },
+        },
+        context
+      );
+      expect(shownPictures("ses_branched").has(address)).toBe(true);
+      expect(shownPictures("ses_delivery").size).toBe(0);
+    });
+
+    // Matching asks under the live session id, so the typed turns noted under the id the session
+    // left can never be found again: a session change forgets them.
+    test("a typed turn's note under the session left is forgotten when the session changes", async () => {
+      const running = Promise.withResolvers<UserInputResult>();
+      const { agent, delivered, fixture } = await bootDirectSession("typed-note-across-switch", {
+        accept: () => ({ accepted: true }),
+        sendUserInput: () => running.promise,
+      });
+
+      agent.push(directDispatchEnvelope("steer", "typed-note-across-switch"));
+      await delivered(1);
+      expect(envoyPluginInterface().injectedUserTurns.get("ses_delivery")?.sent).toEqual([
+        { messageId: DIRECT_MESSAGE_ID, via: "typed" },
+      ]);
+      await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_note"));
+
+      expect(envoyPluginInterface().injectedUserTurns.has("ses_delivery")).toBe(false);
+      running.resolve({ handled: "prompt" });
+    });
+
     for (const [name, first] of [
       ["the host's terminal-only answer", async () => ({ handled: "terminal-only" as const })],
       [
@@ -6146,7 +6253,7 @@ describe("envoy OMP extension", () => {
         {};
       const asked = Promise.withResolvers<void>();
       const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
-        accept: acceptBodyOnce(body),
+        accept: acceptOnce(body),
         dispatch: pictureRoutes(slug),
         sendUserInput: async () => {
           await handlers.input?.({ source: "extension", text: "rewritten before Envoy" }, context);
@@ -6193,7 +6300,7 @@ describe("envoy OMP extension", () => {
       const asked = Promise.withResolvers<void>();
       const images: unknown[] = [];
       const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
-        accept: acceptBodyOnce(body),
+        accept: acceptOnce(body),
         dispatch: pictureRoutes(slug),
         sendUserInput: async (text) => {
           const answer = (await handlers.input?.({ source: "extension", text }, context)) as

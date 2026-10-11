@@ -18,6 +18,10 @@ import { envoyPluginInterface } from "./interface";
  * phase-stall check (`extensions/legion.ts`) counts it as an inbound event rather than the
  * daemon's assignment.
  *
+ * Every match asks under the session id live when the message arrives, so the turns of a session
+ * the process no longer serves are forgotten whole when the session changes
+ * (`forgetInjectedUserTurns`): nothing asks under that id again.
+ *
  * The record is the `injectedUserTurns` member of the versioned interface (`interface.ts`):
  * envoy.ts writes what legion.ts reads, and each plugin bundles its own copy of this module.
  */
@@ -119,4 +123,10 @@ export function endInjectedUserTurns(sessionID: string): void {
   const typed = turns.get(sessionID)?.sent.filter((sent) => sent.via === "typed") ?? [];
   if (typed.length === 0) turns.delete(sessionID);
   else turns.set(sessionID, { found: new Map(), sent: typed });
+}
+
+/** The process no longer serves `sessionID`: every turn sent into it and every answer given for it
+ *  go, since no message is matched under that id again. */
+export function forgetInjectedUserTurns(sessionID: string): void {
+  envoyPluginInterface().injectedUserTurns.delete(sessionID);
 }
