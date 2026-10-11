@@ -656,12 +656,14 @@ gh_hosts_token() { pod_exec "$1" "$2" sh -c "sed -n 's/^    oauth_token: //p' $g
 pod_viewer() {
   pod_exec "$1" "$2" sh -c "GH_CONFIG_DIR=${3:-$gh_config_dir} GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login"
 }
-# operator_gh DIR args… runs the devbox's own gh with the same three variables pod_viewer empties,
-# against the controller's gh config directory rather than a pod's.
+# operator_gh DIR args… runs the real gh (real_gh, mise's) with the same three variables pod_viewer
+# empties, against the controller's gh config directory rather than a pod's. The devbox's `gh` on
+# PATH is a wrapper that, in an agent session, replaces GH_CONFIG_DIR with its own directory, so it
+# would read neither DIR nor the controller's files.
 operator_gh() {
   local dir=$1
   shift
-  env GH_CONFIG_DIR="$dir" GH_TOKEN= GITHUB_TOKEN= GH_HOST= gh "$@"
+  env GH_CONFIG_DIR="$dir" GH_TOKEN= GITHUB_TOKEN= GH_HOST= "$real_gh" "$@"
 }
 # gh_log_line MSG POD ROLE prints the daemon's newest credential log line with MSG (`written` or
 # `refreshed`) for the role's Secret, as the daemon logs it (sandbox runtime: github credential …).
@@ -2134,10 +2136,12 @@ gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
 require_proof_human
 # The devbox's `gh` on PATH is a dotfiles wrapper acting as the proof human; it refuses an inherited
-# GH_TOKEN rather than passing it on, so a check that must present a raw token (the expired and the
-# refreshed lease at github-credential-refresh) runs the real gh, mise's, as stage 3 does. Every
-# other gh call of the proof is the proof human's and stays the wrapper's.
-real_gh=$(mise which gh) || fail "mise has no gh (the raw-token checks run it past the devbox's gh wrapper)"
+# GH_TOKEN rather than passing it on, and in an agent session it replaces GH_CONFIG_DIR with its own
+# directory. So a check that must present a raw token (the expired and the refreshed lease at
+# github-credential-refresh) or read a gh config directory the run wrote (the controller's, through
+# operator_gh) runs the real gh, mise's, as stage 3 does. Every other gh call of the proof is the
+# proof human's and stays the wrapper's.
+real_gh=$(mise which gh) || fail "mise has no gh (the raw-token and config-directory checks run it past the devbox's gh wrapper)"
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
