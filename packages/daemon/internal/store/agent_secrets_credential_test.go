@@ -84,17 +84,17 @@ func TestCompareAndSaveAgentSecretsCredentialKeepsTheWinner(t *testing.T) {
 		t.Fatal(err)
 	}
 	loserPreflight := agentsecrets.Kept{CredentialID: "cred-1", PrivateKey: old.PrivateKey, NextPrivateKey: []byte("loser-next")}
-	saved, err := store.CompareAndSaveAgentSecretsCredential(ctx, project, broker, old.PrivateKey, loserPreflight)
+	saved, err := store.CompareAndSaveAgentSecretsCredential(ctx, project, broker, old, loserPreflight)
 	if err != nil || !saved {
 		t.Fatalf("loser preflight compare-and-save = %v, %v; want saved before the broker race", saved, err)
 	}
 	winner := agentsecrets.Kept{CredentialID: "cred-1", PrivateKey: []byte("winner-key")}
-	saved, err = store.CompareAndSaveAgentSecretsCredential(ctx, project, broker, old.PrivateKey, winner)
+	saved, err = store.CompareAndSaveAgentSecretsCredential(ctx, project, broker, loserPreflight, winner)
 	if err != nil || !saved {
 		t.Fatalf("winner compare-and-save = %v, %v; want saved", saved, err)
 	}
 	loserCleanup := agentsecrets.Kept{CredentialID: "cred-1", PrivateKey: old.PrivateKey}
-	saved, err = store.CompareAndSaveAgentSecretsCredential(ctx, project, broker, old.PrivateKey, loserCleanup)
+	saved, err = store.CompareAndSaveAgentSecretsCredential(ctx, project, broker, loserPreflight, loserCleanup)
 	if err != nil || saved {
 		t.Fatalf("loser cleanup compare-and-save = %v, %v; want not saved", saved, err)
 	}

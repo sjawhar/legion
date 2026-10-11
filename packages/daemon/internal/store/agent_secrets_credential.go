@@ -50,18 +50,21 @@ func (s *Store) SaveAgentSecretsCredential(ctx context.Context, project, brokerU
 }
 
 // CompareAndSaveAgentSecretsCredential replaces project's kept launcher credential only when its
-// current private key is expectedPrivateKey. A broker renewal moves the broker's row from that old
-// key to a new one under its own lock; this matching CAS keeps a losing daemon from overwriting the
+// complete prior state (credential id, private key and candidate next key) is expected. A broker
+// renewal moves the broker's row from that old state to a new key under its own lock; matching the
+// candidate too prevents another daemon's candidate preflight or loser cleanup from overwriting the
 // durable key the winner saved. false, nil means another process already changed the row.
-func (s *Store) CompareAndSaveAgentSecretsCredential(ctx context.Context, project, brokerURL string, expectedPrivateKey []byte, kept agentsecrets.Kept) (bool, error) {
+func (s *Store) CompareAndSaveAgentSecretsCredential(ctx context.Context, project, brokerURL string, expected, kept agentsecrets.Kept) (bool, error) {
 	var expires *time.Time
 	if !kept.ExpiresAt.IsZero() {
 		expires = &kept.ExpiresAt
 	}
 	tag, err := s.pool.Exec(ctx, `update agent_secrets_credentials
-		set credential_id = $4, private_key = $5, next_private_key = $6, expires_at = $7, saved_at = now()
-		where project = $1 and broker_url = $2 and private_key = $3`,
-		project, brokerURL, expectedPrivateKey, kept.CredentialID, kept.PrivateKey, kept.NextPrivateKey, expires)
+		set credential_id = $5, private_key = $6, next_private_key = $7, expires_at = $8, saved_at = now()
+		where project = $1 and broker_url = $2 and credential_id = $3 and private_key = $4
+			and next_private_key is not distinct from $9`,
+		project, brokerURL, expected.CredentialID, expected.PrivateKey,
+		kept.CredentialID, kept.PrivateKey, kept.NextPrivateKey, expires, expected.NextPrivateKey)
 	if err != nil {
 		return false, fmt.Errorf("compare and keep the agent-secrets launcher credential for %s: %w", project, err)
 	}

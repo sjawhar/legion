@@ -302,8 +302,8 @@ func (k credentialKeeper) Save(ctx context.Context, kept agentsecrets.Kept) erro
 	return k.store.SaveAgentSecretsCredential(ctx, k.project, k.url, kept)
 }
 
-func (k credentialKeeper) CompareAndSave(ctx context.Context, expectedPrivateKey []byte, kept agentsecrets.Kept) (bool, error) {
-	return k.store.CompareAndSaveAgentSecretsCredential(ctx, k.project, k.url, expectedPrivateKey, kept)
+func (k credentialKeeper) CompareAndSave(ctx context.Context, expected, kept agentsecrets.Kept) (bool, error) {
+	return k.store.CompareAndSaveAgentSecretsCredential(ctx, k.project, k.url, expected, kept)
 }
 
 func (k credentialKeeper) Forget(ctx context.Context, credentialID string) error {

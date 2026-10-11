@@ -155,12 +155,12 @@ type Keeper interface {
 	Forget(ctx context.Context, credentialID string) error
 }
 
-// RotationKeeper is a Keeper that updates a renewed credential only when the key it kept is the
-// old key a broker renewal replaced. A second daemon that lost the same renewal race must not write
-// its key over the broker winner's.
+// RotationKeeper updates a renewed credential only when its complete prior durable state — the
+// credential id, current key and candidate next key — still matches. A second daemon that lost the
+// same renewal race must not write either its candidate or its old key over the broker winner's.
 type RotationKeeper interface {
 	Keeper
-	CompareAndSave(ctx context.Context, expectedPrivateKey []byte, kept Kept) (saved bool, err error)
+	CompareAndSave(ctx context.Context, expected Kept, kept Kept) (saved bool, err error)
 }
 
 // Kept is a launcher credential as a Keeper keeps it: the broker's id for it, its private key and,
@@ -557,8 +557,12 @@ func (c *Client) doProof(ctx context.Context, method, path string, body any) (in
 			return 0, nil, err
 		}
 		if status != http.StatusUnauthorized {
+			expected, err := keptCredential(cred)
+			if err != nil {
+				return 0, nil, err
+			}
 			moved := &credential{key: next, id: cred.id}
-			if err := c.keepRotation(ctx, cred, moved); err != nil {
+			if err := c.keepRotation(ctx, expected, moved); err != nil {
 				c.log().Error("agent-secrets: took up the broker's renewed key but did not replace its durable key; another daemon may hold the durable winner", "error", err)
 				return 0, nil, err
 			}
@@ -690,6 +694,10 @@ func (c *Client) renew(ctx context.Context, held *credential) (*credential, erro
 // credential to that key, which the client then holds and keeps; 401 means it never did, and the
 // next key is dropped. The caller holds proofMu exclusively.
 func (c *Client) resolveNext(ctx context.Context, held *credential) (*credential, error) {
+	expected, err := keptCredential(held)
+	if err != nil {
+		return nil, err
+	}
 	next := held.next.Load()
 	status, raw, err := c.signed(ctx, next, held.id, http.MethodGet, "/v1/launcher-credentials/self", nil)
 	if err != nil {
@@ -703,7 +711,7 @@ func (c *Client) resolveNext(ctx context.Context, held *credential) (*credential
 		}
 		moved := &credential{key: next, id: held.id}
 		moved.setExpires(answer.ExpiresAt)
-		if err := c.keepRotation(ctx, held, moved); err != nil {
+		if err := c.keepRotation(ctx, expected, moved); err != nil {
 			c.log().Error("agent-secrets: took up the broker's renewed key but did not replace its durable key; another daemon may hold the durable winner", "error", err)
 			return nil, err
 		}
@@ -711,7 +719,7 @@ func (c *Client) resolveNext(ctx context.Context, held *credential) (*credential
 		return moved, nil
 	case http.StatusUnauthorized:
 		held.next.Store(nil)
-		if err := c.keepCurrent(ctx, held); err != nil {
+		if err := c.keepCurrent(ctx, expected, held); err != nil {
 			c.log().Error("agent-secrets: did not clear a stale next key from the durable credential; another daemon may hold the durable winner", "error", err)
 		}
 		return held, nil
@@ -740,10 +748,18 @@ func (c *Client) rotate(ctx context.Context, held *credential) (*credential, err
 	if err != nil {
 		return nil, fmt.Errorf("agent-secrets renewal: sign request object: %w", err)
 	}
+	before, err := keptCredential(held)
+	if err != nil {
+		return nil, err
+	}
 	held.next.Store(key)
-	if err := c.keepCurrent(ctx, held); err != nil {
+	if err := c.keepCurrent(ctx, before, held); err != nil {
 		held.next.Store(nil)
 		return nil, fmt.Errorf("keep the next key before asking the broker to move to it: %w", err)
+	}
+	candidate, err := keptCredential(held)
+	if err != nil {
+		return nil, err
 	}
 	status, raw, err := c.signed(ctx, held.key, held.id, http.MethodPost, "/v1/launcher-credentials/"+url.PathEscape(held.id)+"/renew", renewalBody{Request: request})
 	if err != nil {
@@ -757,7 +773,7 @@ func (c *Client) rotate(ctx context.Context, held *credential) (*credential, err
 		}
 		renewed := &credential{key: key, id: held.id}
 		renewed.setExpires(answer.ExpiresAt)
-		if err := c.keepRotation(ctx, held, renewed); err != nil {
+		if err := c.keepRotation(ctx, candidate, renewed); err != nil {
 			c.cred.CompareAndSwap(held, renewed)
 			c.log().Error("agent-secrets: renewed the broker credential but did not replace its durable key; another daemon may hold the durable winner", "error", err)
 			c.wake()
@@ -771,7 +787,7 @@ func (c *Client) rotate(ctx context.Context, held *credential) (*credential, err
 		return nil, refusal(status, raw)
 	}
 	held.next.Store(nil)
-	if err := c.keepCurrent(ctx, held); err != nil {
+	if err := c.keepCurrent(ctx, candidate, held); err != nil {
 		c.log().Error("agent-secrets: did not clear a losing next key from the durable credential; another daemon may hold the durable winner", "error", err)
 	}
 	switch status {
@@ -924,28 +940,24 @@ func (c *Client) keep(ctx context.Context, cred *credential) error {
 	return nil
 }
 
-// keepCurrent updates only the non-key fields of cred's durable row while that row still holds
-// cred's key. It is used before a renewal stores its candidate next key and while a loser clears
-// one; neither write may restore an old key over another daemon's durable winner.
-func (c *Client) keepCurrent(ctx context.Context, cred *credential) error {
+// keepCurrent applies desired only when the Keeper still holds expected. It is used before a
+// renewal stores its candidate next key and while a loser clears one; neither write may restore an
+// old key or replace a candidate another daemon saved after the caller observed the row.
+func (c *Client) keepCurrent(ctx context.Context, expected Kept, desired *credential) error {
 	if c.Keeper == nil {
 		return nil
 	}
 	keeper, ok := c.Keeper.(RotationKeeper)
 	if !ok {
-		return c.keep(ctx, cred)
+		return c.keep(ctx, desired)
 	}
-	expected, err := keptCredential(&credential{key: cred.key, id: cred.id})
-	if err != nil {
-		return err
-	}
-	kept, err := keptCredential(cred)
+	kept, err := keptCredential(desired)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keeperTimeout)
 	defer cancel()
-	saved, err := keeper.CompareAndSave(ctx, expected.PrivateKey, kept)
+	saved, err := keeper.CompareAndSave(ctx, expected, kept)
 	if err != nil {
 		return err
 	}
@@ -955,36 +967,12 @@ func (c *Client) keepCurrent(ctx context.Context, cred *credential) error {
 	return nil
 }
 
-// keepRotation stores renewed only if the Keeper still holds held's key: the broker has already
-// made renewed its winner, and a losing daemon must never overwrite that durable winner. A Keeper
-// without the optional CAS operation is a unit-test implementation; production's credentialKeeper
-// implements it.
-func (c *Client) keepRotation(ctx context.Context, held, renewed *credential) error {
-	if c.Keeper == nil {
-		return nil
-	}
-	keeper, ok := c.Keeper.(RotationKeeper)
-	if !ok {
-		return c.keep(ctx, renewed)
-	}
-	expected, err := keptCredential(held)
-	if err != nil {
-		return err
-	}
-	kept, err := keptCredential(renewed)
-	if err != nil {
-		return err
-	}
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), keeperTimeout)
-	defer cancel()
-	saved, err := keeper.CompareAndSave(ctx, expected.PrivateKey, kept)
-	if err != nil {
-		return err
-	}
-	if !saved {
-		return errDurableCredentialChanged
-	}
-	return nil
+// keepRotation stores renewed only if the Keeper still holds the complete state held had when the
+// broker moved it. The broker has already made renewed its winner, and a losing daemon must never
+// overwrite that durable winner. A Keeper without the optional CAS operation is a unit-test
+// implementation; production's credentialKeeper implements it.
+func (c *Client) keepRotation(ctx context.Context, expected Kept, renewed *credential) error {
+	return c.keepCurrent(ctx, expected, renewed)
 }
 
 // refused clears cred, which the broker refused (401), wakes the renewal loop and starts a login;

@@ -225,10 +225,12 @@ func (k *memoryKeeper) Save(_ context.Context, kept Kept) error {
 	return nil
 }
 
-func (k *memoryKeeper) CompareAndSave(_ context.Context, expectedPrivateKey []byte, kept Kept) (bool, error) {
+func (k *memoryKeeper) CompareAndSave(_ context.Context, expected, kept Kept) (bool, error) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-	if k.kept == nil || !bytes.Equal(k.kept.PrivateKey, expectedPrivateKey) {
+	if k.kept == nil || k.kept.CredentialID != expected.CredentialID ||
+		!bytes.Equal(k.kept.PrivateKey, expected.PrivateKey) ||
+		!bytes.Equal(k.kept.NextPrivateKey, expected.NextPrivateKey) {
 		return false, nil
 	}
 	k.kept = &kept
