@@ -397,7 +397,7 @@ func TestDenyOpensNoRecord(t *testing.T) {
 // the machine's own claim, which anyone signed in to Dispatch may approve, so the service account is what
 // proves the service: a pod under the service's login running as another account, a pod running
 // as the service's account under a login for a service the broker does not register, the
-// operator's own host session, and a pod no service's launcher enrolled are each denied it with no
+// operator's own machine session, and a pod no service's launcher enrolled are each denied it with no
 // record. Nobody approved the service pod's grant and it runs on no one's machine, so no person's
 // grant list holds it.
 func TestAServicesSecretGoesToItsOwnPodsAlone(t *testing.T) {
@@ -430,7 +430,7 @@ func TestAServicesSecretGoesToItsOwnPodsAlone(t *testing.T) {
 	}{
 		"a pod under the service's login running as another account":       {impostor, impostorKey},
 		"a pod running as the service's account under an unlisted service": {unlisted, unlistedKey},
-		"the operator's host session":                                      {host, hostKey},
+		"the operator's machine session":                                   {host, hostKey},
 		"a pod no service's launcher enrolled":                             {plainPod, plainPodKey},
 	} {
 		denied, err := m.Create(ctx, r.enrollment, signRequest(t, m, r.key, "need it", "SERVICE_KEY"), "")

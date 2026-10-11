@@ -34,7 +34,7 @@ type rig struct {
 }
 
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
-// log it in (see rig.login) before any Enroll — host session or box — can succeed, since Task
+// log it in (see rig.login) before any Enroll — machine session or box — can succeed, since Task
 // 1's Broker fails closed until a human has run `agent-secrets machine login`. startRig below
 // is newRig plus that login, for every test that doesn't care about the pre-login state itself.
 func newRig(t *testing.T, statePath string) *rig {

@@ -816,7 +816,7 @@ func TestEnrollWaitGivesUpAtItsBound(t *testing.T) {
 }
 
 // TestEnrollWaitNeedsAFreshMarker pins that only the launcher's live marker makes a call wait: an
-// empty key dir (a host session's, a pod's), a marker older than the launcher's own setup bound
+// empty key dir (a machine session's, a pod's), a marker older than the launcher's own setup bound
 // (a launcher killed outright), and a failed enrollment the launcher has already reported
 // (enrollment.error, marker removed) all fail at once, as they did before the wait existed.
 func TestEnrollWaitNeedsAFreshMarker(t *testing.T) {
@@ -1223,8 +1223,8 @@ func TestEnrollHelperFlagValidation(t *testing.T) {
 }
 
 // TestRequestAndExecFormSendSessionIDWithFallbackOrder is the regression for the review's finding
-// I3: POST /v1/requests carries session_id so the broker can wake this host session directly
-// once its request is decided (host enrollments carry no session_id of their own) — both call
+// I3: POST /v1/requests carries session_id so the broker can wake this machine session directly
+// once its request is decided (machine session enrollments carry no session_id of their own) — both call
 // sites, cmdRequest and cmdExec, must forward requestSessionID()'s answer rather than leaving it
 // "" — and for LEGION-587's fallback order: with OMP_SESSION_ID unset, the request form still
 // sends ENVOY_SESSION_ID. requestSessionID's own three-way fallback order is pinned at the unit
