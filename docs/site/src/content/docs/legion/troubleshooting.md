@@ -399,10 +399,11 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   most 5 minutes.
 - **`supervise: agent-secrets: the broker found the pod token expired; keeping the key for a fresh
   token`** (`403 POD_TOKEN_EXPIRED: the projected token has expired (oidc: token expired at
-  <time>)`). The token the daemon presented for the pod expired before the broker checked it, most
-  often because the enrollment waited longer than the token lives, for the machine login's approval
-  or for the broker. The daemon keeps the pod's key and enrolls it with the token the shim's next
-  hello carries.
+  <time>)`). The token the daemon presented for the pod expired before the broker checked it. The
+  daemon reads a fresh token from the shim when the one it holds is about to expire, so from a
+  current daemon this means the broker's clock runs more than a minute ahead of the daemon's. The
+  daemon keeps the pod's key, asks the shim for the pod's current token at its next observation,
+  and enrolls the key with it; check the two hosts' clocks.
 - **`supervise: agent-secrets: enrollment refused; waiting for the shim's next hello`** with
   `403 POD_IDENTITY_MISMATCH: the projected token does not identify this pod`. The token is not
   this pod's: it names another pod UID, it is not signed by the cluster the broker trusts
