@@ -608,11 +608,13 @@ func (n *Node) WriteTokenJSON(w io.Writer) error {
 	if err := n.Validate(); err != nil {
 		return err
 	}
-	return n.writeTokenJSON(w)
+	out := tokenWriter{w: w}
+	n.writeTokenJSON(&out)
+	return out.err
 }
 
-func (n *Node) writeTokenJSON(w io.Writer) error {
-	out := tokenWriter{w: w}
+// writeTokenJSON writes n's token representation through out, which keeps the first error.
+func (n *Node) writeTokenJSON(out *tokenWriter) {
 	out.raw(`{"type":`)
 	out.value(n.Type)
 	if attrs := tokenAttrs(n.Type, n.Attrs); len(attrs) > 0 {
@@ -626,7 +628,7 @@ func (n *Node) writeTokenJSON(w io.Writer) error {
 				out.raw(",")
 			}
 			if out.err == nil {
-				out.err = child.writeTokenJSON(w)
+				child.writeTokenJSON(out)
 			}
 		}
 		out.raw("]")
@@ -642,7 +644,10 @@ func (n *Node) writeTokenJSON(w io.Writer) error {
 		for _, mark := range n.Marks {
 			encoded, err := json.Marshal(tokenMark{Type: mark.Type, Attrs: canonicalAttrs(mark.Attrs)})
 			if err != nil {
-				return err
+				if out.err == nil {
+					out.err = err
+				}
+				return
 			}
 			marks = append(marks, encoded)
 		}
@@ -657,7 +662,6 @@ func (n *Node) writeTokenJSON(w io.Writer) error {
 		out.raw("]")
 	}
 	out.raw("}")
-	return out.err
 }
 
 type tokenMark struct {

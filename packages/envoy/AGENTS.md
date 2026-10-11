@@ -339,11 +339,15 @@ operation never writes the room: it runs on the transaction's fork of the room's
 A document no room holds is forked from the store (`coldFork`) and loads no room until the
 committed write is published, so a cold edit holds one copy of the document rather than a room
 beside its fork; an upload's version on such a fork takes out the stored updates through the head
-that read loaded and no in-flight credit. Each operation's mutate starts from the tree `applyLive`
-already read rather than reading its own, and a write drops its fork and rendering once it
-commits, before its publish loads the room (`releaseFork`), since a pooled connection's context
-can keep the write reachable long after it answered (LEGION-504). The `nodeToken` hash streams the
-token's encoding (`pmdoc.WriteTokenJSON`) rather than holding it whole.
+that read loaded and no in-flight credit. A browser's room load takes no lock the write holds, so
+a room that loads while `coldFork` reads the store is forked from instead and the stored copy is
+dropped undecoded, and one that loads later is forked from at the write's next operation. Every
+mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading
+its own; `applyLive` lets that tree go before the one check that decodes a second copy of the
+state (`refuseUndecodable`); and a write drops its fork and rendering once it commits, before its
+publish loads the room (`releaseFork`), since a pooled connection's context can keep the write
+reachable long after it answered (LEGION-504). The `nodeToken` hash streams the token's encoding
+(`pmdoc.WriteTokenJSON`) rather than holding it whole.
 The handler ends the transaction with
 `ledger.Commit`, which records each settlement credit with the document content and takes each
 version's authors back out of that record, commits, credits the writes' actor to their rooms,

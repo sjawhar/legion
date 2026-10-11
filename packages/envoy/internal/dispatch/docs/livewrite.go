@@ -212,6 +212,11 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	if s.srv.GetDoc(write.artifactID) == nil {
 		return s.coldFork(ctx, write)
 	}
+	return s.warmFork(ctx, write)
+}
+
+// warmFork is forkLive's fork of a document a room holds, brought up to date from that room.
+func (s *Service) warmFork(ctx context.Context, write *liveWrite) (*crdt.Doc, error) {
 	seq := write.state.creditSeq.Load()
 	var gained []byte
 	var room *crdt.Doc
@@ -254,8 +259,11 @@ func (s *Service) forkLive(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 // write is published, from the store, which by then holds the write. A fork it built is kept for
 // the transaction's next operation while no room has loaded since, as nothing else can have
 // written the document meanwhile: the transaction's writer slot holds off every other writer and
-// settlement, and a browser's edits reach a room. A room that has loaded since is forked from
-// again (forkLive).
+// settlement, and a browser's edits reach a room. A browser's room load takes no lock the write
+// holds (onLoadDocument), so a room can load while this reads the store: a room found once the
+// read is done is forked from instead (warmFork), and the copy read from the store is dropped
+// undecoded, so the document is never held both in a room and in a fork read from the store. A
+// room that loads after that is forked from at the write's next operation (forkLive).
 //
 // What an upload's version takes out (uploadCapture) is what this read held: the stored updates
 // through the head it loaded (forkHold), and no in-flight credit (forkSeq 0), since a credit no
@@ -279,6 +287,12 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		s.failRoom(write.artifactID, err)
 		return nil, fmt.Errorf("%w: %w", ErrServiceUnavailable, err)
 	}
+	// A room that loaded during the read holds the document; forking it rather than the store
+	// keeps one copy beside it, and its browser's edits in the fork.
+	if s.srv.GetDoc(write.artifactID) != nil {
+		loaded.Update = nil
+		return s.warmFork(ctx, write)
+	}
 	fork := newDocumentCopy(crdt.WithClientID(write.clientID))
 	if len(loaded.Update) > 0 {
 		if err := crdt.ApplyUpdateV1(fork, loaded.Update, nil); err != nil {
@@ -288,10 +302,8 @@ func (s *Service) coldFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 		}
 	}
 	loaded.Update = nil
-	for _, update := range write.updates {
-		if err := crdt.ApplyUpdateV1(fork, update, nil); err != nil {
-			return nil, fmt.Errorf("fork live document with transaction writes: %w", err)
-		}
+	if err := applyTransactionWrites(fork, write.updates); err != nil {
+		return nil, err
 	}
 	write.fork, write.cold, write.forkSeq = fork, true, 0
 	write.forkHold = &roomHold{loaded: int64(loaded.Version)}
@@ -332,14 +344,23 @@ func buildFork(write *liveWrite, incremental bool, gained []byte) (*crdt.Doc, er
 	if err := crdt.ApplyUpdateV1(fork, gained, nil); err != nil {
 		return nil, fmt.Errorf("fork live document: %w", err)
 	}
-	for _, update := range write.updates {
-		if err := crdt.ApplyUpdateV1(fork, update, nil); err != nil {
-			return nil, fmt.Errorf("fork live document with transaction writes: %w", err)
-		}
+	if err := applyTransactionWrites(fork, write.updates); err != nil {
+		return nil, err
 	}
 	// A rebuilt fork is a different document from the one the rendering was taken from.
 	write.dropRendering()
 	return fork, nil
+}
+
+// applyTransactionWrites applies updates, the writes a transaction has made so far, to fork, a copy
+// of the document built without them.
+func applyTransactionWrites(fork *crdt.Doc, updates [][]byte) error {
+	for _, update := range updates {
+		if err := crdt.ApplyUpdateV1(fork, update, nil); err != nil {
+			return fmt.Errorf("fork live document with transaction writes: %w", err)
+		}
+	}
+	return nil
 }
 
 // dropRendering forgets the rendering and the anchor refresh taken from a fork that has moved.
