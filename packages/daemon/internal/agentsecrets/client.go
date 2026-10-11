@@ -351,8 +351,12 @@ func (c *Client) settle(state LoginState, cred *credential) {
 	c.login.Store(&state)
 }
 
-// open sends one machine login and, once the broker opens it, records it pending and starts its
-// poll goroutine.
+// open sends one machine login and, once the broker opens it, records it pending, logs its code with
+// the line an operator approves it by, and starts its poll goroutine. Every login the client opens
+// comes through here: the boot's, whether nothing was kept or the kept row was unreadable, malformed
+// or expired, and each one retryLogin starts after a revoke, a lapsed or denied code, or the expiry
+// of a credential a broker could not or would not renew. So an operator, or a relay reading the log,
+// sees each code exactly once, at INFO.
 func (c *Client) open(ctx context.Context) (string, error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -381,6 +385,10 @@ func (c *Client) open(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("broker answered %d with a body that is not the contract's shape: %w", status, err)
 	}
 	c.login.Store(&LoginState{State: "pending", Code: answer.Code})
+	c.log().Info(fmt.Sprintf(
+		"agent-secrets machine login: enter code %s on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved",
+		answer.Code,
+	))
 	// The poll goroutine outlives this call by design (see the package doc): it keeps running,
 	// backed off, until the login resolves, however long that takes. ctx here may be the RPC-
 	// scoped context of the Enroll/Revoke call whose 401 triggered this automatic re-login

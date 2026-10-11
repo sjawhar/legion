@@ -427,7 +427,8 @@ func TestContractARestartTakesUpARenewalWhoseAnswerWasLost(t *testing.T) {
 // TestContractABootWithARevokedCredentialStartsOneLogin: someone revokes the daemon's login on
 // Dispatch's machine-login page while it is stopped. The restarted daemon takes the kept credential
 // back, its boot renewal is refused, it logs at ERROR the credential to revoke, and it opens exactly
-// one machine login, which a person approves before the pod enrolls.
+// one machine login, whose code it logs exactly once with the boot login's line, so an operator or a
+// relay reading the log sees it; a person approves it before the pod enrolls.
 func TestContractABootWithARevokedCredentialStartsOneLogin(t *testing.T) {
 	withFastPolling(t)
 	rig := newBrokerRig(t)
@@ -461,6 +462,11 @@ func TestContractABootWithARevokedCredentialStartsOneLogin(t *testing.T) {
 	}
 	if n := brokerLogins(t, rig); n != 2 {
 		t.Fatalf("the broker holds %d machine logins, want 2", n)
+	}
+	codeLine := "agent-secrets machine login: enter code " + c.LoginStatus().Code +
+		" on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved"
+	if out := logged.String(); strings.Count(out, codeLine) != 1 || strings.Count(out, "enter code") != 1 || !strings.Contains(out, "level=INFO msg=\""+codeLine) {
+		t.Fatalf("log = %s, want the new code logged exactly once at INFO with the boot login's line %q", out, codeLine)
 	}
 }
 

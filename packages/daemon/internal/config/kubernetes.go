@@ -148,10 +148,10 @@ const (
 // probed.
 var imageDigestRef = regexp.MustCompile(`^[^@\s]+@sha256:[0-9a-f]{64}$`)
 
-// AgentSecretsConfig is `runtime.kubernetes.agent_secrets`: the broker's base URL (once its boot is
-// recorded, the daemon takes back the launcher credential it kept in its own database from an
-// earlier boot, or runs a machine login and logs the confirmation code once, and keeps the
-// credential renewed onto a new key each time; no file ever carries it), the audience of the
+// AgentSecretsConfig is `runtime.kubernetes.agent_secrets`: the broker's base URL (once supervision
+// starts, the daemon takes back the launcher credential it kept in its own database from an earlier
+// boot, or runs a machine login, logging the confirmation code of every login it opens, and keeps
+// the credential renewed onto a new key each time; no file ever carries it), the audience of the
 // projected token every pod carries for it, and that token's lifetime. The login is the
 // legion-daemon service's, which anyone signed in to Dispatch approves, so the block names no
 // approver. The audience defaults to the broker's own (`agent-secrets`) and the lifetime to 3600 s,

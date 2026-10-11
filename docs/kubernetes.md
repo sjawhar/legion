@@ -2018,10 +2018,11 @@ issue's pod (every role container of it alike) and the image probe's.
   credential it kept from an earlier boot (the `agent_secrets_credentials` table of its own
   database, keyed by project and broker URL), logs `agent-secrets machine login resumed`, and
   renews it, logging `renewed the launcher credential onto a new key`, so a restart needs nobody.
-  With none it can use (a first boot, a credential past its expiry, or a new broker URL) it runs a
-  login and logs the confirmation code exactly once: `agent-secrets machine login: enter code
-  XXXX-XXXX on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is
-  held until approved`. The same code and the login's current status ("none", "pending", "issued",
+  With none it can use (a first boot, a kept row it cannot read, a malformed or expired one, or a new
+  broker URL) it runs a login. Every login the daemon opens, at boot or later, logs its confirmation
+  code exactly once at INFO: `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch
+  credential page, where anyone signed in may approve it; pod enrollment is held until approved`. The
+  same code and the login's current status ("none", "pending", "issued",
   "denied", "expired", or "failed" when the broker never opened the login; a credential taken back
   reads "issued" with no code) are on `GET /legion/v1/state`'s `agentSecretsLogin` (daemon API
   contract 9); pod enrollment fails closed and retries until a person signed in to Dispatch approves
@@ -2038,12 +2039,13 @@ issue's pod (every role container of it alike) and the image probe's.
   revoking that login on Dispatch's machine-login page ends, so revoke it there unless someone already
   did. When a login ends without a credential (the broker refused it or could not be reached, its
   code expired undecided, or someone denied it), or the broker refuses the credential, the next pod
-  enrollment starts a fresh login, with no restart. The new code is on `agentSecretsLogin` and in the
-  supervisor's `enrollment failed; retrying on the next observation` warning. After a login the
+  enrollment starts a fresh login, with no restart. The new code is logged with the same `enter code`
+  line, and is on `agentSecretsLogin` and in the supervisor's `enrollment failed; retrying on the
+  next observation` warning. After a login the
   broker never opened the daemon waits 30 s before the next, doubling each time to at most 5 minutes;
   after a code a person was shown and did not approve, it waits an hour, doubling each time to at
   most a day, so nobody signed in sees a new code every 15 minutes. An approved login resets both
-  waits, a restart with no credential it can use runs a login once its boot is recorded (the way to
+  waits, a restart with no credential it can use runs a login once supervision starts (the way to
   ask for a fresh code), and it never starts a login while one is pending. Two daemons of one project
   must never run at once (the in-cluster daemon's Deployment replaces its pod, never doubles it): each
   renewal moves the key, so the other one's calls would be refused. The key in that table is the one

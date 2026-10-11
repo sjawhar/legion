@@ -404,14 +404,17 @@ func TestLoginThenEnrollSignsProofs(t *testing.T) {
 
 // TestExpiredCredentialTriggersAFreshLoginWithANewKey pins the fail-open-to-a-new-login path: a
 // 401 on an enrollment-route call (LAUNCHER_INVALID) clears the held credential and starts a
-// fresh login signed by a freshly minted key — never the old, now-refused one.
+// fresh login signed by a freshly minted key — never the old, now-refused one — and logs its code
+// once with the boot login's line. A credential an old broker could not renew, or one whose renewal
+// failed for good, reaches this path at its expiry.
 func TestExpiredCredentialTriggersAFreshLoginWithANewKey(t *testing.T) {
 	withFastPolling(t)
 	broker, server := newFakeBroker(t)
 	broker.enrollAnswers = []enrollAnswer{
 		{status: http.StatusUnauthorized, body: `{"code":"LAUNCHER_INVALID","error":"expired"}`},
 	}
-	c := &Client{URL: server.URL, HTTP: server.Client()}
+	var logged syncBuffer
+	c := &Client{URL: server.URL, HTTP: server.Client(), Log: slog.New(slog.NewTextHandler(&logged, nil))}
 
 	if _, err := c.Login(context.Background()); err != nil {
 		t.Fatal(err)
@@ -433,6 +436,11 @@ func TestExpiredCredentialTriggersAFreshLoginWithANewKey(t *testing.T) {
 	}
 	if got := c.LoginStatus(); got.State != "pending" || got.Code == "CODE-1" {
 		t.Fatalf("LoginStatus = %+v, want a fresh pending code distinct from CODE-1", got)
+	}
+	line := "agent-secrets machine login: enter code " + c.LoginStatus().Code +
+		" on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved"
+	if out := logged.String(); strings.Count(out, line) != 1 || strings.Count(out, "enter code") != 2 {
+		t.Fatalf("log = %s, want the first code and the fresh code %q each logged once", out, c.LoginStatus().Code)
 	}
 
 	// Resolve the second login before returning: an unresolved pending login's poll goroutine
@@ -1381,4 +1389,44 @@ func TestIssuedCredentialIsPersistedBeforeItIsPublished(t *testing.T) {
 	}
 	close(keeper.release)
 	eventually(t, func() bool { return c.LoginStatus().State == "issued" && c.cred.Load() != nil }, "the persisted credential to be published")
+}
+
+// unreadableKeeper is a Keeper whose Load fails, as a database the daemon cannot read does.
+type unreadableKeeper struct{ memoryKeeper }
+
+func (*unreadableKeeper) Load(context.Context) (Kept, bool, error) {
+	return Kept{}, false, errors.New("database unreachable")
+}
+
+// TestEveryBootThatOpensALoginLogsItsCodeOnce: a boot opens a machine login when nothing is kept,
+// the kept row cannot be read, its key is malformed, or it has expired. Each logs the new code exactly
+// once, at INFO, with the line an operator approves it by.
+func TestEveryBootThatOpensALoginLogsItsCodeOnce(t *testing.T) {
+	der, err := x509.MarshalPKCS8PrivateKey(mustTestKey(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, keeper := range map[string]Keeper{
+		"absent":     &memoryKeeper{},
+		"unreadable": &unreadableKeeper{},
+		"malformed":  &memoryKeeper{kept: &Kept{CredentialID: "cred-1", PrivateKey: []byte("not a key"), ExpiresAt: time.Now().Add(time.Hour)}},
+		"expired":    &memoryKeeper{kept: &Kept{CredentialID: "cred-1", PrivateKey: der, ExpiresAt: time.Now().Add(-time.Minute)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, server := newFakeBroker(t)
+			var logged syncBuffer
+			c := &Client{URL: server.URL, HTTP: server.Client(), Keeper: keeper, Log: slog.New(slog.NewTextHandler(&logged, nil))}
+			ctx, cancel := context.WithCancel(context.Background())
+			t.Cleanup(cancel)
+			code, err := c.Start(ctx)
+			if err != nil || code == "" {
+				t.Fatalf("Start = %q, %v; want a machine login's code", code, err)
+			}
+			line := "agent-secrets machine login: enter code " + code +
+				" on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved"
+			if out := logged.String(); strings.Count(out, line) != 1 || strings.Count(out, "enter code") != 1 || !strings.Contains(out, "level=INFO msg=\""+line) {
+				t.Fatalf("log = %s, want the code logged exactly once at INFO with %q", out, line)
+			}
+		})
+	}
 }

@@ -261,11 +261,12 @@ func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *
 // credential a login wins: a daemon that restarts takes back the credential a person approved
 // before it rather than asking again, and keeps it renewed, onto a new key each time, for as long as
 // ctx lives. It logs that it took the credential back (the client then logs its boot renewal: INFO
-// when it succeeds, ERROR naming the credential when the broker refuses it), or, when it has none it
-// can use, the confirmation code exactly once — pod enrollment is held until a person signed in to
-// Dispatch approves it on the credential page. A boot login that fails, expires or is denied is
-// retried by the client on a later enrollment, so no restart is needed. Nothing when client is nil
-// (no block).
+// when it succeeds, ERROR naming the credential when the broker refuses it). The confirmation code of
+// every login the client opens, this boot's included, is logged once by the client itself
+// (agentsecrets.Client.open, through the logger newSecretsLogin gave it) — pod enrollment is held
+// until a person signed in to Dispatch approves it on the credential page. A boot login that fails,
+// expires or is denied is retried by the client on a later enrollment, so no restart is needed.
+// Nothing when client is nil (no block).
 func startSecretsLogin(ctx context.Context, client *agentsecrets.Client, keeper agentsecrets.Keeper, log *slog.Logger) {
 	if client == nil {
 		return
@@ -278,11 +279,6 @@ func startSecretsLogin(ctx context.Context, client *agentsecrets.Client, keeper 
 			log.Error("agent-secrets machine login failed; a pod enrollment retries it", "error", err)
 		case code == "":
 			log.Info("agent-secrets machine login resumed: the daemon took back the launcher credential a person approved before its restart and is renewing it")
-		default:
-			log.Info(fmt.Sprintf(
-				"agent-secrets machine login: enter code %s on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved",
-				code,
-			))
 		}
 	}()
 }
