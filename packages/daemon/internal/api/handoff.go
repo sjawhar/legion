@@ -191,7 +191,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 	if s.mergeRules != nil {
 		rules = s.mergeRules(issue.Project)
 	}
-	note, refused := readyChecks(ctx, github, s.githubAPI, repository, rules, issue.Key, readyHead, pr)
+	note, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, pr)
 	if refused != nil {
 		refused.write(w)
 		return "", false

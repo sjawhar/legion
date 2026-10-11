@@ -57,7 +57,7 @@ func githubReadFailed(err error) *refusal {
 // was read and passed: a private repository on the free plan can define no ruleset, so this is the
 // ordinary state of the smoke sandbox, and a merger there has no check-based gate on the head at
 // all. The note is the completion's answer (HandoffCompleteResponse.Note).
-func readyChecks(ctx context.Context, github githubrest.Client, githubAPI string, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead string, pr *record.PullRequest) (note string, refused *refusal) {
+func readyChecks(ctx context.Context, github githubrest.Client, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead string, pr *record.PullRequest) (note string, refused *refusal) {
 	if pr == nil || pr.Number <= 0 {
 		return "", &refusal{http.StatusConflict, "NO_PULL_REQUEST", fmt.Sprintf("%s has no pull request recorded", issue)}
 	}
@@ -105,7 +105,7 @@ func readyChecks(ctx context.Context, github githubrest.Client, githubAPI string
 		return "", githubReadFailed(err)
 	}
 	if len(required.Checks) == 0 && len(required.Workflows) == 0 {
-		if note, refused := mergeReadyPolicy(ctx, github, githubAPI, repository, rules, number); refused != nil || note != "" {
+		if note, refused := mergeReadyPolicy(ctx, github, rules, number); refused != nil || note != "" {
 			return note, refused
 		}
 		return fmt.Sprintf("no check is required on %q of %s, so READY was published without reading the head's checks", pull.Base.Ref, repository), nil
@@ -151,13 +151,13 @@ func readyChecks(ctx context.Context, github githubrest.Client, githubAPI string
 			return "", refused
 		}
 	}
-	if note, refused := mergeReadyPolicy(ctx, github, githubAPI, repository, rules, number); refused != nil || note != "" {
+	if note, refused := mergeReadyPolicy(ctx, github, rules, number); refused != nil || note != "" {
 		return note, refused
 	}
 	return "", nil
 }
 
-func mergeReadyPolicy(ctx context.Context, github githubrest.Client, _ string, _ ghrepo.Repository, rules config.MergeRules, number int) (string, *refusal) {
+func mergeReadyPolicy(ctx context.Context, github githubrest.Client, rules config.MergeRules, number int) (string, *refusal) {
 	if len(rules.ByHand) == 0 {
 		return "", nil
 	}

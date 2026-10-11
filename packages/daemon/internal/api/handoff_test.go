@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -68,8 +67,6 @@ type handoffGitHub struct {
 	merged         bool
 	merge          config.MergeRules
 	pullFiles      map[int][]string
-	queued         map[int]bool
-	// What READY reads of main and of the head: the rulesets' rules (with the status the read
 	// answers when not 200), the branch's protection, and the head's check runs, commit statuses
 	// and workflow runs.
 	rules        string
@@ -87,8 +84,7 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	t.Helper()
 	g := &handoffGitHub{
 		files: map[string]map[string]string{}, fail: map[string]int{},
-		pullFiles: map[int][]string{42: {"src/main.go"}, 43: {"src/other.go"}},
-		queued:    map[int]bool{},
+		pullFiles: map[int][]string{42: {"src/main.go"}},
 		pullHead:  headSHA, baseRepo: 4242, mergeableState: "clean",
 		rules:        `[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
 		mainBranch:   `{"name":"main","protection":{"required_status_checks":{"contexts":["legacy"],"checks":[{"context":"legacy"}]}}}`,
@@ -105,23 +101,6 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 		defer g.mu.Unlock()
 		g.bearers = append(g.bearers, r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Path == "/graphql" {
-			var request struct {
-				Variables struct {
-					Number int `json:"number"`
-				} `json:"variables"`
-			}
-			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			entry := "null"
-			if g.queued[request.Variables.Number] {
-				entry = `{"id":"entry"}`
-			}
-			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"mergeQueueEntry":%s}}}}`, entry)
-			return
-		}
 		path, ok := strings.CutPrefix(r.URL.Path, "/repos/acme/widgets/")
 		if !ok {
 			http.NotFound(w, r)
