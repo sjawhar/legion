@@ -453,7 +453,9 @@
   gets back the wording that decision was given on, in code and not by a migration: every boot
   restores them all in one statement and logs each ask, its document and its question, and each
   document's settlement restores its own before it writes the decided wording back into the block,
-  which also undoes a rewording an earlier release's task writes during a rolling deploy
+  which also undoes a rewording an earlier release's task writes during a rolling deploy. Either
+  restoration settles the restored asks' copies again: a copy that settled while its source's row
+  held the rewording showed the decision on the reworded question, and now opens its own ask
   (LEGION-651).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and

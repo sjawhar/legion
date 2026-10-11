@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -36,9 +37,9 @@ type settlementReconciliation struct {
 	repairs   []askRepair
 	events    []model.Event
 	retracted []model.Ask
-	// owedCopies are the other documents showing a copy of an ask this settlement retracts, whose
-	// settlement reconcileAskBlocks marked owed (owedCopiesOf); the settlement arms each once it
-	// commits.
+	// owedCopies are the other documents showing a copy of an ask this settlement retracts, or of
+	// a decided ask whose wording it restores (restoreDocumentDecidedWordings), whose settlement
+	// reconcileAskBlocks marked owed (owedCopiesOf); the settlement arms each once it commits.
 	owedCopies []string
 	// indexedAskBlocks are the blocks with a recorded author that this settlement indexed or
 	// found indexed, whose author the room forgets once it commits (consumeAskAuthors). A copy
@@ -195,7 +196,8 @@ func settlementRetraction(resolution model.AskResolution) bool {
 // whose update observer has not run is left for the settlement that observer arms.
 // A block copied from another document's ask opens none and shows that ask's state instead
 // (copiedAskSources). A decided ask of this document that a task of an earlier release reworded
-// gets its decided wording back first (restoreDecidedWordings), so the block is written back to it.
+// gets its decided wording back first (restoreDocumentDecidedWordings), so the block is written
+// back to it, and its copies settle again.
 // before is the document's rendering as settlement read it ("" where it did not render), which the
 // answers settlement writes back into returning blocks are weighed against (withholdAnswers).
 func (s *Service) reconcileAskBlocks(
@@ -215,7 +217,8 @@ func (s *Service) reconcileAskBlocks(
 	if err != nil {
 		return settlementReconciliation{}, err
 	}
-	if err := s.restoreDecidedWordings(ctx, tx, rows); err != nil {
+	restored, err := s.restoreDocumentDecidedWordings(ctx, tx, rows)
+	if err != nil {
 		return settlementReconciliation{}, err
 	}
 
@@ -366,11 +369,14 @@ func (s *Service) reconcileAskBlocks(
 		}
 		reconciled.retracted = append(reconciled.retracted, ask)
 	}
-	// The copies of what this settlement retracts owe a settlement of their own (owedCopiesOf),
-	// marked here, under the project's copy lock, before this settlement's repairs append its
-	// update and lock its own pending row: the copy lock and every other document's pending row
-	// come before this document's own pending row and before any event.
-	reconciled.owedCopies, err = owedCopiesOf(ctx, tx, artifactID, owner, reconciled.retracted)
+	// The copies of what this settlement retracts, and of the decided asks whose wording it
+	// restored, owe a settlement of their own (owedCopiesOf), marked here, under the project's copy
+	// lock, before this settlement's repairs append its update and lock its own pending row: the
+	// copy lock and every other document's pending row come before this document's own pending row
+	// and before any event.
+	reconciled.owedCopies, err = owedCopiesOf(ctx, tx, documentAsks{
+		artifactID: artifactID, owner: owner, asks: slices.Concat(reconciled.retracted, restored),
+	})
 	if err != nil {
 		return settlementReconciliation{}, err
 	}

@@ -461,12 +461,18 @@ refuses one that does (Pre-deploy census, below). Every boot runs the restoratio
 decided ask in one statement (`docs.Service.RestoreDecidedWordings`, bounded at 30 s), reading
 `events` through `events_ask_payload_id` and writing only the rows whose wording differs; it logs
 `dispatch: restored a decided ask's wording` for each with the ask, its document and the question
-it asks again, then `dispatch: restored decided asks' wordings` with the count. On the
-2026-10-11 production dump (3,739 asks, 82,153 events) it restores 5 asks in 1.3 s, so the first
-boot of the release that carries it logs those 5. Each document's settlement runs the same
-statement over its own decided asks before it reconciles them, so a rewording a task of the
-earlier release writes during the roll is undone by that document's next settlement on this
-release, which also writes the decided wording back into the block.
+it asks again. In the same transaction it marks owed the settlement of every other document of
+each restored ask's owner whose latest version holds the ask's block with no ask of its own under
+that id, a copy that may have matched the rewording and shown the decision on it, and arms those
+settlements once it commits; then it logs `dispatch: restored decided asks' wordings` with
+`restored=<n> copies=<n>`. On the 2026-10-11 production dump (3,739 asks, 82,153 events) it
+restores 5 asks and marks 0 copies owed, in 0.17-0.77 s: the one other document holding one of
+those 5 blocks has an ask of its own under that id, so it is no copy, and the first boot of the
+release that carries it logs `restored=5 copies=0`. Each document's settlement runs the same
+statement over its own decided asks before it reconciles them, and marks the restored asks' copies
+owed the same way, so a rewording a task of the earlier release writes during the roll is undone by
+that document's next settlement on this release, which also writes the decided wording back into
+the block and settles its copies again.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

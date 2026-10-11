@@ -1557,17 +1557,20 @@ there, since the copy has no ask row an answer or resolve route could reach and 
 reads the source's; `dispatch request-approval`'s refusal and the dashboard's decision card name
 the source, its document and its state from those attributes, reading no ask. A copy shows its
 source as of its own last settlement, and settles again when its own content changes, when a
-restart resumes a settlement it owed, when its source is answered or resolved, and when settlement
-retracts its source: the answer and resolve routes (`SettleCopiesOf`) and a retracting settlement
-(`reconcileAskBlocks`) mark owed, in one `doc_settlements_pending` upsert (`markSettlementPending`), and
-arm once they commit, the settlement of every other document of the owner whose latest version
-holds the block with no ask of its own under that id (`owedCopiesOf`). After a retraction the first
-of those to settle opens the block's own ask, credited to the author who wrote the block into it,
-whom the room keeps owed while the block is a copy; every other copy then matches that ask and
-names it, so copies of one owner share one ask once their source is retracted and the question
-waits in one place, and a block pasted elsewhere and then cut, in either order, is open in one
-place. That needs the owner's copies to settle one at a time: an issue's documents do, under their
-issue's row (`lockArtifactOwner`), but a project document's owner row is the document itself, so a
+restart resumes a settlement it owed, when its source is answered or resolved, when settlement
+retracts its source, and when its source's decided wording is restored (below): the answer and
+resolve routes (`SettleCopiesOf`), a retracting or restoring settlement (`reconcileAskBlocks`) and
+the boot's restoration (`RestoreDecidedWordings`) mark owed, in one `doc_settlements_pending`
+upsert (`markSettlementPending`), and arm once they commit, the settlement of every other document
+of the owner whose latest version holds the block with no ask of its own under that id
+(`owedCopiesOf`, which takes the copy lock of each project among the documents it is given, in the
+projects' order). After a retraction the first of those to settle opens the block's own ask,
+credited to the author who wrote the block into it, whom the room keeps owed while the block is a
+copy; every other copy then matches that ask and names it, so copies of one owner share one ask
+once their source is retracted and the question waits in one place, and a block pasted elsewhere
+and then cut, in either order, is open in one place. That needs the owner's copies to settle one at
+a time: an issue's documents do, under their issue's row (`lockArtifactOwner`), but a project
+document's owner row is the document itself, so a
 project's copy bookkeeping - a settlement's copy-source read, and every marking of copies owed -
 takes a transaction advisory lock keyed on the project (`lockProjectCopies`), so nothing that locks
 the project's row waits on it. It is the two-key form, `pg_advisory_xact_lock(copiedAsksLockNamespace,
@@ -1611,13 +1614,16 @@ the wording before it - gets back the wording its decision was given on, the pre
 the first `ask.edited` after its latest `ask.answered` or `ask.resolved` with no `ask.opened`
 between, in code rather than by a migration, since the pre-deploy census refuses a migration that
 rewrites rows (`cmd/dispatch/README.md`, "Pre-deploy census"): once at boot over every decided ask
-(`docs.Service.RestoreDecidedWordings`, one statement), and at every settlement over its document's
-decided asks (`restoreDecidedWordings`, the same statement scoped to their ids), which also undoes
-a rewording a task of that release writes during a rolling deploy. Both are
-`decidedWordingRestore`, re-index the restored question's references and log each ask they
-restore, its document and the question it asks again (`dispatch: restored a decided ask's
-wording`), never the wording it replaced; the boot then logs the count (`dispatch: restored
-decided asks' wordings`). A route that changes an ask's text or lifecycle writes both:
+(`docs.Service.RestoreDecidedWordings`), and at every settlement over its document's decided asks
+(`restoreDocumentDecidedWordings`), which also undoes a rewording a task of that release writes
+during a rolling deploy. Both run `decidedWordingRestore`, one statement whose `$1` names the asks
+it may restore, null at boot for every decided ask; both re-index the restored question's
+references, log each ask they restore, its document and the question it asks again (`dispatch:
+restored a decided ask's wording`), never the wording it replaced, and mark the restored asks'
+copies owed: a copy that settled while its source's row held the rewording matched that wording and
+shows the decision on it, and its next settlement opens the block's own ask. The boot then logs the
+asks' and the copies' counts (`dispatch: restored decided asks' wordings`, `restored=<n>
+copies=<n>`). A route that changes an ask's text or lifecycle writes both:
 `PATCH /api/v1/asks/{id}` on a block ask (an open one; a decided one is `409 ASK_NOT_OPEN`) writes
 the block through the document ledger and then takes the row's values from what the block parses
 back to, and `POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the

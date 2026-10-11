@@ -618,11 +618,78 @@ func TestASettlementRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
 			if strings.Contains(line, "Tuesday") {
 				t.Fatalf("the settlement logged the wording it replaced: %q", line)
 			}
-			restored, err := service.RestoreDecidedWordings(context.Background())
-			if err != nil || restored != 0 {
-				t.Fatalf("the boot's restoration after the settlement restored %d asks (%v), want none left", restored, err)
+			restored, copies, err := service.RestoreDecidedWordings(context.Background())
+			if err != nil || restored != 0 || copies != 0 {
+				t.Fatalf("the boot's restoration after the settlement restored %d asks and marked %d copies owed (%v), want none", restored, copies, err)
 			}
 		})
+	}
+}
+
+// A copy that settles while an earlier release's rewording of its decided source is still in the
+// source's row matches the reworded question, and shows the decision beside it. Restoring the
+// source's decided wording, at its document's settlement or at boot, marks the copy owed, and the
+// copy's next settlement opens the block's own ask, the reworded question being one no decision
+// answered. A second restoration finds nothing left, and the copy owes nothing more.
+func TestARestorationOfACopysSourceSettlesTheCopyAgain(t *testing.T) {
+	ctx := context.Background()
+	for _, closing := range []string{"answered", "resolved"} {
+		for _, restoration := range []string{"settlement", "boot"} {
+			t.Run(closing+"/"+restoration, func(t *testing.T) {
+				service, original := newTestService(t)
+				service.settle = time.Hour
+				seedServiceText(t, service, original, "Context\n\n"+shipBlock)
+				settleCurrentGeneration(t, service, original)
+				answer, _ := decidedShip(closing)
+				if err := closeSource(ctx, service, original, "ship", blockAskOn(t, service, original, "ship"), answer, nil); err != nil {
+					t.Fatal(err)
+				}
+				source := blockAskOn(t, service, original, "ship")
+				editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
+					return replaceRun("Yes: Monday.", "Tuesday: Ship it.")(replaceRun("Ship on Monday?", "Ship on Tuesday?")(tree))
+				})
+				rewordAsAnEarlierRelease(t, service, original, source)
+
+				copied := createIssueDocument(t, service.store, 1, "# Copy")
+				seedServiceText(t, service, copied, "Record\n\n"+tuesdayBlock)
+				settleCurrentGeneration(t, service, copied)
+				requireCopiedStates(t, service, copied, `:::ask{#ship urgency="med" multiple="false" state="`+closing+`"`)
+
+				switch restoration {
+				case "settlement":
+					settleCurrentGeneration(t, service, original)
+				case "boot":
+					if restored, copies, err := service.RestoreDecidedWordings(ctx); err != nil || restored != 1 || copies != 1 {
+						t.Fatalf("the boot's restoration restored %d asks and marked %d copies owed (%v), want the source and its copy", restored, copies, err)
+					}
+				}
+				if owed := copyOwed(t, service, copied); owed != 1 {
+					t.Fatalf("the copy owes %d settlements once its source's wording was restored at %s, want one", owed, restoration)
+				}
+				settleCurrentGeneration(t, service, copied)
+				text, err := service.Text(ctx, copied)
+				if err != nil {
+					t.Fatalf("read the copy: %v", err)
+				}
+				if strings.Contains(text, `state="`+closing+`"`) || strings.Contains(text, "copied_from") {
+					t.Fatalf("the copy of the reworded question still shows its source %s once the source was restored:\n%s", closing, text)
+				}
+				requireCopiedStates(t, service, copied, `:::ask{#ship urgency="med" multiple="false" state="open"}`+"\nShip on Tuesday?")
+				if blocks := openAskBlocksOn(t, service, copied); blocks != "ship" {
+					t.Fatalf("the copy's open asks = %q, want its own ship", blocks)
+				}
+
+				if restored, copies, err := service.RestoreDecidedWordings(ctx); err != nil || restored != 0 || copies != 0 {
+					t.Fatalf("a second restoration restored %d asks and marked %d copies owed (%v), want none", restored, copies, err)
+				}
+				if owed := copyOwed(t, service, copied); owed != 0 {
+					t.Fatalf("the copy owes %d settlements after a second restoration, want none", owed)
+				}
+				if again, err := service.Text(ctx, copied); err != nil || again != text {
+					t.Fatalf("the copy changed after a second restoration (%v):\n%s", err, again)
+				}
+			})
+		}
 	}
 }
 

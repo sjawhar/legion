@@ -24,24 +24,26 @@ import (
 // that indexes the same block id and asks exactly what the block asks (its question, options,
 // multiple and urgency, which a copy carries unchanged). A decided ask's current wording is the one
 // it was decided on, since settlement never takes a document's rewording of an answered or resolved
-// ask into its row (reconcileAskBlocks), and the asks a task of an earlier release reworded get
-// their decided wording back at boot and at their document's settlement (RestoreDecidedWordings,
-// restoreDecidedWordings), so a match on the current wording shows a decision on what the block
-// asks. The block may also ask an earlier wording, since a copy can be taken before an edit
-// (askHistories), but a match on an earlier wording counts only while the ask is open, or when its
-// answer or resolution was given while it asked that wording (askHistory.shownBy), so a copy never
-// shows a decision on a question it does not ask. A block whose text the copy changes, or whose
-// earlier-wording match does not count, opens an ask as any new block does. An ask settlement
+// ask into its row (reconcileAskBlocks), so a match on the current wording shows a decision on what
+// the block asks. The one exception is an ask a task of an earlier release reworded, until its
+// decided wording is restored at boot or at its document's settlement (RestoreDecidedWordings,
+// restoreDocumentDecidedWordings): a copy settled before then matches the rewording and shows the
+// decision on it, and the restoration settles that copy again (owedCopiesOf), which then opens the
+// block's own ask. The block may also ask an earlier wording, since a copy can be taken before an
+// edit (askHistories), but a match on an earlier wording counts only while the ask is open, or when
+// its answer or resolution was given while it asked that wording (askHistory.shownBy), so a copy
+// never shows a decision on a question it does not ask. A block whose text the copy changes, or
+// whose earlier-wording match does not count, opens an ask as any new block does. An ask settlement
 // retracted because its block left its document is no source: a block cut from one document and
 // pasted into another is the only one left, and opens an ask as any new block does. Of several
 // sources, the earliest asked is the original, whichever wording it matched on, since a copy that
 // opened asks of its own before copies were recognised came after it; two unrelated asks of one
 // owner under one id asking the same thing are therefore one question to a copy, the earlier. The
-// copy shows its source's state as of its own last settlement, and an answer or a resolution of the
-// source settles it again (SettleCopiesOf). The rows are read, never locked or written: settlement
-// holds this document's owner row and room lock, and a source's answer route takes the source's ask
-// row before its own document's room. A project document's settlement also takes its project's copy
-// lock first (lockProjectCopies).
+// copy shows its source's state as of its own last settlement, and an answer, a resolution or a
+// restoration of the source settles it again. The rows are read, never locked or written:
+// settlement holds this document's owner row and room lock, and a source's answer route takes the
+// source's ask row before its own document's room. A project document's settlement also takes its
+// project's copy lock first (lockProjectCopies).
 func copiedAskSources(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -217,27 +219,65 @@ func owedCopiesQuery(owner artifactOwner) (string, string) {
 	`, ownerKey
 }
 
-// owedCopiesOf marks a settlement owed, in tx, for every other document of owner whose latest
-// version holds the block of one of asks with no ask of its own under that block's id, and returns
-// them for the caller to arm once tx commits. Such a block is a copy of the ask, or one its
-// document has not settled yet, and shows the ask as of its own last settlement. Settlement calls
-// this for the asks it retracts, whose copies then open the block's own ask, and an answer or a
-// resolution for the ask it closes (SettleCopiesOf), whose copies then show it. A document's latest
-// version is read for the block's opener (`:::ask{#<id> …}`), so one that quotes the opener
-// elsewhere, in code, is settled for nothing. The pending rows (markSettlementPending, one
-// statement however many copies there are) keep the debt across a restart, for the resumption to
-// arm. They are taken under the project's copy lock (lockProjectCopies), and the caller has taken
+// documentAsks is asks of one document, artifactID, whose owner is owner.
+type documentAsks struct {
+	artifactID string
+	owner      artifactOwner
+	asks       []model.Ask
+}
+
+// owedCopiesOf marks a settlement owed, in tx, for every other document of each document's owner
+// whose latest version holds the block of one of that document's asks with no ask of its own under
+// that block's id, and returns them for the caller to arm once tx commits. Such a block is a copy
+// of the ask, or one its document has not settled yet, and shows the ask as of its own last
+// settlement. Settlement calls this for the asks it retracts, whose copies then open the block's
+// own ask, and for the decided asks whose wording it restores; an answer or a resolution for the
+// ask it closes (SettleCopiesOf) and the boot for every ask it restores (RestoreDecidedWordings),
+// whose copies then show them or open their own. A document's latest version is read for the
+// block's opener (`:::ask{#<id> …}`), so one that quotes the opener elsewhere, in code, is settled
+// for nothing. The pending rows (markSettlementPending, one statement however many copies there
+// are) keep the debt across a restart, for the resumption to arm. They are taken under the copy
+// lock of every project among the owners (lockProjectCopies), taken first and in the projects'
+// order, so two holders of several never wait on each other in a cycle; and the caller has taken
 // no other pending row and not the events' commit-order lock: a copy's settlement deletes its own
 // row before it appends an event, so the two can wait on each other in only one direction.
-func owedCopiesOf(
-	ctx context.Context,
-	tx pgx.Tx,
-	artifactID string,
-	owner artifactOwner,
-	asks []model.Ask,
-) ([]string, error) {
+func owedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]string, error) {
+	var projects []string
+	for _, document := range documents {
+		if document.owner.IssueKey == nil && slices.ContainsFunc(document.asks, func(ask model.Ask) bool { return ask.BlockID != nil }) {
+			projects = append(projects, document.owner.Project)
+		}
+	}
+	slices.Sort(projects)
+	for _, project := range slices.Compact(projects) {
+		if err := lockProjectCopies(ctx, tx, artifactOwner{Project: project}); err != nil {
+			return nil, err
+		}
+	}
+	var copies []string
+	for _, document := range documents {
+		found, err := copiesOf(ctx, tx, document)
+		if err != nil {
+			return nil, err
+		}
+		copies = append(copies, found...)
+	}
+	if len(copies) == 0 {
+		return nil, nil
+	}
+	slices.Sort(copies)
+	copies = slices.Compact(copies)
+	if err := markSettlementPending(ctx, tx, copies, nil, false, true); err != nil {
+		return nil, err
+	}
+	return copies, nil
+}
+
+// copiesOf reads the other documents of document's owner holding the block of one of its asks with
+// no ask of their own under that block's id (owedCopiesQuery).
+func copiesOf(ctx context.Context, tx pgx.Tx, document documentAsks) ([]string, error) {
 	var blockIDs, patterns []string
-	for _, ask := range asks {
+	for _, ask := range document.asks {
 		if ask.BlockID == nil {
 			continue
 		}
@@ -248,34 +288,27 @@ func owedCopiesOf(
 	if len(blockIDs) == 0 {
 		return nil, nil
 	}
-	if err := lockProjectCopies(ctx, tx, owner); err != nil {
-		return nil, err
-	}
-	query, ownerKey := owedCopiesQuery(owner)
-	rows, err := tx.Query(ctx, query, blockIDs, artifactID, ownerKey, patterns)
+	query, ownerKey := owedCopiesQuery(document.owner)
+	rows, err := tx.Query(ctx, query, blockIDs, document.artifactID, ownerKey, patterns)
 	if err != nil {
 		return nil, fmt.Errorf("find copies of asks: %w", err)
 	}
-	var copies []string
-	for rows.Next() {
-		var copy string
-		if err := rows.Scan(&copy); err != nil {
-			rows.Close()
-			return nil, fmt.Errorf("scan a copy of an ask: %w", err)
-		}
-		copies = append(copies, copy)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate copies of asks: %w", err)
-	}
-	if len(copies) == 0 {
-		return nil, nil
-	}
-	if err := markSettlementPending(ctx, tx, copies, nil, false, true); err != nil {
-		return nil, err
+	copies, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("read copies of asks: %w", err)
 	}
 	return copies, nil
+}
+
+// documentOwner reads the owner of the document artifactID without locking it.
+func documentOwner(ctx context.Context, tx pgx.Tx, artifactID string) (artifactOwner, error) {
+	var owner artifactOwner
+	if err := tx.QueryRow(ctx, `
+		select issue_key, coalesce(project_key, '') from artifacts where id = $1
+	`, artifactID).Scan(&owner.IssueKey, &owner.Project); err != nil {
+		return artifactOwner{}, fmt.Errorf("load the document's owner: %w", err)
+	}
+	return owner, nil
 }
 
 // SettleCopiesOf marks owed, in the transaction ctx joined, the settlement of every other document
@@ -293,13 +326,11 @@ func (s *Service) SettleCopiesOf(ctx context.Context, ask model.Ask) error {
 	if ask.BlockID == nil || ask.BlockArtifactID == nil {
 		return fmt.Errorf("ask %q is not a block ask", ask.ID)
 	}
-	var owner artifactOwner
-	if err := tx.QueryRow(ctx, `
-		select issue_key, coalesce(project_key, '') from artifacts where id = $1
-	`, *ask.BlockArtifactID).Scan(&owner.IssueKey, &owner.Project); err != nil {
-		return fmt.Errorf("load the ask's document owner: %w", err)
+	owner, err := documentOwner(ctx, tx, *ask.BlockArtifactID)
+	if err != nil {
+		return err
 	}
-	copies, err := owedCopiesOf(ctx, tx, *ask.BlockArtifactID, owner, []model.Ask{ask})
+	copies, err := owedCopiesOf(ctx, tx, documentAsks{artifactID: *ask.BlockArtifactID, owner: owner, asks: []model.Ask{ask}})
 	if err != nil {
 		return err
 	}

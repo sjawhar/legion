@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
@@ -15,6 +16,9 @@ import (
 // the one answered and then reworded: one answered again after the rewording holds a decision on
 // the new wording, one reworded while open and one reopened before its rewording were decided on
 // nothing they no longer ask, and one reworded and back again already asks its decided wording.
+// A record copy of the spec taken while the reworded ask's row held the rewording showed the
+// decision on the reworded question, so the boot marks it owed a settlement, which opens its own
+// ask; a document holding the block of an ask the boot left as it was owes none.
 func TestDispatchBootRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -25,6 +29,8 @@ func TestDispatchBootRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
 		reopened  = "5a660655-04ad-4ce0-8a9b-93dd03c412b4"
 		unchanged = "5a660655-04ad-4ce0-8a9b-93dd03c412b5"
 		spec      = "5a660655-04ad-4ce0-8a9b-93dd03c41200"
+		record    = "5a660655-04ad-4ce0-8a9b-93dd03c41201"
+		notes     = "5a660655-04ad-4ce0-8a9b-93dd03c41202"
 	)
 	monday := `{"question":"Ship on Monday?","options":[{"label":"Yes","description":"Monday."},{"label":"No","description":"Later."}],"multiple":false,"urgency":"med"}`
 	tuesday := `{"question":"Ship on Tuesday?","options":[{"label":"Tuesday","description":"Ship it."},{"label":"No","description":"Later."}],"multiple":false,"urgency":"high"}`
@@ -35,6 +41,23 @@ func TestDispatchBootRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
 			values ('CORE-1', 'CORE', 1, 'Spec', '{"kind":"session","id":"s"}', 'U')`,
 		`insert into artifacts (id, issue_key, project_key, slug, name, kind, is_primary, created_by)
 			values ('` + spec + `', 'CORE-1', 'CORE', 'spec', 'spec.md', 'doc', true, '{"kind":"session","id":"s"}')`,
+		// The record copy holds the reworded ask's block as its row asked it before the boot; the
+		// notes hold the block of the ask answered again after its rewording.
+		`insert into artifacts (id, issue_key, project_key, slug, name, kind, created_by) values
+			('` + record + `', 'CORE-1', 'CORE', 'record', 'record.md', 'doc', '{"kind":"session","id":"s"}'),
+			('` + notes + `', 'CORE-1', 'CORE', 'notes', 'notes.md', 'doc', '{"kind":"session","id":"s"}')`,
+		`insert into artifact_versions (artifact_id, number, markdown) values
+			('` + record + `', 1, ':::ask{#block-b1 urgency="high" multiple="false" state="answered" copied_from="` + reworded + `"}
+Ship on Tuesday?
+
+- Tuesday: Ship it.
+- No: Later.
+:::
+'),
+			('` + notes + `', 1, ':::ask{#block-b2 urgency="high" multiple="false"}
+Ship on Tuesday?
+:::
+')`,
 	} {
 		if _, err := database.Pool.Exec(ctx, statement); err != nil {
 			t.Fatalf("seed the issue: %v", err)
@@ -90,10 +113,14 @@ func TestDispatchBootRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
 	answered(unchanged)
 	edited(unchanged)
 
-	process := startDispatchProcess(t, database.Pool.Config().ConnString())
+	// The settlement the boot arms waits five minutes, so the copy's debt is still there to read.
+	process := startDispatchProcessWithSettleDelay(t, database.Pool.Config().ConnString(), 5*time.Minute)
 	process.waitHealthy(t)
 	process.WaitForOutput(t, `msg="dispatch: restored decided asks' wordings" restored=1`)
 	output := process.Output.String()
+	if !strings.Contains(output, `msg="dispatch: restored decided asks' wordings" restored=1 copies=1`) {
+		t.Errorf("the boot's count names no copy marked owed, want copies=1")
+	}
 	for line := range strings.Lines(output) {
 		if !strings.Contains(line, "restored a decided ask's wording") {
 			continue
@@ -129,6 +156,22 @@ func TestDispatchBootRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
 		if id == reworded && (label != "Yes" || urgency != "med" || state != "answered") {
 			t.Errorf("the restored ask reads %s %s %s, want its decided options and urgency, still answered", label, urgency, state)
 		}
+	}
+	var owed []string
+	rows, err := database.Pool.Query(ctx, `select artifact_id::text from doc_settlements_pending order by artifact_id`)
+	if err != nil {
+		t.Fatalf("read the owed settlements: %v", err)
+	}
+	for rows.Next() {
+		var document string
+		if err := rows.Scan(&document); err != nil {
+			t.Fatalf("scan an owed settlement: %v", err)
+		}
+		owed = append(owed, document)
+	}
+	rows.Close()
+	if len(owed) != 1 || owed[0] != record {
+		t.Errorf("the documents owing a settlement after the boot are %v, want only the record copy %s", owed, record)
 	}
 	if t.Failed() {
 		t.Logf("Dispatch's output:\n%s", output)

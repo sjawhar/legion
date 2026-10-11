@@ -11,10 +11,10 @@ import (
 // The reads a settlement makes for its copied ask blocks run at every settlement of a copy, which
 // never gets an ask row of its own. Each must reach the owner's documents through an index - the
 // issue's through artifacts_issue_key, a project's unlinked documents through
-// artifacts_project_documents - and read events through events_ask_payload_id, never scanning a
+// artifacts_project_documents, and read events through events_ask_payload_id, never scanning a
 // table that grows with every document or event. So must the restoration of a decided ask's
 // wording, which every settlement of a document holding one runs over its decided asks, reaching
-// them through their primary key, and which the boot runs over every decided ask.
+// them through their primary key, and which the boot runs over every decided ask (a null $1).
 func TestCopiedAskQueriesAvoidSequentialScans(t *testing.T) {
 	service, _ := newTestService(t)
 	ctx := context.Background()
@@ -49,9 +49,9 @@ func TestCopiedAskQueriesAvoidSequentialScans(t *testing.T) {
 		{"the latest versions of an issue's copies", copiesOnIssue, "artifact_versions", "artifact_versions_artifact_id_number_key", []any{blocks, document, issueKey, patterns}},
 		{"the latest versions of a project's copies", copiesOnProject, "artifact_versions", "artifact_versions_artifact_id_number_key", []any{blocks, document, projectKey, patterns}},
 		{"what a copied ask asked and decided", copiedAskHistoryQuery, "events", "events_ask_payload_id", []any{[]string{"ask-id"}}},
-		{"a settlement's decided asks", decidedWordingRestore(true), "asks", "asks_pkey", []any{[]string{document}}},
-		{"a settlement's decided asks' events", decidedWordingRestore(true), "events", "events_ask_payload_id", []any{[]string{document}}},
-		{"the boot's decided asks' events", decidedWordingRestore(false), "events", "events_ask_payload_id", nil},
+		{"a settlement's decided asks", decidedWordingRestore, "asks", "asks_pkey", []any{[]string{document}}},
+		{"a settlement's decided asks' events", decidedWordingRestore, "events", "events_ask_payload_id", []any{[]string{document}}},
+		{"the boot's decided asks' events", decidedWordingRestore, "events", "events_ask_payload_id", []any{[]string(nil)}},
 	} {
 		t.Run(query.name, func(t *testing.T) {
 			var planJSON []byte

@@ -109,6 +109,7 @@ func TestCopyLockOrderGuardFollowsTheLockTakers(t *testing.T) {
 		{"docs.lockProjectCopies", takesCopyLock},
 		{"docs.Service.SettleCopiesOf", takesCopyLock},
 		{"docs.Service.reconcileAskBlocks", takesCopyLock},
+		{"docs.Service.RestoreDecidedWordings", takesCopyLock | takesPendingRow},
 		{"docs.Service.settleRoomWithin", takesCopyLock | takesPendingRow | appendsEvent},
 		{"api.server.transitionAskTx", takesCopyLock | takesPendingRow},
 		{"api.server.closeAskTx", takesCopyLock | takesPendingRow | appendsEvent},
