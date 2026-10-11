@@ -41,9 +41,10 @@ func sessionResp(s requests.Session) recordSessionResp {
 // enrollment's slot, one of several independent identities in one pod, and null for every
 // enrollment without one.
 type recordEnrollmentResp struct {
-	// "box", "host" or "pod".
+	// "session" (an agent session on a machine its person logged in) or "pod".
 	Kind string `json:"kind"`
-	// The session's runtime: a host session's host:pid:start time, a box's id, a pod's UID.
+	// The session's runtime: whatever names the session on its machine (the helper's
+	// host:pid:start time, a container's id), or a pod's UID.
 	RuntimeID string `json:"runtime_id"`
 	// The person the session runs for; empty for a pod.
 	Operator string `json:"operator"`

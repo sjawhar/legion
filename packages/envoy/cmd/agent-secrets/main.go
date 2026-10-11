@@ -573,7 +573,9 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
 	sessionID := flags.String("session-id", "", "the agent session the broker notifies if one of this session's pending requests expires")
 	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
-	if slices.ContainsFunc(flagArgs, func(a string) bool { return a == "--kind" || a == "-kind" || strings.HasPrefix(a, "--kind=") || strings.HasPrefix(a, "-kind=") }) {
+	if slices.ContainsFunc(flagArgs, func(a string) bool {
+		return a == "--kind" || a == "-kind" || strings.HasPrefix(a, "--kind=") || strings.HasPrefix(a, "-kind=")
+	}) {
 		fmt.Fprintln(stderr, "agent-secrets enroll: --kind is gone: every session a launcher enrolls is one kind, so leave it out")
 		return exitUsageError
 	}

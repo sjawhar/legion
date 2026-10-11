@@ -174,7 +174,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, body = req(t, http.MethodPost, brokerURL+"/v1/enrollments", map[string]string{"Proof": launcherProof},
-		map[string]any{"kind": "box", "runtime_id": "box-devrelay-test", "operator": testApprover, "thumbprint": thumbprint})
+		map[string]any{"kind": "session", "runtime_id": "session-devrelay-test", "operator": testApprover, "thumbprint": thumbprint})
 	if status != http.StatusCreated {
 		t.Fatalf("POST /v1/enrollments = %d: %s", status, body)
 	}

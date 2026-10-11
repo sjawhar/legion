@@ -361,7 +361,7 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("thumbprint: %v", err)
 		}
 		status, body = ts.launcher(t, machineKey, launcherCredentialID, http.MethodPost, "/v1/enrollments", map[string]any{
-			"kind": "box", "runtime_id": "e2e-box", "operator": testApprover, "thumbprint": sessionThumbprint,
+			"kind": "session", "runtime_id": "e2e-session", "operator": testApprover, "thumbprint": sessionThumbprint,
 		})
 		if status != http.StatusCreated {
 			t.Fatalf("POST /v1/enrollments (launcher proof by the machine's own key) = %d, want 201: %s", status, body)
@@ -705,7 +705,7 @@ func (s *e2eServer) loginAndEnroll(t *testing.T, person, host string) (string, *
 		t.Fatalf("thumbprint: %v", err)
 	}
 	status, body = s.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments",
-		map[string]any{"kind": "box", "runtime_id": host + "-box", "thumbprint": thumbprint})
+		map[string]any{"kind": "session", "runtime_id": host + "-session", "thumbprint": thumbprint})
 	if status != http.StatusCreated {
 		t.Fatalf("enroll %s's session = %d: %s", person, status, body)
 	}

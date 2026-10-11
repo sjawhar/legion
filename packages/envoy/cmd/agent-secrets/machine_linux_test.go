@@ -125,11 +125,11 @@ func TestMachineListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	}
 }
 
-// TestGrantListAndRevokeUnderTheMachinesLogin: a box this machine enrolled gets an agent-tier
-// secret automatically. `grant list` shows that grant, and `--json` prints exactly what Dispatch's
-// Live grants page reads for the operator. `grant revoke` ends it, as the operator's revoke on that
-// page does: the box can no longer read the value, and its next request for the secret waits for
-// approval.
+// TestGrantListAndRevokeUnderTheMachinesLogin: a session key this machine enrolled gets an
+// agent-tier secret automatically. `grant list` shows that grant, and `--json` prints exactly what
+// Dispatch's Live grants page reads for the operator. `grant revoke` ends it, as the operator's
+// revoke on that page does: the session can no longer read the value, and its next request for the
+// secret waits for approval.
 func TestGrantListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	binary := buildAgentSecrets(t)
@@ -167,8 +167,8 @@ func TestGrantListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	if want := []string{"GRANT_ID", "SECRETS", "GRANTED", "APPROVER", "SESSION", "OPERATOR", "EXPIRES"}; exit != 0 || !slices.Equal(header, want) || len(rows) != 1 {
 		t.Fatalf("grant list: exit %d, stdout %q, stderr %q; want the header %v and one row", exit, stdout, stderr, want)
 	}
-	if row := rows[0]; !slices.Equal(row[:6], []string{grantID, "TEST_AUTO_SECRET", "automatic", "-", "box/" + runtimeID, rig.Operator}) {
-		t.Fatalf("grant list's row = %v, want the box's automatic grant %s", row, grantID)
+	if row := rows[0]; !slices.Equal(row[:6], []string{grantID, "TEST_AUTO_SECRET", "automatic", "-", "session/" + runtimeID, rig.Operator}) {
+		t.Fatalf("grant list's row = %v, want the session key's automatic grant %s", row, grantID)
 	}
 
 	stdout, stderr, exit = grant("list", "--json")

@@ -110,7 +110,7 @@ func TestRevokingAnAutomaticGrantWithholdsItFromThatSessionAlone(t *testing.T) {
 			m, enr, key, operator := newFixture(t)
 			withSharedToken(t, m)
 			ctx := context.Background()
-			other, otherKey := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
+			other, otherKey := newEnrollment(t, m.Store, "session", "box-b-"+t.Name(), new(fixtureOperator), nil)
 
 			auto, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", c.name), "")
 			if err != nil || auto.State != "granted" || auto.GrantID == nil || auto.RecordID != nil {

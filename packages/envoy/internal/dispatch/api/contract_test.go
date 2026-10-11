@@ -146,7 +146,7 @@ func (rig *contractRig) newSessionEnrollment(t *testing.T, operator string) (enr
 	}
 	enrollmentID = uuid.NewString()
 	if _, err := rig.brokerStore.Pool.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, launcher_credential_id, lease_expires_at)
-		values ($1,'box',$2,$3,$4,$5, now() + interval '1 hour')`, enrollmentID, "box-"+t.Name(), operator, thumbprint, credentialID); err != nil {
+		values ($1,'session',$2,$3,$4,$5, now() + interval '1 hour')`, enrollmentID, "session-"+t.Name(), operator, thumbprint, credentialID); err != nil {
 		t.Fatalf("insert enrollments: %v", err)
 	}
 	return enrollmentID, key

@@ -25,7 +25,7 @@ func TestCanonicalBodyIsByteExactAndIDIsItsSHA256(t *testing.T) {
 	b := Body{
 		Request:         "eyJ.fake.jws",
 		Approver:        "sjawhar",
-		Enrollment:      Enrollment{Kind: "box", RuntimeID: "agentbox-1234", Operator: "sjawhar"},
+		Enrollment:      Enrollment{Kind: "session", RuntimeID: "agentbox-1234", Operator: "sjawhar"},
 		LifetimeSeconds: 43200,
 		RulesVersion:    "ab12",
 		ExpiresAt:       time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
@@ -33,7 +33,7 @@ func TestCanonicalBodyIsByteExactAndIDIsItsSHA256(t *testing.T) {
 	want := "agent-secrets-record/v1\n" +
 		"request: eyJ.fake.jws\n" +
 		"approver: sjawhar\n" +
-		"enrollment: box\tagentbox-1234\tsjawhar\n" +
+		"enrollment: session\tagentbox-1234\tsjawhar\n" +
 		"lifetime_seconds: 43200\n" +
 		"rules_version: ab12\n" +
 		"expires_at: 2026-09-27T12:00:00Z\n" +

@@ -121,20 +121,20 @@ func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
 	ctx := context.Background()
 	devbox := mintApprovedCredential(t, svc, "ada@example.com", nil, "devbox")
 	laptop := mintApprovedCredential(t, svc, "ada@example.com", nil, "laptop")
-	host, err := svc.Create(ctx, devbox, Enrollment{Kind: "host", RuntimeID: "host-1", Thumbprint: "tp-host-1"})
+	helperSession, err := svc.Create(ctx, devbox, Enrollment{Kind: "session", RuntimeID: "host-1", Thumbprint: "tp-host-1"})
 	if err != nil {
-		t.Fatalf("Create(host): %v", err)
+		t.Fatalf("Create(the helper's session): %v", err)
 	}
-	box, err := svc.Create(ctx, devbox, Enrollment{Kind: "box", RuntimeID: "box-1", Thumbprint: "tp-box-1"})
+	keySession, err := svc.Create(ctx, devbox, Enrollment{Kind: "session", RuntimeID: "box-1", Thumbprint: "tp-box-1"})
 	if err != nil {
-		t.Fatalf("Create(box): %v", err)
+		t.Fatalf("Create(a launcher's session key): %v", err)
 	}
-	other, err := svc.Create(ctx, laptop, Enrollment{Kind: "host", RuntimeID: "host-2", Thumbprint: "tp-host-2"})
+	other, err := svc.Create(ctx, laptop, Enrollment{Kind: "session", RuntimeID: "host-2", Thumbprint: "tp-host-2"})
 	if err != nil {
-		t.Fatalf("Create(the laptop's host): %v", err)
+		t.Fatalf("Create(the laptop's session): %v", err)
 	}
-	grant := insertLiveGrant(t, svc, host.ID)
-	pending := insertPendingRequest(t, svc, box.ID)
+	grant := insertLiveGrant(t, svc, helperSession.ID)
+	pending := insertPendingRequest(t, svc, keySession.ID)
 	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{laptop.ID, devbox.ID}) {
 		t.Fatalf("LiveCredentials before the revoke = %v, want the laptop then the devbox", got)
 	}
@@ -143,9 +143,9 @@ func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
 		t.Fatalf("RevokeCredential by the person who approved it: %v", err)
 	}
 
-	for _, e := range []Enrollment{host, box} {
+	for _, e := range []Enrollment{helperSession, keySession} {
 		if _, live, err := svc.Lookup(ctx, e.ID.String()); err != nil || live {
-			t.Fatalf("Lookup(%s session) after the revoke = live %v, %v; want ended", e.Kind, live, err)
+			t.Fatalf("Lookup(%s) after the revoke = live %v, %v; want ended", e.RuntimeID, live, err)
 		}
 	}
 	if _, live, err := svc.Lookup(ctx, other.ID.String()); err != nil || !live {
@@ -161,7 +161,7 @@ func TestRevokingAMachineLoginEndsEverySessionItEnrolled(t *testing.T) {
 	if got := liveCredentialIDs(t, svc, "ada@example.com"); !slices.Equal(got, []uuid.UUID{laptop.ID}) {
 		t.Fatalf("LiveCredentials after the revoke = %v, want the laptop alone", got)
 	}
-	if _, err := svc.Create(ctx, devbox, Enrollment{Kind: "host", RuntimeID: "host-3", Thumbprint: "tp-host-3"}); !errors.Is(err, ErrUnauthenticated) {
+	if _, err := svc.Create(ctx, devbox, Enrollment{Kind: "session", RuntimeID: "host-3", Thumbprint: "tp-host-3"}); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("Create under the revoked credential = %v, want ErrUnauthenticated", err)
 	}
 
@@ -194,7 +194,7 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	service := mintApprovedCredential(t, svc, "ada@example.com", str("legion-daemon"), "cluster")
 	expired := mintApprovedCredential(t, svc, "ada@example.com", nil, "old-box")
 	stale := mintApprovedCredential(t, svc, "ada@example.com", nil, "older-box")
-	staleBox, err := svc.Create(ctx, stale, Enrollment{Kind: "box", RuntimeID: "box-stale", Thumbprint: "tp-stale"})
+	staleBox, err := svc.Create(ctx, stale, Enrollment{Kind: "session", RuntimeID: "box-stale", Thumbprint: "tp-stale"})
 	if err != nil {
 		t.Fatalf("Create(box under the login that then expires): %v", err)
 	}
@@ -204,7 +204,7 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	if _, err := svc.Renew(ctx, staleBox.ID.String()); err != nil {
 		t.Fatalf("Renew(the box) after its login expired = %v; a session outlives its login's expiry", err)
 	}
-	enr, err := svc.Create(ctx, ada, Enrollment{Kind: "host", RuntimeID: "host-ada", Thumbprint: "tp-ada"})
+	enr, err := svc.Create(ctx, ada, Enrollment{Kind: "session", RuntimeID: "host-ada", Thumbprint: "tp-ada"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -345,11 +345,11 @@ func TestAnExpiredLoginLeavesTheListOnceItsLastSessionEnds(t *testing.T) {
 	ctx := context.Background()
 	devbox := mintApprovedCredential(t, svc, "ada@example.com", nil, "devbox")
 	laptop := mintApprovedCredential(t, svc, "ada@example.com", nil, "laptop")
-	ended, err := svc.Create(ctx, devbox, Enrollment{Kind: "host", RuntimeID: "host-devbox", Thumbprint: "tp-devbox"})
+	ended, err := svc.Create(ctx, devbox, Enrollment{Kind: "session", RuntimeID: "host-devbox", Thumbprint: "tp-devbox"})
 	if err != nil {
 		t.Fatalf("Create(the devbox's session): %v", err)
 	}
-	lapsing, err := svc.Create(ctx, laptop, Enrollment{Kind: "host", RuntimeID: "host-laptop", Thumbprint: "tp-laptop"})
+	lapsing, err := svc.Create(ctx, laptop, Enrollment{Kind: "session", RuntimeID: "host-laptop", Thumbprint: "tp-laptop"})
 	if err != nil {
 		t.Fatalf("Create(the laptop's session): %v", err)
 	}
@@ -537,7 +537,7 @@ func TestAnEnrollmentRacingARevokeCannotLand(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		_, err := svc.Create(ctx, cred, Enrollment{Kind: "host", RuntimeID: "host-racing", Thumbprint: "tp-racing"})
+		_, err := svc.Create(ctx, cred, Enrollment{Kind: "session", RuntimeID: "host-racing", Thumbprint: "tp-racing"})
 		done <- err
 	}()
 	storetest.AwaitLockWaiters(t, svc.Store.Pool, tx, 1)
@@ -571,7 +571,7 @@ func TestARevokeEndsAnEnrollmentCreatedWhileItWaited(t *testing.T) {
 	}
 	enrollment := uuid.New()
 	if _, err := tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, launcher_credential_id, lease_expires_at)
-		values ($1,'host','host-waited','ada@example.com','tp-waited',$2, now() + interval '1 hour')`, enrollment, cred.ID); err != nil {
+		values ($1,'session','host-waited','ada@example.com','tp-waited',$2, now() + interval '1 hour')`, enrollment, cred.ID); err != nil {
 		t.Fatalf("insert the enrollment: %v", err)
 	}
 	done := make(chan error, 1)
@@ -598,7 +598,7 @@ func TestTwoRevokesOfOneLoginEndItOnce(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
 	cred := mintApprovedCredential(t, svc, "ada@example.com", nil, "devbox")
-	if _, err := svc.Create(ctx, cred, Enrollment{Kind: "host", RuntimeID: "host-1", Thumbprint: "tp-host-1"}); err != nil {
+	if _, err := svc.Create(ctx, cred, Enrollment{Kind: "session", RuntimeID: "host-1", Thumbprint: "tp-host-1"}); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	tx, err := svc.Store.Pool.Begin(ctx)
@@ -643,7 +643,7 @@ func TestARevokeRacingTheLaunchersOwnRevokeEndsTheSessionOnce(t *testing.T) {
 	svc := newService(t)
 	ctx := context.Background()
 	cred := mintApprovedCredential(t, svc, "ada@example.com", nil, "devbox")
-	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "host", RuntimeID: "host-1", Thumbprint: "tp-host-1"})
+	enr, err := svc.Create(ctx, cred, Enrollment{Kind: "session", RuntimeID: "host-1", Thumbprint: "tp-host-1"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}

@@ -41,7 +41,7 @@ func TestCreateAndRevokeByApproverUnderLoadNeverDeadlockOrFail(t *testing.T) {
 	ids := []string{enr0}
 	keys := map[string]*ecdsa.PrivateKey{enr0: key0}
 	for i := range 5 {
-		id, k := newEnrollment(t, m.Store, "box", fmt.Sprintf("box-load-%d-%s", i, t.Name()), new(fixtureOperator), nil)
+		id, k := newEnrollment(t, m.Store, "session", fmt.Sprintf("box-load-%d-%s", i, t.Name()), new(fixtureOperator), nil)
 		ids = append(ids, id)
 		keys[id] = k
 	}
@@ -169,7 +169,7 @@ func TestRequestsRacingTheWithholdOnFreshSessions(t *testing.T) {
 	outcomes := map[string]int{}
 	var failures []string
 	for s := range sessions {
-		enr, key := newEnrollment(t, m.Store, "box", fmt.Sprintf("box-race-%d-%s", s, t.Name()), new(fixtureOperator), nil)
+		enr, key := newEnrollment(t, m.Store, "session", fmt.Sprintf("box-race-%d-%s", s, t.Name()), new(fixtureOperator), nil)
 		auto, err := m.Create(ctx, enr, signRequest(t, m, key, "seed", "AUTO_TOKEN"), "")
 		if err != nil || auto.GrantID == nil {
 			t.Fatalf("seed Create = %+v, %v", auto, err)

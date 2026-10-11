@@ -651,7 +651,7 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 	}
 }
 
-func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
+func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", nil)
@@ -661,7 +661,7 @@ func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
 	}
 	posts, _, _ := f.snapshot()
 	post := posts[0]
-	if post["kind"] != "host" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "ada@example.com" ||
+	if post["kind"] != "session" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "ada@example.com" ||
 		post["thumbprint"] != sess.Thumbprint || post["approver"] != nil ||
 		post["session_id"] != nil || post["pod_token"] != nil {
 		t.Fatalf("enroll body: %+v", post)

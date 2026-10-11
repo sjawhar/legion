@@ -331,8 +331,8 @@ func TestServiceCredentialEnrollsOnlyPods(t *testing.T) {
 	}
 
 	cred := enroll.Credential{ID: uuid.MustParse(credentialID), Service: &service, Host: "cluster"}
-	if _, err := svc.Enroll.Create(ctx, cred, enroll.Enrollment{Kind: "box", RuntimeID: "box-1", Operator: new(testApprover), Thumbprint: "tp-1"}); !errors.Is(err, enroll.ErrOperatorMismatch) {
-		t.Fatalf("Create(service cred, kind box) = %v, want ErrOperatorMismatch", err)
+	if _, err := svc.Enroll.Create(ctx, cred, enroll.Enrollment{Kind: "session", RuntimeID: "session-1", Operator: new(testApprover), Thumbprint: "tp-1"}); !errors.Is(err, enroll.ErrOperatorMismatch) {
+		t.Fatalf("Create(service cred, kind session) = %v, want ErrOperatorMismatch", err)
 	}
 }
 

@@ -57,7 +57,12 @@ test("lists live grants once credential requests are configured, and Revoke is o
       {
         approver: "sami@example.com",
         created_at: "2026-09-30T00:00:00Z",
-        enrollment: { kind: "box", operator: "sami@example.com", runtime_id: "box-1", slot: null },
+        enrollment: {
+          kind: "session",
+          operator: "sami@example.com",
+          runtime_id: "box-1",
+          slot: null,
+        },
         expires_at: "2026-09-30T01:00:00Z",
         grant_id: "grant-1",
         granted: "approval",
@@ -95,7 +100,7 @@ test("names how each grant was granted: automatically, or approved by whom", asy
     pending: [],
   });
   const enrollment = {
-    kind: "host",
+    kind: "session",
     operator: "sami@example.com",
     runtime_id: "example-host-devbox:4242:1",
     slot: null,

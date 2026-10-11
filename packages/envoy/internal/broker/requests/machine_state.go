@@ -166,7 +166,7 @@ type enrollmentRow struct {
 	ID, Kind, Thumbprint string
 	// Operator is the person the session acts for, nil for a pod; Service is the service of the
 	// launcher credential that enrolled it, nil for a person's machine; Subject is a pod's verified
-	// service account, nil for a box or host.
+	// service account, nil for a session.
 	Operator, Service, Subject *string
 	RuntimeID, Slot            string
 }

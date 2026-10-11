@@ -73,10 +73,10 @@ type Enrollment struct {
 	PodToken   string
 	// Slot names one of several independent identities in one pod (record.ValidSlot): each slot
 	// of a pod is an enrollment of its own, with its own key, lease and grants. "" is the one
-	// identity of every box, host and single-identity pod enrollment.
+	// identity of every session and single-identity pod enrollment.
 	Slot string
 	// Subject is a pod enrollment's verified service-account subject, set by Create from the
-	// projected token itself and never from the caller; nil for box and host.
+	// projected token itself and never from the caller; nil for a session.
 	Subject      *string
 	LeaseExpires time.Time
 	Existing     bool // true when Create returned an already-live enrollment for the same key
