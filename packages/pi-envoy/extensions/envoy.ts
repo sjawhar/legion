@@ -685,6 +685,7 @@ export default function envoyExtension(pi: PiApi): void {
   const runTypedInput = (
     sendUserInput: NonNullable<PiApi["sendUserInput"]>,
     delivery: DispatchDelivery,
+    replySessionID: string,
     turn: AcceptedUserTurn,
     content: string | readonly ContentBlock[],
     pictureAddresses: readonly string[],
@@ -729,7 +730,7 @@ export default function envoyExtension(pi: PiApi): void {
       )
       .then(async (reply) => {
         releasePendingImages();
-        if (reply !== undefined) await postDispatchReply(delivery, { body: reply }, noted);
+        if (reply !== undefined) await postDispatchReply(delivery, { body: reply }, replySessionID);
       })
       .catch((error: unknown) => {
         logger.warn("envoy: the reply to a person's typed input did not reach Dispatch", {
@@ -936,6 +937,7 @@ export default function envoyExtension(pi: PiApi): void {
               runTypedInput(
                 sendUserInput,
                 accepted.delivery,
+                acceptedSessionID,
                 turn,
                 delivery.content,
                 delivery.shown,

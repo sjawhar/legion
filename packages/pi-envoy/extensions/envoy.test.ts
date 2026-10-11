@@ -5469,6 +5469,52 @@ describe("envoy OMP extension", () => {
         });
       });
 
+      test("posts a typed picture command's reply under the session that accepted it after a switch during the picture read", async () => {
+        const slug = "typed-input-picture-reply-session";
+        const body = `Look:\n\n![shot.png](dispatch://LEGION-1/artifact/${slug}@v1)`;
+        const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 1, 2]);
+        const picture = Promise.withResolvers<Response>();
+        const requested = Promise.withResolvers<void>();
+        const { agent, delivered, fixture, replied, replies } = await bootDirectSession(
+          "typed-input-picture-reply-session",
+          {
+            accept: () => ({ accepted: true, body }),
+            dispatch: ((url: URL) => {
+              if (url.pathname === `/api/v1/issues/LEGION-1/artifacts/${slug}`) {
+                return Response.json({
+                  id: `${slug}-id`,
+                  kind: "image",
+                  name: "shot.png",
+                  versions: [{ mime: "image/png", number: 1, size: png.length }],
+                });
+              }
+              if (url.pathname === `/api/v1/artifacts/${slug}-id/versions/1`) {
+                requested.resolve();
+                return picture.promise as unknown as Response;
+              }
+              return undefined;
+            }) as (url: URL) => Response | undefined,
+            sendUserInput: async () => ({ handled: "terminal-only" }),
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-picture-reply-session", { body }));
+        await requested.promise;
+        await fixture.handlers.get("session_switch")?.(
+          {},
+          sessionContext("ses_after_picture_read")
+        );
+        picture.resolve(new Response(png, { headers: { "Content-Type": "image/png" } }));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies[0]?.body).toEqual({
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: "This message runs only in the session's own terminal; nothing was sent.",
+        });
+      });
+
       // On an idle session the host answers only once the run it started ends, which can be
       // minutes; the person's next message must still be taken meanwhile.
       test("is never awaited, so the next message arrives while the first still runs", async () => {

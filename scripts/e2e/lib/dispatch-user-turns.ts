@@ -204,10 +204,15 @@ async function list(): Promise<void> {
     await picker.selectOption("steer");
     const input = page.getByTestId("agent-composer").locator("textarea");
     const lists: Record<string, { offered: string[]; terminalOnly: string[] }> = {};
-    for (const typed of prefixes) {
+    for (const [index, typed] of prefixes.entries()) {
       await input.pressSequentially(typed);
       lists[typed] = await offeredCommands(page);
-      await page.screenshot({ fullPage: true, path: shot });
+      const suffix = typed.replaceAll(/\W+/g, "-").replaceAll(/^-+|-+$/g, "");
+      const prefixShot = shot.replace(/(\.[^.]+)$/, `-${index + 1}-${suffix}$1`);
+      await page.screenshot({
+        fullPage: true,
+        path: prefixShot === shot ? `${shot}-${index + 1}` : prefixShot,
+      });
       await input.fill("");
     }
     return lists;
