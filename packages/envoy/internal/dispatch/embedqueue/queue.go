@@ -53,11 +53,15 @@ const (
 	// combined: Bedrock throttles the whole account, not a specific caller, so
 	// embed.RateLimitedEmbedder's own in-process, reactive AIMD pacing alone cannot keep a live
 	// search request safe from throttling an unconstrained background process causes in a
-	// different process the reactive limiter never sees. 200,000 sits well below the account's
-	// own Cohere Embed v4 Bedrock quota (300,000 tokens/minute) - 100,000 tokens/minute of
-	// headroom, nowhere near what a live query (tens of tokens) could ever need - and against
-	// this package's own average chunk size projects to about 410 chunks/minute, backfilling the
-	// production corpus (tens of thousands of chunks) in about an hour.
+	// different process the reactive limiter never sees. 200,000 is estimated tokens
+	// (embed.EstimateTokens counts 4 characters a token), not what Bedrock counts, and Cohere's
+	// tokenizer counts more on Dispatch's text: through LEGION-549's production backfill
+	// (2026-10-11, 72 minutes), Bedrock's InputTokenCount for the model, every caller included,
+	// averaged about 220,600 tokens a minute, 73.5% of the account's Cohere Embed v4 quota of
+	// 300,000 tokens a minute, with 8 of the 72 minutes above the quota and a peak minute of
+	// 431,590. Bedrock throttled none of it and no live search fell back to keyword-only, but the
+	// margin a live query keeps is that measured remainder, not the 100,000 the two figures'
+	// difference suggests. That run embedded 15,117 rows in 71 minutes.
 	tokenRateCeiling = 200_000
 )
 
