@@ -673,7 +673,7 @@ function acceptResponse(attempt: number, answer: AcceptAnswer): Response {
 async function bootDirectSession(
   query: string,
   options: {
-    readonly accept?: (count: number) => AcceptAnswer;
+    readonly accept?: (count: number) => AcceptAnswer | Promise<AcceptAnswer>;
     readonly entries?: readonly unknown[];
     readonly branch?: readonly unknown[];
     /** Answers a Dispatch request outside `/api/v1/messages/`, such as the pictures a delivery
@@ -712,7 +712,7 @@ async function bootDirectSession(
         });
         return acceptResponse(
           Number(url.pathname.split("/").at(-2)),
-          (options.accept ?? acceptOnce)(accepts.length)
+          await (options.accept ?? acceptOnce)(accepts.length)
         );
       }
       // The session asks Dispatch nothing else about a direct message but its reply: any other
@@ -5512,6 +5512,41 @@ describe("envoy OMP extension", () => {
           actor: { id: "ses_delivery", kind: "session" },
           attempt: 1,
           body: "This message runs only in the session's own terminal; nothing was sent.",
+        });
+      });
+
+      test("keeps accept and reply under the session that began a deferred accept after a switch", async () => {
+        const accepted = Promise.withResolvers<AcceptAnswer>();
+        const acceptRequested = Promise.withResolvers<void>();
+        const { accepts, agent, delivered, fixture, replied, replies } = await bootDirectSession(
+          "typed-input-accept-reply-session",
+          {
+            accept: () => {
+              acceptRequested.resolve();
+              return accepted.promise;
+            },
+            sendUserInput: async () => ({ handled: "terminal-only" }),
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-accept-reply-session"));
+        await acceptRequested.promise;
+        await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_accept"));
+        accepted.resolve({ accepted: true, body: "/new" });
+        await delivered(1);
+        await replied(1);
+
+        expect(accepts).toEqual([
+          expect.objectContaining({
+            body: expect.objectContaining({
+              actor: { id: "ses_delivery", kind: "session" },
+            }),
+          }),
+        ]);
+        expect(replies[0]?.body).toEqual({
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: "/new runs only in the session's own terminal; nothing was sent.",
         });
       });
 

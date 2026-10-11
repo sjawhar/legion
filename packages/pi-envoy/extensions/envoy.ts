@@ -755,7 +755,8 @@ export default function envoyExtension(pi: PiApi): void {
   // another subscription's pump carded while that accept was in flight would be forgotten, so a
   // Send that arrived as a card could become a turn on a later forged frame.
   const acceptedUserTurn = async (
-    rendered: RenderInboundResult
+    rendered: RenderInboundResult,
+    acceptedSessionID: string
   ): Promise<
     { readonly turn: AcceptedUserTurn; readonly delivery: DispatchDelivery } | undefined
   > => {
@@ -775,7 +776,7 @@ export default function envoyExtension(pi: PiApi): void {
       const dispatch = timedDispatchClient(USER_TURN_ACCEPT_TIMEOUT_MS);
       if (dispatch === undefined) return undefined;
       const accepted = await dispatch.acceptMessageDelivery(delivery.id, delivery.attempt, {
-        actor: { id: sessionID, kind: "session" },
+        actor: { id: acceptedSessionID, kind: "session" },
       });
       const turn = turnFromAccept(accepted);
       if (turn === undefined) {
@@ -881,14 +882,15 @@ export default function envoyExtension(pi: PiApi): void {
             }
           }
         } else {
-          const accepted = await acceptedUserTurn(rendered);
+          const acceptedSessionID = sessionID;
+          const accepted = await acceptedUserTurn(rendered, acceptedSessionID);
           // The pictures the delivered text embeds reach the model beside it, read with this
           // session's own Dispatch bearer, each picture once in this session. They count as shown
           // only once the host took the send: one that throws releases the claim, and the delivery
           // Dispatch retries must carry them again.
           // Fetched once for the delivery: the same set is read for what to name and, once the
           // host took the send, written with what it showed.
-          const shown = shownPictures(sessionID);
+          const shown = shownPictures(acceptedSessionID);
           if (accepted === undefined) {
             const card = await withDeliveredPictures(
               rendered.content,
@@ -907,7 +909,6 @@ export default function envoyExtension(pi: PiApi): void {
             markPicturesShown(shown, card.shown);
           } else {
             const { turn } = accepted;
-            const acceptedSessionID = sessionID;
             // Sent exactly as Enter, or an aside, at the terminal sends it, the person's pictures
             // beside their text.
             const delivery = await withDeliveredPictures(
