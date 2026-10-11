@@ -465,7 +465,7 @@
   the owner indexes, still opens one, and so do a source's copies once its block
   leaves its document: settlement of the source retracts its ask and settles every copy, the first
   opens one ask, credited to whoever wrote the block into it, and the others name that ask, on a
-  project's documents as on an issue's. Migration `0090_artifacts_project_documents` adds the
+  project's documents as on an issue's. Migration `0091_artifacts_project_documents` adds the
   partial index a project document's lookups read. An answered or resolved ask's wording is fixed:
   a document edit or an upload that changes its block's question, options, `multiple` or urgency
   no longer rewords the ask and leaves its answer beside a question nobody answered; settlement

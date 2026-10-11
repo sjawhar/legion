@@ -423,7 +423,7 @@ cross: on 60,000 issues the two deadlocked (`40P01`) in each of two runs, and wi
 the reparent waited for the migration and committed. Neither refuses a row; both censuses answer
 `0`.
 
-Migration `0090_artifacts_project_documents` adds the partial index
+Migration `0091_artifacts_project_documents` adds the partial index
 `artifacts_project_documents`, on `artifacts (project_key)` where `issue_key` and `session_id` are
 null: a project's unlinked documents. Settlement of a project document holding an ask block no ask
 of its own indexes reads its project's other documents through it, for the ask the block may be a

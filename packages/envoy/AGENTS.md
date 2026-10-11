@@ -1599,7 +1599,7 @@ it before it appends an event too: an upload's or a seed's document write marks 
 the edit source touches a row the transaction already holds
 (`TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents`). A
 copy whose text is changed and an id no ask of the owner indexes open an ask as any new block does
-(LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0090), an
+(LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0091), an
 issue document's `artifacts_issue_key`, and the owed copies' latest versions `artifact_versions`'
 unique `(artifact_id, number)`; `copied_asks_plan_test.go` holds each. Finding the owed copies
 reads, with `LIKE`, the latest markdown of every other document of the owner, so a retraction, an

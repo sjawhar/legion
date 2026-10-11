@@ -77,7 +77,10 @@ const decidedWordingRollbackTimeout = 5 * time.Second
 // once at boot; a task of the earlier release still running during a rolling deploy can reword one
 // again, which the next settlement of its document on this release restores
 // (restoreDocumentDecidedWordings). Each block is written back to the decided wording by its
-// document's next settlement.
+// document's next settlement. Its update holds the restored asks' rows while it takes the copy
+// locks, which waits on no holder of one: a settlement takes its own document's ask rows before its
+// copy lock, an answer or a resolution its ask's row before SettleCopiesOf, and neither waits on
+// another ask's row once it holds the copy lock.
 func (s *Service) RestoreDecidedWordings(ctx context.Context) (restored, copies int, err error) {
 	ctx = store.WithTransactionTracking(ctx)
 	tx, err := s.store.Pool.Begin(ctx)
