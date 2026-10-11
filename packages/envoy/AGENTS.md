@@ -2185,8 +2185,15 @@ or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but c
 for callers that choose between the broker and another backend. A helper holding no launcher
 credential, from every restart until the operator logs the machine in, enrolls no one: its sign
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
-with the same not-logged-in notice naming `agent-secrets machine login`. The login that installs
-a credential wakes every registered session's enrollment retry, so those sessions reach the broker
+with the same not-logged-in notice naming `agent-secrets machine login`.
+
+`agent-secrets renew --pod-token-file FILE` is the pod renewer: it re-reads and trims the
+projected token before every broker request, refuses a blank or unreadable file without making a
+bodyless request, and sends it as `pod_token`. The worker shim passes its projected token file.
+The client works against a broker that predates the renewal body because that handler reads no
+body. A permanent 4xx renewal refusal exits 76 (`EX_PROTOCOL`), so the shim logs the refusal and
+stops rather than restarting a pod whose token or enrollment is permanently rejected; transient
+errors keep the retry backoff. The login that installs a credential wakes every registered session's enrollment retry, so those sessions reach the broker
 within about a second of it rather than when a backoff of up to a minute comes round. A session
 whose renew the broker refuses (its lease lapsed) stops counting as enrolled at once, and its
 enrollment becomes the session's lapsed id; so does a re-pinned session's recorded enrollment

@@ -55,6 +55,12 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("%s (%s)", e.Message, e.Code)
 }
 
+// Permanent reports whether retrying this broker refusal cannot change its answer.
+func (e *apiError) Permanent() bool {
+	return e.Status >= http.StatusBadRequest && e.Status < http.StatusInternalServerError &&
+		e.Status != http.StatusTooManyRequests
+}
+
 // do sends the request and, on a 2xx response, returns its raw body; any other status decodes
 // the broker's error envelope into an *apiError.
 func (c *client) do(ctx context.Context, method, url string, body []byte, headers map[string]string) ([]byte, error) {

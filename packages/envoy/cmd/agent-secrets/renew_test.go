@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -13,23 +15,32 @@ import (
 	"time"
 )
 
-// TestRenewSendsThePodsCurrentToken: `agent-secrets renew --pod-token-file <file>` reads the file
-// again before every renewal and sends what it holds, trimmed, as the body's pod_token, so the
-// projected token the kubelet rotates reaches the broker as it is now. A refusal (here 403
-// POD_IDENTITY_MISMATCH) ends the renewer with exit 1, naming the broker's code.
+func renewalSession(t *testing.T, broker string) (*client, Signer, string, string) {
+	t.Helper()
+	dir := newKeyDir(t)
+	t.Setenv("AGENT_SECRETS_URL", broker)
+	t.Setenv("AGENT_SECRETS_KEY_DIR", dir)
+	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
+	base, enrollmentID, signer, err := sessionContext()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return newClient(base), signer, enrollmentID, dir
+}
+
+// TestRenewSendsThePodsCurrentToken: renewLoop reads the projected token again before every
+// request. The test advances the loop through a channel, so the rotation and the permanent broker
+// refusal are steps, not wall-clock delays. A 403 exits exitRenewRefused so the worker shim can
+// stop instead of restarting an identity-rejected pod forever.
 func TestRenewSendsThePodsCurrentToken(t *testing.T) {
-	binary := buildAgentSecrets(t)
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte("first-token\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	var mu sync.Mutex
 	var bodies []string
+	first := make(chan struct{}, 1)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/enrollments/"+testEnrollmentID+"/renew" {
-			http.NotFound(w, r)
-			return
-		}
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			t.Errorf("read renew body: %v", err)
@@ -40,22 +51,29 @@ func TestRenewSendsThePodsCurrentToken(t *testing.T) {
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		if n == 1 {
-			// The kubelet rotates the projected token before the next renewal; a lease already
-			// past makes the renewer come back after its one-second floor.
 			if err := os.WriteFile(tokenFile, []byte("rotated-token\n"), 0o600); err != nil {
 				t.Errorf("rotate token: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"lease_expires_at": time.Now().Add(-time.Second)})
+			first <- struct{}{}
+			_ = json.NewEncoder(w).Encode(map[string]any{"lease_expires_at": time.Now().Add(time.Hour)})
 			return
 		}
 		w.WriteHeader(http.StatusForbidden)
 		_ = json.NewEncoder(w).Encode(map[string]string{"code": "POD_IDENTITY_MISMATCH", "error": "the projected token does not identify this pod"})
 	}))
 	defer srv.Close()
-
-	_, stderr, exit := runAgentSecrets(t, binary, srv.URL, newKeyDir(t), nil, "renew", "--pod-token-file", tokenFile)
-	if exit != 1 || !strings.Contains(stderr, "POD_IDENTITY_MISMATCH") {
-		t.Fatalf("renew --pod-token-file: exit %d, stderr %q; want 1 naming POD_IDENTITY_MISMATCH", exit, stderr)
+	client, signer, enrollmentID, _ := renewalSession(t, srv.URL)
+	wait := make(chan time.Time, 1)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	result := make(chan int, 1)
+	go func() {
+		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return readPodToken(tokenFile) }, io.Discard, func(time.Duration) <-chan time.Time { return wait })
+	}()
+	<-first
+	wait <- time.Now()
+	if code := <-result; code != exitRenewRefused {
+		t.Fatalf("renew loop exit = %d, want permanent-refusal code %d", code, exitRenewRefused)
 	}
 	mu.Lock()
 	got := append([]string(nil), bodies...)
@@ -71,39 +89,113 @@ func TestRenewSendsThePodsCurrentToken(t *testing.T) {
 	}
 }
 
-// TestRenewWithoutAPodTokenFileSendsNoBody: a box's renewer posts no body, which every broker
-// release accepts for a box.
+// TestRenewWithoutAPodTokenFileSendsNoBody: a box renewal posts no body, which every broker
+// release accepts for a box. Its permanent 401 still answers the distinct renewal-refusal exit
+// code, so a shim would not restart an enrollment the broker has already ended.
 func TestRenewWithoutAPodTokenFileSendsNoBody(t *testing.T) {
-	binary := buildAgentSecrets(t)
-	var mu sync.Mutex
-	var lengths []int64
+	var bodies [][]byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		lengths = append(lengths, r.ContentLength)
-		mu.Unlock()
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read renew body: %v", err)
+		}
+		bodies = append(bodies, raw)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_ = json.NewEncoder(w).Encode(map[string]string{"code": "PROOF_INVALID", "error": "enrollment is not live"})
 	}))
 	defer srv.Close()
-	if _, stderr, exit := runAgentSecrets(t, binary, srv.URL, newKeyDir(t), nil, "renew"); exit != 1 || !strings.Contains(stderr, "PROOF_INVALID") {
-		t.Fatalf("renew: exit %d, stderr %q; want 1 naming PROOF_INVALID", exit, stderr)
+	client, signer, enrollmentID, _ := renewalSession(t, srv.URL)
+	if code := renewLoop(context.Background(), client, signer, enrollmentID, func() (string, error) { return "", nil }, io.Discard, time.After); code != exitRenewRefused {
+		t.Fatalf("renew loop exit = %d, want %d", code, exitRenewRefused)
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if len(lengths) != 1 || lengths[0] != 0 {
-		t.Fatalf("renew request content lengths %v, want one request with no body", lengths)
+	if len(bodies) != 1 || len(bodies[0]) != 0 {
+		t.Fatalf("renew bodies %q, want one request with no body", bodies)
 	}
 }
 
-// TestRenewRefusesAnUnreadablePodTokenFile: a --pod-token-file the renewer cannot read is a usage
-// error before any renewal, naming the file, so the renewer never renews without the token it was
-// told to send.
-func TestRenewRefusesAnUnreadablePodTokenFile(t *testing.T) {
-	binary := buildAgentSecrets(t)
-	missing := filepath.Join(t.TempDir(), "no-token")
-	_, stderr, exit := runAgentSecrets(t, binary, "http://127.0.0.1:1", newKeyDir(t), nil, "renew", "--pod-token-file", missing)
-	if exit != exitUsageError || !strings.Contains(stderr, missing) {
-		t.Fatalf("renew --pod-token-file <missing>: exit %d, stderr %q; want %d naming the file", exit, stderr, exitUsageError)
+// TestRenewRefusesAnUnreadableOrBlankPodTokenFile: a configured token file must be nonblank before
+// cmdRenew sends anything. A blank projected file is never silently turned into the legacy
+// bodyless renewal, at startup or after a successful renewal.
+func TestRenewRefusesAnUnreadableOrBlankPodTokenFile(t *testing.T) {
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++ }))
+	defer srv.Close()
+	keyDir := newKeyDir(t)
+	t.Setenv("AGENT_SECRETS_URL", srv.URL)
+	t.Setenv("AGENT_SECRETS_KEY_DIR", keyDir)
+	t.Setenv("AGENT_SECRETS_HELPER_SOCK", "")
+	for name, content := range map[string]*string{
+		"unreadable": nil,
+		"blank":      new(" \n\t "),
+	} {
+		t.Run(name, func(t *testing.T) {
+			requests = 0
+			path := filepath.Join(t.TempDir(), "token")
+			if content != nil {
+				if err := os.WriteFile(path, []byte(*content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var stderr bytes.Buffer
+			if code := cmdRenew([]string{"--pod-token-file", path}, io.Discard, &stderr); code != exitUsageError || !strings.Contains(stderr.String(), path) {
+				t.Fatalf("renew --pod-token-file %s: exit %d stderr %q, want usage naming the file", name, code, stderr.String())
+			}
+			if requests != 0 {
+				t.Fatalf("blank/unreadable token sent %d broker requests, want none", requests)
+			}
+		})
+	}
+}
+
+// TestRenewNeverSendsABlankLaterToken: after one successful renewal, a token file that turns blank
+// is a local transient error and starts the retry wait; it never makes a second, bodyless request.
+func TestRenewNeverSendsABlankLaterToken(t *testing.T) {
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("first-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := make(chan struct{}, 1)
+	var requests int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests != 1 {
+			t.Fatalf("unexpected broker request %d", requests)
+		}
+		if err := os.WriteFile(tokenFile, []byte(" \n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		first <- struct{}{}
+		_ = json.NewEncoder(w).Encode(map[string]any{"lease_expires_at": time.Now().Add(time.Hour)})
+	}))
+	defer srv.Close()
+	client, signer, enrollmentID, _ := renewalSession(t, srv.URL)
+	waits := make(chan chan time.Time, 2)
+	after := func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time)
+		waits <- ch
+		return ch
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan int, 1)
+	go func() {
+		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return readPodToken(tokenFile) }, io.Discard, after)
+	}()
+	<-first
+	firstWait := <-waits
+	firstWait <- time.Now()
+	<-waits // the blank read reached the transient retry wait without a second HTTP request
+	if requests != 1 {
+		t.Fatalf("blank later token sent %d broker requests, want one", requests)
+	}
+	cancel()
+	if code := <-result; code != 0 {
+		t.Fatalf("renew loop exit after cancellation = %d, want 0", code)
+	}
+}
+
+func TestUsageDocumentsPermanentRenewalRefusalExit(t *testing.T) {
+	if !strings.Contains(usage(), "76 permanent renewal refusal") {
+		t.Fatalf("usage does not document exit 76: %q", usage())
 	}
 }

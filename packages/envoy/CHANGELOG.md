@@ -171,6 +171,11 @@
 
 ### Changed
 
+- `agent-secrets renew --pod-token-file FILE` re-reads the projected pod token before each renewal,
+  refuses a blank or unreadable file without posting a bodyless renewal, and sends the token as
+  `pod_token`. The worker shim passes its projected token file. This client works against a broker
+  that predates the renewal body because that handler ignores it. A permanent 4xx renewal refusal
+  now exits 76 (`EX_PROTOCOL`); the shim logs it and stops, while transient failures keep retrying.
 - **Breaking:** `agent-secrets launcher login` and `launcher login-status` are removed, with no
   alias: `agent-secrets machine login` and `machine login-status` replace them, beside
   `machine list` and `machine revoke`. A script that still calls `launcher` gets the usage and

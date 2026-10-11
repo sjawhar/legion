@@ -30,6 +30,11 @@ const keygenTimeout = 30 * time.Second
 // renewRestartDelay is the wait before a renewer that exited is started again.
 const renewRestartDelay = 5 * time.Second
 
+// permanentRenewExitCode is agent-secrets' documented exitRenewRefused. It crosses the process
+// boundary because a permanent broker refusal must stop the shim rather than crash-looping a pod
+// whose projected token is wrong or absent.
+const permanentRenewExitCode = 76
+
 // identity runs `agent-secrets keygen --out <key dir>` once and reads the projected token: the
 // hello2 payload. It runs before the first dial, so a pod that cannot generate its key never
 // registers as one that has. The thumbprint is keygen's stdout, trimmed.
@@ -123,11 +128,12 @@ func writeEnrollment(dir, id string) error {
 
 // startRenewer runs `agent-secrets renew --pod-token-file <projected token file>` — the lease
 // heartbeat that proves the pod live to the broker — as a child of the shim, restarted after
-// renewRestartDelay whenever it exits, until the shim ends. Each renewal carries the pod's current
-// projected token, which the broker checks names the pod UID and service account the enrollment was
-// made for; the shim and agent-secrets ship in one worker image, so the renewer always knows the
-// flag. It reads AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR from the shim's own environment, where
-// the runtime set them. One renewer per shim: a second enrollment frame starts no second one.
+// renewRestartDelay only when it exits transiently, until the shim ends. Each renewal carries the
+// pod's current projected token, which the broker checks names the pod UID and service account the
+// enrollment was made for; a permanent broker refusal exits 76 and stops the renewer. The shim and
+// agent-secrets ship in one worker image, so the renewer always knows the flag. It reads
+// AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR from the shim's own environment, where the runtime
+// set them. One renewer per shim: a second enrollment frame starts no second one.
 func (s *shim) startRenewer() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -149,6 +155,11 @@ func (s *shim) startRenewer() {
 				s.log.Printf("[worker-shim] agent-secrets: renewer started (pid %d)", cmd.Process.Pid)
 				err := cmd.Wait()
 				if s.loop.Err() != nil {
+					return
+				}
+				var exited *exec.ExitError
+				if errors.As(err, &exited) && exited.ExitCode() == permanentRenewExitCode {
+					s.log.Printf("[worker-shim] agent-secrets: renewer permanently refused (exit %d); not restarting", permanentRenewExitCode)
 					return
 				}
 				s.log.Printf("[worker-shim] agent-secrets: renewer exited (%v); restarting in %s", err, renewRestartDelay)
