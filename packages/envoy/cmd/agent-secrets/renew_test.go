@@ -66,14 +66,18 @@ func TestRenewSendsThePodsCurrentToken(t *testing.T) {
 	wait := make(chan time.Time, 1)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var stderr bytes.Buffer
 	result := make(chan int, 1)
 	go func() {
-		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return readPodToken(tokenFile) }, io.Discard, func(time.Duration) <-chan time.Time { return wait })
+		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return readPodToken(tokenFile) }, &stderr, func(time.Duration) <-chan time.Time { return wait })
 	}()
 	<-first
 	wait <- time.Now()
 	if code := <-result; code != exitRenewRefused {
 		t.Fatalf("renew loop exit = %d, want permanent-refusal code %d", code, exitRenewRefused)
+	}
+	if got := stderr.String(); !strings.Contains(got, "enrollment "+enrollmentID) || !strings.Contains(got, "HTTP 403 POD_IDENTITY_MISMATCH") {
+		t.Fatalf("permanent refusal stderr %q, want enrollment, HTTP status and broker code", got)
 	}
 	mu.Lock()
 	got := append([]string(nil), bodies...)
@@ -119,7 +123,12 @@ func TestRenewWithoutAPodTokenFileSendsNoBody(t *testing.T) {
 // bodyless renewal, at startup or after a successful renewal.
 func TestRenewRefusesAnUnreadableOrBlankPodTokenFile(t *testing.T) {
 	var requests int
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests++ }))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = json.NewEncoder(w).Encode(map[string]string{"code": "PROOF_INVALID", "error": "enrollment is not live"})
+	}))
 	defer srv.Close()
 	keyDir := newKeyDir(t)
 	t.Setenv("AGENT_SECRETS_URL", srv.URL)

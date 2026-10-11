@@ -2191,9 +2191,10 @@ with the same not-logged-in notice naming `agent-secrets machine login`.
 projected token before every broker request, refuses a blank or unreadable file without making a
 bodyless request, and sends it as `pod_token`. The worker shim passes its projected token file.
 The client works against a broker that predates the renewal body because that handler reads no
-body. A permanent 4xx renewal refusal exits 76 (`EX_PROTOCOL`), so the shim logs the refusal and
-stops rather than restarting a pod whose token or enrollment is permanently rejected; transient
-errors keep the retry backoff. The login that installs a credential wakes every registered session's enrollment retry, so those sessions reach the broker
+body. A permanent 4xx renewal refusal exits 76 (`EX_PROTOCOL`) with the enrollment id, HTTP status
+and broker code; the shim quotes that terminal line beside its own enrollment id and stops rather
+than restarting a pod whose token or enrollment is permanently rejected. Transient errors keep the
+retry backoff. The login that installs a credential wakes every registered session's enrollment retry, so those sessions reach the broker
 within about a second of it rather than when a backoff of up to a minute comes round. A session
 whose renew the broker refuses (its lease lapsed) stops counting as enrolled at once, and its
 enrollment becomes the session's lapsed id; so does a re-pinned session's recorded enrollment
