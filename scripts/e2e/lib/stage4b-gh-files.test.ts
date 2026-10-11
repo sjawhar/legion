@@ -45,4 +45,12 @@ describe("assert_gh_files", () => {
       "FAIL: the controller container of pod-a's /var/run/legion/gh holds an entry that is neither a gh file nor the kubelet's: token \n"
     );
   });
+
+  test("fails a directory without the kubelet's ..data, which a subPath mount would leave and never refresh", () => {
+    const { exitCode, out } = judge("config.yml\nhosts.yml\n");
+    expect(exitCode).toBe(1);
+    expect(out).toBe(
+      "FAIL: the controller container of pod-a's /var/run/legion/gh holds no ..data: it is not the whole-volume projection the kubelet refreshes in place; it holds: config.yml hosts.yml \n"
+    );
+  });
 });

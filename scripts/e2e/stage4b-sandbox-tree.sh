@@ -796,7 +796,8 @@ pod_viewer() {
 # Secret projection (the mount the hour-boundary refresh needs: the kubelet rewrites it in place
 # when the Secret changes, where a subPath mount never sees an update), so beside the two gh files
 # it always lists the kubelet's atomic-writer entries, `..data` and a `..<timestamp>` directory.
-# The two files are required; a `..`-prefixed entry is the kubelet's; anything else is a stranger,
+# The two files are required, and so is `..data`, which a subPath mount (which never refreshes)
+# would not have; any other `..`-prefixed entry is the kubelet's; anything else is a stranger,
 # named. WHO names the container in the failure. Call it outside a command substitution: fail must
 # end the run.
 assert_gh_files() {
@@ -805,6 +806,8 @@ assert_gh_files() {
   for want in config.yml hosts.yml; do
     grep -qxF -- "$want" <<<"$listed" || fail "$3's $gh_config_dir lacks $want; it holds: $(tr '\n' ' ' <<<"$listed")"
   done
+  grep -qxF -- ..data <<<"$listed" ||
+    fail "$3's $gh_config_dir holds no ..data: it is not the whole-volume projection the kubelet refreshes in place; it holds: $(tr '\n' ' ' <<<"$listed")"
   strangers=$(grep -vxF -e config.yml -e hosts.yml <<<"$listed" | grep -v '^\.\.' || true)
   [ -z "$strangers" ] || fail "$3's $gh_config_dir holds an entry that is neither a gh file nor the kubelet's: $(tr '\n' ' ' <<<"$strangers")"
 }
