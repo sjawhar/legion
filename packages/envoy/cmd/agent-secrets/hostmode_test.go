@@ -242,19 +242,19 @@ func TestHelperSignerAsksTheHelper(t *testing.T) {
 }
 
 // TestHelperSignerSignsRequestObjects covers SignRequestObject: it must send Op "sign-request"
-// with the requested secret names and reason (never audience — the helper signs against its own
-// configured broker URL, not a value this peer supplies), return the helper's signed request
-// object verbatim, and surface the helper's error code unwrapped exactly like Sign does.
+// with the requested secret names, reason and lifetime (never audience — the helper signs against
+// its own configured broker URL, not a value this peer supplies), return the helper's signed
+// request object verbatim, and surface the helper's error code unwrapped exactly like Sign does.
 func TestHelperSignerSignsRequestObjects(t *testing.T) {
 	sock, reqs := fakeHelper(t, helper.Response{OK: true, RequestObject: "eyJ.fake.request"})
 	signer := &helperSigner{sock: sock}
-	ro, err := signer.SignRequestObject("https://secrets.test", []string{"DEEL_API_KEY", "OTHER_KEY"}, "why", 0)
+	ro, err := signer.SignRequestObject("https://secrets.test", []string{"DEEL_API_KEY", "OTHER_KEY"}, "why", 120)
 	if err != nil || ro != "eyJ.fake.request" {
 		t.Fatalf("sign-request: %q %v", ro, err)
 	}
 	select {
 	case req := <-reqs:
-		if req.Op != "sign-request" || !reflect.DeepEqual(req.Secrets, []string{"DEEL_API_KEY", "OTHER_KEY"}) || req.Reason != "why" {
+		if req.Op != "sign-request" || !reflect.DeepEqual(req.Secrets, []string{"DEEL_API_KEY", "OTHER_KEY"}) || req.Reason != "why" || req.LifetimeSeconds != 120 {
 			t.Fatalf("request sent to the helper: %+v", req)
 		}
 	case <-time.After(2 * time.Second):

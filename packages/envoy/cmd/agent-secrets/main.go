@@ -368,11 +368,13 @@ func splitArgs(args []string, takesValue map[string]bool) (flagArgs, positional 
 // ttlFlag is --ttl's usage line, the request form's and the exec form's alike.
 const ttlFlag = "how long the grant lasts, a whole number of seconds such as 2m or 90s; unset, it lasts until this session ends"
 
-// ttlSeconds is --ttl's value as the whole seconds a request object signs: 0 when it is unset,
-// and an error for a value that is not a positive whole number of seconds or is past the most the
-// broker records (record.ValidLifetime).
-func ttlSeconds(ttl time.Duration) (int, error) {
-	if ttl == 0 {
+// ttlSeconds is --ttl's value as the whole seconds a request object signs: 0 when flags never set
+// it, and an error for a value that is not a positive whole number of seconds or is past the most
+// the broker records (record.ValidLifetime), so `--ttl 0` is refused rather than read as unset.
+func ttlSeconds(flags *flag.FlagSet, ttl time.Duration) (int, error) {
+	set := false
+	flags.Visit(func(f *flag.Flag) { set = set || f.Name == "ttl" })
+	if !set {
 		return 0, nil
 	}
 	if ttl%time.Second != 0 || !record.ValidLifetime(int(min(ttl/time.Second, math.MaxInt32+1))) {
@@ -816,7 +818,7 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
-	ttl, err := ttlSeconds(*ttlFlagValue)
+	ttl, err := ttlSeconds(flags, *ttlFlagValue)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return exitUsageError
@@ -1034,7 +1036,7 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
-	ttl, err := ttlSeconds(*ttlFlagValue)
+	ttl, err := ttlSeconds(flags, *ttlFlagValue)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
 		return exitUsageError

@@ -101,7 +101,7 @@ func (h *helperSigner) Sign(method, url string) (string, error) {
 
 // SignRequestObject asks the helper's sign-request op. A helper from before lifetime_seconds
 // ignores the field and signs no lifetime; the broker's answer then names none, and the caller
-// that asked for one refuses it (requireLifetime).
+// that asked for one refuses it (grantedLifetime).
 func (h *helperSigner) SignRequestObject(audience string, names []string, reason string, lifetimeSeconds int) (string, error) {
 	resp, err := helper.Call(h.sock, helper.Request{Op: "sign-request", Secrets: names, Reason: reason, LifetimeSeconds: lifetimeSeconds}, 5*time.Second)
 	if err != nil {

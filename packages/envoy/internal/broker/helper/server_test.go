@@ -239,6 +239,26 @@ func TestSignRequestBuildsAValidRequestObject(t *testing.T) {
 	}
 }
 
+// TestSignRequestSignsTheLifetimeItIsAsked: sign-request with lifetime_seconds signs that lifetime
+// into the request object, the claim the broker grants for, and without it signs none, so the
+// grant lasts until the session ends.
+func TestSignRequestSignsTheLifetimeItIsAsked(t *testing.T) {
+	r := startRig(t, "")
+	if reg := r.call(t, Request{Op: "register", WaitSeconds: 5}); !reg.OK || reg.State != "enrolled" {
+		t.Fatalf("register: %+v", reg)
+	}
+	for _, lifetime := range []int{120, 0} {
+		resp := r.call(t, Request{Op: "sign-request", Secrets: []string{"DEEL_API_KEY"}, Reason: "x", LifetimeSeconds: lifetime})
+		if !resp.OK {
+			t.Fatalf("sign-request lifetime %d: %+v", lifetime, resp)
+		}
+		ro, err := record.VerifyRequestObject(resp.RequestObject, r.srv.Broker.URL, time.Minute, time.Now())
+		if err != nil || ro.LifetimeSeconds != lifetime {
+			t.Fatalf("sign-request lifetime %d signed lifetime %d (%v), want %d", lifetime, ro.LifetimeSeconds, err, lifetime)
+		}
+	}
+}
+
 // TestSignRequestOnlyForDescendantsOfARoot mirrors TestSignOnlyForDescendantsOfARoot: sign-request
 // uses the exact same descendancy gate as sign (both now go through resolveDescendant), so a peer
 // outside the session's process tree and a peer with no registered session at all must both be
