@@ -1,8 +1,9 @@
 import { expect, type Page, test } from "@playwright/test";
 
-import { openAgents, plannerSession, seedAgents } from "./agents";
+import { agentRow, openAgents, plannerSession, seedAgents, shownAgentRows } from "./agents";
 import { createMessage } from "./api";
 import { resetDatabase } from "./seed";
+import { holdPosts, pasteFile, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 /** Resolves once every timer queued before it has run: the next task, the soonest a reader's
@@ -28,7 +29,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const rows = page.locator("[data-agent-row]");
+      const rows = shownAgentRows(page);
       await expect(rows).toHaveCount(2);
       const planner = rows.nth(0);
       const reviewer = rows.nth(1);
@@ -91,7 +92,7 @@ test.describe("agents page", () => {
       await expect(planner.getByRole("button", { name: "Unpin Planner" })).toBeVisible();
       await page.reload();
       await expect(
-        page.locator("[data-agent-row]").nth(0).getByRole("button", { name: "Unpin Planner" })
+        shownAgentRows(page).nth(0).getByRole("button", { name: "Unpin Planner" })
       ).toBeVisible();
 
       // `?` lists the new scope: a scope missing from `SCOPE_ORDER` is dropped silently.
@@ -125,7 +126,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       await page.keyboard.press("j");
       await page.keyboard.press("i");
       const toggle = row.getByRole("button", { name: "Choose issue" });
@@ -152,7 +153,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       await page.keyboard.press("j");
       await page.keyboard.press("i");
       const toggle = row.getByRole("button", { name: "Choose issue" });
@@ -189,7 +190,7 @@ test.describe("agents page", () => {
         return route.fallback();
       });
       await openAgents(page);
-      const rows = page.locator("[data-agent-row]");
+      const rows = shownAgentRows(page);
 
       await page.keyboard.press("j");
       await page.keyboard.press("i");
@@ -212,15 +213,15 @@ test.describe("agents page", () => {
   });
 
   // A typed message is the reader's work: choosing which issue it belongs to must not throw it
-  // away, by either hand. The composer is remounted to reseed the agent mention that an
-  // issue-owned comment needs, and the prose travels across that remount.
+  // away, by either hand. The pick seeds the agent mention an issue-owned comment needs into the
+  // draft the reader already has.
   test("a draft survives the issue pick, by keyboard and by pointer", async ({ browser }) => {
     await seedAgents();
     const context = await asUser(browser, "alice");
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const toggle = row.getByRole("button", { name: "Choose issue" });
 
@@ -251,6 +252,101 @@ test.describe("agents page", () => {
     }
   });
 
+  // A file goes to the issue the message was addressed to when the upload started, and its
+  // reference names that issue's artifact, even when the reader picks another issue while the
+  // file is in the air.
+  test("an upload's reference names the issue it went to, not one picked while it was out", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      const upload = await holdPosts(page, "**/api/v1/issues/*/artifacts");
+      const row = agentRow(page, plannerSession.session_id);
+      const toggle = row.getByRole("button", { name: "Choose issue" });
+      const picker = row.getByRole("combobox", { name: "Issue" });
+      const field = row.getByRole("textbox", { name: "Comment" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await toggle.click();
+      await picker.selectOption("CORE-1");
+      await expect(field).toHaveValue("@Planner");
+      await pasteFile(field, "notes.md", "# Notes\n");
+      await expect(row.getByRole("button", { name: "Uploading file…" })).toBeDisabled();
+      await toggle.click();
+      await picker.selectOption("CORE-2");
+      await expect(toggle).toContainText("CORE-2");
+      upload.release();
+
+      await expect(field).toHaveValue("@Planner dispatch://CORE-1/artifact/notes-md");
+      expect(upload.posts()).toBe(1);
+    } finally {
+      await context.close();
+    }
+  });
+
+  // A message on its way is the server's until it answers, and a refusal hands back exactly the
+  // draft that was sent. An upload's Retry pressed in the meantime would append its reference to
+  // the field for that refusal to drop, leaving the artifact on the issue with nothing pointing
+  // at it, so the Retry waits for the answer, as the rest of the composer does.
+  test("an upload's Retry waits while a send is out, and its reference joins the draft handed back", async ({
+    browser,
+  }) => {
+    await seedAgents();
+    const context = await asUser(browser, "alice");
+    try {
+      const page = await context.newPage();
+      await openAgents(page);
+      let uploads = 0;
+      // The first upload fails, so its Retry is on screen when the message goes.
+      await page.route("**/api/v1/issues/*/artifacts", (route) => {
+        if (route.request().method() !== "POST") return route.fallback();
+        uploads += 1;
+        if (uploads > 1) return route.fallback();
+        return route.fulfill({
+          body: JSON.stringify({ code: "UNAVAILABLE", error: "storage is down" }),
+          contentType: "application/json",
+          status: 503,
+        });
+      });
+      const refuse = await refusePosts(page, "**/api/v1/issues/*/comments");
+      const row = agentRow(page, plannerSession.session_id);
+      const field = row.getByRole("textbox", { name: "Comment" });
+      const uploadRetry = row
+        .getByRole("alert")
+        .filter({ hasText: "storage is down" })
+        .getByRole("button", { name: "Retry" });
+
+      await page.keyboard.press("j");
+      await page.keyboard.press("Enter");
+      await expect(field).toBeFocused();
+      await row.getByRole("button", { name: "Choose issue" }).click();
+      await row.getByRole("combobox", { name: "Issue" }).selectOption("CORE-1");
+      await expect(field).toHaveValue("@Planner");
+      await field.press("End");
+      await page.keyboard.type(" see attached");
+      await pasteFile(field, "notes.md", "# Notes\n");
+      await expect(uploadRetry).toBeVisible();
+
+      await field.press("Control+Enter");
+      await expect(field).toBeDisabled();
+      await expect(uploadRetry).toBeDisabled();
+      refuse();
+
+      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(field).toHaveValue("@Planner see attached");
+      await uploadRetry.click();
+      await expect(field).toHaveValue("@Planner see attached dispatch://CORE-1/artifact/notes-md");
+      expect(uploads).toBe(2);
+    } finally {
+      await context.close();
+    }
+  });
+
   // The same slow read, but the reader has gone into the composer rather than to another row:
   // the picker's focus belongs to the open, and typing is not where the open left them.
   test("a slow issue list never takes focus out of the message being typed", async ({
@@ -269,7 +365,7 @@ test.describe("agents page", () => {
         return route.fallback();
       });
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
 
       await page.keyboard.press("j");
@@ -310,7 +406,7 @@ test.describe("agents page", () => {
         });
       });
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
 
       // While the read is still out: no select, focus on the row, Escape closes what it opened.
@@ -352,7 +448,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -410,7 +506,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -447,7 +543,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -476,7 +572,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -507,7 +603,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
       const field = row.getByRole("textbox", { name: "Comment" });
@@ -544,7 +640,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const pick = async (value: string) => {
@@ -590,7 +686,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const pick = async (value: string) => {
@@ -638,7 +734,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const toggle = row.getByRole("button", { name: "Choose issue" });
 
@@ -668,7 +764,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       await page.keyboard.press("j");
       await expect(row).toBeFocused();
       await page.keyboard.press("Enter");
@@ -696,20 +792,12 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const rows = page.locator("[data-agent-row]");
+      const rows = shownAgentRows(page);
       const planner = rows.nth(0);
       const reviewer = rows.nth(1);
 
       // Hold the send open so the reader has a window to click in, as a slow server would.
-      let release: (() => void) | undefined;
-      const held = new Promise<void>((resolve) => {
-        release = resolve;
-      });
-      await page.route("**/api/v1/agents/*/messages", async (route) => {
-        if (route.request().method() !== "POST") return route.fallback();
-        await held;
-        return route.fallback();
-      });
+      const send = await holdPosts(page, "**/api/v1/agents/*/messages");
 
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
@@ -722,7 +810,7 @@ test.describe("agents page", () => {
       const reviewerBox = reviewer.getByRole("checkbox", { name: "Select Reviewer for broadcast" });
       await reviewerBox.focus();
       await expect(reviewerBox).toBeFocused();
-      release?.();
+      send.release();
       await expect(composer).toHaveValue("");
       await expect(reviewerBox).toBeFocused();
       await expect(composer).not.toBeFocused();
@@ -746,7 +834,7 @@ test.describe("agents page", () => {
     try {
       const page = await context.newPage();
       await openAgents(page);
-      const row = page.locator("[data-agent-row]").nth(0);
+      const row = shownAgentRows(page).nth(0);
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
       await expect(row.getByRole("textbox", { name: "Comment" })).toBeFocused();

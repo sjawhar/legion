@@ -93,7 +93,7 @@ func (s *server) sendResolvedDelivery(
 		Message:        body,
 		Payload:        frame,
 		IdempotencyKey: idempotencyKey,
-		Urgency:        urgencyValue(urgency),
+		Urgency:        deref(urgency),
 		ExpectsReply:   expectsReply,
 	})
 	if errors.Is(err, dispatchenvoy.ErrReceiptTimeout) {

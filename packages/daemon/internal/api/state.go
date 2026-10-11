@@ -14,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -32,20 +33,52 @@ type State struct {
 	Admission           Admission            `json:"admission"`
 	Issues              map[string]Issue     `json:"issues"` // the issue record, keyed by issue key
 	PendingStatusWrites []PendingStatusWrite `json:"pendingStatusWrites"`
-	// ControllerLocator is the project's controller, absent until a session registers with the
-	// capability `legion controller start` fetched.
+	// ControllerLocator is the project's controller, absent until a session registers as it: with
+	// the capability `legion controller start` fetched, or, under `controller: daemon`, with the boot
+	// token of the daemon's own controller launch.
 	ControllerLocator *ControllerLocator `json:"controllerLocator,omitempty"`
 	// AgentSecretsLogin is the daemon's own agent-secrets machine login
-	// (runtime.kubernetes.agent_secrets, AGENTC-393 Plan C), absent when the deployment configures
+	// (runtime.kubernetes.agent_secrets), absent when the deployment configures
 	// no broker.
 	AgentSecretsLogin *AgentSecretsLoginView `json:"agentSecretsLogin,omitempty"`
+	// Capabilities is the deployment's capability report (capabilities.Deployment.Report), one row
+	// per capability in the table's order: what the worker image was probed for, what the live
+	// sessions' reports prove (present), fail (open) or have not reported yet (unchecked), what a
+	// ruling withholds, and what the deployment's own configuration closes, decides or leaves open
+	// — each open deployment row with the legion.yaml line that records a decision. Never null; a
+	// gap is reported here, never refused (contract 16).
+	Capabilities []CapabilityState `json:"capabilities"`
 }
 
-// ControllerLocator is the external record of the project's controller (LEGION-206 Requirement
-// 11): the operator started it on their own machine, so the daemon has no process of it to
-// address — only the runtime the daemon runs under, the session registered with the current
-// controller capability, and when it registered. It is alive while the Envoy listener names that
-// session as the controller role's holder within the liveness window (`controller.Prober`).
+// CapabilityState is one row of that report. Status is "present", "installed" (the image carries
+// the row's tooling, but a pod's agent cannot use it yet; Detail says why), "unchecked",
+// "withheld", "decided" or "open"; Detail is the row's evidence whatever the status; Decision is
+// the operator's reason on a decided row; ConfigLine is, on an open deployment row, the legion.yaml
+// line that records a decision (`capabilities.decided.<name>: "<reason>"`); an open live row has none.
+type CapabilityState struct {
+	Name       string `json:"name"`
+	Status     string `json:"status"`
+	Detail     string `json:"detail"`
+	Decision   string `json:"decision,omitempty"`
+	ConfigLine string `json:"configLine,omitempty"`
+}
+
+// CapabilityStatesOf is report as the state shows it, row for row.
+func CapabilityStatesOf(report []capabilities.State) []CapabilityState {
+	states := make([]CapabilityState, len(report))
+	for i, row := range report {
+		states[i] = CapabilityState{Name: string(row.Name), Status: row.Status, Detail: row.Detail, Decision: row.Decision, ConfigLine: row.ConfigLine}
+	}
+	return states
+}
+
+// ControllerLocator is the record of the session registered as the project's controller: the
+// runtime the daemon runs under, the session, and when it registered. External is true for both
+// launches, a wire constant since contract 4: the operator's controller has no process the daemon
+// can address, and the daemon's own (`controller: daemon`) is a claim whose process the operator
+// routes and the claims list show, as any claim's. The operator's is alive while the Envoy listener
+// names that session as the controller role's holder within the liveness window
+// (`controller.Prober`).
 type ControllerLocator struct {
 	Runtime      string    `json:"runtime"`
 	External     bool      `json:"external"`
@@ -64,16 +97,17 @@ func ControllerLocatorOf(runtimeName string, record controller.Record) *Controll
 
 // AgentSecretsLoginView is the daemon's own agent-secrets machine login's current status
 // (agentsecrets.Client.LoginStatus): State is one of "none" (no login has ever been started),
-// "pending", "issued", "denied", or "expired"; Code is the confirmation code shown on the
-// Dispatch credential page for a pending login, "" otherwise. Never a key or a launcher
-// credential — those live only in the daemon's process memory.
+// "pending", "issued", "denied", "expired", or "failed" (the broker never opened the most recent
+// login: it refused it, or did not answer); Code is the confirmation code shown on the Dispatch
+// credential page for a pending login, "" otherwise. Never a key, a launcher credential, or why a
+// login failed — those live only in the daemon's process memory.
 type AgentSecretsLoginView struct {
 	State string `json:"state"`
 	Code  string `json:"code"`
 }
 
-// MarshalJSON keeps `issues` an object on the wire: a nil Go map is `null`, which the plugin's
-// strict reader refuses.
+// MarshalJSON keeps `issues` an object and `pendingStatusWrites` and `capabilities` arrays on the
+// wire: a nil Go map or slice is `null`, which the plugin's strict reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -82,6 +116,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.PendingStatusWrites == nil {
 		out.PendingStatusWrites = []PendingStatusWrite{}
+	}
+	if out.Capabilities == nil {
+		out.Capabilities = []CapabilityState{}
 	}
 	return json.Marshal(out)
 }
@@ -148,15 +185,55 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 }
 
 // ClaimView is one role claim as the record holds it: the session its agent registered as, where
-// it is in its life (`supervise.ClaimState`), and its locator. The locator is the runtime's own
-// nested shape — `{"runtime":"tmux","claim":…,"incarnation":…,"tmux":{"window":…,"pane":…}}` or
-// the `sandbox` member for a pod — marshalled by the standard library from `runtime.Locator`; the
-// process incarnation lives there and nowhere else in the view, and a socket path never does. A
-// claim with no process (queued, suspended, failed, retired) has no locator.
+// it is in its life (`supervise.ClaimState`), its locator, and the capability report its session
+// sent with its ready (LEGION-663). The locator is the runtime's own nested shape —
+// `{"runtime":"tmux","claim":…,"incarnation":…,"tmux":{"window":…,"pane":…}}` or the `sandbox`
+// member for a pod — marshalled by the standard library from `runtime.Locator`; the process
+// incarnation lives there and in the capability report's `incarnation`, which is the reporting
+// process's: a reader compares it with `locator.incarnation` to tell the running process's report
+// from a predecessor's. A socket path never appears in the view. A claim with no process (queued,
+// suspended, failed, retired) has no locator; a claim whose session has not reported, or whose
+// role never reports (the controller), has no capabilities.
 type ClaimView struct {
-	Session string           `json:"session"`
-	State   string           `json:"state"`
-	Locator *runtime.Locator `json:"locator,omitempty"`
+	Session      string                `json:"session"`
+	State        string                `json:"state"`
+	Locator      *runtime.Locator      `json:"locator,omitempty"`
+	Capabilities *CapabilityReportView `json:"capabilities,omitempty"`
+}
+
+// CapabilityReportView is one session's capability report as the state shows it: when the session
+// measured, the incarnation of the process that reported, the live rows it proved (OK) and the
+// rows it did not, each with the fact its check found (Open). OK and Open are never null.
+type CapabilityReportView struct {
+	MeasuredAt  time.Time       `json:"measuredAt"`
+	Incarnation string          `json:"incarnation"`
+	OK          []string        `json:"ok"`
+	Open        []CapabilityGap `json:"open"`
+}
+
+// CapabilityGap is one live row a session's check failed, with the fact the check found.
+type CapabilityGap struct {
+	Name   string `json:"name"`
+	Detail string `json:"detail"`
+}
+
+// CapabilityReportViewOf is report as the state shows it: its rows partitioned into the names that
+// passed and the gaps that did not, each side in the report's (Table) order.
+func CapabilityReportViewOf(report capabilities.Report) *CapabilityReportView {
+	view := &CapabilityReportView{
+		MeasuredAt:  report.MeasuredAt,
+		Incarnation: report.Locator.Incarnation,
+		OK:          []string{},
+		Open:        []CapabilityGap{},
+	}
+	for _, row := range report.Rows {
+		if row.OK {
+			view.OK = append(view.OK, string(row.Name))
+		} else {
+			view.Open = append(view.Open, CapabilityGap{Name: string(row.Name), Detail: row.Detail})
+		}
+	}
+	return view
 }
 
 // PhaseView is one phase worker's claim, its committed handoff, and the rounds the phase has run.

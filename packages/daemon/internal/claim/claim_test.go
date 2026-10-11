@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The six words a role travels as: the pane's `LEGION_ROLE`, the register response's `role`, the
@@ -52,15 +53,32 @@ func TestWireMemberNames(t *testing.T) {
 		{
 			name: "register response",
 			value: RegisterResponse{
-				ClaimToken: "legion-omp-LEGION-208-architect",
-				Tree:       "LEGION-208",
-				Issue:      "LEGION-208",
-				Role:       RoleArchitect,
-				Generation: 3,
-				Secret:     "sec-1",
+				ClaimToken:   "legion-omp-LEGION-208-architect",
+				Tree:         "LEGION-208",
+				Issue:        "LEGION-208",
+				Role:         RoleArchitect,
+				Generation:   3,
+				Secret:       "sec-1",
+				PromptAgents: []string{"plan-gap-analyst", "scout"},
 			},
 			want: `{"claimToken":"legion-omp-LEGION-208-architect","tree":"LEGION-208",` +
-				`"issue":"LEGION-208","role":"architect","generation":3,"secret":"sec-1"}`,
+				`"issue":"LEGION-208","role":"architect","generation":3,"secret":"sec-1",` +
+				`"promptAgents":["plan-gap-analyst","scout"]}`,
+		},
+		{
+			name: "register response with no prompt agents",
+			value: RegisterResponse{
+				ClaimToken:   "legion-omp-LEGION-208-merger",
+				Tree:         "LEGION-208",
+				Issue:        "LEGION-208",
+				Role:         RoleMerger,
+				Generation:   1,
+				Secret:       "sec-3",
+				PromptAgents: []string{},
+			},
+			want: `{"claimToken":"legion-omp-LEGION-208-merger","tree":"LEGION-208",` +
+				`"issue":"LEGION-208","role":"merger","generation":1,"secret":"sec-3",` +
+				`"promptAgents":[]}`,
 		},
 		{
 			name: "ready request",
@@ -72,6 +90,27 @@ func TestWireMemberNames(t *testing.T) {
 			},
 			want: `{"claimToken":"legion-omp-LEGION-208-tester","sessionId":"ses_tester_208",` +
 				`"secret":"sec-2","generation":4}`,
+		},
+		{
+			name: "ready request with a capability report",
+			value: ReadyRequest{
+				ClaimToken: "legion-omp-LEGION-208-tester",
+				SessionID:  "ses_tester_208",
+				Secret:     "sec-2",
+				Generation: 4,
+				Capabilities: &CapabilityReport{
+					MeasuredAt: time.Date(2026, 10, 10, 2, 18, 59, 0, time.UTC),
+					ElapsedMs:  1200,
+					Rows: []CapabilityRow{
+						{Name: "subagents", OK: true, Detail: "4 agents"},
+						{Name: "web-search", OK: false, Detail: "web_search is not among the active tools"},
+					},
+				},
+			},
+			want: `{"claimToken":"legion-omp-LEGION-208-tester","sessionId":"ses_tester_208",` +
+				`"secret":"sec-2","generation":4,"capabilities":{"measuredAt":"2026-10-10T02:18:59Z",` +
+				`"elapsedMs":1200,"rows":[{"name":"subagents","ok":true,"detail":"4 agents"},` +
+				`{"name":"web-search","ok":false,"detail":"web_search is not among the active tools"}]}}`,
 		},
 		{
 			name: "exit request",
@@ -205,5 +244,52 @@ func TestNewTokenIsTheShippedRoleToken(t *testing.T) {
 				t.Errorf("the refusal does not name %s: %v", testCase.wantFragment, err)
 			}
 		})
+	}
+}
+
+// The project controller's claim, which the daemon launches under `controller: daemon`, is on the
+// role `controller`: the word the operator's controller already registers as and its pane is told
+// as LEGION_ROLE. It is no workflow role — it holds no issue — so IsRole refuses it, no NewToken
+// builds a token of it on an issue, and its one token is ControllerToken.
+func TestTheControllerRoleIsTheControllersOwnAndNoWorkflowRole(t *testing.T) {
+	if RoleController != "controller" {
+		t.Fatalf("RoleController = %q, want the wire word controller", RoleController)
+	}
+	if IsRole(RoleController) {
+		t.Fatal("IsRole(RoleController) = true; the controller holds no issue, so it is no workflow role")
+	}
+	if token, err := NewToken("legion", "LEGION-208", RoleController); err == nil {
+		t.Fatalf("NewToken on an issue as the controller = %q, want a refusal", token)
+	}
+	if !IsController(RoleController, "", "") {
+		t.Fatal("IsController(controller, no issue, no tree) = false, want true")
+	}
+	for _, place := range []struct{ issue, tree string }{{"LEGION-208", ""}, {"", "LEGION-208"}, {"LEGION-208", "LEGION-208"}} {
+		if IsController(RoleController, place.issue, place.tree) {
+			t.Errorf("IsController(controller, %q, %q) = true; the controller's claim is on no issue", place.issue, place.tree)
+		}
+	}
+	if IsController(RoleArchitect, "", "") {
+		t.Error("IsController(architect, no issue, no tree) = true, want false")
+	}
+}
+
+// A token names its role: a workflow role's token the role it ends in, and the controller's token
+// the controller, which Cut does not split. Anything else names no role, a token that only looks
+// like the controller's included.
+func TestATokenNamesItsRoleTheControllersIncluded(t *testing.T) {
+	for token, want := range map[Token]Role{
+		"legion-legion-legion-208-tester":    RoleTester,
+		"legion-legion-legion-208-architect": RoleArchitect,
+		ControllerToken("legion"):            RoleController,
+	} {
+		if role, ok := token.Role(); !ok || role != want {
+			t.Errorf("%s.Role() = %q, %t; want %q", token, role, ok, want)
+		}
+	}
+	for _, token := range []Token{"legion-legion-legion-208", "legion--controller", "legion-a-b-controller", "other-legion-controller", "legion-Legion-controller"} {
+		if role, ok := token.Role(); ok {
+			t.Errorf("%s.Role() = %q, want none", token, role)
+		}
 	}
 }

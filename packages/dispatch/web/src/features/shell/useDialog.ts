@@ -10,12 +10,21 @@ export const PHONE_VIEWPORT_QUERY = "(max-width: 767px)";
 
 const focusableSelector = [
   "a[href]",
-  "button:not([disabled])",
-  "textarea:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
+  "button:not(:disabled)",
+  "textarea:not(:disabled)",
+  "input:not(:disabled)",
+  "select:not(:disabled)",
   '[tabindex]:not([tabindex="-1"])',
 ].join(", ");
+
+/** The controls focus can reach inside `container`, in order. One under a `hidden` ancestor - a
+ *  composer kept mounted, out of sight, for a send it has out - takes no focus, so it is neither
+ *  where the trap starts nor where it wraps. */
+function focusableIn(container: HTMLElement): HTMLElement[] {
+  return [...container.querySelectorAll<HTMLElement>(focusableSelector)].filter(
+    (element) => element.closest("[hidden]") === null
+  );
+}
 
 // Depth-counted so a picker opening inside an already-locked sheet does not unlock scroll
 // when the picker (not the sheet) closes first; only the outermost acquire/release touches
@@ -48,14 +57,23 @@ const scrollLock = {
 
 // Every open dialog's container. Escape is a `dialog`-scope keymap binding so it works before
 // the deferred initial focus has moved into the dialog (the key then lands on whatever was
-// focused before, such as the document editor); only the innermost open dialog closes -
-// innermost by DOM containment, since a picker nested in a sheet runs its effect first.
+// focused before, such as the document editor); only the innermost open dialog closes. Two
+// dialogs nested by DOM containment (a picker opened inside an already-open sheet) resolve by
+// containment, the nested one winning regardless of which mounted its effect first. Two dialogs
+// that are siblings - neither containing the other, such as the phone navigation sheet and a
+// second dialog a control inside it opens without closing the sheet first - have no containment
+// relationship to resolve by, so the most recently opened of the two wins instead.
 const openDialogs = new Set<HTMLElement | null>();
 
 function innermostOpenDialog(): HTMLElement | null | undefined {
   let innermost: HTMLElement | null | undefined;
   for (const container of openDialogs) {
-    if (innermost === undefined || (container !== null && innermost?.contains(container))) {
+    const containerIsAncestorOfInnermost =
+      container !== null &&
+      innermost !== null &&
+      innermost !== undefined &&
+      container.contains(innermost);
+    if (innermost === undefined || !containerIsAncestorOfInnermost) {
       innermost = container;
     }
   }
@@ -124,9 +142,7 @@ export function useDialog<T extends HTMLElement>({
       }
       const initial =
         initialFocusRef?.current ??
-        (container === null
-          ? null
-          : (container.querySelectorAll<HTMLElement>(focusableSelector)[0] ?? container));
+        (container === null ? null : (focusableIn(container)[0] ?? container));
       initial?.focus();
     });
 
@@ -136,7 +152,7 @@ export function useDialog<T extends HTMLElement>({
       if (event.key !== "Tab" || container === null) {
         return;
       }
-      const elements = container.querySelectorAll<HTMLElement>(focusableSelector);
+      const elements = focusableIn(container);
       const first = elements[0];
       const last = elements[elements.length - 1];
       if (first === undefined || last === undefined) {

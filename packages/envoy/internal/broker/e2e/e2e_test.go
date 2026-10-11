@@ -113,8 +113,8 @@ func newE2EServer(t *testing.T) *e2eServer {
 
 	reqMachine := &requests.Machine{
 		Store: st, Policy: current, Secrets: secrets.AWS{Client: local},
-		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
-		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
+		PendingTTL: 12 * time.Hour,
+		Audience:   srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{
@@ -126,7 +126,8 @@ func newE2EServer(t *testing.T) *e2eServer {
 	api.Register(mux, api.Deps{
 		PublicURL: srv.URL, UIToken: testUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
-		Proof: &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
+		Policy: current, SecretsPrefix: policytest.Prefix, SecretsKMSKeyARN: policytest.KeyARN,
 	})
 
 	return &e2eServer{URL: srv.URL, Store: st, Secrets: local, Log: logged}
@@ -241,8 +242,7 @@ func newSigningKey(t *testing.T) *ecdsa.PrivateKey {
 	return key
 }
 
-// --- wire-shape mirrors of the shared broker contract
-// (dispatch://AGENTC-393/artifact/plan-overview-md), the fields this test actually reads ---
+// --- wire-shape mirrors of the shared broker contract, the fields this test actually reads ---
 
 type wireError struct {
 	Code  string `json:"code"`
@@ -282,7 +282,7 @@ func signAgentSecretRequest(t *testing.T, key *ecdsa.PrivateKey, audience, reaso
 	for i, n := range names {
 		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: n, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(key, audience, details, reason, "", time.Now())
+	compact, err := record.Sign(key, audience, details, reason, "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -293,7 +293,7 @@ func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, logi
 	t.Helper()
 	compact, err := record.Sign(key, audience, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: host},
-	}, "", loginHint, time.Now())
+	}, "", loginHint, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -361,7 +361,7 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("thumbprint: %v", err)
 		}
 		status, body = ts.launcher(t, machineKey, launcherCredentialID, http.MethodPost, "/v1/enrollments", map[string]any{
-			"kind": "box", "runtime_id": "e2e-box", "operator": testApprover, "thumbprint": sessionThumbprint,
+			"kind": "session", "runtime_id": "e2e-session", "operator": testApprover, "thumbprint": sessionThumbprint,
 		})
 		if status != http.StatusCreated {
 			t.Fatalf("POST /v1/enrollments (launcher proof by the machine's own key) = %d, want 201: %s", status, body)
@@ -705,7 +705,7 @@ func (s *e2eServer) loginAndEnroll(t *testing.T, person, host string) (string, *
 		t.Fatalf("thumbprint: %v", err)
 	}
 	status, body = s.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments",
-		map[string]any{"kind": "box", "runtime_id": host + "-box", "thumbprint": thumbprint})
+		map[string]any{"kind": "session", "runtime_id": host + "-session", "thumbprint": thumbprint})
 	if status != http.StatusCreated {
 		t.Fatalf("enroll %s's session = %d: %s", person, status, body)
 	}

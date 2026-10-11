@@ -153,7 +153,7 @@ PGOPTIONS="-c client_min_messages=warning" psql "$admin_url" -v ON_ERROR_STOP=1 
 broker_database=$run_database
 
 # --- The broker, on a made-up secret of the operator's at the human tier, so the operator approves
-# every request for it, and a grant lives an hour. -----------------------------------------------
+# every request for it, and a grant lasts until its session ends. --------------------------------
 secrets_prefix="example/agent-secrets/"
 secrets_key="arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 cat >"$work/fake-secrets.json" <<EOF
@@ -172,7 +172,6 @@ start_process broker setsid env -i PATH="$PATH" \
   BROKER_UI_TOKEN_FILE="$work/broker-ui-token" \
   BROKER_SECRETS_PREFIX="$secrets_prefix" \
   BROKER_SECRETS_KMS_KEY_ARN="$secrets_key" \
-  BROKER_MAX_GRANT_SECONDS=3600 \
   BROKER_FAKE_SECRETS_FILE="$work/fake-secrets.json" \
   "$work/bin/broker"
 await_start broker "$broker_pid" 0 60 "the broker to report its address" \
@@ -247,7 +246,7 @@ rig: ready.
   agent       $agent_exec bash   (hostname $AGENT_HOST; agent-secrets-helper for $OPERATOR)
   logs        $work/logs
 
-  On the agent machine: agent-secrets launcher login, type its code at $dispatch_url/credentials/machine,
+  On the agent machine: agent-secrets machine login, type its code at $dispatch_url/credentials/machine,
   then agent-secrets register --wait 10 --exec -- bash, then
   agent-secrets DEMO_API_KEY --reason "<why>" -- ./check-demo-key.sh
 EOF

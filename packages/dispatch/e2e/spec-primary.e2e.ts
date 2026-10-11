@@ -1,6 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 import { createAsk, createIssue, createProject } from "./api";
+import { needsYouCards } from "./editor";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
@@ -53,9 +54,9 @@ test("issue landing keeps Spec primary and puts open asks in Needs you", async (
         path: toggleScreenshot,
       });
       await toggle.click();
-      await expect(page.getByRole("region", { name: "Needs you" })).toContainText(
-        "Approve the document-first layout?"
-      );
+      await expect(
+        needsYouCards(page).filter({ hasText: "Approve the document-first layout?" })
+      ).toBeVisible();
       expect(
         await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)
       ).toBe(true);
@@ -66,12 +67,10 @@ test("issue landing keeps Spec primary and puts open asks in Needs you", async (
         path: needsYouScreenshot,
       });
     } else {
-      await expect(page.getByRole("region", { name: "Needs you" })).toContainText(
-        "Approve the document-first layout?"
-      );
-      await expect(page.getByRole("region", { name: "Needs you" })).toContainText(
-        "Is this opening clear?"
-      );
+      await expect(
+        needsYouCards(page).filter({ hasText: "Approve the document-first layout?" })
+      ).toBeVisible();
+      await expect(needsYouCards(page).filter({ hasText: "Is this opening clear?" })).toBeVisible();
       const desktopScreenshot = testInfo.outputPath("spec-primary-desktop-1440.png");
       await page.screenshot({ path: desktopScreenshot, fullPage: true });
       await testInfo.attach("spec primary desktop 1440", {

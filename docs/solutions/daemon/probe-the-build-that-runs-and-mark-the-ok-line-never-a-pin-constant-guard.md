@@ -48,13 +48,13 @@ Three things made this workable and are reusable:
 
 1. **Find a provider-free, network-free, TTY-free path that reaches the decision point.** Most
    flags exit before the resolver (`--version`, `--export`), never reach the root command
-   (`omp models`, `omp gc`), or need a model (`-p`, `--mode rpc` → "No models available", exit 1
-   without a key). `PI_TIMING=x` makes an interactive start print its timing tree and exit 0 just
-   before the TUI opens; stdin on `/dev/null` keeps the start interactive (an empty non-TTY stdin
-   is not a piped prompt); `--no-session --no-extensions --no-skills --no-rules --no-lsp --no-tools`
-   keeps the profile out of it. The resolver runs right after settings load, ahead of that exit.
-   Document the ordering you rely on — a refactor of the fork can move the exit point without
-   breaking anything visible except this probe.
+   (`omp models`, `omp gc`), or need a model (`-p`). `--mode rpc` with stdin on `/dev/null`
+   resolves the setting during startup, before it reads a command, then exits 0 on the closed
+   stdin without calling a model; `--no-session --no-extensions --no-skills --no-rules --no-lsp
+   --no-tools` keeps the profile out of it. An interactive start is no such path: without a
+   terminal on stdin Oh My Pi refuses it (exit 2) before the resolver runs. Document the ordering
+   you rely on — a refactor of the fork can move the exit point without breaking anything visible
+   except this probe.
 2. **A probe whose negative answer is an exit code has no marker.** The shared `killedOutcome`
    helper treated a printed negative marker as "already answered, definitive even if killed".
    For this probe a killed attempt has no exit code to read, so every budget kill is transient:

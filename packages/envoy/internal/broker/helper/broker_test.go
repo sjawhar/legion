@@ -37,7 +37,7 @@ const failAlways = 1 << 30
 // the SAME stored (possibly already-expired) lease rather than a freshly computed one — the real
 // bug C2's fix works around. runtimeIDToID additionally models the real broker's OTHER
 // idempotent-enroll conflict key, (launcher_credential_id, runtime_id) rather than thumbprint
-// (AGENTC-834 thermonuclear finding on Recover's ordering): an Enroll whose runtime_id already
+// (a review finding on Recover's ordering): an Enroll whose runtime_id already
 // has a different, still-live enrollment id refuses with 409 ALREADY_ENROLLED, whatever
 // thumbprint it carries — exactly the conflict a fresh Recover enroll racing ahead of the old
 // row's revoke can hit for real, which byTP alone (keyed on the NEW session's fresh thumbprint)
@@ -57,7 +57,7 @@ const failAlways = 1 << 30
 // credential.
 //
 // The launcher half (Enroll, Revoke) now authenticates with a Proof header carrying an "lid"
-// claim instead of a bearer token (AGENTC-834 Task 1): enrollUnauthorizedNext simulates an
+// claim instead of a bearer token: enrollUnauthorizedNext simulates an
 // expired or revoked credential (401 LAUNCHER_INVALID) independent of failFirst's unrelated 503.
 // The fake also serves the machine-login routes a Broker.Login talks to: POST
 // /v1/launcher-credentials verifies the posted request object with record.VerifyRequestObject and
@@ -101,10 +101,12 @@ type fakeBroker struct {
 	// before it does.
 	loginLifetime time.Duration
 
-	// refuseRenewNext answers the next N renews 401 LEASE_EXPIRED whatever the lease, so a test
-	// lapses a session on its next renew without racing the lease's wall clock. A renew that
-	// renewFail also covers gets renewFail's 503 instead, since renewFail is checked first.
-	refuseRenewNext int
+	// refuseRenewNext answers the next N renews 401. renewRefusalCode defaults to
+	// ENROLLMENT_NOT_LIVE, the current broker's terminal renewal verdict; a test names
+	// PROOF_INVALID to model a retryable proof-skew failure. A renew that renewFail also covers
+	// gets its 503 first.
+	refuseRenewNext  int
+	renewRefusalCode string
 	// enrollGate, when set, holds every enroll POST until the test closes it, so a test can keep a
 	// session enrolling for exactly as long as it needs.
 	enrollGate chan struct{}
@@ -125,6 +127,9 @@ type fakeBroker struct {
 	// it, so every later one gets lease. A test gives one enrollment a lease short enough that it
 	// renews soon, and nothing it re-enrolls can lapse under the test however the steps interleave.
 	nextLease time.Duration
+	// refuseKinds answers an enroll naming one of these kinds 400 INVALID_KIND, as a broker before
+	// the session kind refuses "session".
+	refuseKinds map[string]bool
 }
 
 func newFakeBroker(t *testing.T) *fakeBroker {
@@ -161,6 +166,10 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		f.posts = append(f.posts, body)
+		if kind, _ := body["kind"].(string); f.refuseKinds[kind] {
+			writeJSON(w, 400, map[string]string{"code": "INVALID_KIND", "error": `kind must be "box", "host", or "pod"`})
+			return
+		}
 		tp, _ := body["thumbprint"].(string)
 		if id, ok := f.byTP[tp]; ok {
 			// The idempotent-enroll conflict path: the real broker answers with the SAME id and
@@ -251,7 +260,15 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		}
 		if f.refuseRenewNext > 0 {
 			f.refuseRenewNext--
-			writeJSON(w, 401, map[string]string{"code": "LEASE_EXPIRED", "error": "the lease has expired"})
+			code := f.renewRefusalCode
+			if code == "" {
+				code = "ENROLLMENT_NOT_LIVE"
+			}
+			message := "enrollment is not live"
+			if code == "PROOF_INVALID" {
+				message = "iat outside the proof skew"
+			}
+			writeJSON(w, 401, map[string]string{"code": code, "error": message})
 			return
 		}
 		v := &proof.Verifier{
@@ -268,14 +285,20 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 				return true, nil
 			},
 		}
-		if sub, err := v.Verify(r.Context(), r.Header.Get("Proof"), "POST", f.srv.URL+"/v1/enrollments/"+id+"/renew", time.Now()); err != nil || sub.EnrollmentID != id {
+		sub, err := v.Verify(r.Context(), r.Header.Get("Proof"), "POST", f.srv.URL+"/v1/enrollments/"+id+"/renew", time.Now())
+		switch {
+		case errors.Is(err, proof.ErrNotLive):
+			// As the broker's renew route answers a proof naming an enrollment it no longer holds.
+			writeJSON(w, 401, map[string]string{"code": "ENROLLMENT_NOT_LIVE", "error": "enrollment is not live"})
+			return
+		case err != nil || sub.EnrollmentID != id:
 			writeJSON(w, 401, map[string]string{"code": "PROOF_INVALID", "error": "proof invalid"})
 			return
 		}
 		// The enrollment row itself survives its own lease — a renew past that stored expiry is
 		// refused, but nothing about the enrollment is deleted; only Revoke deletes it.
 		if exp, ok := f.leaseExpiry[id]; ok && !time.Now().Before(exp) {
-			writeJSON(w, 401, map[string]string{"code": "LEASE_EXPIRED", "error": "the lease has expired"})
+			writeJSON(w, 401, map[string]string{"code": "ENROLLMENT_NOT_LIVE", "error": "enrollment is not live"})
 			return
 		}
 		f.renews++
@@ -459,7 +482,7 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), HTTP: f.srv.Client()}
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 
-	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets launcher login") {
+	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("no credential yet: expected the remedy in the error, got %v", err)
 	}
 
@@ -474,13 +497,13 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	f.mu.Lock()
 	f.enrollUnauthorizedNext = 1
 	f.mu.Unlock()
-	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets launcher login") {
+	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("expired credential: expected the remedy in the error, got %v", err)
 	}
 	if b.cred.Load() != nil {
 		t.Fatal("a 401 LAUNCHER_INVALID must clear the credential")
 	}
-	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets launcher login") {
+	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("cleared credential: expected the remedy again, got %v", err)
 	}
 
@@ -571,7 +594,7 @@ func TestLoginStatusReadsARefusalWithTheClearThatCausedIt(t *testing.T) {
 // TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome: a re-login is waiting for
 // approval when the broker refuses the credential an earlier login installed. While it waits,
 // login-status reads it pending and the credential refused. Once the operator denies it, it reads
-// denied and no longer refused: its outcome is newer than the refusal, and `launcher login`, which
+// denied and no longer refused: its outcome is newer than the refusal, and `machine login`, which
 // reads the same answer, must tell the operator it was denied.
 func TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome(t *testing.T) {
 	f := newFakeBroker(t)
@@ -644,7 +667,7 @@ func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 	}
 }
 
-func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
+func TestEnrollSendsKindSessionAndAcceptsBothStatuses(t *testing.T) {
 	f := newFakeBroker(t)
 	b := loggedInBroker(t, f, "ada@example.com")
 	sess, _ := newSession(1234, 77, "example-host-devbox:1234:77", nil)
@@ -654,7 +677,7 @@ func TestEnrollSendsKindHostAndAcceptsBothStatuses(t *testing.T) {
 	}
 	posts, _, _ := f.snapshot()
 	post := posts[0]
-	if post["kind"] != "host" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "ada@example.com" ||
+	if post["kind"] != "session" || post["runtime_id"] != "example-host-devbox:1234:77" || post["operator"] != "ada@example.com" ||
 		post["thumbprint"] != sess.Thumbprint || post["approver"] != nil ||
 		post["session_id"] != nil || post["pod_token"] != nil {
 		t.Fatalf("enroll body: %+v", post)
@@ -697,7 +720,7 @@ func TestMissingCredentialNamesTheLoginCommand(t *testing.T) {
 	b := &Broker{URL: "http://127.0.0.1:1", OperatorFile: filepath.Join(t.TempDir(), "none"), HTTP: http.DefaultClient}
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 	_, _, err := b.Enroll(context.Background(), sess)
-	if err == nil || !strings.Contains(err.Error(), "agent-secrets launcher login") {
+	if err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
 		t.Fatalf("expected the remedy in the error, got %v", err)
 	}
 }

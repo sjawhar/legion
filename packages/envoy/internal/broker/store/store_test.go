@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
 func testDatabaseURL(t *testing.T) string {
@@ -328,5 +329,146 @@ func TestMigrationSevenKeysLiveEnrollmentsBySlot(t *testing.T) {
 		return enrol(sp, "00000000-0000-0000-0000-0000000000fe", "pod", "pod-uid-1", "tp-implementer-again", &implementer)
 	}); err != nil {
 		t.Fatalf("re-enrolling a revoked slot: %v", err)
+	}
+}
+
+// migrationSchema opens a transaction with search_path set to a fresh schema of its own, dropped
+// on rollback, and applies to it every embedded migration before version below, as a broker of
+// that time left the database; apply then applies one more by its file name.
+func migrationSchema(t *testing.T, schema string, below int) (tx pgx.Tx, apply func(file string)) {
+	t.Helper()
+	ctx := context.Background()
+	s, err := Open(ctx, testDatabaseURL(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(s.Pool.Close)
+	tx, err = s.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(ctx) })
+	if _, err := tx.Exec(ctx, `create schema `+schema); err != nil {
+		t.Fatalf("create schema: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `set local search_path to `+schema); err != nil {
+		t.Fatalf("set search_path: %v", err)
+	}
+	apply = func(file string) {
+		t.Helper()
+		sql, err := migrationFiles.ReadFile("migrations/" + file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		if _, err := tx.Exec(ctx, string(sql)); err != nil {
+			t.Fatalf("apply %s: %v", file, err)
+		}
+	}
+	migrations, err := pgmigrate.Load(migrationFiles, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range migrations {
+		if m.Version < below {
+			apply(m.Name)
+		}
+	}
+	return tx, apply
+}
+
+// TestMigrationTwelveMakesEveryMachineSessionOneKind writes a live box, host and pod enrollment
+// the way a broker before 0012 did, then runs 0012: the box and host rows read as kind session,
+// the pod row stays pod, and box and host are refused from then on.
+func TestMigrationTwelveMakesEveryMachineSessionOneKind(t *testing.T) {
+	ctx := context.Background()
+	tx, apply := migrationSchema(t, "migration_twelve_kind", 12)
+	const credential = "00000000-0000-0000-0000-0000000000c1"
+	if _, err := tx.Exec(ctx, `insert into launcher_credentials (id, operator, host, key_thumbprint, public_jwk, expires_at)
+		values ($1, 'ada@example.com', 'example-host-devbox', 'tp-launcher', '{}'::jsonb, now() + interval '1 day')`, credential); err != nil {
+		t.Fatalf("insert launcher credential: %v", err)
+	}
+	enrol := func(sp pgx.Tx, id, kind string) error {
+		_, err := sp.Exec(ctx, `insert into enrollments (id, kind, runtime_id, thumbprint, launcher_credential_id, lease_expires_at)
+			values ($1, $2, $3, $4, $5, now() + interval '1 hour')`, id, kind, kind+"-1", "tp-"+id, credential)
+		return err
+	}
+	rows := map[string]string{
+		"00000000-0000-0000-0000-0000000000e1": "box",
+		"00000000-0000-0000-0000-0000000000e2": "host",
+		"00000000-0000-0000-0000-0000000000e3": "pod",
+	}
+	for id, kind := range rows {
+		if err := enrol(tx, id, kind); err != nil {
+			t.Fatalf("insert %s enrollment before 0012: %v", kind, err)
+		}
+	}
+
+	apply("0012_one_session_kind.up.sql")
+
+	want := map[string]string{
+		"00000000-0000-0000-0000-0000000000e1": "session",
+		"00000000-0000-0000-0000-0000000000e2": "session",
+		"00000000-0000-0000-0000-0000000000e3": "pod",
+	}
+	for id, kind := range want {
+		var got string
+		if err := tx.QueryRow(ctx, `select kind from enrollments where id = $1`, id).Scan(&got); err != nil || got != kind {
+			t.Fatalf("enrollment %s (was %s) after 0012 = %q (%v), want %q", id, rows[id], got, err, kind)
+		}
+	}
+	for _, kind := range []string{"box", "host"} {
+		sp, err := tx.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = enrol(sp, "00000000-0000-0000-0000-0000000000f"+fmt.Sprint(len(kind)), kind)
+		_ = sp.Rollback(ctx)
+		if err == nil || !strings.Contains(err.Error(), "enrollments_kind_check") {
+			t.Fatalf("a %s enrollment after 0012 = %v, want a violation of enrollments_kind_check", kind, err)
+		}
+	}
+	if err := enrol(tx, "00000000-0000-0000-0000-0000000000e4", "session"); err != nil {
+		t.Fatalf("a session enrollment after 0012: %v", err)
+	}
+}
+
+// TestMigrationThirteenLetsAGrantLastUntilItsSessionEnds runs 0013 over a database 0012 left: a
+// request may name no lifetime and its grant no expiry, the shape of a grant that lasts until its
+// session ends, while a grant written with an expiry keeps it.
+func TestMigrationThirteenLetsAGrantLastUntilItsSessionEnds(t *testing.T) {
+	ctx := context.Background()
+	tx, apply := migrationSchema(t, "migration_thirteen_lifetime", 13)
+	const credential, enrollment = "00000000-0000-0000-0000-0000000000c1", "00000000-0000-0000-0000-0000000000e1"
+	if _, err := tx.Exec(ctx, `insert into launcher_credentials (id, operator, host, key_thumbprint, public_jwk, expires_at)
+		values ($1, 'ada@example.com', 'example-host-devbox', 'tp-launcher', '{}'::jsonb, now() + interval '1 day')`, credential); err != nil {
+		t.Fatalf("insert launcher credential: %v", err)
+	}
+	if _, err := tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, thumbprint, launcher_credential_id, lease_expires_at)
+		values ($1, 'session', 'session-1', 'tp-session', $2, now() + interval '1 hour')`, enrollment, credential); err != nil {
+		t.Fatalf("insert enrollment: %v", err)
+	}
+	insert := func(request string, lifetime *int) error {
+		if _, err := tx.Exec(ctx, `insert into requests (id, enrollment_id, reason, state, rules_version, lifetime_seconds)
+			values ($1, $2, 'why', 'granted', 'v1', $3)`, request, enrollment, lifetime); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `insert into grants (id, request_id, enrollment_id, expires_at)
+			values (gen_random_uuid(), $1, $2, now() + make_interval(secs => $3))`, request, enrollment, lifetime)
+		return err
+	}
+	hour := 3600
+	if err := insert("00000000-0000-0000-0000-0000000000a1", &hour); err != nil {
+		t.Fatalf("a request with a lifetime before 0013: %v", err)
+	}
+
+	apply("0013_grant_until_session_ends.up.sql")
+
+	if err := insert("00000000-0000-0000-0000-0000000000a2", nil); err != nil {
+		t.Fatalf("a request with no lifetime and a grant with no expiry after 0013: %v", err)
+	}
+	var withExpiry, withoutExpiry int
+	if err := tx.QueryRow(ctx, `select count(*) filter (where expires_at is not null), count(*) filter (where expires_at is null) from grants`).
+		Scan(&withExpiry, &withoutExpiry); err != nil || withExpiry != 1 || withoutExpiry != 1 {
+		t.Fatalf("grants after 0013: %d with an expiry, %d without (%v), want one of each", withExpiry, withoutExpiry, err)
 	}
 }

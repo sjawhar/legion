@@ -409,10 +409,11 @@ func markdownQuoteMatches(text flattenedText, quote string) []quoteMatch {
 
 // renderedMarkdownQuote is quote read as markdown, when its text and inline markup differ from
 // quote's own. A quote matches by its text, which a short table row's padded cells do not hold, so
-// its tables are read only while they need no padding (quotePaddingBudget), and a quote each
-// operation of an edit batch resolves costs no padded cell.
+// its tables are read only while they need no padding (quoteBudget), and a quote each
+// operation of an edit batch resolves costs no padded cell. A quote that makes more elements than
+// a write may is refused before goldmark builds the rest of it, and reads as no markdown.
 func renderedMarkdownQuote(quote string) (flattenedText, bool) {
-	parsed, err := parseStamped(quote, quotePaddingBudget())
+	parsed, err := parseStamped(quote, quoteBudget())
 	if err != nil {
 		return flattenedText{}, false
 	}
@@ -864,6 +865,9 @@ func MarkRange(txn *crdt.Transaction, frag *crdt.YXmlFragment, r Range, mark Mar
 	}
 	if !markTypes[mark.Type] {
 		return fmt.Errorf("%w: mark %q", ErrSchema, mark.Type)
+	}
+	if err := attrNestingError("mark", mark.Type, mark.Attrs, maxMarkAttrNesting); err != nil {
+		return err
 	}
 
 	spans, err := yTextRanges(frag)

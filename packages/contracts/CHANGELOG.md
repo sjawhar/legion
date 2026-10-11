@@ -2,8 +2,51 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `LegionReadyRequest`, the body of the Legion daemon's `POST /legion/v1/claims/ready`, and
+  `LegionCapabilityReport`, its optional `capabilities`: what a session measured of the six live
+  capability rows at boot (`measuredAt`, `elapsedMs`, `rows[{name, ok, detail}]`; a `detail` may
+  be empty), with the `ready.json` fixture the Go golden test writes. `LegionRegisterResponse`
+  gains `promptAgents`, the sorted task agents the role's prompts dispatch, and the claim view on
+  `GET /legion/v1/state` gains an optional `capabilities` (`measuredAt`, `incarnation`, `ok`,
+  `open[{name, detail}]`), the claim's latest report as the daemon shows it — daemon API contract
+  21 (LEGION-663).
+- Added `AnswerAskInput.expected_answer_at`, `AskRead.answers`, `InboxThread.answers`,
+  `MyAnswerRow`, `MyAnswersResponse`, and `AskAnsweredEventPayload`, whose
+  `previous_answer` names the answer a human changed (LEGION-622).
+- `images` on `dispatch_message`, `dispatch_comment` and `dispatch_ask`, and `DISPATCH_BODY_MAX`;
+  `Artifact.session_id` (optional: a Dispatch older than conversation-owned artifacts omits it) for
+  an upload an agent's conversation owns; `dispatch_doc_read` and `dispatch_read` describe the
+  pictures they return; the reference table pins `dispatch://agent/<session id>/artifact/<slug>`
+  and the picture syntax; `SESSION_ID_PATTERN` and `isSessionId`, the one session-id rule the
+  dashboard and envoy-client read a reference by (the server's `text.IsSessionID`), and
+  `pictureCaption`, the one caption a picture line carries (LEGION-541).
+- `Version.size` is documented for document versions too: the bytes of the markdown a version
+  stores, which Dispatch now answers on every document version it lists or reads, read from the
+  stored row without rendering the document (LEGION-481). It stays optional, absent on a document
+  version from a server that predates it.
+
 ### Changed
 
+- `live` is removed from the capability row's `status` enum on `GET /legion/v1/state`: a live row
+  is `present`, `open` or `unchecked` from the sessions' reports, and a row no session has reported
+  reads `unchecked` beside an image row no probe has checked — daemon API contract 21 (LEGION-663).
+- Added `ISSUE_TITLE_MAX` (1,000), the longest issue title in UTF-16 units that
+  `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept, generated into Go as
+  `contracts.IssueTitleMax`; the dashboard's title fields take it as their `maxLength`
+  (LEGION-505).
+- Added `WriteAdvice.suggestions`, `Suggestions` and `WriteSuggestion`: `POST /api/v1/issues` and
+  `POST /api/v1/issues/{key}/asks` now return, without ever refusing or delaying the write, the
+  three fused-search hits (sjawhar/legion#1764) most like what was just filed and, for an ask,
+  any already-answered ask that settles the same question, with who answered and when
+  (LEGION-550).
+- `SearchResponse` carries `total`, `reachable`, `limit` and `offset`, and `dispatch_search` takes
+  `offset`; its description says each kind of content is ranked on its own and the lists merged,
+  that an issue key searched alone lists that issue first, and that each kind lists at most its
+  best `SEARCH_KIND_DEPTH` (LEGION-386, LEGION-382).
+- Added `SEARCH_KIND_DEPTH` (100), how many of its best matches each kind lists before
+  `GET /api/v1/search` merges the kinds, generated into Go as `contracts.SearchKindDepth`.
 - The `dispatch_doc_read` description says it reads an uploaded file's text at its latest or named
   version, and describes a file that is not UTF-8 text.
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
@@ -115,7 +158,6 @@
 - Added `PROJECT_KEY_PATTERN`, a whole project key as the Dispatch server creates them; `dispatch_search`'s `project` must now be empty or match it (`project must be a project key such as CORE`), where any other value was sent and answered with no results.
 - Added `maxHint` to `SchemaApi.string`'s options: text appended to the over-cap message, saying what to send instead.
 - Added `LegionGoChildRequest`, the body of the Go daemon's `POST /legion/v1/children/park` and `/rerun` (an architect's `park_child` and `rerun_child`), whose answers are `LegionGoEmptyResponse`.
-- Added optional `legionAppLogins` to `LegionGoGitHubTokenResponse` and to `LegionDaemonApi.GitHubToken`'s response: each Legion role App's login keyed by its App role (`{implement, review}`), on `/legion/v1/gh-token`, which `legion threads resolve` keeps out of its bot-thread rule and whose `review` login's `Accepted:` closes a bot's thread (LEGION-208).
 - Added optional `Message.broadcast_id`, the broadcast a message is one recipient's copy of: null
   for every other message, absent from a Dispatch older than the field. Added optional
   `AgentStreamMessage.dispatchMessageId`, the Dispatch message a streamed user message delivered,
@@ -125,6 +167,11 @@
   accept route's answer: the attempt with the message's stored `body`), the `message.accepted`
   event (`MessageAcceptedEventPayload`), and `broadcast_id` on
   `DispatchTargetedMessagePayloadSchema` (LEGION-394).
+- Added optional `AgentStreamMessage.model`, the `provider/model` that produced an assistant turn
+  (e.g. `anthropic/claude-opus-5`), read off the host's own assistant message; absent on a user
+  message and on an assistant turn whose host carries no model identity. Added
+  `AGENT_STREAM_LIMITS.modelChars`, the cap the publisher applies to it before the frame leaves
+  the session (LEGION-548).
 - Added `IssueSummaryPage` (`{issues, total, limit, offset}`), the answer of
   `GET /api/v1/issues?limit=&offset=`, and `MAX_ISSUE_PAGE_LIMIT` (250) and
   `DEFAULT_ISSUE_PAGE_LIMIT` (50), generated into Go as `contracts.MaxIssuePageLimit` and
@@ -135,13 +182,26 @@
 
 - The `dispatch_issues` description says Dispatch pages the listing and the answer names how many
   issues match, where it said the rows were paged after the server returned the full response.
+- `LegionHandoffCompleteRequest` keeps `commit`, now the pushed commit carrying the phase's handoff
+  (`.legion/<issue>/<phase>.json`), which the `legion` tool's `handoff_complete` finds in the pane
+  with its jj before posting, as `legion handoff complete` did; `LegionHandoffCompleteResponse`
+  gains `note`, what READY's checks say when READY was published without reading the pull
+  request's head (already merged, or a base requiring no check). The daemon reads no handoff file
+  and no branch head; READY's checks (`READY_HEAD_CARRIES_HANDOFFS`, `READY_CHECKS_NOT_GREEN`) run
+  in the daemon (LEGION-631).
 
 ### Removed
 
+- Removed `LegionGitHubTokenResponse`, `LegionGitCredentialResponse`, `LegionGrantRequest.push` and
+  `LegionGrantCredentialRequest`, with the `github-token.json`, `git-credential.json` and
+  `provisioning-credential.json` fixtures: the Legion daemon's `POST /legion/v1/gh-token`,
+  `/git-credential` and `/provisioning-credential` routes and the push grant lifetime are deleted,
+  since each role's GitHub App token is now a file its plain `gh` and `git` read (LEGION-631).
 - Removed `HandoffMessage`, `validateHandoffMessage`, and `MESSAGES_DIR_NAME`: the `legion handoff message|messages` commands they served are gone, and nothing else read `.legion/messages/`.
 - Removed `legionNoticeSubject`: the Go daemon publishes no notice on an issue's topic any more, and its one caller, `legionControllerNoticeSubject`, now builds the controller topic itself.
 - Removed the handoff schema: `validatePhaseHandoff`, `describePhaseHandoffProblems`,
   `describePhaseHandoffWriteProblems`, `isHandoffPhase`, the phase handoff interfaces,
   `PHASE_FILE_NAMES`, `LEGION_DIR_NAME`, `HANDOFF_SCHEMA_VERSION`, `PLAN_REVIEW_MAX_ROUNDS` and
-  `PLAN_REVIEW_VERDICTS`. The Go `legion handoff write` holds each phase's handoff to the same
-  rules and names every field at fault; `HANDOFF_PHASES`, the `legion` tool's phase words, stays.
+  `PLAN_REVIEW_VERDICTS`, and `HANDOFF_PHASES` with the `legion` tool's `handoff_write`/`handoff_read`
+  that took one (LEGION-631). Nothing holds a handoff to a shape any more: each role's prompt spells
+  the fields its handoff carries, and the worker writes the file itself.

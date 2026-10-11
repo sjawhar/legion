@@ -213,16 +213,16 @@ func graphEdges(t *testing.T, handler http.Handler, query url.Values) model.Grap
 	return decodeBody[model.GraphReferences](t, response)
 }
 
-// A message on an AGENTC issue that cites a LEGION ask is a backlink on that ask: the edge names
+// A message on an ACME issue that cites a LEGION ask is a backlink on that ask: the edge names
 // the message with its own issue, project, and dispatch:// address, carries the message body as
 // excerpt, and is stamped with the events.id of the message.created write. Read from the
 // message, the same edge points out at the ask. Filters narrow it and malformed input is 400.
 func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	createReferenceAPIProject(t, handler, "LEGION")
-	createReferenceAPIProject(t, handler, "AGENTC")
+	createReferenceAPIProject(t, handler, "ACME")
 	legion := createReferenceAPIIssue(t, handler, "LEGION")
-	agentc := createReferenceAPIIssue(t, handler, "AGENTC")
+	acme := createReferenceAPIIssue(t, handler, "ACME")
 	askResponse := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+legion.Key+"/asks", map[string]any{
 		"question": "Ship the reference graph?", "options": []map[string]string{{"label": "Yes"}, {"label": "No"}},
 	}, "alice")
@@ -231,7 +231,7 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	}
 	ask := decodeBody[model.Ask](t, askResponse)
 	askRef := "dispatch://" + legion.Key + "/ask/" + ask.ID
-	messageResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+agentc.Key+"/messages", map[string]any{
+	messageResponse := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+acme.Key+"/messages", map[string]any{
 		"body": "Decided in " + askRef + ", see also https://example.com/notes", "actor": sessionActor(),
 	})
 	if messageResponse.Code != http.StatusCreated {
@@ -241,7 +241,7 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 	var messageEventID int64
 	if err := database.Pool.QueryRow(context.Background(), `
 		select id from events where issue_key = $1 and type = 'message.created'
-	`, agentc.Key).Scan(&messageEventID); err != nil {
+	`, acme.Key).Scan(&messageEventID); err != nil {
 		t.Fatalf("read message.created event: %v", err)
 	}
 
@@ -251,11 +251,11 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 		t.Fatalf("queried node = %#v; want %#v", incoming.Node, want)
 	}
 	if len(incoming.Edges) != 1 {
-		t.Fatalf("incoming edges = %#v; want the AGENTC message only", incoming.Edges)
+		t.Fatalf("incoming edges = %#v; want the ACME message only", incoming.Edges)
 	}
 	edge := incoming.Edges[0]
-	agentcKey := agentc.Key
-	wantNode := model.GraphNode{Kind: "message", ID: message.ID, IssueKey: &agentcKey, Project: "AGENTC", Ref: "dispatch://" + agentc.Key + "/message/" + message.ID}
+	acmeKey := acme.Key
+	wantNode := model.GraphNode{Kind: "message", ID: message.ID, IssueKey: &acmeKey, Project: "ACME", Ref: "dispatch://" + acme.Key + "/message/" + message.ID}
 	if edge.Kind != "mentions" || edge.Direction != "in" || !reflect.DeepEqual(edge.Node, wantNode) {
 		t.Fatalf("backlink edge = %#v; want mentions in from %#v", edge, wantNode)
 	}
@@ -266,7 +266,7 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 		t.Fatalf("backlink provenance = seq %v at %v; want event %d at %v", edge.SourceSeq, edge.CreatedAt, messageEventID, message.CreatedAt)
 	}
 
-	outgoing := graphEdges(t, handler, url.Values{"from": {"dispatch://" + agentc.Key + "/message/" + message.ID}})
+	outgoing := graphEdges(t, handler, url.Values{"from": {"dispatch://" + acme.Key + "/message/" + message.ID}})
 	if len(outgoing.Edges) != 1 || outgoing.Edges[0].Direction != "out" || outgoing.Edges[0].Kind != "mentions" || outgoing.Edges[0].Node.Ref != askRef || outgoing.Edges[0].Node.Kind != "ask" {
 		t.Fatalf("outgoing edges = %#v; want one mention of the ask", outgoing.Edges)
 	}
@@ -379,10 +379,10 @@ func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) 
 func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "LEGION")
-	createReferenceAPIProject(t, handler, "AGENTC")
+	createReferenceAPIProject(t, handler, "ACME")
 	createReferenceAPIProject(t, handler, "CORE")
 	sameProject := createReferenceAPIIssue(t, handler, "LEGION")
-	otherProject := createReferenceAPIIssue(t, handler, "AGENTC")
+	otherProject := createReferenceAPIIssue(t, handler, "ACME")
 	autolinked := createReferenceAPIIssue(t, handler, "CORE")
 	response := createIssueRequest(t, handler, map[string]any{
 		"project": "LEGION", "title": "Due dates",

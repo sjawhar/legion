@@ -2,7 +2,7 @@
 // launcher (an operator's box, a Kubernetes pod, or the host agent-secrets-helper of Plan B)
 // signs its own future requests with the private key whose thumbprint and public JWK a launcher
 // credential is minted against — machine.Service.ApplyDecision mints one once a human approves a
-// typed-code machine login (AGENTC-393 Plan A) — and, for a pod, also proves a projected
+// typed-code machine login — and, for a pod, also proves a projected
 // service-account token bound to that pod, receiving a leased enrollment keyed by its own signing
 // key's thumbprint. proof.Verifier reads enrollments back through Lookup and Replay, and launcher
 // credentials back through AuthenticateLauncher (its LookupLauncher hook), to authenticate later
@@ -23,6 +23,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 var (
@@ -30,10 +31,21 @@ var (
 	ErrOperatorMismatch = errors.New("this launcher credential enrols a different operator")
 	ErrAlreadyEnrolled  = errors.New("this runtime is already enrolled and live")
 	ErrPodIdentity      = errors.New("the projected token does not identify this pod")
-	ErrNotLive          = errors.New("enrollment is not live")
-	ErrInvalidSlot      = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
-	ErrNoCredential     = errors.New("no such machine login")
-	ErrNotApprover      = errors.New("only the person who approved the machine login may revoke it")
+	// ErrPodTokenExpired is a pod token whose expiry has passed, wrapped with the expiry the token
+	// names: the launcher or renewer presents the pod's current token with the same key, where
+	// ErrPodIdentity is a token for another pod, or no token of this cluster at all. An expired
+	// token is reported as expired whatever else is wrong with it (oidc.Verifier reads a failed
+	// token's claims before blaming its signature), so its pod UID, which nothing verified, is
+	// never compared.
+	ErrPodTokenExpired = errors.New("the projected token has expired")
+	ErrNotLive         = errors.New("enrollment is not live")
+	ErrInvalidSlot     = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
+	ErrNoCredential    = errors.New("no such machine login")
+	ErrNotApprover     = errors.New("only the person who approved a person's machine login may revoke it")
+	// ErrNotEnrollingCredential refuses a revoke of a pod enrollment by any launcher credential but
+	// the one that enrolled it (Revoke).
+	ErrNotEnrollingCredential = errors.New("only the machine login that enrolled a pod may end its enrollment")
+	ErrPodTokenRequired       = errors.New("a pod enrollment's renewal must carry its projected token")
 )
 
 type Credential struct {
@@ -43,17 +55,20 @@ type Credential struct {
 	Host     string
 }
 
-// LiveCredential is one of the machine logins a person approved, as their machine-login page lists
-// it: a launcher credential minted by their approval and not revoked, either unexpired or still
-// holding a live session it enrolled (Lookup's live: not revoked, its lease not lapsed).
+// LiveCredential is one of the machine logins a person may revoke, as their machine-login page
+// lists it: a launcher credential of one of their own machines, or of any service's login whoever
+// approved it, not revoked, and either unexpired or still holding a live session it enrolled
+// (Lookup's live: not revoked, its lease not lapsed).
 type LiveCredential struct {
 	ID   uuid.UUID
 	Host string
 	// Service names the service a service's login is for (legion-daemon); nil for a person's own
 	// machine.
-	Service   *string
-	IssuedAt  time.Time
-	ExpiresAt time.Time
+	Service *string
+	// ApprovedBy is the login of the person who approved it.
+	ApprovedBy string
+	IssuedAt   time.Time
+	ExpiresAt  time.Time
 	// Expired is true once ExpiresAt has passed: the login enrolls no more sessions, but the ones
 	// it enrolled renew with their own keys and still run, so it stays listed until they end or
 	// lapse, or it is revoked.
@@ -70,10 +85,10 @@ type Enrollment struct {
 	PodToken   string
 	// Slot names one of several independent identities in one pod (record.ValidSlot): each slot
 	// of a pod is an enrollment of its own, with its own key, lease and grants. "" is the one
-	// identity of every box, host and single-identity pod enrollment.
+	// identity of every session and single-identity pod enrollment.
 	Slot string
 	// Subject is a pod enrollment's verified service-account subject, set by Create from the
-	// projected token itself and never from the caller; nil for box and host.
+	// projected token itself and never from the caller; nil for a session.
 	Subject      *string
 	LeaseExpires time.Time
 	Existing     bool // true when Create returned an already-live enrollment for the same key
@@ -205,8 +220,11 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // back (Existing), a different key in a live slot is ErrAlreadyEnrolled, and another slot of the
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
-// A credential revoked by the person who approved it (RevokeCredential), even after the caller's
-// launcher proof was verified, is ErrUnauthenticated.
+// A pod token past its expiry is ErrPodTokenExpired, naming that expiry; any other token that does
+// not prove this pod is ErrPodIdentity.
+// A credential revoked (RevokeCredential: by the person who approved a person's machine login, or
+// by anyone signed in for a service's), even after the caller's launcher proof was verified, is
+// ErrUnauthenticated.
 func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (Enrollment, error) {
 	if in.Slot != "" && (in.Kind != "pod" || !record.ValidSlot(in.Slot)) {
 		return Enrollment{}, ErrInvalidSlot
@@ -220,11 +238,11 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 	}
 	in.Subject = nil
 	if in.Kind == "pod" {
-		if s.Pod == nil {
-			return Enrollment{}, fmt.Errorf("%w: pod enrollment needs BROKER_K8S_OIDC_ISSUER", ErrPodIdentity)
+		claims, err := s.verifyPodToken(ctx, in.PodToken)
+		if err != nil {
+			return Enrollment{}, err
 		}
-		claims, err := s.Pod.Verify(ctx, in.PodToken)
-		if err != nil || claims.PodUID == "" || claims.PodUID != in.RuntimeID {
+		if claims.PodUID != in.RuntimeID {
 			return Enrollment{}, ErrPodIdentity
 		}
 		in.Subject = &claims.Subject
@@ -265,6 +283,9 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	if err != nil {
 		return Enrollment{}, false, err
 	}
+	// pod_token_renewed_at starts null on every row, a pod's included: the first renewal carrying
+	// the pod's token sets it, and from then on Renew refuses a token-less renewal from every live
+	// enrollment naming that pod UID (podTokenRatcheted).
 	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
 		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 		in.ID, in.Kind, in.RuntimeID, in.Slot, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
@@ -285,7 +306,7 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 	}
 	if _, err := tx.Exec(ctx, `insert into audit (kind, enrollment_id, actor, detail) values ('enrollment.created',$1,$2,
 		jsonb_strip_nulls(jsonb_build_object('kind',$3::text,'runtime_id',$4::text,'thumbprint',$5::text,'slot',nullif($6::text,''))))`,
-		in.ID, "launcher:"+cred.ID.String(), in.Kind, in.RuntimeID, in.Thumbprint, in.Slot); err != nil {
+		in.ID, record.LauncherActor(cred.ID.String()), in.Kind, in.RuntimeID, in.Thumbprint, in.Slot); err != nil {
 		return Enrollment{}, false, err
 	}
 	return in, false, tx.Commit(ctx)
@@ -375,7 +396,7 @@ type LapsedEnrollment struct {
 const lapsedBatch = 100
 
 // EndLapsed ends every enrollment whose lease has lapsed and that nothing has ended yet: a pod that
-// is gone, a box whose launcher stopped renewing, a host session whose helper died. Each is ended
+// is gone, a box whose launcher stopped renewing, a machine session whose helper died. Each is ended
 // as Revoke ends one (endEnrollment, actor "broker", an enrollment.expired audit row), so its
 // grants are revoked and its pending requests cancelled and dropped from the approver's list,
 // rather than waiting there for their own expiry with an approval that could grant nothing.
@@ -430,16 +451,143 @@ func (s *Service) endLapsedBatch(ctx context.Context) ([]LapsedEnrollment, error
 	return batch, nil
 }
 
-func (s *Service) Renew(ctx context.Context, id string) (time.Time, error) {
-	expires := time.Now().Add(s.Lease)
-	tag, err := s.Store.Pool.Exec(ctx, `update enrollments set lease_expires_at=$2 where id=$1 and revoked_at is null and lease_expires_at > now()`, id, expires)
+// Renewal is what Renew answers: the new lease, and, for a pod enrollment renewed without its
+// projected token, which pod and slot did so (the API logs each such renewal).
+type Renewal struct {
+	LeaseExpires    time.Time
+	WithoutPodToken bool
+	RuntimeID, Slot string
+}
+
+// verifyPodToken verifies a pod's projected service-account token (issuer, audience, signature,
+// expiry) and requires it to name a pod UID. Create and Renew both call it before any transaction
+// opens, so the issuer's key-set fetch on an unknown key id never holds a row lock or a pooled
+// connection. A token past its expiry is ErrPodTokenExpired, naming that expiry; every other
+// failure, and a broker with no BROKER_K8S_OIDC_ISSUER, is ErrPodIdentity.
+func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, error) {
+	if s.Pod == nil {
+		return PodClaims{}, fmt.Errorf("%w: a pod's token needs BROKER_K8S_OIDC_ISSUER", ErrPodIdentity)
+	}
+	claims, err := s.Pod.Verify(ctx, raw)
+	if errors.Is(err, oidc.ErrExpired) {
+		return PodClaims{}, fmt.Errorf("%w (%v)", ErrPodTokenExpired, err)
+	}
+	if err != nil || claims.PodUID == "" {
+		return PodClaims{}, ErrPodIdentity
+	}
+	return claims, nil
+}
+
+// Renew extends a live enrollment's lease by Lease. The caller's session proof says only that it
+// holds the enrollment's key; a pod enrollment's renewal proves only that its renewer holds an
+// unexpired token the issuer minted for that pod: no API-server call proves the pod still exists,
+// so a deleted pod's enrollment can outlive it for the token's remaining life (at most 3600
+// seconds) plus one lease. podToken is verified as Create verifies it (verifyPodToken, before the
+// row is locked) and required to name the pod UID (runtime_id) and the service-account subject the
+// enrollment recorded at Create, else ErrPodIdentity and the lease stays where it was. A token from
+// another pod or account never renews this one. A machine session renews on its proof alone; a
+// token on its renewal is ErrPodIdentity.
+//
+// The ratchet is keyed on the pod UID. Every pod enrollment starts with pod_token_renewed_at null,
+// whether migration 0014 found it or Create made it, and the first renewal carrying an accepted
+// token sets that row's column, the record that the pod's renewer sends its token. A renewal
+// without a token is ErrPodTokenRequired once any pod enrollment naming the same runtime_id, live or
+// ended, has the column set (podTokenRatcheted), whichever launcher credential made that row or this
+// one; otherwise it still extends the lease and answers WithoutPodToken, which the API logs, naming
+// the enrollment. So the copied-token gap closes for every pod UID a current-image pod has renewed
+// under: a key enrolled under another login with a token copied out of that pod gets a row of its
+// own (rows are unique per launcher credential, pod UID and slot), and that row is refused
+// token-less as soon as any enrollment of the real pod has renewed with its token, whichever came
+// first, and stays refused across the pod's role generations and after the pod is gone. What stays
+// open: a copied token's renewals before the pod's own first token renewal (seconds while the
+// daemon holds an approved machine login; after a daemon restart its pods enroll only once a person
+// approves the new login, and a pod that ends before it enrolls never marks its UID), and every
+// renewal of an old-image pod, whose renewer never sends a token, until the contract release. A pod
+// UID names one pod, so a mark refuses nothing of another. Every deploy order keeps every pod
+// renewing: an older broker ignores the token a newer client sends, and this broker accepts a
+// token-less renewal of a pod UID no enrollment has marked. That bounds liveness, not exposure: a
+// grant lasts until its session ends, so a copy renewing an unmarked UID keeps its grant while it
+// renews, which the operate page's rollout closes by replacing old-image pods and revoking the
+// logins of the copies left.
+// The contract release removes the token-less path once
+// `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null and created_at < now() - interval '1 minute'`
+// answers 0, the broker has logged no "renewed without its projected token" line for one full
+// BROKER_LEASE_SECONDS, and no issue pod runs a worker image older than the one whose renewer sends
+// the token (an old-image issue pod between role generations holds no enrollment, so the count and
+// the log miss it, yet its next phase enrolls an unmarked row). That release also drops
+// podTokenRatcheted and its partial index, which only the ratchet needs.
+func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, error) {
+	withToken := podToken != ""
+	var claims PodClaims
+	if withToken {
+		var err error
+		if claims, err = s.verifyPodToken(ctx, podToken); err != nil {
+			return Renewal{}, err
+		}
+	}
+	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
-		return time.Time{}, err
+		return Renewal{}, err
 	}
-	if tag.RowsAffected() != 1 {
-		return time.Time{}, ErrNotLive
+	defer tx.Rollback(ctx)
+
+	var kind string
+	var subject *string
+	renewal := Renewal{}
+	err = tx.QueryRow(ctx, `select kind, runtime_id, slot, subject from enrollments
+		where id=$1 and revoked_at is null and lease_expires_at > now() for update`, id).
+		Scan(&kind, &renewal.RuntimeID, &renewal.Slot, &subject)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Renewal{}, ErrNotLive
 	}
-	return expires, nil
+	if err != nil {
+		return Renewal{}, err
+	}
+	switch {
+	case kind != "pod" && withToken:
+		return Renewal{}, ErrPodIdentity
+	case kind == "pod" && withToken:
+		if claims.PodUID != renewal.RuntimeID || subject == nil || claims.Subject != *subject {
+			return Renewal{}, ErrPodIdentity
+		}
+	case kind == "pod":
+		ratcheted, err := podTokenRatcheted(ctx, tx, renewal.RuntimeID)
+		if err != nil {
+			return Renewal{}, err
+		}
+		if ratcheted {
+			return Renewal{}, ErrPodTokenRequired
+		}
+		renewal.WithoutPodToken = true
+	}
+	renewal.LeaseExpires = time.Now().Add(s.Lease)
+	if _, err := tx.Exec(ctx, `update enrollments set lease_expires_at=$2,
+		pod_token_renewed_at = case when $3 then coalesce(pod_token_renewed_at, now()) else pod_token_renewed_at end
+		where id=$1`, id, renewal.LeaseExpires, kind == "pod" && withToken); err != nil {
+		return Renewal{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Renewal{}, err
+	}
+	return renewal, nil
+}
+
+// podTokenRatcheted reports whether any pod enrollment naming podUID has renewed with its token
+// (pod_token_renewed_at set), live or ended. A pod UID is the API server's uid of one pod object and
+// is never given to another pod, so every row naming it is that one pod's or a copy of its token,
+// and a mark refuses nothing of any other pod. Ended rows count on purpose. A pod's enrollments end
+// at every role generation (the daemon revokes each one it lets go), so between generations the pod
+// can hold no live row at all; were only live rows read, a key enrolled under another login with a
+// token copied out of the pod would renew token-less again in every such gap, and forever once the
+// pod is gone, since a token-less renewal needs no token and the copied token's expiry stops
+// mattering after Create. A later enrollment of the same pod (a new role generation, or under the
+// daemon's next login) is the pod's own current-image renewer, which sends its token and is never
+// refused. The partial index enrollments_pod_token_renewed (migration 0014) serves the probe.
+func podTokenRatcheted(ctx context.Context, tx pgx.Tx, podUID string) (bool, error) {
+	var ratcheted bool
+	err := tx.QueryRow(ctx, `select exists(select 1 from enrollments
+		where kind = 'pod' and runtime_id = $1 and pod_token_renewed_at is not null)`, podUID).Scan(&ratcheted)
+	return ratcheted, err
 }
 
 // authorized reports whether cred may act on an enrollment of the given kind and operator — the
@@ -465,6 +613,20 @@ func authorized(cred Credential, kind string, operator *string) bool {
 // enrollment is live, already revoked, or (were its id guessed rather than read back) merely
 // plausible-looking. A row that does not exist at all has no operator/kind to check ownership
 // against, so that case alone falls through to ErrNotLive below rather than ErrOperatorMismatch.
+//
+// A pod enrollment carries no operator, so the operator cannot tell one service's pods from
+// another's: a pod enrollment is ended only by the launcher credential that created it
+// (ErrNotEnrollingCredential for any other), never by another service's credential nor a second
+// credential of the same service. A Legion daemon holds a new credential whenever it logs in
+// again: after a restart, since its key lives in memory and every machine login mints a new one,
+// and when its login reaches its expiry (BROKER_LAUNCHER_CREDENTIAL_SECONDS, 7 days by default)
+// and the next refusal starts a new machine login. Either way it cannot end the enrollments its
+// earlier login made: each ends when its pod stops renewing, one lease (BROKER_LEASE_SECONDS)
+// after its renewer stops, or at once when a person revokes that earlier login
+// (RevokeCredential), and the pods its current login enrolled it ends here as before. A box or
+// host enrollment keeps the operator rule alone: a helper that logs in again revokes the
+// enrollments its earlier credential made for the same operator.
+//
 // Once ownership passes, Revoke returns ErrNotLive, changing nothing, when the enrollment is
 // already revoked — the guard that keeps the audit trail honest: without it a no-op call would
 // still write an "enrollment.revoked" audit row for an enrollment that never transitioned.
@@ -477,8 +639,10 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 
 	var operator *string
 	var kind string
+	var enrolledBy uuid.UUID
 	var revokedAt *time.Time
-	err = tx.QueryRow(ctx, `select operator, kind, revoked_at from enrollments where id=$1 for update`, id).Scan(&operator, &kind, &revokedAt)
+	err = tx.QueryRow(ctx, `select operator, kind, launcher_credential_id, revoked_at from enrollments where id=$1 for update`, id).
+		Scan(&operator, &kind, &enrolledBy, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotLive
 	}
@@ -487,6 +651,9 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	}
 	if !authorized(cred, kind, operator) {
 		return ErrOperatorMismatch
+	}
+	if kind == "pod" && enrolledBy != cred.ID {
+		return ErrNotEnrollingCredential
 	}
 	if revokedAt != nil {
 		return ErrNotLive
@@ -497,62 +664,104 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 	return tx.Commit(ctx)
 }
 
-// LiveCredentials lists the machine logins approver approved that can still reach a secret, newest
-// first: every unrevoked launcher credential minted from a launcher_credential record whose
-// approver is that person, while it is unexpired or a session it enrolled is live as Lookup means
+// LiveCredentials lists the machine logins person may list and revoke that can still reach a
+// secret, newest first: every unrevoked launcher credential minted from a launcher_credential
+// record, a service's whoever approved it, a person's own machine's only when it is the person
+// whose record names them, while it is unexpired or a session it enrolled is live as Lookup means
 // it: not revoked, its lease not lapsed. A login's sessions outlive its expiry, since each renews
 // with its own key (Renew never reads the credential), so an expired login stays listed, Expired
 // set, until its last session ends or lapses (a lapsed session renews no more, swept or not):
-// revoking every listed login ends every session the person's machines started. That covers a
-// person's own machines (whose operator is their approver, machine.Service.ApplyDecision) and a
-// service's login, such as the Legion daemon's, which has no operator and is listed for the person
-// who approved it, with its Service set.
-func (s *Service) LiveCredentials(ctx context.Context, approver string) ([]LiveCredential, error) {
-	rows, err := s.Store.Pool.Query(ctx, `select c.id, c.host, c.service, c.created_at, c.expires_at, c.expires_at <= now() from launcher_credentials c
+// revoking every listed login ends every session the person's machines started. A service's
+// login, such as the Legion daemon's, has no operator and acts as no person, so anyone signed in
+// to Dispatch approves it (record.MayDecide), lists it and revokes it, its Service set. Each login
+// names who approved it, the login its approved event records. The sentinel record.AnyoneApprover
+// and an empty login list nothing. OwnLiveCredentials lists the person's own machines' alone.
+func (s *Service) LiveCredentials(ctx context.Context, person string) ([]LiveCredential, error) {
+	return s.liveCredentials(ctx, person, true)
+}
+
+// OwnLiveCredentials is LiveCredentials without any service's login: the logins of the person's
+// own machines alone, those minted from a launcher_credential record that names them, as the
+// person's own machine lists them (GET /v1/operator/machines).
+func (s *Service) OwnLiveCredentials(ctx context.Context, person string) ([]LiveCredential, error) {
+	return s.liveCredentials(ctx, person, false)
+}
+
+// liveCredentials is LiveCredentials, every service's login among them only when services is set.
+func (s *Service) liveCredentials(ctx context.Context, person string, services bool) ([]LiveCredential, error) {
+	person = record.CanonicalLogin(person)
+	if person == "" || person == record.AnyoneApprover {
+		return nil, nil
+	}
+	rows, err := s.Store.Pool.Query(ctx, `select c.id, c.host, c.service,
+			(select ev.login from credential_request_events ev where ev.record_id = r.id and ev.event = 'approved'),
+			c.created_at, c.expires_at, c.expires_at <= now() from launcher_credentials c
 		join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
-		where r.approver = $1 and c.revoked_at is null
+		where ((c.service is null and r.approver = $1) or ($2 and c.service is not null)) and c.revoked_at is null
 			and (c.expires_at > now() or exists (select 1 from enrollments e where e.launcher_credential_id = c.id and e.revoked_at is null and e.lease_expires_at > now()))
-		order by c.created_at desc, c.id`, record.CanonicalLogin(approver))
+		order by c.created_at desc, c.id`, person, services)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, pgx.RowToStructByPos[LiveCredential])
 }
 
-// RevokeCredential ends launcher credential id on the word of the person who approved it, expired
-// or not: from then on no launcher proof signed with it authenticates (AuthenticateLauncher), and
-// every enrollment it made that has not ended — a person's host sessions and boxes, or every pod a
-// service's login enrolled, which outlive the credential's expiry — is ended as Revoke ends one
-// (endEnrollment, actor "human:<approver>", an enrollment.revoked audit row), revoking each one's
-// grants and cancelling its pending requests, all in one transaction with one
-// launcher_credential.revoked audit row. approver must be the approver of the launcher_credential
-// record the credential was minted from (ErrNotApprover); an unknown id, like a credential minted
-// from no such record (which only ApplyDecision mints, always from one), is ErrNoCredential.
-// Revoking a credential already revoked succeeds and changes nothing. It takes the credential's
-// row before its enrollments' rows, so an enrollment Create is inserting under the credential
-// (which holds the row for share) commits first and is ended here, or waits and finds the
-// credential revoked; and it takes those enrollments' rows, so a launcher's own Revoke of one
+// RevokeCredential ends launcher credential id on the word of person, expired or not: from then on
+// no launcher proof signed with it authenticates (AuthenticateLauncher), and every enrollment it
+// made that has not ended — a person's machine sessions and boxes, or every pod a service's login
+// enrolled, which outlive the credential's expiry — is ended as Revoke ends one (endEnrollment, an
+// enrollment.revoked audit row), revoking each one's grants and cancelling its pending requests,
+// all in one transaction with one launcher_credential.revoked audit row. person may revoke a
+// service's login whoever approved it, and a person's own machine's only as the approver of the
+// launcher_credential record it was minted from (ErrNotApprover); the sentinel
+// record.AnyoneApprover and an empty login revoke nothing. An unknown id, like a credential minted
+// from no such record (which only ApplyDecision mints, always from one), is ErrNoCredential. actor
+// is what every row it writes records as having done it, which the caller proved:
+// "human:<person>" for a revoke Dispatch relays from its signed-in person,
+// "launcher:<credential id>" for one the person's own machine login makes. Revoking a credential
+// already revoked succeeds and changes nothing. It takes the
+// credential's row before its enrollments' rows, so an enrollment Create is inserting under the
+// credential (which holds the row for share) commits first and is ended here, or waits and finds
+// the credential revoked; and it takes those enrollments' rows, so a launcher's own Revoke of one
 // either commits first, leaving it out of the list here, or waits and finds it ended.
-func (s *Service) RevokeCredential(ctx context.Context, id, approver string) error {
+func (s *Service) RevokeCredential(ctx context.Context, id, person, actor string) error {
+	return s.revokeCredential(ctx, id, person, actor, true)
+}
+
+// RevokeOwnCredential is RevokeCredential for the logins OwnLiveCredentials lists: a service's
+// login is ErrNoCredential, as an unknown id is, and ends nothing.
+func (s *Service) RevokeOwnCredential(ctx context.Context, id, person, actor string) error {
+	return s.revokeCredential(ctx, id, person, actor, false)
+}
+
+// revokeCredential is RevokeCredential, a service's login revocable only when services is set.
+func (s *Service) revokeCredential(ctx context.Context, id, person, actor string, services bool) error {
 	tx, err := s.Store.Pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var approvedBy, host string
+	var approver, host string
 	var service *string
 	var revokedAt *time.Time
 	err = tx.QueryRow(ctx, `select r.approver, c.service, c.host, c.revoked_at from launcher_credentials c
 		join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
-		where c.id = $1 for no key update of c`, id).Scan(&approvedBy, &service, &host, &revokedAt)
+		where c.id = $1 for no key update of c`, id).Scan(&approver, &service, &host, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNoCredential
 	}
 	if err != nil {
 		return err
 	}
-	person := record.CanonicalLogin(approver)
-	if approvedBy != person {
+	var svc string
+	if service != nil {
+		if !services {
+			return ErrNoCredential
+		}
+		svc = *service
+	}
+	person = record.CanonicalLogin(person)
+	if !record.MayDecide(record.KindLauncherCredential, approver, svc, person) {
 		return ErrNotApprover
 	}
 	if revokedAt != nil {
@@ -569,7 +778,6 @@ func (s *Service) RevokeCredential(ctx context.Context, id, approver string) err
 	if err != nil {
 		return err
 	}
-	actor := "human:" + person
 	for _, enrollment := range ended {
 		if _, _, err := endEnrollment(ctx, tx, enrollment, actor, "enrollment.revoked", "its machine login was revoked"); err != nil {
 			return err

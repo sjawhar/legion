@@ -37,6 +37,7 @@ const details: IssueDetails = {
   artifacts: [],
   children: [],
   open_asks: [],
+  progress: { tasks: null, children: null },
   referenced_by_count: 0,
 };
 const summary: IssueSummary = {
@@ -50,6 +51,7 @@ const summary: IssueSummary = {
   labels: [],
   last_seq: 1,
   open_asks: 0,
+  progress: { tasks: null, children: null },
   parent: null,
   blocked_by: [],
   primary_artifact_id: "artifact-1",
@@ -72,7 +74,7 @@ const inboxRow: InboxRow = {
   multiple: false,
   opened_event_id: 1,
   options: [],
-  thread: { edits: [], followers: [], replies: [] },
+  thread: { answers: [], edits: [], followers: [], replies: [] },
   priority: null,
   snoozed_until: null,
   question: "Which layout?",

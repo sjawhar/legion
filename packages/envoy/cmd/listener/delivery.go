@@ -27,8 +27,8 @@ const roleForwardDedupePrefix = "envoy.role.forward."
 const roleReceiptTimeout = 2 * time.Second
 
 // exceptionPublishFailedLine is the line a delivery logs when its delivery exception could not be
-// published. The deployed publish-failure metric filter matches it exactly (agent-c
-// meta/infra/pulumi/components/envoy/listener.py), so every site that logs it uses this constant.
+// published. The deployed publish-failure metric filter, which the deployment repository's
+// listener infrastructure defines, matches it exactly, so every site that logs it uses this constant.
 const exceptionPublishFailedLine = "listener exception publish failed"
 
 func shouldNAKFanoutDelivery(sessionLive bool, err error) bool {

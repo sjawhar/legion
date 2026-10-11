@@ -13,6 +13,7 @@ function issue(key: string, status: IssueStatus): IssueSummary {
     labels: [],
     last_seq: 1,
     open_asks: 0,
+    progress: { tasks: null, children: null },
     parent: null,
     blocked_by: [],
     primary_artifact_id: "artifact-1",

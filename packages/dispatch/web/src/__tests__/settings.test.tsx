@@ -34,6 +34,7 @@ test("human users manage repository project mappings from the settings route", a
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
@@ -80,6 +81,7 @@ test("human users manage repository project mappings from the settings route", a
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     putRepoProject.mockRestore();
     deleteRepoProject.mockRestore();
@@ -98,6 +100,7 @@ test("repository settings retries a failed mapping query", async () => {
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
@@ -128,6 +131,7 @@ test("repository settings retries a failed mapping query", async () => {
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    getDeliverySettings.mockRestore();
     listProjects.mockRestore();
   }
 });
@@ -143,6 +147,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects")
     .mockResolvedValueOnce([core])
     .mockResolvedValueOnce([core, created]);
@@ -185,6 +190,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
   }
@@ -200,6 +206,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([core]);
   const createProject = spyOn(api, "createProject").mockRejectedValue(
     new ApiError(409, { code: "PROJECT_EXISTS", error: "a project with this key already exists" })
@@ -234,6 +241,7 @@ test("creating a project with a taken key shows the server's error inline", asyn
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     createProject.mockRestore();
   }
@@ -262,6 +270,7 @@ test("a human adds an architecture source and the verified row appears", async (
   const listArchitectureSources = spyOn(api, "listArchitectureSources")
     .mockResolvedValueOnce([])
     .mockResolvedValue([architectureSource]);
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
@@ -306,6 +315,7 @@ test("a human adds an architecture source and the verified row appears", async (
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     putArchitectureSource.mockRestore();
   }
@@ -320,6 +330,7 @@ test("a failed architecture source access check shows the server's reason inline
   const listAgentTokens = spyOn(api, "listAgentTokens").mockResolvedValue([]);
   const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue(null);
   const listArchitectureSources = spyOn(api, "listArchitectureSources").mockResolvedValue([]);
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const listProjects = spyOn(api, "listProjects").mockResolvedValue([
     { created_at: "2026-09-01T00:00:00Z", key: "CORE", name: "Core" },
   ]);
@@ -363,6 +374,7 @@ test("a failed architecture source access check shows the server's reason inline
     listAgentTokens.mockRestore();
     getCredentialPending.mockRestore();
     listArchitectureSources.mockRestore();
+    getDeliverySettings.mockRestore();
     listProjects.mockRestore();
     putArchitectureSource.mockRestore();
   }

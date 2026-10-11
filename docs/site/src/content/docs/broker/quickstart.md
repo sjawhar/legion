@@ -42,10 +42,29 @@ $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
 demo-read-token-value
 ```
 
-When it needs a person's approval, `agent-secrets` says so, with the request's id and where to
-approve it (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL` names Dispatch's address,
+When it needs a person's approval, `agent-secrets` says so, with the request's id, who approves it,
+and where (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL` names Dispatch's address,
 otherwise Credential requests in the Dispatch Inbox), and waits (up to 30 minutes; set `--wait` to
-a duration such as `5m` to change that) while the approver decides.
+a duration such as `5m` to change that) while the approver decides:
+
+```console
+$ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
+agent-secrets: request 0eaf43c4-dea5-4d41-8798-c25f6be7d811 is waiting for approval; waiting up to 30m0s
+agent-secrets: waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox
+```
+
+The approver is the one the broker recorded when the agent asked: the secret's owner, or, for a
+shared secret, anyone signed in to Dispatch. Tell that person, not whoever you believe owns the
+secret: a request goes to whomever its owner tag named at the moment it was made.
+`agent-secrets request` and `agent-secrets status` print the same `waiting for …` line while the
+request waits. If that person's approval is refused `NOT_APPROVER`, something changed after the
+request was made ([Approvals](/legion/broker/concepts/#approvals) says what each change does).
+Usually the secret's owner changed: run `agent-secrets cancel <request id>` and ask again, and the
+new request goes to the current owner. If instead the session's operator withheld one of the names,
+the request waits on anyone, and the broker still serves that name to the session, the operator can
+approve it, so ask them. Otherwise no one can approve it: cancel it and request the names
+separately, one request per approver, leaving out any name the broker no longer serves ([approving
+a request](/legion/broker/guides/approve-a-request/#decide-it) lists every `NOT_APPROVER` case).
 
 ## 2. The approver decides in Dispatch
 
@@ -58,8 +77,8 @@ page:
 | --- | --- |
 | Kind | Secret request |
 | Identifiers | The secrets asked for: `DEMO_API_KEY` |
-| Enrollment | The session's kind, runtime and operator: `host · example-host-build:2150654:335907311 · ada@example.com` |
-| Lifetime | How long a grant would last: 1 hour |
+| Enrollment | The session's kind, runtime and operator: `session · example-host-build:2150654:335907311 · ada@example.com` |
+| Lifetime | How long a grant would last: Until the session ends, or the `--ttl` the agent asked for |
 | Requested, Expires | When it was asked, and when it [expires](/legion/broker/concepts/#approvals) undecided |
 | Policy version | The version of the secret policy it was decided under: the SHA-256 of every agent secret's name, owner, tier and ARN |
 | Approver | `ada@example.com` |
@@ -79,17 +98,18 @@ $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'ech
 deploying with a 18-character key
 ```
 
-The grant outlives the command. Until it expires, the same session asking for exactly the same
-secrets gets it again without asking anyone; `agent-secrets self` lists the session's live grants:
+The grant outlives the command: it lasts until the session ends, unless the agent asked for less
+with `--ttl`. Meanwhile the same session asking for exactly the same secrets gets it again without
+asking anyone; `agent-secrets self` lists the session's live grants:
 
 ```console
 $ agent-secrets self
 enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
-kind: host
+kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
-grant: f5167d29-1789-4719-8e8c-9aec6f1229e7 (request ce11549a-ab03-4a13-95cf-896961c36fc0, expires 2026-10-03T04:21:47Z)
-grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a38e899306, expires 2026-10-03T04:22:04Z)
+grant: f5167d29-1789-4719-8e8c-9aec6f1229e7 (request ce11549a-ab03-4a13-95cf-896961c36fc0, until this session ends)
+grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a38e899306, until this session ends)
 ```
 
 ## When the answer is no

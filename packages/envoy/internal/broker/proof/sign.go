@@ -17,7 +17,7 @@ const typeHeader = "agent-secrets-proof+jwt"
 
 // claims is a session proof's payload: exactly one of EnrollmentID or LauncherID identifies who
 // is proving they hold the signing key — an enrolled session (eid) or a key-bound launcher
-// credential authenticating itself directly (lid, AGENTC-393 Plan A machine logins).
+// credential authenticating itself directly (lid, machine logins).
 type claims struct {
 	JTI          string `json:"jti"`
 	IssuedAt     int64  `json:"iat"`

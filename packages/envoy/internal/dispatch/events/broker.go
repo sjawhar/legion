@@ -141,6 +141,13 @@ func (b *Broker) Append(ctx context.Context, tx pgx.Tx, e model.Event) (model.Ev
 	return e, nil
 }
 
+// eventOwnerKey requires exactly one of IssueKey/ArtifactID/ProjectKey (or a session-addressed
+// message payload, handled by its caller before this is reached) -- there is no "ownerless"
+// event for a plain configuration change. A cross-project singleton settings table (no project,
+// issue, or artifact of its own) has nothing valid to pass here: see
+// api/settings_delivery.go's putDeliverySettings doc comment for a worked example of a route
+// that checked this directly and deliberately skips appending an event rather than inventing an
+// owner.
 func eventOwnerKey(e model.Event) (string, error) {
 	owners := 0
 	if e.IssueKey != nil {

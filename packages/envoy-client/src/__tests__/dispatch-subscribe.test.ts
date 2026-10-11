@@ -7,7 +7,7 @@ describe("dispatchFollowNotice", () => {
       dispatchFollowNotice({ issue: "DSP-42", ask: "ask-1", follows: { ask: "ask-1" } })
     ).toEqual({
       ask: "ask-1",
-      text: "Following ask ask-1 on DSP-42: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>.",
+      text: "Following ask ask-1 on DSP-42: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop). For every event on DSP-42: envoy_subscribe notifications.dispatch.issue.DSP-42.>.",
     });
   });
 
@@ -21,7 +21,7 @@ describe("dispatchFollowNotice", () => {
         follows: { ask: "ask-1" },
       })?.text
     ).toBe(
-      "Following ask ask-1 on CORE/design-notes: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on CORE/design-notes: envoy_subscribe notifications.dispatch.document.CORE.design-notes.>."
+      "Following ask ask-1 on CORE/design-notes: its answer and replies reach you directly (dispatch follow --ask ask-1 --action unfollow to stop). For every event on CORE/design-notes: envoy_subscribe notifications.dispatch.document.CORE.design-notes.>."
     );
   });
 

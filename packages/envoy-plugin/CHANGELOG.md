@@ -4,6 +4,24 @@
 
 ### Changed
 
+- Agents reach Dispatch through the `dispatch` command (LEGION-588). The `shell.env` hook puts
+  the plugin's `bin/dispatch` first on every shell command's `PATH` and sets `DISPATCH_HOST`,
+  `DISPATCH_SESSION_ID` and `DISPATCH_SESSION_TITLE`; the package ships `bin/` and builds the CLI
+  into `dist/dispatch.js`, and `dist/THIRD_PARTY_NOTICES` covers both bundles.
+
+### Removed
+
+- The twenty-one native `dispatch_*` tools.
+
+### Added
+
+- The packaged skills gain `dispatch-brainstorming` (LEGION-475), which OpenCode finds on the
+  skills path the config hook adds: in a session with Dispatch, a design conversation runs in the
+  issue's spec and the plan is the issue's `plan.md` document. The `dispatch-first` instruction
+  file sends each design conversation and plan to it.
+
+### Changed
+
 - `dispatch_request_approval`'s `summary` says only what the human is approving, with no commentary
   and no question, and an approval is requested only once the human has agreed to every point in
   the document (LEGION-475).

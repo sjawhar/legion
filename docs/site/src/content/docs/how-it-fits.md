@@ -50,7 +50,7 @@ to a named person: it waits in that person's **Inbox** until they answer it, and
 is an ask whose answer approves a document at one version or requests changes with a reason.
 
 People use the dashboard: they file issues, answer asks, approve specs and watch the agents working
-on the **Agents** page. Agents use Dispatch's tools and API to write specs, post comments and
+on the **Agents** page. Agents use the `dispatch` command and the API to write specs, post comments and
 messages, open asks and move issues. Dispatch publishes its issue, document and project events on
 Envoy, so nothing that reacts to Dispatch has to poll it.
 
@@ -58,7 +58,7 @@ Envoy, so nothing that reacts to Dispatch has to poll it.
 
 Legion's coordinator works only the issues handed to it, which are the ones carrying the Dispatch
 label `legion`. That lets Legion share a project with people and other agents. A person sets the
-label from the issue header, or an agent sets it with a Dispatch tool. Legion's own **controller**
+label from the issue header, or an agent sets it with `dispatch issue-update`. Legion's own **controller**
 agent also hands over work: whenever an admission slot is free, it labels and admits the
 highest-priority `todo` leaf issue that nobody else is working.
 
@@ -74,9 +74,9 @@ Two decisions stay with people:
 - **The design gate.** Before implementation starts, a person approves the root issue's spec at a
   specific version in Dispatch. A later version of the spec closes the gate again until someone
   approves it. The gate is on by default; a deployment can turn it off.
-- **The merge.** The merger checks that every check the base branch requires has passed, then posts
-  `READY` on the Dispatch issue. A person merges the pull request under the repository's own rules.
-  Legion never merges.
+- **The merge.** The merger checks that every check and workflow the base branch requires has
+  passed, posts `READY` on the Dispatch issue, and submits the pull request for merge. The
+  repository's own rules decide when it lands.
 
 The coordinator runs its agents as Oh My Pi sessions, either in tmux panes on one host or as Agent
 Sandbox pods in a Kubernetes cluster.
@@ -94,8 +94,11 @@ An approval request appears in that person's Dispatch Inbox, labelled as a secre
 machine login, together with the reason the agent gave. The person approves or denies it there, and
 Dispatch relays the decision to the broker under the signed-in person's own identity. The broker
 holds no Dispatch credential: Dispatch reads the pending requests from the broker and sends back
-each decision. A grant is short-lived, and `agent-secrets NAME -- <command>` runs a command with
-the granted value in that command's environment rather than printing it.
+each decision. A grant lasts until its session ends, or for the shorter lifetime its request named,
+and `agent-secrets NAME -- <command>` runs a command with the granted value in that command's
+environment rather than printing it. People create and change the secrets themselves, in AWS
+Secrets Manager under their own AWS sign-in, with `agent-secrets secret`, which has the broker
+serve each change at once.
 
 ## Envoy: the events between them
 
@@ -120,7 +123,7 @@ only where an event goes; what to do about it is the coordinator's and the agent
    changes sends it back to the implementer, and through the tester again.
 6. Once the reviewer approves, the retrospective runs. The merger then confirms the required checks
    and posts `READY` on the issue.
-7. A person merges the pull request.
+7. The merger submits the pull request for merge, and it lands under the repository's own rules.
 8. The implementer drives the change in production and records what it observed on the pull
    request and the issue. The architect signs off, and the issue is Done.
 

@@ -3,7 +3,9 @@ package intake
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -139,10 +141,69 @@ type PullRequestReview struct {
 	CommitID    string
 	HeadSHA     string
 	Author      string
-	Body        string
+	// AuthorCanWrite is whether Author has write access or higher to the repository, as GitHub's
+	// collaborator permission answers it (ConsumerSpec.ReviewPermission reads it before the fact is
+	// applied, since the workflow decides inside a transaction and performs no I/O). It is never
+	// looked up, and stays false, for a review that does not decide (Decides), one with no author,
+	// one on a pull request the daemon does not record, and one the review App submitted, which
+	// decides by its login and the reviewer's session (workflow's DecidesRound). It is also false
+	// for an author GitHub does not give write access.
+	AuthorCanWrite bool
+	// BodyTruncated is whether Envoy's normalizer capped the review's body before the daemon saw
+	// it (`body_truncated: "true"`), which can cut a long review's trailing Legion footer off
+	// (LegionSession). ConsumerSpec.ReviewBody restores the full body from GitHub for a truncated
+	// review-App review before the fact is applied, and clears this.
+	BodyTruncated bool
+	Body          string
 }
 
 func (PullRequestReview) isFact() {}
+
+// Decides says whether the review's state can decide a review round: an approval or a request for
+// changes, in whatever case its producer spelled it. A comment decides nothing, whoever writes it.
+// Intake reads the author's permission only for a review that decides, and the workflow lets only
+// such a review decide, so both ask this.
+func (r PullRequestReview) Decides() bool {
+	state := strings.ToLower(r.State)
+	return state == "approved" || state == "changes_requested"
+}
+
+// legionFooterMarker opens the Legion footer every Legion role appends to a pull-request review:
+// a JSON object naming the session and phase that wrote it (skills/legion-worker/SKILL.md, the
+// reviewer template prompts/roles/reviewer.md).
+const legionFooterMarker = "<!-- legion:"
+
+// LegionSession is the session named in the last Legion footer in the review's body: the session
+// field of the JSON object between the last occurrence of legionFooterMarker and the next `-->`.
+// It is "" when the body carries no footer, the last one's JSON cannot be parsed, or its session
+// is empty. The last occurrence wins, since an earlier footer quoted in the body (a reply, a
+// reviewer's own draft) is not the one that closes it.
+func (r PullRequestReview) LegionSession() string {
+	at := strings.LastIndex(r.Body, legionFooterMarker)
+	if at < 0 {
+		return ""
+	}
+	rest := r.Body[at+len(legionFooterMarker):]
+	end := strings.Index(rest, "-->")
+	if end < 0 {
+		return ""
+	}
+	var footer struct {
+		Session string `json:"session"`
+	}
+	if err := json.Unmarshal([]byte(rest[:end]), &footer); err != nil {
+		return ""
+	}
+	return footer.Session
+}
+
+// Order is where the review falls among the pull request's reviews (record.ReviewOrder): when it
+// was submitted, then GitHub's review id. The workflow orders a deciding review against the pull
+// request's newest by it, and the daemon's read of a pull request's reviews orders what GitHub
+// lists by it, so both order reviews alike.
+func (r PullRequestReview) Order() record.ReviewOrder {
+	return record.ReviewOrder{SubmittedAt: r.SubmittedAt, ID: r.ID}
+}
 
 // CheckRun is one latest-run identity in a checks settlement.
 type CheckRun = record.AttemptRun
@@ -164,17 +225,37 @@ type PullRequestChecks struct {
 
 func (PullRequestChecks) isFact() {}
 
-// RequiredChecks is the checks a pull request's base branch requires, as the daemon read them from
-// GitHub with its implement App's installation token (requiredchecks.Required): never decoded from
-// an event, applied as a synthetic fact by the daemon's own read of each open pull request
-// (workflowRuntime.watchRequiredChecks). An empty Names is a base that requires no check.
+// RequiredChecks is what a pull request's base branch requires, as the daemon read it from GitHub
+// with its implement App's installation token (requiredchecks.Required): never decoded from an
+// event, applied as a synthetic fact by the daemon's own read of each open pull request
+// (workflowRuntime.watchRequiredChecks). Names is the required checks, an empty Names a base that
+// requires none. Workflows is each workflow its rulesets require, with its latest run's result on
+// WorkflowsHead (requiredchecks.Workflows); both are empty when the base requires no workflow.
 type RequiredChecks struct {
-	Repo   string
-	Number int
-	Names  []string
+	Repo          string
+	Number        int
+	Names         []string
+	Workflows     []record.RequiredWorkflow
+	WorkflowsHead string
 }
 
 func (RequiredChecks) isFact() {}
+
+// PullRequestMergeability is GitHub's lazily computed verdict for whether a pull request's head
+// can be merged into Base without a conflict, decoded from GitHub's nullable `mergeable` field on
+// pullRequestMergeability's own /pulls/{number} read, which also names the base branch: never
+// decoded from an event, applied as a synthetic fact by the daemon's own read of each open pull
+// request (workflowRuntime.readRequiredChecks), before requiredFor's own rulesets and workflow
+// reads run. Mergeable is record.MergeabilityUnknown while GitHub is still computing it,
+// record.MergeabilityMergeable or record.MergeabilityConflicting once it has.
+type PullRequestMergeability struct {
+	Repo      string
+	Number    int
+	Base      string
+	Mergeable record.Mergeability
+}
+
+func (PullRequestMergeability) isFact() {}
 
 // PullRequestMerged records GitHub's terminal merged observation.
 type PullRequestMerged struct {

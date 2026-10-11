@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/explaintest"
 )
 
 // The issue detail carries the open asks themselves, not a count: agents read
@@ -501,30 +502,9 @@ func TestListIssuesQueryUsesAsksOpenIndex(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("explain plans = %#v, want one plan", plans)
 	}
-	if planNodeSeqScansRelation(t, plans[0].Plan, "asks") {
+	if explaintest.SeqScansRelation(t, plans[0].Plan, "asks") {
 		t.Fatalf("list query plan sequentially scans asks; want an index scan via asks_open:\n%s", planJSON)
 	}
-}
-
-func planNodeSeqScansRelation(t *testing.T, planJSON json.RawMessage, relation string) bool {
-	t.Helper()
-	var node struct {
-		NodeType     string            `json:"Node Type"`
-		RelationName string            `json:"Relation Name"`
-		Plans        []json.RawMessage `json:"Plans"`
-	}
-	if err := json.Unmarshal(planJSON, &node); err != nil {
-		t.Fatalf("decode plan node: %v", err)
-	}
-	if node.NodeType == "Seq Scan" && node.RelationName == relation {
-		return true
-	}
-	for _, child := range node.Plans {
-		if planNodeSeqScansRelation(t, child, relation) {
-			return true
-		}
-	}
-	return false
 }
 
 // GET /issues/{key}/asks?state=open must also stay on the asks_open partial index even
@@ -582,7 +562,7 @@ func TestListIssueAsksOpenQueryUsesAsksOpenIndex(t *testing.T) {
 	if len(plans) != 1 {
 		t.Fatalf("explain plans = %#v, want one plan", plans)
 	}
-	if planNodeSeqScansRelation(t, plans[0].Plan, "asks") {
+	if explaintest.SeqScansRelation(t, plans[0].Plan, "asks") {
 		t.Fatalf("open asks generic query plan sequentially scans asks; want an index scan via asks_open:\n%s", planJSON)
 	}
 }

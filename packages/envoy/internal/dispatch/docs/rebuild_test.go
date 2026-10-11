@@ -3,6 +3,8 @@ package docs
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -10,6 +12,7 @@ import (
 	"github.com/reearth/ygo/persistence"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
@@ -21,11 +24,11 @@ const rebuildUpdateItems = 100_000
 // empty paragraphs. Each is accepted on its own: AppendUpdate applies it to an empty document,
 // where the first integrates and each later one parks whole behind the clock gap the earlier ones
 // leave, within ygo's pending cap of 100,000 items. Merged, they are one client's 1.1 million
-// items, which ygo refuses from that client's header before it integrates any (reearth/ygo v1.49.5,
-// crdt/update.go decodeAndPark), so the history cannot load and no load of it walks a million
-// items first. Each paragraph is prepended because ygo finds an insert position by walking the
-// fragment's children from its start (crdt/yxml.go leftChildAt): appending takes quadratic time,
-// about 30 s for 100,000.
+// items, which ygo refuses from that client's header before it integrates any (sjawhar/ygo
+// v1.51.3-sami.1, crdt/update.go:545-558 decodeAndPark), so the history cannot load and no load
+// of it walks a million items first. Each paragraph is prepended because ygo finds an insert
+// position by walking the fragment's children from its start (crdt/yxml.go leftChildAt):
+// appending takes quadratic time, about 30 s for 100,000.
 func oversizedHistory(t *testing.T) [][]byte {
 	t.Helper()
 	doc := crdt.New()
@@ -155,6 +158,8 @@ func TestRebuildDocumentRefusesALiveRoom(t *testing.T) {
 	}
 }
 
+// rebuildCaptureStore counts rebuilds, and while invalid loads the stored document once, of either
+// kind (a room's or a cold read's), as a history that does not decode.
 type rebuildCaptureStore struct {
 	VersionedStore
 	invalid  bool
@@ -167,6 +172,16 @@ func (s *rebuildCaptureStore) Load(ctx context.Context, room string) (persistenc
 		return persistence.LoadResult{Update: []byte{0xff}}, nil
 	}
 	return s.VersionedStore.Load(ctx, room)
+}
+
+func (s *rebuildCaptureStore) LoadDocument(ctx context.Context, room string) (LoadedDocument, error) {
+	if s.invalid {
+		s.invalid = false
+		if err := crdt.ApplyUpdateV1(newDocumentCopy(), []byte{0xff}, nil); err != nil {
+			return LoadedDocument{}, fmt.Errorf("%w: decode live document: %w", ErrDocumentUnloadable, err)
+		}
+	}
+	return s.VersionedStore.LoadDocument(ctx, room)
 }
 
 func (s *rebuildCaptureStore) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
@@ -188,5 +203,91 @@ func TestRebuildDocumentWritesThroughItsInjectedPersistence(t *testing.T) {
 	}
 	if persist.rebuilds != 1 {
 		t.Fatalf("injected persistence rebuild calls = %d, want 1", persist.rebuilds)
+	}
+}
+
+// A rebuild from the latest version restores the server's own rendering of the document, which it
+// reads back as every stored rendering is read, counting no elements: a version of 16,385
+// paragraphs, past the 65,536 elements one write may make - stored before that bound, or grown past
+// it by browser edits - rebuilds whole.
+func TestARebuildFromTheLatestVersionRestoresItWhateverItWeighs(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	heavy := strings.Repeat("a\n\n", 16_384) + "a\n"
+	if size := pmdoc.MeasureDocument(heavy); !size.TooHeavy() {
+		t.Fatalf("the version measures %+v, want past the element limit", size)
+	}
+	if _, err := database.Pool.Exec(context.Background(), `update artifact_versions set markdown = $2 where artifact_id = $1`, artifactID, heavy); err != nil {
+		t.Fatalf("store a version past the element limit: %v", err)
+	}
+	service := New(Deps{Store: database, Persistence: &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}})
+	if _, _, err := rebuildDocument(t, service, artifactID, nil); err != nil {
+		t.Fatalf("rebuild from a version past the element limit: %v", err)
+	}
+	if text, err := service.Text(context.Background(), artifactID); err != nil || text != heavy {
+		t.Fatalf("the rebuilt document reads %d bytes (%v), want the version's %d", len(text), err, len(heavy))
+	}
+}
+
+// A rebuild whose seed holds more items than ygo decodes in one update (maxUpdateItems) is refused
+// as too large to store, as an append of such an update is (AppendUpdateTx), not failed as a fault:
+// the route answers it 413 CAP_EXCEEDED rather than 500. 160,000 empty list items make about 1.12
+// million items, from 320 KB of markdown, and replace no history.
+func TestARebuildWhoseSeedPassesTheItemCapIsRefusedAsTooLarge(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	items := strings.Repeat("-\n", 160_000)
+	if _, err := database.Pool.Exec(context.Background(), `update artifact_versions set markdown = $2 where artifact_id = $1`, artifactID, items); err != nil {
+		t.Fatalf("store a version past the item cap: %v", err)
+	}
+	history := func(t *testing.T) string {
+		t.Helper()
+		var rows string
+		if err := database.Pool.QueryRow(context.Background(), `
+			select coalesce(string_agg(version::text || ':' || md5(update), ',' order by version), '')
+			from doc_updates where artifact_id = $1
+		`, artifactID).Scan(&rows); err != nil {
+			t.Fatalf("read document history: %v", err)
+		}
+		return rows
+	}
+	before := history(t)
+	persist := &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}
+	service := New(Deps{Store: database, Persistence: persist})
+	_, _, err := rebuildDocument(t, service, artifactID, nil)
+	if !errors.Is(err, ErrDocumentTooLarge) || !strings.HasPrefix(err.Error(), "document too large to store: ") || !strings.Contains(err.Error(), fmt.Sprintf("exceed the %d", maxUpdateItems)) {
+		t.Fatalf("rebuild from a version past ygo's item cap: %v, want ErrDocumentTooLarge naming the cap, unwrapped", err)
+	}
+	if after := history(t); after != before {
+		t.Fatalf("the refused rebuild changed the document history from %q to %q", before, after)
+	}
+}
+
+// Markdown a caller supplies to a rebuild is weighed as a new document's is (SeedText): its
+// rendering, which can run longer than what was sent, may hold no more than one upload. 16,384
+// headings of exactly 1 MiB, which render as 1,064,959 bytes, are refused and replace no history;
+// the same headings two bytes shorter rebuild the document.
+func TestARebuildFromSuppliedMarkdownIsWeighedAsANewDocument(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	persist := &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}
+	service := New(Deps{Store: database, Persistence: persist})
+	headings := func(width int) string {
+		return strings.Repeat("# "+strings.Repeat("a", width-3)+"\n", 16_384)
+	}
+	long := headings(64)
+	if _, _, err := rebuildDocument(t, service, artifactID, &long); !errors.Is(err, ErrDocumentTooLarge) || !strings.Contains(err.Error(), "1064959 bytes") {
+		t.Fatalf("rebuild from 1 MiB of headings that render as 1,064,959 bytes: %v, want ErrDocumentTooLarge naming the rendering", err)
+	}
+	if persist.rebuilds != 0 {
+		t.Fatalf("the refused rebuild replaced the history %d times, want none", persist.rebuilds)
+	}
+	persist.invalid = true
+	short := headings(62)
+	if _, _, err := rebuildDocument(t, service, artifactID, &short); err != nil {
+		t.Fatalf("rebuild from headings whose rendering fits: %v", err)
+	}
+	if persist.rebuilds != 1 {
+		t.Fatalf("the rebuild that fits replaced the history %d times, want once", persist.rebuilds)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 )
@@ -52,7 +53,7 @@ func kubernetesWith(line, replacement string) string {
 }
 
 func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
-	path := writeConfigFile(t, kubernetesFile+`    tree_volume: 30Gi
+	path := writeConfigFile(t, kubernetesFile+`    issue_volume: 30Gi
     kubeconfig: kube/legion-daemon
     context: legion-daemon@example
     session_store: pvc
@@ -63,11 +64,9 @@ func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
         - {key: spot, operator: Exists, effect: NoExecute}
       priority_class: legion-workers
     resources:
-      implementer:
-        requests: {cpu: 500m, memory: 2Gi}
-        limits: {memory: 6Gi, ephemeral_storage: 30Gi}
-      tester:
-        limits: {cpu: 4}
+      implementer: {cpu: 1500m, memory: 8Gi, ephemeral_storage: 40Gi, ephemeral_storage_request: 2Gi}
+      tester: {cpu: 2}
+      merger: {}
     pod:
       env: {PI_CONFIG_FILES: /etc/legion-operator/overlay.yml, CLAUDE_CODE_USE_FOUNDRY: 0, GEMINI_API_KEY_FILE: /var/run/operator/gemini}
       service_account: legion-worker
@@ -95,11 +94,14 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 		t.Fatalf("LoadForValidation: %v", err)
 	}
 
+	resources := DefaultResources()
+	resources[claim.RoleImplementer] = RoleResources{CPU: "1500m", Memory: "8Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "2Gi"}
+	resources[claim.RoleTester] = RoleResources{CPU: "2", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"}
 	want := Runtime{Name: "kubernetes", Kubernetes: &Kubernetes{
 		Namespace:    "legion",
 		Image:        workerImage,
 		StorageClass: "gp2",
-		TreeVolume:   "30Gi",
+		IssueVolume:  "30Gi",
 		Kubeconfig:   filepath.Join(filepath.Dir(path), "kube/legion-daemon"),
 		Context:      "legion-daemon@example",
 		Scheduling: Scheduling{
@@ -110,13 +112,9 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 			},
 			PriorityClass: "legion-workers",
 		},
-		Resources: map[claim.Role]RoleResources{
-			claim.RoleImplementer: {
-				Requests: Quantities{CPU: "500m", Memory: "2Gi"},
-				Limits:   Quantities{Memory: "6Gi", EphemeralStorage: "30Gi"},
-			},
-			claim.RoleTester: {Limits: Quantities{CPU: "4"}},
-		},
+		// A role's entry sets a field or leaves it to the default, field by field: the tester's
+		// memory and disk bound and the merger's whole reservation are the defaults.
+		Resources: resources,
 		Pod: PodConfig{
 			Env: map[string]string{
 				"PI_CONFIG_FILES": "/etc/legion-operator/overlay.yml", "CLAUDE_CODE_USE_FOUNDRY": "0",
@@ -156,10 +154,12 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 	}
 }
 
-// What a block that sets only its required members settles to: the tree volume at 20Gi, no
-// requests or limits on any role (one tree per node, the pool's floor sizing the node), no
-// scheduling beyond the Legion pool the runtime selects, in-cluster credentials, and nothing of the
-// operator's in any pod.
+// What a block that sets only its required members settles to: the issue volume at 20Gi, every
+// role's reservation at the daemon's default (the six workflow roles and the controller, each with
+// a cpu and a memory, summing to 3 CPU and 19 GiB over an issue pod's six, and each with its
+// ephemeral-storage limit, 20Gi for the implementer and tester and 10Gi for the rest, over a 1Gi
+// request), no scheduling beyond the Legion pool the runtime selects, in-cluster credentials, and
+// nothing of the operator's in any pod.
 func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile), noEnv)
 	if err != nil {
@@ -173,16 +173,96 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		name      string
 		got, want any
 	}{
-		{"tree_volume", block.TreeVolume, "20Gi"},
-		{"resources", block.Resources, map[claim.Role]RoleResources(nil)},
+		{"issue_volume", block.IssueVolume, "20Gi"},
+		{"resources", block.Resources, map[claim.Role]RoleResources{
+			claim.RoleArchitect:   {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RolePlanner:     {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleImplementer: {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleTester:      {CPU: "750m", Memory: "6Gi", EphemeralStorage: "20Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleReviewer:    {CPU: "750m", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleMerger:      {CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+			claim.RoleController:  {CPU: "1", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"},
+		}},
 		{"scheduling", block.Scheduling, Scheduling{}},
 		{"kubeconfig", block.Kubeconfig, ""},
 		{"context", block.Context, ""},
 		{"pod", block.Pod, PodConfig{}},
+		{"session_dsn_secret", block.SessionDSNSecret, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if !reflect.DeepEqual(tc.got, tc.want) {
 				t.Errorf("%s = %#v, want %#v", tc.name, tc.got, tc.want)
+			}
+		})
+	}
+	if !reflect.DeepEqual(block.Resources, DefaultResources()) {
+		t.Errorf("DefaultResources() = %#v, want the settled block's %#v: it is what the sandbox tests and the live proof build from", DefaultResources(), block.Resources)
+	}
+	var cpu, memory resource.Quantity
+	for _, role := range claim.Roles {
+		cpu.Add(resource.MustParse(block.Resources[role].CPU))
+		memory.Add(resource.MustParse(block.Resources[role].Memory))
+	}
+	if cpu.Cmp(resource.MustParse("3")) != 0 || memory.Cmp(resource.MustParse("19Gi")) != 0 {
+		t.Errorf("an issue pod's six roles sum to %s CPU and %s, want 3 and 19Gi", cpu.String(), memory.String())
+	}
+}
+
+// A role's entry sets one field alone and keeps the others' defaults, so a partial entry still
+// settles to a complete reservation: the pod stays Guaranteed with no memory the operator wrote,
+// and bounded on the node's disk with no ephemeral storage the operator wrote.
+func TestARoleSettingOnlyItsCPUKeepsTheDefaultMemory(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    resources: {reviewer: {cpu: 2}, planner: {memory: 2Gi}}\n"), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	resources := cfg.Runtime.Kubernetes.Resources
+	if got, want := resources[claim.RoleReviewer], (RoleResources{CPU: "2", Memory: "4Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+		t.Errorf("reviewer = %+v, want %+v: the file's cpu and the default memory and disk bound", got, want)
+	}
+	if got, want := resources[claim.RolePlanner], (RoleResources{CPU: "250m", Memory: "2Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+		t.Errorf("planner = %+v, want %+v: the default cpu and disk bound and the file's memory", got, want)
+	}
+	if got, want := resources[claim.RoleArchitect], (RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+		t.Errorf("architect = %+v, want the default %+v: a role the file leaves out", got, want)
+	}
+}
+
+// A role's ephemeral-storage bound is the file's where it sets a side and the default for the side
+// it leaves out: `ephemeral_storage` alone raises the limit over the default 1Gi request, and
+// `ephemeral_storage_request` alone raises the request under the default limit — the operator who
+// knows the node's root volume reserves disk without restating the limit. Each setting is read
+// as the file wrote it, since the daemon parses it into the container's requirements.
+func TestARolesEphemeralStorageBoundSettlesFieldByField(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    resources: {tester: {ephemeral_storage: 40Gi}, merger: {ephemeral_storage_request: 2Gi}}\n"), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	resources := cfg.Runtime.Kubernetes.Resources
+	if got, want := resources[claim.RoleTester], (RoleResources{CPU: "750m", Memory: "6Gi", EphemeralStorage: "40Gi", EphemeralStorageRequest: "1Gi"}); got != want {
+		t.Errorf("tester = %+v, want %+v: the file's limit over the default request", got, want)
+	}
+	if got, want := resources[claim.RoleMerger], (RoleResources{CPU: "250m", Memory: "1Gi", EphemeralStorage: "10Gi", EphemeralStorageRequest: "2Gi"}); got != want {
+		t.Errorf("merger = %+v, want %+v: the file's request under the default limit", got, want)
+	}
+}
+
+// `session_store: postgres` names the providers Secret's key that holds the session database's URL,
+// which every pod mounts for its Oh My Pi; `pvc`, the default, names none.
+func TestLoadForValidationSettlesTheSessionStore(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, want string
+	}{
+		{"postgres", kubernetesFile + "    session_store: postgres\n    session_dsn_secret: SESSION_DSN\n", "SESSION_DSN"},
+		{"pvc", kubernetesFile + "    session_store: pvc\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadForValidation(writeConfigFile(t, tc.body), noEnv)
+			if err != nil {
+				t.Fatalf("LoadForValidation: %v", err)
+			}
+			if got := cfg.Runtime.Kubernetes.SessionDSNSecret; got != tc.want {
+				t.Errorf("SessionDSNSecret = %q, want %q", got, tc.want)
 			}
 		})
 	}
@@ -247,18 +327,25 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "storage_class absent",
 			body: kubernetesWith("    storage_class: gp2\n", ""),
-			want: "runtime.kubernetes.storage_class is required: the cluster has no default storage class for the tree volume",
+			want: "runtime.kubernetes.storage_class is required: the cluster has no default storage class for the issue volumes",
 		},
 		{
-			name: "tree_volume not a quantity",
-			body: kubernetesFile + "    tree_volume: twenty gigs\n",
-			want: "runtime.kubernetes.tree_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+			name: "issue_volume not a quantity",
+			body: kubernetesFile + "    issue_volume: twenty gigs\n",
+			want: "runtime.kubernetes.issue_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
 			// The runtime reads a zero volume as "use the default", so zero would be a silent 20Gi.
-			name: "tree_volume zero",
-			body: kubernetesFile + "    tree_volume: 0\n",
-			want: "runtime.kubernetes.tree_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+			name: "issue_volume zero",
+			body: kubernetesFile + "    issue_volume: 0\n",
+			want: "runtime.kubernetes.issue_volume must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+		},
+		{
+			// The tree-volume layout's key (LEGION-632): refused naming the key that replaced it, not
+			// as a generic unknown key, so --check-config says what to edit.
+			name: "the tree-volume layout's tree_volume",
+			body: kubernetesFile + "    tree_volume: 30Gi\n",
+			want: "runtime.kubernetes.tree_volume is now issue_volume: one volume per issue",
 		},
 		{
 			name: "kubeconfig blank",
@@ -338,13 +425,13 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "resources not a mapping",
 			body: kubernetesFile + "    resources: [planner]\n",
-			want: "runtime.kubernetes.resources must be a mapping of role to requests and limits",
+			want: "runtime.kubernetes.resources must be a mapping of role to its cpu and memory reservation",
 		},
 		{
 			// The TypeScript daemon's resource profiles are not roles.
 			name: "resources keyed by a profile",
-			body: kubernetesFile + "    resources: {small: {requests: {cpu: 500m}}}\n",
-			want: `runtime.kubernetes.resources key "small" must be a role (architect, planner, implementer, tester, reviewer, merger)`,
+			body: kubernetesFile + "    resources: {small: {cpu: 500m}}\n",
+			want: `runtime.kubernetes.resources key "small" must be a role (architect, planner, implementer, tester, reviewer, merger, controller)`,
 		},
 		{
 			name: "a role named twice",
@@ -354,7 +441,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "a role's resources not a mapping",
 			body: kubernetesFile + "    resources: {planner: 500m}\n",
-			want: "runtime.kubernetes.resources.planner must be a mapping",
+			want: "runtime.kubernetes.resources.planner must be a mapping of cpu and memory",
 		},
 		{
 			name: "a role's resources with an unknown member",
@@ -362,34 +449,67 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "unknown key runtime.kubernetes.resources.planner.claims",
 		},
 		{
-			name: "requests not a mapping",
-			body: kubernetesFile + "    resources: {planner: {requests: 500m}}\n",
-			want: "runtime.kubernetes.resources.planner.requests must be a mapping",
+			// The earlier shape's nested mappings (LEGION-632): each refused naming the one
+			// reservation that replaced them, never as a generic unknown key.
+			name: "a role's requests mapping",
+			body: kubernetesFile + "    resources: {planner: {requests: {cpu: 500m, memory: 1Gi}}}\n",
+			want: "runtime.kubernetes.resources.planner.requests is gone: a role's reservation is one cpu and one memory, each both its request and its limit",
 		},
 		{
-			name: "an unknown resource",
-			body: kubernetesFile + "    resources: {planner: {limits: {nvidia.com/gpu: 1}}}\n",
-			want: "unknown key runtime.kubernetes.resources.planner.limits.nvidia.com/gpu",
+			name: "a role's limits mapping",
+			body: kubernetesFile + "    resources: {planner: {cpu: 500m, limits: {memory: 2Gi}}}\n",
+			want: "runtime.kubernetes.resources.planner.limits is gone: a role's reservation is one cpu and one memory, each both its request and its limit",
+		},
+		{
+			// The settled request is held to the settled limit, whichever side the file set.
+			name: "an ephemeral_storage_request past its ephemeral_storage",
+			body: kubernetesFile + "    resources: {planner: {ephemeral_storage_request: 12Gi}}\n",
+			want: "runtime.kubernetes.resources.planner.ephemeral_storage_request 12Gi exceeds ephemeral_storage 10Gi",
+		},
+		{
+			name: "an ephemeral_storage_request past the ephemeral_storage set beside it",
+			body: kubernetesFile + "    resources: {tester: {ephemeral_storage: 30Gi, ephemeral_storage_request: 31Gi}}\n",
+			want: "runtime.kubernetes.resources.tester.ephemeral_storage_request 31Gi exceeds ephemeral_storage 30Gi",
+		},
+		{
+			name: "an ephemeral_storage that is no quantity",
+			body: kubernetesFile + "    resources: {planner: {ephemeral_storage: lots}}\n",
+			want: "runtime.kubernetes.resources.planner.ephemeral_storage must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+		},
+		{
+			name: "a zero ephemeral_storage_request",
+			body: kubernetesFile + "    resources: {planner: {ephemeral_storage_request: 0}}\n",
+			want: "runtime.kubernetes.resources.planner.ephemeral_storage_request must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
 			name: "a quantity that is not one",
-			body: kubernetesFile + "    resources: {planner: {requests: {memory: lots}}}\n",
-			want: "runtime.kubernetes.resources.planner.requests.memory must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+			body: kubernetesFile + "    resources: {planner: {memory: lots}}\n",
+			want: "runtime.kubernetes.resources.planner.memory must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
 			name: "a negative quantity",
-			body: kubernetesFile + "    resources: {planner: {limits: {cpu: -1}}}\n",
-			want: "runtime.kubernetes.resources.planner.limits.cpu must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
+			body: kubernetesFile + "    resources: {planner: {cpu: -1}}\n",
+			want: "runtime.kubernetes.resources.planner.cpu must be a positive Kubernetes quantity (e.g. 20Gi or 500m)",
 		},
 		{
 			name: "the TypeScript role_profiles",
 			body: kubernetesFile + "    role_profiles: {tester: large}\n",
-			want: "unknown key runtime.kubernetes.role_profiles: each role's requests and limits are set under runtime.kubernetes.resources, and a role absent there gets none",
+			want: "unknown key runtime.kubernetes.role_profiles: a role's reservation is runtime.kubernetes.resources.<role>, a cpu and a memory each both request and limit, and a role absent there takes the daemon's default",
 		},
 		{
-			name: "session_store postgres",
+			name: "session_store postgres without its key",
 			body: kubernetesFile + "    session_store: postgres\n",
-			want: "runtime.kubernetes.session_store postgres is not supported until Stage 6: a pod's session lives on the tree volume (pvc)",
+			want: "runtime.kubernetes.session_dsn_secret is required with runtime.kubernetes.session_store postgres: the key of the providers Secret that holds the session database's postgres:// URL",
+		},
+		{
+			name: "session_store postgres with an empty key",
+			body: kubernetesFile + "    session_store: postgres\n    session_dsn_secret: \"\"\n",
+			want: "runtime.kubernetes.session_dsn_secret must not be empty",
+		},
+		{
+			name: "session_store postgres with a key no Secret can hold",
+			body: kubernetesFile + "    session_store: postgres\n    session_dsn_secret: sessions/dsn\n",
+			want: `runtime.kubernetes.session_dsn_secret "sessions/dsn" is not a Secret data key ([-._a-zA-Z0-9]+)`,
 		},
 		{
 			name: "session_store neither pvc nor postgres",
@@ -415,6 +535,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "daemon_url on localhost",
 			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://localhost:13370"),
 			want: "daemon_url http://localhost:13370 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "daemon_url on localhost with the root's trailing dot",
+			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://localhost.:13370"),
+			want: "daemon_url http://localhost.:13370 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
 		},
 		{
 			name: "envoy_url on IPv6 loopback",
@@ -447,6 +572,11 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "bind 127.0.0.1 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://127.0.0.1:13371; bind the daemon host's own address when runtime is kubernetes",
 		},
 		{
+			name: "bind on localhost with the root's trailing dot",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: localhost."),
+			want: "bind localhost. is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://localhost.:13371; bind the daemon host's own address when runtime is kubernetes",
+		},
+		{
 			name: "bind unspecified",
 			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0"),
 			want: "bind 0.0.0.0 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://0.0.0.0:13371; bind the daemon host's own address when runtime is kubernetes",
@@ -455,6 +585,26 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "bind IPv6 unspecified",
 			body: kubernetesWith("bind: 10.0.0.5", "bind: \"::\""),
 			want: "bind :: is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://[::]:13371; bind the daemon host's own address when runtime is kubernetes",
+		},
+		{
+			name: "advertise_host on loopback, bind unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: 127.0.0.1"),
+			want: "advertise_host 127.0.0.1 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://127.0.0.1:13371; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "advertise_host unspecified, bind unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: 0.0.0.0"),
+			want: "advertise_host 0.0.0.0 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://0.0.0.0:13371; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "advertise_host on localhost, bind unspecified",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 0.0.0.0\nadvertise_host: localhost"),
+			want: "advertise_host localhost is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://localhost:13371; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "bind on loopback, advertise_host set",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: 127.0.0.1\nadvertise_host: legion-daemon-legsmoke.legion.svc"),
+			want: "bind 127.0.0.1 is loopback, where no pod reaches the worker stream, whatever advertise_host names; bind 0.0.0.0 or the daemon host's own address when runtime is kubernetes",
 		},
 		{
 			name: "daemon_url absent",
@@ -484,7 +634,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		{
 			name: "operator_token_file absent",
 			body: kubernetesWith("operator_token_file: /var/run/legion/OPERATOR_TOKEN\n", ""),
-			want: "operator_token_file is required when runtime is kubernetes: the daemon cannot launch the controller there; legion controller start presents this token",
+			want: "operator_token_file is required when runtime is kubernetes: legion claims presents this token, as legion controller start does under controller: operator",
 		},
 		{
 			name: "dispatch_url absent",
@@ -658,6 +808,27 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 	}
 }
 
+// A pod's own IP changes on every restart, so a `runtime: kubernetes` daemon's bind is allowed to
+// become a listen-only address (0.0.0.0 included) once advertise_host names the stable, pod-facing
+// address instead — a Kubernetes Service's DNS name included, since openSupervision's shimAddress
+// (internal/daemon/daemon.go) builds every pod's `--connect` from it and the listener's port, and
+// sandbox.configure needs only a dialable host:port, never an IP.
+func TestLoadForValidationAcceptsBindUnspecifiedWithAdvertiseHost(t *testing.T) {
+	cfg, err := LoadForValidation(writeConfigFile(t, kubernetesWith(
+		"bind: 10.0.0.5",
+		"bind: 0.0.0.0\nadvertise_host: legion-daemon-legsmoke.legion.svc",
+	)), noEnv)
+	if err != nil {
+		t.Fatalf("LoadForValidation: %v", err)
+	}
+	if cfg.Bind != "0.0.0.0" {
+		t.Errorf("Bind = %q, want 0.0.0.0: a listen-only address once advertise_host is set", cfg.Bind)
+	}
+	if cfg.AdvertiseHost != "legion-daemon-legsmoke.legion.svc" {
+		t.Errorf("AdvertiseHost = %q, want the configured Service name", cfg.AdvertiseHost)
+	}
+}
+
 // operatorRouteAudience is the audience the tests fill into the operator route's placeholder, as an
 // operator and each live harness run fill in their gateway's.
 const operatorRouteAudience = "operator-audience"
@@ -750,8 +921,8 @@ runtime:
 	if cfg.Linger != 18*time.Minute || cfg.Gates.Design != DesignGateOff || cfg.AdmissionCap != 2 {
 		t.Errorf("Linger=%s Gates=%+v AdmissionCap=%d, want 18m, off, 2", cfg.Linger, cfg.Gates, cfg.AdmissionCap)
 	}
-	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@example" || block.Resources != nil || block.Scheduling.NodeSelector != nil {
-		t.Errorf("kubernetes block = %+v, want the restricted context, no requests, and no node selector", *block)
+	if block := cfg.Runtime.Kubernetes; block.Context != "legion-daemon@example" || !reflect.DeepEqual(block.Resources, DefaultResources()) || block.Scheduling.NodeSelector != nil {
+		t.Errorf("kubernetes block = %+v, want the restricted context, every role's default reservation, and no node selector", *block)
 	}
 	if pod := cfg.Runtime.Kubernetes.Pod; pod.ServiceAccount != "legion-worker" || len(pod.Volumes) != 2 || len(pod.VolumeMounts) != 3 ||
 		pod.Env["PI_CONFIG_FILES"] != "/etc/legion-operator/overlay.yml" {
@@ -762,7 +933,6 @@ runtime:
 func TestAgentSecretsBlockSettlesWithDefaults(t *testing.T) {
 	path := writeConfigFile(t, kubernetesFile+`    agent_secrets:
       url: https://secrets.internal.example
-      operator: sjawhar
 `)
 	cfg, err := LoadForValidation(path, noEnv)
 	if err != nil {
@@ -770,8 +940,7 @@ func TestAgentSecretsBlockSettlesWithDefaults(t *testing.T) {
 	}
 	got := cfg.Runtime.Kubernetes.AgentSecrets
 	want := &AgentSecretsConfig{
-		URL: "https://secrets.internal.example", Operator: "sjawhar",
-		Audience: "agent-secrets", TokenExpirySeconds: 3600,
+		URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpirySeconds: 3600,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("agent_secrets = %+v, want %+v", got, want)
@@ -790,18 +959,21 @@ func TestAgentSecretsBlockIsAbsentByDefault(t *testing.T) {
 
 func TestAgentSecretsBlockRefusals(t *testing.T) {
 	for name, tc := range map[string]struct{ block, want string }{
-		"no url":            {"    agent_secrets:\n      operator: sjawhar\n", "runtime.kubernetes.agent_secrets.url is required"},
-		"no operator":       {"    agent_secrets:\n      url: https://s\n", "runtime.kubernetes.agent_secrets.operator is required"},
-		"url with a path":   {"    agent_secrets:\n      url: https://s/v1\n      operator: sjawhar\n", "runtime.kubernetes.agent_secrets.url must be an absolute URL with no path"},
-		"plain http remote": {"    agent_secrets:\n      url: http://secrets.example.com\n      operator: sjawhar\n", "runtime.kubernetes.agent_secrets.url must use https unless the host is a loopback address"},
-		"expiry too long":   {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n      token_expiry_seconds: 7200\n", "runtime.kubernetes.agent_secrets.token_expiry_seconds must be between 600 and 3600"},
-		"expiry too short":  {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n      token_expiry_seconds: 60\n", "runtime.kubernetes.agent_secrets.token_expiry_seconds must be between 600 and 3600"},
-		"blank audience":    {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n      audience: \"\"\n", "runtime.kubernetes.agent_secrets.audience must not be empty"},
-		"unknown key":       {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n      token: abc\n", "unknown key runtime.kubernetes.agent_secrets.token"},
+		"no url":            {"    agent_secrets:\n      audience: agent-secrets\n", "runtime.kubernetes.agent_secrets.url is required"},
+		"url with a path":   {"    agent_secrets:\n      url: https://s/v1\n", "runtime.kubernetes.agent_secrets.url must be an absolute URL with no path"},
+		"plain http remote": {"    agent_secrets:\n      url: http://secrets.example.com\n", "runtime.kubernetes.agent_secrets.url must use https unless the host is a loopback address"},
+		"expiry too long":   {"    agent_secrets:\n      url: https://s\n      token_expiry_seconds: 7200\n", "runtime.kubernetes.agent_secrets.token_expiry_seconds must be between 600 and 3600"},
+		"expiry too short":  {"    agent_secrets:\n      url: https://s\n      token_expiry_seconds: 60\n", "runtime.kubernetes.agent_secrets.token_expiry_seconds must be between 600 and 3600"},
+		"blank audience":    {"    agent_secrets:\n      url: https://s\n      audience: \"\"\n", "runtime.kubernetes.agent_secrets.audience must not be empty"},
+		"unknown key":       {"    agent_secrets:\n      url: https://s\n      token: abc\n", "unknown key runtime.kubernetes.agent_secrets.token"},
 		// The Plan C daemon runs its own machine login instead of reading a launcher credential
 		// off disk: the old key must fail loudly, never parse as a silently-ignored unknown.
-		"the removed launcher_token_file key": {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n      launcher_token_file: x\n", "unknown key runtime.kubernetes.agent_secrets.launcher_token_file"},
-		"not a mapping":                       {"    agent_secrets: yes\n", "runtime.kubernetes.agent_secrets must be a mapping"},
+		"the removed launcher_token_file key": {"    agent_secrets:\n      url: https://s\n      launcher_token_file: x\n", "unknown key runtime.kubernetes.agent_secrets.launcher_token_file"},
+		// The daemon's login is a service's, which anyone signed in to Dispatch approves, so it
+		// names no approver: a file that still sets one is refused, naming the key and why.
+		"the removed operator key": {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n",
+			"runtime.kubernetes.agent_secrets.operator was removed (LEGION-664): the daemon's machine login is the legion-daemon service's, which anyone signed in to Dispatch approves, so it names no approver; delete the key"},
+		"not a mapping": {"    agent_secrets: yes\n", "runtime.kubernetes.agent_secrets must be a mapping"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+tc.block), noEnv)
@@ -815,7 +987,7 @@ func TestAgentSecretsBlockRefusals(t *testing.T) {
 func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
 	for _, url := range []string{"http://127.0.0.1:13380", "http://LOCALHOST:13380"} {
 		t.Run(url, func(t *testing.T) {
-			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: "+url+"\n      operator: sjawhar\n"), noEnv)
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: "+url+"\n"), noEnv)
 			if err != nil {
 				t.Fatal(err)
 			}

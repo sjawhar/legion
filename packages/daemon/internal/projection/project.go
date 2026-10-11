@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -17,8 +18,11 @@ import (
 // Project joins durable issue facts to current supervision claims for GET /legion/v1/state. The
 // caller owns the repeatable-read transaction, so its record reads share one snapshot; claims are
 // intentionally live process facts and arrive separately from the supervisor. project is the
-// Dispatch project whose pending status writes the state lists.
-func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, claims []supervise.Claim) (api.State, error) {
+// Dispatch project whose pending status writes the state lists. reports is each claim's latest
+// capability report, by claim (LEGION-663): a claim with one shows it whatever its incarnation —
+// the view carries the reporting process's, for a reader to compare with the locator's — and a
+// claim with none shows no capabilities. Nil is no reports.
+func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, claims []supervise.Claim, reports map[claim.Token]capabilities.Report) (api.State, error) {
 	issues, err := s.Issues(ctx, tx)
 	if err != nil {
 		return api.State{}, err
@@ -49,11 +53,15 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 				return api.State{}, fmt.Errorf("project claim %s: %w", current.Token, err)
 			}
 		}
-		claimViews[current.Token] = api.ClaimView{
+		view := api.ClaimView{
 			Session: current.Session,
 			State:   string(current.State),
 			Locator: current.Locator,
 		}
+		if report, reported := reports[current.Token]; reported {
+			view.Capabilities = api.CapabilityReportViewOf(report)
+		}
+		claimViews[current.Token] = view
 	}
 
 	slotViews := make(map[string]api.SlotView, len(slots))
@@ -138,6 +146,12 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	}
 
 	for _, current := range claims {
+		// The daemon's own controller (`controller: daemon`) holds a claim on no issue: the state
+		// shows it as the project's controller (controllerLocator), never as an issue's worker,
+		// since an issue keyed "" refuses the whole document at every strict client.
+		if claim.IsController(current.Role, current.Issue, current.Tree) {
+			continue
+		}
 		claimView := claimViews[current.Token]
 		view, known := projected.Issues[current.Issue]
 		if !known {

@@ -636,6 +636,16 @@ test("a failed action carries the API's reason, and a refusal of what it writes 
       want: { message: 'block id "a1" would name two blocks', retryable: false },
     },
     {
+      error: new ApiError(413, {
+        code: "CAP_EXCEEDED",
+        error: "document too large to store: shorten the change, or split the document",
+      }),
+      want: {
+        message: "document too large to store: shorten the change, or split the document",
+        retryable: false,
+      },
+    },
+    {
       error: new ApiError(409, {
         code: "ANCHOR_MISSING",
         error: "the suggestion's text is still loading",

@@ -16,6 +16,7 @@ import {
   typeAtEnd,
 } from "./editor";
 import { resetDatabase } from "./seed";
+import { assertPageFits, assertWhole } from "./unclipped";
 import { asUser } from "./users";
 
 async function setDocumentSheet(page: Page, project: string, open: boolean): Promise<void> {
@@ -255,6 +256,48 @@ test("a document's connection dot stays on the line with its version actions", a
     await expectDotBeside(page, "Name version");
     await page.goto(`${path}?version=1`);
     await expectDotBeside(page, "Diff vs current");
+  } finally {
+    await context.close();
+  }
+});
+
+test("a document's whole title wraps at every width, whether prose or one unbroken word", async ({
+  browser,
+}, testInfo) => {
+  await createProject({ key: "CORE", name: "Core" });
+  // Five repeats of a 48-character sentence, cut to exactly 200: the length the spec names. It
+  // ends mid-sentence on a letter, so the server trims nothing and the page shows all 200.
+  const title200 = "Dispatch cuts off titles that are far too long. ".repeat(5).slice(0, 200);
+  const prose = await createProjectDocument("CORE", { content: "# Body\n", name: title200 });
+  expect(prose.artifact.name).toHaveLength(200);
+  // A single unbroken 100-character string: no space for the browser to break on, so wrapping
+  // depends on `break-words` rather than the ordinary word-wrap every other title gets for
+  // free - and, on this header, on `min-w-0` directly on the heading itself: a flex item's
+  // automatic minimum-content width ignores `break-words` (CSS sizing excludes
+  // `overflow-wrap: break-word` from that calculation, unlike `anywhere`), so without its own
+  // `min-w-0` the heading still claimed its full unbroken width and widened the page.
+  const title100 = "supercalifragilisticexpialidocious".repeat(3).slice(0, 100);
+  expect(title100).toHaveLength(100);
+  expect(title100).not.toContain(" ");
+  const oneWord = await createProjectDocument("CORE", { content: "# Body\n", name: title100 });
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    for (const doc of [prose, oneWord]) {
+      await page.goto(`/projects/CORE/documents/${doc.artifact.slug}`);
+      const heading = page.getByTestId("artifact-header").getByRole("heading", { level: 2 });
+      await expect(heading).toHaveText(doc.artifact.name);
+      // Whole means nothing between the title and the document clips it: no clamp, ellipsis, or
+      // box shorter or narrower than the text it holds, at the width this project renders.
+      await assertWhole(heading);
+      // The one unbroken word wraps rather than pushing the page wider than the viewport.
+      await assertPageFits(page);
+      await page.screenshot({
+        path: testInfo.outputPath(`document-title-${doc.artifact.slug}-whole.png`),
+        fullPage: true,
+      });
+    }
   } finally {
     await context.close();
   }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -20,15 +21,16 @@ var _ supervise.Store = (*Store)(nil)
 
 // claimSelect reads a claim with the delivery pending on it, if any: the two tables are written
 // separately (a delivery changes far more often than the claim it rides on) and read together.
-const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.session,
+const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.generation, c.tree_epoch, c.session,
 	c.session_file, c.locator, c.state, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost, c.last_start_row, c.serving_generation,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation,
 	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
-// PutClaim writes a claim, replacing the row its token names. The pending delivery is not part of
-// the write: it has its own, PutDelivery and RetireDelivery.
+// PutClaim persists an admitted claim's state: every write a claim's machine makes. A claim enters
+// the store through AdmitClaim, which binds it to its tree's open lifecycle first; PutClaim alone
+// writes historical state in migrations and test fixtures.
 func (s *Store) PutClaim(ctx context.Context, c supervise.Claim) error {
 	return putClaim(ctx, s.pool, c)
 }
@@ -54,13 +56,13 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 			enrollmentIncarnation = &c.Enrollment.Incarnation
 		}
 	}
-	_, err := db.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation,
+	_, err := db.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, tree_epoch,
 		session, session_file, locator, state, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, workspace_lost, last_start_row,
 		serving_generation, agent_secrets_enrollment, agent_secrets_enrollment_incarnation)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
-		issue = excluded.issue, role = excluded.role, generation = excluded.generation,
+		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
 		locator = excluded.locator, state = excluded.state,
 		launch_failures = excluded.launch_failures, deaths = excluded.deaths,
@@ -72,7 +74,7 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		agent_secrets_enrollment = excluded.agent_secrets_enrollment,
 		agent_secrets_enrollment_incarnation = excluded.agent_secrets_enrollment_incarnation,
 		updated_at = now()`,
-		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation),
+		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State),
 		c.Budgets.LaunchFailures, c.Budgets.Deaths, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.WorkspaceLost, c.LastStartRow, int64(c.ServingGeneration),
@@ -105,6 +107,61 @@ func (s *Store) Claims(ctx context.Context) ([]supervise.Claim, error) {
 		return nil, fmt.Errorf("read claims: %w", err)
 	}
 	return claims, nil
+}
+
+// IssueHasSessions is whether any stored claim of issue, retained and retired roles included,
+// recorded a session: the issue's volume must then already hold its clone and that session, so a
+// new role of the issue may be the first to notice the volume holding another role's session
+// disappeared. A session another issue of the same tree recorded is on that issue's own volume and
+// does not count.
+func (s *Store) IssueHasSessions(ctx context.Context, project, issue string) (bool, error) {
+	var exists bool
+	err := s.pool.QueryRow(ctx, `select exists (select 1 from claims where project = $1 and issue = $2 and session_file <> '')`,
+		project, issue).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("read retained sessions of issue %s: %w", issue, err)
+	}
+	return exists, nil
+}
+
+// claimMayRun is the stored claim that may still hold a process: one in a state that runs, or one
+// that still records a locator.
+const claimMayRun = `(state not in ('suspended', 'failed', 'retired') or locator is not null)`
+
+// StoredClaimMayRun is whether the stored claim of token may still hold a process and was last
+// started no later than row. A stop row that finds no machine for such a claim is a wait: the
+// supervisor persists a claim before it publishes its machine, and the stop is for that machine.
+func (s *Store) StoredClaimMayRun(ctx context.Context, token claim.Token, row int64) (bool, error) {
+	var may bool
+	err := s.pool.QueryRow(ctx, `select exists (select 1 from claims where token = $1 and last_start_row <= $2 and `+claimMayRun+`)`,
+		string(token), row).Scan(&may)
+	if err != nil {
+		return false, fmt.Errorf("read stored claim %s: %w", token, err)
+	}
+	return may, nil
+}
+
+// HasLegacySandboxClaims is a raw JSON census used before Claims unmarshals locators. A legacy
+// per-claim Sandbox locator lacks podUid/container/generation, so the normal strict locator
+// decoder would refuse first without naming the layout migration that is needed.
+func (s *Store) HasLegacySandboxClaims(ctx context.Context, project string) (bool, error) {
+	var legacy bool
+	err := s.pool.QueryRow(ctx, `select exists (
+		select 1 from claims where project = $1 and locator->>'runtime' = 'sandbox'
+		and (locator->'sandbox'->>'podUid' is null or locator->'sandbox'->>'container' is null
+			or locator->'sandbox'->>'generation' is null)
+	)`, project).Scan(&legacy)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "42P01" {
+			// A brand-new database has no claims table until the first migration, and therefore
+			// cannot contain a legacy locator. This preserves the no-schema-write-before-census
+			// ordering for existing databases.
+			return false, nil
+		}
+		return false, fmt.Errorf("census legacy Sandbox claims for %s: %w", project, err)
+	}
+	return legacy, nil
 }
 
 // ClaimByBootTokenHash finds the claim whose current launch minted the boot token with this hash
@@ -190,7 +247,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 	var (
 		c                          supervise.Claim
 		token, role, state         string
-		generation                 int64
+		generation, treeEpoch      int64
 		locator                    []byte
 		deliveryID, task           *string
 		markedBy                   *string
@@ -202,7 +259,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		confirmed                  *time.Time
 		interrupted                *bool
 	)
-	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &c.Session,
+	err := row.Scan(&token, &c.Project, &c.Tree, &c.Issue, &role, &generation, &treeEpoch, &c.Session,
 		&c.SessionFile, &locator, &state, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
 		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC,
@@ -214,7 +271,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		return supervise.Claim{}, fmt.Errorf("read claim: %w", err)
 	}
 	c.Token, c.Role, c.State = claim.Token(token), claim.Role(role), supervise.ClaimState(state)
-	c.Generation, c.ServingGeneration = uint64(generation), uint64(servingGeneration)
+	c.Generation, c.TreeEpoch, c.ServingGeneration = uint64(generation), uint64(treeEpoch), uint64(servingGeneration)
 	if locator != nil {
 		var loc runtime.Locator
 		if err := json.Unmarshal(locator, &loc); err != nil {

@@ -24,7 +24,7 @@ func TestMarkQuoteWritesMarkAndReturnsCoveredText(t *testing.T) {
 	seedServiceText(t, service, artifactID, "The quick brown fox")
 	spec := MarkSpec{Kind: MarkAsk, ID: "ask-1", By: model.Actor{Kind: "session", ID: "s1"}}
 
-	anchored, err := service.MarkQuote(context.Background(), artifactID, spec, "brown", nil)
+	anchored, err := joinedMarkQuote(service, artifactID, spec, "brown", nil)
 	if err != nil || anchored.Quote != "brown" {
 		t.Fatalf("MarkQuote = %q, %v", anchored.Quote, err)
 	}
@@ -43,10 +43,10 @@ func TestMarkQuoteWritesMarkAndReturnsCoveredText(t *testing.T) {
 	}
 
 	var ambiguous *pmdoc.ErrTargetAmbiguous
-	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "o", nil); !errors.As(err, &ambiguous) {
+	if _, err := joinedMarkQuote(service, artifactID, spec, "o", nil); !errors.As(err, &ambiguous) {
 		t.Fatalf("ambiguous quote err = %v", err)
 	}
-	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "purple", nil); !errors.Is(err, pmdoc.ErrTargetNotFound) {
+	if _, err := joinedMarkQuote(service, artifactID, spec, "purple", nil); !errors.Is(err, pmdoc.ErrTargetNotFound) {
 		t.Fatalf("missing quote err = %v", err)
 	}
 }
@@ -129,7 +129,7 @@ func TestMarkQuoteKeepsAnotherRecordOfTheKindOnTheSameText(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "The quick brown fox")
 	for _, step := range []struct{ id, quote string }{{"c1", "quick brown"}, {"c2", "brown"}} {
-		anchored, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+		anchored, err := joinedMarkQuote(service, artifactID, MarkSpec{
 			Kind: MarkComment, ID: step.id, By: model.Actor{Kind: "session", ID: "s1"},
 		}, step.quote, nil)
 		if err != nil || anchored.Quote != step.quote {
@@ -161,17 +161,17 @@ func TestAcceptSuggestionReplacesMarkedTextAndRemovesTheMark(t *testing.T) {
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "The quick brown fox")
 	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
-	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "brown", nil); err != nil {
+	if _, err := joinedMarkQuote(service, artifactID, spec, "brown", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "*red*", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if err := joinedAcceptSuggestion(service, artifactID, "s1", "*red*", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	waitForDocumentText(t, service, artifactID, "The quick *red* fox\n")
 	if _, _, ok := pmdoc.FindMark(liveTree(t, service, artifactID), "proofSuggestion", "s1"); ok {
 		t.Fatal("mark survived accept")
 	}
-	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "x", model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrAnchorOrphaned) {
+	if err := joinedAcceptSuggestion(service, artifactID, "s1", "x", model.Actor{Kind: "user", ID: "alice"}); !errors.Is(err, ErrAnchorOrphaned) {
 		t.Fatalf("second accept err = %v", err)
 	}
 }
@@ -185,7 +185,7 @@ func TestRejectSuggestionInCodeGivesBackTheCode(t *testing.T) {
 	browserMarkWithAttrs(t, service, artifactID, "proofSuggestion", " added", pmdoc.Attrs{
 		"id": "ins", "by": "user:bob", "kind": "insert",
 	})
-	if err := service.RejectSuggestion(context.Background(), artifactID, "ins", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if err := joinedRejectSuggestion(service, artifactID, "ins", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, ":::callout{#c1 kind=\"note\" title=\"T\"}\n```\nabc\n```\n:::\n")
@@ -230,7 +230,7 @@ func TestRejectSuggestionDeletesTheInsertsText(t *testing.T) {
 					"id": "ins", "by": "user:bob", "kind": "insert",
 				})
 			}
-			if err := service.RejectSuggestion(context.Background(), artifactID, "ins", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+			if err := joinedRejectSuggestion(service, artifactID, "ins", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 				t.Fatalf("reject: %v", err)
 			}
 			waitForDocumentText(t, service, artifactID, test.want)
@@ -285,7 +285,7 @@ func TestRejectSuggestionRefusesARemovalTheDocumentCannotHold(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			err = service.RejectSuggestion(context.Background(), artifactID, "ins", model.Actor{Kind: "user", ID: "alice"})
+			err = joinedRejectSuggestion(service, artifactID, "ins", model.Actor{Kind: "user", ID: "alice"})
 			var invalid *ErrInvalidOp
 			if !errors.As(err, &invalid) || invalid.Field != "anchor" || !strings.Contains(invalid.Reason, test.says) || !strings.Contains(invalid.Reason, "accept the suggestion") {
 				t.Fatalf("reject: %v, want an invalid anchor saying %q and offering to accept the suggestion", err, test.says)
@@ -301,7 +301,7 @@ func TestRejectSuggestionIsKindAware(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "keep this and drop that")
-	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkSuggestion,
 		ID:   "rep",
 		By:   model.Actor{Kind: "session", ID: "s1"},
@@ -313,10 +313,10 @@ func TestRejectSuggestionIsKindAware(t *testing.T) {
 		"by":   "user:bob",
 		"kind": "insert",
 	})
-	if err := service.RejectSuggestion(context.Background(), artifactID, "rep", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if err := joinedRejectSuggestion(service, artifactID, "rep", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.RejectSuggestion(context.Background(), artifactID, "ins", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if err := joinedRejectSuggestion(service, artifactID, "ins", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 	// The space the rejected insert leaves at the paragraph's end is kept, as a reference.
@@ -340,7 +340,7 @@ func TestProjectMarkWritesProofStoredMark(t *testing.T) {
 			At:   "2026-09-10T00:01:00Z",
 		}},
 	}
-	if err := service.ProjectMark(context.Background(), artifactID, "c1", record, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if err := joinedProjectMark(service, artifactID, "c1", record, model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -491,31 +491,35 @@ func TestMarkOnlyUpdateSweepsUnrecordedMarksWithoutCanonicalizingLegacyTable(t *
 }
 
 func TestCompactionRetainsContentClassificationAcrossMarkUpdates(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "before")
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
-		t.Fatalf("write content update: %v", err)
-	}
-	waitForPersistedProofText(t, service.store, artifactID, "after\n")
-	for index := range compactKeep + 1 {
-		browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "after", pmdoc.Attrs{
-			"id": fmt.Sprintf("mark-%d", index), "by": "user:alice",
+	for _, keep := range []int{1, 500} {
+		t.Run(fmt.Sprintf("keep_%d", keep), func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "before")
+			if _, err := joinedReplaceText(service, artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+				t.Fatalf("write content update: %v", err)
+			}
+			waitForPersistedProofText(t, service.store, artifactID, "after\n")
+			for index := 0; index <= keep; index++ {
+				browserMarkWithAttrs(t, service, artifactID, "proofAuthored", "after", pmdoc.Attrs{
+					"id": fmt.Sprintf("mark-%d", index), "by": "user:alice",
+				})
+			}
+			waitForPersistedUpdates(t, service, artifactID, keep+2)
+			persist := service.persistence.(*PgVersioned)
+			if _, err := persist.Compact(context.Background(), artifactID, keep); err != nil {
+				t.Fatalf("compact updates: %v", err)
+			}
+			if err := service.Evict(context.Background(), artifactID); err != nil {
+				t.Fatalf("evict compacted document: %v", err)
+			}
+			if got, err := service.Text(context.Background(), artifactID); err != nil || got != "after\n" {
+				t.Fatalf("reload compacted text = %q (%v), want after", got, err)
+			}
+			settleCurrentGeneration(t, service, artifactID)
+			assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
 		})
 	}
-	waitForPersistedUpdates(t, service, artifactID, compactKeep+2)
-	persist := service.persistence.(*PgVersioned)
-	if _, err := persist.Compact(context.Background(), artifactID, compactKeep); err != nil {
-		t.Fatalf("compact updates: %v", err)
-	}
-	if err := service.Evict(context.Background(), artifactID); err != nil {
-		t.Fatalf("evict compacted document: %v", err)
-	}
-	if got, err := service.Text(context.Background(), artifactID); err != nil || got != "after\n" {
-		t.Fatalf("reload compacted text = %q (%v), want after", got, err)
-	}
-	settleCurrentGeneration(t, service, artifactID)
-	assertTableCellPipeVersionAndEventCounts(t, service.store, artifactID, 2, 1)
 }
 
 func TestCompactionDoesNotCarryCoveredContentClassificationPastCursor(t *testing.T) {
@@ -561,7 +565,7 @@ func TestCompactionRetainsUncoveredContentBeyondVersionCursor(t *testing.T) {
 		})
 	}
 	waitForPersistedUpdates(t, service, artifactID, 3)
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "after", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("write uncovered content update: %v", err)
 	}
 	waitForPersistedProofText(t, service.store, artifactID, "after\n")
@@ -664,7 +668,7 @@ func TestReplaceTextReanchorsOpenRows(t *testing.T) {
 	outerID := insertAnchoredCommentWithID(t, service, artifactID, "00000000-0000-4000-8000-000000000003", "quick brown")
 	innerID := insertAnchoredCommentWithID(t, service, artifactID, "00000000-0000-4000-8000-000000000004", "brown")
 
-	if _, err := service.ReplaceText(context.Background(), artifactID, "A quick brown dog and a slow brown cat", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "A quick brown dog and a slow brown cat", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
 	// The anchored ask and comment above schedule their own settlements, so version 2 can be the
@@ -760,12 +764,12 @@ func TestAnAcceptedSuggestionStaysInsideTheCommentAroundIt(t *testing.T) {
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "The quick brown fox jumps over the lazy dog")
 	commentID := insertAnchoredComment(t, service, artifactID, "quick brown fox jumps")
-	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"},
 	}, "brown", nil); err != nil {
 		t.Fatalf("mark the suggestion: %v", err)
 	}
-	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "red", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if err := joinedAcceptSuggestion(service, artifactID, "s1", "red", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("accept the suggestion: %v", err)
 	}
 	tree := liveTree(t, service, artifactID)
@@ -785,13 +789,13 @@ func TestAcceptingOneOfTwoSuggestionsOverAWordKeepsTheOther(t *testing.T) {
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "The quick brown fox")
 	for _, id := range []string{"earlier", "later"} {
-		if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+		if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 			Kind: MarkSuggestion, ID: id, By: model.Actor{Kind: "session", ID: "s1"},
 		}, "fox", nil); err != nil {
 			t.Fatalf("mark suggestion %s: %v", id, err)
 		}
 	}
-	if err := service.AcceptSuggestion(context.Background(), artifactID, "later", "dog", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if err := joinedAcceptSuggestion(service, artifactID, "later", "dog", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("accept the later suggestion: %v", err)
 	}
 	tree := liveTree(t, service, artifactID)
@@ -814,7 +818,7 @@ type storedAnchor struct {
 func insertAnchoredAsk(t *testing.T, service *Service, artifactID, quote string) string {
 	t.Helper()
 	const id = "00000000-0000-4000-8000-000000000001"
-	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkAsk,
 		ID:   id,
 		By:   model.Actor{Kind: "user", ID: "alice"},
@@ -854,7 +858,7 @@ func insertAnchoredComment(t *testing.T, service *Service, artifactID, quote str
 
 func insertAnchoredCommentWithID(t *testing.T, service *Service, artifactID, id, quote string) string {
 	t.Helper()
-	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkComment,
 		ID:   id,
 		By:   model.Actor{Kind: "user", ID: "alice"},
@@ -1053,10 +1057,10 @@ func TestAcceptSuggestionBesideABlockTheParserAlreadyRefuses(t *testing.T) {
 		t.Fatal("the footnote definition in a callout reads back; the test needs a document the parser refuses")
 	}
 	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
-	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "Body.", nil); err != nil {
+	if _, err := joinedMarkQuote(service, artifactID, spec, "Body.", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if err := joinedAcceptSuggestion(service, artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("accept beside a block the parser already refuses: %v", err)
 	}
 	after := liveTree(t, service, artifactID)
@@ -1089,10 +1093,10 @@ func TestAcceptSuggestionInAFootnoteDefinitionWhoseReferenceIsGone(t *testing.T)
 		t.Fatalf("the unreferenced definition reads back as %#v (%v), want the paragraph and the definition", back, err)
 	}
 	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
-	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "Body.", nil); err != nil {
+	if _, err := joinedMarkQuote(service, artifactID, spec, "Body.", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if err := joinedAcceptSuggestion(service, artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("accept in a footnote definition whose reference is gone: %v", err)
 	}
 	definition := liveTree(t, service, artifactID).Children[1]
@@ -1128,10 +1132,10 @@ func TestAcceptSuggestionLeavesCodeItDoesNotWrite(t *testing.T) {
 			seedServiceText(t, service, artifactID, test.spec)
 			editLiveTree(t, service, artifactID, codeWithMarkedBreak(test.code))
 			spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
-			if _, err := service.MarkQuote(context.Background(), artifactID, spec, test.quote, nil); err != nil {
+			if _, err := joinedMarkQuote(service, artifactID, spec, test.quote, nil); err != nil {
 				t.Fatal(err)
 			}
-			if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", test.with, model.Actor{Kind: "user", ID: "alice"}); err != nil {
+			if err := joinedAcceptSuggestion(service, artifactID, "s1", test.with, model.Actor{Kind: "user", ID: "alice"}); err != nil {
 				t.Fatalf("accept: %v", err)
 			}
 			if _, _, ok := pmdoc.FindMark(liveTree(t, service, artifactID), "proofComment", "c1"); !ok {
@@ -1162,10 +1166,10 @@ func TestAcceptSuggestionLeavesASiblingItemsSpread(t *testing.T) {
 		return tree
 	})
 	spec := MarkSpec{Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"}}
-	if _, err := service.MarkQuote(context.Background(), artifactID, spec, "Body.", nil); err != nil {
+	if _, err := joinedMarkQuote(service, artifactID, spec, "Body.", nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.AcceptSuggestion(context.Background(), artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if err := joinedAcceptSuggestion(service, artifactID, "s1", "Changed.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("accept: %v", err)
 	}
 	if spread := sibling(liveTree(t, service, artifactID)).Attrs["spread"]; spread != true {
@@ -1184,12 +1188,12 @@ func TestWritesBesideALiveRepeatedBlockIDAreTaken(t *testing.T) {
 	alice := model.Actor{Kind: "user", ID: "alice"}
 	accept := func(quote, replacement string) func(*testing.T, *Service, string) error {
 		return func(t *testing.T, service *Service, artifactID string) error {
-			if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+			if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 				Kind: MarkSuggestion, ID: "rep", By: model.Actor{Kind: "session", ID: "s1"},
 			}, quote, nil); err != nil {
 				return err
 			}
-			return service.AcceptSuggestion(context.Background(), artifactID, "rep", replacement, alice)
+			return joinedAcceptSuggestion(service, artifactID, "rep", replacement, alice)
 		}
 	}
 	for _, test := range []struct {
@@ -1208,7 +1212,7 @@ func TestWritesBesideALiveRepeatedBlockIDAreTaken(t *testing.T) {
 			browserMarkWithAttrs(t, service, artifactID, "proofSuggestion", "quick ", pmdoc.Attrs{
 				"id": "ins", "by": "user:bob", "kind": "insert",
 			})
-			return service.RejectSuggestion(context.Background(), artifactID, "ins", alice)
+			return joinedRejectSuggestion(service, artifactID, "ins", alice)
 		}, want: func(before string) string { return strings.Replace(before, "quick brown", "brown", 1) }},
 		{name: "an upload of the document's own text", act: func(t *testing.T, service *Service, artifactID string) error {
 			current, err := service.Text(context.Background(), artifactID)
@@ -1216,7 +1220,7 @@ func TestWritesBesideALiveRepeatedBlockIDAreTaken(t *testing.T) {
 				return err
 			}
 			installCounterIDs(t, "minted")
-			_, err = service.ReplaceText(context.Background(), artifactID, current+"\nAn added line.\n", alice)
+			_, err = joinedReplaceText(service, artifactID, current+"\nAn added line.\n", alice)
 			return err
 		}, want: func(before string) string {
 			// Minted in preorder: the original's paragraph takes minted-1, the copy minted-2.

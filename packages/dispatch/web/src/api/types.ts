@@ -71,6 +71,39 @@ export type {
   CreateProjectInput,
   CreateVersionInput,
   DeliveryCapability,
+  DeliveryColorFacet,
+  DeliveryComponent,
+  DeliveryDailyPoint,
+  DeliveryDeployFlagCounts,
+  DeliveryDeployJobTiming,
+  DeliveryFacet,
+  DeliveryFailingJob,
+  DeliveryFlagCounts,
+  DeliveryJobConclusion,
+  DeliveryJobTiming,
+  DeliveryKpiStatus,
+  DeliveryLeadTimeCell,
+  DeliveryLeadTimeDay,
+  DeliveryLeadTimeTiming,
+  DeliveryMeasures,
+  DeliveryMeasuresResponse,
+  DeliveryPipelineResponse,
+  DeliveryPR,
+  DeliveryRun,
+  DeliveryRunDetail,
+  DeliveryRunJob,
+  DeliveryRunJobDetail,
+  DeliveryRunProduction,
+  DeliverySettings,
+  DeliverySettingsInput,
+  DeliverySpread,
+  DeliveryTargets,
+  DeliveryTimelineResponse,
+  DeliveryTiming,
+  DeliveryTimingCell,
+  DeliveryTimingDay,
+  DeliveryUnownedIssue,
+  DeliveryWaitingPR,
   DispatchEvent,
   DispatchUser,
   DocEditOp,
@@ -93,6 +126,7 @@ export type {
   IssueComponentsInput,
   IssueDetails,
   IssuePriority,
+  IssueProgress,
   IssueRankInput,
   IssueRead,
   IssueReferences,
@@ -105,6 +139,10 @@ export type {
   MessageDeliveryMode,
   MessageEventPayload,
   MessageRead,
+  MyAnswerRow,
+  MyAnswersResponse,
+  OpenAskOwner,
+  ProgressCount,
   Project,
   RepoProject,
   SearchArtifactRef,
@@ -112,6 +150,7 @@ export type {
   SearchResponse,
   SearchResult,
   SearchResultKind,
+  SearchResultsPage,
   Subscriber,
   SubscriptionRemovedEventPayload,
   Suggestion,
@@ -125,9 +164,9 @@ export type {
   Version,
 } from "@legion/contracts";
 
-// Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (the "UI routes" section
-// of the AGENTC-393 overview document). These have no reason to live in the shared
-// @legion/contracts package, which is for Envoy event contracts.
+// Dispatch-UI-only DTOs mirroring the credential broker's JSON verbatim (its UI routes, in the
+// broker's HTTP API reference: https://sjawhar.github.io/legion/broker/reference/api/). These have
+// no reason to live in the shared @legion/contracts package, which is for Envoy event contracts.
 export type CredentialRequestKind = "agent_secret" | "launcher_credential";
 export type CredentialRequestState =
   | "pending"
@@ -137,11 +176,24 @@ export type CredentialRequestState =
   | "cancelled"
   | "revoked";
 
+/** A credential request's two possibly-differing session ids, read independently by the broker:
+ *  `request` is the id the request itself stated (an unsigned override in its body at create
+ *  time), `enrollment` is the id its requesting enrollment stated when it enrolled. Either is
+ *  null when that id was never set; a machine login (`launcher_credential`, which has no request
+ *  row and no requesting enrollment) always answers both null. Optional so an older broker's
+ *  response, with no `session` field at all, resolves the same as a request that names neither
+ *  id. */
+export interface CredentialSession {
+  request: string | null;
+  enrollment: string | null;
+}
+
 export interface CredentialPendingRow {
   record_id: string;
   kind: CredentialRequestKind;
   identifiers: string[]; // secret rule keys, or [hostname] for a launcher_credential
   requested_at: string; // RFC3339
+  session?: CredentialSession;
 }
 export interface CredentialPendingResponse {
   pending: CredentialPendingRow[];
@@ -169,11 +221,14 @@ export interface CredentialRecord {
   identifiers: string[];
   service: string | null;
   reason: string;
-  lifetime_seconds: number;
+  /** How many seconds the grant or credential lasts once approved; null for a grant that lasts
+   *  until its session ends. */
+  lifetime_seconds: number | null;
   rules_version: string;
   expires_at: string;
   requested_at: string;
   decided: CredentialDecisionEvent | null;
+  session?: CredentialSession;
 }
 
 export interface CredentialApproval {
@@ -192,7 +247,8 @@ interface CredentialGrantFields {
   grant_id: string;
   enrollment: CredentialEnrollment;
   names: string[];
-  expires_at: string;
+  /** When it expires; null for a grant that lasts until its session ends. */
+  expires_at: string | null;
   created_at: string;
 }
 /** A grant the policy gave a session the viewer operates without asking: no one approved it, so it
@@ -217,15 +273,18 @@ export interface CredentialGrantsResponse {
   grants: CredentialGrant[];
 }
 
-/** One of the machine logins the viewer approved on `GET /api/v1/machine-logins`: the launcher
- *  credential it minted, for one of the viewer's machines or for a service, not revoked, and
- *  either unexpired or expired with a session it started still running. */
+/** One of the machine logins the viewer may revoke on `GET /api/v1/machine-logins`: the launcher
+ *  credential it minted, for one of the viewer's machines or for a service, whoever approved a
+ *  service's, not revoked, and either unexpired or expired with a session it started still
+ *  running. */
 export interface MachineLogin {
   credential_id: string;
   host: string;
   /** The service a service's login is for (`legion-daemon`), whose sessions are its worker pods;
    *  null for the viewer's own machine. */
   service: string | null;
+  /** The login of the person who approved it. */
+  approved_by: string;
   issued_at: string;
   expires_at: string;
   /** True once `expires_at` has passed: the login starts no more sessions, but sessions it

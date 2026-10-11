@@ -68,17 +68,17 @@ type resolver struct {
 	fn    HelloResolver
 }
 
-func (r *resolver) resolve(bootToken string) (claim.Token, uint64, bool, bool) {
+func (r *resolver) resolve(bootToken string) (claim.Token, uint64, bool, bool, error) {
 	r.calls.Add(1)
 	return r.fn(bootToken)
 }
 
 func defaultResolver() *resolver {
-	return &resolver{fn: func(bootToken string) (claim.Token, uint64, bool, bool) {
+	return &resolver{fn: func(bootToken string) (claim.Token, uint64, bool, bool, error) {
 		if bootToken == testToken {
-			return testClaim, testGeneration, false, true
+			return testClaim, testGeneration, false, true, nil
 		}
-		return "", 0, false, false
+		return "", 0, false, false, nil
 	}}
 }
 

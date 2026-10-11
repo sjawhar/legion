@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Stage 2's gate for the Go coordinator: supervision on tmux, proven against the real things. The
 # Go daemon launches a real Oh My Pi — the pinned build (.omp-pin)
-# with this checkout's plugin in an isolated OMP profile — in panes of its private tmux server,
+# with this checkout's two plugins in an isolated OMP profile — in panes of its private tmux server,
 # against a real Envoy listener and NATS on the host and a real Postgres. Every gate behaviour is
 # one named check that prints what it observed; the first check that does not hold ends the run
 # non-zero, naming it.
@@ -306,11 +306,13 @@ until_true 60 "the Envoy listener to answer /v1/sessions" \
   curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_port/v1/sessions"
 envoy_role() { curl -fsS -H "@$work/envoy-auth-header" "http://127.0.0.1:$envoy_port/v1/roles/$1"; }
 
-# The branch plugin, packed as the release packs it, into this run's own OMP profile.
+# The branch plugins, each packed as the release packs it, into this run's own OMP profile: the
+# Envoy plugin first, then the Legion plugin, whose manifest the daemon's contract gate reads.
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
-manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --profile "$profile" --home "$omp_home" --dest "$work/plugin")
-want_contract=$(jq -r .legion.daemonApiVersion "$root/packages/pi-envoy/package.json")
-echo "plugin: $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile (daemonApiVersion $want_contract)"
+envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
+manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
+want_contract=$(jq -r .legion.daemonApiVersion "$root/packages/pi-legion/package.json")
+echo "plugins: $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile (daemonApiVersion $want_contract)"
 
 (umask 077 && printf 'stage2-operator-%s\n' "$project" >"$work/operator-token")
 cat >"$work/legion.yaml" <<EOF
@@ -340,43 +342,56 @@ EOF
 # ---- the gate refuses first ------------------------------------------------------------------------
 
 begin gate-refuses-another-contract
-cp -p "$work/plugin/package.json" "$work/manifest.orig"
+cp -p "$work/pi-legion/package.json" "$work/manifest.orig"
 bad_contract=$((want_contract + 1))
-jq --argjson v "$bad_contract" '.legion.daemonApiVersion = $v' "$work/manifest.orig" >"$work/plugin/package.json"
-note "the installed manifest now declares daemonApiVersion $bad_contract (the checkout's is $want_contract)"
+jq --argjson v "$bad_contract" '.legion.daemonApiVersion = $v' "$work/manifest.orig" >"$work/pi-legion/package.json"
+note "the installed pi-legion manifest now declares daemonApiVersion $bad_contract (the checkout's is $want_contract)"
 expect_refusal contract "speaks daemon API contract $bad_contract; this daemon requires $want_contract"
-cp -p "$work/manifest.orig" "$work/plugin/package.json"
-cmp -s "$work/manifest.orig" "$work/plugin/package.json" || fail "the installed manifest was not restored"
+cp -p "$work/manifest.orig" "$work/pi-legion/package.json"
+cmp -s "$work/manifest.orig" "$work/pi-legion/package.json" || fail "the installed manifest was not restored"
 pass
 
 begin gate-refuses-a-disabled-plugin
-profile_omp plugin disable @sjawhar/pi-legion-envoy >/dev/null
-note "omp plugin disable: $(profile_omp plugin list --json | jq -c '[.npm[]? | select(.name == "@sjawhar/pi-legion-envoy") | {name, enabled}]')"
+profile_omp plugin disable @sjawhar/pi-legion >/dev/null
+note "omp plugin disable: $(profile_omp plugin list --json | jq -c '[.npm[]? | select(.name == "@sjawhar/pi-legion") | {name, enabled}]')"
 expect_refusal disabled "is installed but not loaded by omp (disabled or unregistered)"
-profile_omp plugin enable @sjawhar/pi-legion-envoy >/dev/null
+profile_omp plugin enable @sjawhar/pi-legion >/dev/null
 profile_omp plugin list --json |
-  jq -e '[.npm[]? | select(.name == "@sjawhar/pi-legion-envoy" and .enabled == true)] | length == 1' >/dev/null ||
+  jq -e '[.npm[]? | select(.name == "@sjawhar/pi-legion" and .enabled == true)] | length == 1' >/dev/null ||
   fail "the plugin did not come back enabled"
+pass
+
+begin gate-refuses-without-the-envoy-plugin
+# The gate's load probe also reads whether pi-envoy publishes the plugin interface pi-legion
+# speaks. The profile with pi-envoy disabled is refused naming the package to install, before any
+# of the skills it ships is reported missing.
+profile_omp plugin disable @sjawhar/pi-envoy >/dev/null
+note "omp plugin disable: $(profile_omp plugin list --json | jq -c '[.npm[]? | select(.name == "@sjawhar/pi-envoy") | {name, enabled}]')"
+expect_refusal no-envoy "but no pi-envoy is: install the @sjawhar/pi-envoy release"
+profile_omp plugin enable @sjawhar/pi-envoy >/dev/null
+profile_omp plugin list --json |
+  jq -e '[.npm[]? | select(.name == "@sjawhar/pi-envoy" and .enabled == true)] | length == 1' >/dev/null ||
+  fail "pi-envoy did not come back enabled"
 pass
 
 begin gate-refuses-a-missing-skill
 # The gate's load probe resolves every skill Legion's prompts load through the pane's own Oh My Pi.
 # The installed plugin without the rubric that its thermonuclear-deep-review agent and the
 # reviewer's role prompt load is refused, naming the skill and both files that load it.
-mv "$work/plugin/dist/skills/thermonuclear-deep-review" "$work/rubric.aside"
+mv "$work/pi-legion/dist/skills/thermonuclear-deep-review" "$work/rubric.aside"
 expect_refusal missing-skill "finds no skill thermonuclear-deep-review (loaded by agents/thermonuclear-deep-review.md, roles/core/reviewer.md)"
-mv "$work/rubric.aside" "$work/plugin/dist/skills/thermonuclear-deep-review"
-[ -f "$work/plugin/dist/skills/thermonuclear-deep-review/SKILL.md" ] || fail "the rubric was not restored"
+mv "$work/rubric.aside" "$work/pi-legion/dist/skills/thermonuclear-deep-review"
+[ -f "$work/pi-legion/dist/skills/thermonuclear-deep-review/SKILL.md" ] || fail "the rubric was not restored"
 pass
 
 begin gate-refuses-a-skill-only-a-role-prompt-loads
 # The gate also resolves the skills the daemon's role prompts load, beside the plugin's own:
 # legion-controller is loaded by roles/controller-root.md alone, so only a gate that reads the
 # daemon's own role prompts can refuse the plugin without it.
-mv "$work/plugin/dist/skills/legion-controller" "$work/controller-skill.aside"
+mv "$work/pi-legion/dist/skills/legion-controller" "$work/controller-skill.aside"
 expect_refusal prompt-only-skill "finds no skill legion-controller (loaded by roles/controller-root.md)"
-mv "$work/controller-skill.aside" "$work/plugin/dist/skills/legion-controller"
-[ -f "$work/plugin/dist/skills/legion-controller/SKILL.md" ] || fail "the legion-controller skill was not restored"
+mv "$work/controller-skill.aside" "$work/pi-legion/dist/skills/legion-controller"
+[ -f "$work/pi-legion/dist/skills/legion-controller/SKILL.md" ] || fail "the legion-controller skill was not restored"
 pass
 
 begin gate-refuses-an-unconfigured-model-role
@@ -400,7 +415,7 @@ pass
 
 begin architect-registers-and-is-ready
 start_daemon
-grep -q '"msg":"boot gate: pi-legion-envoy speaks this daemon' "$daemon_log" ||
+grep -q '"msg":"boot gate: pi-legion speaks this daemon' "$daemon_log" ||
   fail "the daemon served without its gate's pass line in the log"
 expected_omp=$(readlink -f "$omp_bin/omp")
 jq -R -e --arg binary "$expected_omp" '
@@ -550,17 +565,22 @@ note "generation 1's hello on $state/worker-stream.sock: closed with nothing wri
 pass
 
 begin unregistered-agent-retired-at-the-deadline
-# A second daemon whose OMP answers the plugin gate and otherwise never runs the plugin: its pane's
-# process lives and its agent never registers. The gate also asks the load probe for the task agents
-# and skills Legion's prompts name (LEGION_PROMPT_AGENTS, LEGION_PROMPT_SKILLS) and whether each of
-# those agents' models resolves (LEGION_AGENT_MODELS), and the stub answers that they all resolve, as
-# the real Oh My Pi does for this checkout's plugin on the harness's model roles. The deadline is
+# A second daemon whose OMP answers the plugin gate and otherwise never runs the plugins: its pane's
+# process lives and its agent never registers. The stub answers as a pane that loads pi-legion
+# beside pi-envoy does (the installed pi-envoy's manifest owns the file it names). The gate also
+# asks the load probe for the task agents and skills Legion's prompts name (LEGION_PROMPT_AGENTS,
+# LEGION_PROMPT_SKILLS) and whether each of those agents' models resolves (LEGION_AGENT_MODELS),
+# and the stub answers that they all resolve, as the real Oh My Pi does for this checkout's plugins
+# on the harness's model roles. The deadline is
 # worker_boot_timeout_seconds × worker_boot_registration_deadline_intervals = 10 s.
 cat >"$work/stub/omp" <<EOF
 #!/bin/sh
 if [ "\$1" = models ]; then
   echo LEGION_PLUGIN_LOADED=yes >&2
-  echo "LEGION_PLUGIN_LOADED_FROM=file://$work/plugin/dist/legion.js" >&2
+  echo "LEGION_PLUGIN_LOADED_FROM=file://$work/pi-legion/dist/legion.js" >&2
+  echo LEGION_PLUGIN_ENVOY_INTERFACE=1 >&2
+  echo LEGION_ENVOY_INTERFACE=1 >&2
+  echo "LEGION_ENVOY_LOADED_FROM=file://$work/pi-envoy/dist/envoy.js" >&2
   [ -n "\${LEGION_PROMPT_AGENTS:-}" ] && echo LEGION_PROMPT_AGENTS=resolved >&2
   [ -n "\${LEGION_PROMPT_AGENTS:-}" ] && [ -z "\${LEGION_SKIP_AGENT_MODELS:-}" ] && echo LEGION_AGENT_MODELS=resolved >&2
   [ -n "\${LEGION_PROMPT_SKILLS:-}" ] && echo LEGION_PROMPT_SKILLS=resolved >&2

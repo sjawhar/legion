@@ -39,7 +39,7 @@ function inboxRow(overrides: Partial<InboxRow> = {}): InboxRow {
     multiple: false,
     opened_event_id: 1,
     options: [],
-    thread: { edits: [], followers: [], replies: [] },
+    thread: { answers: [], edits: [], followers: [], replies: [] },
     priority: null,
     snoozed_until: null,
     question: "Which approach?",
@@ -441,5 +441,56 @@ test("typing v in the strip's search input never toggles the view", async () => 
   } finally {
     page.restore();
     window.localStorage.removeItem(viewKey);
+  }
+});
+
+test("the Lanes toggle lives in Board view only and persists per signed-in user", async () => {
+  const viewKey = "dispatch.project.issue-view:alice";
+  const lanesKey = "dispatch.project.board-lanes:alice";
+  window.localStorage.setItem(viewKey, "board");
+
+  const first = renderPage("/projects/CORE", undefined, "alice");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    const toggle = await screen.findByRole("button", { name: "Show lanes" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(toggle.classList.contains("min-h-11")).toBe(true);
+    fireEvent.click(toggle);
+    expect(screen.getByRole("button", { name: "Hide lanes" }).getAttribute("aria-pressed")).toBe(
+      "true"
+    );
+    expect(window.localStorage.getItem(lanesKey)).toBe("shown");
+
+    fireEvent.click(screen.getByRole("button", { name: "List" }));
+    expect(screen.queryByRole("button", { name: /lanes/i })).toBeNull();
+  } finally {
+    first.restore();
+  }
+
+  window.localStorage.setItem(viewKey, "board");
+  const second = renderPage("/projects/CORE", undefined, "alice");
+  try {
+    await screen.findByRole("heading", { name: "Core" });
+    expect(
+      (await screen.findByRole("button", { name: "Hide lanes" })).getAttribute("aria-pressed")
+    ).toBe("true");
+  } finally {
+    second.restore();
+  }
+
+  const bob = renderPage("/projects/CORE", undefined, "bob");
+  try {
+    window.localStorage.setItem("dispatch.project.issue-view:bob", "board");
+    await screen.findByRole("heading", { name: "Core" });
+    fireEvent.click(screen.getByRole("button", { name: "Board" }));
+    expect(
+      (await screen.findByRole("button", { name: "Show lanes" })).getAttribute("aria-pressed")
+    ).toBe("false");
+  } finally {
+    bob.restore();
+    window.localStorage.removeItem(viewKey);
+    window.localStorage.removeItem(lanesKey);
+    window.localStorage.removeItem("dispatch.project.issue-view:bob");
+    window.localStorage.removeItem("dispatch.project.board-lanes:bob");
   }
 });

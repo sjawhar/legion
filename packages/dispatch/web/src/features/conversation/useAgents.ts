@@ -22,7 +22,6 @@ export function useAgents(
     queryFn: () => api.listAgents(),
     queryKey: ["agents"],
     refetchInterval: refreshWhileOpen ? 15_000 : false,
-    retry: false,
     staleTime: 10_000,
   });
   const agents = data ?? EMPTY_AGENTS;

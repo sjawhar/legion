@@ -1,0 +1,268 @@
+[
+  {
+    "id": 5480454646,
+    "node_id": "PRR_kwDOUCdo888AAAABRqkZ9g",
+    "user": {
+      "login": "legion-reviewer[bot]",
+      "id": 271566912,
+      "node_id": "BOT_kgDOEC_IQA",
+      "avatar_url": "https://avatars.githubusercontent.com/u/233904402?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/legion-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/legion-reviewer",
+      "followers_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "Review round 1 at head 8848896da05779c592221b1199ee55ddb11cc3f3 (code head b0434efeadd2f1166323c1c2b3792fd51716ea2c). This submission is a COMMENT and decides nothing: the Stage 4b proof driver directed this round to show what the daemon does with a round no review decides; the round's decision follows as its own review on this head when the architect asks for it.\n\nVerified on GitHub, not from handoffs:\n- CI: the handoff head carries 0 runs (`skip-checks: true`); the code head b0434efe has four runs, all success — `fail-on-demand` 38078023553 (push) / 38078027003 (pull_request), `ci` 38078023584 (push) / 38078026989 (pull_request); `commits/b0434efe/check-runs` shows `gate` and `check` completed success; the ruleset on `main` requires only `gate`, non-strict. The daemon's record carries `green` to this head.\n- Threads: none open, no prior review.\n- `E2E (implementer)` and `E2E (tester)` both present with surface, command, observation, head SHA and negative control; the tester re-ran the implementer's commands.\n- Content at this head: `smoke/stage4b-legsmoke-643.md` decodes to the 39 bytes `Stage 4b workflow proof: LEGSMOKE-643.\\n`, sha256 68de74dde438040a338cfcdf6ae8e37f2f809fec23ba6b84b35b4cee936ee549; `compare/main...8848896d` lists the smoke file plus `.legion/LEGSMOKE-643/{plan,implement,test,review}.json`, all added; `.fail-me` → 404 at the head; the smoke file → 404 at `?ref=main`.\n- No contract change census is due: the diff adds no refusal, required field, rename or signature change.\n\nThermonuclear pair ran once at ddf2392e (this head's parent; the diff is identical) as task subagents on the driver's instruction — the diff is docs-only, so the body carries no `Thermo` line. Deep review: 0 findings. Code quality: 2 Minor, both on `.legion/LEGSMOKE-643/implement.json` (a workflow record retro removes before the merge): `filesChanged` omits `plan.json` while its own AC1 `observed` lists it, and `ciRuns` mixes workflow names with round labels. Neither changes behaviour, hides an error or breaks a gate; no inline comment is opened for them.\n\nSecurity: agent-def — the diff adds Legion handoffs that later phases read as authoritative (`.legion/LEGSMOKE-643/plan.json:41-53` names the merge command and the skills each phase loads); every directive matches the shipped skill text rather than relaxing it, the files are authored by the implement and review Apps, they embed no outside-party text (the driver's commit is cited by SHA only, `implement.json:7`), and retro removes them before the merge. No other row's surface is touched (no route/command/tool, credential, untrusted-input path, dependency, action, sandbox or transport change).\n\nFast-follow: none.\n\n<!-- legion: {\"session\":\"01a12735-cb43-73c7-9322-caf8896d3359\",\"phase\":\"review\"} -->",
+    "state": "COMMENTED",
+    "html_url": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480454646",
+    "pull_request_url": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480454646"
+      },
+      "pull_request": { "href": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550" }
+    },
+    "submitted_at": "2026-10-10T19:15:34Z",
+    "commit_id": "8848896da05779c592221b1199ee55ddb11cc3f3"
+  },
+  {
+    "id": 5480463470,
+    "node_id": "PRR_kwDOUCdo888AAAABRqk8bg",
+    "user": {
+      "login": "legion-reviewer[bot]",
+      "id": 271566912,
+      "node_id": "BOT_kgDOEC_IQA",
+      "avatar_url": "https://avatars.githubusercontent.com/u/233904402?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/legion-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/legion-reviewer",
+      "followers_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "Round 1 decision at head 8848896da05779c592221b1199ee55ddb11cc3f3: REQUEST_CHANGES. One change is asked for, in the single inline comment on `smoke/stage4b-legsmoke-643.md`: append the line `Legion proof review round 1 (LEGSMOKE)` below the line already there. The spec's Scope (dispatch://LEGSMOKE-643) permits a review to ask for one more line in that same file; nothing else in the diff is a defect. The verification facts of this round stand as recorded in the COMMENT review 5480454646 on this head (CI green carried from code head b0434efeadd2f1166323c1c2b3792fd51716ea2c, no threads, both E2E lines present, bytes exact, thermonuclear pair 0 deep-review findings and 2 Minor on the removable implement.json).\n\nSecurity: agent-def — the diff adds Legion handoffs that later phases read as authoritative (`.legion/LEGSMOKE-643/plan.json:41-53`); every directive matches the shipped skill text, the files are authored by the implement and review Apps, they embed no outside-party text, and retro removes them before the merge. No other row's surface is touched.\n\nFast-follow: none.\n\n<!-- legion: {\"session\":\"01a12735-cb43-73c7-9322-caf8896d3359\",\"phase\":\"review\"} -->",
+    "state": "CHANGES_REQUESTED",
+    "html_url": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480463470",
+    "pull_request_url": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480463470"
+      },
+      "pull_request": { "href": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550" }
+    },
+    "submitted_at": "2026-10-10T19:17:48Z",
+    "commit_id": "8848896da05779c592221b1199ee55ddb11cc3f3"
+  },
+  {
+    "id": 5480474336,
+    "node_id": "PRR_kwDOUCdo888AAAABRqlm4A",
+    "user": {
+      "login": "legion-implementer[bot]",
+      "id": 271566630,
+      "node_id": "BOT_kgDOEC_HJg",
+      "avatar_url": "https://avatars.githubusercontent.com/u/233904402?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/legion-implementer%5Bbot%5D",
+      "html_url": "https://github.com/apps/legion-implementer",
+      "followers_url": "https://api.github.com/users/legion-implementer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/legion-implementer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/legion-implementer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/legion-implementer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/legion-implementer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/legion-implementer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/legion-implementer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/legion-implementer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/legion-implementer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "",
+    "state": "COMMENTED",
+    "html_url": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480474336",
+    "pull_request_url": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480474336"
+      },
+      "pull_request": { "href": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550" }
+    },
+    "submitted_at": "2026-10-10T19:21:32Z",
+    "commit_id": "a27c9fcab3acf526c3084428771f6dfc1a8703fa"
+  },
+  {
+    "id": 5480496182,
+    "node_id": "PRR_kwDOUCdo888AAAABRqm8Ng",
+    "user": {
+      "login": "sjawhar-agent[bot]",
+      "id": 329211056,
+      "node_id": "BOT_kgDOE59csA",
+      "avatar_url": "https://avatars.githubusercontent.com/u/5074378?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/sjawhar-agent%5Bbot%5D",
+      "html_url": "https://github.com/apps/sjawhar-agent",
+      "followers_url": "https://api.github.com/users/sjawhar-agent%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/sjawhar-agent%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/sjawhar-agent%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/sjawhar-agent%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/sjawhar-agent%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/sjawhar-agent%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/sjawhar-agent%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/sjawhar-agent%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/sjawhar-agent%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "",
+    "state": "COMMENTED",
+    "html_url": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480496182",
+    "pull_request_url": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480496182"
+      },
+      "pull_request": { "href": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550" }
+    },
+    "submitted_at": "2026-10-10T19:27:43Z",
+    "commit_id": "0180f702a9ce2be6a53d43c57cb5847986e56466"
+  },
+  {
+    "id": 5480503153,
+    "node_id": "PRR_kwDOUCdo888AAAABRqnXcQ",
+    "user": {
+      "login": "legion-reviewer[bot]",
+      "id": 271566912,
+      "node_id": "BOT_kgDOEC_IQA",
+      "avatar_url": "https://avatars.githubusercontent.com/u/233904402?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/legion-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/legion-reviewer",
+      "followers_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "",
+    "state": "COMMENTED",
+    "html_url": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480503153",
+    "pull_request_url": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480503153"
+      },
+      "pull_request": { "href": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550" }
+    },
+    "submitted_at": "2026-10-10T19:29:04Z",
+    "commit_id": "0180f702a9ce2be6a53d43c57cb5847986e56466"
+  },
+  {
+    "id": 5480503270,
+    "node_id": "PRR_kwDOUCdo888AAAABRqnX5g",
+    "user": {
+      "login": "legion-reviewer[bot]",
+      "id": 271566912,
+      "node_id": "BOT_kgDOEC_IQA",
+      "avatar_url": "https://avatars.githubusercontent.com/u/233904402?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/legion-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/legion-reviewer",
+      "followers_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "",
+    "state": "COMMENTED",
+    "html_url": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480503270",
+    "pull_request_url": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480503270"
+      },
+      "pull_request": { "href": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550" }
+    },
+    "submitted_at": "2026-10-10T19:29:05Z",
+    "commit_id": "0180f702a9ce2be6a53d43c57cb5847986e56466"
+  },
+  {
+    "id": 5480515292,
+    "node_id": "PRR_kwDOUCdo888AAAABRqoG3A",
+    "user": {
+      "login": "legion-reviewer[bot]",
+      "id": 271566912,
+      "node_id": "BOT_kgDOEC_IQA",
+      "avatar_url": "https://avatars.githubusercontent.com/u/233904402?v=4",
+      "gravatar_id": "",
+      "url": "https://api.github.com/users/legion-reviewer%5Bbot%5D",
+      "html_url": "https://github.com/apps/legion-reviewer",
+      "followers_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/followers",
+      "following_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/following{/other_user}",
+      "gists_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/gists{/gist_id}",
+      "starred_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/starred{/owner}{/repo}",
+      "subscriptions_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/subscriptions",
+      "organizations_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/orgs",
+      "repos_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/repos",
+      "events_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/events{/privacy}",
+      "received_events_url": "https://api.github.com/users/legion-reviewer%5Bbot%5D/received_events",
+      "type": "Bot",
+      "user_view_type": "public",
+      "site_admin": false
+    },
+    "body": "Round 2: APPROVE of head a2cd06879ab30d0e8fbeca82b2970826a2c3b6b3 (code head a27c9fcab3acf526c3084428771f6dfc1a8703fa). No finding stands.\n\nVerified on GitHub, not from handoffs:\n- CI: this handoff head carries 0 runs (`skip-checks: true`); the code head a27c9fca has four runs, all success — `fail-on-demand` 38079385111 (push) / 38079388781 (pull_request), `ci` 38079385082 (push) / 38079388816 (pull_request); `commits/a27c9fca/check-runs` shows `gate` and `check` completed success; the ruleset on `main` requires only `gate`, non-strict. The daemon's record carries `green` to this head.\n- Content: `smoke/stage4b-legsmoke-643.md` decodes to 78 bytes ending at offset 0000116, sha256 35ee7b27d17ca70b7f6814b96b324832b639553d65395f0c78ef0ac12e059166 — equal to `printf` of the two expected lines; line 1 unchanged from round 1, line 2 exactly `Legion proof review round 1 (LEGSMOKE)`. `compare/main...head` lists that file `added 2 0` plus `.legion/LEGSMOKE-643/{plan,implement,test,review}.json`, which retro removes before the merge. `.fail-me` → 404 at the head; the smoke file → 404 at `?ref=main`.\n- `E2E (implementer)` and `E2E (tester)` are both present for the appended-line head with surface, command, observation, head SHA and negative control; the tester re-ran the implementer's round-3 commands.\n- No contract change census is due (no refusal, required field, rename or signature change). No thermonuclear pair this round: the diff is docs-only, so neither pass runs and the body carries no `Thermo` line.\n\nThreads, each read in `gh api graphql` and answered in my own words:\n- PRRT_kwDOUCdo886rG_lj (mine, review 5480463470): \"Verified fixed in a27c9fcab3acf526c3084428771f6dfc1a8703fa … the file is two lines, 78 bytes, sha256 35ee7b27…9166; line 1 is byte-for-byte the round-1 line and line 2 is exactly `Legion proof review round 1 (LEGSMOKE)`, LF-terminated … Nothing stands on this thread; its resolution by the implementer is right.\" Resolved.\n- PRRT_kwDOUCdo886rHEHg (sjawhar-agent[bot], \"is this file change needed?\"): \"Yes, the change is needed: the issue's spec (Dispatch LEGSMOKE-643) asks for exactly this — one new Markdown file under `smoke/` whose line names LEGSMOKE-643 … and its Scope permits the one appended line that review round 1 asked for (line 2) … Not a defect; accepted.\" Named to the implementer by node id; resolved by it as the pull request's author.\n\nRound 1's two Minor notes on `.legion/LEGSMOKE-643/implement.json` are repaired in the implementer's round-3 rewrite (`filesChanged` lists every PR file; runs are recorded per head).\n\nSecurity: agent-def — the diff adds Legion handoffs that later phases read as authoritative (`.legion/LEGSMOKE-643/plan.json:41-53` names the merge command and the skills each phase loads); every directive matches the shipped skill text rather than relaxing it, the files are authored by the implement and review Apps, they embed no outside-party text (the driver's commit is cited by SHA only), and retro removes them before the merge. No other row's surface is touched (no route/command/tool, credential, untrusted-input path, dependency, action, sandbox or transport change).\n\nFast-follow: none.\n\n<!-- legion: {\"session\":\"01a12735-cb43-73c7-9322-caf8896d3359\",\"phase\":\"review\"} -->",
+    "state": "APPROVED",
+    "html_url": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480515292",
+    "pull_request_url": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550",
+    "author_association": "NONE",
+    "_links": {
+      "html": {
+        "href": "https://github.com/sjawhar/legion-smoke/pull/550#pullrequestreview-5480515292"
+      },
+      "pull_request": { "href": "https://api.github.com/repos/sjawhar/legion-smoke/pulls/550" }
+    },
+    "submitted_at": "2026-10-10T19:31:22Z",
+    "commit_id": "a2cd06879ab30d0e8fbeca82b2970826a2c3b6b3"
+  }
+]

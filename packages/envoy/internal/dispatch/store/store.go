@@ -157,7 +157,7 @@ func (s *Store) applyMigration(ctx context.Context, migration pgmigrate.Migratio
 	if applied {
 		return tx.Commit(ctx)
 	}
-	if err := pgmigrate.Exec(ctx, tx, migration); err != nil {
+	if err := pgmigrate.Exec(ctx, tx, migration, s.Pool.Config().BeforeConnect); err != nil {
 		return fmt.Errorf("execute migration: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "insert into schema_migrations (version) values ($1)", migration.Version); err != nil {

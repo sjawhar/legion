@@ -291,7 +291,7 @@ func marksInNodes(nodes []*Node) []MarkRef {
 // the column reads back as it was.
 // The cells it adds spend budget, the caller write's, which refuses (ErrTablePadding) before they
 // are allocated once they pass its limit.
-func PadTables(doc *Node, first, last int, budget *TablePaddingBudget) (*Node, error) {
+func PadTables(doc *Node, first, last int, budget *WriteBudget) (*Node, error) {
 	out := &Node{Type: doc.Type, Attrs: doc.Attrs, Children: append([]*Node(nil), doc.Children...)}
 	for index := first; index <= last && index < len(out.Children); index++ {
 		block := cloneNode(out.Children[index])
@@ -313,7 +313,7 @@ func PadTables(doc *Node, first, last int, budget *TablePaddingBudget) (*Node, e
 	return out, nil
 }
 
-func padTable(table *Node, budget *TablePaddingBudget) error {
+func padTable(table *Node, budget *WriteBudget) error {
 	widths := make([]int, len(table.Children))
 	width := 0
 	var widest *Node

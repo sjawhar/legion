@@ -22,15 +22,17 @@ func importMarker(name string) string {
 }
 
 // A pod's agent runs agentArgv in the repository's working copy. On the pinned binary that argv
-// imports none of the repository's extensions, hooks or TypeScript custom commands, each of which
-// runs its module code at import, while the Legion plugin still loads as the one explicit
-// extension. The control drops --no-extensions and keeps the plugin root, and imports all four:
-// without it, a missing marker could mean a fixture Oh My Pi never looks at.
-func TestTheAgentArgvImportsNoRepositoryExtensionHookOrCommand(t *testing.T) {
+// imports the repository's extensions, hooks and TypeScript custom commands, each of which runs
+// its module code at import, as a tmux pane's agent always has, and the Envoy and Legion plugins
+// load beside them as the two explicit extensions: exactly the five markers, so a plugin root the
+// argv dropped, or a fixture Oh My Pi never looked at, shows as a missing one.
+func TestTheAgentArgvImportsTheRepositorysExtensionsHooksAndCommands(t *testing.T) {
 	omp := testbin.OMP(t)
 	dir := t.TempDir()
-	plugin, repo, home := filepath.Join(dir, "plugin"), filepath.Join(dir, "repo"), filepath.Join(dir, "home")
+	envoy, plugin, repo, home := filepath.Join(dir, "envoy"), filepath.Join(dir, "plugin"), filepath.Join(dir, "repo"), filepath.Join(dir, "home")
 	for path, content := range map[string]string{
+		filepath.Join(envoy, "package.json"):                              `{"name":"envoy-test-plugin","version":"0.0.1","omp":{"extensions":["extension.js"]}}`,
+		filepath.Join(envoy, "extension.js"):                              importMarker("envoy"),
 		filepath.Join(plugin, "package.json"):                             `{"name":"legion-test-plugin","version":"0.0.1","omp":{"extensions":["extension.js"]}}`,
 		filepath.Join(plugin, "extension.js"):                             importMarker("plugin"),
 		filepath.Join(repo, ".omp", "extensions", "repository.ts"):        importMarker("extension"),
@@ -68,47 +70,37 @@ func TestTheAgentArgvImportsNoRepositoryExtensionHookOrCommand(t *testing.T) {
 	environ := []string{"HOME=" + home, "OMP_PROFILE=legion", "PATH=/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED=true"}
 
 	pod := launch{prompt: "The test's system prompt."}.agentArgv([]string{omp})
-	root := slices.Index(pod, legionPlugin)
-	if root < 0 {
-		t.Fatalf("agentArgv %q names no %s", pod, legionPlugin)
+	for _, root := range []struct{ image, test string }{{envoyPlugin, envoy}, {legionPlugin, plugin}} {
+		at := slices.Index(pod, root.image)
+		if at < 0 {
+			t.Fatalf("agentArgv %q names no %s", pod, root.image)
+		}
+		pod[at] = root.test
 	}
-	pod[root] = plugin
-	control := slices.DeleteFunc(slices.Clone(pod), func(arg string) bool { return arg == "--no-extensions" })
 
-	for _, testCase := range []struct {
-		name string
-		argv []string
-		want []string
-	}{
-		{"the pod's argv", pod, []string{"plugin"}},
-		{"the discovery-on control", control, []string{"command", "extension", "hook", "plugin"}},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			marks := t.TempDir()
-			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-			defer cancel()
-			cmd := exec.CommandContext(ctx, testCase.argv[0], testCase.argv[1:]...)
-			cmd.Dir = repo
-			cmd.Env = append(slices.Clone(environ), "LEGION_TEST_MARKS="+marks)
-			// One RPC request, then end of input: Oh My Pi answers it after its session has loaded
-			// every extension, hook and command, and exits when stdin closes.
-			cmd.Stdin = strings.NewReader(`{"type":"get_state","id":"1"}` + "\n")
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("omp %s: %v\n%s", strings.Join(testCase.argv[1:], " "), err, out)
-			}
-			entries, err := os.ReadDir(marks)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var imported []string
-			for _, entry := range entries {
-				imported = append(imported, entry.Name())
-			}
-			slices.Sort(imported)
-			if !slices.Equal(imported, testCase.want) {
-				t.Errorf("omp %s imported %q, want %q", strings.Join(testCase.argv[1:], " "), imported, testCase.want)
-			}
-		})
+	marks := t.TempDir()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, pod[0], pod[1:]...)
+	cmd.Dir = repo
+	cmd.Env = append(slices.Clone(environ), "LEGION_TEST_MARKS="+marks)
+	// One RPC request, then end of input: Oh My Pi answers it after its session has loaded every
+	// extension, hook and command, and exits when stdin closes.
+	cmd.Stdin = strings.NewReader(`{"type":"get_state","id":"1"}` + "\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("omp %s: %v\n%s", strings.Join(pod[1:], " "), err, out)
+	}
+	entries, err := os.ReadDir(marks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var imported []string
+	for _, entry := range entries {
+		imported = append(imported, entry.Name())
+	}
+	slices.Sort(imported)
+	if want := []string{"command", "envoy", "extension", "hook", "plugin"}; !slices.Equal(imported, want) {
+		t.Errorf("omp %s imported %q, want %q", strings.Join(pod[1:], " "), imported, want)
 	}
 }

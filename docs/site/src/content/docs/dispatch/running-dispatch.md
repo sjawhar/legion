@@ -2,7 +2,7 @@
 title: Running Dispatch
 description: What the Dispatch server needs, how to run it, its health check, and its migrations.
 sidebar:
-  order: 7
+  order: 8
 ---
 
 Dispatch is one Go program. It serves the web app, the HTTP API, live documents, and Google
@@ -37,14 +37,24 @@ and refuses every `DISPATCH_SIGNIN_*` setting. Serve Dispatch over HTTPS.
 
 ## Running it on your machine
 
-From a checkout of this repository, with Docker, Bun, and Go installed:
+To see Dispatch working, seeded with example issues, asks, agents and a broadcast and opened
+already signed in, run `bun run dispatch:local` at the repository root. It starts Dispatch beside
+stand-ins for an Envoy listener and GitHub, empties and reseeds its database every time it starts,
+and prints the address to open; `packages/dispatch/README.md` ("Local instance") covers it.
+
+To run Dispatch on a database that keeps what you put in it, from a checkout of this repository,
+with Docker, Bun, and Go installed:
 
 1. Start a Postgres:
 
    ```sh
-   docker run -d --name dispatch-pg -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch \
-     -p 127.0.0.1:55432:5432 postgres:16
+   packages/envoy/scripts/dev-postgres.sh
    ```
+
+   It runs a container named `dispatch-pg` on `127.0.0.1:55432` from a pgvector image, which
+   Dispatch's migrations need, and starts or reuses that container when it is already there. A
+   `dispatch-pg` made from another image is refused, with the commands that move its data onto the
+   right one.
 
 2. Build the web app:
 
@@ -87,6 +97,18 @@ Sign in, then open **Settings**:
   `DISPATCH_DEFAULT_PROJECT` catches repositories with no mapping; that project must already exist.
 - **Architecture sources**: point a project at a repository branch holding its architecture
   model. Saving checks that the GitHub App can read it.
+- **Delivery timeline**: name the repository that deploys, its deploy and pull-request-check
+  workflows, the job whose success is a production deploy, and whose merged pull requests count.
+  Three job names are optional and feed the [Pipeline](/legion/dispatch/delivery/#pipeline) page:
+  the deploy workflow's staging end-to-end job and staging deploy job (each left empty when the
+  pipeline has no such step, and the page then omits its card), and the PR-checks workflow's
+  roll-up job, which only reports the other jobs' result and which the failing-jobs table leaves
+  out. Saving checks that the GitHub App can read the repository. Until it is set, the
+  [Delivery](/legion/dispatch/delivery/) page shows the same form. Every save, of any field,
+  starts the delivery import over: what is already stored stays on both pages, the freshness line
+  reads "never checked" until the next five-minute pass, that pass lists the last 28 days from
+  GitHub again, and the re-listing of each run's branch and event walks those 28 days a day per
+  pass, about 28 passes in all.
 - **Agent tokens**: make a token for each agent you run.
   [Dispatch for agents](/legion/dispatch/for-agents/#connecting-an-agent) covers the rest.
 
@@ -95,12 +117,16 @@ Sign in, then open **Settings**:
 `GET /healthz` needs no credential. It answers `200` when the server is healthy:
 
 ```json
-{"ok":true,"db":true,"nats":null,"commit":null,"schema_version":63}
+{"ok":true,"db":true,"nats":null,"files":null,"commit":null,"schema_version":63}
 ```
 
 - `db` is whether Postgres answered within two seconds. When it does not, the answer is `503` with
   `db: false`.
 - `nats` is whether NATS is connected, or `null` when NATS is turned off.
+- `files` is whether the file store's bucket (`DISPATCH_FILE_STORE_BUCKET`) answered within two
+  seconds, or `null` when no bucket is set. It never decides `ok` or the status: a bucket that
+  stops answering is `200` with `files: false`, so an outage of the bucket fails uploads and
+  downloads and nothing else; a check that wants the bucket asserts `files: true` itself.
 - `commit` is the source commit the image was built from, or `null` in a build that was not
   stamped.
 - `schema_version` is the newest database migration applied.
@@ -119,7 +145,9 @@ DATABASE_URL='<your database URL>' envoy-dispatch census
 ```
 
 It reads the database without changing it, and reports each pending migration's tables, their
-sizes, and any long-running transactions in the way.
+sizes, and any long-running transactions in the way. Run before a deploy, it is a gate: a census
+that refuses, such as one counting rows a migration would rewrite, should fail the deploy before
+any server moves. Dispatch repairs rows it already holds in code, at start, for that reason.
 
 ## The HTTP API
 

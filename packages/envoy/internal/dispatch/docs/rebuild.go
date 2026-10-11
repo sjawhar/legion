@@ -28,12 +28,17 @@ type RebuildReport struct {
 //
 // Every refusal comes before the first write: a room resident in this server, a history that
 // loads, a closed issue (for supplied markdown, which changes the document), and markdown that is
-// not a Proof document or drops an open ask block. Supplied markdown that differs from the latest
-// version is a document change, so the same transaction writes its version, which moves the open
-// approval request to it (writeVersionTx, MoveApprovalAsk); the VersionResult is what the caller's
-// artifact.version event names. A failure anywhere rolls the whole rebuild back with the
-// transaction. The room refuses loads until that transaction ends (Ledger.holdRebuild): a load
-// before the commit would read the old history, and a second rebuild would preflight against it.
+// not a Proof document or drops an open ask block. Supplied markdown is caller text: it is parsed
+// as an upload is, and its rendering is weighed as a new document's is (SeedText). The latest
+// version is the server's own rendering of the document, read back as every stored rendering is
+// (pmdoc.ParseRendering), so a document whose version is past what one write may make - stored
+// before that bound, or grown past it by browser edits - still rebuilds. Supplied markdown that
+// differs from the latest version is a document change, so the same transaction writes its
+// version, which moves the open approval request to it (writeVersionTx, MoveApprovalAsk); the
+// VersionResult is what the caller's artifact.version event names. A failure anywhere rolls the
+// whole rebuild back with the transaction. The room refuses loads until that transaction ends
+// (Ledger.holdRebuild): a load before the commit would read the old history, and a second rebuild
+// would preflight against it.
 func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdown *string, actor model.Actor) (RebuildReport, VersionResult, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -46,7 +51,10 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	// A room still loading is not resident yet. It reads the same history the check below reads,
 	// so it can only fail on a history that cannot load, and its successor load is refused above.
 	// A room stays resident for roomIdleTimeout after its last editor leaves, and ygo's idle
-	// sweep that then evicts it runs every 30 seconds, so the refusal names two minutes.
+	// sweep that then evicts it runs every 30 seconds, so the refusal names two minutes. A load
+	// that starts after this check reads the history this transaction has not yet replaced and
+	// fails on it, since it cannot load, or, once the rebuild commits, reads the rebuilt head:
+	// versions only increase, so its room holds the rebuilt update and none it would mistake for it.
 	if s.srv.GetDoc(artifactID) != nil {
 		return RebuildReport{}, VersionResult{}, fmt.Errorf("%w: document %s is live in this server; close its editors and retry two minutes later, or replace it from markdown instead", ErrDocumentLive, artifactID)
 	}
@@ -69,14 +77,15 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	source := latest.markdown
-	if markdown != nil {
+	var tree *pmdoc.Node
+	if markdown == nil {
+		tree, err = uploadedInput(pmdoc.ParseRendering(latest.markdown))
+	} else {
 		if !open {
 			return RebuildReport{}, VersionResult{}, ErrIssueClosed
 		}
-		source = *markdown
+		tree, err = parseInput(*markdown)
 	}
-	tree, err := parseInput(source)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
@@ -86,9 +95,14 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err := s.refuseDroppedAskBlocks(ctx, artifactID, tree); err != nil {
 		return RebuildReport{}, VersionResult{}, &ErrInvalidAskBlock{Reason: err}
 	}
-	canonical, err := renderTree(tree)
+	canonical, offsets, err := renderTreeWithOffsets(tree)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
+	}
+	if markdown != nil {
+		if err := weighRendering("", canonical); err != nil {
+			return RebuildReport{}, VersionResult{}, err
+		}
 	}
 	seed, err := encodeDocumentTree(tree)
 	if err != nil {
@@ -104,12 +118,14 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if markdown == nil || canonical == latest.markdown {
 		return report, VersionResult{Version: latest.Version}, nil
 	}
-	state := s.room(artifactID)
-	state.mu.Lock()
-	capture, authors := captureAuthors(state, nil, &actor)
-	state.mu.Unlock()
-	written, err := s.writeVersionTx(ctx, tx, artifactID, canonical, tree, actor, &versionWrite{
-		authors: authors,
+	// RebuildTx holds the document's advisory lock until this transaction ends, so the pending
+	// authors read here are the ones the version's commit deletes.
+	capture, err := s.capturePendingAuthors(ctx, tx, artifactID, nil, &actor)
+	if err != nil {
+		return RebuildReport{}, VersionResult{}, err
+	}
+	written, err := s.writeVersionTx(ctx, tx, artifactID, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor, &versionWrite{
+		authors: actorSlice(capture.authors),
 		capture: &capture,
 	})
 	if err != nil {

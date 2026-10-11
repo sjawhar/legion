@@ -1,0 +1,15 @@
+# One query per line for search-smoke.sh; blank lines and lines starting with # are skipped.
+# The first ten are TestSearchLatencyOnCorpus's terms (internal/dispatch/api/search_bench_test.go).
+dispatch
+search
+anchor
+astrolabe
+"merge queue" -daemon
+legion
+proof
+document
+smoke
+token
+merge queue
+LEGION-386
+dispatch_doc_edit

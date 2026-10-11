@@ -7,12 +7,14 @@ import {
   DELIVERY_DUPLICATE_WINDOW_MS,
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_SCHEMA_CLOSE_REASON,
+  ISSUE_TITLE_MAX,
   MAX_BROADCAST_RECIPIENTS,
   MAX_ISSUE_BLOCKERS,
   MAX_ISSUE_PAGE_LIMIT,
   RECEIPT_TIMEOUT_CAUSE,
+  SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
-import { SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
+import { SEARCH_KIND_DEPTH, SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
 import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
@@ -105,13 +107,25 @@ const ReceiptTimeoutCause = ${JSON.stringify(RECEIPT_TIMEOUT_CAUSE)}
 const MaxBroadcastRecipients = ${MAX_BROADCAST_RECIPIENTS}
 
 // SearchQueryMax is the longest GET /api/v1/search query, in UTF-16 units. Generated from
-// SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the dispatch_search tool's
-// cannot drift apart.
+// SEARCH_QUERY_MAX in packages/contracts so the server's refusal and the \`dispatch search\`
+// command's cannot drift apart.
 const SearchQueryMax = ${SEARCH_QUERY_MAX}
 
 // SearchQueryHint follows a refusal over SearchQueryMax, saying what to send instead. Generated
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = ${JSON.stringify(SEARCH_QUERY_HINT)}
+
+// SearchKindDepth is how many of its best matches each kind of content lists before
+// GET /api/v1/search merges the kinds; a kind's later matches count in the total and no offset
+// returns them. Generated from SEARCH_KIND_DEPTH in packages/contracts so the server's cut and the
+// \`dispatch search\` command's account of it cannot drift apart.
+const SearchKindDepth = ${SEARCH_KIND_DEPTH}
+
+// SearchDegradedEmbedderUnavailable is GET /api/v1/search's SearchResponse.degraded value when
+// meaning search could not run for this request and search fell back to keyword-only ranking.
+// Generated from SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE in packages/contracts so the string
+// Dispatch writes and the string search-answer.ts compares against cannot drift apart.
+const SearchDegradedEmbedderUnavailable = ${JSON.stringify(SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE)}
 
 // MaxIssueBlockers bounds blocked_by input before deduplication. Generated from
 // MAX_ISSUE_BLOCKERS in packages/contracts so the server and tool schemas share the limit.
@@ -120,9 +134,14 @@ const MaxIssueBlockers = ${MAX_ISSUE_BLOCKERS}
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
 // MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds
-// and the dispatch_issues tool's cannot drift apart.
+// and the \`dispatch issues\` command's cannot drift apart.
 const MaxIssuePageLimit = ${MAX_ISSUE_PAGE_LIMIT}
 const DefaultIssuePageLimit = ${DEFAULT_ISSUE_PAGE_LIMIT}
+
+// IssueTitleMax is the longest issue title, in UTF-16 units, that POST /api/v1/issues and
+// PATCH /api/v1/issues/{key} accept. Generated from ISSUE_TITLE_MAX in packages/contracts so the
+// server's refusal and the dashboard's title fields cannot drift apart.
+const IssueTitleMax = ${ISSUE_TITLE_MAX}
 
 // DocumentSchemaCloseCode and DocumentSchemaCloseReason close a document websocket whose room is
 // outside the Proof schema, before any sync. Generated from DOCUMENT_SCHEMA_CLOSE_CODE and

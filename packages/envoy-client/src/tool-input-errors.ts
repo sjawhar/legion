@@ -1,9 +1,12 @@
-import { dispatchToolSchema, dispatchToolSpecs, zodSchemaApi } from "@legion/contracts";
-import { z } from "zod";
+import { dispatchToolSpecs } from "@legion/contracts";
+import type { z } from "zod";
+import { commandFlags, commandLine, commandName, fieldFlag } from "./dispatch-command";
 
 /**
  * A tool call refused before any request left the process. `problems` lists every
- * defect found in one pass so the caller fixes them all with a single retry.
+ * defect found in one pass so the caller fixes them all with a single retry. A Dispatch tool is
+ * named as its `dispatch` command (`dispatch message was not called`), followed by the command's
+ * flags and an example; an Envoy tool by its own name (`envoy_send was not called`).
  */
 export class ToolInputError extends Error {
   readonly tool: string;
@@ -11,12 +14,18 @@ export class ToolInputError extends Error {
 
   constructor(tool: string, problems: readonly string[]) {
     const count = problems.length;
-    const help = dispatchInputHelp(tool);
+    const cli = isDispatchTool(tool);
+    const help = cli
+      ? [
+          `Allowed flags: ${commandFlags(tool).join(", ")}`,
+          `Example: ${commandLine(tool, exampleFor(tool))}`,
+        ]
+      : [];
     super(
       [
-        `${tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
+        `${cli ? `dispatch ${commandName(tool)}` : tool} was not called: ${count} problem${count === 1 ? "" : "s"}`,
         ...problems.map((problem) => `- ${problem}`),
-        ...(help === undefined ? [] : help.map((line) => `- ${line}`)),
+        ...help.map((line) => `- ${line}`),
       ].join("\n")
     );
     this.name = "ToolInputError";
@@ -25,13 +34,13 @@ export class ToolInputError extends Error {
   }
 }
 
-/** The keys and a schema-valid invocation shown after a Dispatch input refusal. */
-function dispatchInputHelp(tool: string): readonly string[] | undefined {
+function isDispatchTool(tool: string): boolean {
+  return dispatchToolSpecs.some((spec) => spec.name === tool);
+}
+
+function exampleFor(tool: string): Record<string, unknown> {
   const spec = dispatchToolSpecs.find((candidate) => candidate.name === tool);
-  if (spec === undefined) return undefined;
-  const schema = dispatchToolSchema(spec, zodSchemaApi(z), { strict: true });
-  const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ") || "none";
-  return [`Allowed keys: ${allowed}`, `Example: ${tool}(${JSON.stringify(spec.example)})`];
+  return { ...spec?.example };
 }
 
 /** Strips optional/nullable/default wrappers so the node's own `def.type` is visible. */
@@ -115,16 +124,43 @@ function describeExpected(expected: string, schema: z.ZodType | undefined): stri
 }
 
 /**
+ * How an issue path is written. As JSON it is the dotted path (`options.1.label`); as a command
+ * line its first segment is the flag that sets the field and the rest follows it, so
+ * `options.1.label` reads `--option[1] label` and `ops.0.find` reads `--ops-json[0] find`.
+ */
+function pathText(path: readonly PropertyKey[], cliTool: string | undefined): string {
+  const [head, ...rest] = path.map(String);
+  if (cliTool === undefined || head === undefined) return path.map(String).join(".");
+  let flag = fieldFlag(cliTool, head);
+  let index = 0;
+  for (; index < rest.length && /^\d+$/.test(rest[index] as string); index++) {
+    flag += `[${rest[index]}]`;
+  }
+  const tail = rest
+    .slice(index)
+    .map((segment) => (/^\d+$/.test(segment) ? `[${segment}]` : `.${segment}`))
+    .join("")
+    .replace(/^\./, "");
+  return tail === "" ? flag : `${flag} ${tail}`;
+}
+
+/**
  * One line per zod issue, worded for the model that made the call: what is missing,
  * what is unknown (and what would be accepted), what the allowed values are, and how far
  * over a cap a value is. `schema` is the strict object schema that produced the issues;
  * it supplies the allowed top-level keys and nested object shapes. Parse with
- * `{ reportInput: true }` so string lengths and rejected values are available.
+ * `{ reportInput: true }` so string lengths and rejected values are available. For a Dispatch
+ * tool, each field is named by the `dispatch` flag that sets it; for an Envoy tool, by its key.
  */
-export function formatZodIssues(issues: readonly z.core.$ZodIssue[], schema: z.ZodType): string[] {
+export function formatZodIssues(
+  issues: readonly z.core.$ZodIssue[],
+  schema: z.ZodType,
+  tool: string
+): string[] {
+  const cliTool = isDispatchTool(tool) ? tool : undefined;
   const allowed = Object.keys(shapeOf(schema) ?? {}).join(", ");
   return issues.flatMap((issue) => {
-    const path = issue.path.map(String).join(".");
+    const path = pathText(issue.path, cliTool);
     switch (issue.code) {
       case "invalid_type":
         return issue.input === undefined
@@ -133,6 +169,9 @@ export function formatZodIssues(issues: readonly z.core.$ZodIssue[], schema: z.Z
               `${path} must be ${describeExpected(issue.expected, schemaAt(schema, issue.path))}, not ${describeInput(issue.input)}`,
             ];
       case "unrecognized_keys": {
+        if (cliTool !== undefined && issue.path.length === 0) {
+          return issue.keys.map((key) => `unknown flag ${fieldFlag(cliTool, key)}`);
+        }
         // A nested object's allowed keys are its own: the tool's top-level keys would send a
         // model that mistyped a document-edit operation's key back with the same operation.
         const here = Object.keys(shapeOf(schemaAt(schema, issue.path)) ?? {}).join(", ") || allowed;

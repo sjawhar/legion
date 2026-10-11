@@ -8,6 +8,7 @@ import {
   dispatchToolSpecs,
   type IssueComponents,
   SEARCH_QUERY_MAX,
+  type SearchResult,
   type TablePosition,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -22,6 +23,7 @@ import {
 import { DispatchClient } from "../dispatch-http";
 import { dispatchFollowNotice } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
+import { fakeSearchResponse } from "./fake-search-response";
 
 function response(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -29,6 +31,7 @@ function response(body: unknown, status = 200): Response {
     headers: { "Content-Type": "application/json" },
   });
 }
+
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
   const promise = new Promise<T>((resolvePromise) => {
@@ -487,18 +490,18 @@ describe("executeDispatchTool", () => {
     expect(replying).toBeInstanceOf(ToolInputError);
     if (!(replying instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(replying.problems).toEqual([
-      "body is required (string)",
-      'unknown field "message"; allowed: issue, body, in_reply_to',
+      "--body is required (string)",
+      "unknown flag --message",
       "in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
     ]);
     expect(replying.message).toBe(
       [
-        "dispatch_message was not called: 3 problems",
-        "- body is required (string)",
-        '- unknown field "message"; allowed: issue, body, in_reply_to',
+        "dispatch message was not called: 3 problems",
+        "- --body is required (string)",
+        "- unknown flag --message",
         "- in_reply_to must be a full message id (uuid) or a dispatch://KEY/message/<id> reference",
-        "- Allowed keys: issue, body, in_reply_to",
-        '- Example: dispatch_message({"issue":"DSP-1","body":"Implementation started."})',
+        "- Allowed flags: --issue, --issue-file, --body, --body-file, --in-reply-to, --in-reply-to-file, --image, --clear-images, --help, --dry-run",
+        "- Example: dispatch message --issue DSP-1 --body 'Implementation started.'",
       ].join("\n")
     );
 
@@ -508,8 +511,8 @@ describe("executeDispatchTool", () => {
     if (!(posting instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(posting.problems).toEqual([
       "issue is required; supply issue or set LEGION_ISSUE",
-      "body is required (string)",
-      'unknown field "message"; allowed: issue, body, in_reply_to',
+      "--body is required (string)",
+      "unknown flag --message",
     ]);
   });
 
@@ -527,9 +530,9 @@ describe("executeDispatchTool", () => {
     );
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
-      "options.0 must be an object {label, description?}, not a string",
-      "options.1 must be an object {label, description?}, not a string",
-      'unknown field "custom"; allowed: issue, project, artifact, ref, question, options, multiple, urgency, anchor',
+      "--option[0] must be an object {label, description?}, not a string",
+      "--option[1] must be an object {label, description?}, not a string",
+      "unknown flag --custom",
     ]);
   });
 
@@ -559,7 +562,7 @@ describe("executeDispatchTool", () => {
     );
     if (!(failure instanceof ToolInputError)) throw new Error("expected ToolInputError");
     expect(failure.problems).toEqual([
-      "body is 1 characters over the 2000-character limit (2001/2000)",
+      "--body is 1 characters over the 2000-character limit (2001/2000)",
       "artifact is required when quote is supplied",
       "reply_to and reply_to_ask cannot both be set",
     ]);
@@ -615,7 +618,11 @@ describe("executeDispatchTool", () => {
       "multiple",
       "urgency",
       "anchor",
+      "images",
     ] as const;
+    const pictureDirectory = mkdtempSync(path.join(os.tmpdir(), "dispatch-ask-images-"));
+    const picture = path.join(pictureDirectory, "shot.png");
+    writeFileSync(picture, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]));
     type Field = (typeof fields)[number];
     interface ArgumentCase {
       readonly args: Record<string, unknown>;
@@ -678,6 +685,13 @@ describe("executeDispatchTool", () => {
             quote: "The passage",
           }),
       },
+      images: {
+        args: { issue: "DSP-41", question: "Look at this", images: [picture] },
+        assert: ({ body }) =>
+          expect(body.question).toBe(
+            "Look at this\n\n![shot.png](dispatch://DSP-41/artifact/shot-png@v1)"
+          ),
+      },
     };
     const askSpec = dispatchToolSpecs.find((spec) => spec.name === "dispatch_ask");
     if (askSpec === undefined) throw new Error("dispatch_ask spec is missing");
@@ -706,6 +720,9 @@ describe("executeDispatchTool", () => {
           });
         }
         if (/^\/api\/v1\/projects\/[^/]+\/artifacts$/.test(target.pathname)) return response([]);
+        if (target.pathname === "/api/v1/issues/DSP-41/artifacts" && init?.method === "POST") {
+          return response({ artifact: { slug: "shot-png" }, version: { number: 1 } });
+        }
         if (target.pathname.endsWith("/asks")) {
           const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
           request = { body, path: target.pathname };
@@ -723,6 +740,7 @@ describe("executeDispatchTool", () => {
       if (request === undefined) throw new Error(`dispatch_ask did not create an ask for ${field}`);
       testCase.assert(request);
     }
+    rmSync(pictureDirectory, { recursive: true, force: true });
   });
   test("prefills an omitted issue from a native LEGION_ISSUE without resolving cwd repo", async () => {
     const requests: string[] = [];
@@ -874,7 +892,7 @@ describe("executeDispatchTool", () => {
     expect(reply.details).toMatchObject({ message: "reply-1", in_reply_to: parent, posted: true });
     expect(reply.text).toBe(
       `Replied to message ${parent} with message reply-1. ` +
-        `dispatch_read({message: "${parent}"}) reads the conversation back.`
+        `dispatch read --message ${parent} reads the conversation back.`
     );
     expect(onIssue.details).toMatchObject({ issue: "LEGION-3", message: "message-9" });
     expect(byRef.details).toMatchObject({ issue: "LEGION-3", message: "message-9" });
@@ -917,7 +935,7 @@ describe("executeDispatchTool", () => {
     });
     expect(result.text).toBe(
       `Replied to message ${parent} with message reply-2, a follow-up threaded under your ` +
-        `reply reply-1. dispatch_read({message: "${parent}"}) reads the conversation back.`
+        `reply reply-1. dispatch read --message ${parent} reads the conversation back.`
     );
   });
 
@@ -1148,7 +1166,7 @@ describe("executeDispatchTool", () => {
   });
 
   test("dispatch_search renders results with absolute links", async () => {
-    const results = [
+    const results: SearchResult[] = [
       {
         kind: "document",
         owner: { kind: "issue", key: "LEGION-2", title: "Astrolabe", status: "triage" },
@@ -1188,7 +1206,7 @@ describe("executeDispatchTool", () => {
       requests.push(target.pathname + target.search);
       if (target.pathname !== "/api/v1/search")
         throw new Error(`unexpected request: ${target.pathname}`);
-      return response({ results, took_ms: 12 });
+      return response(fakeSearchResponse(results, { took_ms: 12 }));
     };
 
     const result = await executeDispatchTool({
@@ -1210,9 +1228,96 @@ describe("executeDispatchTool", () => {
         "dispatch://CORE/artifact/navigation-design [document] Navigation design - comment: Comment on **astrolabe** -> http://dispatch.test/projects/CORE/documents/navigation-design?comment=comment-3",
       ].join("\n")
     );
-    expect(result.details).toEqual({ query: "astrolabe", results });
+    expect(result.details).toEqual({
+      query: "astrolabe",
+      results,
+      total: 3,
+      reachable: 3,
+      offset: 0,
+      limit: 20,
+    });
     expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual(["/api/v1/search?q=astrolabe"]);
+  });
+
+  test("dispatch_search names the page, the next offset and the rows no offset reaches", async () => {
+    const hit = (id: string): SearchResult => ({
+      kind: "comment",
+      owner: { kind: "issue", key: "LEGION-2", title: "Astrolabe", status: "triage" },
+      id,
+      snippet: "<mark>astrolabe</mark>",
+      rank: 0.01,
+      href: `/issues/LEGION-2/comments/${id}`,
+    });
+    const requests: string[] = [];
+    const answers = [
+      fakeSearchResponse([hit("c-21"), hit("c-22")], {
+        total: 250,
+        reachable: 120,
+        limit: 2,
+        offset: 20,
+        took_ms: 9,
+      }),
+      fakeSearchResponse([], { total: 250, reachable: 120, limit: 2, offset: 120, took_ms: 4 }),
+    ];
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push(target.pathname + target.search);
+      return response(answers[requests.length - 1]);
+    };
+    const search = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_search",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+    const cut =
+      "Each kind lists only its best 100 matches, so 120 of the 250 can be paged to; narrow the query or name a project to reach the rest.";
+
+    const page = await search({ query: "astrolabe", limit: 2, offset: 20 });
+    expect(page.text).toBe(
+      [
+        '2 results for "astrolabe" (showing 21-22 of 250, 9 ms)',
+        cut,
+        "LEGION-2 [triage] Astrolabe - comment: **astrolabe** -> http://dispatch.test/issues/LEGION-2/comments/c-21",
+        "LEGION-2 [triage] Astrolabe - comment: **astrolabe** -> http://dispatch.test/issues/LEGION-2/comments/c-22",
+        "Next page: offset 22.",
+      ].join("\n")
+    );
+    const past = await search({ query: "astrolabe", limit: 2, offset: 120 });
+    expect(past.text).toBe(
+      [
+        'No results for "astrolabe" at offset 120: it matches 250, and the pages reach the first 120.',
+        cut,
+      ].join("\n")
+    );
+    expect(requests).toEqual([
+      "/api/v1/search?q=astrolabe&limit=2&offset=20",
+      "/api/v1/search?q=astrolabe&limit=2&offset=120",
+    ]);
+  });
+
+  test("dispatch_search refuses a later page from a Dispatch that predates paging", async () => {
+    const fetchImpl = async (_url: RequestInfo | URL): Promise<Response> =>
+      response({ results: [], took_ms: 3 });
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_search",
+        args: { query: "astrolabe", offset: 20 },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      })
+    ).rejects.toThrow("it predates search paging and ignored offset 20");
   });
 
   test("dispatch_search reports no results for an accepted stop-word query", async () => {
@@ -1220,7 +1325,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target.pathname + target.search);
-      return response({ results: [], took_ms: 0 });
+      return response(fakeSearchResponse([]));
     };
 
     const result = await executeDispatchTool({
@@ -1235,7 +1340,14 @@ describe("executeDispatchTool", () => {
     });
 
     expect(result.text).toBe('No results for "the".');
-    expect(result.details).toEqual({ query: "the", results: [] });
+    expect(result.details).toEqual({
+      query: "the",
+      results: [],
+      total: 0,
+      reachable: 0,
+      offset: 0,
+      limit: 20,
+    });
     expect(requests).toEqual(["/api/v1/search?q=the"]);
   });
 
@@ -1281,7 +1393,7 @@ describe("executeDispatchTool", () => {
         fetchImpl,
       })
     ).rejects.toThrow(
-      `- query is ${length - SEARCH_QUERY_MAX} characters over the ${SEARCH_QUERY_MAX}-character limit (${length}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage\n`
+      `- --query is ${length - SEARCH_QUERY_MAX} characters over the ${SEARCH_QUERY_MAX}-character limit (${length}/${SEARCH_QUERY_MAX}); search with a short phrase of a few words, not a passage\n`
     );
     expect(requests).toBe(0);
   });
@@ -1381,7 +1493,7 @@ describe("executeDispatchTool", () => {
         asks: [
           {
             id: "ask-1",
-            ref: "/issues/LEGION-1?ask=ask-1",
+            ref: "/issues/LEGION-1/asks/ask-1",
             question: releaseQuestion,
             kind: "question",
             urgency: "high",
@@ -1431,7 +1543,7 @@ describe("executeDispatchTool", () => {
         "2 unanswered asks you authored on active issues and project documents.",
         "",
         "Waiting on human (1):",
-        `- 1m 5s · P0 · LEGION-1: Reminder · ${releaseQuestion} · http://dispatch.test/issues/LEGION-1?ask=ask-1`,
+        `- 1m 5s · P0 · LEGION-1: Reminder · ${releaseQuestion} · http://dispatch.test/issues/LEGION-1/asks/ask-1`,
         "",
         "Waiting on agent (1):",
         "- 2h · OPS / Runbook · Which region? · http://dispatch.test/projects/OPS/documents/runbook?ask=ask-2",
@@ -1809,14 +1921,14 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const target = new URL(String(url));
       requests.push(target);
-      // A session holds AGENTC-1, so the rows are labelled from the live registry.
+      // A session holds ACME-1, so the rows are labelled from the live registry.
       if (target.pathname === "/api/v1/agents") {
         return response([{ session_id: "s1", title: "Live registry title" }]);
       }
       return response({
         issues: [
           {
-            key: "AGENTC-1",
+            key: "ACME-1",
             title: "First",
             status: "todo",
             priority: 1,
@@ -1827,6 +1939,7 @@ describe("executeDispatchTool", () => {
             updated_at: "2026-09-13T00:00:00Z",
             last_seq: 4,
             open_asks: 2,
+            progress: { tasks: { done: 3, total: 7 }, children: { done: 2, total: 5 } },
             claim: {
               actor: { kind: "session", id: "s1", origin: { session_title: "Implementer" } },
               at: "2026-09-13T01:00:00Z",
@@ -1845,9 +1958,9 @@ describe("executeDispatchTool", () => {
     const result = await executeDispatchTool({
       tool: "dispatch_issues",
       args: {
-        project: "AGENTC",
+        project: "ACME",
         status: "todo",
-        parent: "AGENTC-9",
+        parent: "ACME-9",
         label: "bug",
         priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
@@ -1867,9 +1980,9 @@ describe("executeDispatchTool", () => {
     ]);
     // Each priority repeats as its own parameter, and null asks for issues with no priority.
     expect([...(requests[0]?.searchParams ?? [])]).toEqual([
-      ["project", "AGENTC"],
+      ["project", "ACME"],
       ["status", "todo"],
-      ["parent", "AGENTC-9"],
+      ["parent", "ACME-9"],
       ["label", "bug"],
       ["priority", "0"],
       ["priority", "1"],
@@ -1879,13 +1992,16 @@ describe("executeDispatchTool", () => {
       ["limit", "50"],
       ["offset", "0"],
     ]);
-    // A route that reaches nobody is what the owner audit reads, so the row says so.
-    expect(result.text).toContain("AGENTC-1 [todo] P1 First · 2 open asks · claimed by ");
-    expect(result.text).toContain(" · route role:sre (nobody holds it right now)");
+    // A route that reaches nobody is what the owner audit reads, so the row says so; the
+    // progress comes after the claim, each part only when the server counted it.
+    expect(result.text).toContain("ACME-1 [todo] P1 First · 2 open asks · claimed by ");
+    expect(result.text).toContain(
+      " · tasks 3/7 · children 2/5 · route role:sre (nobody holds it right now)"
+    );
     expect(result.details).toEqual({
       issues: [
         {
-          key: "AGENTC-1",
+          key: "ACME-1",
           title: "First",
           status: "todo",
           priority: 1,
@@ -1900,6 +2016,7 @@ describe("executeDispatchTool", () => {
           route_status: "no_holder",
           route_holder: null,
           updated_at: "2026-09-13T00:00:00Z",
+          progress: { tasks: { done: 3, total: 7 }, children: { done: 2, total: 5 } },
         },
       ],
       total: 1,
@@ -1979,6 +2096,16 @@ describe("executeDispatchTool", () => {
     expect(held.agentCalls).toBe(1);
     const unrouted = await read({ route: null, route_status: null, route_holder: null });
     expect(unrouted.text).toContain("Route: none\n");
+    // The fixture carries no progress, as a server answering before the field existed; a spec
+    // with no task list and no child answers both counts null, and both print as none.
+    expect(unrouted.text).toContain("Route: none\nProgress: none\n");
+    const uncounted = await read({ route: null, progress: { tasks: null, children: null } });
+    expect(uncounted.text).toContain("Progress: none\n");
+    const childrenOnly = await read({
+      route: null,
+      progress: { tasks: null, children: { done: 2, total: 5 } },
+    });
+    expect(childrenOnly.text).toContain("Progress: children 2/5\n");
   });
 
   // Every Dispatch the hosts reach pages the listing (sjawhar/legion#1612), so an array answered to
@@ -1988,7 +2115,7 @@ describe("executeDispatchTool", () => {
   test("dispatch_issues refuses Dispatch's unpaged array and names the change it lacks", async () => {
     const requests: URL[] = [];
     const issues = Array.from({ length: 5 }, (_, index) => ({
-      key: `AGENTC-${index}`,
+      key: `ACME-${index}`,
       title: `Issue ${index}`,
       status: "todo",
       priority: null,
@@ -2008,7 +2135,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issues",
-        args: { project: "AGENTC", limit: 2 },
+        args: { project: "ACME", limit: 2 },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2019,7 +2146,7 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow("sjawhar/legion#1612");
     expect(requests).toHaveLength(1);
     expect(Object.fromEntries(requests[0]?.searchParams ?? [])).toEqual({
-      project: "AGENTC",
+      project: "ACME",
       limit: "2",
       offset: "0",
     });
@@ -2027,7 +2154,7 @@ describe("executeDispatchTool", () => {
 
   test("dispatch_issues returns the last 50 after offset 250 and renders the total", async () => {
     const issues = Array.from({ length: 300 }, (_, index) => ({
-      key: `AGENTC-${index}`,
+      key: `ACME-${index}`,
       title: `Issue ${index}`,
       status: "todo",
       priority: null,
@@ -2055,7 +2182,7 @@ describe("executeDispatchTool", () => {
 
     const defaultPage = await executeDispatchTool({
       tool: "dispatch_issues",
-      args: { project: "AGENTC" },
+      args: { project: "ACME" },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2064,12 +2191,12 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(defaultPage.text).toContain("50 issues in AGENTC (showing 1-50 of 300)");
+    expect(defaultPage.text).toContain("50 issues in ACME (showing 1-50 of 300)");
     expect(defaultPage.details).toMatchObject({ total: 300, offset: 0, limit: 50 });
 
     const result = await executeDispatchTool({
       tool: "dispatch_issues",
-      args: { project: "AGENTC", offset: 250 },
+      args: { project: "ACME", offset: 250 },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2078,9 +2205,9 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toContain("50 issues in AGENTC (showing 251-300 of 300)");
-    expect(result.text).toContain("AGENTC-250 [todo] Issue 250");
-    expect(result.text).toContain("AGENTC-299 [todo] Issue 299");
+    expect(result.text).toContain("50 issues in ACME (showing 251-300 of 300)");
+    expect(result.text).toContain("ACME-250 [todo] Issue 250");
+    expect(result.text).toContain("ACME-299 [todo] Issue 299");
     expect(result.details).toMatchObject({ total: 300, offset: 250, limit: 50 });
     expect(result.details.issues).toHaveLength(50);
     // The page size and start reach Dispatch as the tool was given them, 50 when it names none.
@@ -2096,7 +2223,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_issues",
-      args: { project: "AGENTC", offset: 1 },
+      args: { project: "ACME", offset: 1 },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2105,7 +2232,7 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toBe("No issues in AGENTC. (showing 0-0 of 1)");
+    expect(result.text).toBe("No issues in ACME. (showing 0-0 of 1)");
     expect(result.details).toMatchObject({ total: 1, offset: 1, limit: 50 });
     expect(result.details.issues).toEqual([]);
   });
@@ -2146,7 +2273,7 @@ describe("executeDispatchTool", () => {
       text: [
         'Not created: "Global search across issues and documents" looks like a duplicate.',
         "LEGION-12 [triage] Global search across issues and documents → http://dispatch.test/issues/LEGION-12",
-        "Reference the existing issue, or call dispatch_issue again with force: true after reading it.",
+        "Reference the existing issue, or run dispatch issue again with --force after reading it.",
       ].join("\n"),
       details: { duplicates: candidates },
     });
@@ -2535,12 +2662,12 @@ describe("executeDispatchTool", () => {
         pathname,
         ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
       });
-      if (pathname !== "/api/v1/issues/AGENTC-175") {
+      if (pathname !== "/api/v1/issues/ACME-175") {
         throw new Error(`unexpected request: ${method} ${pathname}`);
       }
       if (method === "GET") {
         return response({
-          key: "AGENTC-175",
+          key: "ACME-175",
           title: "Issue update tool",
           status: "in_progress",
           labels: [],
@@ -2549,7 +2676,7 @@ describe("executeDispatchTool", () => {
         });
       }
       return response({
-        key: "AGENTC-175",
+        key: "ACME-175",
         title: "Issue update tool",
         status: "testing",
         labels: [],
@@ -2561,7 +2688,7 @@ describe("executeDispatchTool", () => {
     const result = await executeDispatchTool({
       tool: "dispatch_issue_update",
       args: {
-        issue: "AGENTC-175",
+        issue: "ACME-175",
         status: "testing",
         external_links: [pullRequest, existingLink.url, pullRequest],
       },
@@ -2576,20 +2703,20 @@ describe("executeDispatchTool", () => {
 
     expect(result).toEqual({
       text:
-        `AGENTC-175: status in_progress -> testing; linked ${pullRequest} (2 links) ` +
-        "(not subscribed to AGENTC-175; envoy_subscribe notifications.dispatch.issue.AGENTC-175.> for every event on it)",
+        `ACME-175: status in_progress -> testing; linked ${pullRequest} (2 links) ` +
+        "(not subscribed to ACME-175; envoy_subscribe notifications.dispatch.issue.ACME-175.> for every event on it)",
       details: {
-        issue: "AGENTC-175",
+        issue: "ACME-175",
         status: "testing",
         external_links: [existingLink.url, pullRequest],
       },
     });
     expect(dispatchFollowNotice(result.details)).toBeNull();
     expect(requests).toEqual([
-      { method: "GET", pathname: "/api/v1/issues/AGENTC-175" },
+      { method: "GET", pathname: "/api/v1/issues/ACME-175" },
       {
         method: "PATCH",
-        pathname: "/api/v1/issues/AGENTC-175",
+        pathname: "/api/v1/issues/ACME-175",
         body: {
           status: "testing",
           external_links: [existingLink, { url: pullRequest }],
@@ -2607,7 +2734,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
       (init?.method ?? "GET") === "GET"
         ? response({
-            key: "AGENTC-175",
+            key: "ACME-175",
             title: "x",
             status: "todo",
             labels: [],
@@ -2624,7 +2751,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", status: "testing" },
+        args: { issue: "ACME-175", status: "testing" },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2640,7 +2767,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
       (init?.method ?? "GET") === "GET"
         ? response({
-            key: "AGENTC-175",
+            key: "ACME-175",
             title: "x",
             status: "todo",
             labels: [],
@@ -2654,7 +2781,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", external_links: [pullRequest] },
+        args: { issue: "ACME-175", external_links: [pullRequest] },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2676,7 +2803,7 @@ describe("executeDispatchTool", () => {
     const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
       (init?.method ?? "GET") === "GET"
         ? response({
-            key: "AGENTC-175",
+            key: "ACME-175",
             title: "x",
             status: "todo",
             labels: [],
@@ -2690,7 +2817,7 @@ describe("executeDispatchTool", () => {
 
     const failure = await executeDispatchTool({
       tool: "dispatch_issue_update",
-      args: { issue: "AGENTC-175", external_links: [pullRequest] },
+      args: { issue: "ACME-175", external_links: [pullRequest] },
       cwd: "/workspace",
       host: "omp",
       config,
@@ -2703,7 +2830,7 @@ describe("executeDispatchTool", () => {
     );
 
     expect(failure).toBe(
-      "HTTP_500: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered 500 Internal Server " +
+      "HTTP_500: PATCH http://dispatch.test/api/v1/issues/ACME-175 answered 500 Internal Server " +
         'Error with a body that is not Dispatch\'s error JSON ("500 Internal Server Error"), which ' +
         "looks like a proxy or gateway page rather than Dispatch's own answer, so the write may or " +
         "may not have reached Dispatch: check whether it took effect before retrying it."
@@ -2718,7 +2845,7 @@ describe("executeDispatchTool", () => {
     await expect(
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175" },
+        args: { issue: "ACME-175" },
         cwd: "/workspace",
         host: "omp",
         config,
@@ -2735,8 +2862,8 @@ describe("executeDispatchTool", () => {
     }) as unknown as typeof fetch;
 
     for (const args of [
-      { issue: "AGENTC-175", status: "done" },
-      { issue: "AGENTC-175", status: "done", reason: " " },
+      { issue: "ACME-175", status: "done" },
+      { issue: "ACME-175", status: "done", reason: " " },
     ]) {
       await expect(
         executeDispatchTool({
@@ -2755,6 +2882,32 @@ describe("executeDispatchTool", () => {
     }
   });
 
+  // A title cap has to reject before the done reason writes its message: otherwise a bad retitle
+  // leaves an issue open with a stray closing reason.
+  test("dispatch_issue_update refuses a title over the cap before posting its close reason", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_issue_update",
+        args: {
+          issue: "ACME-175",
+          status: "done",
+          reason: "Shipped in owner/repo#7.",
+          title: "x".repeat(1001),
+        },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(/title is 1 characters over the 1000-character limit \(1001\/1000\)/);
+  });
+
   /** Records every request; the messages route and the PATCH answer with the given responses. */
   function closingServer(answers: { message: () => Response; patch: () => Response }) {
     const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
@@ -2766,13 +2919,13 @@ describe("executeDispatchTool", () => {
         pathname,
         ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
       });
-      if (pathname === "/api/v1/issues/AGENTC-175/messages") return answers.message();
-      if (pathname !== "/api/v1/issues/AGENTC-175") {
+      if (pathname === "/api/v1/issues/ACME-175/messages") return answers.message();
+      if (pathname !== "/api/v1/issues/ACME-175") {
         throw new Error(`unexpected request: ${method} ${pathname}`);
       }
       if (method === "GET") {
         return response({
-          key: "AGENTC-175",
+          key: "ACME-175",
           title: "x",
           status: "retro",
           labels: [],
@@ -2794,7 +2947,7 @@ describe("executeDispatchTool", () => {
   const closeCall = (fetchImpl: typeof fetch) =>
     executeDispatchTool({
       tool: "dispatch_issue_update",
-      args: { issue: "AGENTC-175", status: "done", reason: "Shipped in owner/repo#7." },
+      args: { issue: "ACME-175", status: "done", reason: "Shipped in owner/repo#7." },
       cwd: "/workspace",
       host: "omp",
       sessionId: "session-42",
@@ -2806,10 +2959,10 @@ describe("executeDispatchTool", () => {
 
   test("dispatch_issue_update posts the reason as a message, then closes the issue", async () => {
     const server = closingServer({
-      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      message: () => response({ id: "message-7", issue_key: "ACME-175" }),
       patch: () =>
         response({
-          key: "AGENTC-175",
+          key: "ACME-175",
           title: "x",
           status: "done",
           labels: [],
@@ -2821,9 +2974,9 @@ describe("executeDispatchTool", () => {
     const result = await closeCall(server.fetchImpl);
 
     expect(server.requests.map(({ method, pathname }) => `${method} ${pathname}`)).toEqual([
-      "GET /api/v1/issues/AGENTC-175",
-      "POST /api/v1/issues/AGENTC-175/messages",
-      "PATCH /api/v1/issues/AGENTC-175",
+      "GET /api/v1/issues/ACME-175",
+      "POST /api/v1/issues/ACME-175/messages",
+      "PATCH /api/v1/issues/ACME-175",
     ]);
     expect(server.requests[1]?.body).toMatchObject({
       body: "Shipped in owner/repo#7.",
@@ -2832,10 +2985,10 @@ describe("executeDispatchTool", () => {
     expect(server.requests[2]?.body).toMatchObject({ status: "done" });
     expect(server.requests[2]?.body).not.toHaveProperty("reason");
     expect(result.text).toStartWith(
-      "AGENTC-175: reason posted as message message-7 (dispatch://AGENTC-175/message/message-7); status retro -> done"
+      "ACME-175: reason posted as message message-7 (dispatch://ACME-175/message/message-7); status retro -> done"
     );
     expect(result.details).toMatchObject({
-      issue: "AGENTC-175",
+      issue: "ACME-175",
       status: "done",
       message: "message-7",
     });
@@ -2890,7 +3043,7 @@ describe("executeDispatchTool", () => {
   // error's own message it joins a clause, or starts a sentence where the message ended one.
   test("dispatch_issue_update says whether a failed post of the reason leaves it posted", async () => {
     const answered = (status: string, page: string) =>
-      `HTTP_${status.slice(0, 3)}: POST http://dispatch.test/api/v1/issues/AGENTC-175/messages ` +
+      `HTTP_${status.slice(0, 3)}: POST http://dispatch.test/api/v1/issues/ACME-175/messages ` +
       `answered ${status} with a body that is not Dispatch's error JSON ("${page}"), which looks ` +
       "like a proxy or gateway page rather than Dispatch's own answer";
     const unknown =
@@ -2961,28 +3114,28 @@ describe("executeDispatchTool", () => {
 
   test("dispatch_issue_update names the posted reason when the close fails after it", async () => {
     const server = closingServer({
-      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      message: () => response({ id: "message-7", issue_key: "ACME-175" }),
       patch: () => refusal(409, "ISSUE_CLAIMED", "claimed by session other"),
     });
 
     await expect(closeCall(server.fetchImpl)).rejects.toThrow(
       "ISSUE_CLAIMED: claimed by session other; the reason already landed as message message-7 " +
-        "(dispatch://AGENTC-175/message/message-7) but the issue did not close. Retrying this call " +
+        "(dispatch://ACME-175/message/message-7) but the issue did not close. Retrying this call " +
         "posts its reason again, so fix what refused the close, then retry with a reason that " +
         "points at message message-7"
     );
     expect(server.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
 
     const gateway = closingServer({
-      message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+      message: () => response({ id: "message-7", issue_key: "ACME-175" }),
       patch: () => gatewayPage(404, "Not Found"),
     });
     await expect(closeCall(gateway.fetchImpl)).rejects.toThrow(
-      "HTTP_404: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered 404 Not Found with a " +
+      "HTTP_404: PATCH http://dispatch.test/api/v1/issues/ACME-175 answered 404 Not Found with a " +
         'body that is not Dispatch\'s error JSON ("404 Not Found"), which looks like a proxy or ' +
         "gateway page rather than Dispatch's own answer, so a retry gets the same answer until the " +
         "Dispatch URL, or whatever answers in its place, is fixed; the reason already landed as " +
-        "message message-7 (dispatch://AGENTC-175/message/message-7) but the issue did not close. " +
+        "message message-7 (dispatch://ACME-175/message/message-7) but the issue did not close. " +
         "Retrying this call posts its reason again, so fix what refused the close, then retry with " +
         "a reason that points at message message-7"
     );
@@ -2998,7 +3151,7 @@ describe("executeDispatchTool", () => {
       [429, "Too Many Requests"],
     ] as const) {
       const server = closingServer({
-        message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+        message: () => response({ id: "message-7", issue_key: "ACME-175" }),
         patch: () => gatewayPage(status, statusText),
       });
 
@@ -3008,11 +3161,11 @@ describe("executeDispatchTool", () => {
       );
 
       expect(failure).toBe(
-        `HTTP_${status}: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered ${status} ` +
+        `HTTP_${status}: PATCH http://dispatch.test/api/v1/issues/ACME-175 answered ${status} ` +
           `${statusText} with a body that is not Dispatch's error JSON ("${status} ${statusText}"), ` +
           "which looks like a proxy or gateway page rather than Dispatch's own answer, so the write " +
           "did not reach Dispatch, and a retry may succeed; the reason already landed as message " +
-          "message-7 (dispatch://AGENTC-175/message/message-7) but the issue did not close. " +
+          "message-7 (dispatch://ACME-175/message/message-7) but the issue did not close. " +
           "Retrying this call posts its reason again, so retry with a reason that points at " +
           "message message-7"
       );
@@ -3027,12 +3180,12 @@ describe("executeDispatchTool", () => {
   // retrying posts the reason again.
   test("dispatch_issue_update says the close is unknown when the PATCH times out or 5xxes after the post", async () => {
     const unknown =
-      "; the reason already landed as message message-7 (dispatch://AGENTC-175/message/message-7), " +
+      "; the reason already landed as message message-7 (dispatch://ACME-175/message/message-7), " +
       "and the close may or may not have taken effect. Read the issue's status before retrying: " +
       "done means it closed; otherwise retry with a reason that points at message message-7, " +
       "since retrying this call posts its reason again";
     const unknownSentence =
-      " The reason already landed as message message-7 (dispatch://AGENTC-175/message/message-7), " +
+      " The reason already landed as message message-7 (dispatch://ACME-175/message/message-7), " +
       "and the close may or may not have taken effect. Read the issue's status before retrying: " +
       "done means it closed; otherwise retry with a reason that points at message message-7, " +
       "since retrying this call posts its reason again";
@@ -3041,13 +3194,13 @@ describe("executeDispatchTool", () => {
       [() => refusal(502, "HTTP_502", "Bad Gateway"), `HTTP_502: Bad Gateway${unknown}`],
       [
         () => gatewayPage(502, "Bad Gateway"),
-        "HTTP_502: PATCH http://dispatch.test/api/v1/issues/AGENTC-175 answered 502 Bad Gateway " +
+        "HTTP_502: PATCH http://dispatch.test/api/v1/issues/ACME-175 answered 502 Bad Gateway " +
           'with a body that is not Dispatch\'s error JSON ("502 Bad Gateway"), which looks like a ' +
           `proxy or gateway page rather than Dispatch's own answer${unknown}`,
       ],
     ] as const) {
       const server = closingServer({
-        message: () => response({ id: "message-7", issue_key: "AGENTC-175" }),
+        message: () => response({ id: "message-7", issue_key: "ACME-175" }),
         patch,
       });
 
@@ -3067,7 +3220,7 @@ describe("executeDispatchTool", () => {
       const method = init?.method ?? "GET";
       if (method === "GET") {
         return response({
-          key: "AGENTC-175",
+          key: "ACME-175",
           title: "Issue update tool",
           status: "in_progress",
           labels: [],
@@ -3078,19 +3231,19 @@ describe("executeDispatchTool", () => {
       }
       patches.push(JSON.parse(String(init?.body)));
       return response({
-        key: "AGENTC-175",
+        key: "ACME-175",
         title: "Issue update tool",
         status: "in_progress",
         labels: [],
         route: null,
-        parent: "AGENTC-9",
+        parent: "ACME-9",
         external_links: [],
       });
     };
 
     const result = await executeDispatchTool({
       tool: "dispatch_issue_update",
-      args: { issue: "AGENTC-175", parent: "AGENTC-9" },
+      args: { issue: "ACME-175", parent: "ACME-9" },
       cwd: "/workspace",
       host: "omp",
       sessionId: "session-42",
@@ -3100,14 +3253,14 @@ describe("executeDispatchTool", () => {
       fetchImpl: fetchImpl as typeof fetch,
     });
 
-    expect(result.text).toContain("parent -> AGENTC-9");
-    expect(patches).toEqual([expect.objectContaining({ parent: "AGENTC-9" })]);
+    expect(result.text).toContain("parent -> ACME-9");
+    expect(patches).toEqual([expect.objectContaining({ parent: "ACME-9" })]);
   });
 
   test("dispatch_issue_update passes components through and reports the attachment", async () => {
     const patches: unknown[] = [];
     const issue = {
-      key: "AGENTC-175",
+      key: "ACME-175",
       title: "Issue update tool",
       status: "done",
       labels: [],
@@ -3128,7 +3281,7 @@ describe("executeDispatchTool", () => {
     const run = (components: unknown) =>
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", components },
+        args: { issue: "ACME-175", components },
         cwd: "/workspace",
         host: "omp",
         sessionId: "session-42",
@@ -3156,18 +3309,18 @@ describe("executeDispatchTool", () => {
       const method = init?.method ?? "GET";
       if (method === "GET") {
         return response({
-          key: "AGENTC-175",
+          key: "ACME-175",
           title: "Issue update tool",
           status: "in_progress",
           labels: [],
           route: null,
-          parent: "AGENTC-9",
+          parent: "ACME-9",
           external_links: [],
         });
       }
       patches.push(JSON.parse(String(init?.body)));
       return response({
-        key: "AGENTC-175",
+        key: "ACME-175",
         title: "Issue update tool",
         status: "in_progress",
         labels: [],
@@ -3179,7 +3332,7 @@ describe("executeDispatchTool", () => {
 
     const result = await executeDispatchTool({
       tool: "dispatch_issue_update",
-      args: { issue: "AGENTC-175", parent: "" },
+      args: { issue: "ACME-175", parent: "" },
       cwd: "/workspace",
       host: "omp",
       sessionId: "session-42",
@@ -3196,7 +3349,7 @@ describe("executeDispatchTool", () => {
   test("dispatch_issue_update sends the priority in the patch and reports what it became", async () => {
     const patches: unknown[] = [];
     const issue = {
-      key: "AGENTC-175",
+      key: "ACME-175",
       title: "Issue update tool",
       status: "in_progress",
       priority: null,
@@ -3214,7 +3367,7 @@ describe("executeDispatchTool", () => {
     const run = (priority: unknown) =>
       executeDispatchTool({
         tool: "dispatch_issue_update",
-        args: { issue: "AGENTC-175", priority },
+        args: { issue: "ACME-175", priority },
         cwd: "/workspace",
         host: "omp",
         sessionId: "session-42",
@@ -3453,7 +3606,7 @@ describe("executeDispatchTool", () => {
     expect(result).toEqual({
       text:
         "chart.png is an uploaded image/png file (version 1, 6 bytes) that is not UTF-8 text, so " +
-        "dispatch_doc_read cannot show it. GET /api/v1/artifacts/image-8/versions/1 serves its bytes.",
+        "dispatch doc-read cannot show it. GET /api/v1/artifacts/image-8/versions/1 serves its bytes.",
       details: { issue: "DSP-42" },
     });
     expect(requests).toEqual(["/api/v1/issues/DSP-42", "/api/v1/artifacts/image-8/versions/1"]);
@@ -3564,8 +3717,10 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(
       "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " +
         "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " +
-        "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, or " +
-        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename)"
+        "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " +
+        "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " +
+        "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " +
+        "for dispatch doc-read)"
     );
   });
 
@@ -3772,6 +3927,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a nightly export to the archive."'
     );
+    expect(result.text).not.toContain("plan-gap-analyst");
   });
 
   test("dispatch_request_approval on a document approved at its current version opens nothing", async () => {
@@ -3824,6 +3980,7 @@ describe("executeDispatchTool", () => {
       "(document id artifact-42) is already approved at version 3 by sjawhar"
     );
     expect(result.text).not.toContain("ask ");
+    expect(result.text).not.toContain("plan-gap-analyst");
     expect(result.details).toMatchObject({ issue: "DSP-42", artifact: "artifact-42", version: 3 });
     expect(dispatchFollowNotice(result.details)).toBeNull();
   });
@@ -3836,8 +3993,10 @@ describe("executeDispatchTool", () => {
       `:::ask{#${block} urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
     const requestOver = async (blocks: string[], version4: string[], asks: unknown[]) => {
       const posts: string[] = [];
+      const requests: string[] = [];
       const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
         const target = new URL(String(url));
+        requests.push(target.pathname);
         if (target.pathname === "/api/v1/issues/DSP-42") {
           return response({
             key: "DSP-42",
@@ -3888,7 +4047,7 @@ describe("executeDispatchTool", () => {
         exec: repoExec("owner/repo"),
         fetchImpl: fetchImpl as typeof fetch,
       });
-      return { outcome, posts };
+      return { outcome, posts, requests };
     };
     const blockAsk = (block: string, state: string) => ({
       id: `ask-${block}`,
@@ -3915,14 +4074,138 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 5)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
+        "dispatch request-approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
         "- block b-2, whose ask Dispatch has not opened yet",
         "- block b-3, which version 4 does not hold yet",
-        '- "Question of b-4?" (block b-4, ask ask-b-4), answered but still open in version 4: fold the answer into the text with dispatch_doc_edit, which writes a version that carries it',
+        '- "Question of b-4?" (block b-4, ask ask-b-4), answered but still open in version 4: fold the answer into the text with dispatch doc-edit, which writes a version that carries it',
       ]);
       expect(refusal).toContain("even when a human asked for it");
       expect(refusal).toContain("ask them to answer it or to waive it");
+      expect(posts).toEqual([]);
+    });
+
+    test("a copied block names the ask settlement says it was copied from, open on its own document", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1"],
+        [
+          ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-source" copied_from_document="dispatch://DSP-42/artifact/plan"}\nQuestion of b-1?\n:::',
+        ],
+        []
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[1]).toBe(
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-source, which is open on DSP-42 plan: answer it there"
+      );
+      expect(refusal.split("\n")[1].match(/dispatch:\/\//g)).toHaveLength(1);
+      expect(refusal).not.toContain("has not opened yet");
+      expect(posts).toEqual([]);
+    });
+
+    test("three copied blocks are named from their attributes without reading one ask", async () => {
+      const copy = (block: string, state: string) =>
+        `:::ask{#${block} urgency="med" multiple="false" state="${state}" copied_from="ask-${block}-source" copied_from_document="dispatch://DSP-42/spec"}\nQuestion of ${block}?\n:::`;
+      const { outcome, posts, requests } = await requestOver(
+        ["b-1", "b-2", "b-3"],
+        [copy("b-1", "open"), copy("b-2", "answered"), copy("b-3", "open")],
+        []
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n").slice(1, 3)).toEqual([
+        "- block b-1, a copy of ask dispatch://DSP-42/ask/ask-b-1-source, which is open on DSP-42 spec: answer it there",
+        "- block b-3, a copy of ask dispatch://DSP-42/ask/ask-b-3-source, which is open on DSP-42 spec: answer it there",
+      ]);
+      expect(requests.filter((path) => path.startsWith("/api/v1/asks/"))).toEqual([]);
+      expect(posts).toEqual([]);
+    });
+
+    test("an ask on another document under the same block id is not named when settlement names no copy", async () => {
+      const { outcome, posts } = await requestOver(
+        ["b-1"],
+        [opening("b-1", "open")],
+        [
+          {
+            ...blockAsk("b-1", "open"),
+            id: "ask-unrelated",
+            question: "Totally unrelated question?",
+            created_at: "2026-10-08T10:00:00Z",
+            block_artifact: { id: "artifact-1", slug: "unrelated-doc" },
+          },
+        ]
+      );
+
+      const refusal = await outcome.then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[1]).toBe("- block b-1, whose ask Dispatch has not opened yet");
+      expect(refusal).not.toContain("ask-unrelated");
+      expect(posts).toEqual([]);
+    });
+
+    test("a copied block of a project document names its source under the project's document", async () => {
+      const posts: string[] = [];
+      const notes = {
+        id: "artifact-notes",
+        issue_key: null,
+        project: "CORE",
+        ref_key: "CORE/notes",
+        slug: "notes",
+        name: "notes.md",
+        kind: "doc",
+        primary: false,
+        approval: { state: "draft", latest_version: 2 },
+        created_by: { kind: "session", id: "session-1" },
+        created_at: "2026-09-18T00:00:00Z",
+        versions: [],
+      };
+      const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+        const target = new URL(String(url));
+        if (target.pathname === "/api/v1/projects/CORE/artifacts/notes") return response(notes);
+        if (target.pathname === "/api/v1/projects/CORE/artifacts") return response([notes]);
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/blocks") {
+          return response([{ id: "b-1", type: "ask", from: 0, to: 90 }]);
+        }
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/versions/2") {
+          return response({
+            number: 2,
+            markdown:
+              ':::ask{#b-1 urgency="med" multiple="false" state="open" copied_from="ask-plan" copied_from_document="dispatch://CORE/artifact/plan"}\nQuestion of b-1?\n:::',
+          });
+        }
+        // A project document's own asks: the copy has none.
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/asks") return response([]);
+        if (target.pathname === "/api/v1/artifacts/artifact-notes/approval-requests") {
+          posts.push(target.pathname);
+          return response({}, 201);
+        }
+        throw new Error(`unexpected request: ${target.pathname}`);
+      };
+      const refusal = await executeDispatchTool({
+        tool: "dispatch_request_approval",
+        args: { project: "CORE", artifact: "notes", summary: "Proposes a nightly export." },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      }).then(
+        () => "",
+        (error: Error) => error.message
+      );
+      expect(refusal.split("\n")[1]).toBe(
+        "- block b-1, a copy of ask dispatch://CORE/artifact/plan/ask/ask-plan, which is open on CORE/plan: answer it there"
+      );
+      expect(refusal.split("\n")[1].match(/dispatch:\/\//g)).toHaveLength(1);
       expect(posts).toEqual([]);
     });
 
@@ -3938,7 +4221,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n")[1]).toBe(
-        '- "Question of b-1?" (block b-1, ask ask-b-1), resolved but still open in version 4: write the decision into the text with dispatch_doc_edit, which writes a version that carries it'
+        '- "Question of b-1?" (block b-1, ask ask-b-1), resolved but still open in version 4: write the decision into the text with dispatch doc-edit, which writes a version that carries it'
       );
       expect(posts).toEqual([]);
     });
@@ -3957,7 +4240,7 @@ describe("executeDispatchTool", () => {
         (error: Error) => error.message
       );
       expect(refusal.split("\n").slice(0, 2)).toEqual([
-        "dispatch_request_approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
+        "dispatch request-approval was not called: spec.md (version 4) has 1 open decision block. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
       ]);
       expect(posts).toEqual([]);
@@ -3971,6 +4254,22 @@ describe("executeDispatchTool", () => {
       );
 
       expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
+    });
+
+    test("a copy whose source was answered after it settled refuses nothing once settlement has shown the answer", async () => {
+      // Answering the source settles its copies again (SettleCopiesOf), so the copy's latest
+      // version carries the answer and the copy is no open block.
+      const { outcome, posts, requests } = await requestOver(
+        ["b-1"],
+        [
+          ':::ask{#b-1 urgency="med" multiple="false" state="answered" answered_by="alice" answered_at="2026-10-09T09:00:00Z" selected="[]" answer="eu-west-1" copied_from="ask-source" copied_from_document="dispatch://DSP-42/artifact/plan"}\nQuestion of b-1?\n:::',
+        ],
+        []
+      );
+
+      expect((await outcome).text).toStartWith("Approval requested for spec.md");
+      expect(requests.filter((path) => path.startsWith("/api/v1/asks/"))).toEqual([]);
       expect(posts).toEqual(["/api/v1/artifacts/artifact-42/approval-requests"]);
     });
   });
@@ -4072,9 +4371,9 @@ describe("executeDispatchTool", () => {
       ]) {
         const { outcome, reads, edits } = edit(ops);
         expect((await outcome).split("\n")).toEqual([
-          "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
+          "dispatch doc-edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
-          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
+          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch edit-ask if you asked it; each keeps it.",
         ]);
         expect(reads).toEqual([
           "/api/v1/artifacts/artifact-42/blocks",
@@ -4096,15 +4395,15 @@ describe("executeDispatchTool", () => {
           { op: "insert", after: "block:p-1", markdown },
         ]);
         expect((await outcome).split("\n")).toEqual([
-          "dispatch_doc_edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
+          "dispatch doc-edit was not called: it would remove a decision block whose ask is still open, and the human's question would leave their Inbox unanswered.",
           '- "Where should the nightly file be written?" (block b-1, ask ask-b-1)',
-          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch_edit_ask if you asked it; each keeps it.",
+          "A decision block leaves the document once its ask is answered or resolved. Until then, reword it with replace, relocate it with move, or change its question, options, urgency or multiple with dispatch edit-ask if you asked it; each keeps it.",
         ]);
         expect(edits).toEqual([]);
       }
     });
 
-    test("names dispatch_edit_ask for the urgency, multiple and options replace and move cannot change", async () => {
+    test("names dispatch edit-ask for the urgency, multiple and options replace and move cannot change", async () => {
       // Changing those attributes requires editing the ask; replace and move cannot change them.
       const { outcome, edits } = edit([
         { op: "delete", block: "b-1" },
@@ -4115,7 +4414,7 @@ describe("executeDispatchTool", () => {
         },
       ]);
       const guidance = (await outcome).split("\n").at(-1);
-      expect(guidance).toContain("dispatch_edit_ask");
+      expect(guidance).toContain("dispatch edit-ask");
       expect(edits).toEqual([]);
     });
 
@@ -5434,7 +5733,9 @@ describe("executeDispatchTool", () => {
           exec: repoExec("owner/repo"),
           fetchImpl: fetchImpl as typeof fetch,
         })
-      ).rejects.toThrow('dispatch_issue({ external: "owner/repo#999", ... })');
+      ).rejects.toThrow(
+        "create it first with dispatch issue --external 'owner/repo#999' --project <key> --title <title>"
+      );
       expect(
         requests.filter(
           (request) =>
@@ -5574,6 +5875,20 @@ describe("executeDispatchTool", () => {
               created_at: "2026-09-08T23:59:00Z",
             },
           ],
+          answers: [
+            {
+              user: "sami",
+              selected: ["MCP API"],
+              text: null,
+              at: "2026-09-08T23:58:00Z",
+            },
+            {
+              user: "sami",
+              selected: ["JSON"],
+              text: "Ship JSON.",
+              at: "2026-09-09T00:00:00Z",
+            },
+          ],
         });
       }
       if (target.pathname === "/api/v1/references" && target.searchParams.has("to")) {
@@ -5586,9 +5901,9 @@ describe("executeDispatchTool", () => {
               node: {
                 kind: "message",
                 id: "message-7",
-                issue_key: "AGENTC-3",
-                project: "AGENTC",
-                ref: "dispatch://AGENTC-3/message/message-7",
+                issue_key: "ACME-3",
+                project: "ACME",
+                ref: "dispatch://ACME-3/message/message-7",
               },
               excerpt: {
                 text: "Decided in dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042.\nShipping.",
@@ -5638,11 +5953,13 @@ describe("executeDispatchTool", () => {
         "- By: sami",
         "- Selected: JSON",
         "- Text: Ship JSON.",
+        "Earlier answers:",
+        "- 2026-09-08T23:58:00Z · sami · MCP API",
         "Replies:",
         "comment-1 · user sami",
         "Body: JSON, please.",
         "Referenced by:",
-        "- mentions message dispatch://AGENTC-3/message/message-7 (Decided in dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042. Shipping. · 2026-09-10T08:00:00Z)",
+        "- mentions message dispatch://ACME-3/message/message-7 (Decided in dispatch://DSP-42/ask/aaaaaaaa-0000-4000-8000-000000000042. Shipping. · 2026-09-10T08:00:00Z)",
         "Links:",
         "- followed_by session author-1 (2026-09-09T00:00:00Z)",
       ].join("\n"),
@@ -5986,7 +6303,7 @@ describe("executeDispatchTool", () => {
           throw new Error("network must not be called");
         }) as unknown as typeof fetch,
       })
-    ).rejects.toThrow("host session id is required for dispatch_follow");
+    ).rejects.toThrow("host session id is required for dispatch follow");
   });
 
   test("rejects a comment reply that names both reply_to and reply_to_ask", async () => {
@@ -6183,6 +6500,7 @@ describe("executeDispatchTool", () => {
             created_at: "2026-09-09T00:00:00Z",
           },
           replies: [],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
@@ -6265,6 +6583,7 @@ describe("executeDispatchTool", () => {
             created_at: "2026-09-09T00:00:00Z",
           },
           replies: [],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("node"));
@@ -6524,6 +6843,7 @@ describe("executeDispatchTool", () => {
               created_at: "2026-09-08T23:59:00Z",
             },
           ],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));
@@ -6607,6 +6927,7 @@ describe("executeDispatchTool", () => {
             { url: "https://example.com/runs/3" },
           ],
           open_asks: [],
+          progress: { tasks: { done: 1, total: 4 }, children: null },
           last_seq: 0,
           labels: ["frontend", "urgent"],
           priority: 1,
@@ -6705,12 +7026,12 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain("Status: open\nAssignee: alice\n");
     expect(result.text).toContain("Claimed by: Implementer since 2026-09-13T01:00:00Z");
     expect(result.text).toContain(
-      "Labels: frontend, urgent\nComponents: web (inherited from DSP-40) (retired: legacy-ui)\nRoute: none\n"
+      "Labels: frontend, urgent\nComponents: web (inherited from DSP-40) (retired: legacy-ui)\nRoute: none\nProgress: tasks 1/4\n"
     );
     // The pull request a person linked is on the read, as on the issue page; the reference graph
     // at the end carries none of it.
     expect(result.text).toContain(
-      "Route: none\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nOpen asks:"
+      "Progress: tasks 1/4\nExternal links:\n- https://github.com/owner/repo/pull/7 (github_pr)\n- https://example.com/runs/3\nOpen asks:"
     );
     expect(
       result.text.endsWith(
@@ -6939,6 +7260,7 @@ describe("executeDispatchTool", () => {
             payload: {
               question: releaseQuestion,
               answer: { selected: ["Keep the limits"], text: "No, trim the asks." },
+              previous_answer: { selected: ["Trim the asks"], text: null },
             },
           },
           {
@@ -6991,7 +7313,7 @@ describe("executeDispatchTool", () => {
         "Events:",
         `- #2 comment.created · user sami · 2026-09-09T00:02:00Z · Looks good. ${"x".repeat(108)}…`,
         `- #3 ask.opened · session s1 · 2026-09-09T00:03:00Z · ${releaseQuestion}`,
-        `- #4 ask.answered · user sami · 2026-09-09T00:04:00Z · ${releaseQuestion} -> Keep the limits - No, trim the asks.`,
+        `- #4 ask.answered · user sami · 2026-09-09T00:04:00Z · ${releaseQuestion} -> Keep the limits - No, trim the asks. (was: Trim the asks)`,
         "- #5 artifact.version · session s1 · 2026-09-09T00:05:00Z · spec.md v3: Record D1",
         "- #6 issue.updated · user sami · 2026-09-09T00:06:00Z · status in_progress",
         "- #7 comment.anchor_refreshed · user sami · 2026-09-09T00:07:00Z · Anchor moved after the document edit.",
@@ -7168,6 +7490,7 @@ describe("executeDispatchTool", () => {
           },
           replies: [],
           edits: [],
+          answers: [],
         });
       }
       if (target.pathname === "/api/v1/references") return response(emptyGraph("ask"));

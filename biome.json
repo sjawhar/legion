@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.3.14/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.4.11/schema.json",
   "vcs": {
     "enabled": true,
     "clientKind": "git",
@@ -13,7 +13,8 @@
       "!!packages/contracts/fixtures/daemon-api",
       "!!packages/daemon/internal/runtime/sandbox/testdata/golden",
       "!!packages/envoy/internal/dispatch/pmdoc/testdata",
-      "!!packages/envoy/internal/dispatch/text/testdata"
+      "!!packages/envoy/internal/dispatch/text/testdata",
+      "!!.legion"
     ]
   },
   "formatter": {

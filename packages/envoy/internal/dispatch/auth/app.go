@@ -32,12 +32,18 @@ type AppConfig struct {
 
 // AppPerms mirrors the GitHub Apps permissions object. We surface only the
 // fields dispatch actually inspects; unknown perms round-trip via the JSON
-// blob if callers re-serialize.
+// blob if callers re-serialize. GitHub's installation-permissions response uses
+// snake_case keys (confirmed directly against a real installation response,
+// e.g. `{"contents":"read","actions":"read","pull_requests":"read"}`) --
+// PullRequests' tag previously read `pullRequests`, which never matched a real
+// response and left the field permanently empty; nothing read it before
+// LEGION-567's delivery package needed a working Actions/Pull-requests check.
 type AppPerms struct {
 	Issues       string `json:"issues,omitempty"`
-	PullRequests string `json:"pullRequests,omitempty"`
+	PullRequests string `json:"pull_requests,omitempty"`
 	Contents     string `json:"contents,omitempty"`
 	Metadata     string `json:"metadata,omitempty"`
+	Actions      string `json:"actions,omitempty"`
 }
 
 // ReadApp returns (nil, nil) when the file does not exist so callers can

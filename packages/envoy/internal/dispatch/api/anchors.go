@@ -84,7 +84,7 @@ func (s *server) resolveAnchor(ctx context.Context, tx pgx.Tx, owner owner, inpu
 func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, owner owner, artifactRef string) (model.Artifact, error) {
 	if owner.IssueKey != nil {
 		return scanArtifact(tx.QueryRow(ctx, `
-			select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
+			select `+artifactColumns+`
 			from artifacts
 			where issue_key = $1 and (id::text = $2 or slug = $2)
 			for key share
@@ -94,7 +94,7 @@ func (s *server) lockAnchorArtifact(ctx context.Context, tx pgx.Tx, owner owner,
 		return model.Artifact{}, errorf(http.StatusBadRequest, "OWNER_INVALID", "owner requires exactly one issue or artifact")
 	}
 	artifact, err := scanArtifact(tx.QueryRow(ctx, `
-		select id::text, issue_key, project_key, ref_key, slug, name, kind, is_primary, created_by, created_at
+		select `+artifactColumns+`
 		from artifacts
 		where id = $1 and issue_key is null
 		for key share

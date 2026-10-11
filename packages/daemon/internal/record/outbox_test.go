@@ -26,11 +26,15 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		MessagePost{Body: "Pull request checks are blocked."},
 		Notice{Kind: "phase-finished", Role: claim.RoleTester, Phase: phase.Testing, Summary: "Tests passed", Verdict: "pass", Version: 4, Reason: ""},
 		ControllerNotice{Kind: "held", Role: claim.RolePlanner, Phase: phase.Planning, Reason: "escalated"},
+		ControllerNotice{Kind: TickNotice, OpenCapabilities: []string{"secrets", "resource-limits"}},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Task: "Write the spec."},
 		GateSeed{ArtifactID: "artifact-208", Version: 4},
 		LingerClose{Generation: 7},
 		WorkspaceRemove{Linger: 3},
 		MergeQueuePublish{Role: "merge-queue", Packet: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"},
+		IssueBranch{Generation: 2},
+		SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Reason: "LEGION-209 is done"},
+		IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7, Release: true},
 	}
 	for _, payload := range payloads {
 		t.Run(string(payload.OutboxKind()), func(t *testing.T) {
@@ -79,6 +83,7 @@ func TestNewOutboxRowRefusesInvalidPayloads(t *testing.T) {
 		{name: "a tick notice for an architect", payload: Notice{Kind: TickNotice}, reason: "unknown notice kind"},
 		{name: "unknown supervise operation", payload: SuperviseRequest{Op: "unknown"}, reason: "unknown supervise operation"},
 		{name: "a stop that is not a tree close", payload: SuperviseRequest{Op: "stop", Tree: "LEGION-208", Role: claim.RoleArchitect}, reason: "unknown supervise operation"},
+		{name: "an issue close naming a linger", payload: SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Linger: 7}, reason: "only a tree close"},
 		{name: "start without tree", payload: SuperviseRequest{Op: "start", Role: claim.RoleArchitect}, reason: "start requires tree"},
 		{name: "start without role", payload: SuperviseRequest{Op: "start", Tree: "LEGION-208"}, reason: "start requires role"},
 		{name: "a merge queue publish without a role", payload: MergeQueuePublish{Packet: "READY #42"}, reason: "merge queue publish requires role"},
@@ -114,6 +119,60 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 			_, err := DecodeOutboxPayload(tc.row)
 			if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("row %d", tc.row.ID)) || !strings.Contains(err.Error(), tc.reason) {
 				t.Fatalf("DecodeOutboxPayload error = %v, want row %d and %q", err, tc.row.ID, tc.reason)
+			}
+		})
+	}
+}
+
+// A releasing suspension is the field's own: an issue_suspend row written before the field existed
+// reads as the close that keeps, so no migration rewrites it.
+func TestAnIssueSuspensionWithoutTheReleaseFieldKeepsTheSandbox(t *testing.T) {
+	row := OutboxRow{ID: 40, Kind: OutboxKindIssueSuspend, Payload: json.RawMessage(`{"tree":"LEGION-208","generation":3,"treeGeneration":7}`)}
+	got, err := DecodeOutboxPayload(row)
+	if err != nil {
+		t.Fatalf("DecodeOutboxPayload: %v", err)
+	}
+	want := IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7}
+	if got != want {
+		t.Fatalf("payload = %#v, want %#v with Release false", got, want)
+	}
+	encoded, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "release") {
+		t.Fatalf("a keeping suspension encodes %s, want no release field", encoded)
+	}
+}
+
+// A tick notice carries the names of the deployment capabilities with no decision through the
+// outbox row and back, and a notice with none carries no such field: the controller's payload
+// reads `openCapabilities` only when there is a gap to name.
+func TestATickNoticeCarriesItsOpenCapabilitiesThroughTheRow(t *testing.T) {
+	now := time.Date(2026, 9, 23, 1, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		payload ControllerNotice
+		field   bool
+	}{
+		{"a tick naming two gaps", ControllerNotice{Kind: TickNotice, OpenCapabilities: []string{"secrets", "resource-limits"}}, true},
+		{"a tick with no gap", ControllerNotice{Kind: TickNotice}, false},
+		{"a slot-free wake", ControllerNotice{Kind: SlotFreeNotice}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			row, err := NewOutboxRow("LEGION", tc.payload, now)
+			if err != nil {
+				t.Fatalf("NewOutboxRow: %v", err)
+			}
+			if got := strings.Contains(string(row.Payload), `"openCapabilities"`); got != tc.field {
+				t.Fatalf("payload %s carries openCapabilities: %t, want %t", row.Payload, got, tc.field)
+			}
+			got, err := DecodeOutboxPayload(row)
+			if err != nil {
+				t.Fatalf("DecodeOutboxPayload: %v", err)
+			}
+			if !reflect.DeepEqual(got, tc.payload) {
+				t.Fatalf("payload = %#v, want %#v", got, tc.payload)
 			}
 		})
 	}

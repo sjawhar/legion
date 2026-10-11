@@ -35,6 +35,8 @@ type Call struct {
 	Known    []runtime.Known
 	Grace    time.Duration
 	Identity runtime.GitIdentity
+	// Tree is CleanupTree's tree.
+	Tree string
 }
 
 // SpawnResult is one scripted answer to Spawn or Resume.
@@ -55,6 +57,8 @@ type ProbeResult struct {
 type Runtime struct {
 	// InPod is what ProvisionsWorkspaces answers: false, the tmux answer, unless a test sets it.
 	InPod bool
+	// ProvisionGrace is what ProvisionBound answers: zero, the tmux answer, unless a test sets it.
+	ProvisionGrace time.Duration
 	// Now stamps the observations the fake mints. NewRuntime sets it to time.Now; a test with a
 	// clock of its own replaces it before use.
 	Now func() time.Time
@@ -135,6 +139,9 @@ func (r *Runtime) FailReconcileOrphans(err error) { r.fail("ReconcileOrphans", e
 
 // FailAdoptWorkingCopy makes every later AdoptWorkingCopy return err.
 func (r *Runtime) FailAdoptWorkingCopy(err error) { r.fail("AdoptWorkingCopy", err) }
+
+// FailCleanupTree makes every later CleanupTree return err; nil clears it.
+func (r *Runtime) FailCleanupTree(err error) { r.fail("CleanupTree", err) }
 
 func (r *Runtime) fail(method string, err error) {
 	r.mu.Lock()
@@ -329,6 +336,20 @@ func (r *Runtime) ProvisionsWorkspaces() bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.InPod
+}
+
+func (r *Runtime) ProvisionBound() time.Duration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.ProvisionGrace
+}
+
+// CleanupTree records its call and answers what FailCleanupTree set, nil by default.
+func (r *Runtime) CleanupTree(_ context.Context, tree string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, Call{Method: "CleanupTree", Tree: tree})
+	return r.failures["CleanupTree"]
 }
 
 // mint is the locator an unscripted spawn or resume hands back: tmux-shaped, because that is a

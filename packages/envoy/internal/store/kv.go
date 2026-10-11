@@ -79,7 +79,7 @@ type openOpts struct {
 // the stdlib log package's output into the same handler, and the deployed CloudWatch metric filters
 // for publish failures, webhook refusals and dropped stream subjects are space-delimited text
 // patterns anchored on that package's date and time prefix
-// (agent-c meta/infra/pulumi/components/envoy/listener.py), so JSON there silently stops three
+// (defined in the deployment repository's listener infrastructure), so JSON there silently stops three
 // alarms. No deployed pattern matches a line from this package or from internal/kvwatch.
 func WithLogger(log *slog.Logger) OpenOption {
 	return func(o *openOpts) { o.log = log }

@@ -170,6 +170,73 @@ test("project routes render the project page and a project document route", asyn
   }
 });
 
+test("the Inbox page links to the answers page, which renders at /answers", async () => {
+  // React.lazy loads the page module on its first render; loading it first keeps its cold
+  // compile out of findBy's window, as the project-routes test above does.
+  await import("./features/answers/AnswersPage");
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
+  const listMyAnswers = spyOn(api, "listMyAnswers").mockResolvedValue({
+    limit: 50,
+    offset: 0,
+    rows: [],
+    total: 0,
+  });
+  function streamFetch(_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
+    return new Promise<Response>(() => {});
+  }
+  streamFetch.preconnect = () => {};
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(streamFetch);
+  const renderRoute = (path: string) =>
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <QueryClientProvider
+          client={new QueryClient({ defaultOptions: { queries: { retry: false } } })}
+        >
+          <AuthGate />
+        </QueryClientProvider>
+      </MemoryRouter>
+    );
+
+  try {
+    const inbox = renderRoute("/");
+    await screen.findByRole("heading", { name: "Inbox" });
+    expect(screen.getByRole("link", { name: "Answered by you" }).getAttribute("href")).toBe(
+      "/answers"
+    );
+    inbox.unmount();
+
+    const answers = renderRoute("/answers");
+    expect(await screen.findByRole("heading", { name: "Answered by you" })).toBeTruthy();
+    expect(await screen.findByText("You have not answered or replied on an ask yet.")).toBeTruthy();
+    answers.unmount();
+  } finally {
+    fetchSpy.mockRestore();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    listMyAnswers.mockRestore();
+    listProjects.mockRestore();
+    whoAmI.mockRestore();
+    window.matchMedia = originalMatchMedia;
+  }
+});
+
 test("a failed identity refetch keeps the cached user's sidebar preference", async () => {
   const sidebarStorageKey = "dispatch.shell.sidebar:alice";
   const originalMatchMedia = window.matchMedia;

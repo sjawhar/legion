@@ -52,11 +52,12 @@ func TestConditionalDocumentEditDoesNotOverwriteWriterDuringTableAnchorCheck(t *
 			})
 			seedServiceText(t, service, artifactID, "| Key | Value |\n| --- | --- |\n| delete | row |\n| retain | row |\n\nkeep")
 			actor := model.Actor{Kind: "user", ID: "alice"}
-			anchored, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+			anchored, err := joinedMarkQuote(service, artifactID, MarkSpec{
 				Kind: MarkComment,
 				ID:   "00000000-0000-4000-8000-000000000003",
 				By:   actor,
 			}, "delete", nil)
+
 			if err != nil {
 				t.Fatalf("mark table cell: %v", err)
 			}

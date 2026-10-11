@@ -78,6 +78,15 @@ type recordingStore struct {
 
 // Every method that writes a claim is wrapped, so a launch is remembered whichever write carried
 // its boot token hash.
+func (s recordingStore) AdmitClaim(ctx context.Context, c supervise.Claim) (supervise.Claim, error) {
+	bound, err := s.Store.AdmitClaim(ctx, c)
+	if err != nil {
+		return supervise.Claim{}, err
+	}
+	s.written(bound)
+	return bound, nil
+}
+
 func (s recordingStore) PutClaim(ctx context.Context, c supervise.Claim) error {
 	if err := s.Store.PutClaim(ctx, c); err != nil {
 		return err

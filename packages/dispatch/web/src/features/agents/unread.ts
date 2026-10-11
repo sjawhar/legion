@@ -49,24 +49,33 @@ function newestSessionReply(
 }
 
 /**
- * The conversations the server marked unread when this view opened, by root message id. The
+ * The conversations the server marked unread when this view last opened, by root message id. The
  * server's own flag is the only unread verdict a view renders (`unreadDirectRepliesCTE` is where
- * it is defined), and it is frozen here: the view's own read mark clears the flag a moment later,
- * and an exchange shown because it held an unread reply has to stay shown while the viewer reads
- * it. Undefined until the conversations have loaded.
+ * it is defined), and it is frozen here from one open to the next: the view's own read mark clears
+ * the flag a moment later, and an exchange shown because it held an unread reply has to stay shown
+ * while the viewer reads it. An agent row keeps its list mounted while it is collapsed, so each
+ * open freezes afresh, as a new mount would. Undefined until the conversations have loaded.
  */
 export function useUnreadAtOpen(
-  exchanges: readonly MessageRead[] | undefined
+  exchanges: readonly MessageRead[] | undefined,
+  open: boolean
 ): ReadonlySet<string> | undefined {
-  const [frozen, setFrozen] = useState<ReadonlySet<string> | undefined>(undefined);
-  if (frozen === undefined && exchanges !== undefined) {
-    const unread = new Set(
-      exchanges.filter((read) => read.unread === true).map((read) => read.message.id)
-    );
-    setFrozen(unread);
-    return unread;
+  const [frozen, setFrozen] = useState<{
+    readonly open: boolean;
+    readonly unread: ReadonlySet<string> | undefined;
+  }>({ open, unread: undefined });
+  let next = frozen;
+  if (next.open !== open) next = { open, unread: open ? undefined : next.unread };
+  if (next.unread === undefined && exchanges !== undefined && open) {
+    next = {
+      open,
+      unread: new Set(
+        exchanges.filter((read) => read.unread === true).map((read) => read.message.id)
+      ),
+    };
   }
-  return frozen;
+  if (next !== frozen) setFrozen(next);
+  return next.unread;
 }
 
 /** Puts the session's state a PUT answered with into the viewer's shared agent-state query, so

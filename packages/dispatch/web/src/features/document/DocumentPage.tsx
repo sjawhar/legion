@@ -1,18 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
+import { api } from "../../api/client";
 import { QueryError } from "../../components/QueryError";
-import {
-  dangerText,
-  linkHoverText,
-  linkText,
-  textMutedOnCanvas,
-  textPrimaryOnCanvas,
-} from "../../theme/classes";
+import { dangerText } from "../../theme/classes";
 import { ArtifactDocument } from "../artifacts/ArtifactDocument";
 import { ArtifactBlobView, ArtifactHeader } from "../artifacts/ArtifactHeader";
+import { ArtifactQueryStates } from "../artifacts/ArtifactQueryStates";
 import type { DocumentToolbar } from "../doc/ProofDocument";
 import { SubscribedAgents } from "../issue/SubscribedAgents";
 import { ReferencedBy } from "../refs/ReferencedBy";
@@ -76,25 +71,16 @@ export function DocumentPage(): ReactNode {
   if (documentRoute === undefined) {
     return null;
   }
-  if (artifact.isPending) {
-    return <p className={textMutedOnCanvas}>Loading document…</p>;
-  }
-  if (artifact.isError) {
-    if (artifact.error instanceof ApiError && artifact.error.status === 404) {
-      return (
-        <section>
-          <h1 className={`text-xl font-semibold ${textPrimaryOnCanvas}`}>Document not found</h1>
-          <Link
-            className={`mt-4 inline-flex min-h-11 items-center text-sm font-medium underline ${linkText} ${linkHoverText}`}
-            to={buildProjectPath({ kind: "documents", project: documentRoute.project })}
-          >
-            Back to {documentRoute.project} documents
-          </Link>
-        </section>
-      );
-    }
+  if (artifact.isPending || artifact.isError) {
     return (
-      <QueryError message="Could not load this document." onRetry={() => void artifact.refetch()} />
+      <ArtifactQueryStates
+        errorMessage="Could not load this document."
+        loadingLabel="Loading document…"
+        notFoundLabel="Document not found"
+        notFoundLinkText={`Back to ${documentRoute.project} documents`}
+        notFoundTo={buildProjectPath({ kind: "documents", project: documentRoute.project })}
+        query={artifact}
+      />
     );
   }
   if (artifact.data === undefined) {

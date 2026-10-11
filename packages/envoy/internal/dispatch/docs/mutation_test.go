@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 
@@ -18,16 +19,72 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// A snapshot or a seed outside Join would write a version or an update that no ledger records,
-// whose authors would never be credited or released, so both refuse to run.
-func TestTransactionalDocumentOperationsRefuseAnUnjoinedContext(t *testing.T) {
+// A write outside Join would reach no transaction to weigh it in and no ledger to record it, so
+// every document write refuses to run, whichever entry point it comes through, and writes nothing:
+// the document keeps its tree and its updates.
+func TestEveryDocumentWriteRefusesAnUnjoinedContext(t *testing.T) {
 	service, artifactID := newTestService(t)
-	alice := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.SnapshotVersion(context.Background(), artifactID, alice); !errors.Is(err, errUnjoined) {
-		t.Fatalf("unjoined snapshot error = %v, want errUnjoined", err)
+	seedServiceText(t, service, artifactID, "The quick brown fox\n\n:::ask{#ask-1 urgency=\"med\" multiple=\"false\" state=\"open\"}\nShip it?\n:::\n")
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
+		Kind: MarkSuggestion, ID: "s1", By: model.Actor{Kind: "session", ID: "s1"},
+	}, "brown", nil); err != nil {
+		t.Fatalf("mark a suggestion: %v", err)
 	}
-	if _, err := service.SeedText(context.Background(), artifactID, "seeded", alice); !errors.Is(err, errUnjoined) {
-		t.Fatalf("unjoined seed error = %v, want errUnjoined", err)
+	before := liveTree(t, service, artifactID)
+	countUpdates := func() int {
+		var updates int
+		if err := service.store.Pool.QueryRow(context.Background(), `select count(*) from doc_updates where artifact_id = $1`, artifactID).Scan(&updates); err != nil {
+			t.Fatalf("count updates: %v", err)
+		}
+		return updates
+	}
+	updates := countUpdates()
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	unjoined := context.Background()
+	token, err := service.currentToken(unjoined, artifactID)
+	if err != nil {
+		t.Fatalf("read the document's token: %v", err)
+	}
+	insert := []model.EditOp{{Op: "insert", After: "end", Markdown: "more"}}
+	for _, write := range []struct {
+		name string
+		run  func() error
+	}{
+		{"SeedText", func() error { _, err := service.SeedText(unjoined, artifactID, "seeded", alice); return err }},
+		{"SnapshotVersion", func() error { _, err := service.SnapshotVersion(unjoined, artifactID, alice); return err }},
+		{"NamedVersion", func() error { _, err := service.NamedVersion(unjoined, artifactID, "named", alice); return err }},
+		{"ReplaceText", func() error { _, err := service.ReplaceText(unjoined, artifactID, "replaced", alice); return err }},
+		{"ApplyOps", func() error { _, err := service.ApplyOps(unjoined, artifactID, insert, alice, nil); return err }},
+		{"ApplyOps with a precondition", func() error {
+			_, err := service.ApplyOps(unjoined, artifactID, insert, alice, &model.EditPrecondition{Document: token})
+			return err
+		}},
+		{"MarkQuote", func() error {
+			_, err := service.MarkQuote(unjoined, artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: alice}, "quick", nil)
+			return err
+		}},
+		{"ProjectMark", func() error {
+			return service.ProjectMark(unjoined, artifactID, "c1", MarkRecord{Kind: "comment", By: "user:alice", Text: "note"}, alice)
+		}},
+		{"AcceptSuggestion", func() error { return service.AcceptSuggestion(unjoined, artifactID, "s1", "red", alice) }},
+		{"RejectSuggestion", func() error { return service.RejectSuggestion(unjoined, artifactID, "s1", alice) }},
+		{"SetBlockAttributes", func() error {
+			return service.SetBlockAttributes(unjoined, artifactID, "ask-1", map[string]any{"state": "answered", "answer": "Yes."}, alice)
+		}},
+		{"SetAskBlockText", func() error {
+			_, err := service.SetAskBlockText(unjoined, artifactID, "ask-1", AskBlockEdit{Question: new("Ship it now?")}, alice)
+			return err
+		}},
+	} {
+		if err := write.run(); !errors.Is(err, errUnjoined) {
+			t.Errorf("unjoined %s = %v, want errUnjoined", write.name, err)
+		}
+	}
+	if after := liveTree(t, service, artifactID); !after.EqualWithBlockIDs(before) {
+		t.Errorf("the document changed under unjoined writes")
+	}
+	if after := countUpdates(); after != updates {
+		t.Errorf("doc_updates rows = %d after the unjoined writes, want the %d before them", after, updates)
 	}
 }
 
@@ -104,7 +161,7 @@ func TestReplaceTextUpdatesLiveDocumentAndSettlesVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "# First")
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "# Replaced", actor); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "# Replaced", actor); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
 	waitForDocumentText(t, service, artifactID, "# Replaced\n")
@@ -141,10 +198,13 @@ func TestReplaceTextWithTransactionRollsBackUpdate(t *testing.T) {
 		t.Fatalf("rollback replace transaction: %v", err)
 	}
 	ledger.Discard()
-	if err := service.srv.CloseRoom(artifactID, true); err != nil {
-		t.Fatalf("close live document: %v", err)
+	// The durable document is what is read once no room holds it.
+	if service.srv.GetDoc(artifactID) != nil {
+		if err := service.srv.CloseRoom(artifactID, true); err != nil {
+			t.Fatalf("close live document: %v", err)
+		}
+		waitForNoLiveDocument(t, service, artifactID)
 	}
-	waitForNoLiveDocument(t, service, artifactID)
 
 	got, err := service.Text(ctx, artifactID)
 	if err != nil {
@@ -190,7 +250,7 @@ func TestTransactionalApplyRefreshesAnchoredComment(t *testing.T) {
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "target")
 	const commentID = "00000000-0000-4000-8000-000000000003"
-	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkComment,
 		ID:   commentID,
 		By:   model.Actor{Kind: "user", ID: "alice"},
@@ -255,7 +315,7 @@ func TestClosedIssueRejectsLiveEditsAndNamedVersions(t *testing.T) {
 		t.Fatalf("close document issue: %v", err)
 	}
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
-	_, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, actor, nil)
+	_, err := joinedApplyOps(service, artifactID, []model.EditOp{{Op: "replace", Find: "before", With: "after"}}, actor, nil)
 	if !errors.Is(err, ErrIssueClosed) {
 		t.Fatalf("edit closed document error = %v, want ErrIssueClosed", err)
 	}
@@ -270,7 +330,7 @@ func TestNamedVersionIncludesTrackedActorsAndResetsRoom(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	connected := model.Actor{Kind: "user", ID: "alice"}
 	actor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
-	service.recordActor(artifactID, connected)
+	service.recordActor(t, artifactID, connected)
 	namedResult, err := namedVersion(t, service, artifactID, "checkpoint", actor)
 	version := namedResult.Version
 	if err != nil {
@@ -282,11 +342,8 @@ func TestNamedVersionIncludesTrackedActorsAndResetsRoom(t *testing.T) {
 	if len(version.Authors) != 2 || version.Authors[0] != actor || version.Authors[1] != connected {
 		t.Fatalf("named version authors = %#v, want %v and %v", version.Authors, actor, connected)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if len(state.pending) != 0 {
-		t.Fatalf("pending authors after named version = %#v, want empty", state.pending)
+	if pending := pendingAuthors(t, service, artifactID); len(pending) != 0 {
+		t.Fatalf("pending authors after named version = %#v, want empty", pending)
 	}
 }
 func TestSnapshotVersionDoesNotAttributeUnchangedDocument(t *testing.T) {
@@ -314,7 +371,7 @@ func TestSnapshotVersionDoesNotAttributeUnchangedDocument(t *testing.T) {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
 
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", editor); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "after", editor); err != nil {
 		t.Fatalf("replace document: %v", err)
 	}
 	version = waitForDocumentVersion(t, service.store, artifactID, 2)
@@ -328,7 +385,7 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	editor := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
 	snapshotter := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "after", editor); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "after", editor); err != nil {
 		t.Fatalf("edit before snapshot: %v", err)
 	}
 
@@ -348,12 +405,8 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	pending := len(state.pending)
-	state.mu.Unlock()
-	if pending != 0 {
-		t.Fatalf("pending authors after committed snapshot = %d, want 0", pending)
+	if pending := pendingAuthors(t, service, artifactID); len(pending) != 0 {
+		t.Fatalf("pending authors after committed snapshot = %v, want none", pending)
 	}
 
 	tx, err = service.store.Pool.Begin(context.Background())
@@ -368,11 +421,8 @@ func TestCommittedSnapshotAndNamedVersionsClearPendingAuthors(t *testing.T) {
 	if err := namedLedger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit named version transaction: %v", err)
 	}
-	state.mu.Lock()
-	pending = len(state.pending)
-	state.mu.Unlock()
-	if pending != 0 {
-		t.Fatalf("pending authors after committed named version = %d, want 0", pending)
+	if pending := pendingAuthors(t, service, artifactID); len(pending) != 0 {
+		t.Fatalf("pending authors after committed named version = %v, want none", pending)
 	}
 }
 
@@ -382,7 +432,7 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	seedServiceText(t, service, artifactID, "before")
 	first := model.Actor{Kind: "user", ID: "alice"}
 	second := model.Actor{Kind: "user", ID: "bob"}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "first", first); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "first", first); err != nil {
 		t.Fatalf("first edit: %v", err)
 	}
 	tx, err := service.store.Pool.Begin(context.Background())
@@ -396,17 +446,13 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if err != nil || !wrote {
 		t.Fatalf("snapshot dirty document = %#v, wrote=%t, err=%v", version, wrote, err)
 	}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "second", second); err != nil {
-		t.Fatalf("later edit: %v", err)
-	}
+	// A browser's edit is the one write that lands while the version's transaction holds the
+	// document; a server write would wait for it.
+	browserReplaceText(t, service, artifactID, "second", second)
 	if err := ledger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit snapshot transaction: %v", err)
 	}
-	state := service.room(artifactID)
-	state.mu.Lock()
-	_, retained := state.pending[actorKey(second)]
-	state.mu.Unlock()
-	if !retained {
+	if !slices.Contains(pendingAuthors(t, service, artifactID), second) {
 		t.Fatal("committed snapshot cleared author from later edit")
 	}
 
@@ -419,17 +465,180 @@ func TestVersionCaptureDoesNotClearAuthorsFromLaterEdits(t *testing.T) {
 	if _, err := service.NamedVersion(namedCtx, artifactID, "checkpoint", first); err != nil {
 		t.Fatalf("name document version: %v", err)
 	}
-	if _, err := service.ReplaceText(context.Background(), artifactID, "third", second); err != nil {
-		t.Fatalf("later named-version edit: %v", err)
-	}
+	browserReplaceText(t, service, artifactID, "third", second)
 	if err := namedLedger.Commit(context.Background()); err != nil {
 		t.Fatalf("commit named transaction: %v", err)
 	}
-	state.mu.Lock()
-	_, retained = state.pending[actorKey(second)]
-	state.mu.Unlock()
-	if !retained {
+	if !slices.Contains(pendingAuthors(t, service, artifactID), second) {
 		t.Fatal("committed named version cleared author from later edit")
+	}
+}
+
+// An author pending when a transaction's named version takes its authors who edits again in a
+// browser before the transaction commits is credited on the named version, which holds the first
+// edit, and on the version that holds the second. While the transaction holds the document's
+// writer slot the second edit's observer arms no settlement, so the version's commit met the
+// author's newer credit under the key it had taken (LEGION-503). The transaction's own write is
+// credited on the named version alone.
+func TestNamedVersionKeepsTheCreditOfAnEditItsAuthorMakesBeforeItCommits(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+	editAsPeer(t, service, artifactID, replaceRun("First.", "First, bob."))
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin edit transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "Second.", With: "Second, agent."}}, agent, nil); err != nil {
+		t.Fatalf("apply the agent's edit: %v", err)
+	}
+	named, err := service.NamedVersion(joined, artifactID, "checkpoint", agent)
+	if err != nil {
+		t.Fatalf("name the version: %v", err)
+	}
+	if want := []model.Actor{agent, bob}; !reflect.DeepEqual(named.Version.Authors, want) {
+		t.Fatalf("named version authors = %#v, want %#v", named.Version.Authors, want)
+	}
+	editAsPeer(t, service, artifactID, replaceRun("First, bob.", "First, bob again."))
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit edit transaction: %v", err)
+	}
+
+	settleCurrentGeneration(t, service, artifactID)
+	requireLatestVersionMarkdown(t, service, artifactID, "First, bob again.\n\nSecond, agent.\n")
+	latest := latestVersionNumber(t, service, artifactID)
+	if latest != named.Version.Number+1 {
+		t.Fatalf("latest version = %d, want %d, the one holding bob's second edit", latest, named.Version.Number+1)
+	}
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{bob}) {
+		t.Fatalf("version %d authors = %#v, want bob alone, whose second edit is all it adds", latest, authors)
+	}
+}
+
+// An edit a browser makes after a transaction's named version has brought its fork up to date
+// with the room is not in the version, so the version does not credit its author: the version
+// takes its authors before that read. The version the edit's own settlement writes holds the edit
+// and credits its author alone; the transaction's own write is credited on the named version
+// (LEGION-503).
+func TestNamedVersionCreditsNoAuthorOfAnEditMadeAfterItsForkRead(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+	agent := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin edit transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	if _, err := service.ApplyOps(joined, artifactID, []model.EditOp{{Op: "replace", Find: "Second.", With: "Second, agent."}}, agent, nil); err != nil {
+		t.Fatalf("apply the agent's edit: %v", err)
+	}
+	edited := false
+	service.afterCaptureFork = func(room string) {
+		if room == artifactID && !edited {
+			edited = true
+			editAsPeer(t, service, artifactID, replaceRun("First.", "First, bob."))
+		}
+	}
+	named, err := service.NamedVersion(joined, artifactID, "checkpoint", agent)
+	if err != nil {
+		t.Fatalf("name the version: %v", err)
+	}
+	if !edited {
+		t.Fatal("the named version never brought its fork up to date")
+	}
+	if !reflect.DeepEqual(named.Version.Authors, []model.Actor{agent}) {
+		t.Fatalf("named version authors = %#v, want the agent alone: bob's edit is not in it", named.Version.Authors)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit edit transaction: %v", err)
+	}
+
+	service.afterCaptureFork = nil
+	settleCurrentGeneration(t, service, artifactID)
+	requireLatestVersionMarkdown(t, service, artifactID, "First, bob.\n\nSecond, agent.\n")
+	latest := latestVersionNumber(t, service, artifactID)
+	if latest != named.Version.Number+1 {
+		t.Fatalf("latest version = %d, want %d, the one holding bob's edit", latest, named.Version.Number+1)
+	}
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{bob}) {
+		t.Fatalf("version %d authors = %#v, want bob, whose edit it holds", latest, authors)
+	}
+}
+
+// A room-backed snapshot takes its authors before it copies the document. A browser edit between
+// those steps is in that snapshot but credited afterwards, so it stays pending for the next version
+// that holds it (LEGION-503).
+func TestSnapshotCreditsAnEditMadeBetweenItsAuthorsAndCopyOnTheNextVersion(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
+	settleCurrentGeneration(t, service, artifactID)
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	if _, err := joinedReplaceText(service, artifactID, "First, alice.\n\nSecond.\n", alice); err != nil {
+		t.Fatalf("alice's edit: %v", err)
+	}
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service.addConnection(artifactID, 1, bob)
+
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin snapshot transaction: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	joined, ledger := service.Join(ctx, tx)
+	defer ledger.Discard()
+	var release func()
+	service.afterCaptureAuthorsTake = func(room string) {
+		if room == artifactID && release == nil {
+			release = holdPeerEdit(t, service, artifactID, &service.afterCreditUpdate, replaceRun("Second.", "Second, bob."))
+		}
+	}
+	snapshot, err := service.SnapshotVersion(joined, artifactID, alice)
+	if err != nil {
+		t.Fatalf("snapshot document: %v", err)
+	}
+	if !snapshot.Wrote || release == nil {
+		t.Fatalf("snapshot = %#v, release=%t, want a version and the author-to-copy window", snapshot, release != nil)
+	}
+	if !reflect.DeepEqual(snapshot.Version.Authors, []model.Actor{alice}) {
+		t.Fatalf("snapshot authors = %#v, want alice alone: Bob's credit follows the take", snapshot.Version.Authors)
+	}
+	if err := ledger.Commit(ctx); err != nil {
+		t.Fatalf("commit snapshot: %v", err)
+	}
+
+	service.afterCaptureAuthorsTake = nil
+	release()
+	settleCurrentGeneration(t, service, artifactID)
+	if latest := latestVersionNumber(t, service, artifactID); latest != snapshot.Version.Number {
+		t.Fatalf("latest version = %d, want %d, which already holds Bob's edit", latest, snapshot.Version.Number)
+	}
+	const both = "First, alice.\n\nSecond, bob.\n"
+	carol := model.Actor{Kind: "user", ID: "carol"}
+	if _, err := joinedReplaceText(service, artifactID, both+"\nThird, carol.\n", carol); err != nil {
+		t.Fatalf("carol's edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, artifactID)
+	if authors := latestVersionAuthors(t, service, artifactID); !reflect.DeepEqual(authors, []model.Actor{bob, carol}) {
+		t.Fatalf("version %d authors = %#v, want Bob and Carol", latestVersionNumber(t, service, artifactID), authors)
 	}
 }
 
@@ -447,7 +656,7 @@ func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
 	editDone := make(chan error, 1)
 	go func() {
 		editDone <- func() error {
-			_, err := service.ReplaceText(context.Background(), artifactID, "after", editor)
+			_, err := joinedReplaceText(service, artifactID, "after", editor)
 			return err
 		}()
 	}()
@@ -485,7 +694,7 @@ func TestColdSnapshotCapturesFirstEditAfterWarm(t *testing.T) {
 func TestReplaceTextAcceptsUnchangedEmptyDocument(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "")
-	if _, err := service.ReplaceText(context.Background(), artifactID, "", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace unchanged empty document: %v", err)
 	}
 }
@@ -494,7 +703,7 @@ func TestRefreshAnchorsClosesRowsBeforeUpdating(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before after")
 	const askID = "00000000-0000-4000-8000-000000000004"
-	if _, err := service.MarkQuote(context.Background(), artifactID, MarkSpec{
+	if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 		Kind: MarkAsk,
 		ID:   askID,
 		By:   model.Actor{Kind: "user", ID: "alice"},
@@ -567,7 +776,7 @@ func TestNamedVersionIndexesDocumentReferences(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
-	if _, err := service.ReplaceText(context.Background(), artifactID, "See dispatch://DOC-1/artifact/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "See dispatch://DOC-1/artifact/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace document text: %v", err)
 	}
 	if _, err := namedVersion(t, service, artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
@@ -589,7 +798,7 @@ func TestNamedVersionIndexesServerURLDocumentReferences(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "before")
-	if _, err := service.ReplaceText(context.Background(), artifactID, "See https://dispatch.example/issues/DOC-1/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
+	if _, err := joinedReplaceText(service, artifactID, "See https://dispatch.example/issues/DOC-1/spec.", model.Actor{Kind: "user", ID: "alice"}); err != nil {
 		t.Fatalf("replace document text: %v", err)
 	}
 	if _, err := namedVersion(t, service, artifactID, "reference", model.Actor{Kind: "user", ID: "alice"}); err != nil {
@@ -621,9 +830,8 @@ func TestSettledVersionNamesChangedReferenceTargets(t *testing.T) {
 	}
 	seedServiceText(t, service, artifactID, "# First")
 	actor := model.Actor{Kind: "user", ID: "alice"}
-	if _, err := service.ReplaceText(
-		context.Background(), artifactID, "# First\n\nWaiting on dispatch://DOC-1/ask/"+askID+".", actor,
-	); err != nil {
+	if _, err := joinedReplaceText(service,
+		artifactID, "# First\n\nWaiting on dispatch://DOC-1/ask/"+askID+".", actor); err != nil {
 		t.Fatalf("replace text: %v", err)
 	}
 	waitForDocumentVersion(t, service.store, artifactID, 2)
@@ -673,7 +881,7 @@ func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 		askIDs = append(askIDs, id)
 	}
 
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "replace", Find: "Pending.", With: "Waiting on dispatch://DOC-1/ask/" + askIDs[0] + "."},
 	}, actor, nil); err != nil {
 		t.Fatalf("apply the citing edit: %v", err)
@@ -697,7 +905,7 @@ func TestVersionWritersReportChangedReferenceTargets(t *testing.T) {
 		t.Fatalf("snapshot changes = %#v (wrote=%t), want %#v", snapshot.Changes.Targets, snapshot.Wrote, want)
 	}
 
-	if _, err := service.ApplyOps(context.Background(), artifactID, []model.EditOp{
+	if _, err := joinedApplyOps(service, artifactID, []model.EditOp{
 		{Op: "replace", Find: "Waiting on", With: "Also dispatch://DOC-1/ask/" + askIDs[1] + ", waiting on"},
 	}, actor, nil); err != nil {
 		t.Fatalf("apply the second citing edit: %v", err)

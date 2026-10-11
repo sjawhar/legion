@@ -19,7 +19,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 // A planner whose launches run out holds its issue: the architect's role topic takes the held and
@@ -61,6 +63,15 @@ func TestAHeldNoticeReachesTheControllerTopicAndItsRetriesNeverResendTheArchitec
 	putOutboxIssue(t, pool, record.NewStore(), record.Issue{
 		Key: issue, Tree: issue, Project: cfg.Project, Title: "held", Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "U",
 	})
+	// The issue's tree is admitted, as every tree the workflow runs is: its lifecycle is open.
+	st, err := store.Open(context.Background(), cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open the daemon's store: %v", err)
+	}
+	t.Cleanup(st.Close)
+	if _, err := st.OpenTreeLifecycle(context.Background(), token, issue, treelifecycle.AuthorityWorkflow); err != nil {
+		t.Fatalf("admit the tree: %v", err)
+	}
 	// The one launch the limit allows fails, and the operator is answered with it; the claim is
 	// failed, and the workflow holds the issue.
 	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", api.SpawnRequest{Tree: issue, Issue: issue, Role: claim.RolePlanner, Prompt: "Plan it."}, true); status != http.StatusInternalServerError || !strings.Contains(string(body), "pane launch failed") {

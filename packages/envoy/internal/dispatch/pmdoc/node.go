@@ -1,9 +1,11 @@
 package pmdoc
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"regexp"
 	"sort"
@@ -115,11 +117,11 @@ func validateNode(n *Node, depth int) error {
 		if !markTypes[m.Type] {
 			return fmt.Errorf("%w: mark %q", ErrSchema, m.Type)
 		}
-		if err := attrNestingError("mark", m.Type, m.Attrs); err != nil {
+		if err := attrNestingError("mark", m.Type, m.Attrs, maxMarkAttrNesting); err != nil {
 			return err
 		}
 	}
-	if err := attrNestingError("node", n.Type, n.Attrs); err != nil {
+	if err := attrNestingError("node", n.Type, n.Attrs, maxNodeAttrNesting); err != nil {
 		return err
 	}
 	for _, child := range n.Children {
@@ -432,19 +434,49 @@ func isInlineNodeType(typeName string) bool {
 
 // Equal compares document content and structure while ignoring block identity.
 func (n *Node) Equal(o *Node) bool {
-	return equalNode(n, o, false)
+	return equalNode(n, o, func(_ string, a, b Attrs) bool { return attrsEqualButBlockID(a, b) })
 }
 
 // EqualWithBlockIDs compares document content, structure, and block identity.
 func (n *Node) EqualWithBlockIDs(o *Node) bool {
-	return equalNode(n, o, true)
+	return equalNode(n, o, func(_ string, a, b Attrs) bool { return attrsEqual(a, b) })
 }
 
-func equalNode(n, o *Node, includeBlockIDs bool) bool {
+// EqualOutsideServerState compares document content, structure and block identity as
+// EqualWithBlockIDs does, but for the attributes of a typed block that the server keeps (the
+// schema's server attributes) other than an ask's answer (IsAnswerAttribute): an ask's state, who
+// answered it and when, and whether it reads. No caller writes those, they say what the server
+// knows about the block's own text, and each is a word or a timestamp beside it.
+func (n *Node) EqualOutsideServerState(o *Node) bool {
+	return equalNode(n, o, attrsEqualOutsideServerState)
+}
+
+// IsAnswerAttribute reports whether name is a server attribute of an ask that holds the answer
+// itself rather than what the server knows of it: the answer's own words, and the options it
+// selects. The server keeps both in agreement with the ask, but both are caller text - a selection
+// copies the asker's option labels, and renders each escaped, a `<` as seven bytes, so one choice
+// of a 1,000,000-character label made a 1 MB document 8 MB. So a write that changes either is
+// weighed as caller text is (EqualOutsideServerState), and where the document has no room for
+// them the server records the answer on the ask and leaves both out of the block.
+func IsAnswerAttribute(name string) bool {
+	return name == "answer" || name == "selected"
+}
+
+func attrsEqualOutsideServerState(nodeType string, a, b Attrs) bool {
+	typ, typed := typedBlock(nodeType)
+	if !typed {
+		return attrsEqual(a, b)
+	}
+	return attrsEqualBut(a, b, func(name string) bool { return !IsAnswerAttribute(name) && typ.Attributes[name].Server })
+}
+
+// equalNode compares n and o, their content and structure, holding each node's attributes to
+// attrs, which is given the node's type.
+func equalNode(n, o *Node, attrs func(nodeType string, a, b Attrs) bool) bool {
 	if n == nil || o == nil {
 		return n == o
 	}
-	if n.Type != o.Type || n.Text != o.Text || !nodeAttrsEqual(n.Attrs, o.Attrs, includeBlockIDs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
+	if n.Type != o.Type || n.Text != o.Text || !attrs(n.Type, n.Attrs, o.Attrs) || len(n.Marks) != len(o.Marks) || len(n.Children) != len(o.Children) {
 		return false
 	}
 	for i := range n.Marks {
@@ -453,19 +485,27 @@ func equalNode(n, o *Node, includeBlockIDs bool) bool {
 		}
 	}
 	for i := range n.Children {
-		if !equalNode(n.Children[i], o.Children[i], includeBlockIDs) {
+		if !equalNode(n.Children[i], o.Children[i], attrs) {
 			return false
 		}
 	}
 	return true
 }
 
-func nodeAttrsEqual(a, b Attrs, includeBlockIDs bool) bool {
-	if includeBlockIDs {
-		return attrsEqual(a, b)
-	}
+// attrsEqualButBlockID is attrsEqual over every attribute but the block id.
+func attrsEqualButBlockID(a, b Attrs) bool {
+	return attrsEqualBut(a, b, func(name string) bool { return name == BlockIDAttr })
+}
+
+// attrsEqual treats nil and empty as equal and compares values by JSON semantics.
+func attrsEqual(a, b Attrs) bool {
+	return attrsEqualBut(a, b, func(string) bool { return false })
+}
+
+// attrsEqualBut is attrsEqual over the attributes ignored does not name.
+func attrsEqualBut(a, b Attrs, ignored func(name string) bool) bool {
 	for key, av := range a {
-		if key == BlockIDAttr {
+		if ignored(key) {
 			continue
 		}
 		bv, ok := b[key]
@@ -480,30 +520,9 @@ func nodeAttrsEqual(a, b Attrs, includeBlockIDs bool) bool {
 		}
 	}
 	for key, bv := range b {
-		if key != BlockIDAttr {
-			if _, ok := a[key]; !ok && bv != nil {
-				return false
-			}
+		if ignored(key) {
+			continue
 		}
-	}
-	return true
-}
-
-// attrsEqual treats nil and empty as equal and compares values by JSON semantics.
-func attrsEqual(a, b Attrs) bool {
-	for key, av := range a {
-		bv, ok := b[key]
-		if !ok {
-			if av == nil {
-				continue
-			}
-			return false
-		}
-		if !reflect.DeepEqual(normalizeJSON(av), normalizeJSON(bv)) {
-			return false
-		}
-	}
-	for key, bv := range b {
 		if _, ok := a[key]; !ok && bv != nil {
 			return false
 		}
@@ -572,22 +591,77 @@ func (n *Node) JSON() ([]byte, error) {
 // concurrency. Block identity and typed-block server state are excluded, while
 // inline marks remain part of the state a document edit can destroy.
 func (n *Node) TokenJSON() ([]byte, error) {
-	if err := n.Validate(); err != nil {
+	var encoded bytes.Buffer
+	if err := n.WriteTokenJSON(&encoded); err != nil {
 		return nil, err
 	}
-	value, err := n.tokenJSON()
-	if err != nil {
-		return nil, err
-	}
-	return json.Marshal(value)
+	return encoded.Bytes(), nil
 }
 
-type tokenNode struct {
-	Type    string       `json:"type"`
-	Attrs   Attrs        `json:"attrs,omitempty"`
-	Content []*tokenNode `json:"content,omitempty"`
-	Text    string       `json:"text,omitempty"`
-	Marks   []tokenMark  `json:"marks,omitempty"`
+// WriteTokenJSON writes TokenJSON's representation to w as it encodes it, so a caller that only
+// hashes it - every document and block token - never holds it whole: built as a tree of its own
+// and then encoded in one piece, a heavy document's representation took two more copies of the
+// document for each token (LEGION-504). It is what encoding/json makes of a node with the fields
+// type, attrs, content, text and marks, in that order and each but type left out when empty: each
+// value is encoded by encoding/json, and only the punctuation between them is written here.
+func (n *Node) WriteTokenJSON(w io.Writer) error {
+	if err := n.Validate(); err != nil {
+		return err
+	}
+	out := tokenWriter{w: w}
+	n.writeTokenJSON(&out)
+	return out.err
+}
+
+// writeTokenJSON writes n's token representation through out, which keeps the first error.
+func (n *Node) writeTokenJSON(out *tokenWriter) {
+	out.raw(`{"type":`)
+	out.value(n.Type)
+	if attrs := tokenAttrs(n.Type, n.Attrs); len(attrs) > 0 {
+		out.raw(`,"attrs":`)
+		out.value(attrs)
+	}
+	if len(n.Children) > 0 {
+		out.raw(`,"content":[`)
+		for index, child := range n.Children {
+			if index > 0 {
+				out.raw(",")
+			}
+			if out.err == nil {
+				child.writeTokenJSON(out)
+			}
+		}
+		out.raw("]")
+	}
+	if n.Text != "" {
+		out.raw(`,"text":`)
+		out.value(n.Text)
+	}
+	if len(n.Marks) > 0 {
+		// Marks are written in the order of their encodings, so a node's marks in any order are
+		// one token.
+		marks := make([][]byte, 0, len(n.Marks))
+		for _, mark := range n.Marks {
+			encoded, err := json.Marshal(tokenMark{Type: mark.Type, Attrs: canonicalAttrs(mark.Attrs)})
+			if err != nil {
+				if out.err == nil {
+					out.err = err
+				}
+				return
+			}
+			marks = append(marks, encoded)
+		}
+		sort.Slice(marks, func(left, right int) bool { return string(marks[left]) < string(marks[right]) })
+		out.raw(`,"marks":[`)
+		for index, mark := range marks {
+			if index > 0 {
+				out.raw(",")
+			}
+			out.bytes(mark)
+		}
+		out.raw("]")
+	}
+	out.raw("}")
 }
 
 type tokenMark struct {
@@ -595,24 +669,34 @@ type tokenMark struct {
 	Attrs Attrs  `json:"attrs,omitempty"`
 }
 
-func (n *Node) tokenJSON() (*tokenNode, error) {
-	out := &tokenNode{Type: n.Type, Attrs: tokenAttrs(n.Type, n.Attrs), Text: n.Text}
-	for _, mark := range n.Marks {
-		out.Marks = append(out.Marks, tokenMark{Type: mark.Type, Attrs: canonicalAttrs(mark.Attrs)})
+// tokenWriter writes a token's encoding to w, keeping the first error and writing nothing after it.
+type tokenWriter struct {
+	w   io.Writer
+	err error
+}
+
+func (t *tokenWriter) raw(text string) {
+	if t.err == nil {
+		_, t.err = io.WriteString(t.w, text)
 	}
-	sort.Slice(out.Marks, func(left, right int) bool {
-		leftJSON, _ := json.Marshal(out.Marks[left])
-		rightJSON, _ := json.Marshal(out.Marks[right])
-		return string(leftJSON) < string(rightJSON)
-	})
-	for _, child := range n.Children {
-		value, err := child.tokenJSON()
-		if err != nil {
-			return nil, err
-		}
-		out.Content = append(out.Content, value)
+}
+
+func (t *tokenWriter) bytes(encoded []byte) {
+	if t.err == nil {
+		_, t.err = t.w.Write(encoded)
 	}
-	return out, nil
+}
+
+func (t *tokenWriter) value(value any) {
+	if t.err != nil {
+		return
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.err = err
+		return
+	}
+	t.bytes(encoded)
 }
 
 func tokenAttrs(nodeType string, attrs Attrs) Attrs {

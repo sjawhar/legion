@@ -16,7 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/prompts"
 )
 
-// agentModelPlugin lays out a pi-legion-envoy under dir whose one skill dispatches three task agents
+// agentModelPlugin lays out a pi-legion under dir whose one skill dispatches three task agents
 // the plugin ships: oracle declaring its model as `@oracle`, reviewer as the list `["@review"]`, and
 // plain declaring none.
 func agentModelPlugin(t *testing.T, dir string) string {
@@ -108,8 +108,9 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 				}
 			}
 			root, references := "", promptrefs.New()
+			envoyRoot := testEnvoyPlugin(t, dir, nil)
 			if testCase.shipped {
-				root, references = shippedPromptPlugin(t, dir), prompts.RoleReferences()
+				root, references = shippedPromptPlugin(t, dir, envoyRoot), prompts.RoleReferences()
 			} else {
 				root = agentModelPlugin(t, dir)
 			}
@@ -120,19 +121,17 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 			log := slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))
 			var err error
 			if testCase.pane {
-				install := exec.Command(omp, "plugin", "install", root)
+				var environ []string
 				for name, value := range env {
-					install.Env = append(install.Env, name+"="+value)
+					environ = append(environ, name+"="+value)
 				}
-				if out, err := install.CombinedOutput(); err != nil {
-					t.Fatalf("omp plugin install: %v\n%s", err, out)
-				}
-				// A pane loads the plugin through discovery, as the daemon's boot gate on tmux
+				installPlugins(t, omp, environ, envoyRoot, root)
+				// A pane loads the plugins through discovery, as the daemon's boot gate on tmux
 				// probes it.
 				err = pluginGate{env: env, workDir: dir, invocation: omp, timeout: defaultProbeTimeout, retry: bootprobe.Image,
 					contract: 3, roleReferences: references, skipAgentModels: testCase.skip, log: log}.verify(context.Background())
 			} else {
-				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
+				err = ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root, EnvoyPluginRoot: envoyRoot,
 					SkipAgentModels: testCase.skip, RoleReferences: references, Log: log})
 			}
 
@@ -154,16 +153,29 @@ func TestTheAgentModelCheckOnTheRealOhMyPi(t *testing.T) {
 	}
 }
 
-// shippedPromptPlugin lays out a pi-legion-envoy under dir with the prompts this checkout ships:
-// the plugin's own agents/, and the repository's skills as its dist/skills, as the package's
-// prepack copies them, under testPlugin's manifest and load marker.
-func shippedPromptPlugin(t *testing.T, dir string) string {
+// shippedPromptPlugin lays out a pi-legion under dir with the prompts this checkout ships — the
+// package's own agents/ and its partition of the repository's skills as its dist/skills, staged as
+// the package's prepack stages them (scripts/pi-plugin-prepack.sh --stage-skills) — under
+// testPlugin's manifest and load marker, and stages the Envoy plugin's partition into envoyRoot, a
+// testEnvoyPlugin, so the two roots together ship every skill the prompts load.
+func shippedPromptPlugin(t *testing.T, dir, envoyRoot string) string {
 	t.Helper()
-	pluginSource := filepath.Join("..", "..", "..", "pi-envoy")
+	repository := filepath.Join("..", "..", "..", "..")
 	root := testPlugin(t, dir, nil)
-	copyDir(t, filepath.Join(pluginSource, "agents"), filepath.Join(root, "agents"))
-	copyDir(t, filepath.Join(pluginSource, "..", "..", "skills"), filepath.Join(root, "dist", "skills"))
+	copyDir(t, filepath.Join(repository, "packages", "pi-legion", "agents"), filepath.Join(root, "agents"))
+	stageSkills(t, repository, "@sjawhar/pi-legion", filepath.Join(root, "dist", "skills"))
+	stageSkills(t, repository, "@sjawhar/pi-envoy", filepath.Join(envoyRoot, "dist", "skills"))
 	return root
+}
+
+// stageSkills stages the named plugin's partition of the repository's skills into dest, the one
+// place that partition is written down (scripts/pi-plugin-prepack.sh).
+func stageSkills(t *testing.T, repository, pkg, dest string) {
+	t.Helper()
+	stage := exec.Command("bash", filepath.Join(repository, "scripts", "pi-plugin-prepack.sh"), "--stage-skills", pkg, dest)
+	if out, err := stage.CombinedOutput(); err != nil {
+		t.Fatalf("stage %s's skills: %v\n%s", pkg, err, out)
+	}
 }
 
 // A Sandbox pod runs on the role prompts the daemon inlines from its own snapshot, not those the
@@ -187,7 +199,7 @@ func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	root := agentModelPlugin(t, dir)
+	root, envoyRoot := agentModelPlugin(t, dir), testEnvoyPlugin(t, dir, nil)
 	references := func(prompt string) promptrefs.Names {
 		names := promptrefs.New()
 		names.Text("roles/core/planner.md", []byte(prompt))
@@ -197,7 +209,7 @@ func TestTheImageProbeResolvesTheAgentsTheDaemonsPromptsName(t *testing.T) {
 	daemonReferences := references("Consult `task(agent=\"oracle\")`, then `task(agent=\"daemon-only\")`.\n")
 	env := map[string]string{"HOME": home, "OMP_PROFILE": "legion", "PATH": "/usr/local/bin:/usr/bin:/bin", "AWS_EC2_METADATA_DISABLED": "true"}
 	probe := func(references promptrefs.Names) error {
-		return ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root,
+		return ProbeImage(context.Background(), ImageProbe{Omp: omp, Contract: 3, Env: env, WorkDir: dir, PluginRoot: root, EnvoyPluginRoot: envoyRoot,
 			RoleReferences: references, Log: slog.New(slog.NewTextHandler(&bytes.Buffer{}, nil))})
 	}
 	if err := probe(imageReferences); err != nil {

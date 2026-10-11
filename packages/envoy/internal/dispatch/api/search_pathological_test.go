@@ -9,31 +9,34 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/sjawhar/envoy/internal/cputest"
 )
 
-// Saving a document or an issue title takes time linear in a pathological run over the tested
-// ladder sizes (LEGION-465). Before the fix Postgres's search indexing read a run of `a_` or `q_`
-// in quadratic time, and pmdoc parsed `a_b*` in nearly quadratic time. On one loaded machine,
-// before the fix and after it at the same moment, 64 KiB of `a_` saved in 46 s and 0.3 s, 128 KiB
-// of `a_b*` in 33 s and 1.3-2.1 s, an issue titled with 32 KiB of `q_` in 12 s and 0.06-0.17 s,
-// and the duplicate check against a 16 KiB title took 18-21 s and 0.12-0.31 s. Times after the
-// fix follow the runner's load, so no wall-clock bound holds on every runner; each save is timed
-// at growing sizes instead, and its growth is bounded (growsLinearly).
+// Saving a document takes time linear in a pathological run over the tested ladder sizes
+// (LEGION-465). Before the fix Postgres's search indexing read a run of `a_` or `q_` in quadratic
+// time, and pmdoc parsed `a_b*` in nearly quadratic time. On one loaded machine, before the fix
+// and after it at the same moment, 64 KiB of `a_` saved in 46 s and 0.3 s, 128 KiB of `a_b*` in
+// 33 s and 1.3-2.1 s, an issue titled with 32 KiB of `q_` in 12 s and 0.06-0.17 s, and the
+// duplicate check against a 16 KiB title took 18-21 s and 0.12-0.31 s. Times after the fix follow
+// the runner's load, so no wall-clock bound holds on every runner; each save is timed at growing
+// sizes instead, and its growth is bounded (growsLinearly).
 //
 // A ladder's first size is small enough that the request's own cost is most of its time, about
 // the same before the fix and after (1 KiB of `a_`: 39-48 ms before, 51-61 ms after); its second
 // is where the code before the fix is many times slower, so that code fails the first step by
-// several times the bound. The duplicate check's own cost is about 2 ms, which the title's
-// passes at a few hundred bytes, so its ladder starts at 64 B. The `)_` ladder deliberately stops
-// at 256 KiB: `)_` documents up to 1,048,574 bytes are accepted, while exactly 1 MiB reaches the
-// 1,048,576-item cap (TestUploadRefusesADocumentTooLargeToStore). A cap-sized `)_` save costs
-// about 1.1 GB of memory, so LEGION-481 measures it in a dedicated RSS harness instead. A title
-// has no cap of its own, and 512 KiB stands for the request's 1 MiB. `)_` saved in linear time
-// before the fix too and is held to the same growth.
+// several times the bound. Written as paragraph text, the larger runs make more elements than one
+// write may (TestUploadRefusesADocumentTooLargeToStore), so each run is a code block's text: the
+// document stores it whole and search indexes it whole, which is where the time went, and pmdoc's
+// linear-time test holds the parser on the same runs. The `)_` ladder stops at 256 KiB, as before
+// the element limit. `)_` saved in linear time before the fix too and is held to the same growth.
 //
-// Comment and message text is capped at 2,000 characters and an ask question at 800. Their
-// removed timings measured a 2,000-character `a_` comment at 51 ms before the fix and 56 ms after,
-// so their 5 s limit could only catch the settlement wait.
+// Comment and message text is capped at 2,000 characters, an ask question at 800 and an issue title
+// at 1,000 (contracts.IssueTitleMax), too short for a ladder to tell the code before the fix from
+// the code after it: their removed timings measured a 2,000-character `a_` comment at 51 ms before
+// the fix and 56 ms after. The title's ladders, and the duplicate check's against a stored title,
+// went with the title cap (TestIssueTitlesAreCappedOnCreateAndRetitle). Every one of these texts
+// is indexed through the search_text the document ladders time.
 //
 // Settlement is held off. A document's settlement holds its issue's row while it renders, so a
 // save timed while one ran would count the wait for it; and the test server's shutdown, which
@@ -54,7 +57,8 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 		t.Run("document "+test.shape, func(t *testing.T) {
 			growsLinearly(t, "saving a document of `"+test.shape+"`", test.sizes, func(size int) time.Duration {
 				documents++
-				body := strings.Repeat(test.shape, size/len(test.shape))
+				const fence = "```\n"
+				body := fence + strings.Repeat(test.shape, (size-2*len(fence)-1)/len(test.shape)) + "\n" + fence
 				started := time.Now()
 				response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{
 					"name": fmt.Sprintf("pathological-%d.md", documents),
@@ -67,47 +71,34 @@ func TestSavingAPathologicalBodyIsBounded(t *testing.T) {
 			})
 		})
 	}
-	// Creating an issue reads titles through the parser three ways: the duplicate check's
-	// to_tsvector over the new title and every title in the project, its ts_headline over each
-	// near-duplicate's title, and the issues trigger. Every title gets a project of its own, so
-	// no save reads the titles the ones before it stored; the duplicate check reads one stored
-	// title, whose word `q` makes it the near-duplicate its headline is drawn from.
-	projects := 0
-	project := func(t *testing.T) string {
-		t.Helper()
-		projects++
-		key := fmt.Sprintf("T%d", projects)
-		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": key, "name": key}, "alice"); response.Code != http.StatusCreated {
-			t.Fatalf("create project %s: status=%d body=%.200s", key, response.Code, response.Body.String())
-		}
-		return key
-	}
-	titled := func(t *testing.T, key string, size int) time.Duration {
-		t.Helper()
-		started := time.Now()
-		created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": key, "title": strings.Repeat("q_", size/2)}, "alice")
-		elapsed := time.Since(started)
-		if created.Code != http.StatusCreated {
-			t.Fatalf("issue titled with %s of `q_`: status=%d body=%.200s", sizeText(size), created.Code, created.Body.String())
-		}
-		return elapsed
-	}
-	t.Run("issue title", func(t *testing.T) {
-		growsLinearly(t, "creating an issue titled with `q_`", []int{512, 32 << 10, 512 << 10}, func(size int) time.Duration {
-			return titled(t, project(t), size)
-		})
-	})
-	t.Run("duplicate check", func(t *testing.T) {
-		growsLinearly(t, "the duplicate check against a title of `q_`", []int{64, 16 << 10, 512 << 10}, func(size int) time.Duration {
-			key := project(t)
-			titled(t, key, size)
-			started := time.Now()
-			duplicate := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{"project": key, "title": "q"}, "alice")
-			elapsed := time.Since(started)
-			if duplicate.Code != http.StatusConflict || !strings.Contains(duplicate.Body.String(), `"code":"POSSIBLE_DUPLICATE"`) {
-				t.Fatalf("issue titled with a word of a %s title run: status=%d body=%.200s, want 409 POSSIBLE_DUPLICATE", sizeText(size), duplicate.Code, duplicate.Body.String())
+	// Replacing a document of many short blocks with as many others, every block changing type,
+	// takes time linear in its blocks (LEGION-465): pmdoc wrote each new block at its own index,
+	// walking the document to it, so the replacement grew with the square of its blocks. A quote of
+	// n headings replaced with a quote of n rules took 34 ms of server CPU at 682 blocks and 10.5 s
+	// at 21,844, the most one write's element limit allows of it, before the fix, and 27 ms and
+	// 1.5 s after it, on one machine at a load of 309 to 343. Replaced blocks that stand apart, kept
+	// blocks between them, still cost a walk each in ygo (pmdoc's TestUpdateIsLinearInTheBlockCount).
+	// Each rung is timed in this process's CPU (cputest.Process), since a rung's wall time at these
+	// sizes is mostly the request's own cost and the runner's load. No test in this package calls
+	// t.Parallel.
+	t.Run("replacing many blocks", func(t *testing.T) {
+		const from, to = "> #\n", "> ***\n"
+		growsLinearly(t, "replacing a quote of headings with a quote of rules", []int{682 * len(to), 5_461 * len(to), 21_844 * len(to)}, func(size int) time.Duration {
+			blocks := size / len(to)
+			documents++
+			name := fmt.Sprintf("many-blocks-%d.md", documents)
+			for index, body := range []string{strings.Repeat(from, blocks), strings.Repeat(to, blocks)} {
+				before := cputest.Process()
+				response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": name}, "body.md", "text/markdown", []byte(body), "alice")
+				took := cputest.Process() - before
+				if response.Code != http.StatusCreated {
+					t.Fatalf("upload %d blocks of %q: status=%d body=%.200s", blocks, body[:len(from)], response.Code, response.Body.String())
+				}
+				if index == 1 {
+					return took
+				}
 			}
-			return elapsed
+			return 0
 		})
 	})
 }
@@ -257,17 +248,17 @@ func TestSearchFindsOrdinaryAndUnderscoredTextAfterSearchText(t *testing.T) {
 	}
 }
 
-// A document whose formatting cannot be stored - 1 MiB of `)_` is 524,288 italic spans, over the
-// 1,048,576 items one document update may hold - is refused as the cap it hit, with the count, on
-// a new document (SeedText) and on a replacement (ReplaceText), never a 500.
+// A document whose markdown makes more elements than one write may - 1 MiB of `)_`, 262,144
+// italic spans, held a gigabyte while it was saved (LEGION-481) - is refused as too large to store,
+// naming the limit, on a new document (SeedText) and on a replacement (ReplaceText), never a 500.
 func TestUploadRefusesADocumentTooLargeToStore(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createArtifactIssue(t, handler)
 	body := strings.Repeat(")_", (1<<20)/2)
 	// A new document (SeedText): refused, and nothing is created.
 	response := multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "too-large.md"}, "body.md", "text/markdown", []byte(body), "alice")
-	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), "1048576") {
-		t.Fatalf("seed of a document too large to store: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the 1048576-item cap", response.Code, response.Body.String())
+	if !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "more than 65536 elements") {
+		t.Fatalf("seed of a document too large to store: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the 65536-element limit, as the document service words it", response.Code, response.Body.String())
 	}
 	if listing := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/artifacts", nil, "alice"); strings.Contains(listing.Body.String(), "too-large") {
 		t.Fatalf("the refused seed left an artifact behind: %.300s", listing.Body.String())
@@ -278,11 +269,53 @@ func TestUploadRefusesADocumentTooLargeToStore(t *testing.T) {
 		t.Fatalf("seed notes.md: status=%d body=%.300s", first.Code, first.Body.String())
 	}
 	response = multipartRequest(t, handler, "/api/v1/issues/"+issue.Key+"/artifacts", map[string]string{"name": "notes.md"}, "body.md", "text/markdown", []byte(body), "alice")
-	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), "1048576") {
-		t.Fatalf("replacement by a document too large to store: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the 1048576-item cap", response.Code, response.Body.String())
+	if !refusedTooLarge(t, response) || !strings.Contains(response.Body.String(), "more than 65536 elements") {
+		t.Fatalf("replacement by a document too large to store: status=%d body=%.400s, want 413 CAP_EXCEEDED naming the 65536-element limit, as the document service words it", response.Code, response.Body.String())
 	}
 	text := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/artifacts/notes-md/text", nil, "alice")
 	if text.Code != http.StatusOK || !strings.Contains(text.Body.String(), `"markdown":"# Notes\n"`) {
 		t.Fatalf("notes.md after the refused replacement: status=%d body=%.300s, want its first version", text.Code, text.Body.String())
+	}
+}
+
+// Every route that writes a caller's markdown refuses markdown past the element limit as 413
+// CAP_EXCEEDED naming the limit, and writes nothing: a spec at issue creation, an issue's and a
+// project's document upload as JSON, and an edit's insert and replace.
+func TestEveryMarkdownWriteRefusesMarkdownPastTheElementLimit(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Element limit", "Before.\n")
+	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{"key": "DOCS", "name": "Docs"}, "alice"); response.Code != http.StatusCreated {
+		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
+	}
+	heavy := strings.Repeat(")_", 200_000)
+	for _, write := range []struct {
+		name, path string
+		body       any
+	}{
+		{"a spec at issue creation", "/api/v1/issues", map[string]string{"project": "TEST", "title": "Too heavy", "spec": heavy}},
+		{"an issue's document upload", "/api/v1/issues/" + issue.Key + "/artifacts", map[string]string{"name": "heavy.md", "content": heavy}},
+		{"a project's document upload", "/api/v1/projects/DOCS/artifacts", map[string]string{"name": "heavy.md", "content": heavy}},
+		{"an edit's insert", "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/edits", map[string]any{
+			"ops": []map[string]string{{"op": "insert", "after": "end", "markdown": heavy}},
+		}},
+		{"an edit's replace", "/api/v1/artifacts/" + issue.PrimaryArtifactID + "/edits", map[string]any{
+			"ops": []map[string]string{{"op": "replace", "find": "Before.", "with": heavy}},
+		}},
+	} {
+		response := dispatchRequest(t, handler, http.MethodPost, write.path, write.body, "alice")
+		if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(response.Body.String(), "more than 65536 elements") {
+			t.Errorf("%s past the element limit: status=%d body=%.300s, want 413 CAP_EXCEEDED naming the limit", write.name, response.Code, response.Body.String())
+		}
+	}
+	if listed := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST", nil, "alice"); strings.Contains(listed.Body.String(), "Too heavy") {
+		t.Errorf("the refused issue was created: %.300s", listed.Body.String())
+	}
+	for _, path := range []string{"/api/v1/issues/" + issue.Key + "/artifacts", "/api/v1/projects/DOCS/artifacts"} {
+		if listed := dispatchRequest(t, handler, http.MethodGet, path, nil, "alice"); strings.Contains(listed.Body.String(), "heavy") {
+			t.Errorf("a refused upload left a document behind at %s: %.300s", path, listed.Body.String())
+		}
+	}
+	if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); text != "Before.\n" {
+		t.Errorf("the spec after the refused edits = %q, want it unchanged", text)
 	}
 }

@@ -45,6 +45,7 @@ const issue: IssueDetails = {
   last_seq: 250,
   number: 1,
   open_asks: [],
+  progress: { tasks: null, children: null },
   parent: null,
   blocked_by: [],
   assignee: null,
@@ -735,7 +736,7 @@ test("IssuePage opens the Spec tab and leaves open asks out of the main column",
       ...openIssueAsk,
       priority: issue.priority,
       snoozed_until: null,
-      thread: { edits: [], followers: [], replies: [] },
+      thread: { answers: [], edits: [], followers: [], replies: [] },
     },
   ]);
   const view = renderIssuePage("/issues/CORE-1");

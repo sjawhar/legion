@@ -929,3 +929,24 @@ test("a first claim and a takeover read differently in the activity line", () =>
     )
   ).toBe("took the claim from Implementer");
 });
+
+test("an answer that replaced an earlier one reads as a change in the activity line", () => {
+  const answer = { at: "2026-09-10T09:05:00Z", selected: ["Hold"], text: null, user: "bob" };
+  const answered = askEvent(5, answer.at, "ask.answered", {
+    ...baseAsk,
+    answer,
+    state: "answered",
+  });
+  expect(activityDescription(answered)).toBe("answered “Ship it?”");
+  expect(
+    activityDescription({
+      ...answered,
+      payload: {
+        ...baseAsk,
+        answer,
+        previous_answer: { ...answer, at: "2026-09-10T09:01:00Z", selected: ["Ship"] },
+        state: "answered",
+      },
+    } as Event)
+  ).toBe("changed the answer to “Ship it?”");
+});

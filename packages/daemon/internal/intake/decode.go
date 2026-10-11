@@ -300,6 +300,7 @@ func decodeReview(repository ghrepo.Repository, raw map[string]json.RawMessage) 
 	headSHA, _ := rawString(raw, "head_sha")
 	author, _ := rawString(raw, "author")
 	body, _ := rawString(raw, "body")
+	bodyTruncated, _ := rawString(raw, "body_truncated")
 	// The listener carries GitHub's review id as a decimal string; one that predates it carries
 	// none, and the review is then ordered by when it is processed.
 	var id int64
@@ -319,7 +320,7 @@ func decodeReview(repository ghrepo.Repository, raw map[string]json.RawMessage) 
 		unread = append(unread, fmt.Sprintf("submitted_at %s is not an RFC 3339 time", raw["submitted_at"]))
 	}
 	return PullRequestReview{Repo: repository.String(), Number: number, ID: id, SubmittedAt: submittedAt, State: strings.ToLower(state),
-		CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body}, unread, nil
+		CommitID: commitID, HeadSHA: headSHA, Author: author, Body: body, BodyTruncated: bodyTruncated == "true"}, unread, nil
 }
 
 func decodePush(repository ghrepo.Repository, raw map[string]json.RawMessage) (Fact, error) {

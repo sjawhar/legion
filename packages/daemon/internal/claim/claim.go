@@ -22,3 +22,8 @@ const (
 	RoleReviewer    Role = "reviewer"
 	RoleMerger      Role = "merger"
 )
+
+// RoleController is the project controller's role. Its claim holds no issue and no tree, so it is
+// none of Roles, and NewToken never builds a token of it; its one token is ControllerToken. The
+// daemon holds such a claim only when it launches the controller itself (`controller: daemon`).
+const RoleController Role = "controller"

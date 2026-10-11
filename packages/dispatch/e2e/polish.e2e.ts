@@ -2,6 +2,7 @@ import { expect, test } from "@playwright/test";
 
 import { setLiveSessions } from "./agents";
 import { createAsk, createIssue, createProject, patchIssue } from "./api";
+import { needsYouCards } from "./editor";
 import { filterPicker, pickFilterOption } from "./filters";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -78,7 +79,7 @@ test("project filters stay collapsed until needed and margin asks use the compac
     if (testInfo.project.name === "iphone") {
       await page.getByRole("button", { name: "Open review panel (1 open ask)" }).click();
     }
-    const marginCard = page.getByRole("region", { name: "Needs you" }).getByTestId(`ask-${ask.id}`);
+    const marginCard = needsYouCards(page).getByTestId(`ask-${ask.id}`);
     await expect(marginCard.getByRole("radio", { name: "Ship" })).toBeVisible();
     await expect(marginCard.getByLabel("Your answer")).toBeHidden();
     await marginCard.getByText("Add a note or answer in your own words", { exact: true }).click();

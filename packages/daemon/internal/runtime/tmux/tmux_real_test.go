@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -26,11 +27,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
@@ -390,6 +393,11 @@ func (c *stubConn) GetState(ctx context.Context) (runtime.ConnState, error) {
 	return runtime.ConnState{IsStreaming: *data.IsStreaming}, nil
 }
 
+func (c *stubConn) Abort(ctx context.Context) error {
+	_, err := c.request(ctx, func(id string) shimwire.Frame { return shimwire.Abort{ID: id} })
+	return err
+}
+
 func (c *stubConn) Shutdown(context.Context) error { return c.writer.WriteFrame(shimwire.Shutdown{}) }
 
 func (c *stubConn) Sequence() uint64 { return c.seq }
@@ -400,6 +408,10 @@ func (c *stubConn) AdoptWorkingCopy(context.Context, runtime.GitIdentity, time.D
 
 func (c *stubConn) AgentSecretsEnrollment(context.Context, string) error {
 	return errors.New("the stream stub does not enroll agent secrets")
+}
+
+func (c *stubConn) AgentSecretsToken(context.Context) (string, error) {
+	return "", errors.New("the stream stub reads no projected token")
 }
 
 func (c *stubConn) awaitEvent(t *testing.T, want string) {
@@ -486,20 +498,21 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 	r.t.Helper()
 	opts := Options{
-		Project:        r.project,
-		StateDir:       r.stateDir,
-		StreamAddress:  "unix://" + filepath.Join(r.dir, "stream.sock"),
-		DaemonURL:      r.daemon.server.URL,
-		EnvoyURL:       "http://127.0.0.1:9020",
-		NatsURLs:       []string{"nats://127.0.0.1:4222"},
-		OmpInvocation:  shellprefix.Word(r.omp),
-		StopGrace:      5 * time.Second,
-		ProbeInterval:  100 * time.Millisecond,
-		AdoptTimeout:   5 * time.Second,
-		CommandTimeout: 10 * time.Second,
-		Conns:          r.stream,
-		Environ:        r.environ,
-		Executable:     func() (string, error) { return r.legion, nil },
+		Project:          r.project,
+		StateDir:         r.stateDir,
+		StreamAddress:    "unix://" + filepath.Join(r.dir, "stream.sock"),
+		DaemonURL:        r.daemon.server.URL,
+		EnvoyURL:         "http://127.0.0.1:9020",
+		NatsURLs:         []string{"nats://127.0.0.1:4222"},
+		OmpInvocation:    shellprefix.Word(r.omp),
+		StopGrace:        5 * time.Second,
+		ProbeInterval:    100 * time.Millisecond,
+		AdoptTimeout:     5 * time.Second,
+		CommandTimeout:   10 * time.Second,
+		Conns:            r.stream,
+		Environ:          r.environ,
+		Executable:       func() (string, error) { return r.legion, nil },
+		GitHubCredential: staticCredential,
 	}
 	for _, f := range adjust {
 		f(&opts)
@@ -759,9 +772,9 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		t.Fatalf("GetState = (%+v, %v)", state, err)
 	}
 
-	// The pane ran `sh -c`, and its OMP runs under the environment the runtime promises: the grant
-	// file's pointer included, from OMP's start, since Oh My Pi copies its own environment once for
-	// every `gh` it runs to resolve a pr:// or issue:// read (LEGION-262).
+	// The pane ran `sh -c`, and its OMP runs under the environment the runtime promises, from OMP's
+	// start: Oh My Pi copies its own environment once for every `gh` it runs to resolve a pr:// or
+	// issue:// read (LEGION-262), so GH_CONFIG_DIR must be there before its first.
 	pid := panePid(t, loc)
 	if argv := procCmdline(pid); len(argv) < 2 || argv[0] != "/bin/sh" || argv[1] != "-c" {
 		t.Errorf("the pane's process is %q, want /bin/sh -c", argv)
@@ -770,7 +783,11 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	env := procEnviron(t, omp)
 	secrets := filepath.Join(r.stateDir, "secrets")
 	for name, want := range map[string]string{
-		"PATH":                   filepath.Join(r.stateDir, "worker-bin") + ":" + filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"],
+		"PATH":                   filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"],
+		"GH_CONFIG_DIR":          filepath.Join(secrets, string(spec.Claim)+"-gh"),
+		"GH_TOKEN":               "",
+		"GITHUB_TOKEN":           "",
+		"GH_HOST":                "",
 		"XDG_CONFIG_HOME":        filepath.Join(r.stateDir, "home", ".config"),
 		"XDG_CACHE_HOME":         filepath.Join(r.stateDir, "home", ".cache"),
 		"XDG_DATA_HOME":          filepath.Join(r.stateDir, "home", ".local", "share"),
@@ -786,7 +803,6 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		"ENVOY_NATS_URL":         "nats://127.0.0.1:4222",
 		"ENVOY_URL":              "http://127.0.0.1:9020",
 		"GIT_TERMINAL_PROMPT":    "0",
-		"LEGION_GRANT_FILE":      filepath.Join(secrets, string(spec.Claim)+"-grant"),
 		"LEGION_BOOT_TOKEN_FILE": filepath.Join(secrets, string(spec.Claim)),
 		"ENVOY_TOKEN_FILE":       filepath.Join(secrets, string(spec.Claim)+"-envoy_token"),
 		"NATS_NKEY_SEED_FILE":    filepath.Join(secrets, string(spec.Claim)+"-nats_nkey_seed"),
@@ -813,6 +829,20 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		if got, _ := os.ReadFile(env[pointer]); string(got) != want {
 			t.Errorf("%s file holds the wrong secret", pointer)
 		}
+	}
+	// The pane's GH_CONFIG_DIR holds the role's gh files, which its plain gh reads the App token
+	// from: a 0700 directory of 0600 files, no token in the environment.
+	if info, err := os.Stat(env["GH_CONFIG_DIR"]); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Errorf("GH_CONFIG_DIR %s: %v, %v; want a 0700 directory", env["GH_CONFIG_DIR"], info, err)
+	}
+	hosts, err := os.ReadFile(filepath.Join(env["GH_CONFIG_DIR"], ghconfig.HostsFile))
+	if err != nil {
+		t.Errorf("the pane's hosts.yml: %v", err)
+	} else if token, err := ghconfig.TokenFromHosts(hosts); err != nil || token != staticCredentialToken(spec.Role) {
+		t.Errorf("the pane's hosts.yml holds %q (%v), want %q", token, err, staticCredentialToken(spec.Role))
+	}
+	if info, err := os.Stat(filepath.Join(env["GH_CONFIG_DIR"], ghconfig.ConfigFile)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("the pane's config.yml: %v, %v; want mode 0600", info, err)
 	}
 	if info, err := os.Stat(secrets); err != nil {
 		t.Errorf("secrets directory: %v", err)
@@ -964,6 +994,92 @@ func TestRealTmuxSpawnReturnsOnlyOnceThePaneRunsItsCommand(t *testing.T) {
 	}
 	if obs := probe(t, r.rt, loc); obs.Kind != runtime.Alive {
 		t.Fatalf("Probe right after Spawn = %+v, want alive: the locator was handed out while its pane was still tmux's fork", obs)
+	}
+}
+
+// A Spawn that fails after it opened its pane returns no locator for the pane's process, so it
+// kills the pane itself: no process the daemon never recorded runs on (runtime.Runtime's Spawn).
+// Each case refuses a read of the new pane process's /proc stat with a permission error, which
+// proves nothing about the process, at one of the two reads that follow the pane's opening: while
+// the launch waits for the pane's command (awaitPaneCommand), and once the command runs, when it
+// reads the process's start time (startTicks).
+func TestRealTmuxSpawnThatFailsAfterOpeningItsPaneKillsThePane(t *testing.T) {
+	for name, tc := range map[string]struct {
+		// refuse is whether to refuse a read of the pane process's stat: execed is whether the
+		// process runs its command yet (its comm is no longer the server's), and reads counts the
+		// reads since it does, this one included.
+		refuse func(execed bool, reads int) bool
+		// startTime is whether the refused read is startTicks': awaitPaneCommand reads the process
+		// once it runs its command and stops there, so only startTicks reads it a second time.
+		startTime bool
+	}{
+		"while it waits for the pane's command":       {refuse: func(bool, int) bool { return true }},
+		"when it reads the pane process's start time": {refuse: func(execed bool, reads int) bool { return execed && reads >= 2 }, startTime: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newRig(t)
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			read := r.rt.readProc
+			var mu sync.Mutex
+			execedReads, refused := map[int]int{}, map[int]int{}
+			r.rt.readProc = func(path string) ([]byte, error) {
+				var pid int
+				if _, err := fmt.Sscanf(path, "/proc/%d/stat", &pid); err != nil {
+					return read(path)
+				}
+				stat, err := read(path)
+				if err != nil {
+					return stat, err
+				}
+				comm, parentPid, err := parseProcStatCommAndParent(string(stat))
+				if err != nil {
+					return stat, nil
+				}
+				parent, err := read(fmt.Sprintf("/proc/%d/stat", parentPid))
+				if err != nil {
+					return stat, nil
+				}
+				if parentComm, _, err := parseProcStatCommAndParent(string(parent)); err != nil || parentComm != "tmux: server" {
+					return stat, nil
+				}
+				mu.Lock()
+				defer mu.Unlock()
+				execed := comm != "tmux: server"
+				if execed {
+					execedReads[pid]++
+				}
+				if !tc.refuse(execed, execedReads[pid]) {
+					return stat, nil
+				}
+				refused[pid] = execedReads[pid]
+				return nil, &fs.PathError{Op: "open", Path: path, Err: syscall.EACCES}
+			}
+
+			if loc, err := r.rt.Spawn(ctx, r.spec("LEGION-8", "LEGION-8", claim.RoleArchitect)); err == nil || !errors.Is(err, syscall.EACCES) {
+				t.Fatalf("Spawn = %+v, %v; want the refused /proc read", loc, err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if len(refused) == 0 {
+				t.Fatal("no pane process read was refused: the launch did not get as far as its pane")
+			}
+			for pid, reads := range refused {
+				if tc.startTime && reads < 2 {
+					t.Fatalf("pane process %d's refused read came %d reads after its command started, not startTicks' second", pid, reads)
+				}
+				deadline := time.Now().Add(10 * time.Second)
+				for {
+					if _, err := os.Stat(fmt.Sprintf("/proc/%d", pid)); os.IsNotExist(err) {
+						break
+					}
+					if time.Now().After(deadline) {
+						t.Fatalf("pane process %d still runs after its Spawn failed", pid)
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+			}
+		})
 	}
 }
 
@@ -1541,8 +1657,9 @@ func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
 }
 
 // A Go pane's bash tool must run this daemon's `legion`, not whichever `legion` the operator's PATH
-// holds (a TypeScript CLI has no `handoff complete`). The worker gh shim strips only worker-bin, so
-// its `legion gh` must reach the same launcher.
+// holds (a TypeScript CLI has no `handoff complete`): the launcher directory leads the pane's PATH.
+// Its gh is not intercepted — whatever gh the PATH gives reads the pane's credential from
+// GH_CONFIG_DIR — so nothing of the daemon's stands between the agent and gh.
 func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
@@ -1563,7 +1680,7 @@ func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	r.daemon.awaitReady(t, spec.BootToken)
 	env := procEnviron(t, descendant(t, panePid(t, loc), "omp"))
 	launcher := filepath.Join(r.stateDir, "bin", "legion")
-	want := filepath.Join(r.stateDir, "worker-bin") + ":" + filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"]
+	want := filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"]
 	if env["PATH"] != want {
 		t.Fatalf("OMP's PATH = %q, want %q", env["PATH"], want)
 	}
@@ -1581,11 +1698,8 @@ func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	if info, err := os.Stat(launcher); err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("launcher stat = %v, %v; want mode 0700", info, err)
 	}
-	// The gh shim drops worker-bin only; the next `legion` it reaches is still the launcher.
-	gh := exec.Command("/bin/sh", "-c", `PATH=${PATH#`+filepath.Join(r.stateDir, "worker-bin")+`:}; command -v legion`)
-	gh.Env = []string{"PATH=" + env["PATH"]}
-	if out, err := gh.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != launcher {
-		t.Fatalf("legion after the gh shim's PATH edit = %q (%v), want %s", out, err, launcher)
+	if _, err := os.Stat(filepath.Join(r.stateDir, "worker-bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the state directory holds a worker-bin (%v), want no gh interception directory", err)
 	}
 }
 

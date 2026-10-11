@@ -17,7 +17,9 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
@@ -31,18 +33,37 @@ type Deps struct {
 	Machine      *requests.Machine
 	MachineLogin *machine.Service
 	Proof        *proof.Verifier
+	// Policy is the live agent-secret policy, which POST /v1/secrets/{name}/reread rereads one
+	// name of (policy.Current.RefreshOne).
+	Policy *policy.Current
+	// SecretsPrefix is BROKER_SECRETS_PREFIX, the namespace GET /v1/settings answers.
+	SecretsPrefix string
+	// SecretsKMSKeyARN is BROKER_SECRETS_KMS_KEY_ARN, the agent-secrets key GET /v1/settings
+	// answers with its region and account.
+	SecretsKMSKeyARN string
 	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
-	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the launcher-credential
-	// rate limiter's per-address bucket trusts for the real client address; empty means keying on
-	// r.RemoteAddr, correct only when the broker is reached directly rather than through a
-	// reverse proxy or load balancer. See limits.go's clientAddress.
+	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
+	// DefaultRereadLimit.
+	RereadLimit *ratelimit.Limit
+	// RereadOverallLimit bounds that route across every caller at once; nil means
+	// DefaultRereadOverallLimit.
+	RereadOverallLimit *ratelimit.Limit
+	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
+	// per-address buckets trust for the real client address; empty means keying on r.RemoteAddr,
+	// correct only when the broker is reached directly rather than through a reverse proxy or load
+	// balancer. See limits.go's clientAddress.
 	TrustedProxyHeader string
 }
 
 type server struct {
 	deps            Deps
 	launcherLimiter *launcherLimiter
+	// rereadLimiter is RereadLimit applied per source address (clientAddress), and rereadOverall
+	// RereadOverallLimit over one bucket every caller shares; refuseReread takes from both or
+	// neither.
+	rereadLimiter *ratelimit.Keyed
+	rereadOverall *ratelimit.Bucket
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
@@ -50,7 +71,20 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.LauncherLimits != nil {
 		limits = *deps.LauncherLimits
 	}
-	s := &server{deps: deps, launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader)}
+	reread := DefaultRereadLimit
+	if deps.RereadLimit != nil {
+		reread = *deps.RereadLimit
+	}
+	rereadOverall := DefaultRereadOverallLimit
+	if deps.RereadOverallLimit != nil {
+		rereadOverall = *deps.RereadOverallLimit
+	}
+	s := &server{
+		deps:            deps,
+		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
+		rereadLimiter:   ratelimit.NewKeyed(reread),
+		rereadOverall:   ratelimit.NewBucket(rereadOverall),
+	}
 	for _, route := range routes() {
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
 			who, ok := s.authenticate(w, r, route.Handler.auth)
@@ -79,7 +113,7 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 	case authLauncher:
 		subject, err := s.proofSubject(r)
 		switch {
-		case errors.Is(err, proof.ErrInvalid):
+		case errors.Is(err, proof.ErrInvalid), errors.Is(err, proof.ErrNotLive):
 			writeError(w, http.StatusUnauthorized, "LAUNCHER_INVALID", "the launcher credential is not valid")
 			return caller{}, false
 		case err != nil:
@@ -97,29 +131,42 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 		}
 		return caller{launcher: cred}, true
 	case authProof:
-		subject, err := s.proofSubject(r)
-		switch {
-		case errors.Is(err, proof.ErrInvalid):
-			writeError(w, http.StatusUnauthorized, "PROOF_INVALID", err.Error())
-			return caller{}, false
-		case err != nil:
-			writeUnavailable(w, "DATABASE_UNAVAILABLE", "verify proof", err)
-			return caller{}, false
-		}
-		if subject.EnrollmentID == "" {
-			writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "this route needs a session proof, not a launcher proof")
-			return caller{}, false
-		}
-		return caller{enrollment: subject.EnrollmentID}, true
+		return s.sessionCaller(w, r, "PROOF_INVALID", "proof invalid: not live")
+	case authRenewProof:
+		return s.sessionCaller(w, r, "ENROLLMENT_NOT_LIVE", "enrollment is not live")
 	}
 	writeInternal(w, "authenticate", fmt.Errorf("route has unknown authentication %d", auth))
 	return caller{}, false
 }
 
+// sessionCaller authenticates a session proof for authenticate, answering a proof whose
+// enrollment is no longer live with notLiveCode and notLiveMessage: PROOF_INVALID on every
+// session route but renew, which alone answers ENROLLMENT_NOT_LIVE so a pod renewer can stop.
+// Every other bad proof is PROOF_INVALID on both.
+func (s *server) sessionCaller(w http.ResponseWriter, r *http.Request, notLiveCode, notLiveMessage string) (caller, bool) {
+	subject, err := s.proofSubject(r)
+	switch {
+	case errors.Is(err, proof.ErrNotLive):
+		writeError(w, http.StatusUnauthorized, notLiveCode, notLiveMessage)
+		return caller{}, false
+	case errors.Is(err, proof.ErrInvalid):
+		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", err.Error())
+		return caller{}, false
+	case err != nil:
+		writeUnavailable(w, "DATABASE_UNAVAILABLE", "verify proof", err)
+		return caller{}, false
+	}
+	if subject.EnrollmentID == "" {
+		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "this route needs a session proof, not a launcher proof")
+		return caller{}, false
+	}
+	return caller{enrollment: subject.EnrollmentID}, true
+}
+
 // proofSubject verifies r's Proof header and returns who it authenticates, unwrapped: authLauncher
 // and authProof each translate a failure into their own vocabulary (LAUNCHER_INVALID vs
-// PROOF_INVALID, Authentication items 1 and 2 of the shared broker contract at
-// dispatch://AGENTC-393/artifact/plan-overview-md), so this reports only the raw error.
+// PROOF_INVALID), so this reports
+// only the raw error.
 func (s *server) proofSubject(r *http.Request) (proof.Subject, error) {
 	return s.deps.Proof.Verify(r.Context(), r.Header.Get("Proof"), r.Method, s.deps.PublicURL+r.URL.Path, time.Now())
 }

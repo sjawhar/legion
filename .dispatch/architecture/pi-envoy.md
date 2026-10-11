@@ -1,7 +1,7 @@
 ---
-title: Oh My Pi extension
+title: Oh My Pi Envoy plugin
 parent: legion
-depends_on: [envoy-client, contracts]
+depends_on: [envoy-client, contracts, pi-shared]
 paths: [packages/pi-envoy]
 ---
-The Oh My Pi extension package: Envoy subscriptions and delivery, the native Dispatch tools, and the Legion lifecycle tool for phase workers.
+The Oh My Pi plugin every session loads (`@sjawhar/pi-envoy`): Envoy subscriptions and delivery, the `dispatch` command on every shell's `PATH`, the `dispatch-first` context, and the four Dispatch and Envoy skills. It publishes the in-process interface in `pi-shared` that the Legion plugin claims its roles through.

@@ -28,7 +28,7 @@ import (
 // next actor again.
 func TestApprovalRequestFollowsDocumentVersions(t *testing.T) {
 	var documentService *docs.Service
-	handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+	handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 		documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 		t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 		return documentService
@@ -75,7 +75,7 @@ func TestApprovalRequestFollowsDocumentVersions(t *testing.T) {
 		t.Fatalf("opened approval = %#v, want requested version 1", opened)
 	}
 
-	if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+	if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
 		t.Fatalf("revise document: %v", err)
 	}
 	if named := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
@@ -157,7 +157,7 @@ func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
 	} {
 		t.Run(flow.name, func(t *testing.T) {
 			var documentService *docs.Service
-			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 				return documentService
@@ -197,10 +197,9 @@ func TestApprovalHandBackWaitsOnTheHuman(t *testing.T) {
 				}
 			}
 			if flow.move {
-				if _, err := documentService.ReplaceText(
-					context.Background(), issue.PrimaryArtifactID, "A revised spec",
-					model.Actor{Kind: "session", ID: sessionActor()["id"].(string)},
-				); err != nil {
+				if _, err := replaceDocumentText(database, documentService,
+					issue.PrimaryArtifactID, "A revised spec",
+					model.Actor{Kind: "session", ID: sessionActor()["id"].(string)}); err != nil {
 					t.Fatalf("revise document: %v", err)
 				}
 				if named := dispatchRequest(t, handler, http.MethodPost,
@@ -323,7 +322,7 @@ func TestARewordlessHandBackKeepsTheQuestionsRevision(t *testing.T) {
 	} {
 		t.Run(flow.name, func(t *testing.T) {
 			var documentService *docs.Service
-			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 				return documentService
@@ -351,10 +350,9 @@ func TestARewordlessHandBackKeepsTheQuestionsRevision(t *testing.T) {
 				t.Fatalf("human comment: status=%d body=%s", human.Code, human.Body.String())
 			}
 			if flow.move {
-				if _, err := documentService.ReplaceText(
-					context.Background(), issue.PrimaryArtifactID, "A revised spec",
-					model.Actor{Kind: "session", ID: sessionActor()["id"].(string)},
-				); err != nil {
+				if _, err := replaceDocumentText(database, documentService,
+					issue.PrimaryArtifactID, "A revised spec",
+					model.Actor{Kind: "session", ID: sessionActor()["id"].(string)}); err != nil {
 					t.Fatalf("revise document: %v", err)
 				}
 				if named := dispatchRequest(t, handler, http.MethodPost,
@@ -506,7 +504,7 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 	} {
 		t.Run(review.name, func(t *testing.T) {
 			var documentService *docs.Service
-			handler, _ := newInteractionHandler(t, func(database *store.Store) docs.API {
+			handler, database := newInteractionHandler(t, func(database *store.Store) docs.API {
 				documentService = docs.New(docs.Deps{Store: database, Settle: time.Hour})
 				t.Cleanup(func() { _ = documentService.Shutdown(context.Background()) })
 				return documentService
@@ -523,7 +521,7 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 					ID string `json:"id"`
 				} `json:"ask"`
 			}](t, requested).Ask.ID
-			if _, err := documentService.ReplaceText(context.Background(), issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
+			if _, err := replaceDocumentText(database, documentService, issue.PrimaryArtifactID, "A revised spec", model.Actor{Kind: "session", ID: "session-0123456789abcdef"}); err != nil {
 				t.Fatalf("revise document: %v", err)
 			}
 			if named := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/versions", map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
@@ -559,9 +557,9 @@ func TestHeaderReviewAnswersMovedApprovalAskBeforeTheAgentHandsItBack(t *testing
 // ask.edited event reaches followers except the actor who made the version. A write that versions
 // nothing leaves the request at the version the human was already shown.
 //
-// The move is attributed to the version's sole writer. A version credits every writer whose
-// change it carries, so a browser edit with several peers or a settlement combining agents uses
-// SettlementActor: choosing one could suppress the only delivery the requesting session receives.
+// The caller names the actor whose edit moved the request. A route knows its own service write;
+// settlement names the latest known browser editor, or SettlementActor when the browser edit was
+// ambiguous.
 func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 	asker := model.Actor{Kind: "session", ID: sessionActor()["id"].(string)}
 	alice := model.Actor{Kind: "user", ID: "alice"}
@@ -659,12 +657,12 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		{"an edit with no summary", time.Hour, func(t *testing.T, doc *document) {
 			edit(t, doc.handler, doc.artifactID, map[string]any{})
 		}, 1, asker, false},
-		{"a live write settlement versions", 20 * time.Millisecond, func(t *testing.T, doc *document) {
-			// A live write that joins no transaction is versioned by settlement alone, so this
-			// movement is settlement's and reaches followers once settlement commits.
+		{"a write only settlement versions", 20 * time.Millisecond, func(t *testing.T, doc *document) {
+			// A write whose transaction writes no version is versioned by settlement alone, so
+			// this movement is settlement's and reaches followers once settlement commits.
 			published, stop := doc.broker.Subscribe()
 			defer stop()
-			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A revised spec", alice); err != nil {
+			if _, err := replaceDocumentText(doc.database, doc.documentService, doc.artifactID, "A revised spec", alice); err != nil {
 				t.Fatalf("revise document: %v", err)
 			}
 			waitForArtifactVersion(t, doc.handler, doc.artifactID, 2)
@@ -684,7 +682,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			}
 		}, 1, alice, true},
 		{"a named version", time.Hour, func(t *testing.T, doc *document) {
-			if _, err := doc.documentService.ReplaceText(context.Background(), doc.artifactID, "A revised spec", alice); err != nil {
+			if _, err := replaceDocumentText(doc.database, doc.documentService, doc.artifactID, "A revised spec", alice); err != nil {
 				t.Fatalf("revise document: %v", err)
 			}
 			if named := dispatchRequest(t, doc.handler, http.MethodPost, "/api/v1/artifacts/"+doc.artifactID+"/versions", map[string]string{"summary": "revised"}, "alice"); named.Code != http.StatusCreated {
@@ -702,6 +700,26 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			connect(t, doc, askerPeer)
 			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
 		}, 2, docs.SettlementActor, true},
+		{"an earlier author and the next browser editor", time.Hour, func(t *testing.T, doc *document) {
+			earlierCtx := context.Background()
+			earlierTx, err := doc.database.Pool.Begin(earlierCtx)
+			if err != nil {
+				t.Fatalf("begin the earlier edit: %v", err)
+			}
+			defer earlierTx.Rollback(earlierCtx)
+			earlierJoined, earlierLedger := doc.documentService.Join(earlierCtx, earlierTx)
+			defer earlierLedger.Discard()
+			if _, err := doc.documentService.ReplaceText(earlierJoined, doc.artifactID, "A temporary spec", alice); err != nil {
+				t.Fatalf("write the earlier edit: %v", err)
+			}
+			if _, err := doc.documentService.ReplaceText(earlierJoined, doc.artifactID, "A spec", alice); err != nil {
+				t.Fatalf("undo the earlier edit: %v", err)
+			}
+			if err := earlierLedger.Commit(earlierCtx); err != nil {
+				t.Fatalf("commit the earlier edit: %v", err)
+			}
+			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
+		}, 2, bob, true},
 		{"an agent's joined write and a human's typing in one settlement window", time.Hour, func(t *testing.T, doc *document) {
 			typist := connect(t, doc, humanPeer)
 			ctx := context.Background()
@@ -721,11 +739,11 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			waitForLiveText(t, doc.documentService, doc.artifactID, "A revised spec")
 			typist.barrier(t)
 			typeNote(t, typist, "A note from bob.")
-		}, 2, docs.SettlementActor, true},
+		}, 2, bob, true},
 		{"a human's typing and then an agent's edit that versions both", time.Hour, func(t *testing.T, doc *document) {
 			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
 			edit(t, doc.handler, doc.artifactID, map[string]any{})
-		}, 2, docs.SettlementActor, true},
+		}, 2, asker, false},
 		{"the only connected peer types", time.Hour, func(t *testing.T, doc *document) {
 			typeNote(t, connect(t, doc, humanPeer), "A note from bob.")
 		}, 1, bob, true},
@@ -787,7 +805,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 				t.Fatalf("approval events for %s: edits=%d resolved=%d, want one move and no resolution", doc.askID, edited, resolved)
 			}
 
-			deliveries := askEventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
+			deliveries := eventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
 			if heard := slices.Contains(deliveries[0].Destinations, contracts.AgentSubject(asker.ID)); heard != write.askerHears {
 				t.Fatalf("the outbox published the move to %v; the asking session's topic among them = %t, want %t", deliveries[0].Destinations, heard, write.askerHears)
 			}
@@ -821,7 +839,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 			t.Fatalf("begin: %v", err)
 		}
 		defer tx.Rollback(ctx)
-		moved, err := docs.MoveApprovalAsk(ctx, tx, events.NewBroker(), doc.artifactID, model.Version{Number: 2}, "")
+		moved, err := docs.MoveApprovalAsk(ctx, tx, events.NewBroker(), doc.artifactID, model.Version{Number: 2}, docs.SettlementActor, "")
 		if err != nil {
 			t.Fatalf("move with no known writer: %v", err)
 		}
@@ -858,7 +876,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		}
 		typeVersion("A fourth note.", 5)
 
-		deliveries := askEventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
+		deliveries := eventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
 		if len(deliveries) != 4 {
 			t.Fatalf("ask.edited events = %#v, want one move to each of versions 2 to 5", deliveries)
 		}
@@ -885,16 +903,16 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 	})
 }
 
-// askEventDelivery is what the outbox did with one event: whether it woke anyone, and the topics it
+// eventDelivery is what the outbox did with one event: whether it woke anyone, and the topics it
 // published the event to.
-type askEventDelivery struct {
+type eventDelivery struct {
 	Notify       bool
 	Destinations []string
 }
 
-// askEventDeliveries runs the outbox until it has published every eventType event about askID, and
-// returns what each one reached, oldest first.
-func askEventDeliveries(t *testing.T, database *store.Store, documentService docs.API, eventType, askID string) []askEventDelivery {
+// eventDeliveries runs the outbox until it has published every eventType event whose payload's id
+// is id (an ask's, or a comment's), and returns what each one reached, oldest first.
+func eventDeliveries(t *testing.T, database *store.Store, documentService docs.API, eventType, id string) []eventDelivery {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
@@ -911,27 +929,27 @@ func askEventDeliveries(t *testing.T, database *store.Store, documentService doc
 	for {
 		var unpublished, total int
 		if err := database.Pool.QueryRow(context.Background(), `select count(*) filter (where published_at is null), count(*) `+about,
-			eventType, askID).Scan(&unpublished, &total); err != nil {
-			t.Fatalf("count %s events for %s: %v", eventType, askID, err)
+			eventType, id).Scan(&unpublished, &total); err != nil {
+			t.Fatalf("count %s events for %s: %v", eventType, id, err)
 		}
 		if total > 0 && unpublished == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the outbox left %d of %d %s events for %s unpublished", unpublished, total, eventType, askID)
+			t.Fatalf("the outbox left %d of %d %s events for %s unpublished", unpublished, total, eventType, id)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	rows, err := database.Pool.Query(context.Background(), `select notify, published_destinations `+about+` order by id`, eventType, askID)
+	rows, err := database.Pool.Query(context.Background(), `select notify, published_destinations `+about+` order by id`, eventType, id)
 	if err != nil {
-		t.Fatalf("read %s deliveries for %s: %v", eventType, askID, err)
+		t.Fatalf("read %s deliveries for %s: %v", eventType, id, err)
 	}
-	deliveries, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (askEventDelivery, error) {
-		var delivery askEventDelivery
+	deliveries, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (eventDelivery, error) {
+		var delivery eventDelivery
 		return delivery, row.Scan(&delivery.Notify, &delivery.Destinations)
 	})
 	if err != nil {
-		t.Fatalf("decode %s deliveries for %s: %v", eventType, askID, err)
+		t.Fatalf("decode %s deliveries for %s: %v", eventType, id, err)
 	}
 	return deliveries
 }

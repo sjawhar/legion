@@ -73,6 +73,51 @@ test("eventDescription labels an edited ask with its new question", () => {
   expect(eventDescription(editedAskEvent())).toBe("Ask edited: Publish?");
 });
 
+function answeredAskEvent(
+  previousAnswer?: Extract<Event, { type: "ask.answered" }>["payload"]["previous_answer"]
+): Extract<Event, { type: "ask.answered" }> {
+  return {
+    actor: { id: "alice", kind: "user" },
+    created_at: "2026-09-11T00:00:00Z",
+    id: 3,
+    issue_key: "CORE-1",
+    notify: true,
+    payload: {
+      anchor: null,
+      answer: { at: "2026-09-11T00:00:00Z", selected: ["Hold"], text: null, user: "alice" },
+      author: { id: "session-1", kind: "session" },
+      created_at: "2026-09-10T00:00:00Z",
+      edited_at: null,
+      id: "ask-1",
+      issue_key: "CORE-1",
+      kind: "question",
+      multiple: false,
+      opened_event_id: 1,
+      options: [{ label: "Ship" }, { label: "Hold" }],
+      question: "Publish?",
+      state: "answered",
+      urgency: "med",
+      ...(previousAnswer === undefined ? {} : { previous_answer: previousAnswer }),
+    },
+    seq: 3,
+    type: "ask.answered",
+  };
+}
+
+test("eventDescription says an answer changed when it replaced an earlier one", () => {
+  expect(eventDescription(answeredAskEvent())).toBe("Ask answered: Publish?");
+  expect(
+    eventDescription(
+      answeredAskEvent({
+        at: "2026-09-10T12:00:00Z",
+        selected: ["Ship"],
+        text: null,
+        user: "alice",
+      })
+    )
+  ).toBe("Answer changed: Publish?");
+});
+
 test("eventDescription labels a malformed decision", () => {
   const event: Extract<Event, { type: "block.invalid" }> = {
     actor: { id: "session-1", kind: "session" },

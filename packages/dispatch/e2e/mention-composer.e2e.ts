@@ -1,15 +1,18 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
-
 import { type FakeSession, getSentMessages, setLiveSessions, setSessionSendStatus } from "./agents";
 import {
   createComment,
   createIssue,
+  createMessage,
   createProject,
   createProjectDocument,
+  patchIssue,
+  resolveComment,
   retryCommentDelivery,
 } from "./api";
 import { barAction, documentEditor, selectEditorText } from "./editor";
 import { resetDatabase } from "./seed";
+import { holdPosts, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 const planner: FakeSession = {
@@ -44,6 +47,46 @@ async function issueCommentPayload(page: Page, issueKey: string): Promise<Record
     .getByRole("button", { name: "Send" })
     .click();
   return (await response).request().postDataJSON() as Record<string, unknown>;
+}
+
+/** Types a comment, then clicks Send and the Reply on the turn reading `parent` in one task,
+ *  before React can re-render, and refuses the send. The comment goes as it was written - top
+ *  level, on the issue's comment route - and no reply starts: the draft stays on screen while the
+ *  send is out and comes back with the refusal, with nothing attached to it. */
+async function sendBesideReply(page: Page, issueKey: string, parent: string): Promise<void> {
+  const form = page.getByRole("form", { name: "Comment composer" });
+  const field = form.getByLabel("Comment");
+  const cancelReply = form.getByRole("button", { name: "Cancel reply" });
+  const refuse = await refusePosts(page, `**/api/v1/issues/${issueKey}/{comments,messages}`);
+  const sent = page.waitForRequest(
+    (request) =>
+      request.method() === "POST" &&
+      /^\/api\/v1\/issues\/[^/]+\/(comments|messages)$/.test(new URL(request.url()).pathname)
+  );
+  const reply = await page
+    .getByRole("list", { name: "Conversation turns" })
+    .locator(":scope > li")
+    .filter({ hasText: parent })
+    .getByRole("button", { name: "Reply" })
+    .elementHandle();
+  await field.fill("Status please");
+  await form.evaluate((node, replyButton) => {
+    const send = node.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (send === null || !(replyButton instanceof HTMLButtonElement))
+      throw new Error("expected Send and the turn's Reply");
+    send.click();
+    replyButton.click();
+  }, reply);
+
+  const request = await sent;
+  expect(new URL(request.url()).pathname).toBe(`/api/v1/issues/${issueKey}/comments`);
+  expect(request.postDataJSON()).toEqual({ body: "Status please" });
+  await expect(field).toHaveValue("Status please");
+  await expect(cancelReply).toHaveCount(0);
+  refuse();
+  await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+  await expect(field).toHaveValue("Status please");
+  await expect(cancelReply).toHaveCount(0);
 }
 
 test.beforeEach(async () => {
@@ -108,6 +151,316 @@ test("E2b: a project-document comment preserves the canonical mention and strips
       delivery: "aside",
       mentions: [{ target: "session:planner" }],
     });
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a conversation send holds Reply and refuses Ctrl+K from the same task", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Held conversation" });
+  await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const field = form.getByLabel("Comment");
+    const reply = page.getByRole("button", { name: "Reply" }).first();
+    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Status please");
+    await form.evaluate((node) => {
+      const sendButton = node.querySelector<HTMLButtonElement>('button[type="submit"]');
+      const field = node.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]');
+      if (sendButton === null || field === null) throw new Error("expected conversation controls");
+      sendButton.click();
+      field.dispatchEvent(
+        new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ctrlKey: true, key: "k" })
+      );
+    });
+
+    await expect(reply).toBeDisabled();
+    await expect(page.getByRole("dialog", { name: "Reference picker" })).toHaveCount(0);
+    send.release();
+    await expect(field).toHaveValue("");
+    await expect(page.getByRole("dialog", { name: "Reference picker" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A send's address is fixed in the task that starts it. A Reply clicked in that same task, before
+// React disables it, must not turn the comment on its way into a reply.
+test("a same-task Reply cannot make a conversation comment a reply", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Held conversation" });
+  await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await sendBesideReply(page, issue.key, "Earlier comment");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A Reply on an agent's message thread answers on the issue's message route, to that agent. In
+// Send's task it must not move the comment on its way there.
+test("a same-task Reply cannot send a conversation comment to an agent's message thread", async ({
+  browser,
+}) => {
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Held conversation" });
+  await createMessage(issue.key, {
+    body: "Can this ship?",
+    delivery: "btw",
+    target: `session:${planner.session_id}`,
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await sendBesideReply(page, issue.key, "Can this ship?");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A thread card's own reply composer lives in the card's open thread, so the thread holds open
+// while that reply is out - from Send's own task on - and its refusal and draft stay there.
+test("a conversation thread's own reply holds Collapse thread while it is out", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "a phone opens the thread full-screen instead");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Held thread" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turn = page.locator(`[data-turn="comment:${earlier.id}"]`);
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const form = turn.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const collapse = turn.getByRole("button", { name: "Collapse thread" });
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Thread reply");
+    const collapseButton = await collapse.elementHandle();
+    await form.evaluate((node, collapseControl) => {
+      const sendButton = node.querySelector<HTMLButtonElement>('button[type="submit"]');
+      if (sendButton === null || !(collapseControl instanceof HTMLButtonElement))
+        throw new Error("expected Send and the thread's Collapse");
+      sendButton.click();
+      collapseControl.click();
+    }, collapseButton);
+
+    await expect(field).toHaveValue("Thread reply");
+    await expect(field).toBeDisabled();
+    await expect(collapse).toBeDisabled();
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Thread reply");
+    await expect(collapse).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+// The issue closing under a send is not the reader leaving it: the docked composer stays,
+// holding the draft until the server answers, and shows the refusal beside the draft it hands
+// back - with no Retry, which a closed issue would refuse again, and a way to drop it.
+test("a docked send out when its issue closes keeps the draft and shows the refusal", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Closed under a send" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const field = form.getByLabel("Comment");
+    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Before the close");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    await expect(field).toHaveValue("Before the close");
+    await expect(field).toBeDisabled();
+
+    const refused = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith(`/api/v1/issues/${issue.key}/comments`)
+    );
+    send.release();
+    expect((await refused).status()).toBe(409);
+    await expect(form.getByText("Couldn't send — issue is closed")).toBeVisible();
+    await expect(field).toHaveValue("Before the close");
+    await expect(form.getByRole("button", { name: "Retry" })).toHaveCount(0);
+    await expect(form.getByRole("button", { exact: true, name: "Send" })).toHaveAttribute(
+      "aria-disabled",
+      "true"
+    );
+    await form.getByRole("button", { name: "Discard draft" }).click();
+    await expect(page.getByRole("form", { name: "Comment composer" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The client's deadline lets go of the controls that would take the reader away from a send; it
+// is not a refusal. A comment that mentions agents can take the server longer than that, and it
+// is still one comment: the deadline offers no Retry, and the answer that follows lands as any
+// answer does.
+test("a docked send the server answers at 35 s posts once and shows once, with no Retry at the deadline", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Slow server" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.clock.install();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const field = form.getByLabel("Comment");
+    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Slow but sure");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await page.clock.fastForward(30_500);
+    await expect(form.getByText(/^Still sending/)).toBeVisible();
+    await expect(form.getByRole("button", { name: "Retry" })).toHaveCount(0);
+    await expect(field).toHaveValue("Slow but sure");
+    await expect(field).toBeDisabled();
+
+    await page.clock.fastForward(4_500);
+    send.release();
+    const turns = page.getByRole("list", { name: "Conversation turns" });
+    await expect(turns.getByText("Slow but sure", { exact: true })).toHaveCount(1);
+    await expect(field).toHaveValue("");
+    await expect(form.getByText(/^Still sending/)).toHaveCount(0);
+    expect(send.posts()).toBe(1);
+  } finally {
+    await alice.close();
+  }
+});
+
+// Closing and reopening the issue while a send is out leaves the send's own composer where it
+// was: the draft held through it, the refusal shown beside it, and the field taking typing after.
+test("an issue closed and reopened under a docked send leaves that send's composer in place", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Closed and reopened" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const form = page.getByRole("form", { name: "Comment composer" });
+    const field = form.getByLabel("Comment");
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Through the close");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    await patchIssue(issue.key, { status: "backlog" }, { login: "bob" });
+    await expect(page.getByRole("button", { name: "Close issue" })).toBeVisible();
+    await expect(field).toHaveValue("Through the close");
+    await expect(field).toBeDisabled();
+
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Through the close");
+    await field.fill("Typed after");
+    await expect(field).toHaveValue("Typed after");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A thread the reader has open stays in the Conversation whoever resolves its comment, so the
+// thread's own reply - its draft, the send it has out and that send's refusal - stays with it.
+test("a thread resolved while its own reply is out stays open with the reply and its refusal", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "a phone opens the thread full-screen instead");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Resolved under a reply" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turn = page.locator(`[data-turn="comment:${earlier.id}"]`);
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const form = turn.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Reply under a resolve");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await resolveComment(earlier.id, { login: "bob" });
+    await expect(turn.getByText(/^Resolved by bob/)).toBeVisible();
+    await expect(field).toHaveValue("Reply under a resolve");
+
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Reply under a resolve");
+    await expect(field).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+// Narrowing to a phone unmounts nothing: a thread open inline on a wider screen stays open in the
+// Conversation, and its reply's refusal shows there with the draft.
+test("a thread's own reply out when the viewport narrows to a phone keeps its draft and refusal", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "the row starts on a wider screen");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Narrowed under a reply" });
+  const earlier = await createComment(issue.key, { body: "Earlier comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const turn = page.locator(`[data-turn="comment:${earlier.id}"]`);
+    await turn.getByRole("button", { name: "Expand thread" }).click();
+    const form = turn.getByRole("form", { name: "Comment composer" });
+    const field = form.getByRole("textbox", { name: "Reply" });
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await field.fill("Reply through a narrowing");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(field).toBeDisabled();
+
+    await page.setViewportSize({ height: 844, width: 390 });
+    await expect(field).toHaveValue("Reply through a narrowing");
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(field).toHaveValue("Reply through a narrowing");
   } finally {
     await alice.close();
   }

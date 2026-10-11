@@ -8,8 +8,9 @@ import { DISPATCH_KEY_PATTERN, LEGION_ROLES } from "./legion-roles";
  * claim wire in `packages/daemon/internal/claim/wire.go` are the source of truth, and every
  * schema here mirrors them field for field. The two are pinned to each other by
  * `packages/contracts/fixtures/daemon-api/*.json`, written by the Go golden tests
- * (`go test ./internal/api/ -update`) and parsed here by `legion-api.test.ts` — no generator
- * runs in either direction, so a Go field added without its line below fails that test.
+ * (`go test ./internal/api/ -update`, and `go test ./internal/projection/ -update` for
+ * `state-controller-claim.json`) and parsed here by `legion-api.test.ts` — no generator runs in
+ * either direction, so a Go field added without its line below fails that test.
  *
  * Reached as `@legion/contracts/legion-api`, never from the barrel.
  */
@@ -80,8 +81,9 @@ export type LegionClaimState = (typeof LEGION_CLAIM_STATES)[number];
  * `runtime.Locator` — where a claim's process is: the runtime word, the claim token, the process
  * incarnation, and exactly one backend member, the one the runtime word names. Nested, marshalled
  * by the standard library: `tmux` (the pane on the daemon's private server; the incarnation is
- * `<pane pid>:<start ticks>`) or `sandbox` (the Agent Sandbox object; the incarnation is its pod's
- * uid).
+ * `<pane pid>:<start ticks>`) or `sandbox` (one role process in its issue's shared Agent Sandbox
+ * pod: the Sandbox's name, the pod's uid, the role container and the process generation; the
+ * incarnation is `<pod uid>/<generation>`).
  */
 const legionLocator = z.discriminatedUnion("runtime", [
   z.strictObject({
@@ -94,16 +96,40 @@ const legionLocator = z.discriminatedUnion("runtime", [
     runtime: z.literal("sandbox"),
     claim: nonEmptyString,
     incarnation: nonEmptyString,
-    sandbox: z.strictObject({ namespace: nonEmptyString, name: nonEmptyString }),
+    sandbox: z.strictObject({
+      namespace: nonEmptyString,
+      name: nonEmptyString,
+      podUid: nonEmptyString,
+      container: nonEmptyString,
+      generation: z.number().int().positive(),
+    }),
   }),
 ]);
 
-/** `api.ClaimView` — `session` is empty until the claim's agent registers one, and `locator` is
- * absent while no process runs (queued, suspended, failed, retired). */
+/** `api.CapabilityReportView` — one session's capability report as the state shows it: when the
+ * session measured, the live rows its checks proved (`ok`) and the rows they did not, each with
+ * the fact the check found (`open`). `incarnation` is the reporting process's: the daemon keeps a
+ * claim's latest report whatever its incarnation, so a reader compares it with
+ * `locator.incarnation` to tell a report of the running process from one a relaunch has outlived
+ * (contract 21). It is empty for a report the API recorded from a claim whose machine held no
+ * process (`runtime.Locator{Claim}`), which no reader compares with a locator. `ok` and `open`
+ * are never null; the daemon floors an open row's detail (`capabilities.Normalize`), and the
+ * schema stays the guard. */
+const legionCapabilityReportView = z.strictObject({
+  measuredAt: timestamp,
+  incarnation: z.string(),
+  ok: z.array(nonEmptyString),
+  open: z.array(z.strictObject({ name: nonEmptyString, detail: nonEmptyString })),
+});
+
+/** `api.ClaimView` — `session` is empty until the claim's agent registers one, `locator` is
+ * absent while no process runs (queued, suspended, failed, retired), and `capabilities` is absent
+ * until a session of the claim reports on `claims/ready` (the controller's never does). */
 const legionClaimView = z.strictObject({
   session: z.string(),
   state: z.enum(LEGION_CLAIM_STATES),
   locator: legionLocator.optional(),
+  capabilities: legionCapabilityReportView.optional(),
 });
 
 /** `api.PhaseView` — one phase worker's claim, its committed handoff, and the rounds it has run. */
@@ -191,10 +217,10 @@ const legionAdmission = z.strictObject({
   free: z.number().int().nonnegative().optional(),
 });
 
-/** `api.ControllerLocator` — the external record of the operator-launched controller: the
- * runtime the daemon runs under (`tmux` or `kubernetes`, its configured runtime), the session that
- * registered with the current controller capability, and when. The daemon has no process of it
- * to address. */
+/** `api.ControllerLocator` — the record of the session registered as the project's controller: the
+ * runtime the daemon runs under (`tmux` or `kubernetes`, its configured runtime), the session, and
+ * when it registered. `external` is `true` for the operator-launched controller and for the one the
+ * daemon launches itself under `controller: daemon`, whose process is a claim like any other. */
 const legionControllerLocator = z.strictObject({
   runtime: z.enum(["tmux", "kubernetes"]),
   external: z.literal(true),
@@ -203,17 +229,38 @@ const legionControllerLocator = z.strictObject({
 });
 
 /** `api.AgentSecretsLoginView` — the daemon's own agent-secrets machine login's current status
- * (runtime.kubernetes.agent_secrets, AGENTC-393 Plan C): `state` is one of "none" (no login has
- * ever been started), "pending", "issued", "denied", or "expired"; `code` is the confirmation
+ * (runtime.kubernetes.agent_secrets): `state` is one of "none" (no login has
+ * ever been started), "pending", "issued", "denied", "expired", or "failed" (the broker never
+ * opened the most recent login: it refused it, or did not answer); `code` is the confirmation
  * code shown on the Dispatch credential page for a pending login, "" otherwise. */
 const legionAgentSecretsLoginView = z.strictObject({
   state: z.string(),
   code: z.string(),
 });
 
+/** `api.CapabilityState` — one row of the deployment's capability report
+ * (`capabilities.Deployment.Report`), in the table's order: `present`, `installed` (the image
+ * carries the row's tooling, but a pod's agent cannot use it yet; `detail` says why), `unchecked`
+ * (no probe has checked an image row, or no session has reported a live row), `withheld` (a
+ * ruling, cited in `detail`), `decided` (the operator's reason in `decision`) or `open`, an open
+ * deployment row carrying `configLine`, the `legion.yaml` line that records a decision. A live row
+ * (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) is
+ * `present` or `open` from the sessions' reports (`legionCapabilityReportView`), and carries no
+ * `configLine`; `live` is no status since contract 21. A gap is reported here, never refused
+ * (contract 16). */
+const legionCapabilityState = z.strictObject({
+  name: nonEmptyString,
+  status: z.enum(["present", "installed", "unchecked", "withheld", "decided", "open"]),
+  detail: nonEmptyString,
+  decision: nonEmptyString.optional(),
+  configLine: nonEmptyString.optional(),
+});
+
 /** `api.State`, the body of `GET /legion/v1/state`. `controllerLocator` is absent until a session
- * registers with the capability `legion controller start` fetched; `agentSecretsLogin` is absent
- * when the deployment configures no broker (contract 9). */
+ * registers as the project's controller: with the capability `legion controller start` fetched, or,
+ * under `controller: daemon`, with the boot token of the daemon's own controller launch;
+ * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9);
+ * `capabilities` is the deployment's report, never null (contract 16). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -221,13 +268,16 @@ export const LegionStateResponse = z.strictObject({
   pendingStatusWrites: z.array(legionPendingStatusWrite),
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
+  capabilities: z.array(legionCapabilityState),
 });
 
 export type LegionState = z.output<typeof LegionStateResponse>;
 export type LegionIssue = LegionState["issues"][string];
 
 /** `claim.RegisterResponse`, the body of `POST /legion/v1/claims/register`: the claim the agent
- * holds, and the secret its ready and exit authenticate with. */
+ * holds, the secret its ready and exit authenticate with, and `promptAgents`, the sorted names of
+ * the task agents the role's prompts dispatch — what the session's subagents check measures its
+ * discovered agents against (contract 21). Never null: a role whose prompts name none gets `[]`. */
 export const LegionRegisterResponse = z.strictObject({
   claimToken: nonEmptyString,
   tree: nonEmptyString,
@@ -235,14 +285,45 @@ export const LegionRegisterResponse = z.strictObject({
   role: z.enum(LEGION_ROLES),
   generation: z.number().int().positive(),
   secret: nonEmptyString,
+  promptAgents: z.array(nonEmptyString),
 });
 
 export type LegionRegistration = z.output<typeof LegionRegisterResponse>;
 
-/** `api.ControllerRegisterResponse`, for a session that registered with the controller capability
+/** `claim.CapabilityReport` — what a session measured of the live capability rows at boot: when it
+ * measured, how long the measuring took, and one row per capability it checked, `ok` with the fact
+ * the check found in `detail`. A `detail` may be empty on the wire: a passing check with nothing
+ * to add. The daemon normalises the rows (unknown names dropped, a live row not reported marked
+ * open, details cut) and never refuses a report (contract 21). */
+export const LegionCapabilityReport = z.strictObject({
+  measuredAt: timestamp,
+  elapsedMs: z.number().int().nonnegative(),
+  rows: z.array(z.strictObject({ name: nonEmptyString, ok: z.boolean(), detail: z.string() })),
+});
+
+export type LegionCapabilityReportBody = z.output<typeof LegionCapabilityReport>;
+export type LegionCapabilityRow = LegionCapabilityReportBody["rows"][number];
+
+/** `claim.ReadyRequest`, the body of `POST /legion/v1/claims/ready`: the registered claim says its
+ * agent has booted and can be prompted, authenticated by the registration's secret and naming the
+ * launch generation it answers for. `capabilities` is the session's report of the live rows; a
+ * ready without one (the controller's) reports nothing and changes no row. */
+export const LegionReadyRequest = z.strictObject({
+  claimToken: nonEmptyString,
+  sessionId: nonEmptyString,
+  secret: nonEmptyString,
+  generation: z.number().int().positive(),
+  capabilities: LegionCapabilityReport.optional(),
+});
+
+export type LegionReadyRequestBody = z.output<typeof LegionReadyRequest>;
+
+/** `api.ControllerRegisterResponse`, for a session that registered as the project's controller
  * (the `bootToken` of `POST /legion/v1/claims/register` is the secret `legion controller start`
- * fetched): the project's controller role token, the role `controller`, the capability's
- * generation, and the secret its controller grants authenticate with. No tree, no issue. */
+ * fetched, or a daemon-launched controller's own boot token): the project's controller role token,
+ * the role `controller`, a generation — the capability's for the operator's controller, the
+ * launch's for the daemon's own, which its `claims/ready` names — and the secret its controller
+ * grants authenticate with. No tree, no issue. */
 export const LegionControllerRegisterResponse = z.strictObject({
   claimToken: nonEmptyString,
   role: z.literal("controller"),
@@ -258,6 +339,16 @@ export type LegionControllerRegistration = z.output<typeof LegionControllerRegis
 export const LegionControllerSecretResponse = z.strictObject({
   secret: nonEmptyString,
   designGate: z.enum(["root-issues", "off"]),
+});
+
+/** `api.ControllerCredentialResponse`, the answer of `POST /legion/v1/controller/github-credential`:
+ * the two files `ghconfig.Rendered` renders for the review App's token, which `legion controller
+ * start` writes under `<state_dir>/gh` and refreshes every minute. The plugin never reads it. */
+export const LegionControllerCredentialResponse = z.strictObject({
+  hosts: nonEmptyString,
+  config: nonEmptyString,
+  app: z.enum(["implement", "review"]),
+  expiresAt: timestamp,
 });
 
 /** Claim routes refuse with only a sentence; credential and workflow routes add a stable code. */
@@ -314,28 +405,21 @@ export const LegionOperatorClaimsResponse = z.strictObject({
   claims: z.array(LegionOperatorClaimResponse),
 });
 
-/** Credential grant, GitHub token, and git-helper bodies from `internal/api/credentials.go`. */
+/** The credential grant body from `internal/api/credentials.go`. */
 export const LegionGrantResponse = z.strictObject({
   grantId: nonEmptyString,
   expiresAt: timestamp,
 });
 export type LegionGrant = z.output<typeof LegionGrantResponse>;
-/** A GitHub App's git identity, `<slug>[bot]`, with a slug. */
-const appLogin = z.string().regex(/^[^[\]]+\[bot\]$/);
-export const LegionGitHubTokenResponse = z.strictObject({
-  token: nonEmptyString,
-  appLogin: z.string().endsWith("[bot]"),
-  /** `api.GitHubTokenResponse.LegionAppLogins`: each Legion role App's login, keyed by its App role,
-   * on gh-token alone; absent when the daemon could not read every one. */
-  legionAppLogins: z.strictObject({ implement: appLogin, review: appLogin }).optional(),
-});
-export const LegionGitCredentialResponse = z.strictObject({
-  username: z.literal("x-access-token"),
-  password: nonEmptyString,
-});
 
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
 export const LegionEmptyResponse = z.strictObject({});
+/** `api.HandoffCompleteResponse`: `note` is what READY's checks say when READY was published
+ * without reading the head's checks (the pull request already merged, or its base requiring none);
+ * every other completion answers none. */
+export const LegionHandoffCompleteResponse = z.strictObject({
+  note: nonEmptyString.optional(),
+});
 export const LegionWaveReleaseResponse = z.strictObject({
   released: z.array(nonEmptyString),
 });
@@ -356,12 +440,11 @@ export const LegionControllerGrantRequest = z.strictObject({
   secret: nonEmptyString,
 });
 
-/** `api.GrantCredentialRequest`, shared by the three grant-redemption routes. */
-export const LegionGrantCredentialRequest = z.strictObject({
-  grantId: nonEmptyString,
-});
-
-/** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow. */
+/** `api.HandoffCompleteRequest`, the observation one worker reports to the workflow. `commit` is
+ * the pushed commit carrying the phase's handoff, `.legion/<issue>/<phase>.json`, which the
+ * `legion` tool's `handoff_complete` finds in the pane with its jj before posting (as
+ * `legion handoff complete` did); a phase that writes no handoff reports the commit the workspace
+ * stands on. The daemon reads no handoff file and no branch head. */
 export const LegionHandoffCompleteRequest = z.strictObject({
   grantId: nonEmptyString,
   summary: nonEmptyString,

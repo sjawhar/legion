@@ -192,7 +192,7 @@ func restoreGitWorktree(ctx context.Context, run Runner, workspace Workspace, lo
 	if filepath.Dir(target) != worktrees {
 		return fmt.Errorf("workspace %s's .git, which a tree agent can write, names %s outside the shared clone's %s; provisioning refuses to create or write it. Remove the workspace so the next provisioning adds it again", workspace.Dir, target, worktrees)
 	}
-	parents, err := RunChecked(ctx, run, []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `parents.map(|c| c.commit_id()).join("\n")`}, nil, workspace.Dir)
+	parents, err := RunCheckedIn(ctx, run, workspace, []string{"jj", "log", "-r", "@", "--no-graph", "--ignore-working-copy", "-T", `parents.map(|c| c.commit_id()).join("\n")`})
 	if err != nil {
 		return err
 	}
@@ -244,11 +244,11 @@ func restoreGitWorktree(ctx context.Context, run Runner, workspace Workspace, lo
 		return fmt.Errorf("restore git worktree %s: %w", target, err)
 	}
 	// No lock makes two concurrent restores of this workspace impossible on every path that
-	// reaches here: workspace-init's own per-repository flock covers only the Kubernetes init
-	// container, and the Go daemon's own tmux-runtime path (outbox.go) serializes provisioning
-	// only incidentally, through a single daemon process running one strictly sequential
-	// goroutine, not a dedicated per-workspace claim. So a stale sibling from an earlier kill is
-	// swept only now, after this restore's own rename already succeeded: at this point our own
+	// reaches here: under Kubernetes one issue pod alone provisions its own clone, on a volume no
+	// other pod mounts, and the Go daemon's own tmux-runtime path (outbox.go) serializes
+	// provisioning only incidentally, through a single daemon process running one strictly
+	// sequential goroutine, not a dedicated per-workspace claim. So a stale sibling from an earlier
+	// kill is swept only now, after this restore's own rename already succeeded: at this point our own
 	// temporary directory is gone (renamed away), target exists complete, and any sibling still
 	// naming this workspace is provably not still in use by us -- a still-racing concurrent
 	// restore's own eventual rename onto target can now only fail, never corrupt what this one

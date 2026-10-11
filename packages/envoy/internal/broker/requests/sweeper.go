@@ -9,8 +9,8 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/machine"
 )
 
-// Sweeper is the one thing that moves state no human decides (the shared broker contract,
-// dispatch://AGENTC-393/artifact/plan-overview-md): every tick it ends the enrollments whose lease
+// Sweeper is the one thing that moves state no human decides:
+// every tick it ends the enrollments whose lease
 // lapsed (revoking their grants and cancelling their pending requests), expires overdue pending
 // agent_secret requests (waking each one's owner) and overdue pending machine logins — all read
 // fresh from Postgres, never from memory, so a restart resumes exactly where the rows are.

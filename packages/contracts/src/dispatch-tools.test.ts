@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
+import { ISSUE_TITLE_MAX } from "./dispatch-api";
 import {
   dispatchToolSchema,
   dispatchToolSpecs,
@@ -102,7 +103,7 @@ const validCalls = {
   dispatch_artifact: { issue: "DSP-1", name: "design.pdf", path: "design.pdf" },
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
-  dispatch_issues: { project: "AGENTC" },
+  dispatch_issues: { project: "ACME" },
   dispatch_architecture_sync: { project: "CORE" },
   dispatch_open_asks: {},
   dispatch_whoami: {},
@@ -111,6 +112,10 @@ const validCalls = {
 function schemaFor(name: keyof typeof validCalls) {
   return dispatchToolSchema(specFor(name), schemaApi);
 }
+
+const ISSUE_UPDATE_RULES =
+  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, or components. " +
+  "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done.";
 
 describe("zodSchemaApi", () => {
   test("rejects fractional values when integers are required", () => {
@@ -223,6 +228,21 @@ describe("dispatchToolSpecs", () => {
     ]);
   });
 
+  test("issue tools accept a title at 1,000 characters and refuse one over", () => {
+    for (const [tool, args] of [
+      ["dispatch_issue", { project: "DSP" }],
+      ["dispatch_issue_update", { issue: "DSP-1" }],
+    ] as const) {
+      const schema = schemaFor(tool);
+
+      expect(schema.safeParse({ ...args, title: "x".repeat(1000) }).success).toBe(true);
+      const over = schema.safeParse({ ...args, title: "x".repeat(1001) });
+      expect(over.error?.issues.map((issue) => issue.message)).toEqual([
+        `is 1 characters over the ${ISSUE_TITLE_MAX}-character limit (1001/${ISSUE_TITLE_MAX})`,
+      ]);
+    }
+  });
+
   test("dispatch_search takes a project key or none, and refuses anything else by name", () => {
     const schema = schemaFor("dispatch_search");
 
@@ -254,7 +274,7 @@ describe("dispatchToolSpecs", () => {
     const schema = schemaFor("dispatch_open_asks");
 
     expect(schema.safeParse({}).success).toBe(true);
-    expect(schema.safeParse({ project: "AGENTC" }).success).toBe(true);
+    expect(schema.safeParse({ project: "ACME" }).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
   });
 
@@ -265,15 +285,15 @@ describe("dispatchToolSpecs", () => {
     expect(schema.safeParse(spec.example).success).toBe(true);
 
     expect(schema.safeParse({}).success).toBe(false);
-    expect(schema.safeParse({ project: "AGENTC", limit: 251 }).success).toBe(false);
-    expect(schema.safeParse({ project: "AGENTC", offset: -1 }).success).toBe(false);
-    expect(schema.safeParse({ project: "AGENTC", offset: 0.5 }).success).toBe(false);
-    expect(schema.safeParse({ project: "AGENTC", status: "not_a_status" }).success).toBe(false);
+    expect(schema.safeParse({ project: "ACME", limit: 251 }).success).toBe(false);
+    expect(schema.safeParse({ project: "ACME", offset: -1 }).success).toBe(false);
+    expect(schema.safeParse({ project: "ACME", offset: 0.5 }).success).toBe(false);
+    expect(schema.safeParse({ project: "ACME", status: "not_a_status" }).success).toBe(false);
     expect(
       schema.safeParse({
-        project: "AGENTC",
+        project: "ACME",
         status: "todo",
-        parent: "AGENTC-1",
+        parent: "ACME-1",
         label: "bug",
         priority: [0, 1, null],
         updated_since: "2026-09-01T00:00:00Z",
@@ -287,14 +307,10 @@ describe("dispatchToolSpecs", () => {
     const schema = schemaFor("dispatch_issues");
 
     for (const priority of [[0], [3, null], [null]]) {
-      expect(schema.safeParse({ project: "AGENTC", priority }).success, String(priority)).toBe(
-        true
-      );
+      expect(schema.safeParse({ project: "ACME", priority }).success, String(priority)).toBe(true);
     }
     for (const priority of [[], [4], [-1], [1.5], ["P0"], 0, null]) {
-      expect(schema.safeParse({ project: "AGENTC", priority }).success, String(priority)).toBe(
-        false
-      );
+      expect(schema.safeParse({ project: "ACME", priority }).success, String(priority)).toBe(false);
     }
   });
 
@@ -386,11 +402,13 @@ describe("dispatchToolSpecs", () => {
     }
   });
 
-  test("dispatch_issue_update requires a field besides issue", () => {
+  test("dispatch_issue_update requires a field besides issue and names the updatable ones", () => {
     const schema = schemaFor("dispatch_issue_update");
 
     const bare = schema.safeParse({ issue: "DSP-1" });
     expect(bare.success).toBe(false);
+    if (bare.success) return;
+    expect(bare.error.issues.map((issue) => issue.message)).toEqual([ISSUE_UPDATE_RULES]);
 
     for (const args of [
       { issue: "DSP-1", title: "Renamed" },
@@ -451,6 +469,10 @@ describe("dispatchToolSpecs", () => {
     ]) {
       const result = schema.safeParse(args);
       expect(result.success, JSON.stringify(args)).toBe(false);
+      expect(
+        result.error?.issues.map((issue) => issue.message),
+        JSON.stringify(args)
+      ).toEqual([ISSUE_UPDATE_RULES]);
     }
     expect(
       schema.safeParse({ issue: "DSP-1", status: "done", reason: "x".repeat(2001) }).success

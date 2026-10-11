@@ -2,19 +2,16 @@ package main
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
+	"github.com/sjawhar/envoy/internal/cmdtest"
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
@@ -37,7 +34,7 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 	_, uri := testnats.Start(t)
 	testnats.Connect(t, uri).Close()
 
-	binary := buildListener(t)
+	binary := cmdtest.Build(t, "envoy-listener")
 	publisher := testnats.Connect(t, uri)
 	t.Cleanup(publisher.Close)
 
@@ -85,22 +82,20 @@ func TestListenerSIGTERMIsAnOrderedShutdown(t *testing.T) {
 		}()
 		time.Sleep(time.Second)
 
-		if err := listener.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-			t.Fatalf("run %d: SIGTERM: %v", run, err)
-		}
-		listener.waitExit(t, "SIGTERM")
+		listener.Terminate(t)
+		listener.WaitExit(t, "SIGTERM")
 		close(stopTraffic)
 		<-trafficDone
 		holder.Close()
-		if !strings.Contains(listener.output.String(), "envoy-listener shutdown complete") {
-			t.Fatalf("run %d: the listener did not finish its ordered shutdown:\n%s", run, listener.output.String())
+		if !strings.Contains(listener.Output.String(), "envoy-listener shutdown complete") {
+			t.Fatalf("run %d: the listener did not finish its ordered shutdown:\n%s", run, listener.Output.String())
 		}
-		for _, line := range strings.Split(listener.output.String(), "\n") {
+		for _, line := range strings.Split(listener.Output.String(), "\n") {
 			if errorLine.MatchString(line) {
 				t.Fatalf("run %d: a SIGTERM shutdown logged an error: %s", run, line)
 			}
 		}
-		_, afterSignal, _ := strings.Cut(listener.output.String(), "received signal, shutting down")
+		_, afterSignal, _ := strings.Cut(listener.Output.String(), "received signal, shutting down")
 		if strings.Contains(afterSignal, "envoy nats recovery attempt") {
 			t.Fatalf("run %d: the listener reconnected to NATS during its shutdown:\n%s", run, afterSignal)
 		}
@@ -117,14 +112,12 @@ func TestASIGTERMWhileAnotherTaskHoldsTheDurableIsAnOrderedShutdown(t *testing.T
 	const machineID = "sigterm-during-bind"
 	old, holder := durableHeldElsewhere(t, testnats.URL(t), "listener-"+machineID)
 
-	listener := startListenerProcess(t, buildListener(t), old.Conn.ConnectedUrl(), machineID)
-	listener.waitForOutput(t, "subscribe failed, retrying")
-	if err := listener.cmd.Process.Signal(syscall.SIGTERM); err != nil {
-		t.Fatalf("SIGTERM: %v", err)
-	}
-	listener.waitExit(t, "SIGTERM")
-	output := listener.output.String()
-	if code := listener.cmd.ProcessState.ExitCode(); code != 1 {
+	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), old.Conn.ConnectedUrl(), machineID)
+	listener.WaitForOutput(t, "subscribe failed, retrying")
+	listener.Terminate(t)
+	listener.WaitExit(t, "SIGTERM")
+	output := listener.Output.String()
+	if code := listener.Cmd.ProcessState.ExitCode(); code != 1 {
 		t.Fatalf("exit code = %d, want 1 (-1 is a death by the signal, with no ordered shutdown):\n%s", code, output)
 	}
 	for _, line := range []string{"received signal, shutting down", "envoy-listener shutdown complete"} {
@@ -145,54 +138,26 @@ func TestASIGTERMWhileAnotherTaskHoldsTheDurableIsAnOrderedShutdown(t *testing.T
 // listenerTestToken is the shared /v1 bearer every test-started listener is given.
 const listenerTestToken = "listener-test-token"
 
-// listenerProcess is a listener binary a test started, with its combined output.
+// listenerProcess is a listener binary a test started, serving on port.
 type listenerProcess struct {
-	cmd    *exec.Cmd
-	port   int
-	output *lockedBuffer
-	exited chan struct{}
+	*cmdtest.Process
+	port int
 }
 
 // startListenerProcess starts binary as machine machineID against the NATS at uri, on a free port,
 // with env added to its environment, and kills it when the test ends if it is still running.
 func startListenerProcess(t *testing.T, binary, uri, machineID string, env ...string) *listenerProcess {
 	t.Helper()
-	process := &listenerProcess{port: freeTCPPort(t), output: &lockedBuffer{}, exited: make(chan struct{})}
-	process.cmd = exec.Command(binary)
-	process.cmd.Env = append([]string{
-		"PORT=" + strconv.Itoa(process.port),
+	port := cmdtest.FreeTCPPort(t)
+	cmd := exec.Command(binary)
+	cmd.Env = append([]string{
+		"PORT=" + strconv.Itoa(port),
 		"ENVOY_LISTEN_HOST=127.0.0.1",
 		"ENVOY_MACHINE_ID=" + machineID,
 		"NATS_URLS=" + uri,
 		"ENVOY_API_TOKEN=" + listenerTestToken,
 	}, env...)
-	process.cmd.Stdout, process.cmd.Stderr = process.output, process.output
-	if err := process.cmd.Start(); err != nil {
-		t.Fatalf("start the listener %s: %v", machineID, err)
-	}
-	go func() {
-		_ = process.cmd.Wait()
-		close(process.exited)
-	}()
-	t.Cleanup(func() {
-		_ = process.cmd.Process.Kill()
-		<-process.exited
-	})
-	return process
-}
-
-func buildListener(t *testing.T) string {
-	t.Helper()
-	binary := filepath.Join(t.TempDir(), "envoy-listener")
-	args := []string{"build", "-o", binary}
-	if overlay := os.Getenv("ENVOY_TEST_GO_OVERLAY"); overlay != "" {
-		args = append(args, "-overlay", overlay)
-	}
-	args = append(args, ".")
-	if out, err := exec.Command("go", args...).CombinedOutput(); err != nil {
-		t.Fatalf("build the listener: %v\n%s", err, out)
-	}
-	return binary
+	return &listenerProcess{Process: cmdtest.Start(t, "the listener "+machineID, cmd), port: port}
 }
 
 // postListener calls a listener /v1 route as the test's shared-token caller and requires a 200.
@@ -201,16 +166,6 @@ func postListener(t *testing.T, port int, path, body string) {
 	if status, answer := callListener(t, port, http.MethodPost, path, body); status != http.StatusOK {
 		t.Fatalf("%s: status %d: %s", path, status, answer)
 	}
-}
-
-func freeTCPPort(t *testing.T) int {
-	t.Helper()
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("pick a port: %v", err)
-	}
-	defer listener.Close()
-	return listener.Addr().(*net.TCPAddr).Port
 }
 
 // waitHealthy waits up to 30 s for /healthz to report "healthy", and kills the listener and fails
@@ -235,37 +190,6 @@ func (p *listenerProcess) waitHealthy(t *testing.T) {
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	_ = p.cmd.Process.Kill()
-	t.Fatalf("the listener never became healthy:\n%s", p.output.String())
-}
-
-// waitForOutput waits up to 30 s for each of lines to appear in the listener's output, and fails the
-// test when the listener exits first or a line never appears.
-func (p *listenerProcess) waitForOutput(t *testing.T, lines ...string) {
-	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for _, line := range lines {
-		for !strings.Contains(p.output.String(), line) {
-			select {
-			case <-p.exited:
-				t.Fatalf("the listener exited before it logged %q:\n%s", line, p.output.String())
-			default:
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("the listener never logged %q:\n%s", line, p.output.String())
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	}
-}
-
-// waitExit waits up to 30 s for the listener to exit, and fails the test with its output when it is
-// still running; after names what it was waiting on.
-func (p *listenerProcess) waitExit(t *testing.T, after string) {
-	t.Helper()
-	select {
-	case <-p.exited:
-	case <-time.After(30 * time.Second):
-		t.Fatalf("the listener was still running 30s after %s:\n%s", after, p.output.String())
-	}
+	_ = p.Cmd.Process.Kill()
+	t.Fatalf("the listener never became healthy:\n%s", p.Output.String())
 }

@@ -142,9 +142,10 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Failing: []string{"unit"}, Cancelled: []string{"e2e"}, CheckedHead: "b1c2d3",
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged,
+		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", HeadCountedBefore: "a0b1c2", PlannedRed: true, State: PullRequestMerged,
 		// A base that requires no check reads back as such, never as a set that was not read.
-		Required: []string{},
+		Required:  []string{},
+		Workflows: []RequiredWorkflow{{Path: ".github/workflows/review.yml", Result: "failure"}}, WorkflowsHead: "b1c2d3",
 	}
 	phase := PhaseRow{Issue: issue.Key, Role: claim.RoleImplementer, Claim: "legion-208-implementer", HandoffCommit: "aabbcc", Rounds: 2, Verdict: "pass"}
 	gate := DesignGate{Issue: issue.Key, ArtifactID: "artifact-208", LatestVersion: 7, ApprovedVersion: &approved}
@@ -202,6 +203,34 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		must(t, err)
 		if len(slots) != 0 {
 			t.Fatalf("slots after release = %#v, want no rows", slots)
+		}
+	})
+}
+
+// ClaimSession is the session claims records for the token (the workflow reads it for the
+// reviewer's claim to tell the reviewer's own review-App session from another's by the Legion
+// footer each carries). An unknown token answers "" and no error.
+func TestClaimSessionAnswersTheSeededSessionOrEmpty(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		_, err := tx.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+			state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+			values ($1, $2, $3, $4, $5, 0, $6, '', $7, 0, 0, 0, 0)`,
+			"review-claim", "LEGION", "LEGION-208", "LEGION-208", string(claim.RoleReviewer), "ses-reviewer", string(supervise.StateWorking))
+		must(t, err)
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.ClaimSession(ctx, tx, "review-claim")
+		must(t, err)
+		if got != "ses-reviewer" {
+			t.Fatalf("ClaimSession(review-claim) = %q, want ses-reviewer", got)
+		}
+		got, err = records.ClaimSession(ctx, tx, "no-such-claim")
+		must(t, err)
+		if got != "" {
+			t.Fatalf("ClaimSession(no-such-claim) = %q, want \"\"", got)
 		}
 	})
 }
@@ -282,13 +311,14 @@ func samePullRequest(got, want PullRequest) bool {
 		got.FixAttempts == want.FixAttempts &&
 		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot &&
-		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted &&
-		got.PlannedRed == want.PlannedRed && reflect.DeepEqual(got.Required, want.Required)
+		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted && got.HeadCountedBefore == want.HeadCountedBefore &&
+		got.PlannedRed == want.PlannedRed && reflect.DeepEqual(got.Required, want.Required) &&
+		reflect.DeepEqual(got.Workflows, want.Workflows) && got.WorkflowsHead == want.WorkflowsHead
 }
 
 // A new generation keeps an open pull request but none of the old generation's fix-attempt
-// accounting: its counts, its counted head, and its planned mark, which would otherwise exempt the
-// new generation's first red from counting.
+// accounting: its counts, its counted head and the mark that count replaced, and its planned mark,
+// which would otherwise exempt the new generation's first red from counting.
 func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -298,7 +328,7 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1359, Branch: "legion/LEGION-285",
 		HeadSHA: "red-tests", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC),
 		CheckedHead: "red-tests", Failing: []string{"test"}, CheckRuns: []AttemptRun{},
-		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", PlannedRed: true, State: PullRequestOpen,
+		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", HeadCountedBefore: "fix", PlannedRed: true, State: PullRequestOpen,
 	}
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, issue))
@@ -311,9 +341,9 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		if got == nil {
 			t.Fatal("the open pull request is gone, want it kept")
 		}
-		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.PlannedRed {
-			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q plannedRed=%v, want 0, 0, \"\" and false",
-				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.PlannedRed)
+		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.HeadCountedBefore != "" || got.PlannedRed {
+			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q headCountedBefore=%q plannedRed=%v, want 0, 0, \"\", \"\" and false",
+				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.HeadCountedBefore, got.PlannedRed)
 		}
 	})
 }
@@ -431,6 +461,55 @@ func TestTheOutboxIsEachProjectsOwn(t *testing.T) {
 			t.Errorf("OTHER's claim after LEGION's = %v, want both of its rows, due and unleased", got)
 		}
 	})
+}
+
+// A start of an issue's role waits while an older issue_branch row of the issue is unfinished, so no
+// role starts before its branch exists on GitHub. Nothing else waits on it: a suspend of the same
+// issue, a start queued before the row, and another issue's start are each due.
+func TestAStartWaitsForItsIssuesBranch(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	enqueue := func(tx pgx.Tx, issue string, payload OutboxPayload) {
+		row, err := NewOutboxRow(issue, payload, now)
+		must(t, err)
+		must(t, records.Enqueue(ctx, tx, row))
+	}
+	start := SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleArchitect, Generation: 1}
+	inTx(t, st, func(tx pgx.Tx) {
+		enqueue(tx, "LEGION-208", start)
+		enqueue(tx, "LEGION-208", IssueBranch{Generation: 1})
+		enqueue(tx, "LEGION-208", start)
+		enqueue(tx, "LEGION-208", SuperviseRequest{Op: "suspend", Tree: "LEGION-208", Role: claim.RolePlanner, Generation: 1})
+		enqueue(tx, "LEGION-209", SuperviseRequest{Op: "start", Tree: "LEGION-209", Role: claim.RoleArchitect, Generation: 1})
+	})
+	// claimed is every row due at at, in claim order, each finished once claimed.
+	claimed := func(at time.Time) []string {
+		var keys []string
+		inTx(t, st, func(tx pgx.Tx) {
+			rows, err := records.ClaimDue(ctx, tx, "LEGION", at, 10, time.Minute)
+			must(t, err)
+			for _, row := range rows {
+				payload, err := DecodeOutboxPayload(row)
+				must(t, err)
+				key := string(row.Kind) + ":" + row.Issue
+				if request, ok := payload.(SuperviseRequest); ok {
+					key += ":" + string(request.Op)
+				}
+				keys = append(keys, key)
+				must(t, records.FinishOutbox(ctx, tx, row.ID, row.LeaseToken))
+			}
+		})
+		return keys
+	}
+
+	if got, want := claimed(now), []string{"supervise:LEGION-208:start", "issue_branch:LEGION-208", "supervise:LEGION-208:suspend", "supervise:LEGION-209:start"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("claimed with the branch unfinished = %v, want %v", got, want)
+	}
+	if got, want := claimed(now.Add(2*time.Minute)), []string{"supervise:LEGION-208:start"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("claimed once the branch finished = %v, want the start that waited for it alone", got)
+	}
 }
 
 // A status write the outbox failed and pushed back is still unwritten, so it stays listed through its
@@ -567,7 +646,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},
@@ -715,6 +794,67 @@ func TestCheckedHeadMigrationKeepsARecordedVerdictStandingForItsHead(t *testing.
 		must(t, err)
 		if unsettled == nil || unsettled.CheckedHead != "" {
 			t.Fatalf("never-settled pull request after 0028 = %+v, want no checked head", unsettled)
+		}
+	})
+}
+
+// Migration 0035 ends phase-end suspension. A transition's suspend queued before it named the phase
+// it ended ("leaves"); the field is gone, and the outbox decodes rows strictly, so each such row is
+// deleted rather than left to fail on every attempt or, read without the field, stop a role its
+// issue still needs. Every other supervise row stays queued and decodes: a close's suspend, a start
+// and a tree close.
+func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) {
+	ctx := context.Background()
+	st := emptyStore(t)
+	all, err := migrations.All()
+	must(t, err)
+	for _, migration := range all {
+		if migration.Version >= 35 {
+			break
+		}
+		inTx(t, st, func(tx pgx.Tx) {
+			must(t, func() error {
+				if _, err := tx.Exec(ctx, migration.SQL); err != nil {
+					return err
+				}
+				_, err := tx.Exec(ctx, "insert into schema_version (version) values ($1)", migration.Version)
+				return err
+			}())
+		})
+	}
+	queued := map[string]string{
+		"phase-end suspend": `{"op": "suspend", "tree": "LEGION-208", "role": "planner", "generation": 1, "leaves": "planning", "reason": "LEGION-208 left planning"}`,
+		"close suspend":     `{"op": "suspend", "tree": "LEGION-208", "role": "implementer", "generation": 1, "reason": "the tree of LEGION-208 lingers"}`,
+		"start":             `{"op": "start", "tree": "LEGION-208", "role": "implementer", "generation": 1, "phase": "implementing", "task": "Continue Workflow."}`,
+		"tree close":        `{"op": "tree_close", "tree": "LEGION-208", "role": "tester", "generation": 1, "linger": 1}`,
+	}
+	inTx(t, st, func(tx pgx.Tx) {
+		for name, payload := range queued {
+			_, err := tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ('supervise', 'LEGION-208', $1, 1, now(), $2)`, payload, name)
+			must(t, err)
+		}
+	})
+
+	_, err = st.Migrate(ctx)
+	must(t, err)
+	inTx(t, st, func(tx pgx.Tx) {
+		rows, err := NewStore().ClaimDue(ctx, tx, "LEGION", time.Now().Add(time.Hour), 10, time.Minute)
+		must(t, err)
+		kept := map[string]SuperviseRequest{}
+		for _, row := range rows {
+			payload, err := DecodeOutboxPayload(row)
+			if err != nil {
+				t.Fatalf("the %s row after 0035 does not decode: %v", row.LastError, err)
+			}
+			kept[row.LastError] = payload.(SuperviseRequest)
+		}
+		want := map[string]SuperviseRequest{
+			"close suspend": {Op: "suspend", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 1, Reason: "the tree of LEGION-208 lingers"},
+			"start":         {Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 1, Phase: phase.Implementing, Task: "Continue Workflow."},
+			"tree close":    {Op: "tree_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 1, Linger: 1},
+		}
+		if !reflect.DeepEqual(kept, want) {
+			t.Fatalf("supervise rows after 0035 = %+v, want %+v: the phase-end suspend deleted and every other row kept", kept, want)
 		}
 	})
 }

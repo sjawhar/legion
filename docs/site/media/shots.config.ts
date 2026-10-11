@@ -102,8 +102,12 @@ const dispatch: ShotSet<DispatchWorkspace> = {
       theme: "light",
       ready: async (page) => {
         const agents = page.getByRole("region", { name: "Agents" });
+        // A folded section's rows stay mounted, hidden (packages/dispatch/AGENTS.md), so only the
+        // rows on screen are counted.
         await expect
-          .poll(async () => (await agents.locator("article h2").allTextContents()).sort())
+          .poll(async () =>
+            (await agents.locator("article:not([hidden]) h2").allTextContents()).sort()
+          )
           .toEqual(["Planner", "Reviewer", "Tester"]);
       },
       steps: async (page) => {
@@ -189,6 +193,32 @@ const dispatch: ShotSet<DispatchWorkspace> = {
       theme: "dark",
       ready: async (page) => {
         await expect(page.getByRole("article", { name: "Urgency: Blocking" })).toBeVisible();
+      },
+    },
+    {
+      id: "delivery-measures",
+      alt: "The Delivery page's measures panel: six target cards over a strip of headline numbers.",
+      route: "/delivery?mode=list&from=2026-08-30T00%3A00%3A00Z&to=2026-09-27T20%3A00%3A00Z",
+      viewport: "desktop",
+      theme: "light",
+      ready: async (page) => {
+        const kpis = page.getByLabel("KPI targets");
+        await expect(kpis).toBeVisible();
+        await expect(kpis.locator('[data-kpi="Deploys a day"]')).toContainText("5 deploys");
+      },
+      element: (page) => page.getByLabel("KPI targets").locator(".."),
+    },
+    {
+      id: "pipeline",
+      alt: "The Pipeline page: six timing cards over the slowest-jobs and failing-jobs tables.",
+      // The e2e seed's pinned day (e2e/delivery-seed.ts PIPELINE_AT), so the fixture's runs are
+      // the seven days shown.
+      route: "/pipeline?at=2026-10-02T12%3A00%3A00Z",
+      viewport: "desktop",
+      theme: "light",
+      ready: async (page) => {
+        await expect(page.locator('[data-metric="staging_e2e"]')).toContainText("55m");
+        await expect(page.locator('[data-failing-job="build / unit"]')).toBeVisible();
       },
     },
   ],

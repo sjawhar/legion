@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"regexp"
 	"slices"
 	"strconv"
@@ -41,9 +40,15 @@ import (
 const (
 	labelProbe     = "legion.dev/probe"
 	probeContainer = "probe"
-	// probeLogLines is how much of the probe pod's log is read and quoted (LOG_TAIL_LINES,
-	// worker-image-probe.ts:59).
-	probeLogLines = 50
+	// probeLogLines is how much of the probe pod's log is read and quoted. The capability table
+	// (internal/capabilities) is one line per row, about twenty, printed before the OK line, so
+	// the TypeScript probe's 50 (LOG_TAIL_LINES, worker-image-probe.ts:59) would leave a refused
+	// image's own messages, printed before the table, out of the tail the refusal quotes. The
+	// read's 64 KiB bound (probeLog) keeps the OK line, the tail's last line, in reach: a
+	// capability line is its prefix, the row's own words, and a command's quoted output cut at 300
+	// characters (capabilities.maxDetail), about 500 bytes at the longest, so a hundred such
+	// lines stay near 50 KiB, and a passing pod prints about twenty.
+	probeLogLines = 100
 	// probeTerminationGrace is the probe pod's terminationGracePeriodSeconds: it holds nothing to
 	// save (worker-image-probe.ts:144).
 	probeTerminationGrace = 5
@@ -74,41 +79,63 @@ type ImageProbe struct {
 	// refuse (the zero Names, a kind left nil, a name no prompt can write): a probe pod handed one
 	// would fail, and the failure would be blamed on the image.
 	RoleReferences promptrefs.Names
-	// Resources are the probe container's requests and limits (the TypeScript probe used the
-	// `small` profile): it runs Oh My Pi three times (pi.agents, the plugin's load, the
-	// session-storage setting) and exits. None when zero.
+	// Resources are the probe container's requirements, as the daemon hands them: the probe's own
+	// fixed reservation (internal/daemon/kubernetes.go, probeReservation), its cpu and memory the
+	// request and the limit alike so the probe pod is Guaranteed as every Legion pod is. It runs Oh
+	// My Pi three times, one at a time (pi.agents, the plugin's load, the session-storage setting),
+	// and exits, so it is sized for that and not for a role's work.
 	Resources corev1.ResourceRequirements
 }
 
 // ProbeImage proves the runtime's image (Options.Image) on the cluster before any claim runs on
-// it, or refuses naming why. Every boot probes: no pass is remembered, because the probe pod's spec
-// cannot show the contents of the operator's ConfigMaps and Secrets, which decide whether the
-// prompt-named agents' models resolve (the LEGION-270 plan, decision 5). An attempt's verdict is
-// definitive — the API refusing what
-// was sent (400, 401, 403, 422, or a create's 404), an image the kubelet cannot use, a pod whose
-// probe container exited on its own and Failed, a log without the OK line or confirming another
-// contract, or not resolving the agents' models, a providers Secret the pod cannot mount — or
+// it, answering what the probe's OK line reported of the image and how the run went
+// (bootprobe.ImageReport), or refuses naming why. Every boot probes: no pass is remembered, because
+// the probe pod's spec cannot show the contents of the operator's ConfigMaps and Secrets, which
+// decide whether the prompt-named agents' models resolve (the LEGION-270 plan, decision 5). An
+// attempt's verdict is definitive — the API refusing what was sent (400, 401, 403, 422, or a
+// create's 404), an image the kubelet cannot use, a pod whose probe container exited on its own
+// and Failed, a log without the OK line or confirming another contract, or not resolving the
+// agents' models, or not checking the capability list, a providers Secret the pod cannot mount —
+// or waiting: a pod the pool has no room for (stuck), which counts against no attempt budget, since
+// a full pool says nothing about the image and the daemon must stay up until it has room — or
 // transient: anything else, a pod the kubelet itself failed included, retried under p.Retry
-// (worker-image-probe.ts:318-338, 470-508).
-func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) error {
+// (worker-image-probe.ts:318-338, 470-508). The report counts the attempts that waited on capacity
+// and keeps the last one's reason, for the pool-capacity row of the capability report.
+func (r *Runtime) ProbeImage(ctx context.Context, p ImageProbe) (bootprobe.ImageReport, error) {
 	if p.Contract < 1 || p.Budget <= 0 || p.Retry.Initial <= 0 || p.Retry.Max < p.Retry.Initial {
-		return errors.New("image probe: a contract, a positive budget, and a positive retry wait are required")
+		return bootprobe.ImageReport{}, errors.New("image probe: a contract, a positive budget, and a positive retry wait are required")
 	}
 	if p.RoleReferences.Zero() {
-		return errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
+		return bootprobe.ImageReport{}, errors.New("image probe: ImageProbe.RoleReferences is required: the references of the role prompts a pod is handed")
 	}
 	if _, err := promptrefs.Decode(p.RoleReferences.Encode()); err != nil {
-		return fmt.Errorf("image probe: ImageProbe.RoleReferences: %w", err)
+		return bootprobe.ImageReport{}, fmt.Errorf("image probe: ImageProbe.RoleReferences: %w", err)
 	}
 	_, hex, _ := strings.Cut(r.image, "@sha256:")
 	if !digestHex.MatchString(hex) {
-		return fmt.Errorf("image probe: image %q is not pinned by a sha256 digest", r.image)
+		return bootprobe.ImageReport{}, fmt.Errorf("image probe: image %q is not pinned by a sha256 digest", r.image)
 	}
 	digest := "sha256:" + hex
 	name := probeName(r.project, hex)
-	return bootprobe.Run(ctx, "worker image", p.Retry, r.log, func(ctx context.Context) bootprobe.Outcome {
-		return r.probeAttempt(ctx, p, name, digest)
+	// The report is the passing attempt's: a transient attempt reports nothing, and a refusal ends
+	// the run. The capacity waits are the run's own count.
+	var report bootprobe.ImageReport
+	waits, reason := 0, ""
+	err := bootprobe.Run(ctx, "worker image", p.Retry, r.log, func(ctx context.Context) bootprobe.Outcome {
+		outcome, passed := r.probeAttempt(ctx, p, name, digest)
+		switch {
+		case outcome.Passed:
+			report = passed
+		case outcome.Waiting != "":
+			waits, reason = waits+1, outcome.Waiting
+		}
+		return outcome
 	})
+	if err != nil {
+		return bootprobe.ImageReport{}, err
+	}
+	report.CapacityWaits, report.CapacityReason = waits, reason
+	return report, nil
 }
 
 // probeName is `legion-probe-<project>-<first 12 hex of the digest>`: one per project and image,
@@ -123,7 +150,8 @@ func probeName(project, hex string) string {
 // probeAttempt is one run of the probe Sandbox: create it (replacing this project's leftover),
 // wait up to the budget for its pod to finish, read the pod's log, judge it, and delete the
 // Sandbox whatever happened — with a context of its own, so a stopping daemon still cleans up.
-func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest string) bootprobe.Outcome {
+// The report is what a passing pod's OK line said of the image; the zero report otherwise.
+func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest string) (bootprobe.Outcome, bootprobe.ImageReport) {
 	// A pod an earlier attempt's Sandbox left, whose deletion is still under way, holds the name.
 	if err := r.await(ctx, p.Budget, "the pod of an earlier probe sandbox "+name+" to go", func() (bool, error) {
 		pod := r.storedPod(name)
@@ -133,7 +161,7 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 		s, err := r.storedSandbox(name)
 		return s != nil && ownedBy(pod, s.UID), err
 	}); err != nil {
-		return unlessStopped(ctx, err, "probe sandbox "+name)
+		return unlessStopped(ctx, err, "probe sandbox "+name), bootprobe.ImageReport{}
 	}
 	// Built at each create, so the shutdown is the budget from that moment, whatever came before it.
 	manifest := func() (*unstructured.Unstructured, error) {
@@ -141,7 +169,7 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	}
 	uid, outcome, created := r.createProbe(ctx, name, digest, manifest, p.Budget)
 	if !created {
-		return outcome
+		return outcome, bootprobe.ImageReport{}
 	}
 	defer func() {
 		deleting, cancel := context.WithTimeout(context.WithoutCancel(ctx), apiTimeout)
@@ -195,13 +223,13 @@ func (r *Runtime) probeAttempt(ctx context.Context, p ImageProbe, name, digest s
 	})
 	switch {
 	case ctx.Err() != nil:
-		return bootprobe.Outcome{}
+		return bootprobe.Outcome{}, bootprobe.ImageReport{}
 	case readErr != nil:
-		return bootprobe.Outcome{Detail: fmt.Sprintf("probe sandbox %s: %v", name, readErr)}
+		return bootprobe.Outcome{Detail: fmt.Sprintf("probe sandbox %s: %v", name, readErr)}, bootprobe.ImageReport{}
 	case err != nil:
-		return bootprobe.Outcome{Detail: r.unfinished(ctx, name, uid, p.Budget)}
+		return bootprobe.Outcome{Detail: r.unfinished(ctx, name, uid, p.Budget)}, bootprobe.ImageReport{}
 	case verdict != nil:
-		return *verdict
+		return *verdict, bootprobe.ImageReport{}
 	}
 	logTail, logErr := r.probeLog(ctx, name)
 	return r.judge(name, digest, finished, logTail, logErr, p.Contract)
@@ -327,15 +355,39 @@ func (r *Runtime) createProbe(ctx context.Context, name, digest string, manifest
 const providersMountRecheck = 15 * time.Second
 
 // stuck is the verdict on a probe pod that has not finished and never will, or nil while waiting
-// can still change it: an image the kubelet cannot use, or a providers Secret it cannot mount,
-// which leaves the pod Pending, never Failed, and which its events say. They are read at most every
-// providersMountRecheck; mountRead holds when they last were.
+// can still change it: an image the kubelet cannot use; a pod the pool has no room for, which the
+// scheduler leaves Pending with PodScheduled=False Unschedulable, waited on (bootprobe.Outcome.Waiting)
+// once it has been so for longer than the boot timeout — the same bound the liveness rules give an
+// issue pod (observe.go), long enough for Karpenter to add a node under the pool's limits when it
+// can, so a cold pool scaling up is not mistaken for a full one — rather than counted against the
+// attempt budget, since a full pool says nothing about the image; or a providers Secret it cannot
+// mount, which leaves the pod Pending, never Failed, and which its events say. They are read at
+// most every providersMountRecheck; mountRead holds when they last were.
+//
+// Ending the attempt on an Unschedulable pod deletes its Sandbox (probeAttempt's deferred delete)
+// and the next attempt, after the retry's longest wait, creates it again: a probe pod that could
+// not be placed holds no node, so recreating it costs the pool nothing, and the new pod asks the
+// scheduler afresh rather than keeping one object Pending across the daemon's whole wait.
 func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest string, mountRead *time.Time) *bootprobe.Outcome {
 	if reason := probeWaiting(pod); definitiveWaiting[reason] {
 		unusable := imageRefusal(digest, "pod %s %s, container %s waiting: %s", name, phaseOf(pod), probeContainer, reason)
 		return &unusable
 	}
-	if !r.mountsProviders() || pod.Status.Phase != corev1.PodPending || r.now().Sub(*mountRead) < providersMountRecheck {
+	if pod.Status.Phase != corev1.PodPending {
+		return nil
+	}
+	if scheduled := podCondition(pod, corev1.PodScheduled); scheduled != nil &&
+		scheduled.Status == corev1.ConditionFalse && scheduled.Reason == corev1.PodReasonUnschedulable {
+		since := scheduled.LastTransitionTime.Time
+		if since.IsZero() {
+			since = pod.CreationTimestamp.Time
+		}
+		if r.now().Sub(since) > r.bootTimeout {
+			waiting := bootprobe.Outcome{Waiting: fmt.Sprintf("probe pod %s is Unschedulable: %s", name, scheduled.Message)}
+			return &waiting
+		}
+	}
+	if !r.mountsProviders() || r.now().Sub(*mountRead) < providersMountRecheck {
 		return nil
 	}
 	*mountRead = r.now()
@@ -343,10 +395,8 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 	if failure == "" {
 		return nil
 	}
-	keys := slices.Concat(slices.Collect(maps.Values(r.providerKeys)), r.providersSecrets)
-	slices.Sort(keys)
 	refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, whose keys every pod mounts (%s): %s",
-		name, ProvidersSecretName(r.project), strings.Join(keys, ", "), failure)}
+		name, ProvidersSecretName(r.project), strings.Join(r.providersKeys(), ", "), failure)}
 	return &refused
 }
 
@@ -432,27 +482,38 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 var undefinedFlag = regexp.MustCompile(`flag provided but not defined: (-\S+)`)
 
 // judge is the verdict on a finished probe pod and its log, logErr when the log could not be read
-// (judgeProbeLog, worker-image-probe.ts:470-508), in this order. A pod the kubelet failed for
+// (judgeProbeLog, worker-image-probe.ts:470-508), in this order, and on a pass what the OK line
+// reported of the image. A pod the kubelet failed for
 // reasons of its own (kubeletFailure) is transient, whatever of its log could be read, and an
 // unread log is judged by the read's error. A Failed pod past those is one whose probe container
 // exited on its own: the image's refusal. The OK line must confirm this daemon's contract: an
 // image whose CLI predates the contract check prints none, having checked no contract, and is
 // refused, not waved through; one that confirmed another contract is refused naming both. And it
 // must say the prompt-named agents' models resolved: any other mark, or none, does not prove the
-// workers run their agents on their models. When the daemon has a pane NATS nkey seed (Options.NATSUser),
+// workers run their agents on their models. It must carry the extensions mark
+// (bootprobe.ExtensionsDiscovered): a CLI that predates the discovery-on pod lane probed the plugin
+// roots with Oh My Pi's extension discovery disabled, and the image it certified links the plugins
+// into its profile, which a pod of this daemon — discovery on, the two roots explicit — would load
+// twice. It must carry the capabilities mark too
+// (bootprobe.CapabilitiesChecked): a CLI that predates the capability check prints none, having
+// checked no capability, and a current one that found a capability missing exits 1 before the OK
+// line, so the mark's absence on a Succeeded pod is the image's CLI, refused as a rebuild. When the
+// daemon has a pane NATS nkey seed (Options.NATSUser),
 // the probe must also name the same user as the seed its pointer read (bootprobe.NATSUser), a
 // refusal otherwise. Naming none is the image's: a current CLI whose pointer holds a blank or
 // invalid seed exits 1 (natsauth.Seed), and a key the kubelet cannot mount never starts the
 // container, so only a CLI that predates the user line succeeds without one. Naming another is the
 // providers Secret holding another seed. An image whose CLI predates a flag the probe command
-// passes stops at the flags, and its Failed pod is refused naming the flag its CLI lacks.
-func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, logErr error, contract int) bootprobe.Outcome {
+// passes stops at the flags, and its Failed pod is refused naming the flag its CLI lacks. The
+// report carries the line's model-fallback mark, which the daemon keeps.
+func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, logErr error, contract int) (bootprobe.Outcome, bootprobe.ImageReport) {
+	none := bootprobe.ImageReport{}
 	if why := kubeletFailure(pod); why != "" {
 		// Whatever the container wrote before the kubelet ended it is quoted when it could be read.
-		return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: %s; the kubelet ended it, not the image — log tail: %s", name, why, logTail)}
+		return bootprobe.Outcome{Detail: fmt.Sprintf("pod %s Failed: %s; the kubelet ended it, not the image — log tail: %s", name, why, logTail)}, none
 	}
 	if logErr != nil {
-		return apiOutcome(digest, logErr, fmt.Sprintf("read probe pod %s's log", name), false)
+		return apiOutcome(digest, logErr, fmt.Sprintf("read probe pod %s's log", name), false), none
 	}
 	if pod.Status.Phase == corev1.PodFailed {
 		ended := ""
@@ -463,40 +524,48 @@ func (r *Runtime) judge(name, digest string, pod *corev1.Pod, logTail string, lo
 		}
 		if flag := undefinedFlag.FindStringSubmatch(logTail); flag != nil {
 			return imageRefusal(digest, "pod %s Failed%s: its legion CLI has no %s, a flag this daemon's probe passes: build the image from this daemon's commit — log tail: %s",
-				name, ended, flag[1], logTail)
+				name, ended, flag[1], logTail), none
 		}
-		return imageRefusal(digest, "pod %s Failed%s — log tail: %s", name, ended, logTail)
+		return imageRefusal(digest, "pod %s Failed%s — log tail: %s", name, ended, logTail), none
 	}
 	if !strings.Contains(logTail, bootprobe.OKPrefix) {
-		return imageRefusal(digest, "pod %s Succeeded without printing %s — log tail: %s", name, bootprobe.OKPrefix, logTail)
+		return imageRefusal(digest, "pod %s Succeeded without printing %s — log tail: %s", name, bootprobe.OKPrefix, logTail), none
 	}
 	confirmed, ok := bootprobe.ConfirmedContract(logTail)
 	if !ok {
-		return imageRefusal(digest, "pod %s Succeeded without confirming daemon API contract %d (its legion CLI predates the check) — log tail: %s", name, contract, logTail)
+		return imageRefusal(digest, "pod %s Succeeded without confirming daemon API contract %d (its legion CLI predates the check) — log tail: %s", name, contract, logTail), none
 	}
 	if confirmed != contract {
-		return imageRefusal(digest, "pod %s Succeeded but confirmed daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail)
+		return imageRefusal(digest, "pod %s Succeeded but confirmed daemon API contract %d, this daemon requires %d — log tail: %s", name, confirmed, contract, logTail), none
 	}
 	if mark := bootprobe.AgentModels(logTail); mark != bootprobe.AgentModelsResolved {
 		if mark == "" {
 			mark = "none"
 		}
 		return imageRefusal(digest, "pod %s Succeeded without resolving the prompt-named agents' models (its OK line's agent-models mark: %s, where the daemon's probe requires %s) — log tail: %s",
-			name, mark, bootprobe.AgentModelsResolved, logTail)
+			name, mark, bootprobe.AgentModelsResolved, logTail), none
+	}
+	if !bootprobe.ExtensionsDiscovered(logTail) {
+		return imageRefusal(digest, "pod %s Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit — log tail: %s",
+			name, logTail), none
+	}
+	if !bootprobe.CapabilitiesChecked(logTail) {
+		return imageRefusal(digest, "pod %s Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit — log tail: %s", name, logTail), none
 	}
 	if r.natsUser != "" {
 		switch got := bootprobe.NATSUser(logTail); got {
 		case r.natsUser:
 		case "":
 			return imageRefusal(digest, "pod %s named no nkey user, where the pane seed the daemon hands every pod is user %s: its legion CLI predates the probe's nats-nkey-user line: build the image from this daemon's commit — log tail: %s",
-				name, r.natsUser, logTail)
+				name, r.natsUser, logTail), none
 		default:
 			return bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s read nkey user %s through its NATS_NKEY_SEED_FILE, the providers Secret %s's NATS_NKEY_SEED, where the pane seed the daemon hands every pod is user %s: put that seed in that key — log tail: %s",
-				name, got, ProvidersSecretName(r.project), r.natsUser, logTail)}
+				name, got, ProvidersSecretName(r.project), r.natsUser, logTail)}, none
 		}
 	}
-	r.log.Info("sandbox runtime: the worker image passed its probe", "image", r.image, "sandbox", name, "log", logTail)
-	return bootprobe.Outcome{Passed: true}
+	report := bootprobe.ImageReport{ModelFallback: bootprobe.ModelFallback(logTail)}
+	r.log.Info("sandbox runtime: the worker image passed its probe", "image", r.image, "sandbox", name, "model-fallback", report.ModelFallback, "log", logTail)
+	return bootprobe.Outcome{Passed: true}, report
 }
 
 // probeSandbox is a Sandbox with the lifecycle fields only the probe sets: upstream's Lifecycle,
@@ -519,9 +588,10 @@ type probeSpec struct {
 // pool, gVisor, the configured scheduling — with the workers' pod security and what the operator
 // adds to every pod (its ServiceAccount, volumes, mounts, and variables, and the providers
 // Secret's configured keys), and a single container running the image's Go `legion probe-image`
-// against p's contract as a worker runs: on the pod's baseline (--pod-safety), loading the plugin
-// from the root a pod loads it from (--plugin-root), with the providers Secret's keys exported as
-// the worker's shim exports them (--provider-env-dir) when any are configured, each providers
+// against p's contract as a worker runs: on the pod's baseline (--pod-safety), loading the plugins
+// from the roots a pod loads them from (--plugin-root, --envoy-plugin-root), with the providers
+// Secret's keys exported as the worker's shim exports them (--provider-env-dir) when any are
+// configured, each providers
 // secret's `<NAME>_FILE` pointing at its file there as a worker's does (so neither exports it),
 // and resolving the daemon's own role prompts' references (--role-references), which ProbeImage
 // requires. Its command and env are escaped against the kubelet's expansion as every worker
@@ -529,7 +599,7 @@ type probeSpec struct {
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
-	command := []string{r.tools.Legion, "probe-image", "--daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--pod-safety"}
+	command := []string{r.tools.Legion, "probe-image", "--daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
 	if len(providersMounts) > 0 {
 		command = append(command, "--provider-env-dir", ProvidersDir)
 	}
@@ -538,7 +608,7 @@ func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) p
 		Name:            probeContainer,
 		Image:           r.image,
 		Command:         command,
-		Env:             slices.Concat(r.operatorEnv(), r.providersPointers()),
+		Env:             slices.Concat(r.operatorEnv(), r.providersPointers(), r.sessionDSNPointer()),
 		VolumeMounts:    slices.Concat(providersMounts, r.pod.VolumeMounts),
 		Resources:       p.Resources,
 		SecurityContext: restrictedContainer(),

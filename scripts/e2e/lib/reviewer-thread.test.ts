@@ -1,7 +1,8 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scriptFunctions } from "./script-functions";
 
 // review_threads and reviewer_thread, taken from lib/workflow.sh by name and run against a
 // stubbed gh api graphql answer: reviewer_thread must pick the thread the Legion reviewer's
@@ -9,12 +10,7 @@ import { join } from "node:path";
 // round-no-review-decides checkpoint in stage4b-sandbox-tree.sh runs that COMMENT review first,
 // on the same proof pull request, before the requested round that actually opens a thread
 // answered by a correction).
-const script = readFileSync(join(import.meta.dir, "workflow.sh"), "utf8");
-const fn = (name: string) => {
-  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(script);
-  if (found === null) throw new Error(`lib/workflow.sh defines no ${name}()`);
-  return found[0];
-};
+const fn = scriptFunctions(join(import.meta.dir, "workflow.sh"));
 
 const dir = mkdtempSync(join(tmpdir(), "reviewer-thread-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));

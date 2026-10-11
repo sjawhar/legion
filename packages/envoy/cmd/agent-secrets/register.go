@@ -1,7 +1,7 @@
 // packages/envoy/cmd/agent-secrets/register.go
 //
 // cmdRegister implements "agent-secrets register [--wait SECONDS] [--exec -- COMMAND
-// [ARGS...]]": the one command a host session (not an agent box) runs at launch to become a
+// [ARGS...]]": the one command a machine session (not an agent box) runs at launch to become a
 // registered session root with agent-secrets-helper. The helper pins THIS process by pidfd, so
 // with --exec the command execs as the very pid that was registered — shims/omp wraps omp this
 // way, and omp becomes the session root every later `agent-secrets` invocation in its process
@@ -46,7 +46,7 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	// where the default socket's directory would be, and no helper listens in it.
 	sock, named := helperSocket()
 	if !named && !exists(sock) {
-		fmt.Fprintf(stderr, "agent-secrets register: AGENT_SECRETS_HELPER_SOCK is unset and no helper socket is at %s (host sessions only; an agent box has a key dir instead)\n", sock)
+		fmt.Fprintf(stderr, "agent-secrets register: AGENT_SECRETS_HELPER_SOCK is unset and no helper socket is at %s (machine sessions only; an agent box has a key dir instead)\n", sock)
 		return exitUsageError
 	}
 
@@ -72,7 +72,7 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	case err != nil:
 		fmt.Fprintf(stderr, "agent-secrets: helper at %s unreachable (%v); this session has no secrets access until it is relaunched with the helper running\n", sock, err)
 	case *wait > 0 && resp.State != "enrolled" && resp.Code == helper.CodeNoCredential:
-		fmt.Fprintln(stderr, "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets launcher login) this session's agent-secrets calls fail")
+		fmt.Fprintln(stderr, "agent-secrets register: this machine is not logged in to the secrets broker; launching anyway, and until it is (run: agent-secrets machine login) this session's agent-secrets calls fail")
 	case *wait > 0 && resp.State != "enrolled":
 		fmt.Fprintf(stderr, "agent-secrets register: not enrolled yet (%s); launching anyway, and this session's secrets calls fail until the helper enrolls it\n", resp.Error)
 	}

@@ -59,11 +59,16 @@ func (e *editInFlight) browserWrites(t *testing.T, edit func(*pmdoc.Node) *pmdoc
 	}
 }
 
+// lostEditService is a document a browser has open: its room is loaded, which is where a
+// browser's edits land while an agent's write is in flight.
 func lostEditService(t *testing.T) (*Service, string) {
 	t.Helper()
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, lostEditDocument)
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
 	return service, artifactID
 }
 
@@ -339,7 +344,7 @@ func TestAnAcceptedSuggestionIsRefusedWhenAConcurrentChangeRemovesItsText(t *tes
 		t.Run(test.name, func(t *testing.T) {
 			service, artifactID := lostEditService(t)
 			ctx := context.Background()
-			if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{
+			if _, err := joinedMarkQuote(service, artifactID, MarkSpec{
 				Kind: MarkSuggestion, ID: "s1", By: lostEditAgent,
 			}, "Alpha", nil); err != nil {
 				t.Fatalf("mark the suggestion: %v", err)
@@ -451,6 +456,10 @@ func TestABatchAnswersForTheBlocksItsUpdateRewroteInPassing(t *testing.T) {
 			service, artifactID := newTestService(t)
 			service.settle = time.Hour
 			seedServiceText(t, service, artifactID, "Alpha paragraph.\n\nBravo paragraph.\n\nCharlie paragraph.\n")
+			// The browser has the document open, so its room is loaded.
+			if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+				t.Fatalf("load the document's room: %v", err)
+			}
 			edit := startEditInFlight(t, service, artifactID, test.ops...)
 			edit.browserWrites(t, withoutTopLevelBlock(test.deletes))
 

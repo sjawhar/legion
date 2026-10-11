@@ -11,6 +11,9 @@ import {
 } from "../../__tests__/proof-document";
 import { api } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
+import { heldSends } from "../conversation/held-sends";
+import { marginComposeSendKey } from "../margin/margin-context";
+import { appKeymap } from "../shell/keymap";
 import { colorForLogin } from "./connection";
 
 answerTextReadsWithTheSeededText();
@@ -151,6 +154,7 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
     rank: "U",
     title: "Ship the release",
     open_asks: [],
+    progress: { tasks: null, children: null },
     updated_at: "2026-09-09T00:00:00Z",
   };
   const getIssue = spyOn(api, "getIssue").mockResolvedValue(issue);
@@ -193,15 +197,26 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
   }
 });
 
-test("ProofDocument reports connection status through the toolbar bag and enforces read-only state", async () => {
-  const { editors, rerender, status, sync, toolbar, view } = renderProofDocument();
+test("ProofDocument reports connection status and pending edits through the toolbar bag", async () => {
+  const { editors, pending, rerender, status, sync, toolbar, view } = renderProofDocument();
 
   try {
     await sync();
     await waitFor(() => expect(editors).toHaveLength(1));
     act(() => status("connected"));
     await waitFor(() => expect(toolbar.current?.connection).toBe("connected"));
-    act(() => status("offline"));
+    act(() => {
+      pending({ count: 2, readOnly: false, rebuiltAt: undefined, stored: true });
+      status("offline");
+    });
+    await waitFor(() =>
+      expect(toolbar.current?.pending).toEqual({
+        count: 2,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+      })
+    );
     await waitFor(() => expect(toolbar.current?.connection).toBe("offline"));
     rerender({ isClosed: true });
     expect(editors[0]?.readOnly).toBe(true);
@@ -392,7 +407,28 @@ test("ProofDocument links to the current version when a historic version is unav
 });
 
 test("a selection-bar action opens the margin composer for the mark and settles the library promise", async () => {
-  const { editors, margin, sync, view } = renderProofDocument();
+  const queryClient = createQueryClient();
+  const { editors, margin, sync, view } = renderProofDocument({ queryClient });
+  const createComment = spyOn(api, "createComment").mockResolvedValue(undefined as never);
+  const openCompose = () => {
+    const open = margin.current?.pendingCompose;
+    if (open === undefined) throw new Error("expected an open compose");
+    return open;
+  };
+  /** Sends the compose the margin has open, as its composer's Send does: from then on the
+   *  compose is its send's, and the library's promise resolves. */
+  const sendOpenCompose = () => {
+    const { anchor, kind } = openCompose();
+    heldSends(queryClient).send(marginComposeSendKey(anchor.artifact), {
+      anchor,
+      ask: { multiple: false, options: [], urgency: "med" },
+      draft: { body: "Why?", mentions: [], replacement: "" },
+      edit: undefined,
+      kind,
+      owner: { issueKey: "CORE-1", kind: "issue" },
+      replyTo: null,
+    });
+  };
 
   try {
     await sync();
@@ -416,8 +452,10 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       anchor: { artifact: artifact.id, mark_id: "m-9", quote: "brown" },
       kind: "comment",
     });
-    act(() => margin.current?.settleCompose("saved"));
+    act(() => sendOpenCompose());
     await expect(comment).resolves.toBeUndefined();
+    // The send lands before the next selection-bar action, which would otherwise wait on it.
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
 
     let suggest: Promise<void> | undefined;
     act(() => {
@@ -430,8 +468,9 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The suggestion action did not return a promise.");
     }
     expect(margin.current?.pendingCompose?.kind).toBe("suggestion");
-    act(() => margin.current?.settleCompose("saved"));
+    act(() => sendOpenCompose());
     await expect(suggest).resolves.toBeUndefined();
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
 
     let ask: Promise<void> | undefined;
     act(() => {
@@ -444,7 +483,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
       throw new Error("The ask action did not return a promise.");
     }
     expect(margin.current?.pendingCompose?.kind).toBe("ask");
-    act(() => margin.current?.settleCompose("cancelled"));
+    act(() => margin.current?.cancelCompose(openCompose().seq));
     await expect(ask).rejects.toThrow("composer closed");
 
     let unsupported: unknown;
@@ -461,6 +500,7 @@ test("a selection-bar action opens the margin composer for the mark and settles 
     );
   } finally {
     view.unmount();
+    createComment.mockRestore();
   }
 });
 
@@ -586,4 +626,59 @@ test("mark placements are published to the margin after document changes", async
   } finally {
     view.unmount();
   }
+});
+
+/** Presses Control+Alt+M on `target` through the application's registry, as `KeymapProvider`'s
+ *  window listener does, and answers whether a binding claimed it. */
+function pressCommentChord(target: Element): boolean {
+  const event = new KeyboardEvent("keydown", {
+    altKey: true,
+    bubbles: true,
+    cancelable: true,
+    code: "KeyM",
+    ctrlKey: true,
+    key: "m",
+  });
+  target.dispatchEvent(event);
+  appKeymap.handleKeyDown(event);
+  return event.defaultPrevented;
+}
+
+test("Ctrl+Alt+M comments on the selection while the editor has focus, and nowhere else", async () => {
+  const { editors, rerender, sync, view } = renderProofDocument();
+  const composer = document.body.appendChild(document.createElement("textarea"));
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("no editor");
+    expect(
+      appKeymap.describe().filter((entry) => entry.id === "comment-on-selection")
+    ).toMatchObject([{ keys: ["$mod+Alt+m"], label: "Comment on selection", scope: "document" }]);
+    editor.root.contentEditable = "true";
+    editor.root.tabIndex = 0;
+    editor.root.focus();
+
+    // A caret, not a selection: the bar offers no Comment, so neither does the chord.
+    expect(pressCommentChord(editor.root)).toBe(false);
+    editor.selectionEmpty = false;
+    expect(pressCommentChord(editor.root)).toBe(true);
+    expect(editor.commented).toBe(1);
+
+    // Focus in a comment composer: the key is the composer's, and the chord does nothing.
+    composer.focus();
+    expect(pressCommentChord(composer)).toBe(false);
+    expect(editor.commented).toBe(1);
+
+    // A closed issue's document is read-only, where the bar offers nothing.
+    editor.root.focus();
+    rerender({ isClosed: true });
+    expect(pressCommentChord(editor.root)).toBe(false);
+    expect(editor.commented).toBe(1);
+  } finally {
+    composer.remove();
+    view.unmount();
+  }
+  expect(appKeymap.describe().some((entry) => entry.id === "comment-on-selection")).toBe(false);
 });

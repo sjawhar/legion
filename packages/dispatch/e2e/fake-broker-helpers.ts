@@ -1,5 +1,6 @@
 import { test } from "@playwright/test";
 
+import type { CredentialRecord } from "../web/src/api/types";
 import type { FakePendingRequest } from "./fake-broker";
 import { usesFakeBroker } from "./harness-broker";
 import { harnessPorts } from "./harness-ports";
@@ -23,6 +24,14 @@ export async function setPendingCredentialRequests(
 ): Promise<void> {
   test.skip(!usesFakeBroker, "this run's server reads no fake broker (e2e/harness-broker.ts)");
   await fixtureRequest("/__fixture/pending", requests);
+}
+
+/** Replaces the fake broker's full credential records wholesale, keyed by their own `record_id`:
+ *  what `GET /v1/credential-requests/{id}` answers for the record page. Skipped the same way
+ *  `setPendingCredentialRequests` is. */
+export async function setCredentialRecords(records: readonly CredentialRecord[]): Promise<void> {
+  test.skip(!usesFakeBroker, "this run's server reads no fake broker (e2e/harness-broker.ts)");
+  await fixtureRequest("/__fixture/records", records);
 }
 
 /** Clears the fake broker between rows, so a request one row seeded never reaches the next. A run

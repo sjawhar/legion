@@ -273,7 +273,7 @@ func TestPadTablesBoundsShortRowsBeforeAllocation(t *testing.T) {
 	runtime.GC()
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	padded, err := PadTables(doc, 0, 0, NewTablePaddingBudget())
+	padded, err := PadTables(doc, 0, 0, NewWriteBudget())
 	runtime.ReadMemStats(&after)
 	allocated := after.TotalAlloc - before.TotalAlloc
 	t.Logf("allocated=%d", allocated)
@@ -293,7 +293,7 @@ func TestPadTablesSharesThePaddingBudgetAcrossTables(t *testing.T) {
 	doc.Children = append(doc.Children, shortTableForPadding(70, 70).Children...)
 	doc.Children = append(doc.Children, shortTableForPadding(70, 70).Children...)
 
-	_, err := PadTables(doc, 0, 2, NewTablePaddingBudget())
+	_, err := PadTables(doc, 0, 2, NewWriteBudget())
 	if !errors.Is(err, ErrTablePadding) || !strings.Contains(err.Error(), "table 3") {
 		t.Fatalf("PadTables error = %v, want ErrTablePadding naming table 3", err)
 	}

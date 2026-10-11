@@ -1,0 +1,345 @@
+import { expect, type Page, test } from "@playwright/test";
+
+import { createComment, createIssue, createProject, patchIssue } from "./api";
+import {
+  barAction,
+  composer,
+  connectedDot,
+  documentEditor,
+  openSpec,
+  selectEditorText,
+  setSheet,
+} from "./editor";
+import { resetDatabase } from "./seed";
+import { answeredPost, holdPosts, navigateInApp, refusePosts } from "./sends";
+import { asUser } from "./users";
+
+// The composer a selection-bar action opens holds a send's draft until the server answers, like
+// every composer. These rows put each thing that would unmount it, or move it to another mark, in
+// the middle of a send, and expect the send's draft and its refusal back on the composer that sent
+// it.
+const spec = "The quick brown fox";
+
+test.beforeEach(async () => {
+  await resetDatabase();
+});
+
+/** What the margin's open composer says while a newer selection-bar action waits on its send. */
+const stillSending = "Still sending this one. Select the text again once it's sent.";
+
+/** A bar Comment on `quote`, and `body` sent from the composer it opens. */
+async function sendFromBar(page: Page, quote: string, body: string): Promise<void> {
+  await selectEditorText(page, quote);
+  await barAction(page, "Comment");
+  const form = composer(page);
+  await expect(form.locator("blockquote")).toHaveText(quote);
+  await form.getByLabel("Comment").fill(body);
+  await form.getByRole("button", { exact: true, name: "Send" }).click();
+  await expect(form.getByLabel("Comment")).toBeDisabled();
+}
+
+function refusal(page: Page, issueKey: string, status: number) {
+  return answeredPost(page, `/api/v1/issues/${issueKey}/comments`, status);
+}
+
+// A newer selection-bar action while a send is out would move the open composer to the newer mark:
+// the send's success would close it as saved, and a refusal's Retry would post to the newer mark.
+// It is refused instead, the editor takes back the mark it wrote, and the margin brings the open
+// composer back on screen saying why.
+test("a newer bar Comment while a margin send is out leaves the composer on the send's own mark", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Newer bar comment" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, spec);
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await sendFromBar(page, "quick", "About quick");
+
+    await setSheet(page, test.info().project.name, false);
+    await selectEditorText(page, "fox");
+    await barAction(page, "Comment");
+    const marks = documentEditor(page).locator('span[data-proof="comment"][data-id]');
+    await expect(marks).toHaveText(["quick"]);
+    const form = composer(page);
+    await expect(form).toBeVisible();
+    await expect(page.getByText(stillSending)).toBeVisible();
+    await expect(form.locator("blockquote")).toHaveText("quick");
+    await expect(form.getByLabel("Comment")).toHaveValue("About quick");
+
+    const refused = refusal(page, issue.key, 503);
+    refuse();
+    await refused;
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(page.getByText(stillSending)).toHaveCount(0);
+    await expect(form.getByLabel("Comment")).toHaveValue("About quick");
+    await expect(form.locator("blockquote")).toHaveText("quick");
+  } finally {
+    await alice.close();
+  }
+});
+
+// Each compose names its own send: the reader leaving a document with its send out takes that
+// compose's composer off screen with them, so a bar Comment on the next document opens a composer
+// of its own, which the earlier send's answer neither closes nor settles.
+test("a bar Comment on another document while a margin send is out opens its own composer", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const first = await createIssue({ project: "CORE", spec, title: "Left mid-send" });
+  const second = await createIssue({ project: "CORE", spec, title: "Opened next" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, first.key, spec);
+    const send = await holdPosts(page, `**/api/v1/issues/${first.key}/comments`);
+    await sendFromBar(page, "quick", "Left behind");
+
+    await navigateInApp(page, `/issues/${second.key}/spec`);
+    await expect(page.getByRole("heading", { level: 1, name: "Opened next" })).toBeVisible();
+    await expect(connectedDot(page)).toHaveText("connected");
+    await setSheet(page, test.info().project.name, false);
+    await selectEditorText(page, "brown");
+    await barAction(page, "Comment");
+    const form = composer(page);
+    await expect(form.locator("blockquote")).toHaveText("brown");
+    await form.getByLabel("Comment").fill("Second draft");
+
+    const landed = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith(`/api/v1/issues/${first.key}/comments`) &&
+        response.ok()
+    );
+    send.release();
+    await landed;
+    await expect(form.locator("blockquote")).toHaveText("brown");
+    await expect(form.getByLabel("Comment")).toHaveValue("Second draft");
+    await expect(form.getByLabel("Comment")).toBeEnabled();
+  } finally {
+    await alice.close();
+  }
+});
+
+// Leaving a document while a margin send is out takes the composer off screen and keeps it, with
+// the send: a refusal while the reader is away hands the draft back there, and coming back to the
+// document finds the draft, the refusal and a Retry that still sends to the send's own mark.
+test("leaving a document while a margin send is out keeps its draft and refusal for the return", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Left with a send out" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    const project = test.info().project.name;
+    await openSpec(page, issue.key, spec);
+    const comments = `**/api/v1/issues/${issue.key}/comments`;
+    const refuse = await refusePosts(page, comments);
+    await sendFromBar(page, "quick", "Kept for the return");
+
+    // The Inbox has no margin at all, so nothing of the margin is on screen there.
+    await navigateInApp(page, "/");
+    await expect(page.locator("main").getByRole("heading", { name: "Inbox" })).toBeVisible();
+    await expect(composer(page)).toHaveCount(0);
+    const refused = refusal(page, issue.key, 503);
+    refuse();
+    await refused;
+
+    await navigateInApp(page, `/issues/${issue.key}/spec`);
+    await expect(
+      page.getByRole("heading", { level: 1, name: "Left with a send out" })
+    ).toBeVisible();
+    await expect(connectedDot(page)).toHaveText("connected");
+    await setSheet(page, project, true);
+    const form = composer(page);
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByLabel("Comment")).toHaveValue("Kept for the return");
+    await expect(form.locator("blockquote")).toHaveText("quick");
+
+    await page.unroute(comments);
+    await form.getByRole("button", { name: "Retry" }).click();
+    await expect(composer(page)).toHaveCount(0);
+    await expect(
+      page.getByTestId("margin-sheet").getByText("Kept for the return", { exact: true })
+    ).toBeVisible();
+  } finally {
+    await alice.close();
+  }
+});
+
+// The Pinned tab shows in place of the Comments tab; the composer at the Comments tab's top stays.
+test("the Pinned tab while a margin send is out keeps the composer, its draft and its refusal", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Pinned tab mid-send" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, spec);
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await sendFromBar(page, "brown", "About brown");
+
+    const margin = page.getByTestId("margin-sheet");
+    await margin.getByRole("tab", { name: "Pinned" }).click();
+    await expect(composer(page)).toHaveCount(0);
+    const refused = refusal(page, issue.key, 503);
+    refuse();
+    await refused;
+    await margin.getByRole("tab", { name: "Comments" }).click();
+
+    const form = composer(page);
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByLabel("Comment")).toHaveValue("About brown");
+    await expect(form.locator("blockquote")).toHaveText("brown");
+  } finally {
+    await alice.close();
+  }
+});
+
+// Collapsing the desktop margin to its rail keeps the margin mounted under it, the composer in it.
+test("collapsing the margin while its send is out keeps the composer, its draft and its refusal", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Collapsed mid-send" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    await openSpec(page, issue.key, spec);
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await sendFromBar(page, "brown", "Through the rail");
+
+    await page.getByRole("button", { name: "Hide margin" }).click();
+    await expect(page.getByTestId("margin-rail")).toBeVisible();
+    const refused = refusal(page, issue.key, 503);
+    refuse();
+    await refused;
+    await page.getByRole("button", { name: "Show margin" }).click();
+
+    const form = composer(page);
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByLabel("Comment")).toHaveValue("Through the rail");
+  } finally {
+    await alice.close();
+  }
+});
+
+// A bar Comment while the collapsed margin's send is out brings the margin back from its rail, with
+// the open composer saying why the new selection waits.
+test("a bar Comment while the collapsed margin's send is out shows the margin and why", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name === "iphone", "below xl the margin is a sheet, with no rail");
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Rail mid-send" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 900, width: 1440 });
+    await openSpec(page, issue.key, spec);
+    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await sendFromBar(page, "brown", "Through the rail");
+
+    await page.getByRole("button", { name: "Hide margin" }).click();
+    await expect(page.getByTestId("margin-rail")).toBeVisible();
+    await selectEditorText(page, "fox");
+    await barAction(page, "Comment");
+    await expect(page.getByTestId("margin-rail")).toHaveCount(0);
+    const form = composer(page);
+    await expect(form.locator("blockquote")).toHaveText("brown");
+    await expect(page.getByText(stillSending)).toBeVisible();
+    send.release();
+    await expect(composer(page)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// On a phone a margin thread opens over the margin's own tabs, which stay mounted under it with
+// the composer; Back finds the composer where it was.
+test("on a phone, a margin thread opened while the margin's send is out keeps the composer and its refusal", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Phone margin thread mid-send" });
+  const root = await createComment(issue.key, {
+    anchor: { artifact: "spec", quote: "fox" },
+    body: "About the fox",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 844, width: 390 });
+    await openSpec(page, issue.key, spec);
+    const refuse = await refusePosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await sendFromBar(page, "quick", "About quick");
+
+    const margin = page.getByTestId("margin-sheet");
+    await margin
+      .locator(`[data-margin-item="${root.id}"]`)
+      .getByRole("button", { expanded: false })
+      .first()
+      .click();
+    const thread = page.getByRole("dialog", { name: "Thread" });
+    await expect(thread).toBeVisible();
+    const refused = refusal(page, issue.key, 503);
+    refuse();
+    await refused;
+    await thread.getByRole("button", { name: "Back" }).click();
+    await expect(thread).toHaveCount(0);
+
+    const form = composer(page);
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(form.getByLabel("Comment")).toHaveValue("About quick");
+    await expect(form.locator("blockquote")).toHaveText("quick");
+  } finally {
+    await alice.close();
+  }
+});
+
+// The issue closing under a margin send leaves the composer and the mark the send names. It stays
+// until the send answers, and shows its refusal with the draft, and a way to drop it, as a closed
+// issue's composers do.
+test("a margin send out when its issue closes keeps the draft and shows the refusal", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", spec, title: "Margin closed mid-send" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await openSpec(page, issue.key, spec);
+    const send = await holdPosts(page, `**/api/v1/issues/${issue.key}/comments`);
+    await sendFromBar(page, "brown", "Before the close");
+
+    await patchIssue(issue.key, { status: "done" }, { login: "bob" });
+    await expect(page.getByRole("button", { name: "Reopen" })).toBeVisible();
+    const form = composer(page);
+    await expect(form.getByLabel("Comment")).toHaveValue("Before the close");
+
+    const refused = refusal(page, issue.key, 409);
+    send.release();
+    await refused;
+    await expect(form.getByText("Couldn't send — issue is closed")).toBeVisible();
+    await expect(form.getByLabel("Comment")).toHaveValue("Before the close");
+    await expect(form.getByRole("button", { name: "Retry" })).toHaveCount(0);
+    await form.getByRole("button", { name: "Discard draft" }).click();
+    await expect(composer(page)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});

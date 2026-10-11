@@ -20,6 +20,7 @@ import {
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
 import {
+  ownerRepoPattern,
   settingsFieldLabel,
   settingsMonoInput,
   settingsSubmitButton,
@@ -220,7 +221,7 @@ export function ArchitectureSourcesSection(): ReactNode {
                 disabled={saveSource.isPending}
                 id="architecture-source-repository"
                 onChange={(event) => setRepository(event.target.value)}
-                pattern="[^\/\s]+\/[^\/\s]+"
+                pattern={ownerRepoPattern}
                 placeholder="owner/repo"
                 required
                 value={repository}

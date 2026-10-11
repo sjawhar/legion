@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
+	"github.com/sjawhar/envoy/internal/dispatch/files"
+	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
 	"github.com/sjawhar/envoy/internal/dispatch/identity"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -222,6 +224,58 @@ func TestUploadArtifactMultipartTrimsNameBeforeMIMEInference(t *testing.T) {
 	}](t, response)
 	if upload.Artifact.Name != "architect-spec.md" || upload.Artifact.Kind != "doc" || upload.Artifact.Primary {
 		t.Fatalf("whitespace-named document = %#v, want non-primary Markdown document", upload.Artifact)
+	}
+}
+
+// pngBytes is a PNG's eight-byte signature and then body: what http.DetectContentType reads as
+// image/png, all an upload needs to be stored as a picture. Each call is a slice of its own.
+func pngBytes(body string) []byte {
+	return append([]byte("\x89PNG\r\n\x1a\n"), body...)
+}
+
+// An upload's kind is read from its bytes, never from the type its client declares, which any
+// client sets at will. It is an image only when its bytes are one of the pictures a model is
+// shown (PNG, JPEG, GIF, WebP), stored, kept in the file store and served under the type its
+// bytes are; anything else, an SVG for one, is a file under the type its client declared. The
+// rule is the same on an issue and in an agent's conversation.
+func TestAnUploadIsAPictureOnlyWhenItsBytesAreOne(t *testing.T) {
+	memory := filestest.NewMemory()
+	handler, _, _ := newTestServer(t, testServerOptions{files: memory})
+	issue := fileIssue(t, handler)
+	for _, owner := range []string{"/api/v1/issues/" + issue, "/api/v1/agents/" + agentSession} {
+		for _, test := range []struct {
+			name, declared string
+			content        []byte
+			kind, mime     string
+		}{
+			{"not-a-picture.png", "image/png", []byte("these bytes are text, whatever the type says"), "file", "image/png"},
+			{"undeclared.png", "application/octet-stream", pngBytes("pixels"), "image", "image/png"},
+			{"jpeg-declared-png.png", "image/png", []byte("\xff\xd8\xff\xe0\x00\x10JFIF"), "image", "image/jpeg"},
+			{"animation.gif", "image/gif", []byte("GIF89a\x01\x00\x01\x00"), "image", "image/gif"},
+			{"photo.webp", "application/octet-stream", []byte("RIFF\x24\x00\x00\x00WEBPVP8 frame"), "image", "image/webp"},
+			{"drawing.svg", "image/svg+xml", []byte(`<svg xmlns="http://www.w3.org/2000/svg"/>`), "file", "image/svg+xml"},
+		} {
+			t.Run(owner+"/"+test.name, func(t *testing.T) {
+				response := multipartRequest(t, handler, owner+"/artifacts", map[string]string{"name": test.name}, test.name, test.declared, test.content, "alice")
+				if response.Code != http.StatusCreated {
+					t.Fatalf("upload: status=%d body=%s", response.Code, response.Body.String())
+				}
+				created := decodeBody[struct {
+					Artifact model.Artifact `json:"artifact"`
+					Version  model.Version  `json:"version"`
+				}](t, response)
+				if created.Artifact.Kind != test.kind || created.Version.MIME == nil || *created.Version.MIME != test.mime {
+					t.Fatalf("declared %s: kind %q, version %+v; want kind %q stored as %s", test.declared, created.Artifact.Kind, created.Version, test.kind, test.mime)
+				}
+				if stored := memory.MIME(files.SHA256(test.content)); stored != test.mime {
+					t.Errorf("the file store holds it as %q, want %s", stored, test.mime)
+				}
+				served := dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+created.Artifact.ID+"/versions/1", nil, "alice")
+				if served.Code != http.StatusOK || served.Header().Get("Content-Type") != test.mime || !bytes.Equal(served.Body.Bytes(), test.content) {
+					t.Fatalf("download: status=%d Content-Type %q, want 200 %s with the bytes", served.Code, served.Header().Get("Content-Type"), test.mime)
+				}
+			})
+		}
 	}
 }
 

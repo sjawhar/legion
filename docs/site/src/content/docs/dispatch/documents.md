@@ -33,6 +33,11 @@ controls at the end of the Spec tab row work with them:
 
 Other documents carry the same controls in their header.
 
+Every version records how big it is stored: a document's markdown in bytes, as a file's are. The
+issue's Artifacts tab and the project's Documents tab show each document's latest size beside its
+kind, and a document's version list shows every version's, so you can find a document close to
+the 1 MiB limit without opening it.
+
 ## Comments in the margin
 
 Comments on a document sit in the margin beside the text they are about. On a wide screen the
@@ -43,7 +48,8 @@ sheet from the bottom.
 
 To comment, select some text. A bar appears with three actions:
 
-- **Comment** opens a comment on the selection.
+- **Comment** opens a comment on the selection. `Ctrl+Alt+M` (`⌘+⌥+M` on a Mac) does the same
+  from the keyboard.
 - **Suggest** proposes replacement text for the selection.
 - **Ask** opens a question on the selection, with an urgency, options, and **Allow multiple**.
 
@@ -130,6 +136,12 @@ to open it for search alone.
 Search covers issue titles, the latest text of every document, comments, asks and their answers,
 and messages. A query needs at least two characters and can be up to 1,000. You can use quotes for
 a phrase, `OR` between words, and `-` before a word to leave it out: `"merge queue" -draft`.
+
+A very long text made almost entirely of words that each appear once, such as a list of hundreds
+of kilobytes of identifiers, holds more words than one search index entry can. Search then indexes
+its opening part, the largest of its first half, quarter, eighth and so on that fits, up to the
+last whole word in it, and does not index the words after it. When the opening part has no
+whitespace before the cut, none of its words are indexed. An issue is always found by its key.
 
 Results are grouped by the issue or document they belong to. Choosing a document result opens the
 document and highlights the first place the words appear. Text typed into a live document can take

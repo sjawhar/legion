@@ -8,9 +8,12 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/controller"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // ControllerStore is the project's controller record: the capability `legion controller start`
@@ -38,20 +41,38 @@ type ControllerSecretResponse struct {
 	DesignGate config.DesignGate `json:"designGate"`
 }
 
-// ControllerRole is the role a controller registration names: the operator's controller, which
-// holds no claim — the operator launches it and nothing supervises it — so it is no claim.Role.
-const ControllerRole = "controller"
+// ControllerCredentialRequest is `POST /legion/v1/controller/github-credential`'s body: the
+// current controller capability, the same secret `legion controller start` holds from
+// `ControllerSecretResponse`.
+type ControllerCredentialRequest struct {
+	Secret string `json:"secret"`
+}
+
+// ControllerCredentialResponse is `POST /legion/v1/controller/github-credential`'s answer: the
+// two files `ghconfig.Rendered` renders for the review App's token (Hosts for `gh`'s hosts.yml,
+// Config for its config.yml), the App name, and the token's expiry. `legion controller start`
+// writes them under `<state_dir>/gh` and refreshes them every minute; the plugin never reads this
+// route or that directory.
+type ControllerCredentialResponse struct {
+	Hosts     string `json:"hosts"`
+	Config    string `json:"config"`
+	App       string `json:"app"`
+	ExpiresAt string `json:"expiresAt"`
+}
 
 // ControllerRegisterResponse is `POST /legion/v1/claims/register`'s answer to a session that
-// registered with the controller capability: the project's controller role token
-// (claim.ControllerToken), ControllerRole, the capability's generation, and the secret its
+// registered as the project's controller: the project's controller role token
+// (claim.ControllerToken), the role claim.RoleController, a generation, and the secret its
 // controller grants authenticate with. It has no tree and no issue; a claim's registration is
 // claim.RegisterResponse.
 type ControllerRegisterResponse struct {
 	ClaimToken claim.Token `json:"claimToken"`
-	Role       string      `json:"role"`
-	Generation uint64      `json:"generation"`
-	Secret     string      `json:"secret"`
+	Role       claim.Role  `json:"role"`
+	// Generation is the generation of the capability the operator's controller registered with,
+	// and, for the daemon's own controller (`controller: daemon`), the generation of the launch
+	// that registered, which its agent names on `claims/ready`.
+	Generation uint64 `json:"generation"`
+	Secret     string `json:"secret"`
 }
 
 // controllerSecret is `legion controller start`'s one daemon call: the operator's bearer, compared
@@ -60,12 +81,19 @@ type ControllerRegisterResponse struct {
 // able to act the moment this answers — last start wins. A request whose plugin contract is not
 // this daemon's is refused before the mint, naming both: the controller it would start is refused
 // at registration, so minting for it would only cut the running controller off (a `legion` binary
-// replaced before its daemon restarted, or the other way round). Every refusal is one log line and
-// mints nothing.
+// replaced before its daemon restarted, or the other way round). A daemon that launches its own
+// controller (`controller: daemon`) refuses every request, since a mint would cut that controller
+// off for a second one. Every refusal is one log line and mints nothing.
 func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	if !s.operatorAuthorized(r) {
 		s.log.Warn("api: refused a controller secret: no operator bearer, or the wrong one")
 		writeJSON(w, http.StatusForbidden, errorBody(invalidOperatorToken))
+		return
+	}
+	if s.controllerLaunched {
+		s.log.Warn("api: refused a controller secret: this daemon launches the project's controller itself")
+		writeJSON(w, http.StatusConflict, errorBody(
+			"this daemon launches the project's controller itself (controller: daemon), so legion controller start has none to start"))
 		return
 	}
 	var req ControllerSecretRequest
@@ -77,7 +105,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 			"pluginContract", req.PluginContract, "daemonApiVersion", DaemonAPIVersion)
 		named := "names no daemon API contract"
 		if req.PluginContract != 0 {
-			named = fmt.Sprintf("holds the controller's pi-legion-envoy to daemon API contract %d", req.PluginContract)
+			named = fmt.Sprintf("holds the controller's pi-legion to daemon API contract %d", req.PluginContract)
 		}
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
 			"legion controller start %s; this daemon requires %d: run the legion built with this daemon",
@@ -98,13 +126,78 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, ControllerSecretResponse{Secret: secret, DesignGate: s.designGate})
 }
 
-// registerController is a registration whose token is no launch's boot token: it registers
-// req's session as the project's controller when the token is the current controller capability,
-// and answers the one refusal an unknown token gets otherwise. No boot gate checks the operator's
-// Oh My Pi — the daemon gates only the panes it launches — so a controller whose plugin speaks
-// another daemon API contract is refused here, naming both, and nothing is recorded. The
-// registration is issued a secret of its own, persisted by its hash before this answers, which
-// the session's controller grants authenticate with.
+// controllerGitHubCredential is `legion controller start`'s refresh call: proving the current
+// controller capability buys a fresh review App token, rendered as the two files `gh` reads
+// (ghconfig.Render). The capability compare runs under controllerMu, the same lock the mint and
+// the controller-session grant take, so a capability a concurrent mint just replaced is never
+// matched; the token mint itself runs after the lock is released, since GitHub is the slow step
+// and holding the lock across it would block every other controller-record read or mint for as
+// long as GitHub takes to answer. A caller whose capability a later `legion controller start` has
+// since replaced is refused with a code the CLI can tell apart from a missing or malformed
+// secret, so its refresh loop stops rather than retrying forever; a daemon that launches its own
+// controller (`controller: daemon`) refuses every call, as controllerSecret does, since its
+// controller's token lives in its pod's Secret and no `legion controller start` runs against it.
+func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Request) {
+	if s.controllerLaunched {
+		s.log.Warn("api: refused a controller GitHub credential: this daemon launches the project's controller itself")
+		writeFailure(w, http.StatusConflict, "CONTROLLER_LAUNCHED",
+			"this daemon launches the project's controller itself (controller: daemon), so legion controller start has none to start")
+		return
+	}
+	var req ControllerCredentialRequest
+	if !readBody(w, r, &req) {
+		return
+	}
+	if !requireFailureFields(w, field{"secret", req.Secret}) {
+		return
+	}
+	matched, err := s.controllerCapabilityCurrent(r, req.Secret)
+	if err != nil {
+		s.log.Error("api: read the controller record for a GitHub credential", "error", err)
+		writeFailure(w, http.StatusInternalServerError, "CONTROLLER_RECORD_UNREADABLE", "could not read the controller record")
+		return
+	}
+	if !matched {
+		s.log.Warn("api: refused a controller GitHub credential: INVALID_CONTROLLER_CAPABILITY")
+		writeFailure(w, http.StatusForbidden, "INVALID_CONTROLLER_CAPABILITY",
+			"the controller capability is not the current one: a later legion controller start replaced it")
+		return
+	}
+	app := appauth.AppRoleFor(claim.RoleController)
+	lease, ok := s.appLease(w, r, app, string(claim.RoleController))
+	if !ok {
+		return
+	}
+	rendered := ghconfig.Render(lease.Token, string(app), lease.ExpiresAt)
+	s.log.Info("api: controller github credential served", "app", rendered.App, "expiresAt", lease.ExpiresAt)
+	writeJSON(w, http.StatusOK, ControllerCredentialResponse{
+		Hosts:     rendered.Hosts,
+		Config:    rendered.Config,
+		App:       rendered.App,
+		ExpiresAt: lease.ExpiresAt.UTC().Format(timeFormat),
+	})
+}
+
+// controllerCapabilityCurrent compares secret against the project's current controller
+// capability under controllerMu, so the compare never races the mint that would replace it.
+func (s *server) controllerCapabilityCurrent(r *http.Request, secret string) (bool, error) {
+	s.controllerMu.Lock()
+	defer s.controllerMu.Unlock()
+	record, found, err := s.controller.Controller(r.Context(), s.project)
+	if err != nil {
+		return false, err
+	}
+	return found && subtle.ConstantTimeCompare(record.CapabilityHash, capabilityHash(secret)) == 1, nil
+}
+
+// registerController is a registration whose token is no launch's boot token, on a daemon that
+// leaves the controller to its operator (`controller: operator`; register routes none here
+// otherwise): it registers req's session as the project's controller when the token is the current
+// controller capability, and answers the one refusal an unknown token gets otherwise. No boot gate
+// checks the operator's Oh My Pi — the daemon gates only the panes it launches — so a controller
+// whose plugin speaks another daemon API contract is refused here, naming both, and nothing is
+// recorded. The registration is issued a secret of its own, persisted by its hash before this
+// answers, which the session's controller grants authenticate with.
 func (s *server) registerController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest) {
 	ctx := context.WithoutCancel(r.Context())
 	s.controllerMu.Lock()
@@ -123,7 +216,7 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		s.log.Warn("api: refused a controller registration: its plugin speaks another daemon API contract",
 			"session", req.SessionID, "pluginContract", req.PluginContract, "daemonApiVersion", DaemonAPIVersion)
 		writeJSON(w, http.StatusConflict, errorBody(fmt.Sprintf(
-			"pi-legion-envoy speaks daemon API contract %d; this daemon requires %d", req.PluginContract, DaemonAPIVersion)))
+			"pi-legion speaks daemon API contract %d; this daemon requires %d", req.PluginContract, DaemonAPIVersion)))
 		return
 	}
 	secret := rand.Text()
@@ -142,8 +235,55 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		"session", req.SessionID, "agent", req.AgentID)
 	writeJSON(w, http.StatusOK, ControllerRegisterResponse{
 		ClaimToken: token,
-		Role:       ControllerRole,
+		Role:       claim.RoleController,
 		Generation: record.Generation,
+		Secret:     secret,
+	})
+}
+
+// registerLaunchedController is the registration of a launch of the daemon's own controller, on a
+// daemon under `controller: daemon` (register refuses one otherwise): its agent registers with the
+// launch's boot token, which the daemon minted for that launch and wrote into the pod's Secret,
+// where the operator's controller presents the capability its bearer bought. The claim's machine
+// takes the registration first, behind the generation and same-agent fences every claim's has, and
+// persists the session, its transcript and the issued secret's hash; then the session is recorded
+// as the project's controller — the record admission's wakes, the controller grant route and the
+// state read — under controller.UnheldCapability, which revokes every earlier controller's grants
+// and keeps the boot token out of the record, whose invariant that function's doc states. The
+// answer is the operator's controller's registration, its generation the launch's, which the
+// agent's ready names.
+func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Request, req claim.RegisterRequest, launch BootToken, m *supervise.Machine) {
+	ctx, decided := s.decision(r, launch.Claim)
+	defer decided()
+	secret := rand.Text()
+	s.controllerMu.Lock()
+	defer s.controllerMu.Unlock()
+	if err := m.Handle(ctx, supervise.RequestRegister{
+		Claim: launch.Claim, Generation: launch.Generation, Session: req.SessionID, SessionFile: req.OmpSessionFile,
+		CapabilityHash: capabilityHash(secret),
+	}); err != nil {
+		s.claimFailure(w, "register", launch.Claim, err)
+		return
+	}
+	generation, err := s.controller.MintController(ctx, s.project, controller.UnheldCapability())
+	if err != nil {
+		s.logFailure("api: record the launched controller's capability", "claim", launch.Claim, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record its controller"))
+		return
+	}
+	s.grants.RevokeControllers()
+	registered, err := s.controller.RegisterController(ctx, s.project, generation, req.SessionID, capabilityHash(secret), time.Now().UTC())
+	if err != nil || !registered {
+		s.logFailure("api: record the launched controller's registration", "claim", launch.Claim, "registered", registered, "error", err)
+		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record its controller"))
+		return
+	}
+	s.log.Info("api: launched controller registered", "claim", launch.Claim, "generation", launch.Generation,
+		"session", req.SessionID, "agent", req.AgentID, "pluginContract", req.PluginContract)
+	writeJSON(w, http.StatusOK, ControllerRegisterResponse{
+		ClaimToken: launch.Claim,
+		Role:       claim.RoleController,
+		Generation: launch.Generation,
 		Secret:     secret,
 	})
 }

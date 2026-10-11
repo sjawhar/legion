@@ -9,18 +9,34 @@ import {
   surfaceMutedBg,
   textPrimaryOnSurface,
 } from "../../theme/classes";
-import { type BoardColumn, statusLabel } from "./board-model";
+import {
+  type BoardColumn,
+  laneColumnId,
+  laneKey,
+  type PriorityLane,
+  statusLabel,
+} from "./board-model";
 
 /**
  * Icebox and Done while the board's edges are hidden: a narrow rail with the status name and
- * its count, no cards. It is the same `status:<s>` droppable a full column is, and like every
- * column it spans the board's height, so a card dragged onto it anywhere along the rail is
- * appended to that status - into Done that closes the issue, exactly as dropping into the full
- * column would. Like a column it is a `tabIndex={-1}` focus target for the board's `h`/`l`
- * keys, and a card moved into it by `Shift+H/L` hands focus to the rail.
+ * its count, no cards. It is the same droppable (`status:<s>` flat, `lane:<l>|status:<s>` inside
+ * a swimlane) a full column is, and like every column it spans the board's height, so a card
+ * dragged onto it anywhere along the rail is appended to that cell - into Done that closes the
+ * issue, exactly as dropping into the full column would. Like a column it is a `tabIndex={-1}`
+ * focus target for the board's `h`/`l` keys, and a card moved into it by `Shift+H/L` hands focus
+ * to the rail.
  */
-export function CollapsedColumn({ column }: { column: BoardColumn }): ReactNode {
-  const { isOver, setNodeRef } = useDroppable({ id: `status:${column.status}` });
+export function CollapsedColumn({
+  column,
+  lane,
+}: {
+  column: BoardColumn;
+  /** The swimlane this rail sits inside, when it does; the flat board omits it. */
+  lane?: PriorityLane;
+}): ReactNode {
+  const { isOver, setNodeRef } = useDroppable({
+    id: lane === undefined ? `status:${column.status}` : laneColumnId(column.status, lane),
+  });
   const label = statusLabel(column.status);
 
   return (
@@ -28,6 +44,7 @@ export function CollapsedColumn({ column }: { column: BoardColumn }): ReactNode 
       aria-label={`${label} (collapsed)`}
       className={`w-10 shrink-0 snap-start outline-none focus-visible:ring-2 ${focusVisibleRing}`}
       data-board-column={column.status}
+      data-board-lane={lane === undefined ? undefined : laneKey(lane)}
       ref={setNodeRef}
       tabIndex={-1}
     >

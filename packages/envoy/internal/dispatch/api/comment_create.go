@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -424,11 +426,20 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			suppressedRouteSessionID = route.sessionID
 		}
 	}
+	// A session a mention delivers this comment to hears it from the mention alone: the author
+	// routes skip it (suppressed_authors). A reply's author route reaches its thread's root
+	// author; a new comment's reaches the sessions that wrote its document, which the outbox reads
+	// when it publishes, so every session a mention resolved to is named, an author or not.
 	suppressedAuthors := []string{}
-	if replyRoot != nil && replyRoot.Author.Kind == "session" {
-		if _, mentioned := mentionedSessions[replyRoot.Author.ID]; mentioned {
-			suppressedAuthors = append(suppressedAuthors, replyRoot.Author.ID)
+	switch {
+	case replyRoot != nil:
+		if replyRoot.Author.Kind == "session" {
+			if _, mentioned := mentionedSessions[replyRoot.Author.ID]; mentioned {
+				suppressedAuthors = append(suppressedAuthors, replyRoot.Author.ID)
+			}
 		}
+	case input.AskID == nil:
+		suppressedAuthors = slices.Sorted(maps.Keys(mentionedSessions))
 	}
 	turn := threadTarget.replyTurn(actor, input.Turn)
 	var rowID string
@@ -516,7 +527,11 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 	var reopenedArtifactName string
 	if replyRoot != nil {
 		root := *replyRoot
-		if root.Resolved {
+		// A reply reopens a resolved root, except a decided suggestion's: accepting or rejecting
+		// it is final, so the reply joins the thread and leaves who decided it, and when, as they
+		// were.
+		decided := root.Suggestion != nil && root.Suggestion.Accepted != nil
+		if root.Resolved && !decided {
 			if _, err := tx.Exec(r.Context(), `
 				update comments
 				set resolved = false, resolved_by = null, resolved_at = null
@@ -541,10 +556,17 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 				s.writeHandlerError(w, err)
 				return
 			}
-			rootProjectionKind, err := s.commentProjectionKind(documentCtx, root)
-			if err != nil {
-				s.writeHandlerError(w, err)
+			// A decided or orphaned suggestion's mark is gone, so it has no projection kind to
+			// carry; the reply still lands and ProjectMark writes only the marks map, as a reopen
+			// or a resolve of that suggestion does.
+			rootProjectionKind := ""
+			kind, kindErr := s.commentProjectionKind(documentCtx, root)
+			if kindErr != nil && !errors.Is(kindErr, docs.ErrAnchorMissing) {
+				s.writeHandlerError(w, kindErr)
 				return
+			}
+			if kindErr == nil {
+				rootProjectionKind = kind
 			}
 			if err := s.deps.Docs.ProjectMark(documentCtx, root.Anchor.ArtifactID, root.Anchor.MarkID, commentMarkRecord(root, replies, rootProjectionKind), actor); err != nil {
 				s.writeHandlerError(w, err)

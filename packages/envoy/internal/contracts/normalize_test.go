@@ -1735,10 +1735,10 @@ func TestGithubSummary(t *testing.T) {
 func TestGithubPayloadFields(t *testing.T) {
 	longBody := strings.Repeat("a", 3000)
 	longBodyWithFooter := strings.Repeat("a", 3000) + `<!-- legion:{"session":"worker-1"} -->`
-	// A real subject line from this repository, well past the 70-rune push summary, which
-	// head_subject must carry whole.
+	// A real subject line from this repository, its issue reference dropped, well past the 70-rune
+	// push summary, which head_subject must carry whole.
 	realLongSubject := "fix(agent-secrets): keep the session identity in the exec child, wait for enrollment," +
-		" and stop login-status reporting a refused credential (AGENTC-393) (#1589)"
+		" and stop login-status reporting a refused credential (#1589)"
 	tests := []struct {
 		name        string
 		event       string

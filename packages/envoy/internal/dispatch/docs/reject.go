@@ -21,7 +21,7 @@ var errJoinsTwoTables = errors.New("the insert runs from one table into the next
 // deletes it with them. A removal the document cannot hold, one the schema refuses or the renderer
 // cannot write, is refused (rejectSpliceRefusal).
 func rejectedInsert(tree *pmdoc.Node, id string) (*pmdoc.Node, error) {
-	budget := pmdoc.NewTablePaddingBudget()
+	budget := pmdoc.NewWriteBudget()
 	spans := pmdoc.MarkSpans(tree, string(MarkSuggestion), id)
 	nothing := &pmdoc.Node{Type: "doc", Children: []*pmdoc.Node{{Type: "paragraph"}}}
 	next := tree

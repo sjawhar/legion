@@ -1,17 +1,13 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scriptFunctions } from "./script-functions";
 
 // The 4b.13b acceptance's own soft and cleanup, taken from the script by name and run after the
 // ending each case names, with the teardown's processes, GitHub and production audit stubbed and a
 // merger starve seeded in the key command's record, so any notes call the trap makes prints.
-const script = readFileSync(join(import.meta.dir, "..", "stage3-4b13b-acceptance.sh"), "utf8");
-const fn = (name: string) => {
-  const found = new RegExp(`^${name}\\(\\) \\{(?:.*\\}$|[\\s\\S]*?\\n\\}$)`, "m").exec(script);
-  if (found === null) throw new Error(`stage3-4b13b-acceptance.sh defines no ${name}()`);
-  return found[0];
-};
+const fn = scriptFunctions(join(import.meta.dir, "..", "stage3-4b13b-acceptance.sh"));
 const dir = mkdtempSync(join(tmpdir(), "stage3-4b13b-notes-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 const bin = join(dir, "bin");

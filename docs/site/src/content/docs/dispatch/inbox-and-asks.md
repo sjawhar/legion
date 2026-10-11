@@ -37,7 +37,22 @@ A credential request is an agent asking you to let it use a secret, or a machine
 agent sessions as you. Pending ones are listed under **Credential requests**, above the sections,
 and each links to the page where you approve or deny it. They count toward **Needs you** and the
 banner like an ask that waits on you. The Inbox says `Nothing needs you` only when it lists no ask
-and no credential request.
+and no credential request. An open Inbox picks up a new request, or one that is no longer pending,
+within moments on its own - no reload needed.
+
+### Asks grouped by issue
+
+When an issue or a document has more than one ask in a section, its asks sit together under one
+header that names the issue or document and how many asks it has, for example
+`CORE-12 Release train · 3 asks`. The group sits where that issue's first ask in the section would,
+so the order between issues is unchanged. An issue with one ask in a section has no header.
+
+When the same issue also has asks in another section, the header ends with a link such as
+`2 more waiting on agents` or `1 more later`. Choose it to jump to those asks, opening **Later**
+first if it is folded. The headers are labels only: `j` and `k` move from ask to ask.
+
+The list does not move under a moving pointer. If the Inbox refreshes while your pointer travels
+across it, the rows stay put until the pointer rests, leaves the list, or you click.
 
 ### Mine and Everyone
 
@@ -96,6 +111,31 @@ If the agent edits the question while you are answering, the card loads the new 
 text, and clears your pick. Pick again so your answer matches the question you read. If someone
 answered or closed the ask before you, the card says so and offers no retry.
 
+### Changing your answer
+
+An answer you gave stays yours to change. Its card shows **Change answer**, to you and nobody
+else. Choose it and the form opens with your current pick and note filled in; change them and
+choose **Save answer**, or **Cancel** to keep the answer you had. Approvals have no Change answer:
+record a new review on the document instead.
+
+The agent that asked receives the new answer as it received the first, with the answer it
+replaces. Every earlier answer stays on the ask: the card reads `Changed <time>` and **Show 1
+earlier answer** lists the earlier ones, oldest first. In a document decision, the decision block
+is rewritten with the new answer.
+
+If someone changed the answer after you opened the card, Dispatch keeps theirs and shows it, so
+you can decide again from the current answer.
+
+### Answered by you
+
+**Answered by you**, beside the Inbox heading, opens a page of every answer you gave and every
+reply you wrote on an ask, newest first. Each row shows when, the issue or document, the question,
+and your answer or reply. **Open** takes you to the ask: an ask on a document opens that document
+with the ask selected, and any other opens its turn in the issue's Conversation. An answer that is
+no longer the ask's current one reads **Changed since**. Your current answers have **Change
+answer**, which opens the ask's card under the row; after you save, the new answer heads the list
+and the card stays open with both answers.
+
 ### Ask back
 
 When you cannot answer yet, type what you need to know and choose **Ask back**. Your question is
@@ -105,6 +145,15 @@ replies.
 If you type a question and choose **Answer** with no option picked, Dispatch checks first. It
 offers **Ask back instead** and **Answer with it anyway**.
 
+### Reply thread
+
+Replies appear newest first. The two newest replies stay visible. When there are older replies,
+choose **Show N more replies** to reveal them below the newest pair; choose **Show fewer replies**
+to collapse the thread again. After an ask is answered, write a follow-up in **Reply**; in the
+Conversation tab and in document decisions, choose **Write a reply** first. A new reply appears at
+the top of the thread, and a reply you are still typing survives if its card remounts elsewhere,
+such as switching margin tabs away and back.
+
 ### Approvals
 
 An agent can ask you to approve a document at a specific version. The card reads
@@ -113,6 +162,13 @@ agent's summary of what that version proposes. It has two fixed choices and no O
 
 - **Approve** approves that version.
 - **Request changes** needs a reason, which goes back to the agent.
+
+The card also names the document and the version it asks about as a link (everywhere except the
+document's own margin, where you're already on it): opening the ask from the Inbox, the drawer, or
+its `dispatch://.../ask/<id>` reference takes you to that document with the approve controls in
+view, instead of the issue's Conversation turn. If the document has moved past the version the
+request named, the link still opens the current document, and the card keeps saying which version
+the request was for.
 
 Answering this card is the same review as the **Approve** and **Request changes** buttons on the
 document itself. [Documents](/legion/dispatch/documents/#approvals) covers approval states and what
@@ -131,6 +187,25 @@ ask's answer and replies. Open it to see two groups:
   subscribed through a wider topic shows that topic and has no control.
 
 Each row shows whether the session is live. The list updates as sessions follow and leave.
+
+## Opening the Inbox as a drawer
+
+You don't have to leave a page to answer an ask. The `i` key opens the Inbox as a drawer over
+whatever page you're on, and so does a header button, which differs by screen width:
+
+- **On a phone or a narrow window**, the sidebar collapses into a top header whose **Inbox**
+  badge (or **Needs you N**, once something needs you) opens the drawer instead of navigating.
+- **On a wide screen**, the sidebar's **Inbox** link still navigates to the Inbox page and keeps
+  its own **Needs you N** badge; a separate **Peek** button beside it, with no count of its own,
+  opens the drawer instead.
+
+Either way it's the same list, cards, and actions as the Inbox page: answer, ask back, snooze, or
+open an ask without losing your place. The page underneath keeps its state, a half-typed message
+included, so a reply you were drafting is still there when you close the drawer.
+
+`Escape` closes the drawer before it closes anything else behind it, and returns focus to the
+button that opened it. Clicking outside the drawer closes it too. The button isn't offered on the
+Inbox page itself, since the page already shows everything the drawer would.
 
 ## On a phone
 

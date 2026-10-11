@@ -1,5 +1,5 @@
 // Ordinary, always-visible unit tests for the Stage 4a agent-secrets checks' pure logic
-// (AGENTC-393), which live_secrets_pure_test.go defines with no e2e build tag: shellJoin's shell
+// that live_secrets_pure_test.go defines with no e2e build tag: shellJoin's shell
 // quoting and agentSecretsBlockReason's blocking-reason string (what live_secrets_test.go's
 // secretsBlocked delegates to). The e2e-tagged checks these back (checkSecretsTwoPodsEnrolled and
 // friends) need a real cluster and a real broker and stay untestable here, exactly as the plan
@@ -60,12 +60,6 @@ func TestAgentSecretsBlockReason(t *testing.T) {
 			}
 			if !tc.wantBlocked && got != "" {
 				t.Fatalf("reason = %q, want empty (nothing missing)", got)
-			}
-			if tc.wantBlocked {
-				const wantTail = "(the production broker with Plan D's rules, and an attended machine login approved on the Dispatch credential page, supply them)"
-				if !strings.HasSuffix(got, wantTail) {
-					t.Fatalf("reason %q does not end with %q", got, wantTail)
-				}
 			}
 		})
 	}

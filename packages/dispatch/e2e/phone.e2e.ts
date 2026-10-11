@@ -15,8 +15,9 @@ import {
   getAsk,
   patchIssue,
 } from "./api";
-import { actionBar, barAction, documentEditor, selectEditorText } from "./editor";
+import { actionBar, barAction, documentEditor, needsYouCards, selectEditorText } from "./editor";
 import { insertExternalLink, resetDatabase } from "./seed";
+import { refusePosts } from "./sends";
 import { asUser } from "./users";
 
 const session = {
@@ -107,9 +108,7 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
       const reviewToggle = page.getByRole("button", { name: "Open review panel (1 open ask)" });
       await expect(reviewToggle).toBeVisible();
       await reviewToggle.click();
-      const askCard = page
-        .getByRole("region", { name: "Needs you" })
-        .getByTestId(`ask-${openAsk.id}`);
+      const askCard = needsYouCards(page).getByTestId(`ask-${openAsk.id}`);
       await askCard.getByRole("button", { name: "Add a note or answer in your own words" }).click();
       await askCard.getByLabel("Your answer").fill("Yes.");
       await askCard.getByRole("button", { exact: true, name: "Answer" }).click();
@@ -187,6 +186,121 @@ test("the phone shell traps focus, dismisses on Escape at the right nesting leve
     const margin = page.getByTestId("margin-sheet");
     await expect(margin.getByText(pinnedMessage)).toBeVisible();
     await expect(margin.getByText(/^Event \d+$/)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+test("a phone thread trap skips a held composer's disabled controls", async ({ browser }) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: initialMarkdown,
+    title: "Held composer focus trap",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto(`/issues/${issue.key}`);
+    await selectEditorText(page, "brown");
+    await barAction(page, "Comment");
+    const sheet = page.getByTestId("margin-sheet");
+    const form = sheet.getByRole("form", { name: "Comment composer" });
+    const body = form.getByLabel("Comment");
+    const refuse = await refusePosts(page, "**/api/v1/issues/*/comments");
+    await body.fill("Keep this draft");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(body).toBeDisabled();
+
+    const focused = await sheet.evaluate((container) => {
+      const controls = [
+        ...container.querySelectorAll<HTMLElement>(
+          'a[href], button, textarea, input, select, [tabindex]:not([tabindex="-1"])'
+        ),
+      ];
+      const last = controls.filter((control) => !control.matches(":disabled")).at(-1);
+      if (last === undefined) throw new Error("expected an enabled focus target");
+      last.focus();
+      return {
+        focused: document.activeElement === last,
+        hasDisabledControlAfter: controls
+          .slice(controls.indexOf(last) + 1)
+          .some((control) => control.matches(":disabled")),
+      };
+    });
+    expect(focused).toEqual({ focused: true, hasDisabledControlAfter: true });
+    await page.keyboard.press("Tab");
+    expect(await activeElementInside(page, '[data-testid="margin-sheet"]')).toBe(true);
+    expect(
+      await sheet.evaluate(
+        (container) =>
+          document.activeElement instanceof HTMLElement &&
+          container.contains(document.activeElement) &&
+          !document.activeElement.matches(":disabled")
+      )
+    ).toBe(true);
+    refuse();
+  } finally {
+    await alice.close();
+  }
+});
+
+// The wrap's other end. Shift+Tab from the sheet's first control goes to its last enabled one,
+// past the held composer's disabled controls, which a trap that read the `disabled` attribute
+// counted as the last and could not focus, leaving focus where it was.
+test("a phone sheet trap wraps Shift+Tab from its first control past a held composer", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({
+    project: "CORE",
+    spec: initialMarkdown,
+    title: "Held composer reverse focus trap",
+  });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.setViewportSize({ height: 844, width: 390 });
+    await page.goto(`/issues/${issue.key}`);
+    await selectEditorText(page, "brown");
+    await barAction(page, "Comment");
+    const sheet = page.getByTestId("margin-sheet");
+    const form = sheet.getByRole("form", { name: "Comment composer" });
+    const body = form.getByLabel("Comment");
+    const refuse = await refusePosts(page, "**/api/v1/issues/*/comments");
+    await body.fill("Keep this draft");
+    await form.getByRole("button", { exact: true, name: "Send" }).click();
+    await expect(body).toBeDisabled();
+
+    // The last control a reader can reach - enabled and on screen - is marked before the key.
+    const startedOnFirst = await sheet.evaluate((container) => {
+      const enabled = [
+        ...container.querySelectorAll<HTMLElement>(
+          'a[href], button, textarea, input, select, [tabindex]:not([tabindex="-1"])'
+        ),
+      ].filter((control) => !control.matches(":disabled") && control.getClientRects().length > 0);
+      const first = enabled[0];
+      const last = enabled.at(-1);
+      if (first === undefined || last === undefined || first === last)
+        throw new Error("expected two enabled focus targets");
+      last.dataset.e2eLastControl = "";
+      first.focus();
+      return document.activeElement === first;
+    });
+    expect(startedOnFirst).toBe(true);
+    await page.keyboard.press("Shift+Tab");
+    expect(
+      await page.evaluate(
+        () => document.activeElement?.hasAttribute("data-e2e-last-control") ?? false
+      )
+    ).toBe(true);
+    await expect(body).toHaveValue("Keep this draft");
+    refuse();
+    await expect(form.getByText("Couldn't send — the server is down")).toBeVisible();
+    await expect(body).toHaveValue("Keep this draft");
   } finally {
     await alice.close();
   }
@@ -420,19 +534,34 @@ test("an inline link keeps its line and grows its hit box without covering its n
 
 /** The name is cut, and whatever cuts it draws an ellipsis. `text-overflow` applies to a block
  *  container's own text, never to a flex container's, and below 1280 px every link is an
- *  inline-flex box: a `truncate` link there clipped its name mid-word with nothing to say so. */
+ *  inline-flex box: a `truncate` link there clipped its name mid-word with nothing to say so.
+ *  An inline box clips nothing (`overflow` does not apply to it), so it is not counted: from
+ *  1280 px a link is a block and the `TruncatedText` span inside it stays inline, and Firefox
+ *  reports that span's `scrollWidth` as its text's width beside a `clientWidth` of 0, where
+ *  Chromium and WebKit report 0 for both. A `MarkdownPreview` clips with a line clamp instead
+ *  (`-webkit-line-clamp`, which draws its own ellipsis at the last line and overflows
+ *  vertically rather than horizontally); Chromium reports the clamped box's display as
+ *  `flow-root`, so the clamp is read from its own property. */
 async function expectEllipsis(link: Locator): Promise<void> {
   const state = await link.evaluate((node) => {
-    const clippers = [node, ...node.querySelectorAll("*")].filter(
-      (element) =>
-        element.scrollWidth > element.clientWidth &&
-        getComputedStyle(element).overflowX === "hidden"
-    );
+    const clippers = [node, ...node.querySelectorAll("*")].filter((element) => {
+      const style = getComputedStyle(element);
+      const clamped = style.webkitLineClamp !== "none";
+      return (
+        style.display !== "inline" &&
+        (clamped
+          ? element.scrollHeight > element.clientHeight
+          : element.scrollWidth > element.clientWidth) &&
+        (clamped ? style.overflow === "hidden" : style.overflowX === "hidden")
+      );
+    });
     const container = node.parentElement?.getBoundingClientRect();
     return {
       clipperStyles: clippers.map((element) => {
         const style = getComputedStyle(element);
-        return `${style.display}/${style.textOverflow}`;
+        return style.webkitLineClamp === "none"
+          ? `${style.display}/${style.textOverflow}`
+          : `clamp/${style.webkitLineClamp}`;
       }),
       overflowsContainer:
         container === undefined || node.getBoundingClientRect().right > container.right + 0.5,
@@ -441,7 +570,7 @@ async function expectEllipsis(link: Locator): Promise<void> {
   expect.soft(state.overflowsContainer).toBe(false);
   expect.soft(state.clipperStyles.length).toBeGreaterThan(0);
   for (const style of state.clipperStyles) {
-    expect.soft(style).toMatch(/^(block|inline-block)\/ellipsis$/);
+    expect.soft(style).toMatch(/^((block|inline-block)\/ellipsis|clamp\/\d+)$/);
   }
 }
 
@@ -531,16 +660,18 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await page.setViewportSize({ height: 900, width: 1280 });
   }
   try {
-    // The project's Documents list: the name ends in an ellipsis, and its kind and time share
-    // one line rather than stacking in a second column.
+    // The project's Documents list: the name ends in an ellipsis, and its kind (with the latest
+    // version's size after it) and time share one line rather than stacking in a second column.
     await page.goto("/projects/CORE/documents");
     const row = page.getByRole("listitem", { name: longName });
     await expectEllipsis(row.getByRole("link", { name: longName }));
     const details = await row.evaluate((node) => {
       const time = node.querySelector("time");
-      const kind = [...node.querySelectorAll("span")].find((span) => span.textContent === "doc");
+      const kind = [...node.querySelectorAll("span")].find((span) =>
+        /^doc · \d/.test(span.textContent ?? "")
+      );
       if (time === null || kind === undefined) {
-        throw new Error("the row has no kind or time");
+        throw new Error("the row has no kind and size, or no time");
       }
       return { kind: kind.getBoundingClientRect().top, time: time.getBoundingClientRect().top };
     });
@@ -605,7 +736,9 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expectEllipsis(agentName);
     await expect.soft(agentName).toHaveAttribute("title", longTitle);
 
-    // A sent broadcast's row: the metadata line, then the message's first line under it.
+    // A sent broadcast's row: the metadata line, then the message's first line under it, cut
+    // by a one-line clamp. Its hover title is the message as plain words (the preview renders
+    // the Markdown, so the source's syntax is never what the reader hovers over).
     await page.goto("/agents/broadcasts");
     const broadcastRow = page
       .getByRole("region", { name: "Broadcasts" })
@@ -614,7 +747,7 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
     await expectEllipsis(broadcastRow);
     await expectStacked(broadcastRow);
     await expect
-      .soft(broadcastRow.getByText(longBroadcast, { exact: true }))
+      .soft(broadcastRow.locator("[data-markdown-preview]"))
       .toHaveAttribute("title", longBroadcast);
   } finally {
     await context.close();

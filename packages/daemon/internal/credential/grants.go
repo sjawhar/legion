@@ -60,8 +60,8 @@ func New(now func() time.Time) *Grants {
 	return &Grants{now: now, issued: make(map[string]Grant)}
 }
 
-// Mint records a 60-second grant for the authenticated claim a route already proved with the exact
-// same capability comparison as /claims/ready and /claims/exit. The capability hash is copied so a
+// Mint records a grant for the authenticated claim a route already proved with the exact same
+// capability comparison as /claims/ready and /claims/exit. The capability hash is copied so a
 // later registration replacement cannot retain the old session's authority.
 func (g *Grants) Mint(c supervise.Claim) (Grant, error) {
 	if c.Token == "" || c.Project == "" || c.Tree == "" || c.Issue == "" || c.Role == "" || len(c.CapabilityHash) == 0 {
@@ -124,11 +124,11 @@ func (g *Grants) record(grant Grant) {
 	g.issued[grant.ID] = grant
 }
 
-// Redeem answers id's grant for as long as its sixty seconds last. A grant is the credential of one
-// bash command, which may run `legion gh` several times and whose git may call the credential
-// helper more than once, so it serves every redemption until it expires — as the shipped daemon's
-// resolveGrant does. Redeem knows nothing of the claim: a route refuses a grant whose claim no
-// longer holds the capability that minted it (StillMatches), on every redemption.
+// Redeem answers id's grant for as long as ttl lasts. A grant is the credential of one call the
+// `legion` tool or the operator CLI makes, which may reach the daemon more than once (`legion status`, which mints then posts),
+// so it serves every redemption until it expires — as the shipped daemon's resolveGrant does.
+// Redeem knows nothing of the claim: a route refuses a grant whose claim no longer holds the
+// capability that minted it (StillMatches), on every redemption.
 func (g *Grants) Redeem(id string) (Grant, error) {
 	g.mu.Lock()
 	grant, ok := g.issued[id]

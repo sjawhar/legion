@@ -11,10 +11,23 @@ import {
 } from "../../__tests__/proof-document";
 import { ApiError, api } from "../../api/client";
 import type { ArtifactText } from "../../api/types";
+import { openPendingEdits } from "./pending-edits";
 
 // Whether the live editor may connect, and what the page shows when it may not or cannot: the
 // admission's own `/text` read, a socket the server refuses as outside the Proof schema, the repair
 // and rebuild it offers, and a transport or editor that fails to load.
+
+async function pendingEditCount(artifactId: string): Promise<number> {
+  const store = await openPendingEdits(artifactId, -1);
+  if (store === undefined) {
+    throw new Error("fake-indexeddb refused to open");
+  }
+  try {
+    return await store.count();
+  } finally {
+    store.close();
+  }
+}
 
 answerTextReadsWithTheSeededText();
 
@@ -63,6 +76,47 @@ test("ProofDocument repairs a document outside the schema by an upload under its
   } finally {
     getArtifactText.mockRestore();
     uploadArtifact.mockRestore();
+  }
+});
+
+test("ProofDocument removes locally saved edits only when its artifact is gone", async () => {
+  const stored = await openPendingEdits(artifact.id, 1);
+  if (stored === undefined) {
+    throw new Error("fake-indexeddb refused to open");
+  }
+  await stored.record(Uint8Array.of(0)).written;
+  stored.close();
+  const getArtifactText = spyOn(api, "getArtifactText").mockRejectedValue(
+    new ApiError(404, { code: "ARTIFACT_NOT_FOUND", error: "artifact not found" })
+  );
+  try {
+    const { view } = renderProofDocument();
+    await screen.findByText("This document could not load: artifact not found");
+    await waitFor(async () => expect(await pendingEditCount(artifact.id)).toBe(0));
+    view.unmount();
+  } finally {
+    getArtifactText.mockRestore();
+  }
+});
+
+test("ProofDocument keeps locally saved edits when another 404 blocks admission", async () => {
+  const document = { ...artifact, id: "artifact-404-keeps-edits" };
+  const stored = await openPendingEdits(document.id, 1);
+  if (stored === undefined) {
+    throw new Error("fake-indexeddb refused to open");
+  }
+  await stored.record(Uint8Array.of(0)).written;
+  stored.close();
+  const getArtifactText = spyOn(api, "getArtifactText").mockRejectedValue(
+    new ApiError(404, { code: "PROXY_NOT_FOUND", error: "proxy not found" })
+  );
+  try {
+    const { view } = renderProofDocument({ document });
+    await screen.findByText("This document could not load: proxy not found");
+    expect(await pendingEditCount(document.id)).toBe(1);
+    view.unmount();
+  } finally {
+    getArtifactText.mockRestore();
   }
 });
 

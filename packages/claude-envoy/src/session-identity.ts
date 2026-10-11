@@ -1,5 +1,6 @@
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
+import { hasErrnoCode } from "@legion/envoy-client/errors"
 
 /**
  * The session id the channel server acts as, held once and passed by reference.
@@ -45,11 +46,6 @@ export function sessionHandoffFile(stateDirectory: string, claudePid: number): s
 /** Role state is keyed by session id so `claude --resume <id>` finds the role it held. */
 export function roleStateFile(stateDirectory: string, sessionId: string): string {
   return join(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`)
-}
-
-/** True when `error` is a Node errno error carrying `code` (ENOENT, EPERM, …). */
-export function hasErrnoCode(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code
 }
 
 /**

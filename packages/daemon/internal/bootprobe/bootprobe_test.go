@@ -27,6 +27,8 @@ func (p *plan) attempt(context.Context) Outcome {
 
 func transient(detail string) Outcome { return Outcome{Detail: detail} }
 
+func waiting(detail string) Outcome { return Outcome{Waiting: detail} }
+
 var passed = Outcome{Passed: true}
 
 // quick is a policy whose waits cost the suite nothing: 1 ms doubling to a 4 ms cap.
@@ -53,10 +55,10 @@ func TestRunStopsAtTheFirstPass(t *testing.T) {
 
 // A refusal is an answer no retry changes: it is returned as it is, at once.
 func TestRunReturnsARefusalWithoutRetrying(t *testing.T) {
-	refusal := errors.New("pi-legion-envoy 1.57.0 is installed but not loaded by omp")
+	refusal := errors.New("pi-legion 1.57.0 is installed but not loaded by omp")
 	p := &plan{outcomes: []Outcome{{Refusal: refusal}, passed}}
 
-	err := Run(context.Background(), "pi-legion-envoy load", quick(6), logger(&bytes.Buffer{}), p.attempt)
+	err := Run(context.Background(), "pi-legion load", quick(6), logger(&bytes.Buffer{}), p.attempt)
 
 	if !errors.Is(err, refusal) || err.Error() != refusal.Error() {
 		t.Fatalf("Run = %v, want the refusal itself", err)
@@ -92,7 +94,7 @@ func TestRunWithoutABoundWaitsOutEveryTransientFailure(t *testing.T) {
 	p := &plan{outcomes: []Outcome{transient("1"), transient("2"), transient("3"), transient("4"), transient("5"), passed}}
 	var logged bytes.Buffer
 
-	if err := Run(context.Background(), "pi-legion-envoy load", quick(0), logger(&logged), p.attempt); err != nil {
+	if err := Run(context.Background(), "pi-legion load", quick(0), logger(&logged), p.attempt); err != nil {
 		t.Fatalf("Run = %v, want the pass after five transient failures", err)
 	}
 	if p.attempts != 6 {
@@ -131,29 +133,130 @@ func TestRunReportsTheStopOverAnInterruptedAttempt(t *testing.T) {
 		return Outcome{Refusal: errors.New("OMP launch probe failed (exit -1)")}
 	}
 
-	err := Run(ctx, "pi-legion-envoy load", quick(6), logger(&bytes.Buffer{}), refused)
+	err := Run(ctx, "pi-legion load", quick(6), logger(&bytes.Buffer{}), refused)
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run = %v, want the stop, not the interrupted attempt's refusal", err)
 	}
 }
 
+// An attempt that waits on capacity says nothing about the probed thing, so no number of them is a
+// verdict: more waits than the bound allows attempts, then a pass, is a pass. Each is logged with
+// what it waited on and retried after the policy's longest wait, never a transient failure.
+func TestRunWaitsOutCapacityBeyondItsAttemptBudget(t *testing.T) {
+	unschedulable := waiting("probe pod legion-probe-legion-1d10089a0000 is Unschedulable: 0/83 nodes are available: 25 Insufficient cpu")
+	p := &plan{outcomes: []Outcome{unschedulable, unschedulable, unschedulable, unschedulable, passed}}
+	var logged bytes.Buffer
+
+	if err := Run(context.Background(), "worker image", quick(3), logger(&logged), p.attempt); err != nil {
+		t.Fatalf("Run = %v, want the pass after four waits under a bound of three attempts", err)
+	}
+	if p.attempts != 5 {
+		t.Errorf("attempts = %d, want four waits and the pass", p.attempts)
+	}
+	if got := strings.Count(logged.String(), "boot probe is waiting on capacity; running it again"); got != 4 {
+		t.Errorf("logged %d capacity waits, want 4:\n%s", got, logged.String())
+	}
+	if strings.Contains(logged.String(), "failed transiently") {
+		t.Errorf("a capacity wait was logged as a transient failure:\n%s", logged.String())
+	}
+	var waits []string
+	for _, match := range regexp.MustCompile(`retryIn=(\S+)`).FindAllStringSubmatch(logged.String(), -1) {
+		waits = append(waits, match[1])
+	}
+	if got, want := strings.Join(waits, " "), "4ms 4ms 4ms 4ms"; got != want {
+		t.Errorf("waits = %q, want %q: the policy's longest wait every time", got, want)
+	}
+	if !strings.Contains(logged.String(), `detail="probe pod legion-probe-legion-1d10089a0000 is Unschedulable: 0/83 nodes are available: 25 Insufficient cpu"`) {
+		t.Errorf("the wait was not logged with what it waited on:\n%s", logged.String())
+	}
+}
+
+// A capacity wait neither counts as a transient failure nor resets the count: two transient
+// failures with a wait between them are the two the bound counts, so a bound of two gives up at the
+// second, naming it.
+func TestRunCountsTransientFailuresAcrossACapacityWait(t *testing.T) {
+	p := &plan{outcomes: []Outcome{transient("first"), waiting("the pool is full"), transient("second"), passed}}
+	var logged bytes.Buffer
+
+	err := Run(context.Background(), "worker image", quick(2), logger(&logged), p.attempt)
+
+	want := "the worker image probe never completed within its retry budget (2 attempts): second"
+	if err == nil || err.Error() != want {
+		t.Fatalf("Run = %v, want %q", err, want)
+	}
+	if p.attempts != 3 {
+		t.Errorf("attempts = %d, want a transient failure, a wait, and the transient failure that spends the bound", p.attempts)
+	}
+	if !strings.Contains(logged.String(), "attempt=1/2") || strings.Contains(logged.String(), "attempt=2/2") {
+		t.Errorf("the transient failures were not counted 1/2 then the bound, with the wait counted as neither:\n%s", logged.String())
+	}
+}
+
+// A refusal after a capacity wait is returned as it is: waiting changes what the pool holds, not
+// what the probed thing answers.
+func TestRunReturnsARefusalAfterACapacityWait(t *testing.T) {
+	refusal := errors.New("worker image sha256:1d10 failed its probe: the OK line confirms contract 2, not 3")
+	p := &plan{outcomes: []Outcome{waiting("the pool is full"), {Refusal: refusal}, passed}}
+
+	err := Run(context.Background(), "worker image", quick(6), logger(&bytes.Buffer{}), p.attempt)
+
+	if !errors.Is(err, refusal) || err.Error() != refusal.Error() {
+		t.Fatalf("Run = %v, want the refusal itself", err)
+	}
+	if p.attempts != 2 {
+		t.Errorf("attempts = %d, want the wait and the refusal", p.attempts)
+	}
+}
+
 // The OK line is the wire between the image's `legion probe-image` and the daemon's probe
-// Sandbox: the session-storage mark, the agent-models mark, then the contract last.
+// Sandbox: the session-storage mark, the extensions mark, the agent-models mark, the capabilities
+// mark, the model-fallback mark, then the contract last.
 func TestOKLineCarriesTheMarksAndTheContract(t *testing.T) {
-	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved daemon-api-version=3"; got != want {
+	if got, want := OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved, ModelFallbackOff), "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=resolved capabilities=checked model-fallback=off daemon-api-version=3"; got != want {
 		t.Errorf("OKLine = %q, want %q", got, want)
 	}
 }
 
-// The daemon reads whether the image's probe resolved the agents' models from its OK line; a CLI
-// that predates the agent-model check prints no mark, which reads as none.
+// oldOKLine is the line a CLI that predates the discovery-on pod lane and the capability check
+// prints: no extensions mark, no capabilities mark, no model-fallback mark. The daemon still parses
+// what it does carry.
+const oldOKLine = "probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved daemon-api-version=5"
+
+// The daemon reads whether the image's probe ran the pod's lane with extension discovery on from
+// its OK line; a CLI that predates that lane prints no mark, and a token the mark merely begins is
+// not the mark.
+func TestExtensionsDiscoveredReadsTheMarkOnAnOKLine(t *testing.T) {
+	for _, testCase := range []struct {
+		name, output string
+		want         bool
+	}{
+		{"the mark, among other output", "[legion] probe retried\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, ModelFallbackOff) + "\n", true},
+		{"the mark on a build-time probe's line", OKLine("/opt/omp/bin/omp", 5, AgentModelsSkipped, ModelFallbackOn), true},
+		{"a CLI that predates the discovery-on pod lane", oldOKLine, false},
+		{"a CLI that predates the agent-model check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=5", false},
+		{"the mark on a line that is not the OK line", "[legion] extensions=discovered agent-models=resolved daemon-api-version=5", false},
+		{"a token the mark merely begins", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered-not agent-models=resolved daemon-api-version=5", false},
+		{"nothing", "", false},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := ExtensionsDiscovered(testCase.output); got != testCase.want {
+				t.Fatalf("ExtensionsDiscovered = %t, want %t", got, testCase.want)
+			}
+		})
+	}
+}
+
+// The daemon reads whether the image's probe resolved the agents' models from its OK line, on the
+// line's current shape and on the shape before the capability marks; a CLI that predates the
+// agent-model check prints no mark, which reads as none.
 func TestAgentModelsReadsTheMarkOnAnOKLine(t *testing.T) {
 	for _, testCase := range []struct {
 		name, output, want string
 	}{
-		{"resolved, among other output", "[legion] probe retried\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved) + "\n", AgentModelsResolved},
-		{"skipped", OKLine("/opt/omp/bin/omp", 5, AgentModelsSkipped), AgentModelsSkipped},
+		{"resolved, among other output", "[legion] probe retried\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, ModelFallbackOff) + "\n", AgentModelsResolved},
+		{"skipped", OKLine("/opt/omp/bin/omp", 5, AgentModelsSkipped, ModelFallbackOn), AgentModelsSkipped},
+		{"a CLI that predates the capability check", oldOKLine, AgentModelsResolved},
 		{"a CLI that predates the check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=5", ""},
 		{"the mark on a line that is not the OK line", "[legion] agent-models=resolved daemon-api-version=5", ""},
 		{"nothing", "", ""},
@@ -161,6 +264,33 @@ func TestAgentModelsReadsTheMarkOnAnOKLine(t *testing.T) {
 		t.Run(testCase.name, func(t *testing.T) {
 			if got := AgentModels(testCase.output); got != testCase.want {
 				t.Fatalf("AgentModels = %q, want %q", got, testCase.want)
+			}
+		})
+	}
+}
+
+// The daemon reads whether the image's probe checked the capability list from its OK line, and
+// the model-fallback mark beside it; a CLI that predates the check prints neither, which reads as
+// unchecked and no mark.
+func TestCapabilityMarksAreReadFromTheOKLine(t *testing.T) {
+	for _, testCase := range []struct {
+		name, output string
+		checked      bool
+		fallback     string
+	}{
+		{"fallback off, among other output", "probe-image: capability browser: present (chromium)\n" + OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, ModelFallbackOff) + "\n", true, ModelFallbackOff},
+		{"fallback on", OKLine("/opt/omp/bin/omp", 5, AgentModelsResolved, ModelFallbackOn), true, ModelFallbackOn},
+		{"a CLI that predates the capability check", oldOKLine, false, ""},
+		{"the marks on a line that is not the OK line", "[legion] capabilities=checked model-fallback=on daemon-api-version=5", false, ""},
+		{"the marks after the contract", "probe-image: OK (/opt/omp/bin/omp) daemon-api-version=5 capabilities=checked model-fallback=on", false, ""},
+		{"nothing", "", false, ""},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := CapabilitiesChecked(testCase.output); got != testCase.checked {
+				t.Errorf("CapabilitiesChecked = %t, want %t", got, testCase.checked)
+			}
+			if got := ModelFallback(testCase.output); got != testCase.fallback {
+				t.Errorf("ModelFallback = %q, want %q", got, testCase.fallback)
 			}
 		})
 	}
@@ -175,8 +305,9 @@ func TestConfirmedContractReadsOnlyTheContractTokenOnAnOKLine(t *testing.T) {
 		contract int
 		ok       bool
 	}{
-		{"the line among other output", "[legion] OMP pi.agents probe failed transiently\n" + OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved) + "\n", 3, true},
-		{"another number", OKLine("/opt/omp/bin/omp", 12, AgentModelsSkipped), 12, true},
+		{"the line among other output", "[legion] OMP pi.agents probe failed transiently\n" + OKLine("/opt/omp/bin/omp", 3, AgentModelsResolved, ModelFallbackOff) + "\n", 3, true},
+		{"another number", OKLine("/opt/omp/bin/omp", 12, AgentModelsSkipped, ModelFallbackOn), 12, true},
+		{"a CLI that predates the capability check", oldOKLine, 5, true},
 		{"a CLI that predates the contract check", "probe-image: OK (/opt/omp/bin/omp) session-storage=probed", 0, false},
 		{"a CLI that predates the session-storage probe", "probe-image: OK (/opt/omp/bin/omp)", 0, false},
 		{"the token before the line's end", "probe-image: OK (/opt/omp/bin/omp) daemon-api-version=3 session-storage=probed", 0, false},

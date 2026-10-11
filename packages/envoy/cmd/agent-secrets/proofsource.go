@@ -1,21 +1,25 @@
 // packages/envoy/cmd/agent-secrets/proofsource.go
 //
 // Signer produces the compact JWS this process puts in a broker call's Proof header, and the
-// signed credential-request object POST /v1/requests embeds (the shared broker contract,
-// dispatch://AGENTC-393/artifact/plan-overview-md, puts authorization_details and reason inside
+// signed credential-request object POST /v1/requests embeds (the broker puts
+// authorization_details and reason inside
 // that signed object, not plain top-level fields). An agent box or pod has its own key on tmpfs
 // under AGENT_SECRETS_KEY_DIR and signs both directly for its own enrollment id (fileSigner); a
-// host session has no key of its own and asks
+// machine session has no key of its own and asks
 // agent-secrets-helper, over AGENT_SECRETS_HELPER_SOCK, which signs only for processes that
 // descend from a registered session root (helperSigner) — the session's key never leaves the
 // helper process, so building the request object is also the helper's job in that mode.
-// buildSigner (main.go) is the one place that chooses between them.
+// buildSigner (main.go) is the one place that chooses between them. The operator's own machine and
+// grant commands sign as this machine's login instead, through the helper's sign-launcher op
+// (launcherSigner, built by machineContext).
 package main
 
 import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/helper"
@@ -23,11 +27,18 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
-// Signer signs one broker call and returns the compact JWS for its Proof header, or builds and
-// signs a credential-request object naming the secrets a session is asking for.
-type Signer interface {
+// proofSigner signs one broker call and returns the compact JWS for its Proof header: all a call
+// that asks for no secret needs, such as the machine and grant commands' (launcherSigner).
+type proofSigner interface {
 	Sign(method, url string) (string, error)
-	SignRequestObject(audience string, names []string, reason string) (string, error)
+}
+
+// Signer is a session's proofSigner, which also builds and signs a credential-request object
+// naming the secrets the session is asking for, and the lifetime its grant lasts: lifetimeSeconds,
+// or nil when it lasts until the session ends.
+type Signer interface {
+	proofSigner
+	SignRequestObject(audience string, names []string, reason string, lifetimeSeconds *int) (string, error)
 }
 
 // fileSigner signs with the key and enrollment id an agent box or pod keeps under
@@ -41,16 +52,16 @@ func (f *fileSigner) Sign(method, url string) (string, error) {
 	return proof.Sign(f.key, f.enrollmentID, method, url, time.Now())
 }
 
-func (f *fileSigner) SignRequestObject(audience string, names []string, reason string) (string, error) {
+func (f *fileSigner) SignRequestObject(audience string, names []string, reason string, lifetimeSeconds *int) (string, error) {
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {
 		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
 	}
-	return record.Sign(f.key, audience, details, reason, "", time.Now())
+	return record.Sign(f.key, audience, details, reason, "", lifetimeSeconds, time.Now())
 }
 
 // helperSigner asks agent-secrets-helper, over its unix socket, to sign for this process's
-// registered host session. The helper resolves the session (and its enrollment id) from the
+// registered machine session. The helper resolves the session (and its enrollment id) from the
 // caller's own pid — nothing here names an enrollment id at all. audience is ignored: the
 // helper signs a request object against its own configured broker URL, not a value this
 // (untrusted, merely locally-scoped) peer supplies — the same trust boundary the Sign method
@@ -60,11 +71,11 @@ type helperSigner struct {
 	sock string
 }
 
-// errNoCredential is what a host session gets from a helper that holds no launcher credential
+// errNoCredential is what a machine session gets from a helper that holds no launcher credential
 // (NO_CREDENTIAL): after every reboot or helper restart, until the operator logs the machine in,
 // the helper enrolls no one, so the session has no broker identity. identity prints it, and
 // reportError prints it the same way for every command that meets it.
-var errNoCredential = errors.New("this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets launcher login)")
+var errNoCredential = errors.New("this machine is not logged in to the secrets broker; not an agent session (run: agent-secrets machine login)")
 
 // helperRefusal is the error for a helper answer that is not OK.
 func helperRefusal(resp helper.Response) error {
@@ -85,8 +96,11 @@ func (h *helperSigner) Sign(method, url string) (string, error) {
 	return resp.Proof, nil
 }
 
-func (h *helperSigner) SignRequestObject(audience string, names []string, reason string) (string, error) {
-	resp, err := helper.Call(h.sock, helper.Request{Op: "sign-request", Secrets: names, Reason: reason}, 5*time.Second)
+// SignRequestObject asks the helper's sign-request op. A helper from before lifetime_seconds
+// ignores the field and signs no lifetime; the broker's answer then names none, and the caller
+// that asked for one refuses it (grantedLifetime).
+func (h *helperSigner) SignRequestObject(audience string, names []string, reason string, lifetimeSeconds *int) (string, error) {
+	resp, err := helper.Call(h.sock, helper.Request{Op: "sign-request", Secrets: names, Reason: reason, LifetimeSeconds: lifetimeSeconds}, 5*time.Second)
 	if err != nil {
 		return "", fmt.Errorf("agent-secrets-helper at %s: %w", h.sock, err)
 	}
@@ -94,4 +108,56 @@ func (h *helperSigner) SignRequestObject(audience string, names []string, reason
 		return "", helperRefusal(resp)
 	}
 	return resp.RequestObject, nil
+}
+
+// launcherRefusal is why the helper gave a machine or grant command no launcher proof, which the
+// command prints as it stands: no machine login to act as (NO_CREDENTIAL), a helper from before
+// sign-launcher (which answers it as an unknown op), or the helper's own code and message, such as
+// IN_SESSION from inside a session.
+type launcherRefusal struct{ message string }
+
+func (e *launcherRefusal) Error() string { return e.message }
+
+// launcherSigner signs broker calls with the machine credential through the helper's
+// sign-launcher op: the key never leaves the helper, which signs only the four operator routes of
+// its own broker, for a process it can show is outside every registered session's process tree.
+// credentialID is the credential the last proof named, as the helper answered it.
+type launcherSigner struct {
+	sock         string
+	credentialID string
+}
+
+func (l *launcherSigner) Sign(method, url string) (string, error) {
+	resp, err := helper.Call(l.sock, helper.Request{Op: "sign-launcher", Method: method, URL: url}, 5*time.Second)
+	if err != nil {
+		return "", fmt.Errorf("agent-secrets-helper at %s: %w", l.sock, err)
+	}
+	switch {
+	case resp.OK:
+		l.credentialID = resp.CredentialID
+		return resp.Proof, nil
+	case resp.Code == helper.CodeNoCredential:
+		return "", &launcherRefusal{"this machine is not logged in to the secrets broker; run: agent-secrets machine login"}
+	case resp.Code == helper.CodeBadRequest && resp.Error == "unknown op sign-launcher":
+		return "", &launcherRefusal{"this machine's agent-secrets-helper is older than this client and cannot sign for machine and grant commands; restart it on this release"}
+	}
+	return "", &launcherRefusal{resp.Code + ": " + resp.Error}
+}
+
+// machineContext answers the broker URL and a launcher signer. Machine and grant commands run
+// where the helper does (the devbox); a machine with no helper has no machine login to act as.
+func machineContext() (base string, signer *launcherSigner, err error) {
+	base = strings.TrimSuffix(os.Getenv("AGENT_SECRETS_URL"), "/")
+	if base == "" {
+		return "", nil, errors.New("AGENT_SECRETS_URL is required")
+	}
+	sock, named := helperSocket()
+	if !exists(sock) {
+		where := "the default socket; AGENT_SECRETS_HELPER_SOCK is unset"
+		if named {
+			where = "AGENT_SECRETS_HELPER_SOCK"
+		}
+		return "", nil, fmt.Errorf("no agent-secrets-helper at %s (%s): machine and grant commands act under this machine's login, which its helper holds", sock, where)
+	}
+	return base, &launcherSigner{sock: sock}, nil
 }

@@ -20,6 +20,13 @@ symptoms:
 
 # .legion/ Handoff File Conflicts During Concurrent Rebases
 
+**Superseded 2026-10-05 (dispatch://LEGION-565):** every tree now writes its handoffs under its
+own per-issue subdirectory, `.legion/<issue>/<phase>.json`, instead of the flat
+`.legion/<phase>.json` this document assumes, so the same-path conflict described below is
+structurally impossible for a tree's own handoffs going forward — concurrent trees write disjoint
+paths and never collide on them. The rebase-conflict workaround below no longer applies to fresh
+trees; main may still carry pre-existing flat-path residue from before this change.
+
 **Superseded 2026-09-27 (LEGION-118):** the legion-worker skill's own conflict/retarget step is
 now a forward merge (`jj new legion/<KEY> <destination> -m "<message>"`, one new commit, never a
 rebase of the chain), so this multi-ancestor-commit `.legion/` conflict pattern no longer arises

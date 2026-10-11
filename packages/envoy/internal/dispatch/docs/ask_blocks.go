@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -35,6 +37,20 @@ type settlementReconciliation struct {
 	repairs   []askRepair
 	events    []model.Event
 	retracted []model.Ask
+	// owedCopies are the other documents showing a copy of an ask this settlement retracts, or of
+	// a decided ask whose wording it restores (restoreDocumentDecidedWordings), whose settlement
+	// reconcileAskBlocks marked owed (owedCopiesOf); the settlement arms each once it commits.
+	owedCopies []string
+	// copied are the blocks this settlement wrote a copy's attributes into, as a copy of another
+	// document's ask (copiedAskSources), which it logs once it commits (logCopiedBlocks).
+	copied []copiedBlock
+	// indexedAskBlocks are the blocks with a recorded author that this settlement indexed or
+	// found indexed, whose author the room forgets once it commits (consumeAskAuthors). A copy
+	// is neither: its author is kept for the ask it opens once its source is retracted.
+	indexedAskBlocks []string
+	// rewrites are the ask blocks whose server attributes repairAsk repaired, which
+	// withholdAnswers reads again where a repair wrote back an answer.
+	rewrites []serverRewrite
 }
 
 // askRepair is one server-owned attribute repair settlement made to the ask block carrying blockID
@@ -44,6 +60,26 @@ type askRepair struct {
 	set     func(*pmdoc.Node) bool
 }
 
+// copiedBlock is one block settlement wrote a copy's attributes into: its id and its source.
+type copiedBlock struct {
+	blockID string
+	source  copiedSource
+}
+
+// logCopiedBlocks logs, once its settlement of artifactID has committed, each block that settlement
+// wrote a copy's attributes into - a block becoming a copy, or a copy whose source's state changed
+// - naming the copy, its source and the state it shows, never the question. A block taken for a
+// copy opens no ask and reaches nobody's Inbox, so this line is how one taken for a copy that was
+// meant as a new question is found. A copy whose attributes already agree is written nothing and
+// logged nothing, so an unchanged copy's later settlements add no line.
+func (r *settlementReconciliation) logCopiedBlocks(artifactID string) {
+	for _, block := range r.copied {
+		slog.Info("dispatch: settled an ask block as a copy of another document's ask",
+			"artifact", artifactID, "block", block.blockID, "source_ask", block.source.ask.ID,
+			"source_document", block.source.document, "source_state", block.source.ask.State)
+	}
+}
+
 // repair runs set on node, the ask block carrying blockID in the tree settlement read, and records
 // it for repairLive when it changed the block.
 func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set func(*pmdoc.Node) bool) bool {
@@ -51,6 +87,27 @@ func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set 
 		return false
 	}
 	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: set})
+	return true
+}
+
+// repairAsk repairs the server attributes of node, the ask block carrying blockID in the tree
+// settlement read, to agree with ask (setAskServerAttributes), records the repair for repairLive
+// and, when event is not nil, the block.repaired it emits - each where withholdAnswers finds it
+// again - and reports whether it changed the block. copied is the document ask is on when node is
+// a copy of it, "" otherwise.
+func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, ask model.Ask, copied string, event *model.Event) bool {
+	found := readAskServerState(node)
+	changed, wroteAnswer := setAskServerAttributes(node, ask, copied, false)
+	if !changed {
+		return false
+	}
+	rewrite := serverRewrite{node: node, ask: ask, copied: copied, found: found, answer: wroteAnswer, repair: len(r.repairs), event: -1}
+	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, copied, false)})
+	if event != nil {
+		rewrite.event = len(r.events)
+		r.events = append(r.events, *event)
+	}
+	r.rewrites = append(r.rewrites, rewrite)
 	return true
 }
 
@@ -149,20 +206,33 @@ const SettlementRetractionReason = "removed from the document in version"
 // the rows loadAskBlocks reads, which is why an approval ask retracted as SettlementActor is
 // never restored.
 func settlementRetracted(ask model.Ask) bool {
-	if ask.State != "resolved" || ask.Resolution == nil || ask.Resolution.Kind != "retracted" {
-		return false
-	}
-	return ask.Resolution.Actor.SameAs(SettlementActor) ||
-		strings.HasPrefix(ask.Resolution.Reason, SettlementRetractionReason)
+	return ask.State == "resolved" && ask.Resolution != nil && settlementRetraction(*ask.Resolution)
 }
 
+// settlementRetraction reports whether resolution is a retraction settlement wrote when its ask's
+// block left the document (settlementRetracted).
+func settlementRetraction(resolution model.AskResolution) bool {
+	return resolution.Kind == "retracted" &&
+		(resolution.Actor.SameAs(SettlementActor) || strings.HasPrefix(resolution.Reason, SettlementRetractionReason))
+}
+
+// reconcileAskBlocks makes the asks rows and the ask blocks of tree, the document settlement read,
+// agree. A new block is authored by the update that introduced it (askBlockSources.author); one
+// whose update observer has not run is left for the settlement that observer arms.
+// A block copied from another document's ask opens none and shows that ask's state instead
+// (copiedAskSources). A decided ask of this document that a task of an earlier release reworded
+// gets its decided wording back first (restoreDocumentDecidedWordings), so the block is written
+// back to it, and its copies settle again.
+// before is the document's rendering as settlement read it ("" where it did not render), which the
+// answers settlement writes back into returning blocks are weighed against (withholdAnswers).
 func (s *Service) reconcileAskBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
 	artifactID string,
 	owner artifactOwner,
 	tree *pmdoc.Node,
-	actor model.Actor,
+	credit settlementVersionCredit,
+	before string,
 ) (settlementReconciliation, error) {
 	blocks, invalidBlocks, err := collectAskBlocksForSettlement(tree)
 	if err != nil {
@@ -172,8 +242,13 @@ func (s *Service) reconcileAskBlocks(
 	if err != nil {
 		return settlementReconciliation{}, err
 	}
+	restoredDecided, err := s.restoreDocumentDecidedWordings(ctx, tx, rows)
+	if err != nil {
+		return settlementReconciliation{}, err
+	}
 
-	reconciled := settlementReconciliation{}
+	actor := credit.actor
+	var reconciled settlementReconciliation
 	for _, invalid := range invalidBlocks {
 		delete(rows, invalid.id)
 		if reconciled.repair(invalid.node, invalid.id, askInvalidAttribute(invalid.reason.Error())) {
@@ -190,10 +265,31 @@ func (s *Service) reconcileAskBlocks(
 			))
 		}
 	}
+	sources, err := copiedAskSources(ctx, tx, artifactID, owner, blocks, rows)
+	if err != nil {
+		return settlementReconciliation{}, err
+	}
 	for _, block := range blocks {
 		ask, exists := rows[block.id]
 		if !exists {
-			ask, err = createAskBlock(ctx, tx, artifactID, owner, block, actor)
+			// A copy is read-only here: its source's state is written into the block, and
+			// nothing this settlement does writes the source's row.
+			if source, copied := sources[block.id]; copied {
+				if reconciled.repairAsk(block.node, block.id, source.ask, source.document, nil) {
+					reconciled.copied = append(reconciled.copied, copiedBlock{blockID: block.id, source: source})
+				}
+				continue
+			}
+		}
+		if _, recorded := credit.askSources.authors[block.id]; recorded {
+			reconciled.indexedAskBlocks = append(reconciled.indexedAskBlocks, block.id)
+		}
+		if !exists {
+			blockActor, known := credit.askSources.author(block.id, actor)
+			if !known {
+				continue
+			}
+			ask, err = createAskBlock(ctx, tx, artifactID, owner, block, blockActor)
 			if err != nil {
 				return settlementReconciliation{}, err
 			}
@@ -202,9 +298,9 @@ func (s *Service) reconcileAskBlocks(
 				return settlementReconciliation{}, fmt.Errorf("index new ask block: %w", err)
 			}
 			reconciled.events = append(reconciled.events, documentAskEvent(
-				owner, artifactID, "ask.opened", actor, model.NewAskEventPayload(ask, changes),
+				owner, artifactID, "ask.opened", blockActor, model.NewAskEventPayload(ask, changes),
 			))
-			reconciled.repair(block.node, block.id, askServerAttributes(ask))
+			reconciled.repairAsk(block.node, block.id, ask, "", nil)
 			continue
 		}
 		delete(rows, block.id)
@@ -224,14 +320,24 @@ func (s *Service) reconcileAskBlocks(
 			))
 		}
 
-		if ask.Question != block.question || !reflect.DeepEqual(ask.Options, block.options) ||
-			ask.Multiple != block.multiple || ask.Urgency != block.urgency {
-			previous := model.AskEditPrevious{
-				Question: ask.Question,
-				Options:  ask.Options,
-				Multiple: ask.Multiple,
-				Urgency:  ask.Urgency,
+		reworded := false
+		if previous := model.NewAskEditPrevious(ask); !block.asks(previous) && ask.State != "open" {
+			// A decided ask's wording is fixed, as the edit route holds it (ASK_NOT_OPEN): its
+			// answer or resolution decides the question it was given on, so the block gets that
+			// wording back rather than the row taking the block's, which would show the decision on
+			// a question nobody decided. A person who wants another question writes a new ask block.
+			changed, err := writeDecidedWording(block.node, ask)
+			switch {
+			case err != nil:
+				slog.Error("dispatch: cannot write a decided ask's wording back into its block",
+					"ask", ask.ID, "artifact", artifactID, "block", block.id, "error", err)
+			case changed:
+				reconciled.repairs = append(reconciled.repairs, askRepair{blockID: block.id, set: decidedWording(ask)})
+				reworded = true
+				slog.Info("dispatch: wrote a decided ask's wording back into its block",
+					"ask", ask.ID, "artifact", artifactID, "block", block.id, "state", ask.State)
 			}
+		} else if !block.asks(previous) {
 			options, err := json.Marshal(block.options)
 			if err != nil {
 				return settlementReconciliation{}, fmt.Errorf("encode reconciled ask options: %w", err)
@@ -262,16 +368,24 @@ func (s *Service) reconcileAskBlocks(
 				model.NewAskEditEventPayload(ask, previous, actor, changes),
 			))
 		}
-		if reconciled.repair(block.node, block.id, askServerAttributes(ask)) {
-			reconciled.events = append(reconciled.events, documentAskEvent(
-				owner,
-				artifactID,
-				"block.repaired",
-				actor,
-				model.BlockRepairedEventPayload{BlockID: block.id, DisturbedBy: actor},
-			))
+		repaired := documentAskEvent(
+			owner,
+			artifactID,
+			"block.repaired",
+			actor,
+			model.BlockRepairedEventPayload{BlockID: block.id, DisturbedBy: actor},
+		)
+		if reworded {
+			// One block.repaired names both repairs: the wording's, and the server attributes'
+			// when they changed too, which withholdAnswers may then drop without taking the
+			// event that still names the wording's.
+			reconciled.events = append(reconciled.events, repaired)
+			reconciled.repairAsk(block.node, block.id, ask, "", nil)
+		} else {
+			reconciled.repairAsk(block.node, block.id, ask, "", &repaired)
 		}
 	}
+	reconciled.withholdAnswers(artifactID, tree, before)
 
 	for _, ask := range rows {
 		// Only an open ask is retracted: an answered or resolved one is already closed, its
@@ -281,6 +395,17 @@ func (s *Service) reconcileAskBlocks(
 			continue
 		}
 		reconciled.retracted = append(reconciled.retracted, ask)
+	}
+	// The copies of what this settlement retracts, and of the decided asks whose wording it
+	// restored, owe a settlement of their own (owedCopiesOf), marked here, under the project's copy
+	// lock, before this settlement's repairs append its update and lock its own pending row: the
+	// copy lock and every other document's pending row come before this document's own pending row
+	// and before any event.
+	reconciled.owedCopies, err = owedCopiesOf(ctx, tx, documentAsks{
+		artifactID: artifactID, owner: owner, asks: slices.Concat(reconciled.retracted, restoredDecided),
+	})
+	if err != nil {
+		return settlementReconciliation{}, err
 	}
 	return reconciled, nil
 }
@@ -363,12 +488,13 @@ func askFingerprints(tree *pmdoc.Node, fingerprint func(*pmdoc.Node) (string, er
 	return held, err
 }
 
-// addedAskBlocks counts the readable ask blocks in after whose block id no readable ask block in
-// before carries: one an edit inserted, retyped another block into, or repaired after a browser left
-// it unreadable, wherever it lands - a blockquote, a list item - as the parser reads it, so an opener
-// quoted in code adds none. One the edit moved, reworded or left alone keeps its id and counts
-// nothing.
-func addedAskBlocks(before, after *pmdoc.Node) int {
+// addedAskBlockIDs is the id of every readable ask block in after that before does not hold: one
+// an edit inserted, retyped another block into, or repaired after a browser left it unreadable,
+// wherever it lands - a blockquote, a list item - as the parser reads it, so an opener quoted in
+// code adds none. One the edit moved, reworded or left alone keeps its id and is not among them. A
+// nil before - a write with no readable starting tree, a repair - holds nothing, so every readable
+// ask in after counts.
+func addedAskBlockIDs(before, after *pmdoc.Node) map[string]struct{} {
 	held := map[string]struct{}{}
 	pmdoc.Walk(before, func(node *pmdoc.Node) bool {
 		if node.Type == "ask" {
@@ -379,19 +505,28 @@ func addedAskBlocks(before, after *pmdoc.Node) int {
 		}
 		return true
 	})
-	added := 0
+	added := map[string]struct{}{}
 	pmdoc.Walk(after, func(node *pmdoc.Node) bool {
 		if node.Type == "ask" {
 			if _, err := parseAskBlock(node); err == nil {
 				id, _ := node.Attrs[pmdoc.BlockIDAttr].(string)
 				if _, kept := held[id]; !kept {
-					added++
+					added[id] = struct{}{}
 				}
 			}
 		}
 		return true
 	})
 	return added
+}
+
+// addedAskBlocks counts the readable ask blocks in after whose block id no readable ask block in
+// before carries: one an edit inserted, retyped another block into, or repaired after a browser left
+// it unreadable, wherever it lands - a blockquote, a list item - as the parser reads it, so an opener
+// quoted in code adds none. One the edit moved, reworded or left alone keeps its id and counts
+// nothing.
+func addedAskBlocks(before, after *pmdoc.Node) int {
+	return len(addedAskBlockIDs(before, after))
 }
 
 // newAskMarkdown is what an uploaded version can say of an ask, for one refuseChangedAsks call: its
@@ -627,24 +762,44 @@ func restoreRetractedAsk(ctx context.Context, tx pgx.Tx, ask model.Ask) (model.A
 	return ask, nil
 }
 
-// askServerAttributes is setAskServerAttributes for ask as it stands now, for a repair to make
-// again on another tree (settlementReconciliation.repair).
-func askServerAttributes(ask model.Ask) func(*pmdoc.Node) bool {
-	return func(node *pmdoc.Node) bool { return setAskServerAttributes(node, ask) }
+// askServerAttributeNames are the attributes of an ask block the server keeps in agreement with
+// its ask row (setAskServerAttributes).
+var askServerAttributeNames = [...]string{"state", "answered_by", "answered_at", "selected", "answer", "invalid", "copied_from", "copied_from_document"}
+
+// askServerAttributes is setAskServerAttributes for ask as it stands now, leaving its answer out
+// when withholdAnswer, for a repair to make again on another tree (repairLive).
+func askServerAttributes(ask model.Ask, copied string, withholdAnswer bool) func(*pmdoc.Node) bool {
+	return func(node *pmdoc.Node) bool {
+		changed, _ := setAskServerAttributes(node, ask, copied, withholdAnswer)
+		return changed
+	}
 }
 
-func setAskServerAttributes(node *pmdoc.Node, ask model.Ask) bool {
+// setAskServerAttributes makes node's server attributes agree with ask, and reports whether it
+// changed any and whether it wrote an answer (pmdoc.IsAnswerAttribute): its words, or the options
+// it selects, which are caller text the server keeps. With withholdAnswer it leaves the answer out
+// of the block, taking off any the block holds, and writes the rest: the block still says who
+// answered and when. A copied block, one ask was copied from on another document
+// (copiedAskSources), names that ask in copied_from and its document's address (copied, the
+// refs.ArtifactRef of that document) in copied_from_document, so a reader of the copy finds the
+// source, its state and where it is answered from the block alone.
+func setAskServerAttributes(node *pmdoc.Node, ask model.Ask, copied string, withholdAnswer bool) (changed, answered bool) {
 	desired := pmdoc.Attrs{"state": ask.State}
+	if copied != "" {
+		desired["copied_from"] = ask.ID
+		desired["copied_from_document"] = copied
+	}
 	if ask.State == "answered" && ask.Answer != nil {
 		desired["answered_by"] = ask.Answer.User
 		desired["answered_at"] = ask.Answer.At.UTC().Format(time.RFC3339Nano)
-		desired["selected"] = append([]string(nil), ask.Answer.Selected...)
-		if ask.Answer.Text != nil {
-			desired["answer"] = *ask.Answer.Text
+		if !withholdAnswer {
+			desired["selected"] = append([]string(nil), ask.Answer.Selected...)
+			if ask.Answer.Text != nil {
+				desired["answer"] = *ask.Answer.Text
+			}
 		}
 	}
-	changed := false
-	for _, name := range []string{"state", "answered_by", "answered_at", "selected", "answer", "invalid"} {
+	for _, name := range askServerAttributeNames {
 		want, present := desired[name]
 		got, exists := node.Attrs[name]
 		if present {
@@ -653,6 +808,7 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask) bool {
 			}
 			node.Attrs[name] = want
 			changed = true
+			answered = answered || pmdoc.IsAnswerAttribute(name)
 			continue
 		}
 		if exists {
@@ -660,7 +816,7 @@ func setAskServerAttributes(node *pmdoc.Node, ask model.Ask) bool {
 			changed = true
 		}
 	}
-	return changed
+	return changed, answered
 }
 
 func askServerAttributeEqual(got, want any) bool {

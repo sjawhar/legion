@@ -247,6 +247,42 @@ func TestReplyToResolvedRootReopensIt(t *testing.T) {
 	}
 }
 
+// Accepting or rejecting a suggestion takes its mark out of the document. A reply still joins
+// that thread, and it leaves the decision as it was: who decided it and when, with no reopen.
+func TestReplyToADecidedSuggestionLandsAndKeepsTheDecision(t *testing.T) {
+	for _, action := range []string{"accept", "reject"} {
+		t.Run(action, func(t *testing.T) {
+			handler := newTestHandler(t)
+			issue := createInteractionIssue(t, handler, "TEST", "Reply after "+action, "The quick brown fox")
+			root := createThreadComment(t, handler, issue.Key, map[string]any{
+				"body": "Use red.", "anchor": map[string]any{"artifact": "spec", "quote": "brown"},
+				"suggestion": map[string]string{"replace_with": "red"}, "actor": sessionActor(),
+			}, "")
+			decided := dispatchRequest(t, handler, http.MethodPost, "/api/v1/comments/"+root.ID+"/"+action, map[string]any{}, "alice")
+			if decided.Code != http.StatusOK {
+				t.Fatalf("%s suggestion: status=%d body=%s", action, decided.Code, decided.Body.String())
+			}
+
+			reply := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
+				"body": "After the decision", "reply_to": root.ID,
+			}, "bob")
+			if reply.Code != http.StatusCreated {
+				t.Fatalf("reply after %s: status=%d body=%s", action, reply.Code, reply.Body.String())
+			}
+			stored := readThreadComment(t, handler, root.ID)
+			if !stored.Resolved || stored.ResolvedBy == nil || stored.ResolvedBy.ID != "alice" || stored.ResolvedAt == nil {
+				t.Fatalf("root after the reply = %#v, want still resolved by alice", stored)
+			}
+			if stored.Suggestion == nil || stored.Suggestion.Accepted == nil || *stored.Suggestion.Accepted != (action == "accept") {
+				t.Fatalf("root's suggestion after the reply = %#v, want the %s kept", stored.Suggestion, action)
+			}
+			if types := strings.Join(commentEventTypes(t, handler, issue.Key), ","); strings.Contains(types, "comment.reopened") {
+				t.Fatalf("event log after the reply = %s, want no comment.reopened", types)
+			}
+		})
+	}
+}
+
 func TestReplyToNestedCommentUsesThreadRoot(t *testing.T) {
 	handler := newTestHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Thread root replies", "before")

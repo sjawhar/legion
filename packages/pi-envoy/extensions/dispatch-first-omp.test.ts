@@ -1,4 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
+import * as path from "node:path";
 import { DISPATCH_FIRST_MARKER } from "@legion/envoy-client/dispatch-first";
 import {
   type Cleanup,
@@ -8,7 +9,7 @@ import {
   serveStandin,
   spawnRpc,
   writeStandinProfile,
-} from "./test-omp-harness";
+} from "@legion/pi-shared/test/omp-harness";
 
 // The dispatch-first skill's insertion on the real Oh My Pi (src/dispatch-first.ts): Oh My Pi keeps
 // nothing a `context` handler returns, so what reaches the model can only be read off the requests
@@ -90,7 +91,7 @@ async function runSession(
   const rpc = spawnRpc(
     binary,
     {
-      extensions: ["envoy.ts"],
+      extensions: [path.join(import.meta.dir, "envoy.ts")],
       home,
       workspace,
       sessions,

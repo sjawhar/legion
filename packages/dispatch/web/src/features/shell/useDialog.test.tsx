@@ -62,3 +62,21 @@ test("Escape closes only the innermost of two nested open dialogs", () => {
     view.unmount();
   }
 });
+
+test("Escape closes the most recently opened of two sibling (non-nested) open dialogs", () => {
+  // Mirrors the phone nav sheet and the Inbox drawer its Peek button opens on top of it
+  // (LEGION-547): neither contains the other, so containment alone can't say which is topmost.
+  const closed = { drawer: 0, nav: 0 };
+  const view = render(
+    <KeymapProvider>
+      <Dialog label="Nav" onClose={() => (closed.nav += 1)} open />
+      <Dialog label="Drawer" onClose={() => (closed.drawer += 1)} open />
+    </KeymapProvider>
+  );
+  try {
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(closed).toEqual({ drawer: 1, nav: 0 });
+  } finally {
+    view.unmount();
+  }
+});

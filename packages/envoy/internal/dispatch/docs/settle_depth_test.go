@@ -10,87 +10,98 @@ import (
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs/docstest"
-	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// A crafted client can write an over-deep tree through the room's CRDT without passing through
-// pmdoc.Update. Settlement skips that tree as it does every tree outside the schema: it writes no
-// version and does not fail the live room.
-func TestSettlementSkipsATreeOverTheDepthBound(t *testing.T) {
-	service, artifactID := newTestService(t)
-	service.settle = time.Hour
-	seedServiceText(t, service, artifactID, "before")
+// A crafted client can write a tree outside the schema through the room's CRDT without passing
+// through pmdoc.Update: one deeper than the depth bound, or a mark nested past what ygo's text
+// writers take, which a server whose bound did not count the map ygo stores a mark as could also
+// have stored. Settlement skips that tree as it does every tree outside the schema: it writes no
+// version, does not fail the live room, and never hands ygo the value to write again. Its
+// pending-settlement row and unsettled state stay, because a later repair or restart must still
+// settle the document rather than forget it.
+func TestSettlementSkipsACraftedTreeOutsideTheSchema(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		write func(t *testing.T, doc *crdt.Doc, transact func(func(*crdt.Transaction))) error
+	}{
+		{"a tree over the depth bound", func(t *testing.T, doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+			fragment := doc.GetXmlFragment(fragmentName)
+			transact(func(txn *crdt.Transaction) {
+				docstest.WriteDeepChain(txn, fragment, pmdoc.MaxTreeDepth+1, "a")
+			})
+			return nil
+		}},
+		{"a mark nested past the bound", func(t *testing.T, doc *crdt.Doc, _ func(func(*crdt.Transaction))) error {
+			peer := crdt.New()
+			if err := crdt.ApplyUpdateV1(peer, crdt.EncodeStateAsUpdateV1(doc, nil), nil); err != nil {
+				return err
+			}
+			return crdt.ApplyUpdateV1(doc, docstest.NestedLinkUpdate(t, peer, docstest.NestedValue(100)), "peer")
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "before")
 
-	if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
-		fragment := doc.GetXmlFragment(fragmentName)
-		transact(func(txn *crdt.Transaction) {
-			docstest.WriteDeepChain(txn, fragment, pmdoc.MaxTreeDepth+1, "a")
+			// An update applied straight to the room, as a peer's is, goes through no transact of
+			// Apply's, which then reports no changes of its own.
+			var writeErr error
+			if err := service.srv.Apply(context.Background(), artifactID, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+				writeErr = test.write(t, doc, transact)
+			}); (err != nil && !errors.Is(err, websocket.ErrNoChanges)) || writeErr != nil {
+				t.Fatalf("write crafted CRDT tree: %v %v", err, writeErr)
+			}
+
+			state := service.room(artifactID)
+			state.mu.Lock()
+			generation := state.roomGeneration
+			state.mu.Unlock()
+			service.settleRoom(artifactID, generation)
+
+			var versions int
+			if err := service.store.Pool.QueryRow(context.Background(), `
+				select count(*) from artifact_versions where artifact_id = $1
+			`, artifactID).Scan(&versions); err != nil {
+				t.Fatalf("count document versions: %v", err)
+			}
+			if versions != 1 {
+				t.Fatalf("settlement wrote %d versions for a document outside the schema, want 1", versions)
+			}
+			if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocSchema) {
+				t.Fatalf("read the document: %v, want ErrDocSchema", err)
+			}
+			state.mu.Lock()
+			defer state.mu.Unlock()
+			if state.failed != nil {
+				t.Fatalf("settlement failed the live room: %v", state.failed)
+			}
+			if state.settleFailures != 0 {
+				t.Fatalf("settlement recorded %d failures for a document outside the schema", state.settleFailures)
+			}
+			if !state.unsettled {
+				t.Fatal("settlement that stopped at ErrDocSchema released the document's unsettled state")
+			}
+			if _, held := service.rooms.Load(artifactID); !held {
+				t.Fatal("settlement that stopped at ErrDocSchema removed the document's state")
+			}
 		})
-	}); err != nil {
-		t.Fatalf("write crafted CRDT tree: %v", err)
-	}
-
-	state := service.room(artifactID)
-	state.mu.Lock()
-	generation := state.gen
-	state.mu.Unlock()
-	service.settleRoom(artifactID, generation)
-
-	var versions int
-	if err := service.store.Pool.QueryRow(context.Background(), `
-		select count(*) from artifact_versions where artifact_id = $1
-	`, artifactID).Scan(&versions); err != nil {
-		t.Fatalf("count document versions: %v", err)
-	}
-	if versions != 1 {
-		t.Fatalf("settlement wrote %d versions for an over-deep document, want 1", versions)
-	}
-	if _, err := service.Text(context.Background(), artifactID); !errors.Is(err, ErrDocSchema) {
-		t.Fatalf("read over-deep document: %v, want ErrDocSchema", err)
-	}
-	state.mu.Lock()
-	defer state.mu.Unlock()
-	if state.failed != nil {
-		t.Fatalf("settlement failed the live room: %v", state.failed)
-	}
-	if state.settleFailures != 0 {
-		t.Fatalf("settlement recorded %d failures for an over-deep document", state.settleFailures)
 	}
 }
 
-// A service write that marks or unmarks reads the live document and then walks it again inside its
-// transaction, and a peer's update can land between the two. A walk that then meets a tree past
-// the depth bound refuses it as the document outside the schema (ErrDocSchema, which the API
-// serves as DOC_SCHEMA), as every read of that tree does, rather than as an internal error:
-// marking a quote, rejecting a suggestion by removing its mark, and the sweep of unrecorded marks.
+// The sweep of unrecorded marks reads the live document and then walks it again inside its
+// transaction on the room, and a peer's update can land between the two. A walk that then meets a
+// tree past the depth bound refuses it as the document outside the schema (ErrDocSchema), as every
+// read of that tree does, rather than as an internal error. Every other write that marks or unmarks
+// runs on its transaction's fork of the room (applyLive), which no peer's update reaches.
 func TestMarkWalksTellATreeDeepenedSinceTheirReadAsOutsideTheSchema(t *testing.T) {
 	ctx := context.Background()
-	bob := model.Actor{Kind: "user", ID: "bob"}
 	for _, test := range []struct {
 		name  string
 		setUp func(t *testing.T, service *Service, artifactID string)
 		write func(service *Service, artifactID string) error
 	}{
-		{
-			name:  "marking a quote",
-			setUp: func(*testing.T, *Service, string) {},
-			write: func(service *Service, artifactID string) error {
-				_, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkComment, ID: "c1", By: bob}, "brown", nil)
-				return err
-			},
-		},
-		{
-			name: "rejecting a suggestion",
-			setUp: func(t *testing.T, service *Service, artifactID string) {
-				if _, err := service.MarkQuote(ctx, artifactID, MarkSpec{Kind: MarkSuggestion, ID: "rep", By: bob}, "brown", nil); err != nil {
-					t.Fatalf("suggest: %v", err)
-				}
-			},
-			write: func(service *Service, artifactID string) error {
-				return service.RejectSuggestion(ctx, artifactID, "rep", bob)
-			},
-		},
 		{
 			name: "sweeping an unrecorded mark",
 			setUp: func(t *testing.T, service *Service, artifactID string) {
