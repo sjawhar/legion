@@ -241,17 +241,16 @@ describe("Dispatch write advice", () => {
     expect(result.details.advice).toEqual(rawAdvice);
   });
 
-  // A new spec is followed by the fresh-reader reminder, ahead of any server advice; an issue
-  // created without a spec keeps its one-line result (the absent-advice cases below).
-  test("dispatch_issue with a spec asks whether a fresh reader checked it", async () => {
+  // Fresh-reader guidance belongs before creation, not in an issue's successful result.
+  test("dispatch_issue with a spec omits fresh-reader guidance after creation", async () => {
     const result = await executeWrite(
       "dispatch_issue",
       { project: "DSP", title: "Created issue", spec: "# Spec\n" },
       advice({ decision_blocks: 0 })
     );
 
-    expect(result.text.split("\n")[1]).toContain('`task(agent="scout")`');
-    expect(result.text.split("\n")[1]).toContain("Legion plugin's `plan-gap-analyst`");
+    expect(result.text).not.toContain("fresh reader");
+    expect(result.text).not.toContain("plan-gap-analyst");
     expect(result.text).toEndWith(zeroBlocks);
   });
 
