@@ -72,8 +72,9 @@ const (
 // every referenceExcerptStep while a full batch says drift remains and every
 // ReferenceExcerptReconcileInterval once none does, until ctx ends. For the first
 // referenceExcerptStaleWindow after it starts, each tick first marks owed the excerpts a version
-// written by the binary a deploy replaces left behind, while both run. Until a mention's excerpt is
-// stored, GET /api/v1/references answers it with the document's name, or with the excerpt it held.
+// written by the binary a deploy replaces left behind, while both run; until a tick marks one,
+// GET /api/v1/references serves that older excerpt. A mention owed an excerpt is answered with
+// the document's name until this stores one.
 func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context) {
 	ctx = store.WithTransactionTracking(ctx)
 	started := time.Now()

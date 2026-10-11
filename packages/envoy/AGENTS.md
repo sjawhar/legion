@@ -1250,8 +1250,13 @@ behind (`refs.MarkStaleExcerpts`). A document the reconciliation cannot read for
 an unloadable history or a tree outside the schema (which it records as having no block), or whose
 excerpts it cannot store, is logged at ERROR and skipped for that tick, its mentions left owed, so
 one document never holds back the rest of its batch. `refs.StoredExcerpts` serves only a row whose
-`excerpt_version` is non-null; until then, the route answers that mention with the document's name,
-never the stale payload the row still holds.
+`excerpt_version` is non-null; a row owed an excerpt is answered with the document's name, not the
+payload it still holds. One window is left: during the one rolling deploy that ships 0091, a
+version the binary it replaces writes leaves the previous version's excerpt with its
+`excerpt_version` still set, and the route serves that excerpt until `refs.MarkStaleExcerpts`
+marks it owed at the reconciliation's next tick, which starts within five minutes
+(`docs.ReferenceExcerptReconcileInterval`) of the last one ending. The deploy's overlap lies inside
+the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the

@@ -88,9 +88,15 @@ func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, e
 	return nil
 }
 
-// StoredExcerpts is, by citing document, the stored and current excerpt on each mention of
-// (toKind, toID) a document writes; a mention with none stored or one the reconciliation owes is
-// absent. It reads refs through refs_to alone.
+// StoredExcerpts is, by citing document, the excerpt stored on each mention of (toKind, toID) a
+// document writes; a mention with none stored, or one the reconciliation owes (excerpt_version
+// null), is absent. It cannot tell a set excerpt_version that is behind its document's latest
+// version: during the one rolling deploy that ships migration 0091, a version the binary it
+// replaces writes leaves the previous version's excerpt set, and that excerpt is served until
+// MarkStaleExcerpts marks it owed at the reconciliation's next tick, which starts within
+// docs.ReferenceExcerptReconcileInterval (five minutes) of the last one ending; the deploy's
+// overlap lies inside the hour after the new task starts, the only hour MarkStaleExcerpts runs.
+// It reads refs through refs_to alone.
 func StoredExcerpts(ctx context.Context, q Queryer, toKind, toID string) (map[string]model.GraphExcerpt, error) {
 	rows, err := q.Query(ctx, `
 		select from_id, coalesce(excerpt_block_id, ''), excerpt_text from refs
@@ -177,8 +183,9 @@ func ClearExcerpts(ctx context.Context, q Execer, fromID string) error {
 // MarkStaleExcerpts marks owed every mention whose excerpt is older than its document's latest
 // version, and returns how many it marked. Every version write stores its own mentions' excerpts,
 // so only a version a binary predating migration 0091 wrote - the task a deploy replaces, while
-// both run - leaves one behind. No index supports it: it reads every artifact mention holding an
-// excerpt (7,537 rows on the 2026-10-10 production dump, 26 ms), so the reconciliation runs it
+// both run - leaves one behind, and StoredExcerpts serves that older excerpt until this marks it,
+// at the reconciliation's next tick. No index supports it: it reads every artifact mention holding
+// an excerpt (7,537 rows on the 2026-10-10 production dump, 26 ms), so the reconciliation runs it
 // only in the hour after its process starts.
 func MarkStaleExcerpts(ctx context.Context, q Execer) (int64, error) {
 	tag, err := q.Exec(ctx, `
