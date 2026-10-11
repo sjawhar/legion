@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -680,17 +681,21 @@ func (s *Postgres) RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, is
 	return runs[token], nil
 }
 
+// roleRunIdentity is a candidate role run as an outbox supervise row names it: its issue, and the
+// payload's role and generation exactly as Postgres renders them (`payload->>'role'`,
+// `payload->>'generation'`), so a row is matched before it is decoded.
 type roleRunIdentity struct {
 	issue      string
-	role       claim.Role
-	generation uint64
+	role       string
+	generation string
 }
 
 // RoleRuns reads the claims and queued supervise rows of keys in two bounded queries, under the
-// caller's transaction snapshot. The outbox query reads the selected issues' supervise rows, then
-// retains only keys' roles and generations: JSON carries those two fields, and filtering them in
-// SQL would turn a simple indexed issue scan into a JSON-expression scan. A state report batches
-// at most workflow's bounded key count, so a tree with several roles adds only its own rows.
+// caller's transaction snapshot. The outbox has no index on issue (only outbox_due, on next_at and
+// id), so the outbox query is a sequential scan of the pending rows, which finishing deletes; it
+// selects the selected issues' supervise rows with each payload's role and generation as text, and
+// decodes only the rows of keys' roles and generations. A row of another role is never decoded, so
+// one that does not decode fails only a read of its own role's run, as RoleRun's did.
 func (s *Postgres) RoleRuns(ctx context.Context, tx pgx.Tx, keys []RoleRunKey) (map[claim.Token]RoleRun, error) {
 	runs := make(map[claim.Token]RoleRun, len(keys))
 	if len(keys) == 0 {
@@ -706,7 +711,7 @@ func (s *Postgres) RoleRuns(ctx context.Context, tx pgx.Tx, keys []RoleRunKey) (
 		}
 		runs[key.Token] = RoleRun{}
 		tokens = append(tokens, string(key.Token))
-		candidates[roleRunIdentity{issue: key.Issue, role: key.Role, generation: key.Generation}] = key.Token
+		candidates[roleRunIdentity{issue: key.Issue, role: string(key.Role), generation: strconv.FormatUint(key.Generation, 10)}] = key.Token
 		if _, seen := seenIssues[key.Issue]; !seen {
 			seenIssues[key.Issue] = struct{}{}
 			issues = append(issues, key.Issue)
@@ -745,28 +750,33 @@ func (s *Postgres) RoleRuns(ctx context.Context, tx pgx.Tx, keys []RoleRunKey) (
 	}
 	rows.Close()
 
-	rows, err = tx.Query(ctx, `select `+outboxColumns+` from outbox
-		where kind = $1 and issue = any($2) order by id`, string(OutboxKindSupervise), issues)
+	rows, err = tx.Query(ctx, `select `+outboxColumns+`, coalesce(payload->>'role', ''), coalesce(payload->>'generation', '')
+		from outbox where kind = $1 and issue = any($2) order by id`, string(OutboxKindSupervise), issues)
 	if err != nil {
 		return nil, fmt.Errorf("read the queued role runs of %d issues: %w", len(issues), err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		row, err := scanOutbox(rows)
-		if err != nil {
+		var row OutboxRow
+		var kind, role, generation string
+		var payload []byte
+		if err := rows.Scan(&row.ID, &kind, &row.Issue, &payload, &row.Attempts, &row.NextAt, &row.LastError,
+			&row.CreatedAt, &row.LeaseToken, &row.LeaseUntil, &role, &generation); err != nil {
 			return nil, fmt.Errorf("read the queued role runs of %d issues: %w", len(issues), err)
 		}
-		payload, err := DecodeOutboxPayload(row)
+		token, wanted := candidates[roleRunIdentity{issue: row.Issue, role: role, generation: generation}]
+		if !wanted {
+			continue
+		}
+		row.Kind = OutboxKind(kind)
+		row.Payload = append(json.RawMessage(nil), payload...)
+		decoded, err := DecodeOutboxPayload(row)
 		if err != nil {
 			return nil, err
 		}
-		request, ok := payload.(SuperviseRequest)
+		request, ok := decoded.(SuperviseRequest)
 		if !ok {
-			return nil, fmt.Errorf("outbox row %d of kind %s decodes to %T", row.ID, row.Kind, payload)
-		}
-		token, wanted := candidates[roleRunIdentity{issue: row.Issue, role: request.Role, generation: request.Generation}]
-		if !wanted {
-			continue
+			return nil, fmt.Errorf("outbox row %d of kind %s decodes to %T", row.ID, row.Kind, decoded)
 		}
 		run := runs[token]
 		run.Queued = append(run.Queued, QueuedSupervise{ID: row.ID, Request: request})

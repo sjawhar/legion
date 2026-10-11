@@ -1288,7 +1288,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		}
 		report, cancel := context.WithTimeout(serving, strandedReportTimeout)
 		defer cancel()
-		reportStranded(report, st, projectRecords{Store: record.NewStore(), project: cfg.Project}, p.project, s.log)
+		reportStranded(report, st, projectRecords{Store: record.NewStore(), project: cfg.Project}, cfg.Project, p.project, s.log)
 		return nil
 	})
 	group.Go(func() error {

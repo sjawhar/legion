@@ -30,15 +30,17 @@ const strandedReportTimeout = 5 * time.Second
 // nothing else is logged. A boot with none logs nothing. The state route judges the same rule on
 // every read (strandedClaims). A failed read is logged and stops nothing: the report is the boot's
 // account of its claims, and no step after it depends on it. A read the daemon's stop cancels is
-// not a failure and logs nothing; one that outlives strandedReportTimeout is.
-func reportStranded(ctx context.Context, st *store.Store, records record.Store, project string, log *slog.Logger) {
+// not a failure and logs nothing; one that outlives strandedReportTimeout is. project is the
+// configured project the line names, as `legion daemon started` does; projectToken selects the
+// project's claims (ofProject).
+func reportStranded(ctx context.Context, st *store.Store, records record.Store, project, projectToken string, log *slog.Logger) {
 	var stranded []supervise.Claim
 	if err := pgx.BeginTxFunc(ctx, st.Pool(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
 		claims, err := st.ClaimsTx(ctx, tx)
 		if err != nil {
 			return err
 		}
-		claims = ofProject(claims, project)
+		claims = ofProject(claims, projectToken)
 		stranded, err = workflow.Stranded(ctx, tx, records, claims)
 		return err
 	}); err != nil {

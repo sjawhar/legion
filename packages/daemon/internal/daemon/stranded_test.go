@@ -224,9 +224,9 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	}
 	resume := []string{implementing + " architect", implementing + " implementer"}
 	workflowStart := []string{reviewing + " reviewer", planning + " architect"}
-	if line["level"] != "ERROR" || line["count"] != float64(len(resume)+len(workflowStart)) ||
+	if line["level"] != "ERROR" || line["project"] != cfg.Project || line["count"] != float64(len(resume)+len(workflowStart)) ||
 		!reflect.DeepEqual(listed("resume"), resume) || !reflect.DeepEqual(listed("needsWorkflowStart"), workflowStart) {
-		t.Fatalf("the boot's line = %v, want an error naming %q to resume and %q needing a workflow start", line, resume, workflowStart)
+		t.Fatalf("the boot's line = %v, want an error for project %s naming %q to resume and %q needing a workflow start", line, cfg.Project, resume, workflowStart)
 	}
 	wantWire := []map[string]string{
 		{"issue": implementing, "role": "architect", "state": "suspended"},
