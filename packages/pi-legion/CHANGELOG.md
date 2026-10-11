@@ -25,6 +25,48 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- `legion.daemonApiVersion` is 19 (LEGION-631). Each Legion role's GitHub App token is now a file
+  the pane's plain `gh` and `git` read: the daemon sets `GH_CONFIG_DIR` (gh's `hosts.yml` and
+  `config.yml`, rendered and refreshed by the daemon) and empties `GH_TOKEN`, `GITHUB_TOKEN` and
+  `GH_HOST`; the daemon's credential routes, the `gh` shim, the `legion gh` and `legion credential`
+  commands and the absolute-path pins of a pane's gh, git and jj are gone. No agent runs `legion`
+  from bash any more, so the extension registers no `tool_call` hook: it mints no grant before any
+  shell command, writes no grant file (`LEGION_GRANT_FILE` is gone from the pane's environment) and
+  refuses nothing — the jj operation-log refusal (`jj undo`, `jj abandon`, `jj op restore` and the
+  rest, LEGION-45) is deleted with it, and the `dispatch` here-document scan of the LEGION-588
+  entry below now has one reader, `@sjawhar/pi-envoy`'s run-end check. The `legion` tool's
+  operations mint their grants in-process and post them with the request: `handoff_complete` finds
+  the commit it reports in the pane with its jj (`src/handoff-commit.ts`, what `legion handoff
+  complete` did — for a file-backed phase the pushed commit carrying
+  `.legion/<issue>/<phase>.json`, refused while the file is uncommitted, missing, not on this
+  branch, another pane's or not yet on `legion/<issue>@origin`; otherwise `@-`) and posts a direct
+  `POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`), whose daemon reads
+  no handoff file and no branch head, refuses `HANDOFF_NOT_NEW` and, for READY, runs the head's
+  checks (`READY_HEAD_CARRIES_HANDOFFS`, `READY_CHECKS_NOT_GREEN`), answering `note` when READY
+  was published without reading them, so a worker pushes before it completes; the `handoff_write`
+  and `handoff_read` operations are gone with the `legion handoff` and `legion push` commands they
+  shelled out beside (a handoff is written with `write`, committed and pushed with plain `jj`,
+  read with `read`; a handoff-only push ends its head's message with two empty lines and
+  `skip-checks: true` as the last line, the one shape GitHub honours — `legion push` wrote it so,
+  and the prompt rule that replaces it does too), so the shell
+  `legion handoff complete` the LEGION-634 entry below describes no longer exists; the tool
+  resolves no review thread (`legion threads resolve` is gone, and the daemon serves no thread
+  route: the reviewer names the bot threads it accepted to the implementer, who resolves them with
+  plain `gh` as the pull request's author); and the controller session gets the tool with
+  `read_state` (the whole `GET /legion/v1/state`) and `set_status` (`POST /legion/v1/issues/status`
+  under a controller grant minted with its registration secret), in place of running
+  `legion state` and `legion status` from bash. The client's strict parse needs this release beside
+  a daemon at 19; the daemon's boot gate and `legion probe-image` refuse any earlier contract (the
+  8.9.0 release declares 18 and the 8.6.0 release 17, each still minting a grant before every command; 8.4.1 declares 16). The
+  merger submits the merge itself the moment READY is accepted, with
+  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` (a merge queue
+  enqueues the pull request, a repository without one arms auto-merge, and the repository's
+  required reviews and checks decide when it lands); the implementer disarms it with
+  `gh pr merge <n> -R <owner>/<repo> --disable-auto` at the start of a round that follows a
+  withdrawn READY; and no skill or prompt says Legion never merges. The tester's prompt and the
+  `legion-worker` skill now say the tester runs the changed surface for real, tries to break it,
+  judges whether the implementer's tests would catch what it broke and reads CI for everything
+  static; the sentences that had it rerun the lint, type or unit lanes before a push are gone.
 - `legion.daemonApiVersion` is 18. Contract 18 makes each issue's Agent Sandbox pod independent,
   on a volume of its own (LEGION-632): the pod's `workspace-init provision` container no longer
   carries `LEGION_REMOVABLE_WORKSPACES` or `LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS` (the
@@ -72,13 +114,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   tools and bundles no `dispatch`).
 - No Legion handoff reaches the default branch (LEGION-605). The `legion-retro` skill ends retro
   with one final commit that removes the issue's `.legion/<issue>/`, pushed with its
-  `docs/solutions/` commit in one `legion push`; the `legion-worker` and `legion-architect` skills
-  and the merge-gate reference say the merger accepts that commit above the approved head and that
-  READY refuses a head still carrying it, in place of the rule that every head kept `.legion/` and
-  the daemon stripped main's from the next branch. The `legion` tool's `handoff_read` description
-  says it finds a handoff that commit removed. Install this release with a Go `legion` built from
-  the same commit, whose `legion handoff read` reads such a handoff and whose READY makes that
-  refusal. `legion.daemonApiVersion` is unchanged.
+  `docs/solutions/` commit in one push; the `legion-worker` and `legion-architect` skills and the
+  merge-gate reference say the merger accepts that commit above the approved head and that READY
+  refuses a head still carrying it, in place of the rule that every head kept `.legion/` and the
+  daemon stripped main's from the next branch. Install this release with a Go `legion` built from
+  the same commit, whose READY makes that refusal. `legion.daemonApiVersion` is unchanged.
 - `legion.daemonApiVersion` is 16 (LEGION-578). Contract 16 adds `capabilities` to
   `GET /legion/v1/state`: the deployment's capability report, one row per capability with its
   `status` (`present`, `installed`, `unchecked`, `live`, `withheld`, `decided` or `open`), its
@@ -110,7 +150,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   itself did not move (no request, response or pane variable changed): the pre-split package's last
   release left it at 13 (LEGION-583: the `push` grant for `legion push` and the worker image's
   `LEGION_REMOVABLE_WORKSPACES` payload, described in `packages/pi-envoy/CHANGELOG.md`), and this
-  release declares 18 (LEGION-632, above; 17 since LEGION-588, 16 since LEGION-578, 15 since
+  release declares 19 (LEGION-631, above; 18 since LEGION-632, 17 since LEGION-588, 16 since LEGION-578, 15 since
   LEGION-462, 14 since LEGION-592). The Envoy messaging and Dispatch command every session uses are
   `@sjawhar/pi-envoy`'s, installed beside this package; a Legion pane needs both.
   The Legion entry claims roles, matches injected user turns and reads the bootstrapped session

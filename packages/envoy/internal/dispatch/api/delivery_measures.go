@@ -67,6 +67,24 @@ func (s *server) getDeliveryMeasures(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, response)
 }
 
+// measuresPRs is the population's pull requests that pass its search and facets, as the measures
+// package reads them. A partial row's lead-time fields are not yet knowable, so it is skipped
+// rather than read as zero.
+func (p deliveryPopulation) measuresPRs() []measures.PR {
+	prs := make([]measures.PR, 0, len(p.rows))
+	for _, row := range p.rows {
+		view := row.view
+		if !row.matches(p.selection, "") || view.CreatedAt == nil || view.MergedAt == nil {
+			continue
+		}
+		prs = append(prs, measures.PR{
+			ID: view.ID, CreatedAt: *view.CreatedAt, MergedAt: *view.MergedAt, FirstCommitAt: view.FirstCommitAt,
+			DeployRunID: view.DeployRun, DeployedAt: view.DeployedAt, Rework: view.Rework,
+		})
+	}
+	return prs
+}
+
 // deliveryMeasuresFor measures [from, to) over population, the window's pull requests as
 // filteredDeliveryPullRequests read them. Facets narrow the pull-request measures (lead time,
 // rework share, the per-PR failure rate) exactly as they narrow the timeline's prs[]; deploys and
@@ -77,19 +95,7 @@ func (s *server) getDeliveryMeasures(w http.ResponseWriter, r *http.Request) {
 // answer through it, so the two never disagree.
 func (s *server) deliveryMeasuresFor(ctx context.Context, settings delivery.DeliverySettings, from, to time.Time, population deliveryPopulation) (deliveryMeasuresResponse, error) {
 	pool := s.deps.Store.Pool
-	prs := make([]measures.PR, 0, len(population.rows))
-	for _, row := range population.rows {
-		view := row.view
-		// A partial row's lead-time fields are not yet knowable, so it is skipped rather than
-		// read as zero.
-		if !row.matches(population.selection, "") || view.CreatedAt == nil || view.MergedAt == nil {
-			continue
-		}
-		prs = append(prs, measures.PR{
-			ID: view.ID, CreatedAt: *view.CreatedAt, MergedAt: *view.MergedAt, FirstCommitAt: view.FirstCommitAt,
-			DeployRunID: view.DeployRun, DeployedAt: view.DeployedAt, Rework: view.Rework,
-		})
-	}
+	prs := population.measuresPRs()
 
 	// Whether a run reached production is decided on the window's own runs and their jobs, never
 	// on the head-commit list containment reads, so every run the window counts is judged.

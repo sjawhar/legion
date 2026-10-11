@@ -171,7 +171,7 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 
 // sessionStatusWrite takes a lifecycle status change written by a session whose write the workflow
 // does not act on. A session holding a claim in the issue's tree is an agent, never a human move,
-// since a phase ends only by its completion (legion handoff complete) and a tree only by the
+// since a phase ends only by its completion (the `legion` tool's `handoff_complete`) and a tree only by the
 // architect's sign-off. Any other session on the root of an admitted tree — another tree's agent, or
 // one outside Legion that took the issue for its own — has no part in the running tree it would end
 // or park, so the tree's architect is told who wrote what. Either way the workflow does not react:
@@ -341,6 +341,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, err
 	}
 	if phase.FileBacked(issue.Phase) {
+		// The commit a completion carries is the pushed commit carrying the phase's handoff, which
+		// the `legion` tool's handoff_complete found in the pane: the one the role reported for its
+		// previous phase means this phase wrote none.
 		if fact.Commit == row.LastHandoff {
 			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the %s reported commit %s for its previous phase of %s; write and commit this phase's handoff before completing", fact.Role, fact.Commit, issue.Key)), nil
 		}
@@ -417,11 +420,15 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 // pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
 // request: its fix and blocked attempts are what bound the review rounds, so they are carried
 // over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap, and
-// so is its newest review, which orders every review it will have, and what its base branch
-// requires - its required checks, and its required workflows with their runs at the head they were
-// read at - as last read, so the reopened head's first settlement is judged by all of it
-// (classify.HeadChecks). A new generation deletes a pull request that is not open, and all of them
-// with it.
+// so is the counted attempt the cap holds a red in (classify.FixAttemptCapHolds), and its newest
+// review, which orders every review it will have, and what its base branch requires - its required
+// checks, and its required workflows with their runs at the head they were read at - as last read,
+// so the reopened head's first settlement is judged by all of it (classify.HeadChecks). A reopen at
+// another head than the recorded one - commits pushed while the pull request was closed, which no
+// synchronize reports - is judged as a synchronize to that head would be
+// (classify.AdvancePullRequestHead): onto a red verdict it counts, onto a green one it leaves the
+// counted attempt. A new generation deletes a pull request that is not open, and all of them with
+// it.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Branch)
 	if err != nil || issue == nil {
@@ -450,7 +457,12 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		if !fact.Reopened || recorded.State == record.PullRequestMerged {
 			return intake.Result{}, nil
 		}
-		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
+		carried := *recorded
+		if fact.HeadSHA != recorded.HeadSHA {
+			carried = classify.AdvancePullRequestHead(carried, fact.HeadSHA)
+		}
+		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = carried.FixAttempts, carried.BlockedAttempts, recorded.ReviewSeen
+		pr.HeadCounted, pr.HeadCountedBefore = carried.HeadCounted, carried.HeadCountedBefore
 		pr.Required, pr.Workflows, pr.WorkflowsHead = recorded.Required, recorded.Workflows, recorded.WorkflowsHead
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}

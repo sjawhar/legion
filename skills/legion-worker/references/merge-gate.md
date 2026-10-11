@@ -1,13 +1,13 @@
 # The merge gate: review, retro, READY, and the production check
 
 Part of `skill://legion-worker`. Read it when you are the reviewer submitting a review or an
-approval, the implementer recording the production check, or the merger building READY. Every
-path it cites is in sjawhar/legion.
+approval, the implementer disarming a withdrawn READY or recording the production check, or the
+merger building READY and submitting the merge. Every path it cites is in sjawhar/legion.
 
 The order, in full: the tester's evidence green → the reviewer's approval of the head →
-retro → the merger's READY → the human merge → the implementer's production check. The approved
+retro → the merger's READY → the merge → the implementer's production check. The approved
 head carries the issue's handoffs, `.legion/<issue>/`; retro's last commit removes them from the
-head a human merges (dispatch://LEGION-605), since a squash merge commits that head merged into
+head that merges (dispatch://LEGION-605), since a squash merge commits that head merged into
 the default branch and nothing there reads a handoff, and READY refuses a head that still
 carries them. After the approval, only retro's commits leave it standing on their own: those that
 change only `docs/solutions/`, and that removal (*Retro*, below). A conflict-forced merge goes back
@@ -25,7 +25,7 @@ the head voids it.
   Skip the `Thermo` line entirely on a docs-only PR. Submit **one review per round** —
   `REQUEST_CHANGES` when any correctness finding stands, otherwise `APPROVE` of the head you
   reviewed — always named by SHA — carrying every inline comment in that single
-  call: `legion gh -- api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
+  call: `gh api --method POST repos/{owner}/{repo}/pulls/{number}/reviews --input body.json`
   with `commit_id`, `event` (`REQUEST_CHANGES` or `APPROVE`), `body` (with the
   Legion footer), and a `comments[]` array of `{path, line, side, body}`, one entry per
   finding — never one `pr review` call per finding (each submission fires a `pr-review` wake).
@@ -48,9 +48,10 @@ before you submit it, since an approval stands only on green checks and GitHub c
 once the head moves, and a verdict that settles red there makes the round's decision a request for
 changes naming the failing checks, unless only review workflows the project declares
 (`projects.<KEY>.review_workflows`) are red on their own findings: then you answer their threads,
-have them resolved with `legion threads resolve` and re-run the failed run, as your role prompt
-says, and approve once it passes. Any other red required workflow is a failing check like any
-other. A request for changes does not wait, since it stands whatever CI says and the issue leaves
+name the ones you accepted to the implementer, who resolves them with its own `gh` as the pull
+request's author, and re-run the failed run once they are resolved, as your role prompt says, and
+approve once it passes. Any other red required workflow is a failing check like any other. A
+request for changes does not wait, since it stands whatever CI says and the issue leaves
 reviewing with it. The verdict is of the checks and workflows the base branch requires, the set
 READY checks: red when one of them failed, and never red for a check the base branch does not
 require. A required check that was cancelled, or that the head's checks
@@ -73,37 +74,72 @@ review posted without a completion leaves the issue in reviewing until you finis
 - **Retro brings the PR body's path-derived content up to date before its push.** Whatever the
   repository's instructions derive from the pull request's changed paths (a checklist named for
   each class of path, read by a required check), retro recomputes for the whole diff at its head
-  and writes into the live body before `legion push` (`skill://legion-retro`), since the merger
+  and writes into the live body before its push (`skill://legion-retro`), since the merger
   reports a stale body rather than rewriting it. A body edit changes no commit, so the approval
   stands.
 
 ## The merger
 
-- The merger runs `legion threads resolve --pr <n> --repo <owner>/<repo>` (it acts as the same
-  code-writing App as the implementer; resolving a thread changes no commit, so this run never
-  invalidates the approval), does not complete while any `left open` line remains or the command
-  exits 1 (report the thread to the architect instead), then proves that rule with two commands.
-  First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
+- The merger resolves no review thread: the reviewer's approval already judged them, and READY
+  requires no thread state beyond it. It proves the head is the approved head plus retro's commits
+  with two commands. First `cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" git fetch && jj -R
   "$LEGION_WORKSPACE" diff --from <approved-sha> --to <tip-sha> --summary`, whose output is quoted
   in READY; then the same with the one fileset `'~(docs/solutions | .legion/<issue>)'` appended,
   which must print nothing (jj unions separate path arguments, so two of them leave nothing out).
-  READY itself refuses a head that still carries `.legion/<issue>/` (the merger tells the
-  architect, which has it move the issue back to `retro`), and publishes a pull request a person
-  already merged unread (`packages/daemon/internal/prompts/go/merger.md`). *The READY packet* is
+  *The READY packet* is
   `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)`
   (the shape `packages/daemon/internal/prompts/roles/merger.md` defines), then the PR body's
   `Outcome:` line and its `Not proven / risk:` value — every bullet under that label joined with
   `; ` on the one READY line, or `none` — quoted from the `## For the reviewer` block at that same
   head (or one line saying the body carries no brief — the packet still goes out), then the
-  `--summary` output and the PR body's gate facts. The merger sends it as the `summary` of its
-  `handoff_complete` with `ready: true`; the daemon posts it as a `dispatch message` on the issue,
-  publishes it to the project's merge queue role when one is set, and says on the issue when that
-  role has no live holder. The READY packet names both the implementer's and tester's `E2E` lines;
-  a missing one is reported to the architect instead of completing. Legion never merges.
+  `--summary` output and the PR body's gate facts. The READY packet names both the implementer's
+  and tester's `E2E` lines; a missing one is reported to the architect instead of completing.
+- READY is `handoff_complete` with `ready: true` and the packet as its `summary`; the merger runs
+  no pre-flight of its own, and its completion reports the commit the workspace stands on. READY's
+  checks run in the daemon, which reads the pull request's head on GitHub and refuses, before
+  recording anything: `READY_HEAD_CARRIES_HANDOFFS` while the head still carries `.legion/<issue>/`
+  (tell the architect, which has you move the issue back to `retro` with `request_backward_move`,
+  so the implementer's retro removes it; a refusal saying GitHub's read of the directory failed is
+  GitHub's failure, not the head's: complete again); `READY_HEAD_CONFLICTS` while the pull
+  request conflicts with its base, named — GitHub can neither merge it nor start pull_request CI
+  for it, so the implementer brings the base into the branch with a forward merge; and
+  `READY_CHECKS_NOT_GREEN` unless every check the base branch requires has succeeded at that head
+  and every workflow its rulesets require has a passing run there — no result for a check, or no
+  run of a workflow, means that head's push skipped CI when it should not have; a check still
+  running means wait; a failed one is a finding. Report the refusal to the architect; never
+  push a commit to make CI run. On success the daemon posts the packet as a `dispatch message` on
+  the issue, publishes it to the project's merge queue role when one is set, and says on the issue
+  when that role has no live holder; the answer's `note` says when READY was published on a pull
+  request a person already merged, whose head can no longer change, or on a base that requires no
+  check, which the packet itself also says.
+- **The merger submits the merge the moment READY is accepted.** In the same turn, before anything
+  else, it runs `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` with
+  its pane's plain `gh`: `<n>` the pull request number, `<head>` the full sha of the current head
+  READY named. A repository with a merge queue enqueues the pull request; one without arms
+  auto-merge; one whose rules are already satisfied merges at once. `--match-head-commit` has
+  GitHub refuse the request when the head has moved since READY read it. The repository's required
+  reviews and checks decide when it lands: the merger makes no merge by hand and bypasses no
+  rule. It then tells the architect with `envoy_publish` to its encoded role token what the
+  command answered — enqueued, auto-merge enabled, or merged — and the head. On any READY refusal
+  it submits nothing, since an armed request would merge through the gate the refusal names; a
+  READY the design gate refused is submitted later, on the architect's word, once the gate opens,
+  and that turn runs only `gh`. A `gh pr merge` GitHub refuses is reported to the architect with
+  its message; a person can still merge after READY. The packet's second line records the step,
+  `Merge: submitted on acceptance with gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`.
+- **A withdrawn READY is disarmed by the implementer.** When READY is withdrawn (the head's CI
+  turned red, or it conflicts with its base, after READY, which sends the issue back to
+  `implementing`), a merge queue drops the pull request on the red check, but auto-merge stays
+  enabled across pushes, and `--match-head-commit` was checked only when it was enabled. So the
+  implementer, at the start of that implementing round, runs
+  `gh pr merge <n> -R <owner>/<repo> --disable-auto` before any push. A pull request still in a
+  merge queue is removed with `gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}' -F id=<pull request node id>`
+  (`--disable-auto` dequeues nothing). When nothing is armed — the merger's submission was refused,
+  or a queue already dropped it — the command exits 1 with "Can't disable auto-merge for this pull
+  request.": run it anyway and take that answer as nothing to disarm.
 
-## After the human merge
+## After the merge
 
-- **After a human merges, the implementer verifies in production.**
+- **After the merge, the implementer verifies in production.**
   The daemon starts the implementer again once the merge lands; the implementer watches the
   deploy slot that carries the merge to `production-apply` (or the equivalent publish step),
   drives the changed path in production through the user's own access path, and records the

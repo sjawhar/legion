@@ -11,7 +11,7 @@ tags:
   - jj
   - worker-safety
 date: 2026-09-14
-status: active
+status: superseded by LEGION-631 — the operation-log word-list rule that pushed probes into files is deleted from the plugin, so a probe no longer has to be a file to mention `abandon` or `undo`; the `/tmp`, `rm` and `$HOME` discipline is the note's own and stands
 module: legion
 related_issues:
   - "LEGION-84"

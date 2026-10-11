@@ -1,6 +1,6 @@
 // The number formats the measures panel and the Pipeline page share, ported from the prototype:
-// `formatMinutes` from web/src/lib/dora.ts:34-40, `formatDuration` and `formatRate` from
-// web/src/lib/pipeline.ts:60-83, and `pct` from web/src/components/DoraPanel.tsx:13-15. Pure.
+// `formatMinutes` from web/src/lib/dora.ts:34-40, `formatDuration`, `formatRate` and `formatDue`
+// from web/src/lib/pipeline.ts:60-83, and `pct` from web/src/components/DoraPanel.tsx:13-15. Pure.
 
 import { formatMinutes as formatLeadTime } from "./prList";
 
@@ -27,4 +27,14 @@ export function formatRate(rate: number | null): string {
 /** A share as a percentage to `digits` decimals: "4.96%". */
 export function pct(v: number, digits = 1): string {
   return `${(v * 100).toFixed(digits)}%`;
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** A `YYYY-MM-DD` day as the Pipeline page names it, "Oct 1"; anything else is an error. */
+export function formatDue(day: string): string {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day);
+  const month = match === null ? undefined : MONTHS[Number(match[2]) - 1];
+  if (match === null || month === undefined) throw new Error(`day ${day} is not YYYY-MM-DD`);
+  return `${month} ${Number(match[3])}`;
 }

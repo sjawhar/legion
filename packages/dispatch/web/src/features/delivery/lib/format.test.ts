@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { formatDuration, formatMinutes, formatRate, pct } from "./format";
+import { formatDue, formatDuration, formatMinutes, formatRate, pct } from "./format";
 
 test("formatDuration: one decimal under ten minutes, whole minutes under three hours, then hours", () => {
   expect(formatDuration(4.62)).toBe("4.6m");
@@ -25,4 +25,10 @@ test("formatRate: a whole percentage, n/a when nothing ended in success or failu
 test("pct: a percentage to the given number of decimals", () => {
   expect(pct(0.0496, 2)).toBe("4.96%");
   expect(pct(0.3306)).toBe("33.1%");
+});
+
+test("formatDue: a YYYY-MM-DD day as month and day, anything else an error", () => {
+  expect(formatDue("2026-10-01")).toBe("Oct 1");
+  expect(formatDue("2026-12-25")).toBe("Dec 25");
+  expect(() => formatDue("tomorrow")).toThrow("day tomorrow is not YYYY-MM-DD");
 });

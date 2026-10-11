@@ -11,11 +11,12 @@ import (
 )
 
 // Oh My Pi's bash tool sources the operator's rc file and snapshots the PATH it leaves, so an rc
-// that prepends its own directories (this devbox's dotfiles shims, with their own gh) lands them
-// ahead of worker-bin. The prefix Oh My Pi runs before every command, `${PI_SHELL_PREFIX} <command>`
-// in its persistent shell, puts the two installed directories back in front, and running it again
-// leaves PATH as it was.
-func TestShellPrefixResolvesLegionsGhAndLegionAheadOfAnRcsDirectories(t *testing.T) {
+// that prepends its own directories (this devbox's dotfiles shims, with their own legion) lands
+// them ahead of the launcher directory. The prefix Oh My Pi runs before every command,
+// `${PI_SHELL_PREFIX} <command>` in its persistent shell, puts the installed directory back in
+// front, and running it again leaves PATH as it was. gh is not intercepted: the rc's gh, like any
+// other gh on PATH, reads the agent's credential from GH_CONFIG_DIR.
+func TestShellPrefixResolvesLegionsLauncherAheadOfAnRcsDirectories(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "state dir")
 	if err := Install(root, "/opt/legion"); err != nil {
 		t.Fatalf("Install: %v", err)
@@ -26,49 +27,74 @@ func TestShellPrefixResolvesLegionsGhAndLegionAheadOfAnRcsDirectories(t *testing
 			t.Fatal(err)
 		}
 	}
-	snapshot := strings.Join([]string{rc, Dir(root), LauncherDir(root), "/usr/bin", "/bin"}, ":")
-	prefix := shellprefix.For(Dir(root), LauncherDir(root))
+	snapshot := strings.Join([]string{rc, LauncherDir(root), "/usr/bin", "/bin"}, ":")
+	prefix := shellprefix.For(LauncherDir(root))
 	script := "PATH=" + shellprefix.Literal(snapshot) + "\n" +
-		prefix + " command -v gh\n" +
 		prefix + " command -v legion\n" +
+		prefix + " command -v gh\n" +
 		"before=$PATH\n" +
 		prefix + ` test "$PATH" = "$before" && echo stable`
 	out, err := exec.Command("bash", "-c", script).CombinedOutput()
 	if err != nil {
 		t.Fatalf("bash: %v: %s", err, out)
 	}
-	want := filepath.Join(Dir(root), "gh") + "\n" + filepath.Join(LauncherDir(root), "legion") + "\nstable\n"
+	want := filepath.Join(LauncherDir(root), "legion") + "\n" + filepath.Join(rc, "gh") + "\nstable\n"
 	if string(out) != want {
 		t.Fatalf("resolved\n%s\nwant\n%s", out, want)
 	}
 }
 
-func TestInstallGhInstallsAPrivateExecutableShimAndNoLauncher(t *testing.T) {
+// Install puts the launcher alone under root: a private 0700 script in a 0700 directory that execs
+// the installing legion, and no gh interception directory beside it.
+func TestInstallInstallsThePrivateLauncherAndNothingElse(t *testing.T) {
 	root := t.TempDir()
-	if err := InstallGh(root); err != nil {
-		t.Fatalf("InstallGh: %v", err)
+	if err := Install(root, "/opt/legion"); err != nil {
+		t.Fatalf("Install: %v", err)
 	}
-	bin := filepath.Join(root, "worker-bin")
+	bin := LauncherDir(root)
 	if info, err := os.Stat(bin); err != nil {
-		t.Fatalf("worker-bin: %v", err)
+		t.Fatalf("bin: %v", err)
 	} else if info.Mode().Perm() != 0o700 {
-		t.Fatalf("worker-bin mode = %o, want 0700", info.Mode().Perm())
+		t.Fatalf("bin mode = %o, want 0700", info.Mode().Perm())
 	}
-	shim := filepath.Join(bin, "gh")
-	contents, err := os.ReadFile(shim)
+	launcher := filepath.Join(bin, "legion")
+	contents, err := os.ReadFile(launcher)
 	if err != nil {
-		t.Fatalf("gh shim: %v", err)
+		t.Fatalf("launcher: %v", err)
 	}
-	if info, err := os.Stat(shim); err != nil {
-		t.Fatalf("gh shim stat: %v", err)
+	if info, err := os.Stat(launcher); err != nil {
+		t.Fatalf("launcher stat: %v", err)
 	} else if info.Mode().Perm() != 0o700 {
-		t.Fatalf("gh shim mode = %o, want 0700", info.Mode().Perm())
+		t.Fatalf("launcher mode = %o, want 0700", info.Mode().Perm())
 	}
-	want := "#!/bin/sh\nPATH=${PATH#'" + bin + ":'}\nexport PATH\nexec legion gh -- \"$@\"\n"
-	if string(contents) != want {
-		t.Fatalf("gh shim = %q, want %q", contents, want)
+	if want := "#!/bin/sh\nexec '/opt/legion' \"$@\"\n"; string(contents) != want {
+		t.Fatalf("launcher = %q, want %q", contents, want)
 	}
-	if _, err := os.Stat(LauncherDir(root)); !os.IsNotExist(err) {
-		t.Fatalf("InstallGh installed a launcher directory (%v)", err)
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "bin" {
+		t.Fatalf("Install left %d entries under root, want bin alone", len(entries))
+	}
+	if err := Install(root, "legion"); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
+		t.Fatalf("Install with a relative executable = %v, want a refusal", err)
+	}
+}
+
+// Path leads with root's bin exactly once, whatever PATH the daemon inherited: a daemon started
+// from an agent's shell carries its predecessor's bin, and every other entry stays verbatim.
+func TestPathLeadsWithTheLauncherDirectoryExactlyOnce(t *testing.T) {
+	root := "/var/lib/legion"
+	bin := LauncherDir(root)
+	for path, want := range map[string]string{
+		"/usr/local/bin:/usr/bin":                    bin + ":/usr/local/bin:/usr/bin",
+		bin + ":/usr/local/bin:" + bin + ":/usr/bin": bin + ":/usr/local/bin:/usr/bin",
+		"":               bin,
+		"/usr/bin::/bin": bin + ":/usr/bin:/bin",
+	} {
+		if got := Path(path, root); got != want {
+			t.Errorf("Path(%q) = %q, want %q", path, got, want)
+		}
 	}
 }

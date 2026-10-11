@@ -289,11 +289,23 @@ registered=$(jq -R -c --arg s "$session1" 'fromjson? | select(.msg == "api: cont
 note "daemon: api: controller registered $registered"
 omp1=$(controller_omp "$ctl_state") || fail "no omp process carries LEGION_STATE_DIR=$ctl_state"
 for pair in LEGION_CONTROLLER=1 LEGION_ROLE=controller "LEGION_PROJECT=$ptoken" \
-  "LEGION_CONTROLLER_SECRET_FILE=$ctl_state/secrets/$role" "LEGION_GRANT_FILE=$ctl_state/secrets/$role-grant" \
+  "LEGION_CONTROLLER_SECRET_FILE=$ctl_state/secrets/$role" \
   "ENVOY_TOKEN_FILE=$work/envoy-token" "ENVOY_NATS_URL=$nats_url" "HOME=$omp_home" "OMP_PROFILE=$profile"; do
   [ "$(env_of "$omp1" "${pair%%=*}")" = "${pair#*=}" ] || fail "omp $omp1 has ${pair%%=*}=$(env_of "$omp1" "${pair%%=*}"), want ${pair#*=}"
 done
-env_of "$omp1" PI_SHELL_PREFIX | grep -qF "PATH='$ctl_state/worker-bin:$ctl_state/bin'\${__legion_path" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
+# No grant file: the controller's `legion` tool (read_state, set_status) mints its grants
+# in-process, and no agent runs `legion` from bash.
+for absent in LEGION_GRANT_FILE LEGION_GRANT; do
+  ! tr '\0' '\n' <"/proc/$omp1/environ" | grep -q "^$absent=" || fail "omp $omp1 carries $absent=$(env_of "$omp1" "$absent")"
+done
+env_of "$omp1" PI_SHELL_PREFIX | grep -qF "PATH='$ctl_state/bin'\${__legion_path" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
+case "$(env_of "$omp1" PATH)" in
+  "$ctl_state/bin:"*) ;;
+  *) fail "PATH = $(env_of "$omp1" PATH), want the controller's legion launcher directory first" ;;
+esac
+case ":$(env_of "$omp1" PATH):" in
+  *worker-bin*) fail "PATH = $(env_of "$omp1" PATH) names a worker-bin directory; no daemon installs a gh shim any more" ;;
+esac
 [ -z "$(env_of "$omp1" LEGION_CONTROLLER_SECRET)" ] || fail "the controller secret's value is in omp's environment"
 tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qxF -- "--append-system-prompt" || fail "omp has no --append-system-prompt"
 ! tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qx -- "--mode\|rpc\|--resume.*" || fail "omp runs --mode rpc or --resume"
