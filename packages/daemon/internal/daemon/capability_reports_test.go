@@ -3,20 +3,32 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
+	recordpkg "github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testwait"
 )
 
 // reportingClaim is a claim of this project in state, on a tmux pane at incarnation "4242:1".
@@ -288,6 +300,118 @@ func TestReportsOfClaimsKeepsThisProjectsAlone(t *testing.T) {
 
 	if want := map[claim.Token]capabilities.Report{own.Token: sessionReport(own, "4242:1")}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("reportsOfClaims = %+v, want %+v", got, want)
+	}
+}
+
+// redactionBranch is one entry of packages/contracts/fixtures/capability-redaction.json's
+// branches: a branch of a session's checks that quotes upstream text, the credential that text
+// carries, the detail a plugin without its own redaction sends, and what the state shows. The
+// plugin's test runs each branch with the same upstream text
+// (packages/pi-legion/src/capability-report.test.ts).
+type redactionBranch struct {
+	Branch     string `json:"branch"`
+	Row        string `json:"row"`
+	Credential string `json:"credential"`
+	Sent       string `json:"sent"`
+	Shown      string `json:"shown"`
+}
+
+// GET /legion/v1/state answers anyone who reaches the daemon's port, a worker pod included, so a
+// session's report reaches it redacted whatever the session sent: here a ready carries each branch
+// of the checks that quotes upstream text — web_search's error, a check that throws, dispatch
+// read's and gh's first stderr line, mcp's connection status — with the credential in it, as a
+// plugin built before its own redaction, or a pod the daemon cannot trust, would send it. Neither
+// the claim's view nor the deployment's capability rows carry a credential, anywhere in the body.
+func TestStateShowsTheCredentialsASessionReportedRedacted(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "fixtures", "capability-redaction.json"))
+	if err != nil {
+		t.Fatalf("read the redaction fixture: %v", err)
+	}
+	var fixture struct {
+		Branches []redactionBranch `json:"branches"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode the redaction fixture: %v", err)
+	}
+	rows := make([]claim.CapabilityRow, 0, len(fixture.Branches))
+	for _, branch := range fixture.Branches {
+		rows = append(rows, claim.CapabilityRow{Name: branch.Row, OK: false, Detail: branch.Sent})
+	}
+
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	var record built
+	d := startDaemon(t, cfg, fakeRuntime(rt, &record))
+	spawn := architect()
+	token := d.spawn(spawn)
+	launch := lastLaunch(t, rt, token)
+	stateStore, err := store.Open(context.Background(), cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open state store: %v", err)
+	}
+	t.Cleanup(stateStore.Close)
+	records := recordpkg.NewStore()
+	if err := stateStore.Tx(context.Background(), func(tx pgx.Tx) error {
+		issue := recordpkg.Issue{
+			Key: spawn.Issue, Tree: spawn.Issue, Project: cfg.Project, Title: "Capability report", Phase: phase.Admitted,
+			Generation: 1, Status: "in_progress",
+		}
+		if err := records.PutIssue(context.Background(), tx, issue); err != nil {
+			return err
+		}
+		return records.PutPhase(context.Background(), tx, recordpkg.PhaseRow{Issue: issue.Key, Role: claim.RoleArchitect, Claim: token})
+	}); err != nil {
+		t.Fatalf("write state record: %v", err)
+	}
+	dialShim(t, record.address, launch.BootToken)
+	testwait.Eventually(t, "the hello to reach the machine", func() bool {
+		return d.claim(token).State == string(supervise.StateShimConnected)
+	})
+	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: launch.BootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
+		AgentID: "agent", PluginContract: 1,
+	}, false)
+	if status != http.StatusOK {
+		t.Fatalf("register = %d; body %s", status, body)
+	}
+	var registered claim.RegisterResponse
+	if err := json.Unmarshal(body, &registered); err != nil {
+		t.Fatalf("decode the registration: %v", err)
+	}
+	if status, body := d.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
+		ClaimToken: token, SessionID: "ses_architect", Secret: registered.Secret, Generation: 1,
+		Capabilities: &claim.CapabilityReport{
+			MeasuredAt: time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC), ElapsedMs: 900, Rows: rows,
+		},
+	}, false); status != http.StatusNoContent {
+		t.Fatalf("ready = %d; body %s", status, body)
+	}
+
+	status, body = d.request(http.MethodGet, "/legion/v1/state", nil, false)
+	if status != http.StatusOK {
+		t.Fatalf("GET the state = %d; body %s", status, body)
+	}
+	for _, branch := range fixture.Branches {
+		if bytes.Contains(body, []byte(branch.Credential)) {
+			t.Errorf("%s: the state carries the credential %q: %s", branch.Branch, branch.Credential, body)
+		}
+	}
+	var state api.State
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatalf("decode the state %s: %v", body, err)
+	}
+	view := state.Issues[spawn.Issue].Architect
+	if view == nil || view.Capabilities == nil {
+		t.Fatalf("the state shows the architect as %+v, want its capability report", view)
+	}
+	for _, branch := range fixture.Branches {
+		if want := (api.CapabilityGap{Name: branch.Row, Detail: branch.Shown}); !slices.Contains(view.Capabilities.Open, want) {
+			t.Errorf("%s: the claim's view is open on %+v, want %+v", branch.Branch, view.Capabilities.Open, want)
+		}
+		i := slices.IndexFunc(state.Capabilities, func(row api.CapabilityState) bool { return row.Name == branch.Row })
+		if i < 0 || state.Capabilities[i].Status != capabilities.StatusOpen || !strings.HasSuffix(state.Capabilities[i].Detail, ": "+branch.Shown) {
+			t.Errorf("%s: the deployment's row is %+v, want it open on %q", branch.Branch, state.Capabilities, branch.Shown)
+		}
 	}
 }
 

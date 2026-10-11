@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -736,5 +737,94 @@ describe("github", () => {
     const rows = await measure(fakeHost({ run: installationToken }));
     expect(rows.github.ok).toBe(true);
     expect(rows.github.detail).toContain("legion-reviewer[bot]");
+  });
+});
+
+/** The redaction cases both funnels are held to: this report's rows and the daemon's
+ * `capabilities.Normalize`. `patterns` is one detail per credential shape and what it reads
+ * redacted; `branches` is each branch of a check that quotes upstream text, with the upstream text,
+ * the credential in it, the detail a plugin without this redaction sends, and what the daemon's
+ * state shows. */
+interface RedactionFixture {
+  readonly patterns: readonly {
+    readonly pattern: string;
+    readonly name: string;
+    readonly detail: string;
+    readonly want: string;
+  }[];
+  readonly branches: readonly {
+    readonly branch: string;
+    readonly row: LiveCapability;
+    readonly upstream: string;
+    readonly credential: string;
+    readonly sent: string;
+    readonly shown: string;
+  }[];
+}
+
+const redaction = JSON.parse(
+  readFileSync(
+    path.resolve(import.meta.dir, "../../contracts/fixtures/capability-redaction.json"),
+    "utf8"
+  )
+) as RedactionFixture;
+
+describe("credential redaction", () => {
+  for (const { pattern, name, detail, want } of redaction.patterns) {
+    test(`${pattern}: ${name}`, async () => {
+      const rows = await measure(
+        fakeHost({
+          discoverAgents: async () => {
+            throw new Error(detail);
+          },
+        })
+      );
+      expect(rows.subagents).toEqual({ ok: false, detail: want });
+    });
+  }
+
+  test("each branch that quotes upstream text carries the credential in it redacted", async () => {
+    const upstream = (row: LiveCapability): string => {
+      const branch = redaction.branches.find((candidate) => candidate.row === row);
+      if (branch === undefined) throw new Error(`the fixture has no branch on the ${row} row`);
+      return branch.upstream;
+    };
+    const report = await measureCapabilities(
+      fakeHost({
+        runSearchQuery: async () => ({ content: [], details: { error: upstream("web-search") } }),
+        discoverAgents: async () => {
+          throw new Error(`${upstream("subagents")}\n    at discoverAgents`);
+        },
+        run: async (command) =>
+          command === "dispatch"
+            ? { code: 1, stdout: "", stderr: `${upstream("dispatch-envoy-tools")}\nsecond line\n` }
+            : { code: 1, stdout: "", stderr: `${upstream("github")}\n` },
+        loadMCPConfigs: async () => ({
+          configs: { alpha: { url: "https://mcp.example/sse" } },
+          sources: {},
+        }),
+        discoverMCPServers: async () => ({
+          manager: {
+            waitForPendingConnections: async () => undefined,
+            getConnectionStatus: () => upstream("mcp"),
+            disconnectAll: async () => undefined,
+          },
+          errors: [],
+        }),
+      }),
+      input()
+    );
+
+    const details = Object.fromEntries(report.rows.map((row) => [row.name, row.detail]));
+    for (const branch of redaction.branches) {
+      expect(branch.sent).toContain(branch.upstream);
+      expect(branch.upstream).toContain(branch.credential);
+      expect({ branch: branch.branch, detail: details[branch.row] }).toEqual({
+        branch: branch.branch,
+        detail: branch.shown,
+      });
+    }
+    const wire = JSON.stringify(report);
+    for (const branch of redaction.branches) expect(wire).not.toContain(branch.credential);
   });
 });

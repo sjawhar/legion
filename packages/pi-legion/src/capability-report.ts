@@ -13,8 +13,10 @@ import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors";
  * `dispatch read` answering, and the role's App login through `gh api graphql {viewer{login}}`.
  *
  * The daemon renders the report and never refuses a session for it, so a failing check is a
- * failing row, never a stopped boot: `measureCapabilities` never throws. Every collaborator a check
- * needs is behind `CapabilityHost`, so a test fakes it; `ompCapabilityHost()` is the production one.
+ * failing row, never a stopped boot: `measureCapabilities` never throws. Every row's detail leaves
+ * with its credentials redacted (`redactCredentials`), since a check quotes upstream errors and the
+ * report reaches the daemon's unauthenticated state route. Every collaborator a check needs is
+ * behind `CapabilityHost`, so a test fakes it; `ompCapabilityHost()` is the production one.
  */
 
 /** The budget of one check; a check still pending at it is a failing row. */
@@ -217,30 +219,22 @@ const checkWebSearch: Check = async (host, input, signal) => {
   return ok(`web_search registered; provider ${String(provider)} answered in ${elapsed} ms`);
 };
 
-/** `scheme://userinfo@` in a URL: the credentials a connection error may quote. */
-const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi;
-
-/** The error `discoverMCPServers` recorded for `name`, when its `errors` carry one, with every
- * URL's userinfo in it replaced by `***`: a server's connection error can quote its URL whole,
- * token and all, and the detail travels to the daemon's log and the state. Oh My Pi records
- * `{path: "mcp:<name>", error}`; a `server` or `name` member and a `message` are read the same
- * way, and anything else naming the server is quoted whole. */
+/** The error `discoverMCPServers` recorded for `name`, when its `errors` carry one. Oh My Pi
+ * records `{path: "mcp:<name>", error}`; a `server` or `name` member and a `message` are read the
+ * same way, and anything else naming the server is quoted whole. */
 function mcpErrorFor(errors: readonly unknown[], name: string): string | undefined {
-  let quoted: string | undefined;
   for (const entry of errors) {
     if (typeof entry !== "object" || entry === null) {
       if (!String(entry).includes(name)) continue;
-      quoted = String(entry);
-      break;
+      return String(entry);
     }
     const record = entry as Record<string, unknown>;
     const names = [record.server, record.name, record.path];
     if (!names.some((value) => value === name || value === `mcp:${name}`)) continue;
     const message = record.error ?? record.message;
-    quoted = message === undefined ? String(entry) : String(message);
-    break;
+    return message === undefined ? String(entry) : String(message);
   }
-  return quoted?.replace(URL_USERINFO, "$1***@");
+  return undefined;
 }
 
 const checkMCP: Check = async (host, input, signal) => {
@@ -412,6 +406,39 @@ const CHECKS: Readonly<Record<LiveCapability, Check>> = {
   github: checkGitHub,
 };
 
+/**
+ * The credential shapes a check's upstream error may quote, each with what replaces it, applied in
+ * order: a URL's userinfo (`scheme://user:password@`, `scheme://user@`, up to the last `@` before
+ * the host); the value of a `token`, `key`, `secret`, `password`, `access_token` or `sig` query
+ * parameter; an Authorization or Proxy-Authorization header's credential, after its scheme when the
+ * scheme is bearer, basic, token or digest; a bearer credential anywhere; a GitHub token (`ghp_`,
+ * `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`); and an AWS access key id (`AKIA`, `ASIA`). Each
+ * keeps what names the credential and replaces the secret with `***`. The daemon redacts every
+ * report it takes with the same list (`credentialPatterns` in
+ * `packages/daemon/internal/capabilities`), and both are held to
+ * `packages/contracts/fixtures/capability-redaction.json`.
+ */
+const CREDENTIAL_PATTERNS: readonly (readonly [RegExp, string])[] = [
+  [/([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]+@/gi, "$1***@"],
+  [/([?&](?:token|key|secret|password|access_token|sig)=)[^&\s#"'<>]+/gi, "$1***"],
+  [
+    /(authorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|token|digest)\s+)?)[A-Za-z0-9._~+/=-]+/gi,
+    "$1***",
+  ],
+  [/\b(bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1***"],
+  [/\b(gh[pousr]_)[A-Za-z0-9]{20,}/g, "$1***"],
+  [/\b(github_pat_)[A-Za-z0-9_]{20,}/g, "$1***"],
+  [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, "$1***"],
+];
+
+/** `text` with every `CREDENTIAL_PATTERNS` match replaced. */
+function redactCredentials(text: string): string {
+  return CREDENTIAL_PATTERNS.reduce(
+    (redacted, [pattern, replacement]) => redacted.replace(pattern, replacement),
+    text
+  );
+}
+
 /** `8 s` for a whole number of seconds, else the milliseconds. */
 function budgetLabel(ms: number): string {
   return ms % 1_000 === 0 ? `${ms / 1_000} s` : `${ms} ms`;
@@ -432,8 +459,10 @@ async function withinBudget<T>(work: Promise<T>, ms: number, onDeadline: () => T
  * Measures the six live rows concurrently: each check under `budgets.checkMs` (its signal is
  * aborted at the deadline), the whole report under `budgets.reportMs`. A check that throws, or
  * is still pending at its deadline, is a failing row with the reason; the function itself never
- * throws. `measuredAt` is when the measuring started, `elapsedMs` how long it took, and the rows
- * are in `LIVE_CAPABILITIES` order.
+ * throws. Every row's detail is redacted here (`redactCredentials`), the one place every check's
+ * outcome passes, so no branch of a check quotes a credential into the report. `measuredAt` is
+ * when the measuring started, `elapsedMs` how long it took, and the rows are in
+ * `LIVE_CAPABILITIES` order.
  */
 export async function measureCapabilities(
   host: CapabilityHost,
@@ -465,10 +494,11 @@ export async function measureCapabilities(
     () => undefined
   );
   for (const controller of controllers) controller.abort();
-  const rows: LegionCapabilityRow[] = LIVE_CAPABILITIES.map((name) => ({
-    name,
-    ...(outcomes.get(name) ?? failed(`did not finish within ${budgetLabel(budgets.reportMs)}`)),
-  }));
+  const rows: LegionCapabilityRow[] = LIVE_CAPABILITIES.map((name) => {
+    const { ok, detail } =
+      outcomes.get(name) ?? failed(`did not finish within ${budgetLabel(budgets.reportMs)}`);
+    return { name, ok, detail: redactCredentials(detail) };
+  });
   return { measuredAt, elapsedMs: Date.now() - started, rows };
 }
 

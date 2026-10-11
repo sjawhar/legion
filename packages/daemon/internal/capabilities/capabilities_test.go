@@ -1,6 +1,9 @@
 package capabilities
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -229,6 +232,63 @@ func TestNormalizeKeepsTheLiveRowsInTableOrder(t *testing.T) {
 				if !utf8.ValidString(row.Detail) {
 					t.Errorf("%s: detail %q is not valid UTF-8: the cut split a rune", row.Name, row.Detail)
 				}
+			}
+		})
+	}
+}
+
+// redactionCase is one entry of packages/contracts/fixtures/capability-redaction.json's patterns:
+// a detail quoting one credential shape and what it reads redacted. The plugin's capability report
+// is held to the same cases (packages/pi-legion/src/capability-report.test.ts).
+type redactionCase struct {
+	Pattern string `json:"pattern"`
+	Name    string `json:"name"`
+	Detail  string `json:"detail"`
+	Want    string `json:"want"`
+}
+
+// Normalize redacts every credential shape a reported detail may quote — a URL's userinfo, the
+// value of a credential query parameter, an Authorization header's or a bearer's credential, a
+// GitHub token, an AWS access key id — since a kept detail reaches the unauthenticated state route,
+// the log and the store whatever the session sent. It redacts once the detail is one line, so a
+// credential the session split with control characters is still found, and before the cut, so a
+// cut never leaves the head of a credential too short to recognise.
+func TestNormalizeRedactsCredentials(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "fixtures", "capability-redaction.json"))
+	if err != nil {
+		t.Fatalf("read the redaction fixture: %v", err)
+	}
+	var fixture struct {
+		Patterns []redactionCase `json:"patterns"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode the redaction fixture: %v", err)
+	}
+	padding := strings.Repeat("a", MaxReportDetail-24)
+	cases := append(fixture.Patterns,
+		redactionCase{
+			Pattern: "authorization-header",
+			Name:    "split by control characters the session sent",
+			Detail:  "request failed\nAuthorization:\vBearer\x1babc.def",
+			Want:    "request failed Authorization: Bearer ***",
+		},
+		redactionCase{
+			Pattern: "github-token",
+			Name:    "one the cut at MaxReportDetail would have halved",
+			Detail:  padding + " ghs_EXAMPLEtoken0123456789abcdefghijklmn",
+			Want:    padding + " ghs_***",
+		},
+	)
+	for _, testCase := range cases {
+		t.Run(testCase.Pattern+": "+testCase.Name, func(t *testing.T) {
+			kept, _ := Normalize([]claim.CapabilityRow{{Name: "github", OK: false, Detail: testCase.Detail}})
+
+			i := slices.IndexFunc(kept, func(row Row) bool { return row.Name == GitHub })
+			if i < 0 {
+				t.Fatalf("kept %+v, want a github row", kept)
+			}
+			if got := kept[i].Detail; got != testCase.Want {
+				t.Errorf("detail = %q\nwant     %q", got, testCase.Want)
 			}
 		})
 	}

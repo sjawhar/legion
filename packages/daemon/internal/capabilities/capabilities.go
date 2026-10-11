@@ -8,6 +8,7 @@
 package capabilities
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -133,8 +134,10 @@ type Row struct {
 	// OK is whether the session's check of the row passed.
 	OK bool `json:"ok"`
 	// Detail is the fact the check found, passed or not, as one line of at most MaxReportDetail
-	// bytes (cleanDetail): it reaches the daemon log, the store and the controller's daily report
-	// with nothing delimiting it, so no newline or control character the session sent survives.
+	// bytes with every credential it quoted redacted (cleanDetail): it reaches the daemon log, the
+	// store, the unauthenticated state route and the controller's daily report with nothing
+	// delimiting it, so no newline or control character the session sent survives, and no
+	// credential an upstream error quoted does either.
 	// A row that is not OK always has one — "no detail reported" when the session sent none — since
 	// the state's `open[].detail` is a non-empty string; an OK row's may be empty, a passing check
 	// with nothing to add.
@@ -173,10 +176,12 @@ type Session struct {
 const MaxReportDetail = 1024
 
 // Normalize turns a wire report's rows into the rows the daemon keeps: a name Table has no live
-// row for is dropped (returned in dropped, in wire order), a detail is cleaned to one line and cut
-// at MaxReportDetail (cleanDetail), a row that is not OK with no detail left reads "no detail
-// reported", a live row the wire lacks is appended as not OK with the detail "not reported by this
-// session", and the kept rows are in Table order; a name sent twice keeps the first.
+// row for is dropped (returned in dropped, in wire order), a detail is cleaned to one line with its
+// credentials redacted and cut at MaxReportDetail (cleanDetail), a row that is not OK with no
+// detail left reads "no detail reported", a live row the wire lacks is appended as not OK with the
+// detail "not reported by this session", and the kept rows are in Table order; a name sent twice
+// keeps the first. The ready route is its one caller, so every detail the daemon keeps from a
+// session — what it logs, persists and shows on the state — has passed cleanDetail.
 func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 	live := Live()
 	byName := make(map[Name]Row, len(live))
@@ -207,10 +212,13 @@ func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 }
 
 // cleanDetail is a reported detail as one printed line: every control rune — a newline, a tab,
-// an escape — is a space, whitespace runs are one space with none at either end, and the line is
-// cut at MaxReportDetail on a rune boundary. A detail quotes names the worked repository chooses
-// (a server in `.mcp.json`, a file under `.omp/`), and a name must neither split a log line nor
-// put a line of its own into the controller's instructions.
+// an escape — is a space, whitespace runs are one space with none at either end, every credential
+// is redacted (redactCredentials), and the line is cut at MaxReportDetail on a rune boundary. A
+// detail quotes names the worked repository chooses (a server in `.mcp.json`, a file under
+// `.omp/`), and a name must neither split a log line nor put a line of its own into the
+// controller's instructions. Redaction runs on the one line, so a credential split by control
+// characters is still found, and before the cut, so a cut never leaves a credential's head too
+// short to match.
 func cleanDetail(text string) string {
 	spaced := strings.Map(func(r rune) rune {
 		if unicode.IsControl(r) {
@@ -218,7 +226,38 @@ func cleanDetail(text string) string {
 		}
 		return r
 	}, text)
-	return truncate(strings.Join(strings.Fields(spaced), " "), MaxReportDetail)
+	return truncate(redactCredentials(strings.Join(strings.Fields(spaced), " ")), MaxReportDetail)
+}
+
+// credentialPatterns are the credential shapes a check's upstream error may quote, each with what
+// replaces it, applied in order: a URL's userinfo (`scheme://user:password@`, `scheme://user@`, up
+// to the last `@` before the host); the value of a `token`, `key`, `secret`, `password`,
+// `access_token` or `sig` query parameter; an Authorization or Proxy-Authorization header's
+// credential, after its scheme when the scheme is bearer, basic, token or digest; a bearer
+// credential anywhere; a GitHub token (`ghp_`, `gho_`, `ghs_`, `ghu_`, `ghr_`, `github_pat_`); and
+// an AWS access key id (`AKIA`, `ASIA`). Each keeps what names the credential and replaces the
+// secret with `***`. The Legion plugin redacts its report with the same list before it sends it
+// (`packages/pi-legion/src/capability-report.ts`), and both are held to
+// `packages/contracts/fixtures/capability-redaction.json`.
+var credentialPatterns = []struct {
+	pattern     *regexp.Regexp
+	replacement string
+}{
+	{regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^\s/?#]+@`), "${1}***@"},
+	{regexp.MustCompile(`(?i)([?&](?:token|key|secret|password|access_token|sig)=)[^&\s#"'<>]+`), "${1}***"},
+	{regexp.MustCompile(`(?i)(authorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|token|digest)\s+)?)[A-Za-z0-9._~+/=-]+`), "${1}***"},
+	{regexp.MustCompile(`(?i)\b(bearer\s+)[A-Za-z0-9._~+/=-]+`), "${1}***"},
+	{regexp.MustCompile(`\b(gh[pousr]_)[A-Za-z0-9]{20,}`), "${1}***"},
+	{regexp.MustCompile(`\b(github_pat_)[A-Za-z0-9_]{20,}`), "${1}***"},
+	{regexp.MustCompile(`\b(AKIA|ASIA)[A-Z0-9]{16}\b`), "${1}***"},
+}
+
+// redactCredentials is text with every credentialPatterns match replaced.
+func redactCredentials(text string) string {
+	for _, credential := range credentialPatterns {
+		text = credential.pattern.ReplaceAllString(text, credential.replacement)
+	}
+	return text
 }
 
 // truncate is text cut to at most max bytes on a rune boundary, so a cut never leaves a partial

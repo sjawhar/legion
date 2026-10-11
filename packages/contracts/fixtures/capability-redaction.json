@@ -1,0 +1,160 @@
+{
+  "patterns": [
+    {
+      "pattern": "url-userinfo",
+      "name": "a user and a password",
+      "detail": "fetch failed: https://user:hunter2@mcp.example/sse (HTTP 401)",
+      "want": "fetch failed: https://***@mcp.example/sse (HTTP 401)"
+    },
+    {
+      "pattern": "url-userinfo",
+      "name": "a user alone",
+      "detail": "clone of https://oauth2token@git.example/acme/widgets.git refused",
+      "want": "clone of https://***@git.example/acme/widgets.git refused"
+    },
+    {
+      "pattern": "url-userinfo",
+      "name": "a password holding an at sign",
+      "detail": "dial postgres://legion:p@ss@db.example:5432/legion: refused",
+      "want": "dial postgres://***@db.example:5432/legion: refused"
+    },
+    {
+      "pattern": "query-credential",
+      "name": "every credential parameter in any case, and no parameter that only ends in one's name",
+      "detail": "GET https://api.example/v1/search?q=jj&token=t0k&Key=k3y&secret=s3c&password=pw&ACCESS_TOKEN=at&sig=s1g&page_token=next: 401",
+      "want": "GET https://api.example/v1/search?q=jj&token=***&Key=***&secret=***&password=***&ACCESS_TOKEN=***&sig=***&page_token=next: 401"
+    },
+    {
+      "pattern": "query-credential",
+      "name": "a value up to the quote that closes its URL",
+      "detail": "connect \"https://mcp.example/sse?token=abc123\" failed",
+      "want": "connect \"https://mcp.example/sse?token=***\" failed"
+    },
+    {
+      "pattern": "authorization-header",
+      "name": "a bearer credential, up to the parenthesis that closes it",
+      "detail": "request failed (Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJsZWdpb24ifQ.c2ln)",
+      "want": "request failed (Authorization: Bearer ***)"
+    },
+    {
+      "pattern": "authorization-header",
+      "name": "the token scheme, lowercase",
+      "detail": "authorization: token 0123abcd rejected",
+      "want": "authorization: token *** rejected"
+    },
+    {
+      "pattern": "authorization-header",
+      "name": "a quoted basic credential",
+      "detail": "headers {\"Authorization\":\"Basic dXNlcjpwYXNz\"}",
+      "want": "headers {\"Authorization\":\"Basic ***\"}"
+    },
+    {
+      "pattern": "authorization-header",
+      "name": "a proxy credential with no scheme",
+      "detail": "Proxy-Authorization: c2VjcmV0 refused",
+      "want": "Proxy-Authorization: *** refused"
+    },
+    {
+      "pattern": "bearer",
+      "name": "a bearer credential outside a header",
+      "detail": "401 from mcp.example: invalid Bearer abc.def-ghi_jkl",
+      "want": "401 from mcp.example: invalid Bearer ***"
+    },
+    {
+      "pattern": "github-token",
+      "name": "a personal access token (ghp_)",
+      "detail": "token ghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "github-token",
+      "name": "an OAuth token (gho_)",
+      "detail": "token gho_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token gho_*** expired"
+    },
+    {
+      "pattern": "github-token",
+      "name": "an installation token (ghs_)",
+      "detail": "token ghs_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghs_*** expired"
+    },
+    {
+      "pattern": "github-token",
+      "name": "a user-to-server token (ghu_)",
+      "detail": "token ghu_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghu_*** expired"
+    },
+    {
+      "pattern": "github-token",
+      "name": "a refresh token (ghr_)",
+      "detail": "token ghr_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghr_*** expired"
+    },
+    {
+      "pattern": "github-token",
+      "name": "a fine-grained personal access token (github_pat_)",
+      "detail": "token github_pat_11EXAMPLE0123456789abcd_EXAMPLEtoken0123456789abcdefghijklmnopqrstuvwxyz expired",
+      "want": "token github_pat_*** expired"
+    },
+    {
+      "pattern": "aws-access-key-id",
+      "name": "a long-term key id (AKIA)",
+      "detail": "AccessDenied: AKIAIOSFODNN7EXAMPLE is not authorized",
+      "want": "AccessDenied: AKIA*** is not authorized"
+    },
+    {
+      "pattern": "aws-access-key-id",
+      "name": "a temporary key id (ASIA)",
+      "detail": "session ASIAIOSFODNN7EXAMPLE expired",
+      "want": "session ASIA*** expired"
+    },
+    {
+      "pattern": "none",
+      "name": "a detail quoting no credential",
+      "detail": "gh viewer login: legion-implementer[bot]; connected: alpha (.omp/mcp.json)",
+      "want": "gh viewer login: legion-implementer[bot]; connected: alpha (.omp/mcp.json)"
+    }
+  ],
+  "branches": [
+    {
+      "branch": "web_search's error",
+      "row": "web-search",
+      "upstream": "provider brave answered 401 for https://api.search.example/res/v1/web/search?q=jujutsu&key=BSAexampleKey0123",
+      "credential": "BSAexampleKey0123",
+      "sent": "web_search failed: provider brave answered 401 for https://api.search.example/res/v1/web/search?q=jujutsu&key=BSAexampleKey0123",
+      "shown": "web_search failed: provider brave answered 401 for https://api.search.example/res/v1/web/search?q=jujutsu&key=***"
+    },
+    {
+      "branch": "a check that throws",
+      "row": "subagents",
+      "upstream": "agent index https://indexer:exampleIndexSecret@agents.example/index.json unreachable",
+      "credential": "exampleIndexSecret",
+      "sent": "agent index https://indexer:exampleIndexSecret@agents.example/index.json unreachable",
+      "shown": "agent index https://***@agents.example/index.json unreachable"
+    },
+    {
+      "branch": "dispatch read's first stderr line",
+      "row": "dispatch-envoy-tools",
+      "upstream": "dispatch: 401 Unauthorized (Authorization: Bearer dispatchExampleSecret0123)",
+      "credential": "dispatchExampleSecret0123",
+      "sent": "dispatch read failed: dispatch: 401 Unauthorized (Authorization: Bearer dispatchExampleSecret0123)",
+      "shown": "dispatch read failed: dispatch: 401 Unauthorized (Authorization: Bearer ***)"
+    },
+    {
+      "branch": "gh's first stderr line",
+      "row": "github",
+      "upstream": "HTTP 401: Bad credentials (token ghs_EXAMPLEtoken0123456789abcdefghijklmn)",
+      "credential": "EXAMPLEtoken0123456789abcdefghijklmn",
+      "sent": "gh viewer login failed: HTTP 401: Bad credentials (token ghs_EXAMPLEtoken0123456789abcdefghijklmn)",
+      "shown": "gh viewer login failed: HTTP 401: Bad credentials (token ghs_***)"
+    },
+    {
+      "branch": "mcp's connection status",
+      "row": "mcp",
+      "upstream": "failed: AKIAIOSFODNN7EXAMPLE is not authorized to invoke the server",
+      "credential": "IOSFODNN7EXAMPLE",
+      "sent": "not connected: alpha (status failed: AKIAIOSFODNN7EXAMPLE is not authorized to invoke the server)",
+      "shown": "not connected: alpha (status failed: AKIA*** is not authorized to invoke the server)"
+    }
+  ]
+}
