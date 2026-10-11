@@ -111,10 +111,12 @@ func Missing(err error) bool {
 // Dispatch itself made counts, which is a 4xx carrying one of its error codes.
 //
 // Everything else is an outage a caller rides out: every 5xx, every transport failure, "come back
-// later" (408, 429), a codeless 4xx from whatever sits in front of Dispatch, and a credential
-// answer (401, 403). A revoked or expired token says nothing about the write — an operator
-// restores it and the same body is taken — so reading one as permanent would drop the write for
-// good.
+// later" (408, 429), a codeless 4xx from whatever sits in front of Dispatch, a credential answer
+// (401, 403), and 409 PARENT_CONTENDED. A revoked or expired token says nothing about the write —
+// an operator restores it and the same body is taken — so reading one as permanent would drop the
+// write for good. PARENT_CONTENDED is an issue PATCH that found its parent moved by a concurrent
+// reparent at every attempt to lock it, so nothing was applied and the same body is taken once the
+// reparents stop.
 func PermanentRefusal(err error) (*Error, bool) {
 	var refusal *Error
 	if !errors.As(err, &refusal) {
@@ -126,7 +128,8 @@ func PermanentRefusal(err error) (*Error, bool) {
 		refusal.Status == http.StatusRequestTimeout,
 		refusal.Status == http.StatusTooManyRequests,
 		refusal.Status == http.StatusUnauthorized,
-		refusal.Status == http.StatusForbidden:
+		refusal.Status == http.StatusForbidden,
+		refusal.Status == http.StatusConflict && refusal.Code == "PARENT_CONTENDED":
 		return nil, false
 	}
 	return refusal, true
@@ -148,9 +151,10 @@ func (e *TransientError) Unwrap() error { return e.Err }
 // Unreachable reports whether err means Dispatch is not reachable yet, the same outage
 // PermanentRefusal already rides out rather than drops a queued write over: a TransientError (no
 // answer came back at all), or an *Error whose refusal PermanentRefusal does not call permanent —
-// every 5xx, a codeless 4xx, 408, 429, and a credential answer (401, 403; the Dispatch token
-// (dispatch_token_file) is read once at boot, so a corrected file takes a restart to take effect,
-// same as a queued write already accepts). Anything else — a genuine coded refusal
+// every 5xx, a codeless 4xx, 408, 429, 409 PARENT_CONTENDED, and a credential answer (401, 403;
+// the Dispatch token (dispatch_token_file) is read once at boot, so a corrected file takes a
+// restart to take effect, same as a queued write already accepts). Anything else — a genuine coded
+// refusal
 // PermanentRefusal does call permanent, or an error that is neither a TransientError nor a
 // Dispatch *Error at all, such as a 200 response
 // whose body is not the JSON it promised — is not an outage this waits out.
