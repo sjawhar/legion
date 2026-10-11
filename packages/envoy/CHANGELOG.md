@@ -4,6 +4,14 @@
 
 ### Added
 
+- `Ctrl+Alt+M` (`⌘+⌥+M` on a Mac), Google Docs' shortcut, comments on the text selected in a
+  document, as the selection bar's **Comment** does: it opens the margin's composer on the
+  selection and puts the cursor in it. It works in an issue's documents and a project's documents
+  while the cursor is in the document and text is selected, and does nothing in a comment being
+  written or on a document the reader cannot edit. The `?` help lists it under **Document** and
+  shows `⌥` for Alt on a Mac. On a Mac, shortcuts that hold Alt also match the key's position,
+  since Option changes the character (Option+M types `µ`); every other system keeps
+  character-only matching, so AltGr continues typing its layout's character (LEGION-680).
 - Every document version now carries `size`, the bytes of the markdown it stores, as file and
   image versions already carried theirs: on the issue and project artifact lists, the issue read,
   an artifact's read, each version's read, the reference closure and outgoing reference reads, the
@@ -178,9 +186,10 @@
   a dedicated account its pods set as `serviceAccountName` before taking this release.
 - **Breaking:** a pod's renewal (`POST /v1/enrollments/{id}/renew`) carries the pod's current
   projected token as `pod_token`, and the broker refuses it `403 POD_IDENTITY_MISMATCH` unless the
-  token names the pod UID and service account the enrollment was made for, and `403
-  POD_TOKEN_REQUIRED` without one. A lapsed/revoked enrollment's next renewal is `401
-  ENROLLMENT_NOT_LIVE`, distinct from retryable `PROOF_INVALID` proof failures such as iat skew.
+  token names the pod UID and service account the enrollment was made for, `403 POD_TOKEN_EXPIRED`
+  (naming its expiry, and retried by the renewer with the token its file holds next) once it has
+  expired, and `403 POD_TOKEN_REQUIRED` without one. A lapsed/revoked enrollment's next renewal is
+  `401 ENROLLMENT_NOT_LIVE`, distinct from retryable `PROOF_INVALID` proof failures such as iat skew.
   `agent-secrets renew --pod-token-file FILE` reads the file before every renewal and sends it, and
   Legion's worker shim passes the projected token file. For every pod enrollment this broker makes,
   a token copied out of a pod no longer keeps the enrollment alive past the token's expiry. The pod
@@ -209,6 +218,14 @@
   `PROOF_INVALID` saying `not live`, exit 76 (`EX_PROTOCOL`) naming the enrollment, HTTP status
   and broker code; the shim quotes that terminal line beside its own enrollment and stops. Any
   other `PROOF_INVALID` and other transient failures retry.
+- `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
+  naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
+  Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not
+  identify this pod", which reads as another pod's token. `POD_IDENTITY_MISMATCH` now means only a
+  token that does not prove the pod. A launcher that branches on the code presents the pod's
+  current token with the same key; the Legion daemon reads the new code as not permanent, keeps
+  the key, and enrolls it with the pod's current token, which it asks the shim for at its next
+  observation.
 - **Breaking:** `agent-secrets launcher login` and `launcher login-status` are removed, with no
   alias: `agent-secrets machine login` and `machine login-status` replace them, beside
   `machine list` and `machine revoke`. A script that still calls `launcher` gets the usage and
@@ -453,6 +470,19 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A person's new comment on a document reaches the agents that wrote it, each once, on its own
+  `notifications.agent.<session_id>` topic, whatever the issue's route: a comment on a passage of
+  an issue's document or a project document, a comment on a whole project document, a suggestion,
+  and an edit of any of these. The writers are the session that created the document and every
+  session one of its versions credits, which includes an agent whose anchored comment credited it
+  on a new version. Before, a new comment found no author to route to, so the agent heard of it
+  only by subscribing to the issue's or document's own topic (LEGION-681). A document only people
+  wrote sends nothing new, since a person has no topic. A reply still reaches its thread's root
+  author and its parent's author alone, an ask reply its followers, and a comment on an issue's
+  conversation, which names no document, no author. An agent's comment still notifies nobody, so a
+  session commenting on a document it wrote is not told of its own comment. A writer the comment
+  @-mentions hears it once, from the mention: a new comment's `suppressed_authors` now names every
+  session a mention resolved to.
 - `scripts/dev-postgres.sh` reuses its `dispatch-pg` container rather than failing on the name: it
   starts a stopped one and serves a running one, when the container runs the pinned pgvector
   image. It refuses one on any other image, such as a `postgres:16` an older version of the script

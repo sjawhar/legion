@@ -27,11 +27,16 @@ const reviewReadApp = "legion-reviewer[bot]"
 // listedReview is one review as GitHub's GET /pulls/{number}/reviews lists it: submitted reviews
 // carry submitted_at, a pending one (a draft) carries none.
 func listedReview(id int64, login, state, commit, submitted string) string {
+	return listedReviewWithBody(id, login, state, commit, submitted, fmt.Sprintf("review %d", id))
+}
+
+// listedReviewWithBody is listedReview with the review's body.
+func listedReviewWithBody(id int64, login, state, commit, submitted, body string) string {
 	when := ""
 	if submitted != "" {
 		when = fmt.Sprintf(`,"submitted_at":%q`, submitted)
 	}
-	return fmt.Sprintf(`{"id":%d,"user":{"login":%q},"body":"review %d","state":%q,"commit_id":%q%s}`, id, login, id, state, commit, when)
+	return fmt.Sprintf(`{"id":%d,"user":{"login":%q},"body":%q,"state":%q,"commit_id":%q%s}`, id, login, body, state, commit, when)
 }
 
 // reviewsStandIn is GitHub's REST API for acme/widgets as the required-checks pass reads it: pull
@@ -429,6 +434,45 @@ func TestTheReadJudgesEachReviewOnce(t *testing.T) {
 	}
 	if got, _ := reviewerDecision(t, pool); got != "" || outsiderReads.Load() != 1 || reads.Load() != 2 {
 		t.Fatalf("the round's decision is %q, the outsider's permission was read %d times and the reviews %d; want none, once and twice", got, outsiderReads.Load(), reads.Load())
+	}
+}
+
+// The controller holds the review App's token too, so its reviews list under the review App's own
+// login. The read tells the reviewer's own review from any other review-App session's as the
+// webhook's delivery does (workflow.Engine.DecidesRound with the reviewer's recorded session): a
+// review-App review whose Legion footer names another session is set aside, judged once and kept as
+// refused, and the reviewer's own, though older, decides the round. Without it the pass would apply
+// the controller's review every two minutes and the workflow set it aside every time.
+func TestTheReadSetsAsideAReviewAppReviewFromAnotherSession(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	seedCapture(t, pool, phase.Reviewing, "needs_review", completedReviewer("review-1"))
+	if _, err := pool.Exec(context.Background(), `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+		state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+		values ('review-claim', 'CAPTURE', 'CAPTURE-1', 'CAPTURE-1', 'reviewer', 1, 'ses-reviewer', '', 'working', 0, 0, 0, 0)`); err != nil {
+		t.Fatalf("seed the reviewer's claim session: %v", err)
+	}
+	footer := func(session string) string {
+		return fmt.Sprintf("reviewed\n\n<!-- legion: {\"session\":%q,\"phase\":\"review\"} -->", session)
+	}
+	var reads atomic.Int64
+	api := reviewsStandIn(t, func() string {
+		return "[" + listedReviewWithBody(40, reviewReadApp, "APPROVED", "code", "2026-10-08T22:15:40Z", footer("ses-reviewer")) + "," +
+			listedReviewWithBody(41, reviewReadApp, "CHANGES_REQUESTED", "code", "2026-10-08T22:15:52Z", footer("ses-controller")) + "]"
+	}, &reads).URL
+	w := reviewReadRuntime(pool, api)
+	w.readRequiredChecks(context.Background())
+	if got, _ := capturePhase(t, pool); got != phase.Retro {
+		t.Fatalf("after the pass the issue is in %s, want retro: the reviewer's own approval decides, the controller's newer request for changes is set aside", got)
+	}
+	if got, _ := reviewerDecision(t, pool); got != "approved" {
+		t.Fatalf("the round's recorded decision = %q, want approved", got)
+	}
+	if !w.refusedReviews[41] || w.refusedReviews[40] {
+		t.Fatalf("refused reviews = %v, want the controller's review 41 alone", w.refusedReviews)
+	}
+	w.readRequiredChecks(context.Background())
+	if got, _ := capturePhase(t, pool); got != phase.Retro || reads.Load() != 2 {
+		t.Fatalf("after the second pass the issue is in %s and the reviews were read %d times, want retro and twice: the set-aside review is not judged again", got, reads.Load())
 	}
 }
 

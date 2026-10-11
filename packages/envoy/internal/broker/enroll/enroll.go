@@ -23,6 +23,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 var (
@@ -30,10 +31,17 @@ var (
 	ErrOperatorMismatch = errors.New("this launcher credential enrols a different operator")
 	ErrAlreadyEnrolled  = errors.New("this runtime is already enrolled and live")
 	ErrPodIdentity      = errors.New("the projected token does not identify this pod")
-	ErrNotLive          = errors.New("enrollment is not live")
-	ErrInvalidSlot      = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
-	ErrNoCredential     = errors.New("no such machine login")
-	ErrNotApprover      = errors.New("only the person who approved a person's machine login may revoke it")
+	// ErrPodTokenExpired is a pod token whose expiry has passed, wrapped with the expiry the token
+	// names: the launcher or renewer presents the pod's current token with the same key, where
+	// ErrPodIdentity is a token for another pod, or no token of this cluster at all. An expired
+	// token is reported as expired whatever else is wrong with it (oidc.Verifier reads a failed
+	// token's claims before blaming its signature), so its pod UID, which nothing verified, is
+	// never compared.
+	ErrPodTokenExpired = errors.New("the projected token has expired")
+	ErrNotLive         = errors.New("enrollment is not live")
+	ErrInvalidSlot     = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
+	ErrNoCredential    = errors.New("no such machine login")
+	ErrNotApprover     = errors.New("only the person who approved a person's machine login may revoke it")
 	// ErrNotEnrollingCredential refuses a revoke of a pod enrollment by any launcher credential but
 	// the one that enrolled it (Revoke).
 	ErrNotEnrollingCredential = errors.New("only the machine login that enrolled a pod may end its enrollment")
@@ -212,6 +220,8 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // back (Existing), a different key in a live slot is ErrAlreadyEnrolled, and another slot of the
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
+// A pod token past its expiry is ErrPodTokenExpired, naming that expiry; any other token that does
+// not prove this pod is ErrPodIdentity.
 // A credential revoked (RevokeCredential: by the person who approved a person's machine login, or
 // by anyone signed in for a service's), even after the caller's launcher proof was verified, is
 // ErrUnauthenticated.
@@ -451,12 +461,16 @@ type Renewal struct {
 // verifyPodToken verifies a pod's projected service-account token (issuer, audience, signature,
 // expiry) and requires it to name a pod UID. Create and Renew both call it before any transaction
 // opens, so the issuer's key-set fetch on an unknown key id never holds a row lock or a pooled
-// connection. ErrPodIdentity for every failure, and for a broker with no BROKER_K8S_OIDC_ISSUER.
+// connection. A token past its expiry is ErrPodTokenExpired, naming that expiry; every other
+// failure, and a broker with no BROKER_K8S_OIDC_ISSUER, is ErrPodIdentity.
 func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, error) {
 	if s.Pod == nil {
 		return PodClaims{}, fmt.Errorf("%w: a pod's token needs BROKER_K8S_OIDC_ISSUER", ErrPodIdentity)
 	}
 	claims, err := s.Pod.Verify(ctx, raw)
+	if errors.Is(err, oidc.ErrExpired) {
+		return PodClaims{}, fmt.Errorf("%w (%v)", ErrPodTokenExpired, err)
+	}
 	if err != nil || claims.PodUID == "" {
 		return PodClaims{}, ErrPodIdentity
 	}

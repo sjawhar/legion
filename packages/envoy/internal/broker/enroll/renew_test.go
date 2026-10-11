@@ -3,6 +3,7 @@ package enroll
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -83,13 +84,15 @@ func TestARenewalCarryingThePodsCurrentTokenExtendsTheLease(t *testing.T) {
 }
 
 // TestARenewalCarryingAnotherPodsOrAccountsTokenIsRefused: a token for another pod UID, for another
-// service account, one past its expiry, one no trusted issuer signed, or one bound to no pod is
-// ErrPodIdentity, and the lease is left where it was: a projected token copied out of a pod once
-// stops renewing anything once it expires, and a token from another pod never renews this one.
+// service account, one no trusted issuer signed, or one bound to no pod is ErrPodIdentity, and one
+// past its expiry is ErrPodTokenExpired naming that expiry (as Create answers it), and the lease is
+// left where it was: a projected token copied out of a pod stops renewing anything once it expires,
+// and a token from another pod never renews this one.
 func TestARenewalCarryingAnotherPodsOrAccountsTokenIsRefused(t *testing.T) {
 	r := newPodRenewalRig(t)
+	expiry := time.Now().Add(-time.Hour).Truncate(time.Second)
 	expired := r.issuer.Claims(renewAccount, testAudience)
-	expired["iat"], expired["exp"] = time.Now().Add(-2*time.Hour).Unix(), time.Now().Add(-time.Hour).Unix()
+	expired["iat"], expired["exp"] = expiry.Add(-time.Hour).Unix(), expiry.Unix()
 	expired["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": renewPodUID}}
 	stranger := oidctest.New(t)
 	strangerKey := stranger.PublishKey(t, "stranger-key")
@@ -97,7 +100,6 @@ func TestARenewalCarryingAnotherPodsOrAccountsTokenIsRefused(t *testing.T) {
 	for name, token := range map[string]string{
 		"another pod's token":              mintPodToken(t, r.issuer, r.key, renewAccount, "pod-uid-other"),
 		"another service account's token":  mintPodToken(t, r.issuer, r.key, "system:serviceaccount:legion:other", renewPodUID),
-		"a token past its expiry":          r.issuer.Mint(t, r.key, expired),
 		"a token no trusted issuer signed": mintPodToken(t, stranger, strangerKey, renewAccount, renewPodUID),
 		"a token bound to no pod":          r.issuer.Mint(t, r.key, r.issuer.Claims(renewAccount, testAudience)),
 		"not a token at all":               "not-a-jwt",
@@ -108,6 +110,16 @@ func TestARenewalCarryingAnotherPodsOrAccountsTokenIsRefused(t *testing.T) {
 		if lease := r.lease(t); !lease.Equal(before) {
 			t.Fatalf("lease after the refused renewal with %s = %v, want it left at %v", name, lease, before)
 		}
+	}
+	_, err := r.svc.Renew(context.Background(), r.id, r.issuer.Mint(t, r.key, expired))
+	if !errors.Is(err, ErrPodTokenExpired) || errors.Is(err, ErrPodIdentity) {
+		t.Fatalf("Renew(a token past its expiry) = %v, want ErrPodTokenExpired and not ErrPodIdentity", err)
+	}
+	if want := expiry.UTC().Format(time.RFC3339); !strings.Contains(err.Error(), want) {
+		t.Fatalf("Renew(a token past its expiry) = %q, want it to name the expiry %s", err, want)
+	}
+	if lease := r.lease(t); !lease.Equal(before) {
+		t.Fatalf("lease after the refused renewal with an expired token = %v, want it left at %v", lease, before)
 	}
 }
 

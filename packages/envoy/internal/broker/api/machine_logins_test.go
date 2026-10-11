@@ -377,6 +377,13 @@ func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 				t.Fatalf("renew with %s = %d %s, want 403 POD_IDENTITY_MISMATCH", name, status, code)
 			}
 		}
+		expiry := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+		claims := ts.podIssuer.Claims(workerAccount, podAudience)
+		claims["iat"], claims["exp"] = expiry.Add(-10*time.Minute).Unix(), expiry.Unix()
+		claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
+		if status, code := renew(t, key, id, map[string]any{"pod_token": ts.podIssuer.Mint(t, ts.podKey, claims)}); status != http.StatusForbidden || code != "POD_TOKEN_EXPIRED" {
+			t.Fatalf("renew with the pod's own token past its expiry = %d %s, want 403 POD_TOKEN_EXPIRED", status, code)
+		}
 		if status, code := renew(t, key, id, map[string]any{"pod_token": ts.podToken(t, workerAccount, podUID)}); status != http.StatusOK {
 			t.Fatalf("renew with the pod's own token = %d %s, want 200", status, code)
 		}

@@ -3,7 +3,9 @@ package api_test
 import (
 	"crypto/ecdsa"
 	"net/http"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -248,5 +250,30 @@ func TestRolesAndGenerationsOfOnePodEnrollRequestAndReleaseIndependently(t *test
 	}
 	if status, body := values(reviewer, grants["reviewer-g1"]); status != http.StatusOK {
 		t.Fatalf("reviewer-g1 reading its grant after implementer-g1's revoke = %d %s, want 200", status, body)
+	}
+}
+
+// An enrollment presenting the pod's own token after it expired is refused 403 POD_TOKEN_EXPIRED,
+// naming the token's expiry, so the launcher can tell a stale token, which the pod's current one
+// replaces, from POD_IDENTITY_MISMATCH, a token that is not this pod's.
+func TestAnExpiredPodTokenIsRefusedAsExpiredNamingItsExpiry(t *testing.T) {
+	ts := newTestServer(t)
+	credentialID, launcherKey := ts.mintServiceLauncherCredential(t)
+	podUID := uuid.NewString()
+	expiry := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	claims := ts.podIssuer.Claims(workerAccount, podAudience)
+	claims["iat"], claims["exp"] = expiry.Add(-10*time.Minute).Unix(), expiry.Unix()
+	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": podUID}}
+	expired := ts.podIssuer.Mint(t, ts.podKey, claims)
+
+	status, body := ts.launcher(t, launcherKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
+		"kind": "pod", "runtime_id": podUID, "slot": "implementer-g1", "thumbprint": thumbprintOf(t, newSigningKey(t)), "pod_token": expired,
+	})
+	refusal := decode[wireError](t, body)
+	if status != http.StatusForbidden || refusal.Code != "POD_TOKEN_EXPIRED" {
+		t.Fatalf("an expired pod token = %d %s, want 403 POD_TOKEN_EXPIRED", status, body)
+	}
+	if want := expiry.UTC().Format(time.RFC3339); !strings.Contains(refusal.Error, want) {
+		t.Fatalf("an expired pod token's refusal %q, want it to name the expiry %s", refusal.Error, want)
 	}
 }

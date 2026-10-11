@@ -43,6 +43,7 @@ import {
   parseDispatchReference,
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
+import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
@@ -311,6 +312,26 @@ export function ProofDocument({
     }
     return copyText(`${window.location.origin}${window.location.pathname}#b-${blockId}`);
   }, []);
+  // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
+  // offered while this editor has focus, holds a selection and takes edits, which is when the bar
+  // offers Comment; anywhere else - a comment composer, an ask card's field, a read-only or
+  // historical document - the chord does nothing. `inEditable` because the editor is where it is
+  // pressed. A document is its own scope, since the issue page and a project's document page both
+  // render one.
+  useKeymapScope("document");
+  useKeymap("document", [
+    {
+      id: "comment-on-selection",
+      inEditable: true,
+      keys: "$mod+Alt+m",
+      label: "Comment on selection",
+      run: () => editorRef.current?.commentOnSelection(),
+      when: () => {
+        const view = editorRef.current?.view;
+        return view?.editable === true && view.hasFocus() && !view.state.selection.empty;
+      },
+    },
+  ]);
   useEffect(() => {
     setOpenDecisionIndex((current) => Math.min(current, Math.max(openBlockAsks.length - 1, 0)));
   }, [openBlockAsks.length]);

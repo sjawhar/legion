@@ -8,11 +8,12 @@ sidebar:
 Dispatch can be driven from the keyboard. Press `?` on any page to see the shortcuts that page
 offers.
 
-`Ctrl` below means `⌘` on a Mac. A shortcut written `g i` is a sequence: press `g`, let go, then
-press `i` within a second. While you wait, the keys pressed so far show in the bottom right corner.
+`Ctrl` below means `⌘` on a Mac, and `Alt` means `⌥` (Option). A shortcut written `g i` is a
+sequence: press `g`, let go, then press `i` within a second. While you wait, the keys pressed so far
+show in the bottom right corner.
 
-While you type in a text field, only `Ctrl+K` and `Escape` work as shortcuts, so single letters
-never interrupt your typing.
+While you type in a text field, only `Ctrl+K`, `Escape`, and `Ctrl+Alt+M` in a document work as
+shortcuts, so single letters never interrupt your typing.
 
 ## The help and the palette
 
@@ -124,6 +125,19 @@ On the List:
 
 `0` – `3` and `Shift+P` do nothing while focus is in an ask's card or on a checkbox or option,
 where the key belongs to that control.
+
+## Document
+
+These work in an issue's documents and in a project's documents.
+
+| Keys | Action |
+| --- | --- |
+| `Ctrl+Alt+M` | Comment on the selected text |
+
+`Ctrl+Alt+M` is the shortcut Google Docs uses. It does what the selection bar's **Comment** does:
+it opens a comment on the text you selected and puts the cursor in it. It works while the cursor is
+in the document and text is selected. With nothing selected, in a comment you are writing, or on a
+document you cannot edit, it does nothing.
 
 ## Agents
 

@@ -87,14 +87,18 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 19 for contract 19's token file (LEGION-631: the three routes that redeemed a grant for a
-GitHub or git credential and the grant request's `push` are gone, the pane gains the GitHub
-variables above and loses the absolute-path pins of its gh, git and jj, the credential-helper
-variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/complete` takes no `commit` and answers
-`note`; `POST /legion/v1/threads/resolve` is deleted), after contract 18's independent issue pods,
-each on a volume of its own (LEGION-632: the init container's environment is the four surfaces
-above and nothing of a shared disk — no removable-workspaces list, no lock wait, no role or
-generation — and its volume expectation is `LEGION_EXPECT_ISSUE_VOLUME`), contract 17's `dispatch`
+number is 20 for contract 20's controller credential (LEGION-668: the controller holds the review
+App's GitHub token like every role — `POST /legion/v1/controller/github-credential` answers the
+operator-launched controller's `legion controller start` the review App's gh files for the current
+controller capability, and the daemon-launched controller's pod gets the GitHub variables above
+like any role's container), after contract 19's token file (LEGION-631: the three routes that
+redeemed a grant for a GitHub or git credential and the grant request's `push` are gone, the pane
+gains the GitHub variables above and loses the absolute-path pins of its gh, git and jj, the
+credential-helper variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/complete` takes no
+`commit` and answers `note`; `POST /legion/v1/threads/resolve` is deleted), contract 18's
+independent issue pods, each on a volume of its own (LEGION-632: the init container's environment
+is the four surfaces above and nothing of a shared disk — no removable-workspaces list, no lock
+wait, no role or generation — and its volume expectation is `LEGION_EXPECT_ISSUE_VOLUME`), contract 17's `dispatch`
 command instructions in every daemon role prompt (LEGION-588), contract 16's `capabilities` list on
 `GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
 (LEGION-462), contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push`
