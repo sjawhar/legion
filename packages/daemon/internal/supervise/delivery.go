@@ -370,8 +370,9 @@ const interruptedTask = "Your previous turn on this task was interrupted when yo
 	"Before repeating anything, check what that turn already did in your workspace and on the " +
 	"issue's branch, then continue the task.\n\n"
 
-// interrupted takes back the pending task whose turn the claim's dead process was running, so the
-// relaunched agent's ready sends it again: Oh My Pi does not resume the turn itself. The turn ran,
+// interrupted takes back the pending task whose turn the claim's process can no longer finish — it
+// died, or a forced stop is about to end it — so the relaunched agent's ready sends it again: Oh My
+// Pi does not resume the turn itself. why names which, for the line it logs. The turn ran,
 // so the agent read the task and it keeps its read mark; it goes back unconfirmed under a new id
 // the new process's shim has no record of, marked Interrupted, so it is sent behind
 // interruptedTask. It is neither retired nor its run marked served, since the turn never
@@ -382,12 +383,12 @@ const interruptedTask = "Your previous turn on this task was interrupted when yo
 // sweep finds it gone again and this takes the task back then — where a task taken back in memory
 // alone would be skipped by that death, relaunched from a store still holding it confirmed, and
 // retired as served by a restart.
-func (m *Machine) interrupted(ctx context.Context) error {
+func (m *Machine) interrupted(ctx context.Context, why string) error {
 	p := m.claim.Pending
 	if p == nil || p.ConfirmedAt.IsZero() {
 		return nil
 	}
-	m.log.Warn("supervise: the process died in the task's turn; the task waits for the relaunch", "delivery", p.ID)
+	m.log.Warn("supervise: "+why+"; the task waits for the relaunch", "delivery", p.ID)
 	next := *p
 	next.ID, next.ConfirmedAt, next.Interrupted = rand.Text(), time.Time{}, true
 	if err := m.deps.Store.PutDelivery(ctx, m.claim.Token, next); err != nil {

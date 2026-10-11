@@ -118,23 +118,24 @@ func suspendedAgain(m *Machine, ctx context.Context, ev Event) error {
 
 // suspendAtTimeout is the held suspension's timer: the turn did not end within the stop timeout,
 // so the process is stopped mid-turn; or an earlier stop failed, and it is tried again.
+//
+// A stop forced mid-turn is not the turn's end: the confirmed task did not finish, so it goes back
+// interrupted, as a death in a turn takes it back, and the operator's resume re-sends it to the
+// same owner. The task is taken back before the stop, as died does: a take-back that fails stops
+// nothing and is tried again at the probe interval, and a crash between the two leaves a running
+// claim holding an interrupted task, never a suspended claim holding a confirmed one, which settle
+// would retire as a finished turn.
 func suspendAtTimeout(m *Machine, ctx context.Context, _ Event) error {
-	midTurn := m.claim.State == StateWorking
-	if midTurn {
+	if m.claim.State == StateWorking {
 		m.log.Warn("supervise: the agent's turn has not ended; suspending it mid-turn", "stopTimeout", m.deps.Timeouts.Stop)
+		if err := m.interrupted(ctx, "the stop timeout ended the task's turn"); err != nil {
+			m.arm(TimerSuspend, m.deps.Timeouts.Probe, "")
+			return fmt.Errorf("take back the task of %s before its forced stop: %w", m.claim.Token, err)
+		}
 	} else {
 		m.log.Info("supervise: trying the held suspension's stop again")
 	}
-	if err := m.suspendHeld(ctx); err != nil {
-		return err
-	}
-	// A stop forced mid-turn is not the turn's end: the confirmed task did not finish, so it goes
-	// back interrupted, as a death in a turn takes it back, rather than being retired as served.
-	// The operator's resume then re-sends it to the same owner.
-	if midTurn && m.claim.State == StateSuspended {
-		return m.interrupted(ctx)
-	}
-	return nil
+	return m.suspendHeld(ctx)
 }
 
 // suspendRequest is the event a suspension's row is handed. The table routes only RequestSuspend

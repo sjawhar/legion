@@ -364,8 +364,12 @@ Closing the terminal leaves the project without one, and the daemon logs
    legion claims resume  --config legion.yaml --operator-token-file operator-token --claim <token>
    ```
 
-   An operator's suspension waits for the agent's current turn to land, at most
-   `worker_stop_timeout_seconds`; the resumed agent continues the same conversation in a new pod.
+   An operator's suspension of an agent in a turn waits for that turn to land, at most
+   `worker_stop_timeout_seconds`, and the cut-off task is re-sent on the resume. One that reaches a
+   claim while it is still launching waits until the agent is ready, or until its registration
+   deadline. Until the stop lands the hold lives only in the daemon's memory, so before restarting
+   the daemon wait until `legion claims list` shows the claim `suspended`, not merely
+   `suspensionHeld`. The resumed agent continues the same conversation in a new pod.
 
    **An operator's suspension holds until the operator resumes the claim.** The daemon resumes a
    suspended claim on its own when the claim owns its issue's current phase (at boot, at
@@ -386,8 +390,9 @@ Closing the terminal leaves the project without one, and the daemon logs
    legion claims resume --config legion.yaml --operator-token-file operator-token --claim <unknown-claim>
    ```
 
-   Resume every `unknown` claim that was not deliberately drained. The boot report names them too,
-   so this list is the one command needed to choose them.
+   Resume every `unknown` claim that was not deliberately drained. The daemon's boot report lists
+   the suspended phase owners and tree architects among them, the ones whose trees cannot move
+   until they are resumed.
 5. **Restart the controller** with the new binary and plugins.
 
 ## Observe
