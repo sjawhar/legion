@@ -252,7 +252,7 @@ const legionCapabilityState = z.strictObject({
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
  * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9);
  * `capabilities` is the deployment's report, never null (contract 16); `strandedClaims` is every
- * claim nothing will wake, by issue and then role, never null (contract 20). */
+ * claim nothing will wake, by issue and then role, never null (contract 21). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
@@ -301,6 +301,16 @@ export type LegionControllerRegistration = z.output<typeof LegionControllerRegis
 export const LegionControllerSecretResponse = z.strictObject({
   secret: nonEmptyString,
   designGate: z.enum(["root-issues", "off"]),
+});
+
+/** `api.ControllerCredentialResponse`, the answer of `POST /legion/v1/controller/github-credential`:
+ * the two files `ghconfig.Rendered` renders for the review App's token, which `legion controller
+ * start` writes under `<state_dir>/gh` and refreshes every minute. The plugin never reads it. */
+export const LegionControllerCredentialResponse = z.strictObject({
+  hosts: nonEmptyString,
+  config: nonEmptyString,
+  app: z.enum(["implement", "review"]),
+  expiresAt: timestamp,
 });
 
 /** Claim routes refuse with only a sentence; credential and workflow routes add a stable code. */

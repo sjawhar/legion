@@ -1996,7 +1996,9 @@ credential, runtime id and slot: `POST /v1/enrollments` takes an optional pod-on
 same way) naming one of several independent identities in one pod. The launcher whose proof
 authenticates the enrollment chooses the slot; a session's proof cannot enroll anything
 (`401 LAUNCHER_INVALID`). So each slot of a pod holds its own key, lease, requests and grants,
-while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
+while a pod's `runtime_id` stays the pod UID its token proves. A pod token past its expiry is
+`403 POD_TOKEN_EXPIRED`, naming that expiry, and any other token that does not prove the pod is
+`403 POD_IDENTITY_MISMATCH`. Omitted or `""` is the runtime's
 one enrollment, every box's and host's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
 ALREADY_ENROLLED`, and the policy never sees the slot: a pod is a requester with no operator, whose

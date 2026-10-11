@@ -116,8 +116,23 @@ package api
 // and 8.9.0 declaring them without the token file, so a daemon at any of them would pass the gate
 // against them. Renumbered three times, as the collision note says.)
 //
-// 20: LEGION-670 -- api.State gains `strandedClaims`, every claim nothing will wake
+// 20: LEGION-668 -- the controller holds the review App's GitHub token like every role: `POST
+// /legion/v1/controller/github-credential` is the route `legion controller start` fetches the
+// controller's gh files from and refreshes them over, with the controller capability. The
+// controller pod's agent environment gains `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN` and
+// `GH_HOST` exactly as an issue pod's role container has them, backed by a `gh-controller` volume
+// of its role Secret. A `legion` built before 20 never fetches the credential, so its controller's
+// gh acts as nobody against a daemon that expects it to, and a daemon before 20 serves no such
+// route, so `legion controller start` from 20 is refused after the mint and cuts the incumbent
+// controller off for nothing: the boot gate and `legion probe-image` refuse the mixed pair. (This
+// branch first took 19; LEGION-631 landed at 19 first, pi-legion 8.10.1 declaring it without this
+// route, so a daemon at 19 would pass the gate against it. Renumbered, as the collision note says.)
+//
+// 21: LEGION-670 -- api.State gains `strandedClaims`, every claim nothing will wake
 // (workflow.Stranded): a suspended or failed worker of its issue's phase, or tree architect, in a
 // tree that runs, each named by its issue, role and state. Never null, so a plugin built before it
-// refuses the state, and the bump is why the two never meet.
-const DaemonAPIVersion = 20
+// refuses the state, and the bump is why the two never meet. (This branch first took 19, then 20;
+// LEGION-631 landed at 19 and LEGION-668 at 20 first, so a daemon at either would pass the gate
+// against a plugin whose strict reader lacks the field. Renumbered twice, as the collision note
+// says.)
+const DaemonAPIVersion = 21

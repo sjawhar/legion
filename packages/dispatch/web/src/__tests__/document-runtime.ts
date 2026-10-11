@@ -18,6 +18,8 @@ import type { PendingState } from "../features/doc/pending-sync";
 import type { DocumentRuntimeValue } from "../features/doc/runtime";
 
 export interface FakeEditor {
+  /** How many times the host asked to comment on the selection. */
+  commented: number;
   destroyed: boolean;
   focused: string[];
   markdown: string | undefined;
@@ -26,6 +28,8 @@ export interface FakeEditor {
   readOnly: boolean;
   remoteMarks: Record<string, StoredMark>[];
   root: HTMLElement;
+  /** Whether the fake view's selection is empty (a caret); a test sets it to select text. */
+  selectionEmpty: boolean;
   /** The fake view's props bag, where `setProps` accumulates node views the host installs. */
   viewProps: Record<string, unknown>;
 }
@@ -91,6 +95,7 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       root.setAttribute(name, value);
     }
     const editor: FakeEditor = {
+      commented: 0,
       destroyed: false,
       focused: [],
       focusedBlocks: [],
@@ -99,12 +104,17 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       readOnly: options.readOnly ?? false,
       remoteMarks: [],
       root,
+      selectionEmpty: true,
       viewProps: { nodeViews: {} },
     };
     root.textContent = options.ydoc.getXmlFragment("prosemirror").toString();
     const handle = {
       applyRemoteMarks(metadata: Record<string, StoredMark>) {
         editor.remoteMarks.push(metadata);
+      },
+      commentOnSelection() {
+        editor.commented += 1;
+        return true;
       },
       destroy() {
         editor.destroyed = true;
@@ -135,11 +145,22 @@ export function fakeDocumentRuntime(seed: { text?: string } = {}): FakeDocumentR
       view: {
         dispatch() {},
         dom: root,
+        get editable() {
+          return !editor.readOnly;
+        },
+        hasFocus: () => root.ownerDocument.activeElement === root,
         props: editor.viewProps,
         setProps(next: Record<string, unknown>) {
           Object.assign(editor.viewProps, next);
         },
-        state: { doc: { descendants() {} } },
+        state: {
+          doc: { descendants() {} },
+          selection: {
+            get empty() {
+              return editor.selectionEmpty;
+            },
+          },
+        },
       },
     } as unknown as EditorHandle;
     editors.push(editor);

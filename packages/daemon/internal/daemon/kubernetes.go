@@ -271,7 +271,8 @@ func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *
 }
 
 // brokerEnroller is agentsecrets.Client as supervise.Enroller; an *agentsecrets.APIError is a
-// PermanentError when its status says so, which is how the machine tells a refusal from an outage.
+// PermanentError when its status says so, which is how the machine tells a refusal from an outage,
+// and an ExpiredTokenError for POD_TOKEN_EXPIRED, a stale token under a key that stands.
 type brokerEnroller struct{ client *agentsecrets.Client }
 
 func (b brokerEnroller) Enroll(ctx context.Context, e supervise.PodEnrollment) (string, error) {

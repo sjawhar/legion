@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import {
   LegionChildRequest,
+  LegionControllerCredentialResponse,
   LegionControllerGrantRequest,
   LegionControllerRegisterResponse,
   LegionControllerSecretResponse,
@@ -42,6 +43,7 @@ const schemas: Record<string, z.ZodType> = {
   "register.json": LegionRegisterResponse,
   "register-controller.json": LegionControllerRegisterResponse,
   "controller-secret.json": LegionControllerSecretResponse,
+  "controller-github-credential.json": LegionControllerCredentialResponse,
   "error.json": LegionErrorResponse,
   "operator-claim.json": LegionOperatorClaimResponse,
   "operator-claims.json": LegionOperatorClaimsResponse,
@@ -299,7 +301,7 @@ test("a capability row's status is one the report renders, and the report cannot
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
-// The claims nothing will wake (contract 20): the golden names LEGION-210's failed implementer,
+// The claims nothing will wake (contract 21): the golden names LEGION-210's failed implementer,
 // whose issue is held, and a state with none carries an empty list rather than none.
 test("the state golden names the claims nothing will wake, and the list cannot be dropped", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));

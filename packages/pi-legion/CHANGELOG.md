@@ -25,10 +25,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- `legion.daemonApiVersion` is 20. Contract 20 adds `strandedClaims` to `GET /legion/v1/state`
+- `legion.daemonApiVersion` is 21. Contract 21 adds `strandedClaims` to `GET /legion/v1/state`
   (LEGION-670): every claim nothing will wake — a suspended or failed worker of its issue's phase
   that no queued start will wake, or a suspended or failed tree architect, in a tree that runs —
-  each named by its issue, role and state. The list is never absent, so a plugin built before 20
+  each named by its issue, role and state. The list is never absent, so a plugin built before 21
   refuses the state; install this release with a Go `legion` and a worker image built from the
   same commit.
 - `legion.daemonApiVersion` is 19 (LEGION-631). Each Legion role's GitHub App token is now a file
@@ -92,6 +92,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   from Dispatch's Agents page, and the controller answers it first, in the conversation. The
   daemon's `How this controller runs` prompt for that launch says the same.
   `legion.daemonApiVersion` is unchanged.
+- `legion.daemonApiVersion` is 20 (LEGION-668): the controller holds the review App's GitHub token
+  like every role — a daemon-launched controller pod gets it as a mounted gh directory
+  (`GH_CONFIG_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied, backed by a
+  `gh-controller` volume of the role Secret) and `legion controller start` fetches it over `POST
+  /legion/v1/controller/github-credential` and refreshes it every minute. The plugin's code does
+  not change; the number only gates the pair.
 - The `legion-worker` skill says what a shell `legion handoff complete` and a `task` subagent's bash
   can do since LEGION-630 removed the role gate, and how the phase-stall reminder then behaves
   (LEGION-634): a shell completion, should one run, completes the phase at the daemon and is not

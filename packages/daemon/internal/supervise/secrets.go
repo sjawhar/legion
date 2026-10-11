@@ -40,9 +40,14 @@ type Enroller interface {
 	Revoke(ctx context.Context, id string) error
 }
 
-// PermanentError is an Enroll failure a retry with the same identity cannot change (the broker's
-// 4xx); the machine drops the identity and waits for the shim's next hello.
+// PermanentError is an Enroll failure a retry with the same identity cannot change (a broker 4xx
+// other than an expired token); the machine drops the identity and waits for the shim's next hello.
 type PermanentError interface{ Permanent() bool }
+
+// ExpiredTokenError is an Enroll failure the broker gave because the pod token presented had
+// expired (POD_TOKEN_EXPIRED): the key the hello carried stands, its token does not. The machine
+// drops the token, keeps the key, and enrolls that key with the token freshToken reads next.
+type ExpiredTokenError interface{ TokenExpired() bool }
 
 const (
 	// revokeAttempts and revokeRetryDelay bound the revocation of a let-go process's enrollment;
@@ -57,7 +62,8 @@ const (
 // heldIdentity is the latest hello2 identity for the claim's current incarnation, kept in memory
 // until the enrollment lands: a resume enrolls on the hello itself, a fresh launch once the agent
 // registers and the session id is known. Its token is the one the hello carried until freshToken
-// replaces it with one the shim read later.
+// replaces it with one the shim read later, and empty once the broker found it expired, until
+// freshToken reads a fresh one.
 type heldIdentity struct {
 	incarnation string
 	AgentSecretsIdentity
@@ -67,7 +73,9 @@ type heldIdentity struct {
 // identity: the hello's thumbprint and token for this incarnation, and the agent's session id,
 // the broker's wake address. It never fails a transition: a refusal is logged with its code, a
 // transient one retried on the next Alive observation, a permanent one on the shim's next hello.
-// Once enrolled, the id is handed to the shim over the claim's connection, once per connection.
+// An expired token is dropped and the key kept, and the next attempt reads a fresh one
+// (freshToken). Once enrolled, the id is handed to the shim over the claim's connection, once per
+// connection.
 func (m *Machine) ensureEnrolled(ctx context.Context) error {
 	if m.deps.Secrets == nil || m.claim.Locator == nil {
 		return nil
@@ -91,11 +99,16 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 		})
 		cancel()
 		if err != nil {
+			var expired ExpiredTokenError
 			var permanent PermanentError
-			if errors.As(err, &permanent) && permanent.Permanent() {
+			switch {
+			case errors.As(err, &expired) && expired.TokenExpired():
+				m.log.Warn("supervise: agent-secrets: the broker found the pod token expired; keeping the key for a fresh token", "incarnation", incarnation, "error", err)
+				m.identity.PodToken = ""
+			case errors.As(err, &permanent) && permanent.Permanent():
 				m.log.Error("supervise: agent-secrets: enrollment refused; waiting for the shim's next hello", "incarnation", incarnation, "error", err)
 				m.identity = nil
-			} else {
+			default:
 				m.log.Warn("supervise: agent-secrets: enrollment failed; retrying on the next observation", "incarnation", incarnation, "error", err)
 			}
 			return nil
@@ -130,12 +143,14 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 // again when it cannot. The shim reads its projected token at each hello, the token lives at most
 // an hour from when the kubelet wrote it, and an enrollment can wait much longer after the hello
 // (a machine login awaiting approval, a broker outage); the broker refuses an expired token as
-// POD_IDENTITY_MISMATCH. So a token that could expire before the broker verifies it (within the
+// POD_TOKEN_EXPIRED. So a token that could expire before the broker verifies it (within the
 // Enroll call's RPC bound plus podTokenSkew), or whose expiry cannot be read, is replaced by the
-// one the shim reads from its mount now. A shim that cannot read it again, one built before the
-// request among them, drops the identity to wait for its next hello, as a refused enrollment
-// does; a lost request is asked again on the next observation, and with no connection the next
-// hello carries a token read then.
+// one the shim reads from its mount now. That includes a token the broker already refused as
+// expired, which ensureEnrolled drops, so a broker whose clock runs further ahead than
+// podTokenSkew costs one refusal, not a wait for the next hello. A shim that cannot read it again,
+// one built before the request among them, drops the identity to wait for its next hello, as a
+// refused enrollment does; a lost request is asked again on the next observation, and with no
+// connection the next hello carries a token read then.
 func (m *Machine) freshToken(ctx context.Context, incarnation string) bool {
 	if expires, ok := podTokenExpiry(m.identity.PodToken); ok && expires.After(m.deps.Clock.Now().Add(m.deps.Timeouts.RPC+podTokenSkew)) {
 		return true
