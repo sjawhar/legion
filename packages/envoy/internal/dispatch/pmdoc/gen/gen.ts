@@ -2,7 +2,7 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setBlockIdGenerator } from "@legion/proof-editor";
-import { createHeadlessProof, type HeadlessProofEditor } from "@legion/proof-editor/headless";
+import { createHeadlessProof } from "@legion/proof-editor/headless";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { Transform } from "prosemirror-transform";
 import { prosemirrorToYXmlFragment } from "y-prosemirror";
@@ -42,16 +42,36 @@ const engine = await createHeadlessProof({ blockSchema });
 
 // These are browser-oracle replaceRange cases. A single paragraph replacement
 // is sliced open to model Splice's inline paragraph replacement contract.
-type ReplaceRangeCase = {
+type ReplaceRangeTextCase = {
   name: string;
   markdown: string;
-  from?: string;
-  to?: string;
-  at?: string;
-  point?: "after" | "before" | "after-textblock" | "before-textblock" | "doc-start" | "doc-end";
+  from: string;
+  to: string;
   replacement: string;
   inline?: boolean;
 };
+
+type ReplaceRangeDocumentPointCase = {
+  name: string;
+  markdown: string;
+  point: "doc-start" | "doc-end";
+  replacement: string;
+  inline?: boolean;
+};
+
+type ReplaceRangeAnchoredPointCase = {
+  name: string;
+  markdown: string;
+  at: string;
+  point: "after" | "before" | "after-textblock" | "before-textblock";
+  replacement: string;
+  inline?: boolean;
+};
+
+type ReplaceRangeCase =
+  | ReplaceRangeTextCase
+  | ReplaceRangeDocumentPointCase
+  | ReplaceRangeAnchoredPointCase;
 
 const replaceRangeCases: ReplaceRangeCase[] = [
   {
@@ -373,28 +393,33 @@ const replaceRangeCases: ReplaceRangeCase[] = [
     to: "head",
     replacement: "X\n\n```\ncode\n```\n",
   },
-].map(({ name, markdown, from, to, at, point, replacement, inline = false }) => {
+].map((replace) => {
+  const { name, markdown, replacement, inline = false } = replace;
   const doc = engine.parseMarkdown(markdown);
   const inserted = engine.parseMarkdown(replacement);
   const transformed = new Transform(doc);
-  const pointPosition = (): number => {
-    switch (point) {
-      case "doc-start":
-        return 0;
-      case "doc-end":
-        return doc.content.size;
-      case "after":
-        return quotePosition(doc, at!) + at!.length;
-      case "before":
-        return quotePosition(doc, at!);
-      case "after-textblock":
-        return doc.resolve(quotePosition(doc, at!)).after();
-      case "before-textblock":
-        return doc.resolve(quotePosition(doc, at!)).before();
-    }
-  };
-  const fromPos = point ? pointPosition() : quotePosition(doc, from!);
-  const toPos = point ? fromPos : quotePosition(doc, to!) + to!.length;
+  const pointPosition =
+    replace.point === undefined
+      ? undefined
+      : (() => {
+          switch (replace.point) {
+            case "doc-start":
+              return 0;
+            case "doc-end":
+              return doc.content.size;
+            case "after":
+              return quotePosition(doc, replace.at) + replace.at.length;
+            case "before":
+              return quotePosition(doc, replace.at);
+            case "after-textblock":
+              return doc.resolve(quotePosition(doc, replace.at)).after();
+            case "before-textblock":
+              return doc.resolve(quotePosition(doc, replace.at)).before();
+          }
+        })();
+  const fromPos = pointPosition === undefined ? quotePosition(doc, replace.from) : pointPosition;
+  const toPos =
+    pointPosition === undefined ? quotePosition(doc, replace.to) + replace.to.length : fromPos;
   const slice = inline
     ? inserted.slice(1, inserted.content.size - 1)
     : inserted.slice(0, inserted.content.size);
@@ -402,10 +427,10 @@ const replaceRangeCases: ReplaceRangeCase[] = [
   return {
     name,
     markdown,
-    from,
-    to,
-    at,
-    point,
+    from: replace.from,
+    to: replace.to,
+    at: replace.at,
+    point: replace.point,
     replacement,
     pm_json: transformed.doc.toJSON(),
   };
@@ -416,7 +441,7 @@ const replaceRangeOracle = {
   schema: "pmdoc/replace-range-oracle/v1",
   cases: replaceRangeCases,
 };
-const nextSplices = JSON.stringify(replaceRangeOracle, null, 2) + "\n";
+const nextSplices = `${JSON.stringify(replaceRangeOracle, null, 2)}\n`;
 
 function quotePosition(doc: ProseMirrorNode, quote: string): number {
   let result = -1;
@@ -473,7 +498,7 @@ const nextFences = `[\n${fenceCases
   .map((line) => `  ${line}`)
   .join(",\n")}\n]\n`;
 
-const next = JSON.stringify(fixtures, null, 2) + "\n";
+const next = `${JSON.stringify(fixtures, null, 2)}\n`;
 if (check) {
   const current = readFileSync(out, "utf8");
   const currentSplices = readFileSync(spliceOut, "utf8");
