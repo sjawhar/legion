@@ -204,7 +204,7 @@ func TestATokenRequestIsAnsweredWithTheTokenTheMountHoldsNow(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, _ := agentSecretsConfig(t, path, o)
+	cfg, _, _ := agentSecretsConfig(t, path, o)
 	r := run(t, cfg, newClock())
 	peer := stub.accept(t)
 	peer.open(t)
