@@ -87,8 +87,8 @@ func StopActs(id int64, stop record.SuperviseRequest, lastStart int64, root *rec
 // that holds a task for the same generation and phase by then (record.SuperviseRequest's
 // ResumeTask).
 //
-// Stranded reads the same rule for a failed claim, and for a suspended one the daemon or its own
-// exit suspended: a claim for which StartFor is true has no queued start that will wake it. A
+// Stranded reads the same rule for a failed claim, and for a suspended one no operator suspended: a
+// claim for which StartFor is true has no queued start that will wake it. A
 // suspension that holds for the operator (supervise's RuleHolds) is woken by no start, queued or
 // not, since each waits for the operator's resume, so Stranded lists it without asking. The
 // architect's start names no phase, so its current is "".

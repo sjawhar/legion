@@ -12,10 +12,12 @@ import (
 )
 
 // booted is the daemon's boot (intake.DaemonBooted): every claim of this project that owns its
-// issue's current phase and is suspended, by anyone but an operator, is started again. Nothing
-// else would start it: the phase's start ran before the restart, a re-admission's starts are queued
-// only when a tree is re-admitted, and the next start is the next phase's. An operator's suspension
-// holds until the operator resumes the claim, so such a claim is left as it is.
+// issue's current phase and that the daemon or its own exit suspended (supervise's ByRule) is
+// started again. Nothing else would start it: the phase's start ran before the restart, a
+// re-admission's starts are queued only when a tree is re-admitted, and the next start is the next
+// phase's. This is the one trigger main did not have, so it acts on no other source: an operator's
+// suspension holds until the operator resumes the claim, and a suspension recorded before the
+// source existed (unknown) may be a drain made before the upgrade, so both are left as they are.
 //
 // The phase's owner is the role that works the issue's phase (RoleFor) on an issue in the workflow
 // whose tree is admitted — its root holds a slot — and does not linger: a lingering tree's claims
@@ -63,8 +65,7 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, _ intake.DaemonBooted) (
 			return intake.Result{}, err
 		}
 		held := run.Claim
-		if held == nil || held.State != supervise.StateSuspended ||
-			(held.SuspendedBy != supervise.SuspendedByDaemon && held.SuspendedBy != supervise.SuspendedByExit) ||
+		if held == nil || held.State != supervise.StateSuspended || !held.SuspendedBy.ByRule() ||
 			!StartFor(run, root, issue.Generation, issue.Phase) {
 			continue
 		}

@@ -64,9 +64,11 @@ func TestASuspensionNamingNoSourceIsRefused(t *testing.T) {
 	}
 }
 
-// The rule resumes only claims the daemon or a root's own exit suspended; it leaves an operator's,
-// unknown pre-0038, or empty source as held until the operator resumes it.
-func TestTheRuleResumesOnlyKnownDaemonOrExitSuspensions(t *testing.T) {
+// The rule resumes every suspension but the operator's: the daemon's, a root's own exit, and one
+// suspended before migration 0038 recorded its source (unknown, or none), as main resumed those on
+// the same triggers. The operator's holds until the operator resumes the claim. (The boot's resume
+// by rule, the one trigger main did not have, filters for daemon and exit itself: workflow's booted.)
+func TestTheRuleResumesEverySuspensionButTheOperators(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		suspend func(h *harness)
@@ -81,7 +83,7 @@ func TestTheRuleResumesOnlyKnownDaemonOrExitSuspensions(t *testing.T) {
 				h.t.Fatal(err)
 			}
 			h.restart()
-		}},
+		}, resumed: true},
 		{name: "an empty source", suspend: func(h *harness) {
 			suspendedBy(h, SuspendedByDaemon)
 			c := h.claim()
@@ -90,7 +92,7 @@ func TestTheRuleResumesOnlyKnownDaemonOrExitSuspensions(t *testing.T) {
 				h.t.Fatal(err)
 			}
 			h.restart()
-		}},
+		}, resumed: true},
 		{name: "the operator's", suspend: func(h *harness) { suspendedBy(h, SuspendedByOperator) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

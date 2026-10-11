@@ -5,9 +5,9 @@ import (
 	"testing"
 )
 
-// A release drain made before 0038 left claims suspended without recording who suspended them.
-// Migration 0038 must conservatively mark those rows unknown: resume by rule treats unknown as
-// held, so the first upgraded boot never overrides the operator's pre-upgrade drain.
+// A claim suspended before 0038 carries no record of who suspended it. Migration 0038 marks those
+// rows unknown, and only them: the boot's resume by rule acts on no unknown claim, so the first
+// upgraded boot never overrides a drain made before the upgrade.
 func TestSuspendedClaimsPredating0038MigrateAsUnknown(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()

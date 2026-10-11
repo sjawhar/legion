@@ -217,6 +217,85 @@ func TestAStartWaitsForTheOperatorToResumeAClaimItSuspended(t *testing.T) {
 	}
 }
 
+// suspendedBefore0038 creates role's claim on issue as migration 0038 leaves a claim that was
+// suspended before it: suspended, its session kept, its source unknown.
+func suspendedBefore0038(t *testing.T, sup *supervisor, tree, issue string, role claim.Role) claim.Token {
+	t.Helper()
+	token := claim.ControllerToken("legion")
+	if role != claim.RoleController {
+		token = mustClaimToken(t, issue, role)
+	}
+	if _, _, err := sup.Create(context.Background(), supervise.Claim{Token: token, Project: "legion", Tree: tree, Issue: issue, Role: role,
+		Generation: 1, State: supervise.StateSuspended, SuspendedBy: supervise.SuspendedByUnknown,
+		Session: "ses-" + string(role), SessionFile: "/tmp/" + string(role) + ".jsonl"}, ""); err != nil {
+		t.Fatalf("create the pre-0038 suspended %s: %v", role, err)
+	}
+	sup.deps.Conns.(*fake.Conns).Register(token, fake.NewConn())
+	return token
+}
+
+// A claim suspended before migration 0038 recorded who suspended it is resumed by every trigger
+// main resumed it on, here its phase's start, as on re-admission or a child's re-entry. Most such
+// rows are the daemon's own (a lingering tree, a parked child, a re-entry's interrupted worker), so
+// holding them for the operator would leave the trees main ran again parked.
+func TestAStartResumesAClaimSuspendedBeforeItsSourceWasRecorded(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+	putOutboxIssue(t, pool, records, issue)
+	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+	tester := suspendedBefore0038(t, sup, issue.Tree, issue.Key, claim.RoleTester)
+	clock := time.Now()
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion",
+		now: func() time.Time { return clock }}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester,
+		Generation: 1, Phase: phase.Testing, Task: "Test it."}, clock))
+
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("run the start: %v", err)
+	}
+	machine, _ := sup.Machine(tester)
+	machine.Wait()
+	if got := machine.Claim(); len(resumesOf(rt, tester)) != 1 || got.State != supervise.StateLaunching || outboxRows(t, pool) != 0 ||
+		got.Pending == nil || got.Pending.Task != "Test it." {
+		t.Fatalf("after the start the tester is %s with %d resumes, %d rows and pending %+v; want its session relaunched once, the start run and its task held",
+			got.State, len(resumesOf(rt, tester)), outboxRows(t, pool), got.Pending)
+	}
+}
+
+// The daemon keeps its own controller running by rule. A controller suspended before migration
+// 0038 recorded who suspended it is relaunched, as main relaunched it; one the operator suspended
+// stays suspended until the operator resumes it.
+func TestTheControllerKeeperResumesEveryControllerButOneTheOperatorSuspended(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		by      supervise.SuspendSource
+		resumed bool
+	}{
+		{name: "suspended before 0038", by: supervise.SuspendedByUnknown, resumed: true},
+		{name: "the operator's", by: supervise.SuspendedByOperator},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
+			token := suspendedBefore0038(t, sup, "", "", claim.RoleController)
+			machine, _ := sup.Machine(token)
+			if tc.by == supervise.SuspendedByOperator {
+				if err := machine.Handle(context.Background(), supervise.RequestSuspend{Claim: token, Reason: "the operator suspended it", By: supervise.SuspendedByOperator}); err != nil {
+					t.Fatalf("the operator's suspend: %v", err)
+				}
+			}
+			keeper := newControllerKeeper(context.Background(), sup, "legion", time.Minute, quietLogger())
+			if err := keeper.keep(); err != nil {
+				t.Fatalf("keep the controller: %v", err)
+			}
+			machine.Wait()
+			if resumed := len(resumesOf(rt, token)) == 1 && machine.Claim().State == supervise.StateLaunching; resumed != tc.resumed {
+				t.Fatalf("the keeper left the controller %s after %d resumes, want resumed %t", machine.Claim().State, len(resumesOf(rt, token)), tc.resumed)
+			}
+		})
+	}
+}
+
 // readmissionRig is a lingering tree, LEGION-208, whose child LEGION-209 was implementing when the
 // tree closed: the root's architect and the child's implementer each ran, and each was suspended,
 // suspend as the case says. The returned function re-admits the tree and runs what it queued.

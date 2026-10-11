@@ -187,15 +187,18 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 }
 
 // A phase worker the daemon or its own exit suspended is not stranded: the daemon resumes it by rule,
-// at boot (DaemonBooted) and at its phase's next start. One an operator suspended, or whose source
-// predates migration 0038, is: only the operator's resume runs it again. A tree architect is
-// stranded whoever suspended it, since no rule resumes an architect.
+// at boot (DaemonBooted) and at its phase's next start. One an operator suspended is: only the
+// operator's resume runs it again, a start queued for it included. One whose suspension predates
+// migration 0038 (unknown) is stranded while no start is queued for it, since the boot resumes no
+// such claim; a start queued for it resumes it, as on main. A tree architect is stranded whoever
+// suspended it, since no rule resumes an architect.
 func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 	issues := []record.Issue{
 		strandedIssue("LEGION-1", "LEGION-1", phase.Implementing),
 		strandedIssue("LEGION-2", "LEGION-2", phase.Testing),
 		strandedIssue("LEGION-3", "LEGION-3", phase.Reviewing),
 		strandedIssue("LEGION-4", "LEGION-4", phase.Merging),
+		strandedIssue("LEGION-5", "LEGION-5", phase.Testing),
 	}
 	by := func(c supervise.Claim, source supervise.SuspendSource) supervise.Claim {
 		c.SuspendedBy = source
@@ -206,13 +209,17 @@ func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
 	unknownWorker := by(strandedClaim(t, "LEGION-3", "LEGION-3", claim.RoleReviewer, supervise.StateSuspended), supervise.SuspendedByUnknown)
 	exitWorker := by(strandedClaim(t, "LEGION-4", "LEGION-4", claim.RoleMerger, supervise.StateSuspended), supervise.SuspendedByExit)
 	daemonArchitect := by(strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleArchitect, supervise.StateSuspended), supervise.SuspendedByDaemon)
-	claims := []supervise.Claim{daemonWorker, operatorWorker, unknownWorker, exitWorker, daemonArchitect}
+	unknownStarted := by(strandedClaim(t, "LEGION-5", "LEGION-5", claim.RoleTester, supervise.StateSuspended), supervise.SuspendedByUnknown)
+	claims := []supervise.Claim{daemonWorker, operatorWorker, unknownWorker, exitWorker, daemonArchitect, unknownStarted}
 	stored := map[claim.Token]supervise.Claim{}
 	for _, c := range claims {
 		stored[c.Token] = c
 	}
 
-	store := &strandedStore{issues: issues, slots: slotsOf("LEGION-1", "LEGION-2", "LEGION-3", "LEGION-4"), claims: stored}
+	store := &strandedStore{issues: issues, slots: slotsOf("LEGION-1", "LEGION-2", "LEGION-3", "LEGION-4", "LEGION-5"), claims: stored,
+		queued: map[claim.Token][]record.QueuedSupervise{
+			unknownStarted.Token: {{ID: 21, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-5", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
+		}}
 	got, err := Stranded(context.Background(), nil, store, claims)
 	if err != nil {
 		t.Fatalf("Stranded: %v", err)

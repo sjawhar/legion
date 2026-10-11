@@ -143,8 +143,8 @@ type RequestSuspend struct {
 type RequestResume struct{ Claim claim.Token }
 
 // RequestRuleResume is the daemon's own resume, by rule: it relaunches a suspended claim's session
-// only when the daemon or the claim's own exit suspended it (Claim.RuleMayResume); an operator's
-// or unknown pre-0038 suspension holds until the operator resumes the claim. The daemon asks it of
+// unless an operator suspended it (Claim.RuleMayResume): that suspension holds until the operator
+// resumes the claim. The daemon asks it of
 // a claim that owns its issue's current phase (the outbox's start of that phase, the boot's
 // included) and of its own controller. It resumes nothing that is not suspended — a failed claim's
 // launch budget is spent, and only the workflow's retry relaunches it — so it is asked again as
@@ -978,8 +978,8 @@ func reready(m *Machine, ctx context.Context, _ Event) error {
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
 
 // resumeByRule is the daemon's own resume of a suspended claim (RequestRuleResume): the same
-// session relaunched, as the operator's resume relaunches it, only when a known daemon or exit
-// suspension stopped it. An operator's suspension, and an unknown pre-0038 suspension, hold until
+// session relaunched, as the operator's resume relaunches it, unless an operator suspended the
+// claim: that suspension holds until
 // the operator resumes the claim. A launch that fails is charged to the claim's launch budget like
 // any other, so a claim the rule resumes that keeps failing fails once the budget is spent, and a
 // failed claim is never resumed by rule.
@@ -1138,8 +1138,8 @@ func deliverNow(m *Machine, ctx context.Context, ev Event) error {
 }
 
 // deliverResuming queues a task on a suspended claim and resumes it for that task. The workflow's
-// task (an outbox delivery, which carries a durable id) resumes only a claim the daemon or its own
-// exit suspended: an operator's or unknown pre-0038 suspension answers ErrHeldByOperator, queuing
+// task (an outbox delivery, which carries a durable id) resumes a claim unless an operator
+// suspended it: an operator's suspension answers ErrHeldByOperator, queuing
 // nothing, and its start waits for the operator's resume. The operator's own delivery resumes the
 // claim whoever suspended it.
 func deliverResuming(m *Machine, ctx context.Context, ev Event) error {

@@ -65,15 +65,17 @@ const (
 	StateRetired ClaimState = "retired"
 )
 
-// SuspendSource is who suspended a claim. The daemon resumes a suspended claim by rule — when it
-// owns its issue's current phase (RequestRuleResume) — only when a known daemon or exit suspension
-// stopped it. An operator's suspension, and SuspendedByUnknown from a pre-0038 row, hold until an
-// operator resumes the claim.
+// SuspendSource is who suspended a claim. The daemon resumes a suspended claim by rule on the
+// triggers main had — its phase's start, a workflow delivery, the controller keeper
+// (RequestRuleResume) — unless an operator suspended it: that suspension holds until the operator
+// resumes the claim. The boot's resume by rule, which main did not have, acts only on a source
+// ByRule names, so it never overrides a drain recorded before the source existed.
 type SuspendSource string
 
 const (
-	// SuspendedByUnknown is the conservative source migration 0038 assigns every claim that was
-	// already suspended before the source existed.
+	// SuspendedByUnknown is the source migration 0038 assigns every claim that was already
+	// suspended before the source existed: most such rows are the daemon's own (a lingering tree, a
+	// parked child, a re-entry's interrupted worker), and main's triggers resume them as before.
 	SuspendedByUnknown SuspendSource = "unknown"
 	// SuspendedByOperator: the operator's suspend route.
 	SuspendedByOperator SuspendSource = "operator"
@@ -83,6 +85,11 @@ const (
 	// SuspendedByExit: the tree root's agent reported its own exit, which suspends a root.
 	SuspendedByExit SuspendSource = "exit"
 )
+
+// ByRule is whether the source is one the daemon itself recorded, the daemon's own suspend or a
+// root's exit: the only sources the boot's resume by rule acts on, and the only suspended phase
+// workers the stranded report leaves out.
+func (s SuspendSource) ByRule() bool { return s == SuspendedByDaemon || s == SuspendedByExit }
 
 // Claim is one role claim as the supervisor holds and persists it.
 type Claim struct {
@@ -139,34 +146,25 @@ type Claim struct {
 	SuspensionHeldBy SuspendSource
 }
 
-// RuleMayResume says whether the rule may resume this suspended claim. Only the daemon's own
-// suspension and a root's exit are known safe; an operator's, an unknown pre-0038 suspension and
-// an empty source all hold until an operator resumes the claim.
+// RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
+// operator's, which holds until an operator resumes the claim.
 func (c Claim) RuleMayResume() bool {
-	return c.State == StateSuspended && (c.SuspendedBy == SuspendedByDaemon || c.SuspendedBy == SuspendedByExit)
+	return c.State == StateSuspended && c.SuspendedBy != SuspendedByOperator
 }
 
-// RuleHolds is whether a suspension blocks a daemon rule: the claim is suspended by anything that
-// is not a known daemon or exit source, or the held suspension in its current turn is likewise not
-// known safe.
+// RuleHolds is whether an operator's suspension blocks a daemon rule: the claim is suspended by the
+// operator, or the operator's suspension is held for its agent's turn.
 func (c Claim) RuleHolds() bool {
 	if c.SuspensionHeld {
-		return c.SuspensionHeldBy != SuspendedByDaemon && c.SuspensionHeldBy != SuspendedByExit
+		return c.SuspensionHeldBy == SuspendedByOperator
 	}
-	return c.State == StateSuspended && !c.RuleMayResume()
+	return c.State == StateSuspended && c.SuspendedBy == SuspendedByOperator
 }
 
-// RuleHoldError says why a start or outbox delivery waits: its actual suspension source, not the
-// misleading fixed "operator" text legacy unknown rows previously produced.
+// RuleHoldError says why a start or outbox delivery waits: the operator's suspension, which only
+// the operator's resume ends.
 func (c Claim) RuleHoldError() error {
-	by := c.SuspendedBy
-	if c.SuspensionHeld {
-		by = c.SuspensionHeldBy
-	}
-	if by == "" {
-		by = SuspendedByUnknown
-	}
-	return fmt.Errorf("the claim is suspended by %s; it waits for the operator's resume: %w", by, ErrHeldByOperator)
+	return fmt.Errorf("the claim is suspended by %s; it waits for the operator's resume: %w", SuspendedByOperator, ErrHeldByOperator)
 }
 
 // ClaimView is a claim as its machine last published it (Machine.View), with what only the decision
@@ -351,9 +349,9 @@ var ErrDeliveryPending = wait.New("a delivery is already pending")
 // where one runs.
 var ErrRootStop = errors.New("the tree's root claim ends only when its tree closes")
 
-// ErrHeldByOperator is the daemon's start or task meeting a suspension that rule-resume must not
-// override: an operator's, or unknown legacy source. RuleHoldError names the actual source around
-// this sentinel for the outbox log.
+// ErrHeldByOperator is the daemon's start or task meeting an operator's suspension, which no rule
+// overrides (Claim.RuleHolds): a wait, ended only by the operator's resume. RuleHoldError wraps it
+// for the outbox log.
 var ErrHeldByOperator = wait.New("the suspension holds until the operator resumes the claim")
 
 // Machine is one claim's decision owner.
@@ -549,9 +547,9 @@ func (c Claim) ReleasedLaunch() bool {
 // StartedBy records the outbox row of the start being run against this claim, so a stop written
 // before it can be told apart from one written after. A stop is retried until the runtime takes
 // it, and a retry that lands after this start would suspend the run this start began. That
-// includes a held suspension (holdSuspension), which the start drops — unless its source blocks a
-// rule resume: an operator's or unknown pre-0038 suspension records no start and answers
-// ErrHeldByOperator, so the start waits for the operator to resume the claim.
+// includes a held suspension (holdSuspension), which the start drops — unless it is the operator's:
+// a claim an operator's suspension holds records no start and answers ErrHeldByOperator, so the
+// start waits for the operator to resume the claim.
 func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 	m.mu.Lock()
 	defer m.unlock()

@@ -23,10 +23,11 @@ const strandedRoleRunBatchSize = 200
 //   - A worker of its issue's phase: the role RoleFor gives the phase its worker works
 //     (workingPhase), which a held issue keeps from the phase it left. Only a start of that phase
 //     retries a failed worker, so one is stranded once no such start is queued (StartFor, the rule
-//     promotion reads). A suspended one is stranded only when its suspension holds for the
-//     operator: an operator suspended it, or its source predates migration 0038 (supervise's
-//     RuleHolds). The daemon resumes one it or its own exit suspended by rule, at boot
-//     (DaemonBooted) and at the phase's next start.
+//     promotion reads). A suspended one is stranded when an operator suspended it, or when its
+//     suspension was recorded before migration 0038 (unknown) and no start is queued for it: the
+//     boot resumes neither, and a start queued for an unknown one resumes it. The daemon resumes
+//     one it or its own exit suspended by rule (supervise's ByRule), at boot (DaemonBooted) and at
+//     the phase's next start.
 //   - Its tree's architect: only its tree's admission starts it, whoever suspended it. A notice to a
 //     suspended one is held until it holds its role again, which nothing in the daemon brings
 //     about, and a notice to a failed one finishes undelivered (the notice executor). Its tree
@@ -98,7 +99,7 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 		switch {
 		case claim.IsTreeArchitect(c.Role, issue.Key, issue.Tree):
 		case RoleFor(workingPhase(issue)) == c.Role:
-			if c.State == supervise.StateSuspended && c.RuleMayResume() {
+			if c.State == supervise.StateSuspended && c.SuspendedBy.ByRule() {
 				continue
 			}
 			current = issue.Phase

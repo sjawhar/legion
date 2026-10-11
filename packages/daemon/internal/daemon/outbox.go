@@ -485,7 +485,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"tree", issue.Tree, "role", payload.Role)
 			return nil
 		}
-		// An operator's or unknown pre-0038 suspension holds its claim until the operator resumes
+		// An operator's suspension holds its claim until the operator resumes
 		// it: the start, and the task it gives, wait on the row's backoff, before a quiesce
 		// interrupts the role whose phase it would take over. StartedBy refuses the same in the
 		// claim's own decision.

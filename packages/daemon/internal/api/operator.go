@@ -54,8 +54,8 @@ type OperatorClaim struct {
 	UncertainStreak int              `json:"uncertainStreak"`
 	// Pending is the task the claim holds, until the turn it started ends.
 	Pending *DeliveryView `json:"pending,omitempty"`
-	// SuspendedBy is who suspended the claim while it is suspended: unknown (a pre-0038
-	// suspension held for an operator to decide), operator, daemon or exit; absent otherwise.
+	// SuspendedBy is who suspended the claim while it is suspended: operator, daemon, exit, or
+	// unknown (a suspension recorded before migration 0038); absent otherwise.
 	SuspendedBy string `json:"suspendedBy,omitempty"`
 	// SuspensionHeld is a suspension the machine holds for the agent's turn (supervise's
 	// holdSuspension); absent when none is.
