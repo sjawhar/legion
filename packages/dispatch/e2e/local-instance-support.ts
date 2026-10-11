@@ -132,7 +132,9 @@ export function databaseUrlRefusal(raw: string): string | undefined {
   );
 }
 
-/** `value` as one shell word, safe to paste whatever it holds. */
+/** `value` as one shell word, safe to paste whatever it holds. The same rule as `quote` in
+ *  packages/envoy/scripts/dev-postgres.sh; both tests hold it to
+ *  packages/envoy/scripts/fixtures/shell-quote.json. */
 export function shellQuote(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value) ? value : `'${value.replaceAll("'", `'\\''`)}'`;
 }

@@ -6,7 +6,9 @@
 # each case asserts both what the script printed and every docker command it ran. A stale
 # `dispatch-pg` (any image but the pinned pgvector one) is refused naming the container, both
 # images and the commands that move its data volume onto the pinned image, and the script itself
-# never stops, renames, removes, starts or creates anything for it.
+# never stops, renames, removes, starts or creates anything for it. Its `quote`, which prints those
+# commands, is held to fixtures/shell-quote.json, the table packages/dispatch's shellQuote test
+# reads too, so the two copies of the rule cannot drift apart.
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -163,6 +165,35 @@ if [ "$status" -ne 1 ] || ! read_only || ! grep -qF "holds PostgreSQL 15" "$err"
   fail "a stale dispatch-pg on another PostgreSQL major: refused with no move"
 else
   printf 'PASS: a stale dispatch-pg on PostgreSQL 15: refused, offering a dump and no move\n'
+fi
+
+# dev-postgres.sh's own `quote`, taken from the script as it ships (it runs on load, so it is not
+# sourced), against the shared table: each word quotes to the table's value, and that value reads
+# back in bash as exactly the one word.
+eval "$(sed -n '/^quote() {$/,/^}$/p' "$script")"
+if ! declare -F quote >/dev/null; then
+  printf 'FAIL: no quote() function in %s\n' "$script"
+  failures=$((failures + 1))
+else
+  table_failures=0
+  table_cases=0
+  while IFS= read -r word && IFS= read -r quoted; do
+    table_cases=$((table_cases + 1))
+    got="$(quote "$word")"
+    eval "set -- $got"
+    if [ "$got" != "$quoted" ] || [ "$#" -ne 1 ] || [ "$1" != "$word" ]; then
+      printf 'FAIL: quote %q gave %s, the table says %s\n' "$word" "$got" "$quoted"
+      table_failures=$((table_failures + 1))
+    fi
+  done < <(jq -r '.[] | .word, .quoted' "${project_root}/packages/envoy/scripts/fixtures/shell-quote.json")
+  if [ "$table_cases" -eq 0 ]; then
+    printf 'FAIL: fixtures/shell-quote.json holds no case\n'
+    failures=$((failures + 1))
+  elif [ "$table_failures" -ne 0 ]; then
+    failures=$((failures + 1))
+  else
+    printf 'PASS: quote matches fixtures/shell-quote.json on all %d words, each reading back whole\n' "$table_cases"
+  fi
 fi
 
 if [ "$failures" -ne 0 ]; then

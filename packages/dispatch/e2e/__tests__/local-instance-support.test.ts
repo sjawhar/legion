@@ -148,20 +148,20 @@ describe("databaseUrlRefusal", () => {
   });
 });
 
+/** The quoting cases dev-postgres.sh's `quote` is held to as well, so the two copies of the rule
+ *  cannot drift apart. */
+const quoteCases = (await Bun.file(
+  new URL("../../../envoy/scripts/fixtures/shell-quote.json", import.meta.url)
+).json()) as { word: string; quoted: string }[];
+
 describe("shellQuote", () => {
-  test("keeps a plain word, and quotes one a shell would split or expand", () => {
-    expect(shellQuote("9021")).toBe("9021");
-    expect(shellQuote("postgres://u@127.0.0.1:5432/d")).toBe("postgres://u@127.0.0.1:5432/d");
-    expect(shellQuote("postgres://u@127.0.0.1/d?sslmode=disable&x=1")).toBe(
-      "'postgres://u@127.0.0.1/d?sslmode=disable&x=1'"
-    );
-    expect(shellQuote("/srv/My Data")).toBe("'/srv/My Data'");
-    expect(shellQuote("it's")).toBe(`'it'\\''s'`);
+  test("the shared table has cases", () => {
+    expect(quoteCases.length).toBeGreaterThan(0);
   });
 
-  test("a quoted value reads back whole in bash", async () => {
-    const value = "/srv/My Data/it's $HOME";
-    const echoed = await Bun.$`bash -c ${`printf %s ${shellQuote(value)}`}`.text();
-    expect(echoed).toBe(value);
+  test.each(quoteCases)("quotes $word as $quoted, which reads back whole in bash", async (row) => {
+    expect(shellQuote(row.word)).toBe(row.quoted);
+    const echoed = await Bun.$`bash -c ${`printf %s ${shellQuote(row.word)}`}`.text();
+    expect(echoed).toBe(row.word);
   });
 });

@@ -26,6 +26,8 @@ refuse() {
 
 # Each argument as one shell word, joined by spaces: a word a shell would split or expand (a bind
 # mount's host path with a space in it) is single-quoted, so a printed command pastes as it reads.
+# The same rule as shellQuote in packages/dispatch/e2e/local-instance-support.ts; both tests hold
+# it to fixtures/shell-quote.json.
 quote() {
   local words=() word
   for word in "$@"; do

@@ -59,6 +59,9 @@ cat >"${fake_bin_dir}/docker" <<'EOF'
 printf '%s\n' "$*" >>"${DEV_BROKER_TEST_DOCKER_CALL_FILE:?}"
 pinned_id="sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a"
 case "$1 $2" in
+  # dev-broker.sh no longer calls `ps`; this answer keeps the stale-image case red on a
+  # dev-broker.sh that goes back to finding dispatch-pg with `docker ps` and reusing it unchecked.
+  # Without it that version reads the container as absent, hands off to dev-postgres.sh, and passes.
   "ps "* | "ps -a") printf 'dispatch-pg\n' ;;
   "container inspect")
     case "$*" in
@@ -180,6 +183,28 @@ wait_for_ready() {
     sleep 0.1
   done
   return 1
+}
+
+# Waits up to 5 s for instance <n> to exit by itself and sets the global "exited_status" to its
+# exit status. A run meant to refuse that is still running then went on to serve: it is killed
+# and "exited_status" stays 0, which each caller reads as the failure, so the wait is bounded and
+# reports that case rather than hanging.
+exited_status=0
+wait_for_exit() {
+  local n="$1"
+  local pid="${instance_pid[$n]}"
+  exited_status=0
+  for _ in $(seq 1 50); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.1
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  else
+    wait "$pid" || exited_status=$?
+  fi
+  instance_pid[n]=""
 }
 
 created_database() {
@@ -346,20 +371,8 @@ printf 'PASS: two concurrent DEV_BROKER_POSTGRES_URL instances use two databases
 # --- A dbname= in DEV_BROKER_POSTGRES_URL's query string would point the broker at another
 # database: the run refuses before the broker starts, and drops only the database it created. ---
 run_instance 1 "$log1" "$docker_calls1" "$curl_calls1" "${admin_url}&dbname=victim"
-# A run that does not refuse goes on to serve until killed, so the wait is bounded: still running
-# after 5 s is the failure, reported below, not a hang.
-for _ in $(seq 1 50); do
-  kill -0 "${instance_pid[1]}" 2>/dev/null || break
-  sleep 0.1
-done
-refused_status=0
-if kill -0 "${instance_pid[1]}" 2>/dev/null; then
-  kill -TERM "${instance_pid[1]}" 2>/dev/null || true
-  wait "${instance_pid[1]}" 2>/dev/null || true
-else
-  wait "${instance_pid[1]}" || refused_status=$?
-fi
-instance_pid[1]=""
+wait_for_exit 1
+refused_status="$exited_status"
 refused_db="$(created_database "$docker_calls1")"
 if [[ "$refused_status" -eq 0 ]] || ! grep -q "dev-broker: refused: the broker's database URL connects to 'victim'" "$log1" || grep -q 'starting broker' "$log1"; then
   cat "$log1" >&2
@@ -390,25 +403,10 @@ printf 'PASS: a run whose create database fails drops no database\n'
 # --- A dispatch-pg on another image than dev-postgres.sh's pinned one (an older script's
 # postgres:16, with no pgvector) is refused through dev-postgres.sh before this run creates a
 # database or starts a broker. ---
-: >"$docker_calls1"
-stale_status=0
-PATH="${fake_bin_dir}:${PATH}" DEV_BROKER_TEST_PG_IMAGE_ID="sha256:eb4759788a2182f08257135e61a34f2cfc3c2914079f3465d64ee62350f4d081" \
-  DEV_BROKER_TEST_DOCKER_CALL_FILE="$docker_calls1" DEV_BROKER_TEST_CURL_CALL_FILE="$curl_calls1" \
-  bash "$driver" >"$log1" 2>&1 &
-instance_pid[1]=$!
-# A run that reuses the container instead goes on to serve until killed, so the wait is bounded:
-# still running after 5 s is the failure, reported below, not a hang.
-for _ in $(seq 1 50); do
-  kill -0 "${instance_pid[1]}" 2>/dev/null || break
-  sleep 0.1
-done
-if kill -0 "${instance_pid[1]}" 2>/dev/null; then
-  kill -TERM "${instance_pid[1]}" 2>/dev/null || true
-  wait "${instance_pid[1]}" 2>/dev/null || true
-else
-  wait "${instance_pid[1]}" || stale_status=$?
-fi
-instance_pid[1]=""
+DEV_BROKER_TEST_PG_IMAGE_ID="sha256:eb4759788a2182f08257135e61a34f2cfc3c2914079f3465d64ee62350f4d081" \
+  run_instance 1 "$log1" "$docker_calls1" "$curl_calls1"
+wait_for_exit 1
+stale_status="$exited_status"
 if [[ "$stale_status" -eq 0 ]] || ! grep -qF "dev-postgres: dispatch-pg runs postgres:16" "$log1" \
   || grep -q 'create database' "$docker_calls1" || grep -q 'starting broker' "$log1" \
   || grep -qE '^(start|run|stop|rm|rename) ' "$docker_calls1"; then
