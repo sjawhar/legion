@@ -4,6 +4,12 @@
 
 ### Added
 
+- An agent session creates a Dispatch project (LEGION-684). `POST /api/v1/projects` accepts a
+  bearer as well as a signed-in person, so a session with its token makes the project its work
+  needs, with its `project.created` event naming that session, rather than asking a person to
+  make it in Settings. A key that already exists is still `409 PROJECT_EXISTS` whoever asks, and a
+  key that is not a project key or an empty name `400 INVALID_PROJECT`. `GET /api/v1` lists the
+  route as `any`.
 - `Ctrl+Alt+M` (`⌘+⌥+M` on a Mac), Google Docs' shortcut, comments on the text selected in a
   document, as the selection bar's **Comment** does: it opens the margin's composer on the
   selection and puts the cursor in it. It works in an issue's documents and a project's documents

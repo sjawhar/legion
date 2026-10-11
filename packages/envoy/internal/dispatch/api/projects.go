@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -59,14 +60,14 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if actor.Kind != "user" {
-		writeError(w, "HUMAN_ONLY", http.StatusForbidden, "projects may only be created by a user")
-		return
-	}
 	input.Key = strings.TrimSpace(input.Key)
 	input.Name = strings.TrimSpace(input.Name)
-	if !projectKeyPattern.MatchString(input.Key) || input.Name == "" {
-		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "project key and name are required")
+	if !projectKeyPattern.MatchString(input.Key) {
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, fmt.Sprintf("project key %q is not a project key: an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE", input.Key))
+		return
+	}
+	if input.Name == "" {
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "project name is required")
 		return
 	}
 	tx, err := s.begin(r.Context())

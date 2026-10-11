@@ -1,7 +1,10 @@
 package api
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -33,6 +36,111 @@ func TestCreateProjectRejectsDuplicateKeyWithProjectExists(t *testing.T) {
 	}, "alice")
 	if duplicate.Code != http.StatusConflict || !strings.Contains(duplicate.Body.String(), `"code":"PROJECT_EXISTS"`) {
 		t.Fatalf("duplicate project: status=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+}
+
+// An agent session creates a project with its bearer, as it creates an issue: the project is
+// listed like any other, and its project.created event names the session that created it.
+func TestASessionBearerCreatesAProject(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+
+	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
+		"key": "AGENT", "name": "Agent project", "actor": sessionActor(),
+	})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("a session creates a project: status=%d body=%s", created.Code, created.Body.String())
+	}
+	project := decodeBody[projectResponse](t, created)
+	if project.Key != "AGENT" || project.Name != "Agent project" || project.CreatedAt == "" {
+		t.Fatalf("created project = %#v", project)
+	}
+
+	var actor []byte
+	if err := database.Pool.QueryRow(context.Background(), `
+		select actor from events where type = 'project.created' and project_key = 'AGENT'
+	`).Scan(&actor); err != nil {
+		t.Fatalf("read the project.created event: %v", err)
+	}
+	var by model.Actor
+	if err := json.Unmarshal(actor, &by); err != nil {
+		t.Fatalf("decode the project.created actor %s: %v", actor, err)
+	}
+	if by.Kind != "session" || by.ID != sessionActor()["id"] {
+		t.Fatalf("project.created actor = %s, want the creating session", actor)
+	}
+
+	listed := sessionRequest(t, handler, http.MethodGet, "/api/v1/projects", nil)
+	if listed.Code != http.StatusOK {
+		t.Fatalf("list projects: status=%d body=%s", listed.Code, listed.Body.String())
+	}
+	projects := decodeBody[[]projectResponse](t, listed)
+	if len(projects) != 1 || projects[0].Key != "AGENT" || projects[0].Name != "Agent project" {
+		t.Fatalf("listed projects = %#v, want the session's AGENT", projects)
+	}
+}
+
+// A key that already exists is refused whoever asks: a session's bearer and a signed-in person's
+// cookie each get 409 PROJECT_EXISTS, and the project keeps the name it was created with.
+func TestCreatingATakenProjectKeyIsRefusedForABearerAndACookie(t *testing.T) {
+	handler, _, _, withCookie := newCookieServer(t)
+
+	if first := sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
+		"key": "TAKEN", "name": "First", "actor": sessionActor(),
+	}); first.Code != http.StatusCreated {
+		t.Fatalf("create TAKEN: status=%d body=%s", first.Code, first.Body.String())
+	}
+	for _, attempt := range []struct {
+		caller   string
+		response *httptest.ResponseRecorder
+	}{
+		{"bearer", sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
+			"key": "TAKEN", "name": "Again", "actor": sessionActor(),
+		})},
+		{"cookie", withCookie(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TAKEN", "name": "Again"})},
+	} {
+		if attempt.response.Code != http.StatusConflict || !strings.Contains(attempt.response.Body.String(), `"code":"PROJECT_EXISTS"`) {
+			t.Fatalf("a %s creating a taken key: status=%d body=%s", attempt.caller, attempt.response.Code, attempt.response.Body.String())
+		}
+	}
+
+	listed := sessionRequest(t, handler, http.MethodGet, "/api/v1/projects", nil)
+	projects := decodeBody[[]projectResponse](t, listed)
+	if len(projects) != 1 || projects[0].Name != "First" {
+		t.Fatalf("listed projects = %#v, want TAKEN still named First", projects)
+	}
+}
+
+// A bad key or an empty name is 400 INVALID_PROJECT for a session as for a person, and the
+// refusal names which of the two is wrong: an agent reads it as the whole answer.
+func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
+	handler := newTestHandler(t)
+	const badKey = `is not a project key: an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE`
+	for _, input := range []struct{ name, key, projectName, says string }{
+		{"lowercase key", "agent", "Agent project", `project key \"agent\" ` + badKey},
+		{"one-character key", "A", "Agent project", `project key \"A\" ` + badKey},
+		{"key starting with a digit", "1AGENT", "Agent project", `project key \"1AGENT\" ` + badKey},
+		{"key over ten characters", "ABCDEFGHIJK", "Agent project", `project key \"ABCDEFGHIJK\" ` + badKey},
+		{"empty name", "AGENT", "", "project name is required"},
+		{"blank name", "AGENT", "   ", "project name is required"},
+	} {
+		t.Run(input.name, func(t *testing.T) {
+			for _, attempt := range []struct {
+				caller   string
+				response *httptest.ResponseRecorder
+			}{
+				{"bearer", sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
+					"key": input.key, "name": input.projectName, "actor": sessionActor(),
+				})},
+				{"person", dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+					"key": input.key, "name": input.projectName,
+				}, "alice")},
+			} {
+				body := attempt.response.Body.String()
+				if attempt.response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"INVALID_PROJECT"`) || !strings.Contains(body, input.says) {
+					t.Fatalf("a %s creating key %q name %q: status=%d body=%s, want 400 INVALID_PROJECT saying %s", attempt.caller, input.key, input.projectName, attempt.response.Code, body, input.says)
+				}
+			}
+		})
 	}
 }
 

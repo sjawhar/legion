@@ -52,7 +52,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1", authPublic, "This index: every route with its method, auth, and purpose.", s.getRouteIndex},
 		{http.MethodGet, "/api/v1/schema/blocks", authPublic, "The typed document block schema as JSON.", s.getBlockSchema},
 		{http.MethodGet, "/api/v1/projects", authAny, "List projects.", s.listProjects},
-		{http.MethodPost, "/api/v1/projects", authHuman, "Create a project {key, name}.", s.createProject},
+		{http.MethodPost, "/api/v1/projects", authAny, "Create a project {key, name}: any signed-in person or agent session; a bearer names its session in actor. A key that is not a project key, or an empty name, is 400 INVALID_PROJECT; a key that already exists is 409 PROJECT_EXISTS.", s.createProject},
 		{http.MethodGet, "/api/v1/projects/{key}/artifacts", authAny, "List a project's documents.", s.listProjectArtifacts},
 		{http.MethodPost, "/api/v1/projects/{key}/artifacts", authAny, "Upload a project document or file (JSON or multipart); a file's kind is read from its bytes, as an issue upload's is.", s.uploadProjectArtifact},
 		{http.MethodGet, "/api/v1/settings/repo-projects", authAny, "List GitHub repository to project mappings.", s.listRepoProjects},
