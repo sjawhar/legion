@@ -515,10 +515,10 @@ type plan struct {
 	controllerRetry time.Duration
 	// stopBudget is how long the stop waits for the daemon's own work once it begins (stopBudget).
 	stopBudget time.Duration
-	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
+	// secretsEnroller is the daemon's agent-secrets token login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
-	// secretsLogin is the same machine login's client, read-only, for the state route to show its
+	// secretsLogin is the same login's client, read-only, for the state route to show its
 	// current status (source.State, agentsecrets.Client.LoginStatus); nil when the deployment
 	// enrolls no pod.
 	secretsLogin *agentsecrets.Client
@@ -1427,7 +1427,7 @@ type source struct {
 	runtime      string
 	admissionCap int
 	startedAt    time.Time
-	// secretsLogin is the daemon's own agent-secrets machine login client (newSecretsLogin), read
+	// secretsLogin is the daemon's own agent-secrets token login client (newSecretsLogin), read
 	// through LoginStatus for the state route; nil when the deployment enrolls no pod.
 	secretsLogin *agentsecrets.Client
 	// deployment is the deployment's capabilities as this boot knows them (supervision.deployment),
@@ -1494,8 +1494,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	state.ControllerLocator = api.ControllerLocatorOf(s.runtime, controller)
 	if s.secretsLogin != nil {
-		login := s.secretsLogin.LoginStatus()
-		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: login.State, Code: login.Code}
+		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: s.secretsLogin.LoginStatus().State}
 	}
 	state.Capabilities = api.CapabilityStatesOf(s.deployment().Report())
 	return state, nil

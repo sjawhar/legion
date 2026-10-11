@@ -1,12 +1,13 @@
-// Package machine implements machine logins: a typed-code approval flow that
-// mints key-bound launcher credentials. A machine (an operator's box, or an automated service like
-// the Legion daemon, whose pods it enrolls) signs a credential-request object carrying a single
-// launcher_credential authorization detail — naming the service a service's login is for, or, for
-// a person's machine, the operator it logs in as in its login_hint — and polls Login's pendingID
-// for a human to approve the confirmation code Login also mints.
-// Machine-login records are decided here, not in requests.Machine: ApplyDecision takes the
-// deciding human's Dispatch login and the typed code and, on approval, mints the credential
-// directly — there is no Dispatch ask anywhere in this flow, and no bearer token in any response.
+// Package machine implements machine logins. A person's machine (an operator's box) logs in
+// through a typed-code approval flow that mints a key-bound launcher credential: it signs a
+// credential-request object carrying a single launcher_credential authorization detail, naming the
+// operator it logs in as in its login_hint, and polls Login's pendingID for that person to approve
+// the confirmation code Login also mints. Machine-login records are decided here, not in
+// requests.Machine: ApplyDecision takes the deciding human's Dispatch login and the typed code and,
+// on approval, mints the credential directly — there is no Dispatch ask anywhere in this flow, and
+// no bearer token in any response. A service (the Legion daemon, whose pods it enrolls) logs in
+// with its own projected Kubernetes ServiceAccount token instead (TokenLogin), and no person
+// approves it.
 package machine
 
 import (
@@ -66,6 +67,13 @@ type Service struct {
 	// and confirmation code — a confirmation-fatigue/notification-spam vector against the named
 	// operator.
 	Replay func(ctx context.Context, jti string, expires time.Time) (fresh bool, err error)
+
+	// Tokens verifies a service's ServiceAccount token for TokenLogin; nil on a broker that trusts
+	// no Kubernetes token issuer, which serves no token login.
+	Tokens TokenVerifier
+	// ServiceLogins is BROKER_SERVICE_LOGINS: each ServiceAccount subject that logs in with its
+	// token, answering the service it logs in as.
+	ServiceLogins map[string]string
 }
 
 // jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
@@ -128,10 +136,10 @@ func deref(s *string) string {
 
 // Login verifies a signed machine credential-request object and opens a pending record for a
 // human to approve or deny. authorization_details must carry exactly one launcher_credential
-// entry. A service's login, one whose entry names a service, is decided by anyone signed in to
-// Dispatch: its record's approver is record.AnyoneApprover, and any login_hint it carries is
-// ignored. A person's machine login must carry a login_hint naming the person who decides it and
-// whose machine it becomes, so never record.AnyoneApprover.
+// entry, and it must name no service: a service logs in with its own Kubernetes token
+// (TokenLogin), never through a code a person approves. A person's machine login must carry a
+// login_hint naming the person who decides it and whose machine it becomes, so never
+// record.AnyoneApprover.
 // Nothing here touches Dispatch; the record and its poll row are the whole state, and rate
 // limiting this unauthenticated route is the api layer's job, not this one's.
 func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, code string, err error) {
@@ -143,15 +151,15 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 	if len(obj.Details) != 1 || obj.Details[0].Type != record.KindLauncherCredential {
 		return "", "", fmt.Errorf("%w: exactly one launcher_credential detail is required", record.ErrRequestInvalid)
 	}
-	approver := record.AnyoneApprover
-	if obj.Service() == "" {
-		approver = record.CanonicalLogin(obj.LoginHint)
-		if approver == "" {
-			return "", "", fmt.Errorf("%w: login_hint is required for a person's machine login", record.ErrRequestInvalid)
-		}
-		if approver == record.AnyoneApprover {
-			return "", "", fmt.Errorf("%w: a person's machine login's login_hint names its operator, never %q", record.ErrRequestInvalid, record.AnyoneApprover)
-		}
+	if obj.Service() != "" {
+		return "", "", fmt.Errorf("%w: %s", record.ErrRequestInvalid, errServiceLogsInWithToken)
+	}
+	approver := record.CanonicalLogin(obj.LoginHint)
+	if approver == "" {
+		return "", "", fmt.Errorf("%w: login_hint is required for a person's machine login", record.ErrRequestInvalid)
+	}
+	if approver == record.AnyoneApprover {
+		return "", "", fmt.Errorf("%w: a person's machine login's login_hint names its operator, never %q", record.ErrRequestInvalid, record.AnyoneApprover)
 	}
 	fresh, err := s.Replay(ctx, obj.JTI, obj.Expires.Add(s.Skew+jtiRetentionMargin))
 	if err != nil {
@@ -203,9 +211,10 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 // means the human is looking at a different login than the one they're deciding, refused before
 // anything else is checked (CODE_MISMATCH). login, the deciding human's Dispatch login, must be one
 // the record's rule admits (record.ErrNotApprover), checked next against the request object its
-// record embeds, re-verified as of the record's creation: for a service's login any login, for a
-// person's machine login that person alone. So another login is refused the same way whatever the
-// record's state. A record that already carries a decision is
+// record embeds, re-verified as of the record's creation: a person's machine login is decided by
+// that person alone, and a service's login, which a broker before TokenLogin opened, is approved by
+// no one (a service logs in with its token now), though it may still be denied. So another login is
+// refused the same way whatever the record's state. A record that already carries a decision is
 // ErrAlreadyDecided, and one that expired undecided — recorded expired by the sweeper, or past its
 // expires_at before the sweeper got to it — is ErrLoginExpired, both checked under the record's
 // row lock before anything is minted, so a second decision, one racing the first and one after
@@ -289,17 +298,15 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 			return "", "", err
 		}
 		detail := obj.Details[0]
-		var operator, service *string
 		if detail.Service != "" {
-			service = &detail.Service
-		} else {
-			op := login
-			operator = &op
+			return "", "", fmt.Errorf("%w: %s", record.ErrRequestInvalid, errServiceLogsInWithToken)
 		}
+		op := login
+		operator := &op
 		if body.LifetimeSeconds == nil {
 			return "", "", fmt.Errorf("machine login record has no credential lifetime")
 		}
-		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operator, service, detail.Identifier, obj.Thumbprint, jwk, recordID,
+		id, err := s.Enroll.MintLauncherCredentialTx(ctx, tx, operator, nil, detail.Identifier, obj.Thumbprint, jwk, recordID,
 			time.Now().Add(time.Duration(*body.LifetimeSeconds)*time.Second))
 		if store.IsUniqueViolation(err) {
 			return "", "", ErrKeyHoldsLiveCredential

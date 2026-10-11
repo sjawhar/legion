@@ -146,4 +146,10 @@ package api
 // 20 would pass the gate against it. Renumbered twice, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
-const DaemonAPIVersion = 21
+//
+// 22: LEGION-618 -- the daemon logs in to the secrets broker with its own Kubernetes ServiceAccount
+// token, which no person approves, so GET /legion/v1/state's `agentSecretsLogin` loses `code` (no
+// confirmation code exists any more) and its `state` is `none`, `issued` or `failed`. A 21 plugin's
+// strict reader requires `code` and refuses a 22 daemon's state, so the boot gate and `legion
+// probe-image` refuse the mixed pair.
+const DaemonAPIVersion = 22

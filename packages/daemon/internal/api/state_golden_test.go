@@ -136,7 +136,7 @@ func populatedState() State {
 			SessionID:    "ses_controller",
 			RegisteredAt: time.Date(2026, 9, 22, 9, 16, 40, 0, time.UTC),
 		},
-		AgentSecretsLogin: &AgentSecretsLoginView{State: "pending", Code: "WXYZ-1234"},
+		AgentSecretsLogin: &AgentSecretsLoginView{State: "issued"},
 		// A kubernetes deployment whose image passed the probe, with the broker gap decided and
 		// one role unreserved, and no session's report yet, so the fixture carries a decided row and
 		// an open row beside the present, unchecked and withheld ones, rendered by the report

@@ -82,6 +82,16 @@ type Config struct {
 	// to those pods and is refused to every other session. Unset, no service is registered, and a
 	// secret whose owner tag names one is refused as owner-tag-malformed.
 	ServiceAccounts map[string]string
+	// BROKER_SERVICE_LOGINS: the ServiceAccounts that log in as a service with their own projected
+	// token (POST /v1/launcher-credentials/token), whitespace-separated <service>=<service account>
+	// entries, such as legion-daemon=system:serviceaccount:legion-system:legion-daemon-legion. Each
+	// account (system:serviceaccount:<namespace>:<name>, named exactly: there is no wildcard) logs in
+	// as the one service its entry names and is given once; one service may have several accounts,
+	// one per machine. Keyed by account, each answering its service. A token whose subject is not
+	// listed is refused, and a credential an account's login issued stops authenticating once its
+	// entry is gone. Needs BROKER_K8S_OIDC_ISSUER, whose tokens it trusts. Unset, no service logs in
+	// with a token.
+	ServiceLogins map[string]string
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
 	K8sOIDCIssuer string
@@ -308,11 +318,28 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		cfg.ServiceAccounts[name] = subject
 	}
+	for _, entry := range strings.Fields(getenv("BROKER_SERVICE_LOGINS")) {
+		name, subject, ok := strings.Cut(entry, "=")
+		_, duplicate := cfg.ServiceLogins[subject]
+		if !ok || !record.ValidService(name) || name == policy.OwnerShared || !serviceAccountPattern.MatchString(subject) {
+			return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS must be <service>=system:serviceaccount:<namespace>:<name> entries, each service lowercase letters, digits and hyphens, at most 64, not %s, got %q", policy.OwnerShared, entry)
+		}
+		if duplicate {
+			return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS names the service account %s twice; each account logs in as one service", subject)
+		}
+		if cfg.ServiceLogins == nil {
+			cfg.ServiceLogins = map[string]string{}
+		}
+		cfg.ServiceLogins[subject] = name
+	}
 	issuer, audience, err := oidc.ConfigFromEnv(getenv, "BROKER_K8S_OIDC_ISSUER", "BROKER_K8S_OIDC_AUDIENCE")
 	if err != nil {
 		return Config{}, err
 	}
 	cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience = issuer, audience
+	if len(cfg.ServiceLogins) > 0 && cfg.K8sOIDCIssuer == "" {
+		return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its accounts log in with")
+	}
 	token, err := secretValue(getenv, "BROKER_UI_TOKEN")
 	if err != nil {
 		return Config{}, err

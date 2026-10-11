@@ -10,13 +10,11 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 )
 
-// LauncherLimits bounds POST /v1/launcher-credentials, the one route an unauthenticated caller
-// can use to make the broker do work on their behalf. Every source address has its own token
-// bucket, and so does every person a machine login's login_hint names, while every service's login
-// spends one shared bucket, whatever service it names (launcherLoginKey): a flood from one address
-// cannot keep the broker busy verifying and recording machine-login requests, a flood naming one
-// operator cannot bury that operator's pending machine logins, and a flood of invented service
-// names cannot buy itself a bucket per name.
+// LauncherLimits bounds POST /v1/launcher-credentials and POST /v1/launcher-credentials/token, the
+// routes an unauthenticated caller can use to make the broker do work on their behalf. Every source
+// address has its own token bucket, and so does every person a machine login's login_hint names: a
+// flood from one address cannot keep the broker busy verifying machine-login requests and tokens,
+// and a flood naming one operator cannot bury that operator's pending machine logins.
 type LauncherLimits struct {
 	PerAddress ratelimit.Limit
 	PerLogin   ratelimit.Limit
@@ -91,10 +89,8 @@ func clientAddress(r *http.Request, trustedProxyHeader string) string {
 // The per-login bucket, keyed on the request object's own claims rather than the caller's address,
 // is unaffected by trustedProxyHeader and remains a smaller, accepted risk. A person's machine
 // login spends its own person:<login> bucket, so an attacker naming a specific victim operator
-// repeatedly can lock out that operator's machine logins at a low rate. Every service's login
-// shares the one "service" bucket, so a flood under any service name, invented or not, locks out
-// every service's login, the Legion daemon's included, until the bucket refills. This is inherent
-// to a per-login limit on an unauthenticated route.
+// repeatedly can lock out that operator's machine logins at a low rate. This is inherent to a
+// per-login limit on an unauthenticated route.
 func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, login string) bool {
 	now := time.Now()
 	address := clientAddress(r, l.trustedProxyHeader)
@@ -102,6 +98,17 @@ func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, login s
 		return false
 	}
 	refuseWithRetryAfter(w, max(l.perAddress.Every(), l.perLogin.Every()), "too many launcher credential requests; try again later")
+	return true
+}
+
+// refuseAddress writes 429 RATE_LIMITED and reports true when r's source address has no request
+// left in its bucket: POST /v1/launcher-credentials/token's limit, which names no login before its
+// token verifies.
+func (l *launcherLimiter) refuseAddress(w http.ResponseWriter, r *http.Request) bool {
+	if l.perAddress.AllowAt(clientAddress(r, l.trustedProxyHeader), time.Now()) {
+		return false
+	}
+	refuseWithRetryAfter(w, l.perAddress.Every(), "too many launcher credential requests; try again later")
 	return true
 }
 

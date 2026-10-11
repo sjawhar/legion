@@ -161,8 +161,10 @@ What each part is for:
 - **`nats_nkey_seed_file`** and **`nats_daemon_nkey_seed_file`** (optional) are the NATS nkey user
   seeds for the agents and for the daemon's own connection, each in a file only its owner can read.
 - **`runtime.kubernetes.agent_secrets`** (optional) enrolls every pod with the
-  [Secrets Broker](/legion/broker/): `url` is the broker. The daemon's own machine login is the
-  `legion-daemon` service's, which anyone signed in to Dispatch approves on its credential page.
+  [Secrets Broker](/legion/broker/): `url` is the broker, and `token_file` is where the daemon's own
+  projected ServiceAccount token for the broker's audience is mounted. The daemon logs in with that
+  token at every start and keeps logging in; no person approves it, provided the broker's
+  `BROKER_SERVICE_LOGINS` names the daemon's ServiceAccount.
 - **`controller`** (optional) is who runs the project's controller: `operator` (the default), you,
   with `legion controller start`, or `daemon`, a pod the daemon launches and keeps running
   ([Start the controller](#start-the-controller)).

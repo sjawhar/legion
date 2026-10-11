@@ -87,10 +87,12 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 21 for contract 21's capability report (LEGION-663: `claims/register` answers
-`promptAgents`, `claims/ready` takes an optional `capabilities` report, each claim view on
-`GET /legion/v1/state` carries its session's latest report as `capabilities`, and `live` is gone
-from the capability status enum), after contract 20's controller credential (LEGION-668: the
+number is 22 for contract 22's token login (LEGION-618: the daemon logs in to the secrets broker
+with its own ServiceAccount token, so `agentSecretsLogin` on `GET /legion/v1/state` loses `code`
+and its `state` is `none`, `issued` or `failed`), after contract 21's capability report (LEGION-663:
+`claims/register` answers `promptAgents`, `claims/ready` takes an optional `capabilities` report,
+each claim view on `GET /legion/v1/state` carries its session's latest report as `capabilities`,
+and `live` is gone from the capability status enum), after contract 20's controller credential (LEGION-668: the
 controller holds the review App's GitHub token like every role — `POST
 /legion/v1/controller/github-credential` answers the operator-launched controller's `legion
 controller start` the review App's gh files for the current controller capability, and the

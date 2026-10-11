@@ -65,7 +65,8 @@ type LiveCredential struct {
 	// Service names the service a service's login is for (legion-daemon); nil for a person's own
 	// machine.
 	Service *string
-	// ApprovedBy is the login of the person who approved it.
+	// ApprovedBy is the login of the person who approved it, "" for a service's token login, which
+	// no person approves.
 	ApprovedBy string
 	IssuedAt   time.Time
 	ExpiresAt  time.Time
@@ -113,6 +114,11 @@ type Service struct {
 	// back to a genuinely signed, human-approved credential-request record. NewChainVerifier
 	// builds one against this same Store.
 	Chain *record.ChainVerifier
+
+	// ServiceLogins is BROKER_SERVICE_LOGINS: each ServiceAccount subject that logs in as a service
+	// with its token, answering that service. AuthenticateLauncher reads it for every credential a
+	// token login issued.
+	ServiceLogins map[string]string
 
 	// testConflictHook, when set, runs once a 23505 insert conflict is detected in createAttempt,
 	// before the recovery lookup. It exists only so a test can deterministically reproduce the
@@ -162,20 +168,23 @@ func NewChainVerifier(st *store.Store, audience string, skew time.Duration) *rec
 
 // AuthenticateLauncher answers proof.Verifier's LookupLauncher hook directly: given a launcher
 // credential's own id (the "lid" claim of a proof.SignLauncher proof), it resolves the live,
-// unexpired credential row and re-verifies its entire issuance chain through s.Chain — a
-// launcher_credentials row is never trusted on its own, so a row inserted without a genuine
-// approved credential-request record behind it never authenticates. A missing, expired, revoked,
-// or chain-broken credential all answer ("", false, nil); only a genuine dependency failure is a
-// non-nil error, matching Lookup's own contract.
+// unexpired credential row and checks what vouches for it. A credential a person approved has its
+// entire issuance chain re-verified through s.Chain — a launcher_credentials row is never trusted
+// on its own, so a row inserted without a genuine approved credential-request record behind it
+// never authenticates. A credential a service's token login issued (machine.Service.TokenLogin,
+// its subject set) authenticates while ServiceLogins still names its subject for its service, so
+// removing an account from BROKER_SERVICE_LOGINS ends its credential at its next call. A missing,
+// expired, revoked, chain-broken or no-longer-listed credential all answer ("", false, nil); only a
+// genuine dependency failure is a non-nil error, matching Lookup's own contract.
 func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string, bool, error) {
 	if _, err := uuid.Parse(lid); err != nil {
 		return "", false, nil
 	}
 	var thumbprint string
-	var recordID *string
+	var recordID, service, subject *string
 	var expiresAt time.Time
-	err := s.Store.Pool.QueryRow(ctx, `select key_thumbprint, record_id, expires_at from launcher_credentials where id=$1 and revoked_at is null`, lid).
-		Scan(&thumbprint, &recordID, &expiresAt)
+	err := s.Store.Pool.QueryRow(ctx, `select key_thumbprint, record_id, service, subject, expires_at from launcher_credentials where id=$1 and revoked_at is null`, lid).
+		Scan(&thumbprint, &recordID, &service, &subject, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
@@ -184,6 +193,12 @@ func (s *Service) AuthenticateLauncher(ctx context.Context, lid string) (string,
 	}
 	if !expiresAt.After(time.Now()) {
 		return "", false, nil
+	}
+	if subject != nil {
+		if listed, ok := s.ServiceLogins[*subject]; !ok || service == nil || listed != *service {
+			return "", false, nil
+		}
+		return thumbprint, true, nil
 	}
 	if recordID == nil {
 		return "", false, nil
@@ -617,15 +632,13 @@ func authorized(cred Credential, kind string, operator *string) bool {
 // A pod enrollment carries no operator, so the operator cannot tell one service's pods from
 // another's: a pod enrollment is ended only by the launcher credential that created it
 // (ErrNotEnrollingCredential for any other), never by another service's credential nor a second
-// credential of the same service. A Legion daemon holds a new credential whenever it logs in
-// again: after a restart, since its key lives in memory and every machine login mints a new one,
-// and when its login reaches its expiry (BROKER_LAUNCHER_CREDENTIAL_SECONDS, 7 days by default)
-// and the next refusal starts a new machine login. Either way it cannot end the enrollments its
-// earlier login made: each ends when its pod stops renewing, one lease (BROKER_LEASE_SECONDS)
-// after its renewer stops, or at once when a person revokes that earlier login
-// (RevokeCredential), and the pods its current login enrolled it ends here as before. A box or
-// host enrollment keeps the operator rule alone: a helper that logs in again revokes the
-// enrollments its earlier credential made for the same operator.
+// credential of the same service. A Legion daemon's token login keeps its account's one credential
+// across its restarts (machine.Service.TokenLogin), so it ends here every pod it enrolled. An
+// enrollment another credential made — a service login a person approved before token logins, or
+// the daemon's credential before someone revoked it — ends when its pod stops renewing, one lease
+// (BROKER_LEASE_SECONDS) after its renewer stops, or at once when a person revokes that credential
+// (RevokeCredential). A box or host enrollment keeps the operator rule alone: a helper that logs in
+// again revokes the enrollments its earlier credential made for the same operator.
 //
 // Once ownership passes, Revoke returns ErrNotLive, changing nothing, when the enrollment is
 // already revoked — the guard that keeps the audit trail honest: without it a no-op call would
@@ -667,15 +680,16 @@ func (s *Service) Revoke(ctx context.Context, cred Credential, id, by string) er
 // LiveCredentials lists the machine logins person may list and revoke that can still reach a
 // secret, newest first: every unrevoked launcher credential minted from a launcher_credential
 // record, a service's whoever approved it, a person's own machine's only when it is the person
-// whose record names them, while it is unexpired or a session it enrolled is live as Lookup means
-// it: not revoked, its lease not lapsed. A login's sessions outlive its expiry, since each renews
-// with its own key (Renew never reads the credential), so an expired login stays listed, Expired
-// set, until its last session ends or lapses (a lapsed session renews no more, swept or not):
-// revoking every listed login ends every session the person's machines started. A service's
-// login, such as the Legion daemon's, has no operator and acts as no person, so anyone signed in
-// to Dispatch approves it (record.MayDecide), lists it and revokes it, its Service set. Each login
-// names who approved it, the login its approved event records. The sentinel record.AnyoneApprover
-// and an empty login list nothing. OwnLiveCredentials lists the person's own machines' alone.
+// whose record names them, and every service's token login (machine.Service.TokenLogin), while it
+// is unexpired or a session it enrolled is live as Lookup means it: not revoked, its lease not
+// lapsed. A login's sessions outlive its expiry, since each renews with its own key (Renew never
+// reads the credential), so an expired login stays listed, Expired set, until its last session ends
+// or lapses (a lapsed session renews no more, swept or not): revoking every listed login ends every
+// session the person's machines started. A service's login, such as the Legion daemon's, has no
+// operator and acts as no person, so anyone signed in to Dispatch lists it and revokes it, its
+// Service set. Each login names who approved it, the login its approved event records, or "" for a
+// token login, which no person approved. The sentinel record.AnyoneApprover and an empty login list
+// nothing. OwnLiveCredentials lists the person's own machines' alone.
 func (s *Service) LiveCredentials(ctx context.Context, person string) ([]LiveCredential, error) {
 	return s.liveCredentials(ctx, person, true)
 }
@@ -694,10 +708,11 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 		return nil, nil
 	}
 	rows, err := s.Store.Pool.Query(ctx, `select c.id, c.host, c.service,
-			(select ev.login from credential_request_events ev where ev.record_id = r.id and ev.event = 'approved'),
+			coalesce((select ev.login from credential_request_events ev where ev.record_id = r.id and ev.event = 'approved'), ''),
 			c.created_at, c.expires_at, c.expires_at <= now() from launcher_credentials c
-		join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
-		where ((c.service is null and r.approver = $1) or ($2 and c.service is not null)) and c.revoked_at is null
+		left join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
+		where ((c.service is null and r.approver = $1) or ($2 and c.service is not null and (r.id is not null or c.subject is not null)))
+			and c.revoked_at is null
 			and (c.expires_at > now() or exists (select 1 from enrollments e where e.launcher_credential_id = c.id and e.revoked_at is null and e.lease_expires_at > now()))
 		order by c.created_at desc, c.id`, person, services)
 	if err != nil {
@@ -712,10 +727,12 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 // enrolled, which outlive the credential's expiry — is ended as Revoke ends one (endEnrollment, an
 // enrollment.revoked audit row), revoking each one's grants and cancelling its pending requests,
 // all in one transaction with one launcher_credential.revoked audit row. person may revoke a
-// service's login whoever approved it, and a person's own machine's only as the approver of the
+// service's login whoever approved it, a service's token login (which no person approved, and whose
+// service logs in again with its token under a new credential unless BROKER_SERVICE_LOGINS no
+// longer names its account), and a person's own machine's only as the approver of the
 // launcher_credential record it was minted from (ErrNotApprover); the sentinel
-// record.AnyoneApprover and an empty login revoke nothing. An unknown id, like a credential minted
-// from no such record (which only ApplyDecision mints, always from one), is ErrNoCredential. actor
+// record.AnyoneApprover and an empty login revoke nothing. An unknown id, like a credential with
+// neither a record nor a token login's subject, is ErrNoCredential. actor
 // is what every row it writes records as having done it, which the caller proved:
 // "human:<person>" for a revoke Dispatch relays from its signed-in person,
 // "launcher:<credential id>" for one the person's own machine login makes. Revoking a credential
@@ -741,12 +758,13 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 		return err
 	}
 	defer tx.Rollback(ctx)
-	var approver, host string
+	var approver *string
+	var host string
 	var service *string
 	var revokedAt *time.Time
 	err = tx.QueryRow(ctx, `select r.approver, c.service, c.host, c.revoked_at from launcher_credentials c
-		join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
-		where c.id = $1 for no key update of c`, id).Scan(&approver, &service, &host, &revokedAt)
+		left join credential_requests r on r.id = c.record_id and r.kind = 'launcher_credential'
+		where c.id = $1 and (r.id is not null or c.subject is not null) for no key update of c`, id).Scan(&approver, &service, &host, &revokedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNoCredential
 	}
@@ -761,7 +779,15 @@ func (s *Service) revokeCredential(ctx context.Context, id, person, actor string
 		svc = *service
 	}
 	person = record.CanonicalLogin(person)
-	if !record.MayDecide(record.KindLauncherCredential, approver, svc, person) {
+	switch {
+	case approver == nil:
+		// A service's token login: no person approved it, and like every service's login anyone
+		// signed in may revoke it. Its service logs in again with its token at its next call, under
+		// a new credential, unless BROKER_SERVICE_LOGINS no longer names its account.
+		if person == "" || person == record.AnyoneApprover {
+			return ErrNotApprover
+		}
+	case !record.MayDecide(record.KindLauncherCredential, *approver, svc, person):
 		return ErrNotApprover
 	}
 	if revokedAt != nil {

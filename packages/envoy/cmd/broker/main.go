@@ -109,12 +109,16 @@ func main() {
 		loader.Secrets, loader.Describer, loader.Aliases, reader = sm, sm, kms.NewFromConfig(awsCfg), secrets.AWS{Client: sm}
 	}
 	var pod enroll.PodVerifier
+	var tokens machine.TokenVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
 	verifier, err := oidc.Discover(ctx, cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, oidc.DiscoveryTimeout)
 	fatal(err)
 	if verifier != nil {
-		pod = enroll.K8sPodVerifier{Verifier: verifier}
+		// One verifier for both: a pod's enrollment token and a service's login token are the same
+		// cluster's projected tokens, for the same audience.
+		k8s := enroll.K8sPodVerifier{Verifier: verifier}
+		pod, tokens = k8s, k8s
 	}
 
 	current, err := policy.NewCurrent(ctx, loader, policyRefresh)
@@ -146,14 +150,14 @@ func main() {
 	}
 	slog.Info("broker listening", "addr", listener.Addr().String())
 
-	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod}
+	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, reader, enr.Replay)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
 		PendingTTL: machineLoginPendingTTL, CredentialLifetime: time.Duration(cfg.LauncherCredentialSeconds) * time.Second,
-		Replay: enr.Replay,
+		Replay: enr.Replay, Tokens: tokens, ServiceLogins: cfg.ServiceLogins,
 	}
 
 	var waker func(context.Context, string, string, string)

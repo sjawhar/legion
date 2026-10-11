@@ -38,10 +38,11 @@
 # The secrets-* checks are optional and print CHECK <name>: SKIPPED-BLOCKED when
 # unconfigured: LEGION_E2E_AGENT_SECRETS_URL, LEGION_E2E_AGENT_SECRETS_OPERATOR (the email of the
 # person who approves secrets-approval-ask's credential request on the Dispatch credential page
-# during the run), and LEGION_E2E_AGENT_SECRETS_AUTO_SHA256. With all of them set the harness also
-# starts the run's machine login, the legion-daemon service's, which any person signed in to
-# Dispatch approves, attended the same way: the harness polls, prints STAGE4A: approve …, and waits
-# up to 10 minutes for a real approval. See scripts/e2e/README.md's Stage 4a section.
+# during the run), LEGION_E2E_AGENT_SECRETS_AUTO_SHA256, and LEGION_E2E_AGENT_SECRETS_ACCOUNT
+# (<namespace>/<name> of a ServiceAccount the broker's BROKER_SERVICE_LOGINS lets log in as
+# legion-daemon). The run logs in as the daemon does, with that account's token, which the operator
+# context mints with `kubectl create token` for the broker's audience; no person approves it. See
+# scripts/e2e/README.md's Stage 4a section.
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -67,6 +68,7 @@ image=${LEGION_E2E_IMAGE:-}
 agent_secrets_url=${LEGION_E2E_AGENT_SECRETS_URL:-}
 agent_secrets_operator=${LEGION_E2E_AGENT_SECRETS_OPERATOR:-}
 agent_secrets_auto_sha=${LEGION_E2E_AGENT_SECRETS_AUTO_SHA256:-}
+agent_secrets_account=${LEGION_E2E_AGENT_SECRETS_ACCOUNT:-}
 from=${STAGE4A_FROM:-}
 evidence=${STAGE4A_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e4a-evidence.XXXXXXXX)}
 work=$(mktemp -d /tmp/legion-e2e4a.XXXXXXXX)
@@ -163,6 +165,21 @@ if [ -n "$agent_secrets_url" ]; then
 else
   note "agent-secrets: none (the secrets-* checks report SKIPPED-BLOCKED)"
 fi
+agent_secrets_token_file=
+if [ -n "$agent_secrets_account" ]; then
+  # The run's login token: what the kubelet projects into the daemon's pod, minted here by the
+  # operator context for the broker's audience and written owner-only; never printed.
+  account_namespace=${agent_secrets_account%%/*}
+  account_name=${agent_secrets_account#*/}
+  [ -n "$account_namespace" ] && [ -n "$account_name" ] && [ "$account_namespace" != "$agent_secrets_account" ] ||
+    fail "LEGION_E2E_AGENT_SECRETS_ACCOUNT must be <namespace>/<name>, got $agent_secrets_account"
+  agent_secrets_token_file=$work/agent-secrets-token
+  (
+    umask 077
+    timeout --foreground 300 kubectl --context "$operator" -n "$account_namespace" create token "$account_name" --audience agent-secrets --duration 3h >"$agent_secrets_token_file"
+  ) || fail "the operator could not mint a token for $agent_secrets_account"
+  note "[operator] minted a 3h agent-secrets token for $agent_secrets_account (owner-only file, not printed)"
+fi
 
 begin snapshot
 snapshot "$evidence/namespace-before.txt" || fail "the operator could not list namespace $namespace"
@@ -250,6 +267,7 @@ if env \
   LEGION_E2E_AGENT_SECRETS_OPERATOR="$agent_secrets_operator" \
   LEGION_E2E_AGENT_SECRETS_AUTO_SHA256="$agent_secrets_auto_sha" \
   LEGION_E2E_AGENT_SECRETS_BIN="$work/agent-secrets" \
+  LEGION_E2E_AGENT_SECRETS_TOKEN_FILE="$agent_secrets_token_file" \
   LEGION_E2E_SESSION_DSN_FILE="$work/session-dsn" \
   LEGION_E2E_SESSION_DB_ADDRESS="$host:$session_db_port" \
   "$work/stage4a.test" -test.run '^TestStage4aSandboxRuntimeLive$' -test.v -test.timeout 150m; then

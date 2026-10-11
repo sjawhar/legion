@@ -205,6 +205,60 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 	}
 }
 
+// TestLoadReadsTheServiceLogins pins BROKER_SERVICE_LOGINS: whitespace-separated
+// <service>=<ServiceAccount subject> entries keyed by subject, none when unset; one service may have
+// several accounts, an account is named once and exactly (no wildcard), and the setting needs a
+// Kubernetes token issuer to trust.
+func TestLoadReadsTheServiceLogins(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ServiceLogins != nil {
+		t.Fatalf("ServiceLogins = %v, want nil when BROKER_SERVICE_LOGINS is unset", cfg.ServiceLogins)
+	}
+	withIssuer := func() map[string]string {
+		e := validEnv()
+		e["BROKER_K8S_OIDC_ISSUER"] = "https://oidc.eks.example.invalid/id/EXAMPLE"
+		e["BROKER_K8S_OIDC_AUDIENCE"] = "agent-secrets"
+		return e
+	}
+	e := withIssuer()
+	e["BROKER_SERVICE_LOGINS"] = " legion-daemon=system:serviceaccount:legion-system:legion-daemon-a\nlegion-daemon=system:serviceaccount:legion-system:legion-daemon-b "
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"system:serviceaccount:legion-system:legion-daemon-a": "legion-daemon",
+		"system:serviceaccount:legion-system:legion-daemon-b": "legion-daemon",
+	}
+	if !maps.Equal(cfg.ServiceLogins, want) {
+		t.Fatalf("ServiceLogins = %v, want %v", cfg.ServiceLogins, want)
+	}
+
+	for _, bad := range []string{
+		"legion-daemon", "=system:serviceaccount:a:b", "shared=system:serviceaccount:a:b", "Legion=system:serviceaccount:a:b",
+		"legion-daemon=system:serviceaccount:legion-system:*", "legion-daemon=system:serviceaccount:*:legion-daemon", "legion-daemon=legion-daemon-a",
+	} {
+		e := withIssuer()
+		e["BROKER_SERVICE_LOGINS"] = bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICE_LOGINS") || !strings.Contains(err.Error(), strconv.Quote(bad)) {
+			t.Errorf("BROKER_SERVICE_LOGINS = %q: err = %v, want a refusal naming the setting and the entry", bad, err)
+		}
+	}
+	e = withIssuer()
+	e["BROKER_SERVICE_LOGINS"] = "a=system:serviceaccount:x:y b=system:serviceaccount:x:y"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "system:serviceaccount:x:y") {
+		t.Errorf("BROKER_SERVICE_LOGINS naming one account twice: err = %v, want a refusal naming the account", err)
+	}
+	e = validEnv()
+	e["BROKER_SERVICE_LOGINS"] = "legion-daemon=system:serviceaccount:legion-system:legion-daemon-a"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_K8S_OIDC_ISSUER") {
+		t.Errorf("BROKER_SERVICE_LOGINS with no token issuer: err = %v, want a refusal naming BROKER_K8S_OIDC_ISSUER", err)
+	}
+}
+
 // TestLoadRefusesTheRulesFileVariables pins that a deployment still configured for the rules file
 // refuses to start naming the variable, rather than running with its rules silently ignored.
 func TestLoadRefusesTheRulesFileVariables(t *testing.T) {
