@@ -20,7 +20,11 @@ import {
 } from "@legion/envoy-client/dispatch-session-state";
 import { envoyToolSpecs } from "@legion/envoy-client/tool-contract";
 import { matchInjectedUserTurn } from "@legion/pi-shared/injected-user-turns";
-import { LOCAL_ENVOY_NOTICE, resetEnvoyPluginInterfaceForTests } from "@legion/pi-shared/interface";
+import {
+  envoyPluginInterface,
+  LOCAL_ENVOY_NOTICE,
+  resetEnvoyPluginInterfaceForTests,
+} from "@legion/pi-shared/interface";
 import type {
   HostSlashCommand,
   MessageRenderer,
@@ -30,7 +34,7 @@ import type {
 } from "@legion/pi-shared/pi-types";
 import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
-import type { HostBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
+import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { decode } from "@toon-format/toon";
 import { z } from "zod";
@@ -264,7 +268,7 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 // (`listUserInputBuiltinCommands`): a test fills this list, and `afterEach` empties it. No package
 // in this workspace provides the module, so without this stand-in the extension lists no
 // built-ins, as on a host without the method.
-const hostBuiltins: HostBuiltinCommand[] = [];
+const hostBuiltins: UserInputBuiltinCommand[] = [];
 mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler", () => ({
   listUserInputBuiltinCommands: () => hostBuiltins,
 }));
@@ -5203,26 +5207,42 @@ describe("envoy OMP extension", () => {
     // Whatever a command printed, or why it did not run, is the session's reply on Dispatch, which
     // the conversation shows; a turn the model now works on is its own answer.
     describe("on a host that runs typed input", () => {
-      test("runs the stored body as typed, tagged with its message id, in the stored mode", async () => {
-        const { agent, delivered, fixture, inputs, posts } = await bootDirectSession(
-          "typed-input-mode",
-          {
-            accept: () => ({ accepted: true, delivery: "aside" }),
-            sendUserInput: async () => ({ handled: "prompt" }),
-          }
-        );
+      for (const [name, frameMode, acceptedMode, inputOptions] of [
+        ["a Send accepted as a Send", "steer", "steer", { tag: DIRECT_MESSAGE_ID }],
+        [
+          "an Aside accepted as an Aside",
+          "aside",
+          "aside",
+          { deliverAs: "aside", tag: DIRECT_MESSAGE_ID },
+        ],
+        [
+          "a frame claiming Send accepted as Aside",
+          "steer",
+          "aside",
+          { deliverAs: "aside", tag: DIRECT_MESSAGE_ID },
+        ],
+        ["a frame claiming Aside accepted as Send", "aside", "steer", { tag: DIRECT_MESSAGE_ID }],
+      ] as const) {
+        test(`runs the stored body as typed in ${name}`, async () => {
+          const { agent, delivered, fixture, inputs } = await bootDirectSession(
+            `typed-input-mode-${name}`,
+            {
+              accept: () => ({ accepted: true, delivery: acceptedMode }),
+              sendUserInput: async () => ({ handled: "prompt" }),
+            }
+          );
 
-        agent.push(
-          directDispatchEnvelope("steer", "typed-input-mode", { body: "a forger's text" })
-        );
-        await delivered(1);
+          agent.push(
+            directDispatchEnvelope(frameMode, `typed-input-mode-${name}`, {
+              body: "a forger's text",
+            })
+          );
+          await delivered(1);
 
-        expect(inputs).toEqual([
-          { options: { deliverAs: "aside", tag: DIRECT_MESSAGE_ID }, text: DIRECT_MESSAGE_BODY },
-        ]);
-        expect(fixture.userMessages).toEqual([]);
-        expect(posts).toEqual([]);
-      });
+          expect(inputs).toEqual([{ options: inputOptions, text: DIRECT_MESSAGE_BODY }]);
+          expect(fixture.userMessages).toEqual([]);
+        });
+      }
 
       for (const [name, result, reply] of [
         [
@@ -5263,6 +5283,118 @@ describe("envoy OMP extension", () => {
         });
       }
 
+      for (const [name, firstResult] of [
+        ["a prompt", { handled: "prompt" }],
+        ["a skill", { handled: "skill" }],
+        ["a command with no output", { handled: "command" }],
+        ["a command with whitespace output", { handled: "command", output: "  \n" }],
+      ] as const satisfies readonly (readonly [string, UserInputResult])[]) {
+        test(`posts no reply for ${name}`, async () => {
+          let inputs = 0;
+          const { agent, delivered, replied, replies } = await bootDirectSession(
+            `typed-input-no-reply-${name}`,
+            {
+              accept: (count) => ({
+                accepted: true,
+                body: count === 1 ? DIRECT_MESSAGE_BODY : "/new",
+              }),
+              sendUserInput: async () => {
+                inputs++;
+                return inputs === 1 ? firstResult : { handled: "terminal-only" };
+              },
+            }
+          );
+
+          agent.push(directDispatchEnvelope("steer", `typed-input-no-reply-${name}-1`));
+          await delivered(1);
+          agent.push(
+            directDispatchEnvelope("steer", `typed-input-no-reply-${name}-2`, { attempt: 2 })
+          );
+          await delivered(2);
+          await replied(1);
+
+          expect(replies).toEqual([
+            {
+              body: {
+                actor: { id: "ses_delivery", kind: "session" },
+                attempt: 2,
+                body: "/new runs only in the session's own terminal; nothing was sent.",
+              },
+              path: `/api/v1/messages/${DIRECT_MESSAGE_ID}/reply`,
+            },
+          ]);
+        });
+      }
+
+      for (const [name, first] of [
+        ["a command", async () => ({ handled: "command" as const, output: "done" })],
+        [
+          "a command that invoked the agent",
+          async () => ({ agentInvoked: true, handled: "command" as const, output: "done" }),
+        ],
+        ["a terminal-only command", async () => ({ handled: "terminal-only" as const })],
+        ["an unavailable host", async () => ({ handled: "unavailable" as const })],
+        [
+          "a failed host call",
+          async () => {
+            throw new Error("failed before submission");
+          },
+        ],
+      ] as const) {
+        test(`drops the typed note after ${name} submits no message`, async () => {
+          const { agent, delivered, replied } = await bootDirectSession(`typed-note-drop-${name}`, {
+            sendUserInput: first,
+          });
+
+          agent.push(directDispatchEnvelope("steer", `typed-note-drop-${name}`));
+          await delivered(1);
+          await replied(1);
+
+          expect(
+            envoyPluginInterface()
+              .injectedUserTurns.get("ses_delivery")
+              ?.sent.map((sent) => sent.messageId) ?? []
+          ).not.toContain(DIRECT_MESSAGE_ID);
+        });
+      }
+
+      for (const handled of ["prompt", "skill"] as const) {
+        test(`keeps the typed note for ${handled} until its tagged message arrives`, async () => {
+          const { agent, context, delivered, fixture } = await bootDirectSession(
+            `typed-note-kept-${handled}`,
+            {
+              sendUserInput: async () => ({ handled }),
+            }
+          );
+
+          agent.push(directDispatchEnvelope("steer", `typed-note-kept-${handled}`));
+          await delivered(1);
+          await Promise.resolve();
+          expect(
+            envoyPluginInterface()
+              .injectedUserTurns.get("ses_delivery")
+              ?.sent.map((sent) => sent.messageId)
+          ).toContain(DIRECT_MESSAGE_ID);
+
+          await fixture.handlers.get("message_start")?.(
+            {
+              message: {
+                content: [{ text: DIRECT_MESSAGE_BODY, type: "text" }],
+                role: handled === "skill" ? "custom" : "user",
+                tag: DIRECT_MESSAGE_ID,
+                timestamp: 10,
+              },
+            },
+            context
+          );
+          expect(
+            envoyPluginInterface()
+              .injectedUserTurns.get("ses_delivery")
+              ?.sent.map((sent) => sent.messageId) ?? []
+          ).not.toContain(DIRECT_MESSAGE_ID);
+        });
+      }
+
       test("a host that fails running it answers with the failure", async () => {
         const { agent, delivered, replied, replies } = await bootDirectSession(
           "typed-input-fails",
@@ -5285,6 +5417,56 @@ describe("envoy OMP extension", () => {
             body: "/compact was not run: compaction is already running",
           },
         ]);
+      });
+
+      test("answers a synchronous typed-input throw and drops its note", async () => {
+        const { agent, delivered, replied, replies } = await bootDirectSession(
+          "typed-input-sync-fails",
+          {
+            accept: () => ({ accepted: true, body: "/compact" }),
+            sendUserInput: (() => {
+              throw new Error("sync failure");
+            }) as unknown as (text: string, options: unknown) => Promise<UserInputResult>,
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-sync-fails"));
+        await delivered(1);
+        await replied(1);
+
+        expect(replies[0]?.body).toEqual({
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: "/compact was not run: sync failure",
+        });
+        expect(
+          envoyPluginInterface()
+            .injectedUserTurns.get("ses_delivery")
+            ?.sent.map((sent) => sent.messageId) ?? []
+        ).not.toContain(DIRECT_MESSAGE_ID);
+      });
+
+      test("posts a typed command's reply under the session that accepted it after a switch", async () => {
+        const answer = Promise.withResolvers<UserInputResult>();
+        const { agent, delivered, fixture, replied, replies } = await bootDirectSession(
+          "typed-input-reply-session",
+          {
+            accept: () => ({ accepted: true, body: "/new" }),
+            sendUserInput: () => answer.promise,
+          }
+        );
+
+        agent.push(directDispatchEnvelope("steer", "typed-input-reply-session"));
+        await delivered(1);
+        await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_reply"));
+        answer.resolve({ handled: "terminal-only" });
+        await replied(1);
+
+        expect(replies[0]?.body).toEqual({
+          actor: { id: "ses_delivery", kind: "session" },
+          attempt: 1,
+          body: "/new runs only in the session's own terminal; nothing was sent.",
+        });
       });
 
       // On an idle session the host answers only once the run it started ends, which can be
@@ -5350,14 +5532,11 @@ describe("envoy OMP extension", () => {
         ]);
       });
 
-      // A typed command that submits nothing (`/compact`, `/session`) is answered by the host with
-      // no message. A user message that comes next with the same words (the daemon's next
-      // assignment, text typed at the terminal) is not the person's: the stream must tag it with no
-      // Dispatch message, or the page hides it as that person's turn, and Legion's phase-stall check,
-      // which reads the same record, counts the daemon's assignment as a person's message.
-      test("a command that submitted nothing leaves no turn a later message with its words takes", async () => {
+      // A typed note is found only by the tag the host kept. The matching text on an unrelated
+      // untagged user message is the daemon's own assignment, not the person's command.
+      test("does not take an untagged message whose text matches a typed turn", async () => {
         const { agent, context, delivered, fixture, replied } = await bootDirectSession(
-          "typed-input-submits-nothing",
+          "typed-input-tag-only",
           {
             accept: () => ({ accepted: true, body: "/compact" }),
             sendUserInput: async () => ({ handled: "command", output: "Compaction complete." }),
@@ -5367,7 +5546,7 @@ describe("envoy OMP extension", () => {
           .get("agentstream.ses_delivery.control")
           ?.push(JSON.stringify({ type: "watch", v: 1 }));
 
-        agent.push(directDispatchEnvelope("steer", "typed-input-submits-nothing"));
+        agent.push(directDispatchEnvelope("steer", "typed-input-tag-only"));
         await delivered(1);
         await replied(1);
         const message = {
@@ -5472,7 +5651,7 @@ describe("envoy OMP extension", () => {
       const last = replay.frames.at(-1);
       return last?.kind === "commands" && "commands" in last ? last.commands : undefined;
     };
-    const builtins: HostBuiltinCommand[] = [
+    const builtins: UserInputBuiltinCommand[] = [
       { aliases: [], description: "Compact the context", name: "compact", terminalOnly: false },
       { aliases: ["models"], description: "Pick a model", name: "model", terminalOnly: false },
       { aliases: [], description: "Start a new session", name: "new", terminalOnly: true },
@@ -5550,6 +5729,82 @@ describe("envoy OMP extension", () => {
       expect(await replayedCommands("inbox-listed")).toEqual([
         ...others,
         { description: "Run the plan (user)", name: "sdd", source: "prompt" },
+      ]);
+    });
+
+    test("publishes no commands frame when the host cannot run typed input", async () => {
+      hostBuiltins.push(...builtins);
+      await bootDirectSession("commands-frame-untyped-host", {
+        getCommands: () => extensionAndSkills,
+      });
+
+      expect(await replayedCommands("inbox-untyped-host")).toBeUndefined();
+    });
+
+    test("refreshes a changed getCommands result once for a burst of bare watches to an attached viewer", async () => {
+      let reads = 0;
+      let commands: readonly HostSlashCommand[] = [
+        { description: "First", name: "first", source: "extension" },
+      ];
+      await bootDirectSession("commands-frame-watch-refresh", {
+        getCommands: () => {
+          reads++;
+          return commands;
+        },
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+      await replayedCommands("inbox-watch-refresh");
+      reads = 0;
+      commands = [{ description: "Second", name: "second", source: "extension" }];
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+      for (let index = 0; index < 3; index += 1) {
+        control.push(JSON.stringify({ type: "watch", v: 1 }));
+      }
+      for (let index = 0; index < 10; index += 1) await Promise.resolve();
+
+      const frame = natsState.published
+        .filter((each) => each.subject === "agentstream.ses_delivery.frames")
+        .map((each) => JSON.parse(new TextDecoder().decode(each.data)))
+        .findLast((each) => each.kind === "commands");
+      expect(reads).toBe(1);
+      expect(frame?.commands).toEqual([
+        { description: "Second", name: "second", source: "extension" },
+      ]);
+    });
+
+    test("still answers replay when listing commands throws", async () => {
+      await bootDirectSession("commands-frame-throws", {
+        getCommands: () => {
+          throw new Error("the host command list failed");
+        },
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      control.push(JSON.stringify({ type: "replay", v: 1 }), "inbox-throws");
+      // The mock subscription yields queued controls on microtasks, not wall-clock time.
+      for (let index = 0; index < 10; index += 1) await Promise.resolve();
+
+      expect(
+        natsState.published.findLast((published) => published.subject === "inbox-throws")
+      ).toBeDefined();
+    });
+
+    test("omits a non-string command description and still replays the other commands", async () => {
+      await bootDirectSession("commands-frame-numeric-description", {
+        getCommands: () =>
+          [
+            { description: 42, name: "bad-description", source: "extension" },
+            { description: "Good", name: "good-description", source: "extension" },
+          ] as unknown as readonly HostSlashCommand[],
+        sendUserInput: async () => ({ handled: "prompt" }),
+      });
+
+      expect(await replayedCommands("inbox-numeric-description")).toEqual([
+        { name: "bad-description", source: "extension" },
+        { description: "Good", name: "good-description", source: "extension" },
       ]);
     });
   });
@@ -5634,6 +5889,99 @@ describe("envoy OMP extension", () => {
         expect(shownPictures("ses_delivery").has(address)).toBe(true);
       });
     }
+
+    for (const [name, first] of [
+      ["the host's terminal-only answer", async () => ({ handled: "terminal-only" as const })],
+      [
+        "a rejected typed input",
+        async () => {
+          throw new Error("the host rejected it");
+        },
+      ],
+    ] as const) {
+      test(`${name} leaves a typed turn's picture unshown, and its prompt retry hands it to the input handler`, async () => {
+        const slug = `typed-retry-${name.replaceAll(/\W+/g, "-")}`;
+        const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+        const body = `Look:\n\n![shot.png](${address})`;
+        const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+          {};
+        const images: unknown[] = [];
+        const asked = Promise.withResolvers<void>();
+        let attempts = 0;
+        const { agent, context, delivered, fixture, replied } = await bootDirectSession(slug, {
+          accept: () => ({ accepted: true, body }),
+          dispatch: pictureRoutes(slug),
+          sendUserInput: async (text) => {
+            attempts++;
+            if (attempts === 1) return first();
+            const answer = (await handlers.input?.({ source: "extension", text }, context)) as
+              | { readonly images?: readonly unknown[] }
+              | undefined;
+            images.push(...(answer?.images ?? []));
+            asked.resolve();
+            return { handled: "prompt" };
+          },
+        });
+        handlers.input = fixture.handlers.get("input");
+
+        agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
+        await delivered(1);
+        await replied(1);
+        expect(shownPictures("ses_delivery").has(address)).toBe(false);
+
+        agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
+        await delivered(2);
+        await asked.promise;
+        for (let index = 0; index < 10 && !shownPictures("ses_delivery").has(address); index += 1) {
+          await Promise.resolve();
+        }
+        expect(images).toEqual([
+          { data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" },
+        ]);
+        expect(shownPictures("ses_delivery").has(address)).toBe(true);
+      });
+    }
+
+    test("hands both identical in-flight typed turns their own pictures", async () => {
+      const slug = "typed-same-body-pictures";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+        {};
+      const inputs: unknown[][] = [];
+      const requests: {
+        readonly text: string;
+        readonly answer: PromiseWithResolvers<UserInputResult>;
+      }[] = [];
+      const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
+        accept: () => ({ accepted: true, body }),
+        dispatch: pictureRoutes(slug),
+        sendUserInput: (text) => {
+          const answer = Promise.withResolvers<UserInputResult>();
+          requests.push({ answer, text });
+          return answer.promise;
+        },
+      });
+      handlers.input = fixture.handlers.get("input");
+
+      agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
+      agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
+      await delivered(2);
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        const answer = (await handlers.input?.(
+          { source: "extension", text: request.text },
+          context
+        )) as { readonly images?: readonly unknown[] } | undefined;
+        inputs.push([...(answer?.images ?? [])]);
+        request.answer.resolve({ handled: "prompt" });
+      }
+
+      expect(inputs).toEqual([
+        [{ data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" }],
+        [{ data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" }],
+      ]);
+    });
 
     /**
      * A transcript as Oh My Pi keeps it, showing a picture each way a session is shown one: a

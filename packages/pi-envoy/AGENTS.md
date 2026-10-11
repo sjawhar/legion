@@ -86,20 +86,22 @@ typed, and the page takes the stored copy away only when the two texts are equal
 the stream carries no custom message, so the page shows Dispatch's stored copy alone.
 
 The stream also lists the slash commands a viewer can send (`kind: "commands"`, the last frame of
-every replay and published whenever the list changes), read again at every watch and replay ping
-(`refreshAgentStreamCommands`), in the session's terminal picker's order: the host's built-ins
-(`listUserInputBuiltinCommands`, our fork's export, loaded through a dynamic import so a host
-without the module still loads the extension), each marked `terminalOnly` when only the terminal
-runs it; the extension, custom and skill commands (`pi.getCommands`); then the markdown file commands
-and prompt templates the live session expands, read from the host's own `AgentSession`
-(`slashCommands`, `promptTemplates`) by finding, in `AgentRegistry.global().list()`, the ref whose
-live session id is this session's. The ref is looked up at every ping, since the host keeps one
-`AgentSession` across `/new`, `/resume` and a fork and changes its id; a host without the registry
-export, or one listing no session under this id, lists none of those two and publishes the rest.
-Every built-in's name and aliases are reserved before anything else is listed, since the host runs a
-built-in by either before `prompt()`; among the rest a repeated name keeps its first source, which
-is the one the host runs. A host without `sendUserInput` publishes no list, and its viewer offers no
-completion.
+every replay and published whenever the list changes), in the session's terminal picker's order:
+the host's built-ins (`listUserInputBuiltinCommands`, our fork's export, loaded through a dynamic
+import so a host without the module still loads the extension), each marked `terminalOnly` when only
+the terminal runs it; the extension, custom and skill commands (`pi.getCommands`); then the
+markdown file commands and prompt templates the live session expands, read from the host's own
+`AgentSession` (`slashCommands`, `promptTemplates`) by finding, in `AgentRegistry.global().list()`,
+the ref whose live session id is this session's. At the pin, `createAgentSession` defaults its
+main session to that registry (sdk.ts:2204) and registers it (sdk.ts:4067), so print and `--mode rpc`
+main sessions list file commands and templates too. The ref is looked up whenever commands refresh,
+since the host keeps one `AgentSession` across `/new`, `/resume` and a fork and changes its id; a
+host without the registry export, or one listing no session under this id, lists none of those two
+and publishes the rest. Replay always refreshes commands; attached watch pings refresh at most once
+per ten seconds. Every built-in's name and aliases are reserved before anything else is listed,
+since the host runs a built-in by either before `prompt()`; among the rest a repeated name keeps its
+first source, which is the one the host runs. A host without `sendUserInput` publishes no list, and
+its viewer offers no completion.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
 (every authenticated caller's event stream carries it, and Dispatch publishes it before its own

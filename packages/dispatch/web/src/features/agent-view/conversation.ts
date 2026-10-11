@@ -46,16 +46,29 @@ const COMMAND_SOURCES: Record<AgentStreamCommand["source"], true> = {
  *  the composer renders every field of it. A name is one token a person types after the slash, so
  *  an empty name or one holding whitespace is no command the session lists (pi-envoy's
  *  `setCommands` drops both). */
-function isCommand(command: AgentStreamCommand | null | undefined): boolean {
+function isCommand(command: unknown): command is AgentStreamCommand {
+  if (typeof command !== "object" || command === null) return false;
+  if (!("name" in command) || typeof command.name !== "string" || !/^\S+$/u.test(command.name)) {
+    return false;
+  }
+  if (
+    !("source" in command) ||
+    typeof command.source !== "string" ||
+    !Object.hasOwn(COMMAND_SOURCES, command.source)
+  ) {
+    return false;
+  }
+  if (
+    "description" in command &&
+    command.description !== undefined &&
+    typeof command.description !== "string"
+  ) {
+    return false;
+  }
   return (
-    typeof command === "object" &&
-    command !== null &&
-    typeof command.name === "string" &&
-    /^\S+$/u.test(command.name) &&
-    (command.description === undefined || typeof command.description === "string") &&
-    typeof command.source === "string" &&
-    Object.hasOwn(COMMAND_SOURCES, command.source) &&
-    (command.terminalOnly === undefined || command.terminalOnly === true)
+    !("terminalOnly" in command) ||
+    command.terminalOnly === undefined ||
+    command.terminalOnly === true
   );
 }
 

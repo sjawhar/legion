@@ -608,7 +608,10 @@ until_true 60 "the extension command's record" test -s "$extension_record"
 [ "$(cat "$extension_record")" = "alpha $run" ] || fail "the extension command recorded \"$(cat "$extension_record")\", want \"alpha $run\""
 [ "$(user_mentions "/$extension_command_name")" = 0 ] || fail "the extension command's raw text became a user message"
 extension_id=$(message_id "$extension_body")
-[ "$(tagged_user_texts "$extension_id")" = "[]" ] || fail "the extension command submitted a user message"
+[ -n "$extension_id" ] && [ "$extension_id" != null ] ||
+  fail "Dispatch holds no message whose body is \"$extension_body\""
+[ "$(tagged_user_texts "$extension_id")" = "[]" ] ||
+  fail "the extension command submitted a user message"
 note "the handler recorded \"alpha $run\" in $extension_record; no user message"
 pass
 

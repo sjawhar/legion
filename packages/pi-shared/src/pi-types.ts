@@ -371,12 +371,17 @@ export interface UserInputResult {
   readonly agentInvoked?: boolean;
 }
 
+/** The local mirror of the host's file-command and prompt-template getters. */
+export interface SessionPromptCommand {
+  readonly name: string;
+  readonly description: string;
+}
+
 export interface HostSlashCommand {
   readonly name: string;
   readonly description?: string;
   readonly source: "extension" | "prompt" | "skill";
 }
-
 export interface PiApi {
   readonly zod: PiZod;
   readonly agents?: ExtensionAgentsApi;

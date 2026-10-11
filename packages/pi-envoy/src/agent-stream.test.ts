@@ -199,21 +199,31 @@ describe("AgentStreamPublisher", () => {
 
   // The composer offers what the last commands frame lists: it must reach a viewer who opens the
   // session after the list was set, survive a full history, and change only when the list does.
-  test("the session's commands are the last frame of a replay however long the history", () => {
+  test("the session's commands are the last frame of a replay inside its UTF-8 budget", () => {
     const { publisher } = harness();
-    const body = "x".repeat(AGENT_STREAM_LIMITS.historyBytes / 10);
-    for (let index = 0; index < 20; index += 1) {
+    const body = "🚀".repeat(AGENT_STREAM_LIMITS.partChars);
+    for (let index = 0; index < 60; index += 1) {
       publisher.record(SUBJECT, assistant(index + 1, [{ text: body, type: "text" }]), false);
     }
-    publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+    publisher.setCommands(
+      SUBJECT,
+      Array.from({ length: AGENT_STREAM_LIMITS.commands }, (_, index) => ({
+        description: "界".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars),
+        name: `command-${index}`,
+        source: "extension" as const,
+      }))
+    );
     publisher.noteViewer();
 
     const { frames } = publisher.replay("s1");
-    expect(frames.at(-1)).toMatchObject({
-      commands: [{ name: "compact", source: "builtin" }],
+    const last = frames.at(-1);
+    expect(last).toMatchObject({
       kind: "commands",
     });
-    expect(JSON.stringify(frames).length).toBeLessThanOrEqual(AGENT_STREAM_LIMITS.historyBytes);
+    expect(new TextEncoder().encode(JSON.stringify(frames)).length).toBeLessThanOrEqual(
+      AGENT_STREAM_LIMITS.historyBytes
+    );
+    expect(last?.kind === "commands" && last.commands).toHaveLength(AGENT_STREAM_LIMITS.commands);
   });
 
   test("a changed command list is published at once, and an unchanged one is not", () => {
@@ -249,6 +259,52 @@ describe("AgentStreamPublisher", () => {
       { name: "compact", source: "builtin" },
       { name: "new", source: "builtin", terminalOnly: true },
     ]);
+  });
+
+  test("caps the command count and description, and drops a name it would change", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.setCommands(SUBJECT, [
+      {
+        description: "d".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars + 100),
+        name: "n".repeat(AGENT_STREAM_LIMITS.commandNameChars + 1),
+        source: "extension" as const,
+      },
+      ...Array.from({ length: AGENT_STREAM_LIMITS.commands }, (_, index) => ({
+        description: "d".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars + 100),
+        name: `command-${index}`,
+        source: "extension" as const,
+      })),
+      { name: "after-the-cap", source: "extension" as const },
+    ]);
+
+    const frame = published.at(-1);
+    expect(frame?.kind === "commands" && frame.commands).toHaveLength(AGENT_STREAM_LIMITS.commands);
+    expect(
+      frame?.kind === "commands" &&
+        frame.commands.every(
+          (command) => command.name.length <= AGENT_STREAM_LIMITS.commandNameChars
+        )
+    ).toBe(true);
+    expect(
+      frame?.kind === "commands" &&
+        frame.commands.every(
+          (command) =>
+            command.description === undefined ||
+            command.description.length <=
+              AGENT_STREAM_LIMITS.commandDescriptionChars + AGENT_STREAM_TRUNCATION_SUFFIX.length
+        )
+    ).toBe(true);
+    expect(
+      frame?.kind === "commands" &&
+        frame.commands.some(
+          (command) => command.name === "n".repeat(AGENT_STREAM_LIMITS.commandNameChars)
+        )
+    ).toBe(false);
+    expect(
+      frame?.kind === "commands" &&
+        frame.commands.some((command) => command.name === "after-the-cap")
+    ).toBe(false);
   });
 });
 

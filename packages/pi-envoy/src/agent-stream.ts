@@ -291,7 +291,8 @@ export class AgentStreamPublisher {
     const kept: AgentStreamCommand[] = [];
     for (const command of commands) {
       if (kept.length >= AGENT_STREAM_LIMITS.commands) break;
-      const name = command.name.slice(0, AGENT_STREAM_LIMITS.commandNameChars);
+      if (command.name.length > AGENT_STREAM_LIMITS.commandNameChars) continue;
+      const name = command.name;
       if (name === "" || /\s/.test(name) || seen.has(name)) continue;
       seen.add(name);
       kept.push({

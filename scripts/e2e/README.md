@@ -952,6 +952,10 @@ registers with a real Envoy listener and NATS. Dispatch, built from the checkout
 its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
 conversation page as the person the header names. The session's model turns go through the model
 gateway on the operator's own hawk login ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+
+The rig serves the checkout's built `packages/dispatch/web/dist` live. Do not run `bun run build:web`
+or `bun run e2e` in this checkout while a run is live: either rewrites that directory under the
+Dispatch process and can leave its page with stale asset names.
 The profile also holds what the slash-command checks send, each named with the run's token: a
 skill (`skills/<name>/SKILL.md`), a prompt template (`prompts/<name>.md`), a file command
 (`commands/<name>.md`), an extension (`extensions/<name>.ts`) registering a command that writes its

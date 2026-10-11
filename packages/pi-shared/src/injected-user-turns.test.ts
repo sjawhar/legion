@@ -57,7 +57,7 @@ describe("the user turns sent into a session", () => {
 
     expect(envoyPluginInterface().injectedUserTurns.get("s1")).toEqual({
       found: new Map(),
-      sent: [{ messageId: "m-1" }],
+      sent: [{ messageId: "m-1", via: "typed" }],
     });
     expect(matchInjectedUserTurn("s1", user(20, "ship it"))).toBeUndefined();
     expect(matchInjectedUserTurn("s1", { ...user(30, "/sdd plan"), tag: "m-1" })).toBe("m-1");
@@ -110,6 +110,7 @@ describe("the user turns sent into a session", () => {
   // finds it. A custom message without the tag (an Envoy card) is nobody's turn.
   test("include the skill prompt a typed /skill: became, found by its tag", () => {
     noteTypedUserTurn("s1", "m-1");
+    noteInjectedUserTurn("s1", "Run the review skill on src.", "m-2");
     const skill = (timestamp: number, tag?: string) => ({
       attribution: "user",
       content: "Run the review skill on src.",
@@ -121,6 +122,7 @@ describe("the user turns sent into a session", () => {
     });
 
     expect(matchInjectedUserTurn("s1", skill(10))).toBeUndefined();
+    expect(matchInjectedUserTurn("s1", user(15, "Run the review skill on src."))).toBe("m-2");
     expect(matchInjectedUserTurn("s1", skill(20, "m-1"))).toBe("m-1");
   });
 
@@ -132,7 +134,7 @@ describe("the user turns sent into a session", () => {
     dropInjectedUserTurn("s1", "m-1");
 
     expect(envoyPluginInterface().injectedUserTurns.get("s1")?.sent).toEqual([
-      { messageId: "m-2" },
+      { messageId: "m-2", via: "typed" },
     ]);
   });
 });

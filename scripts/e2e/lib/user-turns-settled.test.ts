@@ -79,3 +79,69 @@ describe("settled", () => {
     expect(isSettled(userTurn, answer, backgroundJobResult)).toBe(false);
   });
 });
+
+const backgroundStart = (jobId: string) => ({
+  type: "message",
+  message: {
+    role: "toolResult",
+    toolName: "bash",
+    timestamp: 1791645462000,
+    details: { async: { jobId, state: "running", type: "bash" }, timeoutSeconds: 300 },
+    content: [{ type: "text", text: `Backgrounded as job ${jobId}` }],
+  },
+});
+const answerAt = (timestamp: number) => ({
+  type: "message",
+  message: {
+    role: "assistant",
+    stopReason: "stop",
+    timestamp,
+    content: [{ type: "text", text: "Done." }],
+  },
+});
+const card = {
+  type: "custom_message",
+  customType: "envoy-message",
+  display: true,
+  content: "A card from another session.",
+};
+const waitedFor = (jobId: string) => ({
+  type: "message",
+  message: {
+    role: "toolResult",
+    toolName: "job",
+    timestamp: 1791645462500,
+    details: { op: "wait", jobs: [{ id: jobId, status: "completed", type: "bash" }] },
+    content: [{ type: "text", text: `${jobId} completed` }],
+  },
+});
+
+test("a card after the stopped answer is not settled: it starts the next turn", () => {
+  expect(isSettled(userTurn, answer, card)).toBe(false);
+});
+
+test("an extension record and a compaction after the stopped answer are settled: they start no turn", () => {
+  const record = { type: "custom", customType: "envoy-dispatch-handled-attempt", data: {} };
+  const compaction = { type: "compaction", summary: "…", firstKeptEntryId: "e1" };
+  expect(isSettled(userTurn, answer, record, compaction)).toBe(true);
+});
+
+test("a background job still running at the stopped answer is not settled: its result starts a turn", () => {
+  expect(isSettled(userTurn, backgroundStart("bg_9"), answer)).toBe(false);
+});
+
+test("a background job whose result was delivered and answered is settled", () => {
+  expect(
+    isSettled(
+      userTurn,
+      backgroundStart("bg_9"),
+      answer,
+      { ...backgroundJobResult, details: { jobs: [{ jobId: "bg_9", type: "bash" }] } },
+      answerAt(1791645464000)
+    )
+  ).toBe(true);
+});
+
+test("a background job the model took with the job tool is settled: its result is never delivered", () => {
+  expect(isSettled(userTurn, backgroundStart("bg_9"), waitedFor("bg_9"), answer)).toBe(true);
+});

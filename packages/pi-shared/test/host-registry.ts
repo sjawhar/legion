@@ -9,7 +9,7 @@
 /** A file command or prompt template as the host's `AgentSession` getters list it. */
 export interface TestSessionCommand {
   readonly name: string;
-  readonly description?: string;
+  readonly description: string;
 }
 
 export interface TestAgentRef {

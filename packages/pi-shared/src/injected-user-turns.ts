@@ -19,9 +19,13 @@ import { envoyPluginInterface } from "./interface";
  * The record is the `injectedUserTurns` member of the versioned interface (`interface.ts`):
  * envoy.ts writes what legion.ts reads, and each plugin bundles its own copy of this module.
  */
+export type SentUserTurn =
+  | { readonly via: "typed"; readonly messageId: string }
+  | { readonly via: "text"; readonly messageId: string; readonly body: string };
+
 export interface SessionUserTurns {
-  /** `body` is a `sendUserMessage` turn's text, which finds it; a typed turn has none. */
-  readonly sent: { readonly messageId: string; readonly body?: string }[];
+  /** Typed input is found by tag; `sendUserMessage` input is found by body text. */
+  readonly sent: SentUserTurn[];
   readonly found: Map<number, string>;
 }
 
@@ -49,13 +53,13 @@ function sessionTurns(sessionID: string): SessionUserTurns {
 /** Records that Dispatch message `messageId`, whose body is `body`, was just sent into
  *  `sessionID` through `pi.sendUserMessage` as its user's own turn. */
 export function noteInjectedUserTurn(sessionID: string, body: string, messageId: string): void {
-  sessionTurns(sessionID).sent.push({ body, messageId });
+  sessionTurns(sessionID).sent.push({ body, messageId, via: "text" });
 }
 
 /** Records that Dispatch message `messageId` was just sent into `sessionID` through
  *  `pi.sendUserInput`, tagged with its id. */
 export function noteTypedUserTurn(sessionID: string, messageId: string): void {
-  sessionTurns(sessionID).sent.push({ messageId });
+  sessionTurns(sessionID).sent.push({ messageId, via: "typed" });
 }
 
 /** The host answered that the typed turn `messageId` submitted no message: it is no longer one of
@@ -87,7 +91,7 @@ export function matchInjectedUserTurn(sessionID: string, message: unknown): stri
   let index = tag === undefined ? -1 : session.sent.findIndex((sent) => sent.messageId === tag);
   if (index === -1 && message.role === "user") {
     const text = userMessageText("content" in message ? message.content : undefined);
-    index = session.sent.findIndex((sent) => sent.body === text);
+    index = session.sent.findIndex((sent) => sent.via === "text" && sent.body === text);
   }
   const sent = session.sent[index];
   if (sent === undefined) return undefined;
@@ -101,7 +105,7 @@ export function matchInjectedUserTurn(sessionID: string, message: unknown): stri
  *  message carries its tag. */
 export function endInjectedUserTurns(sessionID: string): void {
   const turns = envoyPluginInterface().injectedUserTurns;
-  const typed = turns.get(sessionID)?.sent.filter((sent) => sent.body === undefined) ?? [];
+  const typed = turns.get(sessionID)?.sent.filter((sent) => sent.via === "typed") ?? [];
   if (typed.length === 0) turns.delete(sessionID);
   else turns.set(sessionID, { found: new Map(), sent: typed });
 }

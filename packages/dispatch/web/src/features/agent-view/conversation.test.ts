@@ -313,10 +313,17 @@ const LISTED: readonly AgentStreamCommand[] = [
 // The slash commands a session takes from Dispatch (LEGION-394) arrive as one `commands` frame
 // holding the whole list. They are what the composer completes, never a turn of the transcript.
 describe("the session's slash commands", () => {
-  test("are the latest list the session sent, kept through later turns and out of the transcript", () => {
+  test("are the latest list the session sent, kept through later messages and tool results", () => {
+    const result: AgentStreamFrame = {
+      kind: "tool-result",
+      result: { at: 60, isError: false, output: "ok", toolCallId: "c1", toolName: "bash" },
+      seq: 3,
+      v: 1,
+    };
     const state = applyFrames(EMPTY_CONVERSATION, [
       commandsFrame(1, LISTED),
       message(2, "a50", 50, "Hello", false),
+      result,
     ]);
     expect(sessionCommands(state)).toEqual(LISTED);
     expect(toThreadMessages(state).map((entry) => entry.id)).toEqual(["a50"]);

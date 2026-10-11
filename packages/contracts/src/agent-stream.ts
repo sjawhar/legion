@@ -125,7 +125,7 @@ export interface AgentStreamToolResult {
  * user message; and `skill`, a skill (`skill:<name>`).
  */
 export interface AgentStreamCommand {
-  /** The command without its slash: `compact`, `skill:dispatch`. */
+  /** The command without its slash: `compact`, `skill:dispatch`; one non-empty token, no whitespace. */
   readonly name: string;
   readonly description?: string;
   readonly source: "builtin" | "extension" | "prompt" | "skill";
@@ -152,8 +152,9 @@ export type AgentStreamFrame =
     }
   /**
    * The slash commands the session takes from Dispatch, the whole list each time it changes, and
-   * the last frame of a replay. A session whose host cannot run typed input from an extension
-   * sends none, and a viewer then offers no completion.
+   * the last frame of a replay. A host without `sendUserInput` sends none, and a viewer then offers
+   * no completion. A host that has the method can still answer `unavailable` in a guest or embedder;
+   * its list remains useful, and that pick gets the session's refusal reply.
    */
   | {
       readonly v: typeof AGENT_STREAM_PROTOCOL;

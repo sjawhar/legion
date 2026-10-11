@@ -149,8 +149,12 @@ directly. Nothing else on an issue reaches you unless you subscribe to the issue
 
 A person can also message you from the Agents page:
 
-- On Oh My Pi, their **Send** or **Aside** arrives as their own message in your conversation.
-  Answer it there, as you would anything typed at your terminal.
+- On Oh My Pi, their **Send** or **Aside** arrives as their own message in your conversation,
+  except a message beginning with `/` runs as the session's terminal would run it. A prompt
+  template, file command or skill gives you the resulting prompt; an unknown `/name` gives you the
+  words themselves. A command that prints output, or says it did not run because it belongs only
+  to the terminal, is already a **Reply via Dispatch**. You receive nothing for that command and
+  write nothing for it.
 - A **BTW**, a broadcast, or any message to a host that takes no such turn (Claude Code) arrives as
   a Dispatch notice with a ready-made reply command. Answer with `dispatch message` and its
   `--in-reply-to`.
