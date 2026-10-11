@@ -18,7 +18,8 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
-// Values releases the values of a live grant to its own enrollment. Every call re-checks the
+// Values releases the values of a live grant to its own enrollment, and when the grant expires:
+// nil for a grant that lasts until its session ends. Every call re-checks the
 // enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
 // the policy has changed since the grant's request was decided, or any granted name is a service's
 // (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts) — that the
@@ -27,43 +28,43 @@ import (
 // the request froze.
 // It holds no pooled connection across a Secrets Manager read: the grant's names are read into
 // memory before the first value is fetched.
-func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, time.Time, error) {
+func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map[string]string, *time.Time, error) {
 	var owner, requestID, policyVersion, decidedBy string
-	var expires time.Time
+	var expires *time.Time
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
-	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and g.expires_at > now() and e.revoked_at is null and e.lease_expires_at > now(),
+	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+GrantUnexpired("g")+` and e.revoked_at is null and e.lease_expires_at > now(),
 		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.kind, e.operator, e.subject, c.service
 		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
 		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).
 		Scan(&owner, &expires, &live, &requestID, &policyVersion, &decidedBy, &enr.Kind, &enr.Operator, &enr.Subject, &enr.Service)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return nil, time.Time{}, ErrGrantNotLive
+		return nil, nil, ErrGrantNotLive
 	}
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, nil, err
 	}
 	if owner != enrollmentID {
-		return nil, time.Time{}, ErrNotYours
+		return nil, nil, ErrNotYours
 	}
 	if !live {
-		return nil, time.Time{}, ErrGrantNotLive
+		return nil, nil, ErrGrantNotLive
 	}
 	if err := m.VerifyChain(ctx, grantID); err != nil {
-		return nil, time.Time{}, err
+		return nil, nil, err
 	}
 	granted, err := requestedSecrets(ctx, m.Store.Pool, requestID)
 	if err != nil {
-		return nil, time.Time{}, err
+		return nil, nil, err
 	}
 	if set := m.Policy.Get(); policyVersion != set.Version || anyServiceOwned(set, granted) {
 		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
 		if err != nil {
-			return nil, time.Time{}, err
+			return nil, nil, err
 		}
 		for _, g := range granted {
 			if err := stillAllowed(set, g.name, g.decision, decidedBy, requester); err != nil {
-				return nil, time.Time{}, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -72,17 +73,17 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	for _, g := range granted {
 		value, err := m.Secrets.Read(ctx, g.source)
 		if errors.Is(err, secrets.ErrNotFound) {
-			return nil, time.Time{}, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
+			return nil, nil, fmt.Errorf("%w: %s", ErrSecretNotInStore, g.name)
 		}
 		if err != nil {
-			return nil, time.Time{}, fmt.Errorf("read %s: %w", g.name, err)
+			return nil, nil, fmt.Errorf("read %s: %w", g.name, err)
 		}
 		values[g.name] = value
 		released = append(released, g.name)
 	}
 	if _, err := m.Store.Pool.Exec(ctx, `insert into audit (kind, enrollment_id, request_id, grant_id, actor, detail) values ('grant.used',$1,$2,$3,$4,$5)`,
 		enrollmentID, requestID, grantID, "session:"+enrollmentID, auditDetail{"names": released}); err != nil {
-		return nil, time.Time{}, err
+		return nil, nil, err
 	}
 	return values, expires, nil
 }
@@ -150,10 +151,10 @@ func stillAllowed(set *policy.Set, name, frozenDecision, decidedBy string, reque
 func (m *Machine) Get(ctx context.Context, id string) (Request, error) {
 	var r Request
 	var enrollmentID string
-	err := m.Store.Pool.QueryRow(ctx, `select r.id, r.state, r.enrollment_id, r.decided_at, r.decided_by, r.decision_detail, r.record_id, cr.approver,
+	err := m.Store.Pool.QueryRow(ctx, `select r.id, r.state, r.enrollment_id, r.lifetime_seconds, r.decided_at, r.decided_by, r.decision_detail, r.record_id, cr.approver,
 		(select g.id::text from grants g where g.request_id=r.id and g.revoked_at is null limit 1)
 		from requests r left join credential_requests cr on cr.id = r.record_id where r.id=$1`, id).
-		Scan(&r.ID, &r.State, &enrollmentID, &r.DecidedAt, &r.DecidedBy, &r.Detail, &r.RecordID, &r.Approver, &r.GrantID)
+		Scan(&r.ID, &r.State, &enrollmentID, &r.LifetimeSeconds, &r.DecidedAt, &r.DecidedBy, &r.Detail, &r.RecordID, &r.Approver, &r.GrantID)
 	if err != nil {
 		return Request{}, err
 	}
@@ -207,14 +208,15 @@ type Grant struct {
 	RequestID string `json:"request_id"`
 	// The login that approved it; null for a grant the policy gave automatically.
 	Approver *string `json:"approver"`
-	// When it expires.
-	ExpiresAt time.Time `json:"expires_at"`
+	// When it expires; null for a grant that lasts until its session ends.
+	ExpiresAt *time.Time `json:"expires_at"`
 }
 
-// LiveGrants lists this enrollment's own live (not revoked, not expired) grants.
+// LiveGrants lists this enrollment's own live (not revoked, not expired) grants, soonest to
+// expire first and those that last until the session ends last.
 func (m *Machine) LiveGrants(ctx context.Context, enrollmentID string) ([]Grant, error) {
-	rows, err := m.Store.Pool.Query(ctx, `select id, request_id, approver, expires_at from grants
-		where enrollment_id=$1 and revoked_at is null and expires_at > now() order by expires_at`, enrollmentID)
+	rows, err := m.Store.Pool.Query(ctx, `select id, request_id, approver, expires_at from grants g
+		where enrollment_id=$1 and revoked_at is null and `+GrantUnexpired("g")+` order by expires_at nulls last, created_at`, enrollmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -460,7 +462,8 @@ func (m *Machine) ReadRecord(ctx context.Context, recordID string) (RecordDetail
 // Granted is policy.Automatic for a grant the policy gave the session without asking, which has no
 // RecordID and an empty Approver, and policy.Approval for one a person approved, whose RecordID is
 // the record the approval rests on and whose Approver is that person's login, which for an
-// operator's own list can be another login.
+// operator's own list can be another login. ExpiresAt is nil for a grant that lasts until its
+// session ends.
 type ApproverGrant struct {
 	GrantID    string
 	Granted    string
@@ -468,7 +471,7 @@ type ApproverGrant struct {
 	Enrollment record.Enrollment
 	Names      []string
 	Approver   string
-	ExpiresAt  time.Time
+	ExpiresAt  *time.Time
 	CreatedAt  time.Time
 }
 
@@ -482,7 +485,7 @@ func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]App
 		from grants g
 		join requests r on r.id=g.request_id
 		join enrollments e on e.id=g.enrollment_id
-		where g.revoked_at is null and g.expires_at > now()
+		where g.revoked_at is null and `+GrantUnexpired("g")+`
 		and (g.approver=$1 or e.operator=$1)
 		order by g.created_at desc`, login)
 	if err != nil {

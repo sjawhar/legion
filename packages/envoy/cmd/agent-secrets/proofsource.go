@@ -34,10 +34,11 @@ type proofSigner interface {
 }
 
 // Signer is a session's proofSigner, which also builds and signs a credential-request object
-// naming the secrets the session is asking for.
+// naming the secrets the session is asking for, and the lifetime its grant lasts: lifetimeSeconds,
+// or, for 0, until the session ends.
 type Signer interface {
 	proofSigner
-	SignRequestObject(audience string, names []string, reason string) (string, error)
+	SignRequestObject(audience string, names []string, reason string, lifetimeSeconds int) (string, error)
 }
 
 // fileSigner signs with the key and enrollment id an agent box or pod keeps under
@@ -51,10 +52,13 @@ func (f *fileSigner) Sign(method, url string) (string, error) {
 	return proof.Sign(f.key, f.enrollmentID, method, url, time.Now())
 }
 
-func (f *fileSigner) SignRequestObject(audience string, names []string, reason string) (string, error) {
+func (f *fileSigner) SignRequestObject(audience string, names []string, reason string, lifetimeSeconds int) (string, error) {
 	details := make([]record.AuthorizationDetail, len(names))
 	for i, name := range names {
 		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
+	}
+	if lifetimeSeconds != 0 {
+		return record.SignWithLifetime(f.key, audience, details, reason, lifetimeSeconds, time.Now())
 	}
 	return record.Sign(f.key, audience, details, reason, "", time.Now())
 }
@@ -95,8 +99,11 @@ func (h *helperSigner) Sign(method, url string) (string, error) {
 	return resp.Proof, nil
 }
 
-func (h *helperSigner) SignRequestObject(audience string, names []string, reason string) (string, error) {
-	resp, err := helper.Call(h.sock, helper.Request{Op: "sign-request", Secrets: names, Reason: reason}, 5*time.Second)
+// SignRequestObject asks the helper's sign-request op. A helper from before lifetime_seconds
+// ignores the field and signs no lifetime; the broker's answer then names none, and the caller
+// that asked for one refuses it (requireLifetime).
+func (h *helperSigner) SignRequestObject(audience string, names []string, reason string, lifetimeSeconds int) (string, error) {
+	resp, err := helper.Call(h.sock, helper.Request{Op: "sign-request", Secrets: names, Reason: reason, LifetimeSeconds: lifetimeSeconds}, 5*time.Second)
 	if err != nil {
 		return "", fmt.Errorf("agent-secrets-helper at %s: %w", h.sock, err)
 	}

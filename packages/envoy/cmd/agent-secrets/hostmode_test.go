@@ -248,7 +248,7 @@ func TestHelperSignerAsksTheHelper(t *testing.T) {
 func TestHelperSignerSignsRequestObjects(t *testing.T) {
 	sock, reqs := fakeHelper(t, helper.Response{OK: true, RequestObject: "eyJ.fake.request"})
 	signer := &helperSigner{sock: sock}
-	ro, err := signer.SignRequestObject("https://secrets.test", []string{"DEEL_API_KEY", "OTHER_KEY"}, "why")
+	ro, err := signer.SignRequestObject("https://secrets.test", []string{"DEEL_API_KEY", "OTHER_KEY"}, "why", 0)
 	if err != nil || ro != "eyJ.fake.request" {
 		t.Fatalf("sign-request: %q %v", ro, err)
 	}
@@ -262,7 +262,7 @@ func TestHelperSignerSignsRequestObjects(t *testing.T) {
 	}
 
 	sock2, _ := fakeHelper(t, helper.Response{Code: helper.CodeNotASession, Error: "pid 5 is not inside a registered host session"})
-	if _, err := (&helperSigner{sock: sock2}).SignRequestObject("https://secrets.test", []string{"DEEL_API_KEY"}, "why"); err == nil ||
+	if _, err := (&helperSigner{sock: sock2}).SignRequestObject("https://secrets.test", []string{"DEEL_API_KEY"}, "why", 0); err == nil ||
 		!strings.Contains(err.Error(), helper.CodeNotASession) {
 		t.Fatalf("the helper's code reaches the caller: %v", err)
 	}

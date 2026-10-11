@@ -100,8 +100,8 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 
 	reqMachine := &requests.Machine{
 		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local},
-		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
-		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
+		PendingTTL: 12 * time.Hour,
+		Audience:   srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{

@@ -144,7 +144,6 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 		Store:           st,
 		Policy:          policytest.Current(t, local, fixtureService),
 		Secrets:         secrets.AWS{Client: local},
-		MaxGrant:        time.Hour,
 		PendingTTL:      12 * time.Hour,
 		Audience:        testAudience,
 		Skew:            time.Minute,
@@ -263,8 +262,8 @@ func TestValuesRefusesAChainTheBrokerDidNotWrite(t *testing.T) {
 	for name, tamper := range map[string]func(t testing.TB, st *store.Store, recordID string){
 		"a tampered body": storetest.Exec(
 			`alter table credential_requests disable trigger credential_requests_no_update`,
-			`update credential_requests set body = replace(body, 'lifetime_seconds: 3600', 'lifetime_seconds: 43200')
-				where id=$1 and body like '%lifetime_seconds: 3600%'`,
+			`update credential_requests set body = replace(body, 'lifetime_seconds: -', 'lifetime_seconds: 43200')
+				where id=$1 and body like '%lifetime_seconds: -%'`,
 		),
 		"an approval by another login": storetest.Exec(
 			`update credential_request_events set login='mallory' where record_id=$1 and event='approved'`,

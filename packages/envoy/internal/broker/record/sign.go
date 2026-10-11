@@ -12,8 +12,19 @@ import (
 
 // Sign builds and signs a credential-request object (used by the CLI, the host helper, the
 // Legion daemon, and tests). It mirrors proof/sign.go's go-jose usage: iss is the key's
-// proof.Thumbprint, and exp is iat+600s.
+// proof.Thumbprint, and exp is iat+600s. The object names no lifetime: a grant it gets lasts until
+// its session ends.
 func Sign(key *ecdsa.PrivateKey, audience string, details []AuthorizationDetail, reason, loginHint string, now time.Time) (string, error) {
+	return sign(key, audience, details, reason, loginHint, nil, now)
+}
+
+// SignWithLifetime is Sign for a request for agent secrets whose grant lasts lifetimeSeconds
+// rather than until its session ends: the object carries the lifetime_seconds claim.
+func SignWithLifetime(key *ecdsa.PrivateKey, audience string, details []AuthorizationDetail, reason string, lifetimeSeconds int, now time.Time) (string, error) {
+	return sign(key, audience, details, reason, "", &lifetimeSeconds, now)
+}
+
+func sign(key *ecdsa.PrivateKey, audience string, details []AuthorizationDetail, reason, loginHint string, lifetimeSeconds *int, now time.Time) (string, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, &jose.SignerOptions{
 		EmbedJWK:     true,
 		ExtraHeaders: map[jose.HeaderKey]any{jose.HeaderType: RequestTyp},
@@ -35,6 +46,7 @@ func Sign(key *ecdsa.PrivateKey, audience string, details []AuthorizationDetail,
 		AuthorizationDetails: details,
 		Reason:               reason,
 		LoginHint:            loginHint,
+		LifetimeSeconds:      lifetimeSeconds,
 	})
 	if err != nil {
 		return "", err

@@ -113,8 +113,8 @@ func newE2EServer(t *testing.T) *e2eServer {
 
 	reqMachine := &requests.Machine{
 		Store: st, Policy: current, Secrets: secrets.AWS{Client: local},
-		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
-		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
+		PendingTTL: 12 * time.Hour,
+		Audience:   srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{

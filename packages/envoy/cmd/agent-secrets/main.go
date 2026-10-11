@@ -16,7 +16,7 @@
 //	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
 //	agent-secrets identity
 //	agent-secrets renew
-//	agent-secrets request NAME... [--reason TEXT] [--json]
+//	agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]
 //	agent-secrets status <request_id> [--json]
 //	agent-secrets cancel <request_id>
 //	agent-secrets revoke <grant_id>
@@ -24,7 +24,7 @@
 //	agent-secrets whoami [--json]
 //	agent-secrets sign --method M --url U [--enrollment E]
 //	agent-secrets secret list|show|create|set|retag|delete|restore ...
-//	agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
+//	agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <command> [args...]
 //
 // Environment: AGENT_SECRETS_URL (the broker's base URL) and, for every session-authenticated
 // subcommand, either AGENT_SECRETS_KEY_DIR (an agent box or pod's key.pem and enrollment, the
@@ -58,6 +58,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -126,8 +127,8 @@ var commands = []command{
 		"Print the release this binary was built as."},
 	{"renew", "agent-secrets renew",
 		"Keep an agent box's enrollment lease alive, renewing it until interrupted."},
-	{"request", "agent-secrets request NAME... [--reason TEXT] [--json]",
-		"Request secrets and print the request's id and state, and who approves it and where while\nit waits; exit 75 while it waits for approval and 77 when it is denied."},
+	{"request", "agent-secrets request NAME... [--reason TEXT] [--ttl DURATION] [--json]",
+		"Request secrets and print the request's id and state, and who approves it and where while\nit waits; exit 75 while it waits for approval and 77 when it is denied. The grant lasts\n--ttl, or until this session ends."},
 	{"status", "agent-secrets status <request_id> [--json]",
 		"Print a request's state, who approves it and where while it waits, its grant once\ngranted, and who decided it."},
 	{"cancel", "agent-secrets cancel <request_id>",
@@ -140,8 +141,8 @@ var commands = []command{
 		"Print this session's enrollment as the broker's JSON, as self --json does."},
 	{"sign", "agent-secrets sign --method M --url U [--enrollment E]",
 		"Print the proof this session would sign for one broker call, without making the call."},
-	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]",
-		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted."},
+	{"", "agent-secrets NAME... [--reason TEXT] [--wait DURATION] [--ttl DURATION] -- <command> [args...]",
+		"Request secrets, wait up to --wait (default 30m) for a person to decide, and run <command>\nwith each granted secret in its environment under its NAME; nothing runs unless all are\ngranted. The grant lasts --ttl, or until this session ends."},
 }
 
 // usageEnvironment closes usage: the variables every form reads, and the exit codes.
@@ -362,6 +363,52 @@ func splitArgs(args []string, takesValue map[string]bool) (flagArgs, positional 
 		}
 	}
 	return flagArgs, positional
+}
+
+// ttlFlag is --ttl's usage line, the request form's and the exec form's alike.
+const ttlFlag = "how long the grant lasts, a whole number of seconds such as 2m or 90s; unset, it lasts until this session ends"
+
+// ttlSeconds is --ttl's value as the whole seconds a request object signs: 0 when it is unset,
+// and an error for a value that is not a positive whole number of seconds or is past the most the
+// broker records (record.ValidLifetime).
+func ttlSeconds(ttl time.Duration) (int, error) {
+	if ttl == 0 {
+		return 0, nil
+	}
+	if ttl%time.Second != 0 || !record.ValidLifetime(int(min(ttl/time.Second, math.MaxInt32+1))) {
+		return 0, fmt.Errorf("--ttl %s is not a whole number of seconds from 1s to %ds", ttl, math.MaxInt32)
+	}
+	return int(ttl / time.Second), nil
+}
+
+// grantedLifetime checks that the broker gave result's grant the lifetime --ttl asked for. A
+// broker or agent-secrets-helper from before --ttl drops the lifetime without refusing the
+// request, and the grant would then last longer than asked: until the session ends, or that
+// broker's fixed lifetime. So when ttl is set and the answer names another lifetime, or none, it
+// ends what the request made — the grant, or the request still waiting for approval — and answers
+// why, and the caller runs and prints nothing more. A denied request made nothing, and passes.
+func grantedLifetime(ctx context.Context, c *client, signer Signer, result RequestResult, ttl int) error {
+	if ttl == 0 || result.State == "denied" || (result.LifetimeSeconds != nil && *result.LifetimeSeconds == ttl) {
+		return nil
+	}
+	given := "no lifetime"
+	if result.LifetimeSeconds != nil {
+		given = fmt.Sprintf("a lifetime of %ds", *result.LifetimeSeconds)
+	}
+	ended := "nothing"
+	switch {
+	case result.GrantID != nil:
+		if err := c.RevokeGrant(ctx, signer, *result.GrantID); err != nil {
+			return fmt.Errorf("the broker gave request %s %s, not --ttl %ds, and revoking its grant %s failed: %w", result.RequestID, given, ttl, *result.GrantID, err)
+		}
+		ended = "its grant " + *result.GrantID
+	case result.State == "pending":
+		if err := c.CancelRequest(ctx, signer, result.RequestID); err != nil {
+			return fmt.Errorf("the broker gave request %s %s, not --ttl %ds, and cancelling it failed: %w", result.RequestID, given, ttl, err)
+		}
+		ended = "the request"
+	}
+	return fmt.Errorf("the broker gave request %s %s, not --ttl %ds, so %s was ended: the broker or this machine's agent-secrets-helper is from before --ttl; restart the helper on the pinned release, or request without --ttl", result.RequestID, given, ttl, ended)
 }
 
 func readTrimmed(path string) (string, error) {
@@ -761,12 +808,18 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 // ---------------------------------------------------------------------------
 
 func cmdRequest(args []string, stdout, stderr io.Writer) int {
-	flagArgs, names := splitArgs(args, map[string]bool{"reason": true})
+	flagArgs, names := splitArgs(args, map[string]bool{"reason": true, "ttl": true})
 	flags := newFlagSet("request", stderr)
 	reason := flags.String("reason", "", "why these secrets are needed")
+	ttlFlagValue := flags.Duration("ttl", 0, ttlFlag)
 	asJSON := flags.Bool("json", false, "print the response body verbatim")
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
+	}
+	ttl, err := ttlSeconds(*ttlFlagValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
+		return exitUsageError
 	}
 	if len(names) == 0 {
 		fmt.Fprintln(stderr, "agent-secrets request: at least one secret NAME is required")
@@ -777,9 +830,14 @@ func cmdRequest(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return exitUsageError
 	}
-	result, raw, err := newClient(base).CreateRequest(context.Background(), signer, names, *reason, requestSessionID())
+	c := newClient(base)
+	result, raw, err := c.CreateRequest(context.Background(), signer, names, *reason, ttl, requestSessionID())
 	if err != nil {
 		reportError(stderr, "agent-secrets request", err)
+		return 1
+	}
+	if err := grantedLifetime(context.Background(), c, signer, result, ttl); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets request: %v\n", err)
 		return 1
 	}
 	if *asJSON {
@@ -931,6 +989,10 @@ func cmdSelf(name string, args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintf(stdout, "enrollment_id: %s\nkind: %s\noperator: %s\nlease_expires_at: %s\n",
 		result.EnrollmentID, result.Kind, operator, result.LeaseExpiresAt.Format(time.RFC3339))
 	for _, g := range result.Grants {
+		if g.ExpiresAt == nil {
+			fmt.Fprintf(stdout, "grant: %s (request %s, until this session ends)\n", g.GrantID, g.RequestID)
+			continue
+		}
 		fmt.Fprintf(stdout, "grant: %s (request %s, expires %s)\n", g.GrantID, g.RequestID, g.ExpiresAt.Format(time.RFC3339))
 	}
 	return 0
@@ -964,12 +1026,18 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 
-	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true})
+	flagArgs, names := splitArgs(before, map[string]bool{"reason": true, "wait": true, "ttl": true})
 	flags := newFlagSet("", stderr)
 	reason := flags.String("reason", "", "why these secrets are needed")
 	wait := flags.Duration("wait", 30*time.Minute, "how long to wait for a pending request")
+	ttlFlagValue := flags.Duration("ttl", 0, ttlFlag)
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
+	}
+	ttl, err := ttlSeconds(*ttlFlagValue)
+	if err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v\n", err)
+		return exitUsageError
 	}
 	if len(names) == 0 {
 		fmt.Fprintln(stderr, "agent-secrets: at least one secret NAME is required")
@@ -983,9 +1051,13 @@ func cmdExec(args []string, stdout, stderr io.Writer) int {
 	}
 	c := newClient(base)
 	ctx := context.Background()
-	result, _, err := c.CreateRequest(ctx, signer, names, *reason, requestSessionID())
+	result, _, err := c.CreateRequest(ctx, signer, names, *reason, ttl, requestSessionID())
 	if err != nil {
 		reportError(stderr, "agent-secrets", err)
+		return 1
+	}
+	if err := grantedLifetime(ctx, c, signer, result, ttl); err != nil {
+		fmt.Fprintf(stderr, "agent-secrets: %v; nothing was run\n", err)
 		return 1
 	}
 

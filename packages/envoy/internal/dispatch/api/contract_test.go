@@ -81,8 +81,8 @@ func newContractRig(t *testing.T) *contractRig {
 	enr.Chain = enroll.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
 	reqMachine := &requests.Machine{
 		Store: brokerStore, Policy: cur, Secrets: secrets.AWS{Client: local},
-		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
-		Audience: brokerServer.URL, Skew: time.Minute, Replay: enr.Replay,
+		PendingTTL: 12 * time.Hour,
+		Audience:   brokerServer.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
 	mach := &machine.Service{

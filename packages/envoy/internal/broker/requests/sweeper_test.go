@@ -290,7 +290,7 @@ func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := lockIdenticalPending(ctx, holdAdvisory, enr, []string{"DEEL_API_KEY"}); err != nil {
+	if err := lockIdenticalPending(ctx, holdAdvisory, enr, []string{"DEEL_API_KEY"}, nil); err != nil {
 		t.Fatalf("hold the advisory lock: %v", err)
 	}
 	var lease time.Time

@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -118,7 +119,7 @@ func TestParseBodyRefusesAnyEditedLine(t *testing.T) {
 	valid := "agent-secrets-record/v1\n" +
 		"request: eyJ.fake.jws\n" +
 		"approver: sjawhar\n" +
-		"enrollment: box\tagentbox-1234\tsjawhar\n" +
+		"enrollment: session\tagentbox-1234\tsjawhar\n" +
 		"lifetime_seconds: 43200\n" +
 		"rules_version: ab12\n" +
 		"expires_at: 2026-09-27T12:00:00Z\n" +
@@ -570,5 +571,74 @@ func TestUnsignedTypHeaderFailsForRequestObject(t *testing.T) {
 	}
 	if _, err := VerifyRequestObject(string(jsonSerialized), "https://secrets.test", time.Minute, now); err == nil || !errors.Is(err, ErrRequestInvalid) {
 		t.Fatalf("typ present only in the unsigned header must be rejected with ErrRequestInvalid, got %v", err)
+	}
+}
+
+// TestARequestNamesItsGrantsLifetimeOrNone pins the lifetime_seconds claim: a request for agent
+// secrets may sign one, which verifies back as the grant's lifetime; one that names none verifies
+// as 0, a grant that lasts until its session ends; and a lifetime outside 1..MaxInt32, or on a
+// machine login, is refused.
+func TestARequestNamesItsGrantsLifetimeOrNone(t *testing.T) {
+	key, _ := proof.NewKey()
+	now := time.Now()
+	verify := func(compact string) (RequestObject, error) {
+		t.Helper()
+		return VerifyRequestObject(compact, "https://secrets.test", time.Minute, now)
+	}
+	withLifetime, err := SignWithLifetime(key, "https://secrets.test", secretDetail(), "two minutes", 120, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ro, err := verify(withLifetime); err != nil || ro.LifetimeSeconds != 120 {
+		t.Fatalf("a request naming 120 seconds = %+v, %v; want lifetime 120", ro, err)
+	}
+	without, err := Sign(key, "https://secrets.test", secretDetail(), "until the session ends", "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ro, err := verify(without); err != nil || ro.LifetimeSeconds != 0 {
+		t.Fatalf("a request naming no lifetime = %+v, %v; want lifetime 0", ro, err)
+	}
+	for _, seconds := range []int{0, -1, math.MaxInt32 + 1} {
+		compact, err := SignWithLifetime(key, "https://secrets.test", secretDetail(), "", seconds, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := verify(compact); !errors.Is(err, ErrRequestInvalid) {
+			t.Fatalf("lifetime %d = %v, want ErrRequestInvalid", seconds, err)
+		}
+	}
+	login, err := SignWithLifetime(key, "https://secrets.test", []AuthorizationDetail{{Type: KindLauncherCredential, Identifier: "h.example"}}, "", 120, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verify(login); !errors.Is(err, ErrRequestInvalid) {
+		t.Fatalf("a machine login naming a lifetime = %v, want ErrRequestInvalid", err)
+	}
+}
+
+// TestABodyWithNoLifetimeRendersADash pins the record line for a grant that lasts until its session
+// ends: lifetime_seconds is "-", the body round-trips, and a stored 0 or negative count is refused
+// rather than read as no lifetime, so no other spelling addresses the same record.
+func TestABodyWithNoLifetimeRendersADash(t *testing.T) {
+	b := Body{
+		Request:      "eyJ.fake.jws",
+		Approver:     "sjawhar",
+		Enrollment:   Enrollment{Kind: "session", RuntimeID: "example-host-devbox:1:2", Operator: "sjawhar"},
+		RulesVersion: "ab12",
+		ExpiresAt:    time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
+	}
+	got := b.Canonical()
+	if !strings.Contains(got, "\nlifetime_seconds: -\n") {
+		t.Fatalf("canonical body of a grant with no lifetime:\n%q\nwant the line lifetime_seconds: -", got)
+	}
+	back, err := ParseBody(got)
+	if err != nil || back != b {
+		t.Fatalf("round trip: %+v %v", back, err)
+	}
+	for _, spelled := range []string{"0", "-5", ""} {
+		if _, err := ParseBody(strings.Replace(got, "lifetime_seconds: -", "lifetime_seconds: "+spelled, 1)); err == nil {
+			t.Fatalf("lifetime_seconds: %q parsed, want it refused", spelled)
+		}
 	}
 }

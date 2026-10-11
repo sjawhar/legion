@@ -29,8 +29,8 @@ type approverGrantResp struct {
 	Names []string `json:"names"`
 	// The person who approved it; null for an automatic grant.
 	Approver *string `json:"approver"`
-	// When it expires.
-	ExpiresAt time.Time `json:"expires_at"`
+	// When it expires; null for a grant that lasts until its session ends.
+	ExpiresAt *time.Time `json:"expires_at"`
 	// When it was granted.
 	CreatedAt time.Time `json:"created_at"`
 }

@@ -24,16 +24,17 @@ import (
 // unregister, sessions, login, login-status, enroll-session-key or unenroll-session-key. A field
 // the helper does not read is ignored, so an older client's enroll-box "kind" costs nothing.
 type Request struct {
-	Op           string   `json:"op"`
-	Method       string   `json:"method,omitempty"`        // sign, sign-launcher: the HTTP method of the broker call
-	URL          string   `json:"url,omitempty"`           // sign, sign-launcher: its absolute URL
-	Secrets      []string `json:"secrets,omitempty"`       // sign-request: the requested agent_secret names
-	Reason       string   `json:"reason,omitempty"`        // sign-request: why they're needed
-	WaitSeconds  int      `json:"wait_seconds,omitempty"`  // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
-	RuntimeID    string   `json:"runtime_id,omitempty"`    // enroll-session-key: the session's runtime id on this machine
-	Thumbprint   string   `json:"thumbprint,omitempty"`    // enroll-session-key: the session key's thumbprint
-	SessionID    *string  `json:"session_id,omitempty"`    // enroll-session-key: optional registry session id
-	EnrollmentID string   `json:"enrollment_id,omitempty"` // unenroll-session-key: which enrollment to end
+	Op              string   `json:"op"`
+	Method          string   `json:"method,omitempty"`           // sign, sign-launcher: the HTTP method of the broker call
+	URL             string   `json:"url,omitempty"`              // sign, sign-launcher: its absolute URL
+	Secrets         []string `json:"secrets,omitempty"`          // sign-request: the requested agent_secret names
+	Reason          string   `json:"reason,omitempty"`           // sign-request: why they're needed
+	LifetimeSeconds int      `json:"lifetime_seconds,omitempty"` // sign-request: how many seconds the grant lasts; 0 or absent for until the session ends
+	WaitSeconds     int      `json:"wait_seconds,omitempty"`     // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
+	RuntimeID       string   `json:"runtime_id,omitempty"`       // enroll-session-key: the session's runtime id on this machine
+	Thumbprint      string   `json:"thumbprint,omitempty"`       // enroll-session-key: the session key's thumbprint
+	SessionID       *string  `json:"session_id,omitempty"`       // enroll-session-key: optional registry session id
+	EnrollmentID    string   `json:"enrollment_id,omitempty"`    // unenroll-session-key: which enrollment to end
 }
 
 // Response is the helper's one line. Code and Error are set only when OK is false, except that
