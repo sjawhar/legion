@@ -18,7 +18,9 @@ function judge(listing: string) {
     'assert_gh_files pod-a controller "the controller container of pod-a"',
     "echo OK",
   ].join("\n");
-  const result = Bun.spawnSync(["bash", "-c", script], { env: { ...process.env, LISTING: listing } });
+  const result = Bun.spawnSync(["bash", "-c", script], {
+    env: { ...process.env, LISTING: listing },
+  });
   return { exitCode: result.exitCode, out: result.stdout.toString() };
 }
 

@@ -550,18 +550,20 @@ func TestClaimsPrintsTheDaemonsRefusalAndFails(t *testing.T) {
 		want string
 	}{
 		{
+			// A suspend of a launching claim is held until the agent is ready, so a resume, which a
+			// claim that is not suspended refuses, is the request its state refuses.
 			name: "a request the claim's state refuses",
 			args: func(d *operatorDaemon) []string {
-				return append(append([]string{"suspend"}, d.reach()...), "--claim", string(architectClaim))
+				return append(append([]string{"resume"}, d.reach()...), "--claim", string(architectClaim))
 			},
-			want: "the daemon answered 409 Conflict: suspend refused: the claim is launching (the agent has not registered)",
+			want: "the daemon answered 409 Conflict: resume refused: the claim is launching",
 		},
 		{
 			name: "the same refusal under --json",
 			args: func(d *operatorDaemon) []string {
-				return append(append([]string{"suspend", "--json"}, d.reach()...), "--claim", string(architectClaim))
+				return append(append([]string{"resume", "--json"}, d.reach()...), "--claim", string(architectClaim))
 			},
-			want: "the daemon answered 409 Conflict: suspend refused: the claim is launching",
+			want: "the daemon answered 409 Conflict: resume refused: the claim is launching",
 		},
 		{
 			name: "a claim the daemon does not hold",
