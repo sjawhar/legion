@@ -196,6 +196,8 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// Only a create with blockers can close a wait cycle: a new issue with none has nothing waiting
+	// on it yet, so its parent edge alone cannot close one and takes no dependency lock.
 	if len(blockers) > 0 {
 		if err := lockProjectIssueDependencies(r.Context(), tx, input.Project); err != nil {
 			s.writeHandlerError(w, err)
