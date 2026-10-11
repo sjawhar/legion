@@ -467,8 +467,11 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 		return err
 	}
 	if orphan {
+		// An orphan still mid-run is the same work as a hand-over, whoever handed it to Legion: a
+		// child stranded by a root that closed before its hand-over existed carries its phase, gate
+		// and pull request too. One its tree finished or parked (phase done) starts fresh.
 		a.log.Info("admission orphan", "issue", stored.Key, "parent", observation.Parent)
-		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, false)
+		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, stored.Phase != phase.Done)
 	}
 	return a.recordObservation(ctx, tx, stored, observed{
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,

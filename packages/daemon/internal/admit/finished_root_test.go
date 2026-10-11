@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
@@ -293,6 +294,67 @@ func handoverOf(t *testing.T, pool *pgxpool.Pool, issue string) *record.Handover
 		}
 	})
 	return got
+}
+
+// A child left mid-run by a root that closed before hand-overs existed has no fence: its tree's
+// cleanup confirmed with it still in production_check, its pull request merged. A person handing
+// it to Legion (todo with the label) admits it as an orphan, and that orphan carries its state as a
+// hand-over does: its own tree at a new generation, still in production_check with the merged pull
+// request, its implementer started there and its architect told it is carried. A child reopened
+// from done starts fresh, as before.
+func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T) {
+	ctx := context.Background()
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	root := record.Issue{Key: "LEGION-208", Project: testProject, Title: "finished root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
+	parent := root.Key
+	child := record.Issue{Key: "LEGION-209", Project: testProject, Title: "merged child", Tree: root.Key, Parent: &parent,
+		Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}
+	putIssue(t, pool, root)
+	putIssue(t, pool, child)
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		if err := records.PutPullRequest(ctx, tx, record.PullRequest{Issue: child.Key, Repo: "acme/widgets", Number: 42,
+			Branch: "legion/LEGION-209", HeadSHA: "merged-head", State: record.PullRequestMerged}); err != nil {
+			t.Fatalf("seed merged pull request: %v", err)
+		}
+		if _, err := treelifecycle.Open(ctx, tx, "legion", root.Key, treelifecycle.AuthorityWorkflow); err != nil {
+			t.Fatalf("open old tree lifecycle: %v", err)
+		}
+		lifecycle, err := treelifecycle.ReserveCleanup(ctx, tx, "legion", root.Key, treelifecycle.AuthorityWorkflow)
+		if err != nil {
+			t.Fatalf("reserve old tree cleanup: %v", err)
+		}
+		if err := treelifecycle.ConfirmCleanup(ctx, tx, "legion", root.Key, lifecycle.Epoch); err != nil {
+			t.Fatalf("confirm old tree cleanup: %v", err)
+		}
+	})
+
+	apply(t, pool, admission, "person-hands-over", intake.DispatchIssue{Key: child.Key, Seq: 2, Type: "issue.updated",
+		Status: "todo", Title: child.Title, Parent: root.Key, Rank: child.Rank, HandedOver: handed}, engine)
+
+	got := issue(t, pool, child.Key)
+	if got.Tree != child.Key || got.Generation != 2 || got.Phase != phase.ProductionCheck {
+		t.Fatalf("handed-over child = %#v, want its own tree at generation 2 in production_check", got)
+	}
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		pr, err := records.PullRequest(ctx, tx, child.Key)
+		if err != nil || pr == nil || pr.State != record.PullRequestMerged || pr.HeadSHA != "merged-head" {
+			t.Fatalf("pull request = %#v, %v; want merged at merged-head", pr, err)
+		}
+		carried, err := records.CarriedRoot(ctx, tx, child.Key)
+		if err != nil || carried != 2 {
+			t.Fatalf("carried root generation = %d, %v; want 2", carried, err)
+		}
+	})
+	if starts := architectStarts(t, pool, child.Key); starts != 1 {
+		t.Fatalf("architect starts = %d, want one", starts)
+	}
+	if starts := phaseStarts(t, pool, child.Key, claim.RoleImplementer, phase.ProductionCheck); starts != 1 {
+		t.Fatalf("production-check implementer starts = %d, want one", starts)
+	}
 }
 
 // A root a person sets todo again while its tree lingers is re-admitted, and its mid-run children
