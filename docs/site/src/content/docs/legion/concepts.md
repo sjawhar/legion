@@ -226,12 +226,14 @@ daemon accepts READY, the merger submits the pull request with
 merge queue enqueues it, one without arms auto-merge, and the repository's own required reviews and
 checks decide when it merges — rules Legion neither reads nor changes. If the head moves before the
 command, the head match refuses it; the merger builds and sends a new `READY` packet. GitHub checks
-the head match only when auto-merge is enabled, so a push after arming would merge an unreviewed
-head: the daemon disables the pull request's auto-merge, and takes it out of a merge queue, as the
-implement App whenever a push moves an awaiting pull request past its `READY` head, and tells the
-`READY`'s audience. When the head's own CI turns red while the issue awaits its merge, or the head
-starts conflicting with its base, the daemon posts on the issue, and tells that role, that the
-`READY` is withdrawn, naming the cause, and disarms the pull request the same way.
+the head match only when auto-merge is enabled, so an arm outliving its `READY` would merge an
+unreviewed head. Arming is right only for the `READY` head of an issue awaiting its merge, so the
+daemon queues a disarm (it disables auto-merge and takes the pull request out of a merge queue, as
+the implement App, leaving alone anything armed after the disarm was queued) on every other push,
+and when a child is set back to `todo`. `READY` is withdrawn when a push moves the head past the one
+`READY` named, when the head's own CI turns red, or when it starts conflicting with its base: the
+issue goes back to `implementing`, the architect is told, and the daemon disarms the pull request
+and posts on the issue, and tells that role, that the `READY` is withdrawn, naming the cause.
 
 ## The production check
 

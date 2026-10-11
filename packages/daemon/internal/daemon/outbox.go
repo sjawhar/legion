@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
@@ -50,6 +51,9 @@ const (
 	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
 	// effect behind it.
 	issueBranchTimeout = 30 * time.Second
+	// autoMergeDisableTimeout bounds one auto_merge_disable row's GitHub calls, its token's mint
+	// with them, for the same reason: one unanswered call would stall every effect behind it.
+	autoMergeDisableTimeout = 30 * time.Second
 )
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
@@ -842,56 +846,23 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue))
 }
 
-// autoMergeDisable turns off whatever would merge pull request payload.Number without a person,
-// as the implement App, which armed it: GitHub's auto-merge where it is enabled, and the pull
-// request's merge-queue entry where it has one. It reads both first, so a retried row, or one for
-// a pull request never armed, changes nothing. A pull request GitHub no longer has is nothing to
-// disarm.
+// autoMergeDisable disarms pull request payload.Number as the implement App, which armed it
+// (ghautomerge.Disarm): whatever was armed before the row was queued is turned off, and a later
+// READY's arm is left alone.
 func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, payload record.AutoMergeDisable) error {
-	ctx, cancel := context.WithTimeout(ctx, issueBranchTimeout)
+	ctx, cancel := context.WithTimeout(ctx, autoMergeDisableTimeout)
 	defer cancel()
 	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
 	if err != nil {
 		return fmt.Errorf("mint implement App token: %w", err)
 	}
-	const read = `query PullRequestAutoMerge($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) { id autoMergeRequest { enabledAt } mergeQueueEntry { id } }
-  }
-}`
-	var answer struct {
-		Repository struct {
-			PullRequest *struct {
-				ID               string    `json:"id"`
-				AutoMergeRequest *struct{} `json:"autoMergeRequest"`
-				MergeQueueEntry  *struct{} `json:"mergeQueueEntry"`
-			} `json:"pullRequest"`
-		} `json:"repository"`
+	github := githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}
+	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, row.CreatedAt)
+	if err != nil {
+		return err
 	}
-	if err := githubrest.GraphQL(ctx, lease.Token, r.githubAPI, read, map[string]any{
-		"owner": r.repo.Owner(), "name": r.repo.Name(), "number": payload.Number,
-	}, &answer); err != nil {
-		return fmt.Errorf("read whether pull request #%d of %s is armed: %w", payload.Number, r.repo, err)
-	}
-	pull := answer.Repository.PullRequest
-	if pull == nil {
-		r.log.Info("outbox auto-merge disable names a pull request GitHub does not have; finished without acting", "row", row.ID, "issue", row.Issue, "number", payload.Number)
-		return nil
-	}
-	if pull.AutoMergeRequest != nil {
-		const disable = `mutation DisableAutoMerge($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }`
-		if err := githubrest.GraphQL(ctx, lease.Token, r.githubAPI, disable, map[string]any{"id": pull.ID}, nil); err != nil {
-			return fmt.Errorf("disable the auto-merge of pull request #%d of %s: %w", payload.Number, r.repo, err)
-		}
-		r.log.Info("outbox disabled a pull request's auto-merge", "row", row.ID, "issue", row.Issue, "number", payload.Number)
-	}
-	if pull.MergeQueueEntry != nil {
-		const dequeue = `mutation DequeuePullRequest($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }`
-		if err := githubrest.GraphQL(ctx, lease.Token, r.githubAPI, dequeue, map[string]any{"id": pull.ID}, nil); err != nil {
-			return fmt.Errorf("take pull request #%d of %s out of the merge queue: %w", payload.Number, r.repo, err)
-		}
-		r.log.Info("outbox took a pull request out of the merge queue", "row", row.ID, "issue", row.Issue, "number", payload.Number)
-	}
+	r.log.Info("outbox disarmed a pull request", "row", row.ID, "issue", row.Issue, "number", payload.Number,
+		"missing", disarmed.Missing, "autoMergeDisabled", disarmed.AutoMerge, "dequeued", disarmed.Queue)
 	return nil
 }
 

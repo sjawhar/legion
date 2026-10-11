@@ -23,35 +23,51 @@ func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, packe
 }
 
 // withdrawReady tells the READY's audience (tellReadyAudience) that the READY no longer stands:
-// the head's own CI turned red, or it started conflicting with its base (reason, which names
-// either; classify.RedWithdrawsReady, classify.ConflictWithdrawsReady), so the issue left
-// awaiting_merge for implementing, GitHub will not merge the head, and a new READY follows once
-// the work comes back through testing and review. The merge armed for the READY is disarmed with
-// it (record.AutoMergeDisable). The architect hears it through its checks-red notice.
+// the head's own CI turned red, it started conflicting with its base, or a push moved it past the
+// head READY named (reason, which names the cause; classify.RedWithdrawsReady,
+// classify.ConflictWithdrawsReady, withdrawMovedReady), so the issue left awaiting_merge for
+// implementing, and a new READY follows once the work comes back through testing and review. It
+// queues the disarm of the merge armed for the READY (disarm) before it tells anyone, so no
+// withdrawal leaves that merge armed. The architect hears it through its checks-red notice.
 func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reason string) error {
-	if err := e.enqueue(ctx, tx, issue.Key, record.AutoMergeDisable{Number: pr.Number}); err != nil {
+	if err := e.disarm(ctx, tx, issue.Key, pr); err != nil {
 		return err
 	}
-	return e.tellReadyAudience(ctx, tx, issue, fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason))
+	return e.tellReadyAudience(ctx, tx, issue, fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: a disarm of its auto-merge and merge-queue entry is queued, the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason))
 }
 
-// disarmMovedReady disarms an awaiting_merge pull request a push moved past the head its READY
-// named (the merger's completion commit): GitHub checks --match-head-commit only when auto-merge
-// is enabled, so a later push by anyone with write access would otherwise merge a head nobody
-// reviewed. The READY's audience is told the READY no longer covers the head. A push that leaves
-// the head where READY named it changes nothing.
-func (e *Engine) disarmMovedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+// withdrawMovedReady withdraws the READY of an awaiting_merge pull request a push moved past the
+// head READY named (the merger's completion commit), as a red or a conflicting head withdraws it
+// (TriggerChecksRed, withdrawReady): GitHub checks --match-head-commit only when auto-merge is
+// enabled, so the arm would otherwise merge a head no review approved. The issue goes back to
+// implementing with its implementer started and the architect told, and the new head comes back
+// through testing, review and a new READY. A tree that lingers takes no transition, and the
+// disarm is queued all the same. A push landing on the READY head changes nothing.
+func (e *Engine) withdrawMovedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
 	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
 	if err != nil {
 		return err
 	}
-	if merger.HandoffCommit == "" || merger.HandoffCommit == pr.HeadSHA {
+	if merger.HandoffCommit != "" && merger.HandoffCommit == pr.HeadSHA {
 		return nil
 	}
-	if err := e.enqueue(ctx, tx, issue.Key, record.AutoMergeDisable{Number: pr.Number}); err != nil {
+	reason := fmt.Sprintf("its head moved from %s, the head READY named, to %s, which no review approved", merger.HandoffCommit, pr.HeadSHA)
+	if err := e.transition(ctx, tx, issue, TriggerChecksRed, "", record.PhaseRow{}, pr, reason); err != nil {
 		return err
 	}
-	return e.tellReadyAudience(ctx, tx, issue, fmt.Sprintf("READY for %s no longer covers pull request #%d: its head moved from %s to %s, which no review approved, so its auto-merge is disabled. Do not merge it; the architect decides how the new head is reviewed.", issue.Key, pr.Number, merger.HandoffCommit, pr.HeadSHA))
+	after, err := e.store.Issue(ctx, tx, issue.Key)
+	if err != nil || after == nil || after.Phase != phase.AwaitingMerge {
+		return err
+	}
+	return e.disarm(ctx, tx, issue.Key, pr)
+}
+
+// disarm queues the disarm of pr's merge (record.AutoMergeDisable): arming is legitimate only for
+// the READY head of an awaiting_merge pull request, so every head move but one landing on that
+// head, every READY withdrawal and every re-entry disarms. The executor turns off only what was
+// armed before the row was queued, and changes nothing on a pull request never armed.
+func (e *Engine) disarm(ctx context.Context, tx pgx.Tx, issue string, pr *record.PullRequest) error {
+	return e.enqueue(ctx, tx, issue, record.AutoMergeDisable{Number: pr.Number})
 }
 
 // tellReadyAudience tells packet to everyone a READY goes to: posted on the Dispatch issue, and

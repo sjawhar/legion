@@ -52,27 +52,58 @@ func (c Client) Post(ctx context.Context, path string, body, into any) error {
 	return err
 }
 
-// GraphQL posts query and variables to the GraphQL route of endpoint, GitHub's API root (empty is
-// https://api.github.com), and decodes the answer's data into into. An answer that carries
-// GraphQL errors is an error even when its HTTP status is 200.
-func GraphQL(ctx context.Context, token, endpoint, query string, variables map[string]any, into any) error {
-	var response struct {
-		Data   json.RawMessage `json:"data"`
-		Errors []struct {
-			Message string `json:"message"`
-		} `json:"errors"`
+// GraphQLAPI is GitHub's GraphQL route under endpoint, GitHub's API root; empty is
+// https://api.github.com. A Client whose API is it sends GraphQL.
+func GraphQLAPI(endpoint string) string {
+	if endpoint == "" {
+		endpoint = "https://api.github.com"
 	}
-	if err := (Client{Token: token, API: graphQLEndpoint(endpoint)}).Post(ctx, "", map[string]any{
-		"query": query, "variables": variables,
-	}, &response); err != nil {
+	return strings.TrimRight(endpoint, "/") + "/graphql"
+}
+
+// GraphQLFailure is one error a GraphQL answer carries: its type, such as NOT_FOUND, and message.
+type GraphQLFailure struct {
+	Type    string `json:"type"`
+	Message string `json:"message"`
+}
+
+// GraphQLError is a GraphQL answer that carries errors, which GitHub sends with HTTP status 200.
+type GraphQLError struct {
+	Failures []GraphQLFailure
+}
+
+func (e *GraphQLError) Error() string {
+	messages := make([]string, 0, len(e.Failures))
+	for _, failure := range e.Failures {
+		messages = append(messages, failure.Message)
+	}
+	return "GitHub GraphQL: " + strings.Join(messages, "; ")
+}
+
+// NotFound says whether every error is NOT_FOUND: GitHub's answer for an object, such as a pull
+// request number, that does not exist.
+func (e *GraphQLError) NotFound() bool {
+	for _, failure := range e.Failures {
+		if failure.Type != "NOT_FOUND" {
+			return false
+		}
+	}
+	return len(e.Failures) != 0
+}
+
+// GraphQL sends query and variables to the client's API, a GraphQL route (GraphQLAPI), and reads
+// the answer's data into into when into is not nil. An answer that carries errors is a
+// *GraphQLError, and one other than 2xx an *Answer.
+func (c Client) GraphQL(ctx context.Context, query string, variables map[string]any, into any) error {
+	var response struct {
+		Data   json.RawMessage  `json:"data"`
+		Errors []GraphQLFailure `json:"errors"`
+	}
+	if err := c.Post(ctx, "", map[string]any{"query": query, "variables": variables}, &response); err != nil {
 		return err
 	}
 	if len(response.Errors) != 0 {
-		messages := make([]string, 0, len(response.Errors))
-		for _, failure := range response.Errors {
-			messages = append(messages, failure.Message)
-		}
-		return fmt.Errorf("GitHub GraphQL: %s", strings.Join(messages, "; "))
+		return &GraphQLError{Failures: response.Errors}
 	}
 	if len(response.Data) == 0 || string(response.Data) == "null" {
 		return errors.New("GitHub GraphQL answered without data")
@@ -84,20 +115,6 @@ func GraphQL(ctx context.Context, token, endpoint, query string, variables map[s
 		return fmt.Errorf("decode GitHub GraphQL data: %w", err)
 	}
 	return nil
-}
-
-// graphQLEndpoint is the GraphQL route of endpoint, GitHub's API root: /graphql beside the REST
-// routes, and /api/graphql for an Enterprise Server root that ends in /api/v3.
-func graphQLEndpoint(endpoint string) string {
-	endpoint = strings.TrimRight(endpoint, "/")
-	switch {
-	case endpoint == "":
-		return "https://api.github.com/graphql"
-	case strings.HasSuffix(endpoint, "/api/v3"):
-		return strings.TrimSuffix(endpoint, "/v3") + "/graphql"
-	default:
-		return endpoint + "/graphql"
-	}
 }
 
 // GetPages reads every page of the JSON array GitHub answers at path, a hundred items to a page,

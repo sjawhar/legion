@@ -207,7 +207,6 @@ func pullRequestPaths(ctx context.Context, github githubrest.Client, number int)
 }
 
 // shortSHA is sha as a refusal names it, its first twelve characters.
-
 func shortSHA(sha string) string {
 	if len(sha) > 12 {
 		return sha[:12]

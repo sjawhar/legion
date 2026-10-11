@@ -183,13 +183,15 @@ without auto-arming, and the repository's authorized person merges it. Otherwise
 merger submits the pull request with `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` (a
 merge queue enqueues it; a repository without one arms auto-merge), and the repository's required
 reviews and checks decide when it merges. A head that moves before submission is not armed: the
-merger builds a new READY packet. A push that moves an awaiting pull request past its READY head
-after arming has the daemon disable its auto-merge and dequeue it (an `auto_merge_disable` outbox
-row, as the implement App), since GitHub checks the head match only when auto-merge is enabled.
-When the head's own CI turns red before the merge, or the head starts conflicting with its base
-(GitHub computes no merge ref for a conflicting head and runs no checks on it at all), the daemon
-sends the issue back to `implementing`, posts the READY's withdrawal on the Dispatch issue,
-publishes it to that role, and disarms the pull request the same way. GitHub's own merge queue (`merge_group`
+merger builds a new READY packet. GitHub checks the head match only when auto-merge is enabled, and
+arming is right only for an awaiting issue's READY head, so the daemon queues an
+`auto_merge_disable` outbox row (auto-merge disabled and the merge-queue entry removed, as the
+implement App, sparing anything armed after the row was queued) on every other push and when a
+child is set back to `todo`. When a push moves the head past the one READY named, the head's own CI
+turns red before the merge, or the head starts conflicting with its base (GitHub computes no merge
+ref for a conflicting head and runs no checks on it at all), the daemon sends the issue back to
+`implementing`, disarms the pull request, posts the READY's withdrawal on the Dispatch issue, and
+publishes it to that role. GitHub's own merge queue (`merge_group`
 trigger) is a repository setting Legion does not modify. No lifecycle labels exist; GitHub issues
 are never read or written by Legion.
 

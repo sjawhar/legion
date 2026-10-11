@@ -282,6 +282,17 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 			return err
 		}
 	}
+	// The child's open pull request outlives the run, and may still be armed for the READY of the
+	// run being left: no head of the new run is an accepted READY's, so it is disarmed now.
+	pr, err := e.store.PullRequest(ctx, tx, child.Key)
+	if err != nil {
+		return err
+	}
+	if pr != nil && pr.State == record.PullRequestOpen {
+		if err := e.disarm(ctx, tx, child.Key, pr); err != nil {
+			return err
+		}
+	}
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
 	}
@@ -496,7 +507,12 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 		return intake.Result{}, err
 	}
 	if issue.Phase == phase.AwaitingMerge {
-		return intake.Result{}, e.disarmMovedReady(ctx, tx, *issue, pr)
+		return intake.Result{}, e.withdrawMovedReady(ctx, tx, *issue, pr)
+	}
+	// No head outside awaiting_merge is an accepted READY's, so whatever an earlier READY left
+	// armed - a child re-entered from awaiting_merge, say - is disarmed on every push.
+	if err := e.disarm(ctx, tx, issue.Key, pr); err != nil {
+		return intake.Result{}, err
 	}
 	if issue.Phase != phase.Implementing {
 		return intake.Result{}, nil

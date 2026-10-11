@@ -1,8 +1,11 @@
 package workflow
 
 import (
+	"context"
 	"slices"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -14,20 +17,22 @@ import (
 
 // A READY names the head the merger arms with --match-head-commit, and GitHub checks that head
 // only when auto-merge is enabled: a later push by anyone with write access leaves it armed for a
-// head nobody reviewed. So a push that moves an awaiting_merge pull request past its READY head
-// queues a disarm of that pull request. The READY head arriving again, or a push outside
-// awaiting_merge, queues none.
-func TestAPushPastTheREADYHeadDisarmsTheMerge(t *testing.T) {
+// head nobody reviewed. Arming is legitimate only for the READY head of an awaiting_merge pull
+// request, so every head move but a push landing on that head queues a disarm. In awaiting_merge
+// the move withdraws the READY as a red or a conflict does: the issue goes back to implementing
+// with its implementer started, and the architect hears a checks-red naming the move, so the new
+// head comes back through testing, review and a new READY. Elsewhere the issue stays where it is.
+func TestAPushPastTheREADYHeadWithdrawsTheREADY(t *testing.T) {
 	for _, tc := range []struct {
-		name   string
-		at     phase.Phase
-		status string
-		head   string
-		want   []record.AutoMergeDisable
+		name                string
+		at                  phase.Phase
+		status              string
+		head                string
+		disarmed, withdrawn bool
 	}{
-		{"a new head in awaiting_merge", phase.AwaitingMerge, "retro", "moved", []record.AutoMergeDisable{{Number: 42}}},
-		{"the READY head again", phase.AwaitingMerge, "retro", "head", nil},
-		{"a new head in reviewing", phase.Reviewing, "needs_review", "moved", nil},
+		{"a new head in awaiting_merge", phase.AwaitingMerge, "retro", "moved", true, true},
+		{"the READY head again", phase.AwaitingMerge, "retro", "head", false, false},
+		{"a new head in reviewing", phase.Reviewing, "needs_review", "moved", true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -35,13 +40,63 @@ func TestAPushPastTheREADYHeadDisarmsTheMerge(t *testing.T) {
 				Phase: tc.at, Generation: 1, Status: tc.status, Rank: "U"})
 			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
 				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
 			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
 			applyRefusingNothing(t, pool, readyEngine(""),
 				intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: tc.head})
-			if got := autoMergeDisables(t, pool); !slices.Equal(got, tc.want) {
-				t.Fatalf("auto-merge disables %v, want %v", got, tc.want)
+			var want []record.AutoMergeDisable
+			if tc.disarmed {
+				want = []record.AutoMergeDisable{{Number: 42}}
+			}
+			if got := autoMergeDisables(t, pool); !slices.Equal(got, want) {
+				t.Fatalf("auto-merge disables %v, want %v", got, want)
+			}
+			if !tc.withdrawn {
+				if got := issuePhase(t, pool); got != tc.at {
+					t.Fatalf("the issue is in %s, want it left in %s", got, tc.at)
+				}
+				return
+			}
+			if got := issuePhase(t, pool); got != phase.Implementing {
+				t.Fatalf("after the head moved the issue is in %s, want implementing", got)
+			}
+			if task := implementerTask(t, pool); !strings.Contains(task, "moved") {
+				t.Fatalf("implementer task %q, want it started naming the moved head", task)
+			}
+			if got := noticeKinds(t, pool, "LEGION-208"); !containsNotice(got, "checks-red") {
+				t.Fatalf("notices %v, want the architect told checks-red", got)
 			}
 		})
+	}
+}
+
+// A person setting an awaiting_merge child back to todo re-enters it in a new run, with its pull
+// request still open and, until something disarms it, still armed for the old READY. The re-entry
+// disarms it, and so does every push after, since no head of the new run is an accepted READY.
+func TestAReenteredChildsPullRequestIsDisarmedAndStaysDisarmedOnPush(t *testing.T) {
+	pool := migratedPool(t)
+	ctx := context.Background()
+	seedIssue(t, pool, record.Issue{Key: "LEGION-207", Tree: "LEGION-207", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U", LastDispatchSeq: 3})
+	seedSlot(t, pool, record.Slot{Issue: "LEGION-207", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
+	parent := "LEGION-207"
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-207", Parent: &parent, Project: "LEGION", Title: "child",
+		Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "V", LastDispatchSeq: 4})
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
+		Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
+	engine := readyEngine("")
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-back-to-todo", intake.DispatchIssue{
+		Key: "LEGION-208", Seq: 5, Type: "issue.updated", Status: "todo", Title: "child", Parent: "LEGION-207", Rank: "V",
+	}, engine, admissionStub{}); err != nil {
+		t.Fatalf("ApplyFact child todo: %v", err)
+	}
+	if got, want := autoMergeDisables(t, pool), []record.AutoMergeDisable{{Number: 42}}; !slices.Equal(got, want) {
+		t.Fatalf("auto-merge disables after the re-entry %v, want %v", got, want)
+	}
+	applyRefusingNothing(t, pool, engine,
+		intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "moved"})
+	if got, want := autoMergeDisables(t, pool), []record.AutoMergeDisable{{Number: 42}, {Number: 42}}; !slices.Equal(got, want) {
+		t.Fatalf("auto-merge disables after a push to the re-entered child %v, want %v", got, want)
 	}
 }
 
