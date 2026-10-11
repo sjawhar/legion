@@ -2182,11 +2182,12 @@ deploy order keeps every pod renewing (an older broker ignores the token, and 00
 nullable), but that is liveness, not exposure: a grant lasts until its session ends, so a copy
 renewing an old-image UID keeps one approval's grant while it renews. The rollout therefore
 replaces every old-image issue pod before or right after the broker deploys, then revokes the
-login that made each enrollment a remaining token-less WARN names, by its credential id once its
-code and approver show it is not the daemon's, never by its self-reported machine name (the
-operate page). A pod enrollment is ended only by the launcher credential that made it (`DELETE` by
-any other is `403 NOT_ENROLLING_CREDENTIAL`), so a Legion daemon that logs in again (a restart, or
-its login's expiry) leaves its earlier login's pods to their leases or to a revoke of that login.
+login that made each enrollment a remaining token-less WARN names (the line's own enrollment),
+on Dispatch's machine-login page by its **Credential** id once its code shows it is not the
+daemon's, never by its self-reported machine name (the operate page). A pod enrollment is ended
+only by the launcher credential that made it (`DELETE` by any other is
+`403 NOT_ENROLLING_CREDENTIAL`), so a Legion daemon that logs in again (a restart, or its login's
+expiry) leaves its earlier login's pods to their leases or to a revoke of that login.
 The renew route alone maps proof.ErrNotLive to `401 ENROLLMENT_NOT_LIVE` (its own `authRenewProof`
 case in `authenticate`, `sessionCaller`): a pod renewer stops only on it or `POD_TOKEN_REQUIRED`,
 and retries `POD_IDENTITY_MISMATCH`, which `verifyPodToken` also answers for a token it could not

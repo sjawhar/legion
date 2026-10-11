@@ -142,8 +142,10 @@ helper that renews it runs. A login can be ended, with every session it enrolled
 a machine that is lost, compromised or no longer used, or a Legion daemon whose pods must lose
 their secrets now. Dispatch's machine-login page (`/credentials/machine`) lists **Machine logins**:
 every machine logged in as you, and every service's login, such as the Legion daemon's, shown as
-`legion-daemon on <host>` whoever approved it, each with who approved it, when its login was issued
-and when it expires. A login that has expired stays listed, marked `expired, sessions still
+`legion-daemon on <host>` whoever approved it, each with its **Credential** id, who approved it,
+when its login was issued and when it expires. The host is the name its machine reported, so two
+logins can share it; the credential id is the one every enrollment the login made names, and it
+tells them apart. A login that has expired stays listed, marked `expired, sessions still
 running`, while a session it enrolled still runs, so revoking every row a machine has ends every
 session it started, those of its earlier logins included. Click
 **Revoke** on its row and confirm. The broker then, at once:

@@ -210,8 +210,8 @@ The broker logs text lines to stderr. The ones worth alerting or searching on:
 | `agent secret policy load failed; previous policy kept error=…` | At ERROR: a reread of the namespace failed (Secrets Manager or KMS out of reach, or refusing the broker), and the broker keeps serving the policy from its last good read; or, with `name=<NAME>` (the name a request asked for), the request named a secret the broker did not serve and the broker's reread of that one secret failed, so the request is refused `UNKNOWN_SECRET`. A reread of the namespace in flight when the broker shuts down is not one of these and logs nothing. |
 | `broker: <operation> failed error=…` | A request failed with a 500 or 503; the line carries the cause the response does not. A reread whose own request ended before it finished - its caller went away, or it reached the 45-second bound - is not one of these: it answers `503 REQUEST_ENDED` and logs nothing, since anyone can end a request. |
 | `broker sweeper: ended an enrollment whose lease lapsed enrollment_id=… kind=… runtime_id=… slot=… lease_expired_at=… grants_revoked=… requests_cancelled=…` | A session stopped renewing (a pod that is gone, a box whose `agent-secrets renew` stopped); the sweep ended it, revoking its grants and cancelling its pending requests. |
-| `broker: pod enrollment renewed without its projected token enrollment=… pod_uid=… slot=…` | At WARN: a pod enrollment renewed without its token, and no enrollment naming its pod UID has ever renewed with one, so the broker accepted it; for that pod a token copied out of it still keeps an enrollment alive. It is expected from a pod on a worker image whose `agent-secrets renew` predates `--pod-token-file`. A pod on the current image sends its token from its first renewal, so a line naming such a pod means a holder of an enrollment key for it is renewing outside the cluster before the pod's own first token renewal. List pod images below and replace an older-image pod. If its pod UID is absent or every image is current, revoke the machine login that made the enrollment by its credential id once it is shown not to be the Legion daemon's, which ends every enrollment it made; never pick it by its machine name ([the renew token check](#the-renew-token-check) gives the query and the call). |
-| `broker: pod enrollment renewal refused: projected token required enrollment=…` | At WARN: a pod enrollment renewed without its token after an enrollment naming the same pod UID, this one or another, had renewed with one, and was refused. One cause is someone holding its key, possibly enrolled under another machine login with a token copied out of the pod, renewing outside the cluster. The other is an old-image pod refused because someone else marked its UID first: whoever holds an unexpired copy of an old-image pod's token and an approved service login can enroll a key of their own on that UID and renew it with the copy, which marks the UID, and from then on the real old-image pod, whose renewer sends no token, is refused here until its lease lapses. That is weaker than what the copy already allowed, which was to enroll and renew as the pod. The refused enrollment's pod UID names the pod: list pod images (below), and if that pod runs an older image, revoke the login of each marked row of that pod UID by its credential id once it is shown not to be the Legion daemon's, never by its machine name ([the renew token check](#the-renew-token-check)), and replace the pod with a current image. A current-image renewer that cannot read its token file sends nothing at all, so the broker logs nothing for it; `agent-secrets renew` prints `ERROR: enrollment <id> cannot read its pod token` instead, which the worker shim relays into the pod's log. Its lease and grants end one `BROKER_LEASE_SECONDS` after its last valid renewal. |
+| `broker: pod enrollment renewed without its projected token enrollment=… pod_uid=… slot=…` | At WARN: a pod enrollment renewed without its token, and no enrollment naming its pod UID has ever renewed with one, so the broker accepted it; for that pod a token copied out of it still keeps an enrollment alive. It is expected from a pod on a worker image whose `agent-secrets renew` predates `--pod-token-file`. A pod on the current image sends its token from its first renewal, so a line naming such a pod means a holder of an enrollment key for it is renewing outside the cluster before the pod's own first token renewal. List pod images below and replace an older-image pod. If its pod UID is absent or every image is current, revoke the machine login that made the line's enrollment, which ends every enrollment it made: on Dispatch's machine-login page, the row whose **Credential** is that login's id, once its code shows it is not the Legion daemon's; never pick it by its machine name ([the renew token check](#the-renew-token-check) gives the query). |
+| `broker: pod enrollment renewal refused: projected token required enrollment=…` | At WARN: a pod enrollment renewed without its token after an enrollment naming the same pod UID, this one or another, had renewed with one, and was refused. One cause is someone holding its key, possibly enrolled under another machine login with a token copied out of the pod, renewing outside the cluster. The other is an old-image pod refused because someone else marked its UID first: whoever holds an unexpired copy of an old-image pod's token and an approved service login can enroll a key of their own on that UID and renew it with the copy, which marks the UID, and from then on the real old-image pod, whose renewer sends no token, is refused here until its lease lapses. That is weaker than what the copy already allowed, which was to enroll and renew as the pod. The refused enrollment's pod UID names the pod: list pod images (below). If that pod runs an older image, the copy's rows are the marked rows of that pod UID: revoke each one's login on Dispatch's machine-login page by its **Credential**, once its code shows it is not the Legion daemon's, never by its machine name ([the renew token check](#the-renew-token-check)), and replace the pod with a current image. Otherwise the copy is the line's own enrollment, as that section says. A current-image renewer that cannot read its token file sends nothing at all, so the broker logs nothing for it; `agent-secrets renew` prints `ERROR: enrollment <id> cannot read its pod token` instead, which the worker shim relays into the pod's log. Its lease and grants end one `BROKER_LEASE_SECONDS` after its last valid renewal. |
 | `broker shutting down` | SIGTERM or SIGINT: in-flight requests get 10 seconds to finish. |
 
 Each request is bounded to 45 seconds. Request bodies are JSON of at most 1 MiB.
@@ -246,13 +246,18 @@ kubectl get pods -n <namespace> -l legion.dev/issue \
 ```
 
 Once that list shows no old-image pod, a token-less WARN line no longer names a pod of yours but a
-copy. For each one that remains, list every enrollment of its pod UID with the machine login that
-made it:
+copy, and for either line the copy is the line's own enrollment: a pod on the current image renews
+with its token, so its own rows are the marked ones, and the line names the row that renewed
+without it. (Marked rows are a copy's only when the refused pod runs an older image, as the
+`projected token required` row above says.) List every enrollment of the line's pod UID with the
+machine login that made it; `own` is the line's enrollment:
 
 ```sql
-select o.id as enrollment, o.pod_token_renewed_at is not null as marked,
+select o.id = e.id as own, o.id as enrollment, o.pod_token_renewed_at is not null as marked,
        o.revoked_at is null and o.lease_expires_at > now() as live,
-       c.id as credential_id, c.service, c.host, c.created_at as issued_at, r.code,
+       c.id as credential_id, c.service, c.host,
+       to_char(c.created_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS') || ' UTC' as issued_at,
+       r.code,
        (select ev.login from credential_request_events ev
         where ev.record_id = r.id and ev.event = 'approved') as approved_by
 from enrollments e
@@ -263,40 +268,45 @@ where e.id = '<the line''s enrollment>'
 order by o.created_at;
 ```
 
-The copy's rows are the line's own enrollment for a `renewed without its projected token` line,
-and every row marked `t` for a `projected token required` line. Before revoking a row's login,
-confirm it is not the Legion daemon's, the current login or one from before a restart:
+Before revoking the copy's login, confirm it is not the Legion daemon's, its current login or one
+from before a restart: its `code` is none the daemon has logged. Each login's code is in the boot
+line `agent-secrets machine login: enter code …` or, after a re-login, the supervisor's
+`enrollment failed; retrying on the next observation` warning, and `legion state --json` shows the
+current one as `agentSecretsLogin.code`.
 
-- its `code` is none the daemon has logged: each login's code is in the boot line
-  `agent-secrets machine login: enter code …` or, after a re-login, the supervisor's `enrollment
-  failed; retrying on the next observation` warning, and `legion state --json` shows the current
-  one as `agentSecretsLogin.code`;
-- the person its `approved_by` names, at its `issued_at`, did not approve it for the daemon.
+Then revoke it on Dispatch's machine-login page (`/credentials/machine`), signed in: find the row
+whose **Credential** is the query's `credential_id`, check that its **Approved by** is the query's
+`approved_by` and that its **Issued** time, in the tooltip, is the query's `issued_at` (the tooltip
+shows that second in the browser's time zone), then click **Revoke** and confirm. That ends every
+enrollment the login made
+([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), and the
+broker records the signed-in person as who revoked it. Never pick the row by its machine name: a
+login's host is the name its machine reported, so a copy's login can read `legion-daemon on <host>`
+exactly as the daemon's does, and revoking the daemon's login ends every pod's secrets until
+someone approves its next one.
 
-Then revoke it by its `credential_id`, which ends every enrollment that login made, with the
-broker's own route, the call Dispatch's server makes for its machine-login page
-([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)). It takes
-the UI bearer and the person revoking as `approver`, which the broker records on every row it
-writes; it lets any login but `anyone` revoke a service's login, and only the person who approved a
-person's machine login revoke that one (`403 NOT_APPROVER`). With `AGENT_SECRETS_UI_TOKEN` holding
-`BROKER_UI_TOKEN`'s value and `AGENT_SECRETS_URL` the broker's `BROKER_PUBLIC_URL`:
+A line whose own enrollment's `code` is the daemon's names an enrollment the daemon made, renewed
+by someone holding its key from that pod's role container. Replacing that pod makes the daemon
+revoke the enrollment as it lets the process go. If the pod is gone and the enrollment is still
+live (the daemon logs `supervise: agent-secrets: enrollment not revoked after every attempt; the
+lease ends it`, which a copy that keeps renewing never lets happen), only revoking the daemon's
+login ends it, on the same page by its credential id.
 
-```sh
-curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' \
-  "$AGENT_SECRETS_URL/v1/launcher-credentials/<credential_id>/revoke-by-approver"
+To end a login you know by its code instead, such as the daemon's own to take every pod's secrets
+away at once, find its row by that code; any of the daemon's logged codes finds that login:
+
+```sql
+select c.id as credential_id, c.service, c.host,
+       to_char(c.created_at at time zone 'UTC', 'YYYY-MM-DD HH24:MI:SS') || ' UTC' as issued_at,
+       (select ev.login from credential_request_events ev
+        where ev.record_id = r.id and ev.event = 'approved') as approved_by,
+       c.revoked_at is not null as revoked
+from credential_requests r
+join launcher_credentials c on c.record_id = r.id
+where r.kind = 'launcher_credential' and r.code = '<the code>';
 ```
 
-Never pick the login by its machine name on Dispatch's machine-login page. The page shows no
-credential id, and a login's host is the name its machine reported, so a copy's login can read
-`legion-daemon on <host>` exactly as the daemon's does, and revoking the daemon's login ends every
-pod's secrets until someone approves its next one. Dispatch's own route,
-`POST /api/v1/machine-logins/<credential_id>/revoke`, answers only a signed-in browser on Dispatch's
-origin (a bearer gets `403 HUMAN_ONLY`), so from a shell the broker's route is the call. A copy
-whose row is the daemon's current login renews a key the daemon enrolled: replacing that pod makes
-the daemon revoke the enrollment as it lets the process go, and once the pod is gone with the
-enrollment still live (the daemon logs `supervise: agent-secrets: enrollment not revoked after
-every attempt; the lease ends it`, which a copy that keeps renewing never lets happen), only
-revoking the daemon's login ends it.
+and revoke the row whose **Credential** is that `credential_id`, as above.
 
 The release that requires the token from every pod is safe to deploy only when all three of these
 hold:
