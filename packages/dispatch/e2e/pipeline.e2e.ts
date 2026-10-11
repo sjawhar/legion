@@ -79,7 +79,8 @@ test("the Pipeline page shows each stage's timing and the failing jobs", async (
   await expect(failing.locator('[data-failing-job="checks-complete"]')).toHaveCount(0);
   await expect(failing.locator('[data-failing-job="typecheck"]')).toHaveCount(0);
 
-  // On a phone the six cards stack in one column (the grid is grid-cols-1 under md).
+  // On a phone the six cards stack in one column: the page is narrower than the 46rem the
+  // second column needs.
   const viewport = page.viewportSize();
   if (viewport !== null && viewport.width < 768) {
     const first = await page.locator('[data-metric="pr_ci"]').boundingBox();
