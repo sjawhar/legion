@@ -67,20 +67,3 @@ func TestTheControllersPromptIsItsRolePartThenItsLaunchsPart(t *testing.T) {
 	}
 }
 
-func TestControllerPromptNamesBacklogStewardship(t *testing.T) {
-	body, err := roleParts.ReadFile("roles/controller-root.md")
-	if err != nil {
-		t.Fatalf("read controller root prompt: %v", err)
-	}
-	text := string(body)
-	for _, want := range []string{
-		"ranks that work from the weekly plan",
-		"claims `backlog-order`",
-		"READY, scope, routing, ownership, and stopped-session work",
-		"Sami's rulings in the weekly plan",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("controller root prompt does not say %q", want)
-		}
-	}
-}

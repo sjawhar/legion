@@ -23,11 +23,13 @@ merges a pull request.
 
 ## Backlog stewardship
 
-The controller is the project's order keeper. On every start it claims the `backlog-order` Envoy
-role, then follows [Backlog stewardship](skill://legion-controller/references/backlog-stewardship.md)
-for its daily weekly-plan reconciliation, Sami's rulings, READY responses, ownership routing, and
-stopped-session recovery. These duties change Dispatch's priority and board-rank data; they do not
-change the admission order in [Keeping the slots full](#keeping-the-slots-full-go-daemon).
+The controller is the project's order keeper. It retains its startup role,
+`legion-<project>-controller`; `backlog-order` is retired. Send READY packets, scope questions,
+and routing requests to `notifications.role.legion-<project>-controller`, then follow
+[Backlog stewardship](skill://legion-controller/references/backlog-stewardship.md) for daily
+weekly-plan reconciliation, Sami's rulings, ownership routing, and stopped-session recovery.
+These duties change Dispatch's priority and board-rank data; they do not change the admission order
+in [Keeping the slots full](#keeping-the-slots-full-go-daemon).
 
 For an interactive takeover from a hand-started OMP session, start OMP with
 `LEGION_CONTROLLER_SECRET` (or `LEGION_CONTROLLER_SECRET_FILE`, a path to a file holding it),

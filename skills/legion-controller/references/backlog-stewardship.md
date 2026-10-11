@@ -5,11 +5,12 @@ plan. The plan is the source of the work order and its one-owner map; Dispatch p
 rank are the executable form of that order. The deployment instructions name the weekly-planning
 issue and its `plan-week-*` artifact.
 
-## Claim the order role
+## Controller routing address
 
-On every controller start, claim `backlog-order` with `envoy_role_set`. Do not subscribe to the
-role topic manually. A fresh start is allowed to replace a holder that has stopped; if another live
-controller holds the role, stop and resolve that controller ownership before taking backlog action.
+The controller keeps its startup role, `legion-<project>-controller`; it never claims
+`backlog-order`, which is retired. Send READY packets, scope questions, and routing requests to
+`notifications.role.legion-<project>-controller`. Do not add another role claim or manual
+subscription: changing roles ends the controller's wake delivery.
 
 ## Reconcile the weekly plan
 
@@ -36,11 +37,11 @@ scope or priority decision, then record the resulting current rule in the affect
 (or its ruling section when it has no one line). Link the message when Dispatch gave it a reference.
 A ruling triggers the full reconciliation pass even when it appears to affect only one issue.
 
-## Answering `backlog-order`
+## Answering controller deliveries
 
-Read every `backlog-order` delivery against live Dispatch and daemon state. Answer scope questions
-from the weekly plan and deployment instructions. Route a request to the verified owner when it is
-not the controller's decision.
+Read every delivery to `notifications.role.legion-<project>-controller` against live Dispatch and
+daemon state. Answer scope questions from the weekly plan and deployment instructions. Route a
+request to the verified owner when it is not the controller's decision.
 
 Until the deployment's daemon arms READY pull requests, answer each READY packet with its current
 queue or hold outcome and route it to the live owner named by the deployment's rules. Never merge
