@@ -344,7 +344,7 @@ func main() {
 	// editing them (LEGION-542).
 	go documentService.RunTaskProgressReconciliation(ctx)
 	// The references route serves each document mention's stored excerpt; this fills the ones no
-	// version write stored: every mention indexed before migration 0090, and each rebuild-refs
+	// version write stored: every mention indexed before migration 0091, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx)
 

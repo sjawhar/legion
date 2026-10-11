@@ -162,7 +162,7 @@ func TestAnIndexedExcerptIsTheBlockTheRouteServedForEachBlockKind(t *testing.T) 
 	}
 }
 
-// A mention indexed before excerpts were stored (every row migration 0090 found) holds none, so
+// A mention indexed before excerpts were stored (every row migration 0091 found) holds none, so
 // the route answers it with the document's name until the reconciliation stores the excerpt the
 // rendered document gives it; once stored, a tick finds nothing to do.
 func TestTheReconciliationStoresTheExcerptOfAMentionIndexedWithout(t *testing.T) {

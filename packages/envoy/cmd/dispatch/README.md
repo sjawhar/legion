@@ -452,7 +452,7 @@ cross: on 60,000 issues the two deadlocked (`40P01`) in each of two runs, and wi
 the reparent waited for the migration and committed. Neither refuses a row; both censuses answer
 `0`.
 
-Migration `0090_refs_excerpts` adds three nullable columns to `refs` with no default
+Migration `0091_refs_excerpts` adds three nullable columns to `refs` with no default
 (`excerpt_block_id`, `excerpt_text`, `excerpt_version`), a catalog change that rewrites no row,
 and the partial index `refs_excerpt_drift` over the rows whose `excerpt_version` is null: the
 stored excerpt `GET /api/v1/references` answers a document mention with, which every version write

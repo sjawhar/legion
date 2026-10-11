@@ -137,7 +137,7 @@ const driftedExcerptsQuery = `
 	order by d.from_id`
 
 // DriftedExcerpts lists, in id order and at most limit, the documents some of whose mentions are
-// owed an excerpt: every mention indexed before migration 0090, each one rebuild-refs inserts, one
+// owed an excerpt: every mention indexed before migration 0091, each one rebuild-refs inserts, one
 // a version write could not cut (ClearExcerpts), and one MarkStaleExcerpts found behind.
 func DriftedExcerpts(ctx context.Context, q Queryer, limit int) ([]ExcerptDrift, error) {
 	rows, err := q.Query(ctx, driftedExcerptsQuery, limit)
@@ -173,7 +173,7 @@ func ClearExcerpts(ctx context.Context, q Execer, fromID string) error {
 
 // MarkStaleExcerpts marks owed every mention whose excerpt is older than its document's latest
 // version, and returns how many it marked. Every version write stores its own mentions' excerpts,
-// so only a version a binary predating migration 0090 wrote - the task a deploy replaces, while
+// so only a version a binary predating migration 0091 wrote - the task a deploy replaces, while
 // both run - leaves one behind. No index supports it: it reads every artifact mention holding an
 // excerpt (7,537 rows on the 2026-10-10 production dump, 26 ms), so the reconciliation runs it
 // only in the hour after its process starts.

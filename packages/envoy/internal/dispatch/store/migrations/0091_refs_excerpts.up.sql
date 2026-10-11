@@ -1,4 +1,4 @@
--- 0090_refs_excerpts.up.sql
+-- 0091_refs_excerpts.up.sql
 -- Stores on each mention a document writes the excerpt GET /api/v1/references answers it with:
 -- the id of the block holding the target's first mention (the dashboard's #b-<id> jump) and that
 -- block's markdown cut to 480 characters, as of document version excerpt_version. Every version
