@@ -110,7 +110,7 @@ func TestRevokingAnAutomaticGrantWithholdsItFromThatSessionAlone(t *testing.T) {
 			m, enr, key, operator := newFixture(t)
 			withSharedToken(t, m)
 			ctx := context.Background()
-			other, otherKey := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
+			other, otherKey := newEnrollment(t, m.Store, "session", "box-b-"+t.Name(), new(fixtureOperator), nil)
 
 			auto, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", c.name), "")
 			if err != nil || auto.State != "granted" || auto.GrantID == nil || auto.RecordID != nil {
@@ -450,23 +450,22 @@ func TestTheWithholdLeavesTheSessionsApprovedGrantOfTheSecretLive(t *testing.T) 
 	}
 }
 
-// TestAnApprovalAfterTheWithholdOutlivesTheOperatorsLaterRevokes pins that a revoke withholding
-// nothing new ends no grant but its own: the operator withholds AUTO_TOKEN and SHARED_TOKEN by
-// revoking the session's automatic {AUTO_TOKEN, SHARED_TOKEN} grant, which also ends its automatic
-// AUTO_TOKEN grant, and then approves two requests that were waiting with AUTO_TOKEN in them.
-// Revoking the ended AUTO_TOKEN grant (from a Live grants list loaded before), and then the first
-// approval's grant, leaves the second approval's grant releasing AUTO_TOKEN.
+// TestAnApprovalAfterTheWithholdOutlivesTheOperatorsLaterRevokes pins that a withhold ends only
+// the grants that got a name it newly withholds without asking. A request for {AUTO_TOKEN,
+// DEEL_API_KEY} waits for the operator while AUTO_TOKEN is still given without asking, so its
+// AUTO_TOKEN is recorded automatic. The operator then revokes the session's automatic AUTO_TOKEN
+// grant, which withholds AUTO_TOKEN and ends the session's automatic {AUTO_TOKEN, SHARED_TOKEN}
+// grant, and approves the waiting request. Revoking that already-ended pair afterwards newly
+// withholds SHARED_TOKEN alone, and revoking the AUTO_TOKEN grant again withholds nothing new: the
+// approval, whose request got AUTO_TOKEN automatically but never SHARED_TOKEN, keeps releasing
+// AUTO_TOKEN through both.
 func TestAnApprovalAfterTheWithholdOutlivesTheOperatorsLaterRevokes(t *testing.T) {
 	m, enr, key, operator := newFixture(t)
 	withSharedToken(t, m)
 	ctx := context.Background()
-	var waiting []Request
-	for _, names := range [][]string{{"AUTO_TOKEN", "DEEL_API_KEY"}, {"AUTO_TOKEN", "DEEL_API_KEY", sharedToken}} {
-		req, err := m.Create(ctx, enr, signRequest(t, m, key, "deploy", names...), "")
-		if err != nil || req.State != "pending" {
-			t.Fatalf("Create(%v) = %+v, %v; want pending", names, req, err)
-		}
-		waiting = append(waiting, req)
+	waiting, err := m.Create(ctx, enr, signRequest(t, m, key, "deploy", "AUTO_TOKEN", "DEEL_API_KEY"), "")
+	if err != nil || waiting.State != "pending" || waiting.RecordID == nil {
+		t.Fatalf("Create(AUTO_TOKEN, DEEL_API_KEY) = %+v, %v; want pending", waiting, err)
 	}
 	single, err := m.Create(ctx, enr, signRequest(t, m, key, "one", "AUTO_TOKEN"), "")
 	if err != nil || single.GrantID == nil {
@@ -476,33 +475,37 @@ func TestAnApprovalAfterTheWithholdOutlivesTheOperatorsLaterRevokes(t *testing.T
 	if err != nil || pair.GrantID == nil {
 		t.Fatalf("Create(AUTO_TOKEN, %s) = %+v, %v; want granted", sharedToken, pair, err)
 	}
-	if err := m.RevokeByApprover(ctx, *pair.GrantID, operator, record.HumanActor(operator)); err != nil {
-		t.Fatalf("RevokeByApprover(pair): %v", err)
-	}
-	var approved []string
-	for _, req := range waiting {
-		dec, err := m.ApplyDecision(ctx, *req.RecordID, true, operator)
-		if err != nil || dec.GrantID == "" {
-			t.Fatalf("ApplyDecision(%s) = %+v, %v; want granted", operator, dec, err)
-		}
-		approved = append(approved, dec.GrantID)
-	}
-	releases := func(step string, grants []string) {
-		t.Helper()
-		for _, g := range grants {
-			if values, _, err := m.Values(ctx, g, enr); err != nil || values["AUTO_TOKEN"] == "" {
-				t.Fatalf("after %s, Values of the operator's approval %s = %v, %v; want AUTO_TOKEN released", step, g, values, err)
-			}
-		}
-	}
 	if err := m.RevokeByApprover(ctx, *single.GrantID, operator, record.HumanActor(operator)); err != nil {
-		t.Fatalf("RevokeByApprover(the AUTO_TOKEN grant the withhold ended): %v", err)
+		t.Fatalf("RevokeByApprover(AUTO_TOKEN grant): %v", err)
 	}
-	releases("the operator's revoke of the ended AUTO_TOKEN grant", approved)
-	if err := m.RevokeByApprover(ctx, approved[0], operator, record.HumanActor(operator)); err != nil {
-		t.Fatalf("RevokeByApprover(first approval): %v", err)
+	if got := withheldFrom(t, m, enr); !slices.Equal(got, []string{"AUTO_TOKEN"}) {
+		t.Fatalf("withheld after the AUTO_TOKEN revoke = %v, want [AUTO_TOKEN]", got)
 	}
-	releases("the operator's revoke of the first approval", approved[1:])
+	if _, _, err := m.Values(ctx, *pair.GrantID, enr); !errors.Is(err, ErrGrantNotLive) {
+		t.Fatalf("Values of the automatic pair after the withhold = %v, want ErrGrantNotLive", err)
+	}
+	dec, err := m.ApplyDecision(ctx, *waiting.RecordID, true, operator)
+	if err != nil || dec.GrantID == "" {
+		t.Fatalf("ApplyDecision(%s) after the withhold = %+v, %v; want granted", operator, dec, err)
+	}
+	releases := func(step string) {
+		t.Helper()
+		if values, _, err := m.Values(ctx, dec.GrantID, enr); err != nil || values["AUTO_TOKEN"] == "" {
+			t.Fatalf("after %s, Values of the operator's approval %s = %v, %v; want AUTO_TOKEN released", step, dec.GrantID, values, err)
+		}
+	}
+	releases("the approval")
+	if err := m.RevokeByApprover(ctx, *pair.GrantID, operator, record.HumanActor(operator)); err != nil {
+		t.Fatalf("RevokeByApprover(the ended pair): %v", err)
+	}
+	if got := withheldFrom(t, m, enr); !slices.Equal(got, []string{"AUTO_TOKEN", sharedToken}) {
+		t.Fatalf("withheld after the pair's revoke = %v, want [AUTO_TOKEN %s]", got, sharedToken)
+	}
+	releases("the operator's revoke of the ended pair, which newly withholds " + sharedToken)
+	if err := m.RevokeByApprover(ctx, *single.GrantID, operator, record.HumanActor(operator)); err != nil {
+		t.Fatalf("RevokeByApprover(the ended AUTO_TOKEN grant): %v", err)
+	}
+	releases("the operator's revoke of the ended AUTO_TOKEN grant, which withholds nothing new")
 }
 
 // TestAnotherPersonsRevokeDoesNotWithholdTheOperatorsOwnSecret pins that only the session's own

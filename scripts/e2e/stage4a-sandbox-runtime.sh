@@ -26,10 +26,12 @@
 # LEGION_E2E_MODEL_GATEWAY_URL (required) the model gateway's Anthropic endpoint, which the run
 # substitutes for the operator route's models.yml placeholder; LEGION_E2E_MODEL_GATEWAY_AUDIENCE
 # (required) the audience that gateway accepts on a worker's projected token, which the run
-# substitutes for the operator route's pod.yml placeholder; LEGION_E2E_SESSION_DB_PORT (required) a
-# port on the devbox's private address that the devbox's security group admits from the Legion
-# nodes, as it admits the worker-stream port, where the run's scratch Postgres listens for
-# postgres-resume;
+# substitutes for the operator route's pod.yml placeholder; LEGION_E2E_WORKER_STREAM_PORT (default
+# 13373, the same name and default Stage 4b reads for its own worker-stream port, since the two
+# collide on it by default) the port the harness binds for the worker stream;
+# LEGION_E2E_SESSION_DB_PORT (required) a port on the devbox's private address that the devbox's
+# security group admits from the Legion nodes, as it admits the worker-stream port, where the
+# run's scratch Postgres listens for postgres-resume;
 # STAGE4A_FROM a development entry point, which is never the proof; STAGE4A_EVIDENCE_DIR where the
 # transcript and the runtime's log go (default a fresh /tmp directory, kept and printed).
 #
@@ -44,9 +46,14 @@ set -euo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
 namespace=legion
-# The rigs' worker-stream port, beside the production daemon's 13370/13371. Stage 4b binds the same
-# pair, and each stage refuses to start while the other holds it.
-port=13373
+# The rigs' worker-stream port, within the devbox's admitted range. Overridable
+# (LEGION_E2E_WORKER_STREAM_PORT, see Inputs, above) so two runs — two Stage 4a's, or a Stage 4a
+# and a Stage 4b — can each hold their own; left at its default, each stage refuses to start while
+# the other holds it, exactly as before. A lane's port must be one the devbox's security group
+# admits from the Legion nodes (README's port-admission note has the current allocation and how
+# many lanes it leaves room for); widening that admitted range is a change to the deployment
+# repository's infrastructure, not this one.
+port=${LEGION_E2E_WORKER_STREAM_PORT:-13373}
 repo=sjawhar/legion-smoke
 app_id=3202636
 app_key=LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64

@@ -476,6 +476,30 @@ evidence directory is under the scratch work directory, whose processes the tear
 so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ([`lib/transcript.sh`](#libtranscriptsh)).
 
+## Port admission
+
+The devbox's security group admits TCP 13370-13375 from the Legion nodes, six ports, and nothing
+wider: widening it is a change to the deployment repository's infrastructure, not either stage
+script. The Legion daemon that once ran on the devbox and held 13370/13371 there has moved into
+the cluster; nothing on the devbox holds them today. That makes all six ports available to a
+lane's own identity, not five beside a fixed occupant — confirm with `ss` before relying on it,
+since the harness's own `ports_free` and taken-port checks are the authority at run time and this
+note only the architecture behind them.
+
+Each stage needs exactly two of the six, never three — the two scripts need different pairs of
+two, which is where "two or three" confusion comes from, not either one needing three:
+- **Stage 4b**: `LEGION_E2E_DAEMON_PORT` (default `13372`) and `LEGION_E2E_WORKER_STREAM_PORT`
+  (default `13373`). It has no session database of its own; `stage4b-sandbox-tree.sh` names no
+  `SESSION_DB` anywhere.
+- **Stage 4a**: `LEGION_E2E_WORKER_STREAM_PORT` (default `13373`, the same name and default Stage
+  4b reads) and `LEGION_E2E_SESSION_DB_PORT` (required, no default: `postgres-resume`'s scratch
+  Postgres).
+
+Both scripts default `LEGION_E2E_WORKER_STREAM_PORT` to `13373`, so two lanes at their defaults —
+two Stage 4b's, two Stage 4a's, or one of each — collide there; set at least one override to run
+two lanes together. With six admitted ports and two per lane, the ceiling is three lanes at once,
+each on its own pair with nothing shared; a fourth needs the admitted range widened.
+
 ## stage4a-sandbox-runtime.sh
 
 ```sh
@@ -533,6 +557,7 @@ and the providers Secret read; neither is printed.
 | `LEGION_E2E_IMAGE` | required | the worker image under test, by digest: a `worker-image.yaml` run on the branch under test |
 | `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint, the `baseUrl` the run's copy of the fixture's `models.yml` names; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
 | `LEGION_E2E_MODEL_GATEWAY_AUDIENCE` | required | the audience the model gateway accepts on a worker's projected ServiceAccount token, put in place of the `${MODEL_TOKEN_AUDIENCE}` placeholder in the run's copy of the operator route's `pod.yml`; checked by [`lib/model-gateway-audience.sh`](#libmodel-gateway-audiencesh) |
+| `LEGION_E2E_WORKER_STREAM_PORT` | `13373` | the port the harness binds for the worker stream on the devbox's private address; the same name and default Stage 4b reads for its own worker-stream port, so two runs — two Stage 4a's, or a Stage 4a and a Stage 4b — collide on it by default and need distinct values to run at once |
 | `LEGION_E2E_SESSION_DB_PORT` | required | a port on the devbox's private address that the devbox's security group admits from the Legion nodes, as it admits the worker-stream port, where the scratch session database listens; refused when it is not a number, is the worker stream's port, or is taken |
 | `STAGE4A_FROM` | unset | a development entry point: any check after `identity` except `stale-incarnation`, which rides `kill-launcher`'s relaunch; the harness refuses any other name at `identity`, before it creates anything. `identity` always runs; the checks before the entry point are skipped, and each later check first puts the claims it needs where the full run would have left them, through the same runtime calls. The run ends `stage 4a e2e: every check from <check> passed — a development run, never the proof`, and is never cited as the proof |
 | `STAGE4A_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e4a-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `transcript.log` (the whole run), `runtime.log` (the runtime's and the listener's JSON log lines), and the two namespace snapshots |
@@ -563,8 +588,8 @@ namespace list. Every evidence line names which one observed it (`[runtime]`, `[
 `[harness]` for the listener and its resolver).
 
 The harness hosts the worker stream itself, on the devbox's private address (from instance
-metadata, never `0.0.0.0`) and port 13373 — the rigs' worker-stream port, which the devbox's
-security group admits from Legion nodes beside the production daemon's 13370/13371 — and refuses
+metadata, never `0.0.0.0`) and port `LEGION_E2E_WORKER_STREAM_PORT` (default 13373) — within the
+devbox's admitted range ([Port admission](#port-admission)) — and refuses
 to start while anything holds it, naming the holder. Its resolver accepts
 only each claim's current generation and records every hello with the claim, the generation, and
 the hash of the token presented. The pods run a stub agent under the real Go shim: it appends its
@@ -658,6 +683,8 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
 STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
+LEGION_E2E_PROJECT=S4B2 LEGION_E2E_DAEMON_PORT=13370 LEGION_E2E_WORKER_STREAM_PORT=13371 \
+  bash scripts/e2e/stage4b-sandbox-tree.sh        # a second lane beside a default-identity run; S4B2 must already exist as a Dispatch project
 ```
 
 The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
@@ -688,7 +715,8 @@ value. `preflight` reads Dispatch's `whoami` with the run's bearer and requires 
 the same read with an invalid bearer, its negative control, must be refused 401.
 
 `STAGE4B_UNTIL` must name a checkpoint below; any other value is refused. `STAGE4B_SKIP_CONTROLLER=1`,
-refused without `STAGE4B_UNTIL`, runs none of `controller`'s checks and only takes tree 3 out, printing `CHECK controller: SKIPPED (…)`,
+refused without `STAGE4B_UNTIL`, runs none of the checks of `controller`, `full-agent-negative` or `controller-walk` and only takes
+tree 3 out, printing `CHECK <checkpoint>: SKIPPED (…)` for each of the three,
 so a development run can reach a later checkpoint while a defect of the controller's own is unfixed; it also skips the GitHub credential check in `controller` and the one in `daemon-controller-liveness`'s phase 1, so a run with it proves neither controller's gh. `STAGE4B_EVIDENCE_DIR`
 keeps the evidence (default: a fresh `/tmp` directory, printed at the end): the transcript, the
 daemon log, `run.json` (source revision, image and plugin), the pod watch, each checked pod's spec,
@@ -764,24 +792,71 @@ Three roots are set todo under `admission_cap: 2`:
   files two children under it, each in an issue pod and on a volume of its own: child 1 is closed
   as `done` and released, child 2 parked in backlog and kept until the tree closes.
 - Tree 2 runs through its planner beside tree 1, in an issue pod of its own, carrying the
-  repository-configuration fixture, and is then moved to backlog.
+  repository-configuration fixture, supplies the capability report every session sends at its start
+  (`full-agent`), and is then moved to backlog.
 - Tree 3 is admitted when tree 2 leaves the line. It supplies the held phase the controller
-  checkpoint needs, and is taken out from an operator shell.
+  checkpoint needs and, held, the planner whose workspace turns a capability off and on again
+  (`full-agent-negative`), and is taken out from an operator shell (`controller-walk`).
 - Tree 4 is admitted when tree 3 has been taken out. It supplies the deaths of a worker whose task
   is outstanding, and is taken out the same way.
 
-**One run at a time.** The project, the durable consumer names, ports 13372 and 13373 (the rigs'
-pair; the production daemon keeps 13370 and 13371; the daemon's API takes 13372 and its worker
-stream 13373 until `address-moved-stream-new-pod` swaps them) and the namespace label
-`legion.dev/project=legsmoke` are shared.
-- The run takes `~/.local/state/legion/e2e/stage4b.lock`, one path whatever `XDG_STATE_HOME` says.
-- It owns the shared objects only after four checks pass: the lock, both ports free, no leftover
-  `legsmoke` object in the namespace, and no `legion-go-LEGSMOKE-` consumer on the stream.
+**One run at a time per identity.** `LEGION_E2E_PROJECT` (default `LEGSMOKE`, a Dispatch project
+key: `[A-Z][A-Z0-9]{1,9}`, exactly Dispatch's own `projectKeyPattern`
+(`packages/envoy/internal/dispatch/api/server.go`), checked in `prerequisites`) names a run's
+identity; everything else derives from it. `run_label`, the `legion.dev/project` label every
+object in the namespace carries, is the daemon's own `ProjectToken(project)`
+(`packages/daemon/internal/claim/token.go`) — exactly `project` lowercased, since the validated
+shape holds no character `ProjectToken` would drop. The lock is today's single fixed path when
+`run_label` is the default `legsmoke`, else a path named for `run_label`, so a non-default
+project never shares today's lock, its leftover checks, or its durable consumers with a default
+run. `LEGION_E2E_DAEMON_PORT` (default `13372`) and `LEGION_E2E_WORKER_STREAM_PORT` (default
+`13373`, the same name Stage 4a reads for its one port) are the only other inputs, within the
+devbox's admitted range ([Port admission](#port-admission)); the run's daemon may swap which of
+its two takes the API and which the worker stream (`address-moved-stream-new-pod`), never a third.
+Left at their defaults, a run collides with another default run exactly as it always has; set all
+three to distinct values and two runs proceed at once, on the same devbox, against the
+same production cluster. `LEGION_E2E_PROJECT` must already exist as a Dispatch project:
+production Dispatch has no auto-create, and only a signed-in human may create one
+(`createProject` refuses a bearer actor, `HUMAN_ONLY`).
+- The run takes its own lock, derived from the project (above).
+- It owns its identity's shared objects only after four checks pass: that lock, both its ports
+  free, no leftover `run_label` object in the namespace, and no `legion-go-<project>-` consumer on
+  the stream.
 - A run refused at any of the four removes nothing.
-- Each daemon start checks both ports again, since another process can take one after the
+- Each daemon start checks both its ports again, since another process can take one after the
   prerequisites; once the daemon answers `/healthz`, both ports must be held by that daemon's
   process, or the boot fails naming the holder. A `/healthz` answer alone could come from another
   daemon on the same address.
+
+**Two lanes need separate checkouts, not just distinct identities above.** The controller
+checkpoint packs both of this checkout's plugins, `@sjawhar/pi-envoy` (`packages/pi-envoy`) and
+`@sjawhar/pi-legion` (`packages/pi-legion`) ([`lib/pack-plugin.sh`](#libpack-pluginsh)), each
+rewriting its own `package.json` in place for the few seconds its pack takes, under its own flock
+on that one file: pi-envoy's pack and pi-legion's pack take separate locks, each serializing
+two lanes' packs of that one plugin against each other (whichever holds it waits its turn, as
+`release.yaml` and every other branch-built install already rely on); neither protects a lane's
+own [`lib/built-from.sh`](#libbuilt-fromsh) — called in `prerequisites` and again before the
+build — whose `jj diff`/`jj log` read the shared working copy directly, with no lock of their
+own. A second lane's pack landing mid-read reads as this lane's own tree having changed, failing
+`prerequisites` or the build's own revision check for a reason that has nothing to do with the
+change under test. Run concurrent lanes from separate checkouts (`jj workspace add`, or separate
+clones) of the same commit.
+
+**Two lanes can race the legion pool's own capacity preflight, and that is a finding, not a bug
+to fix here.** `prerequisites` reads the legion NodePool's current room (`pool_pod_room`) before
+either lane has placed a pod, and refuses, BLOCKED, only if that one read already can't fit
+`run_pods_at_once` pods (4: the cap's two roots and tree 1's two children). Two lanes starting
+close together can each read room enough for itself alone — the read is not a reservation — so a
+true shortfall surfaces only once both are actually scheduling. That is never silent: every
+pod-placement wait is wrapped (`on_tree`/`on_issue`), so a wait stalled on the pool's own limits
+while its subject pod is still Pending, or after its claim has given up, ends its checkpoint
+`BLOCKED: capacity: …`, naming the pod the scheduler could not place — the same outcome a single
+lane gets today when the pool is simply full. A pod that starves and is placed before its own
+claim's launch budget runs out, with the wait still timing out for some other reason, reads FAIL:
+neither path has evidence of a starvation that never reached either threshold.
+Running two lanes at once therefore needs either enough spare legion-pool capacity for both (8
+pods' worth of reservations between them) or tolerance for the slower lane landing `BLOCKED` on
+capacity; widening the pool is infrastructure, not this change.
 
 **What the run touches in production**, all of it removed by the `EXIT`/`INT`/`TERM`/`HUP` trap of
 the run that owns it. A signal to the whole process group does not stop the removal:
@@ -801,12 +876,12 @@ the run that owns it. A signal to the whole process group does not stop the remo
 - a teardown command that fails prints `cleanup warning: line N exited S`, never a check's `FAIL`
   line, and leaves the exit status the checks set.
 - **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's two durable consumers. They are
-  named by the Dispatch key: `legion-go-LEGSMOKE-dispatch` (`notifications.dispatch.issue.>`) and
-  `legion-go-LEGSMOKE-github` (`notifications.github.sjawhar.legion-smoke.>`).
+  named by the Dispatch key: `legion-go-<project>-dispatch` (`notifications.dispatch.issue.>`) and
+  `legion-go-<project>-github` (`notifications.github.sjawhar.legion-smoke.>`) — `LEGSMOKE` by default.
   - The teardown deletes both by exact name and prints `deleted` or `absent` for each.
   - `hygiene` fails if either remains, and the preflight refuses to start while either exists.
-  - A SIGKILLed driver runs no trap, and the next run's preflight names what it left.
-- **Production Dispatch, project LEGSMOKE**: three root issues per run. The preflight moves stale
+  - A SIGKILLed driver runs no trap, and the next run of the same identity's preflight names what it left; a different identity's run never sees it.
+- **Production Dispatch, project `LEGSMOKE` by default**: three root issues per run. The preflight moves stale
   todo roots to backlog. The proof human's writes use the agents' bearer and name the session
   `legion-e2e4b-proof-human-<pid>` as their actor, which production Dispatch requires; it holds no
   claim, so the daemon sets back its status write on a live root as it does any outside session's.
@@ -814,14 +889,14 @@ the run that owns it. A signal to the whole process group does not stop the remo
 - **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, tree 1's pull request, which
   the proof reads first and the proof human merges by hand only when the merger armed nothing (the
   merger's own submission on its READY is the expected path under this branch's prompt), and
-  `done`'s cleanup pull request on `proof/clean-main-legsmoke`, which the proof human merges. The
+  `done`'s cleanup pull request on `proof/clean-main-<run_label>` (`legsmoke` by default), which the proof human merges. The
   teardown closes any pull request the run left open, such as one from a
   run that stopped before the merge, and deletes each tree's branch `legion/<tree>`. It also closes
   the cleanup pull request if it is still open, with a comment naming the run, and deletes its
   branch, when the run stopped after `done` made that branch and before the merge deleted it (a
   merge GitHub answered with a 504, the wait that timed out, an interrupt;
   [`close_smoke_cleanup`](#libworkflowsh)), and prints the URL of a pull request it could not close.
-  Every Stage 4b run's cleanup branch has that one name, so the teardown acts only on the branch the
+  Every run's cleanup branch is named for its own identity, so the teardown acts only on the branch the
   run recorded making: a run that never reached the cleanup touches none, an earlier run's
   included, and `done` fails, naming the branch, when one is there before it makes its own, which it
   then leaves. To go on, delete that branch on `sjawhar/legion-smoke`, which also closes a pull
@@ -877,7 +952,8 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `issue-independence` | while tree 1's planner holds for the driver, the driver files two children of tree 1 in Dispatch and sets them todo, with no `legion` label (the daemon enters a child of a live tree itself); each child's planner registers from an issue pod of its own, and its planner claim records tree 1 as its tree (`legion claims list --json`, the claims carrying `tree`; the state view's issue entry carries none). The root and its two children then run at once in three pods, each Running with no affinity; the PVCs labelled with each issue are exactly one each, Bound, and three in all; and no pod can read another issue's workspace, each way between the root's pod and child 1's (`ls` of the other's workspace path answers `No such file or directory`, while the same path exists in its own pod). Their nodes are recorded (`issue-independence-pods.txt`); two or more are asserted only when preflight read the NodePool's instance bounds as holding no two of the run's pods, otherwise the count is noted. Tree 1's planner is then told to plan. Tree 2's planner has held for the driver: a tree 2 that left planning before the driver sent it anything fails here by name. The proof's instructions tell every phase worker that the daemon's task line (`Continue <title>. Issue: <key>. Phase: <phase>.`) is not the driver's instruction. The memory hog, the pod watch's negative control, runs on the root's node and is OOMKilled by its own 64Mi limit |
 | `child-release` | while tree 1 keeps running: the proof human sets child 1 `done`, and its Sandbox and PVC are gone (`kubectl get sandboxes,pvc -l legion.dev/issue=<child 1>` lists nothing), the daemon logged `sandbox runtime: released the closed issue's Sandbox and the volume it owned` for it exactly once and no lost volume, every claim of child 1 is `retired` with no session, and the root's Sandbox stays Running, its one PVC Bound and its pod the same uid. The proof human then sets child 2 `backlog`: its Sandbox is Suspended, its pod gone, and its one PVC kept Bound until the tree closes |
 | `child-reentered` | resume by rule, live: child 2's planner, parked by `child-release`, is `suspended` with `suspendedBy: daemon`; the proof human sets child 2 `todo` again, its planning start resumes that planner on the session it kept with no `suspendedBy`, the daemon logs `supervise: resuming by rule` for it exactly once naming the daemon's suspension, and the planner's session then holds two planning tasks, the first run's and the re-entered run's. The proof human parks child 2 again. The control, on the same claim and start path: `legion claims suspend` of the parked planner records `suspendedBy: operator`, and child 2 is set `todo` once more; its planning start waits (`outbox row waits` naming the suspension that holds until the operator resumes the claim), the planner stays suspended by the operator at the same generation for 60 s, and no `supervise: resuming by rule` line names it. `legion claims resume` relaunches it and the waiting start gives it the run's planning task, its session's third. Child 2 is parked a last time: its Sandbox Suspended, its pod gone, its one PVC Bound, its planner suspended by the daemon |
-| `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv |
+| `repository-configuration` | tree 2's workspace carries the fixture (`.omp/extensions/fixture.ts` and its `AGENTS.md`); the markers each loading path writes, and the agent's argv. The fixture's two MCP servers are one bun stdio MCP server (`.omp/mcp-fixture.ts`: newline-delimited JSON-RPC answering `initialize`, `ping`, `tools/list` with `fixture_echo` and `tools/call`), configured under two names, which writes the marker its argument names whenever a client starts it; an MCP marker may be written by the session's own connection or by the capability probe's second client |
+| `full-agent` | every live session measured the six live capability rows (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) at its boot and reported them with its ready (LEGION-663). With tree 1's and tree 2's roles live and tree 2's finished planner still the process of its first boot, `legion state --json` renders all six `present` (waited for: the newest session's report may be seconds away), each row's detail naming the pod of a live claim; tree 2's planner's claim view carries `capabilities` with all six under `ok`, `open` empty and `incarnation` equal to its locator's; the daemon log's `capabilities: session reported` line for that incarnation carries `rows` whose `mcp` detail names `fixture-omp-mcp` and `fixture-root-mcp` and whose `repository-extensions` detail names `fixture.ts`; and no `capability <live row> is open` line has been logged. The rows, the view and the report line are kept as `full-agent.json` |
 | `finished-idle-planner-death` | tree 2's completed planner is idle with no pending task while its implementer owns `implementing`; the driver records its session, process incarnation and pod UID and kills only the planner launcher PID 1, once. Kubernetes restarts that container in the same issue pod, and the daemon relaunches the planner on the same session at a new process generation, in the same pod by uid, registered and ready or idle with no task pending and no new planning-task delivery, while tree 2 remains `implementing`, unheld and with its implementer live. A relaunch registers and reaches Ready in seconds, and Ready resets the launch-failure budget, so the driver cannot exhaust it; the exhausted budget's failure, its one `worker-died` and the unheld phase are `packages/daemon/internal/daemon/outbox_lifecycle_test.go`'s (`TestAFinishedWorkerThatDiesIsRelaunchedAndItsFailureHoldsNothing`). `issue-cap-moves` then removes tree 2 normally |
 | `issue-cap-moves` | the proof human's `backlog` on tree 2's live root is set back: the next status write is `legion-daemon:LEGSMOKE`'s (a control re-attributing it must fail), tree 2's architect receives a `status-reasserted` notice naming the proof human, and tree 2 keeps its slot; `legion status … backlog` then frees the slot, tree 3 is admitted, and tree 2's pods are gone |
 | `tree-moved` | before tree 1's implementer completes, `legion claims suspend` suspends tree 1's architect (`suspendedBy: operator`); the implementer's completion takes tree 1 to `testing`, and its `phase-finished` notice waits for the architect (`outbox row waits`, the architect holding no role), resuming nothing: the architect stays suspended by the operator at the same generation for 120 s. No rule acts on a tree architect, so the rule passing over an operator's suspension is `child-reentered`'s control. `legion claims resume` then relaunches it with no `suspendedBy`, the held notice arrives in its session, and the daemon logged exactly two `api: operator request` lines for the architect, the suspend's route and then the resume's. With real agents throughout; the tester's adoption leaves a new empty change and keeps the implementer's author |
@@ -898,7 +974,9 @@ event is dated by Dispatch's `created_at`; one without it stops the audit, never
 | `restart-mid-tree` | a daemon restart at the same addresses re-adopts the merger's pod and session, and relaunches no role: 75 s after the merger is re-adopted (past the probe interval in which every role, once its launcher has redialled, is judged on its Sandbox's address record), every claim that ran a process and still runs one has its generation and incarnation unchanged, its issue pod's uid as the operator reads it is the one `legion claims` records, tree 1's claims all still run, and the daemon logged no stale-address replacement. It is the two address-moved checkpoints' negative control |
 | `address-moved-env-same-pod` | the daemon restarts handing `envoy_url` with its host upper-cased, the same Envoy listener, and nothing else moved. Each of tree 1's claims that ran a process runs exactly its next generation (one launch, none refused), registered and ready again, **in the same issue pod** (its uid unchanged), whose launchers still dial the unmoved worker stream; the generation's Oh My Pi is told the new `ENVOY_URL` spelling and the run's other services, and runs `--resume=` the claim's unchanged session file; `budgets.launchFailures` is 0 and its deaths unchanged; and the daemon logged one stale-address replacement of it, whose detail names `ENVOY_URL` alone (compared, never printed, since it names a production host), and no failed launch. Every other claim leaves the generation it ran, no claim leaves its issue pod, and from one read of `legion claims` every claim that runs a process is on the addresses the daemon hands now. The respelling stays for the rest of the run, and `scrub` hides the Envoy host in either case |
 | `address-moved-stream-new-pod` | the daemon restarts with its API and worker-stream ports swapped (13373 and 13372, the rigs' pair), so every role launcher dials a worker stream, and every role generation was told a `LEGION_DAEMON_URL`, the daemon no longer serves. Each of tree 1's claims that ran a process runs exactly its next generation, registered and ready again, **in a new issue pod**, one per issue shared by all its roles, whose six launchers dial the new stream; the generation is told the new API and the run's services and resumes the claim's unchanged session file; `budgets.launchFailures` is 0 and its deaths unchanged; and the daemon logged one stale-address replacement of it, whose detail names `--connect` alone, from the old stream to the new, and no failed launch. Every other claim leaves the incarnation it ran, and from one read of `legion claims` every claim that runs a process is on the new addresses. `record_stream`'s last two records are the old stream then the new, the shape watcher has checked every pod the claims run in since the move, and every pod the watch has seen ready dials the stream served when it was created. The ports stay swapped for the rest of the run |
-| `controller` | `legion controller start` registers with the Sandbox daemon, and the controller's first turn starts itself: its session's first user message is the start message the pi-legion extension sends once its claim succeeds (LEGION_CONTROLLER_START_MESSAGE, cmd/legion/controller.go), before it opens the live wake subscription a tick could race it on, and the model answers it, with nothing typed into its pane; tree 3's held notice reaches its session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)); `legion status … backlog` from the operator shell moves tree 3, and Dispatch shows it. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes. A kill that lands after the task's turn has ended is charged nothing, since the turn's end retired the task: the driver reads each death's charge from the daemon log, gives such a relaunch a new task with `legion claims deliver` (a Dispatch message sets no delivery of the daemon's), and kills again, at most twice per hold loop (`hold_rearm_limit`), failing on a third miss; a miss counts toward no hold ([`lib/stage4b-hold.test.ts`](lib/stage4b-hold.test.ts)). Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon/internal/supervise/budgets_test.go`. With tree 3 out and a slot free, the controller's walk wakes: its Oh My Pi was launched with the daemon's ``Design gate policy: `gates.design: off`.`` line; an unlabelled issue set to `todo` puts `todo on <KEY>` in its session, and the daemon's tick (`controller_wake_interval_seconds: 60`) `tick on LEGSMOKE`; a minute later that issue is still unlabelled and unrecorded, since the proof's scope says the controller hands Legion no issue, and it is set `done`; tree 3's root issue is claimed by its architect's session, and its events carry the `issue.claimed`. The operator-launched controller's gh, read from `$work/controller-state/gh` with mise's `gh` (the devbox's `gh` wrapper replaces `GH_CONFIG_DIR` in an agent session), answers tree 1's pull request's state (`OPEN`, `MERGED` or `CLOSED`) and `legion-reviewer[bot]` as viewer, with `GH_CONFIG_DIR=/nonexistent` failing, and its stderr names the review App and `github-credential.log` exists |
+| `controller` | `legion controller start` registers with the Sandbox daemon, and the controller's first turn starts itself: its session's first user message is the start message the pi-legion extension sends once its claim succeeds (LEGION_CONTROLLER_START_MESSAGE, cmd/legion/controller.go), before it opens the live wake subscription a tick could race it on, and the model answers it, with nothing typed into its pane. Tree 3's planner is told to plan, and each launch of its implementer is killed once its agent is ready or in a turn with its task outstanding, so every death is charged whatever a relaunch's boot takes. A kill that lands after the task's turn has ended is charged nothing, since the turn's end retired the task: the driver reads each death's charge from the daemon log, gives such a relaunch a new task with `legion claims deliver` (a Dispatch message sets no delivery of the daemon's), and kills again, at most twice per hold loop (`hold_rearm_limit`), failing on a third miss; a miss counts toward no hold ([`lib/stage4b-hold.test.ts`](lib/stage4b-hold.test.ts)). Tree 3 is held by one of its implementer claim's budgets, `launch failures ran out` or `deaths with work outstanding ran out`, and any other hold fails. The reason must be the budget the daemon's own counters show at the bound (its `supervise: claim failed` line) and the one its implementer's last relaunch death leads to: charged as a death with work outstanding, or not. A death charged for a relaunch that never registered fails, since it could have had no work. The transcript names each relaunch's end, registration, death and charge. The notice reaching the controller is the checkpoint's point; the budgets' own rules are held by `packages/daemon/internal/supervise/budgets_test.go`: tree 3's held notice reaches the controller's session, which is under the run's own home, and `~/.omp/profiles` holds none of the controller's profile ([`lib/omp-home.sh`](#libomp-homesh)). Tree 3 stays held, its planner live, for `full-agent-negative`; `controller-walk` takes it out. The operator-launched controller's gh, read from `$work/controller-state/gh` with mise's `gh` (the devbox's `gh` wrapper replaces `GH_CONFIG_DIR` in an agent session), answers tree 1's pull request's state (`OPEN`, `MERGED` or `CLOSED`) and `legion-reviewer[bot]` as viewer, with `GH_CONFIG_DIR=/nonexistent` failing, and its stderr names the review App and `github-credential.log` exists |
+| `full-agent-negative` | a live row a session's check fails reads `open`, named by the session's pod, until that process is gone, and the daemon runs the session all the same (dispatch://LEGION-663: run, and report). Tree 3, held, is the one live tree without a pull request while a controller runs: the driver writes `.omp/config.yml` (`web_search: enabled: false`) in tree 3's workspace through its planner container, kills the planner's launcher PID 1 once, and waits for the relaunch to be ready or idle at a new incarnation with its claim view's `capabilities.incarnation` equal to its locator's. Then the `web-search` row of `legion state --json` is `open` with a detail naming `pod <sandbox>/planner`, `planner`, tree 3 and `web_search is not a registered tool`; the view lists `web-search` under `capabilities.open`; the daemon log holds a `capability web-search is open` warning carrying the new incarnation; the controller's session receives a tick whose `openCapabilities` names `web-search`; and the planner, so reported, answers a nonce. The file removed and the planner killed once more, the relaunch's report reads `web-search` `present` again, and the view lists it under `capabilities.ok`. The open and healed rows and views are kept as `full-agent-negative.json`; the teardown removes the file, best effort, should the run end while it is in place |
+| `controller-walk` | `legion status … backlog` from the operator shell moves tree 3, Dispatch shows it, and tree 3's pods are gone. With tree 3 out and a slot free, the controller's walk wakes: its Oh My Pi was launched with the daemon's ``Design gate policy: `gates.design: off`.`` line; an unlabelled issue set to `todo` puts `todo on <KEY>` in its session, and the daemon's tick (`controller_wake_interval_seconds: 60`) `tick on LEGSMOKE`; a minute later that issue is still unlabelled and unrecorded, since the proof's scope says the controller hands Legion no issue, and it is set `done`; tree 3's root issue is claimed by its architect's session, and its events carry the `issue.claimed` |
 | `daily-report` | the controller's daily report, which the proof's instructions exempt from their wait for a targeted message and fit to the run: an issue titled `Legion daily report (<run directory>)` appears in LEGSMOKE, parked in icebox and without the `legion` label, holding the controller session's message, which names tree 1 and the free slots within 2,000 characters; in the controller's session, the call that posted it comes on a turn a `tick on LEGSMOKE` delivery started once the start turn had ended, never in its start turn. That call is the controller's first `dispatch message --issue <report>` run through bash, made any way Oh My Pi offers: the `bash` tool, a write to its `xd://bash` device, or `eval` code calling `tool.bash(...)` ([`lib/omp-tool-calls.jq`](lib/omp-tool-calls.jq), which `stage3-4b13b-acceptance.sh`'s merger check reads too; `lib/report-after-tick.test.ts`). `production-audit` then holds that the issue, like every write, is in LEGSMOKE |
 | `daemon-controller-liveness` | under `controller: daemon` the daemon's liveness sweep writes the two lines a log monitor on the daemon counts, with the text and on the cadence it writes them under `controller: operator` ([`lib/controller-liveness-verdict.jq`](lib/controller-liveness-verdict.jq), tested by `bun test scripts/e2e/lib`, which also holds the daemon's source to both texts and the machine's to its launch lines). The operator's controller quits, and the listener answers 404 for the controller role. The daemon restarts with `controller: daemon` and `runtime.kubernetes.resources.controller` sized to run: the controller it launches registers, holds the role and is ready, `controllerLocator` names its session, and for 270 s (two boot timeouts and 30 s) the daemon logs neither line, the negative control (`controller-liveness-up.json`); its gh, from the pod's `/var/run/legion/gh`, answers tree 1's pull request's state and `legion-reviewer[bot]` as viewer, the directory holds `config.yml` and `hosts.yml` and, beside them, only the kubelet's atomic-writer entries (`..data`, `..<timestamp>`), and `GH_CONFIG_DIR=/nonexistent` fails. It restarts with the controller's CPU request at 100000, more than any node holds, re-adopts the running controller, and the driver deletes its pod. The relaunch's Running patch makes a pod whose role launcher never connects, so each launch onto it fails at the boot timeout (`supervise: launch failed`) with no process recorded. The daemon logs `controller liveness: the controller role has no live holder; the controller is gone` on at least 3 sweeps, naming the dead session, and `controller not registered; run legion controller start only under controller: operator; …` at least twice, 120 s or more apart, with `mode: daemon`, `registered: true` and a claim state that is not a live controller's, one of them after the first failed launch. The controller's claim launches on no pod but the deleted one (a relaunch can catch that pod while it terminates, return it and see it die), and the pod watch shows each pod requesting 100000 CPU, the pods the relaunch made, Unschedulable and never scheduled; the deleted pod and the one the Agent Sandbox controller recreates from the old template request 250m and are not judged (`controller-liveness-down.json`). It restarts with `controller: operator`: the boot retires the controller's claim, its Sandbox and volume go, its registration ends (`controllerLocator` empty), and the sweep logs `controller not registered; run legion controller start`, exactly, with `mode: operator` (`controller-liveness-operator.json`). The rest of the run keeps `controller: operator` with no controller registered |
 | `deaths-with-work` | tree 4, admitted once tree 3 has left: its planner, killed once mid-turn, is sent its task again, told the turn was interrupted, and finishes planning; its implementer, killed after each ready with its task outstanding, is failed after 3 deaths in a row (`budgets.deaths` 3, `supervise: claim failed` because "deaths with work outstanding ran out"), tree 4 is held and nothing relaunches it; `legion status … backlog` then takes tree 4 out. A kill of either that lands after its task's turn has ended is given a new task and repeated, as in `controller`, and restarts the implementer's run of deaths |

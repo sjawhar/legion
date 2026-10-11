@@ -58,6 +58,17 @@ func TestLoadRefusesUIOrigin(t *testing.T) {
 	}
 }
 
+// TestLoadRefusesMaxGrantSeconds pins that deployments cannot silently turn their explicit grant
+// cap into a session-length grant after that setting is removed.
+func TestLoadRefusesMaxGrantSeconds(t *testing.T) {
+	e := validEnv()
+	e["BROKER_MAX_GRANT_SECONDS"] = "3600"
+	_, err := Load(env(e))
+	if err == nil || !strings.HasPrefix(err.Error(), "BROKER_MAX_GRANT_SECONDS is removed; ") {
+		t.Fatalf("Load(BROKER_MAX_GRANT_SECONDS set) = %v, want a refusal naming BROKER_MAX_GRANT_SECONDS", err)
+	}
+}
+
 func TestLoadRequiresUIToken(t *testing.T) {
 	e := validEnv()
 	delete(e, "BROKER_UI_TOKEN")
@@ -82,10 +93,10 @@ func TestLoadReadsUITokenFileAheadOfValue(t *testing.T) {
 	if cfg.UIToken != "tok-from-file" {
 		t.Fatalf("token file must win: got %d-byte token, want the %d-byte file value", len(cfg.UIToken), len("tok-from-file"))
 	}
-	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 || cfg.MaxGrantSeconds != 43200 ||
+	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 ||
 		cfg.LauncherCredentialSeconds != 604800 || cfg.SweepSeconds != 5 {
-		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d MaxGrantSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
-			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.MaxGrantSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
+		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
+			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
 	}
 }
 

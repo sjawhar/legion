@@ -13,8 +13,11 @@ import (
 )
 
 // fakeAgentSecrets is `agent-secrets` as the shim runs it: keygen writes key.pem and prints a
-// fixed thumbprint; renew records that it started and sleeps until killed; anything else fails.
+// fixed thumbprint; renew records its invocation and either sleeps or exits the test-controlled
+// code; anything else fails.
 const fakeThumbprint = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
+
+const fakeRenewRestartDelay = 5 * time.Second
 
 func writeFakeAgentSecrets(t *testing.T, dir string) string {
 	t.Helper()
@@ -25,8 +28,12 @@ case "$1" in
     [ "$2" = "--out" ] || exit 64
     umask 077; printf 'fake key\n' >"$3/key.pem"; printf '%s\n' "` + fakeThumbprint + `"; exit 0 ;;
   renew)
-    printf 'renew %s\n' "$$" >>"$AGENT_SECRETS_KEY_DIR/renew.log"; exec sleep 300 ;;
-  *) echo "unexpected: $*" >&2; exit 65 ;;
+    shift; printf 'renew %s %s\n' "$$" "$*" >>"$AGENT_SECRETS_KEY_DIR/renew.log"
+    if [ "$AGENT_SECRETS_TEST_RENEW_EXIT" = 76 ]; then
+      printf 'agent-secrets renew: enrollment %s permanently refused by broker: HTTP 403 POD_TOKEN_REQUIRED: fake refusal\n' "$(cat "$AGENT_SECRETS_KEY_DIR/enrollment")" >&2
+    fi
+    if [ -n "$AGENT_SECRETS_TEST_RENEW_EXIT" ]; then exit "$AGENT_SECRETS_TEST_RENEW_EXIT"; fi
+    exec sleep 300 ;;
 esac
 `
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
@@ -35,7 +42,7 @@ esac
 	return path
 }
 
-func agentSecretsConfig(t *testing.T, socket string, o *omp) (shim.Config, string) {
+func agentSecretsConfig(t *testing.T, socket string, o *omp) (shim.Config, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	keyDir := filepath.Join(dir, "keys")
@@ -49,14 +56,14 @@ func agentSecretsConfig(t *testing.T, socket string, o *omp) (shim.Config, strin
 	cfg := config(t, socket, o)
 	cfg.AgentSecrets = &shim.AgentSecrets{KeyDir: keyDir, TokenFile: tokenFile, Binary: writeFakeAgentSecrets(t, dir)}
 	cfg.Env = append(cfg.Env, "AGENT_SECRETS_KEY_DIR="+keyDir, "AGENT_SECRETS_URL=http://broker.test")
-	return cfg, keyDir
+	return cfg, keyDir, tokenFile
 }
 
 func TestTheHelloCarriesTheKeyThumbprintAndTheProjectedToken(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, keyDir := agentSecretsConfig(t, path, o)
+	cfg, keyDir, _ := agentSecretsConfig(t, path, o)
 	r := run(t, cfg, newClock())
 	peer := stub.accept(t)
 
@@ -94,12 +101,17 @@ func TestAHelloWithoutAgentSecretsIsAPlainHello2(t *testing.T) {
 	r.stop(t)
 }
 
+// TestTheEnrollmentFrameIsWrittenBesideTheKeyAndStartsTheRenewer: the renewer is started with the
+// projected token file the runtime mounts, `agent-secrets renew --pod-token-file <file>`, so each
+// renewal carries the pod's current token for the broker to check against the enrollment.
 func TestTheEnrollmentFrameIsWrittenBesideTheKeyAndStartsTheRenewer(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, keyDir := agentSecretsConfig(t, path, o)
-	r := run(t, cfg, newClock())
+	cfg, keyDir, tokenFile := agentSecretsConfig(t, path, o)
+	cfg.Env = append(cfg.Env, "AGENT_SECRETS_TEST_RENEW_EXIT=1")
+	clock := newClock()
+	r := run(t, cfg, clock)
 	peer := stub.accept(t)
 	peer.open(t) // hello2 read, acked, the child's first frame read back
 
@@ -112,27 +124,63 @@ func TestTheEnrollmentFrameIsWrittenBesideTheKeyAndStartsTheRenewer(t *testing.T
 	if info, _ := os.Stat(filepath.Join(keyDir, "enrollment")); info.Mode().Perm() != 0o600 {
 		t.Fatalf("enrollment file mode %v, want 0600", info.Mode().Perm())
 	}
-	deadline := time.Now().Add(waitLimit) // the fake renewer records its start in renew.log
-	for {
-		if raw, err := os.ReadFile(filepath.Join(keyDir, "renew.log")); err == nil && strings.HasPrefix(string(raw), "renew ") {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the renewer was not started within the wait limit")
-		}
-		time.Sleep(20 * time.Millisecond)
+	clock.next(t, fakeRenewRestartDelay) // fake renewer wrote renew.log, exited, and asked for its retry
+	raw, err := os.ReadFile(filepath.Join(keyDir, "renew.log"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	// The same id again is answered again and rewrites nothing that matters.
+	if fields := strings.Fields(string(raw)); len(fields) != 4 || fields[2] != "--pod-token-file" || fields[3] != tokenFile {
+		t.Fatalf("renewer started as %q, want `renew --pod-token-file %s`", raw, tokenFile)
+	}
 	peer.send(t, shimwire.AgentSecretsEnrollment{ID: "req-2", EnrollmentID: "enr-1"})
 	peer.expect(t, shimwire.AgentSecretsEnrollmentResult{ID: "req-2", OK: true})
 	if frames := o.received(t); len(frames) != 0 {
 		t.Fatalf("OMP received %v; the enrollment frames are the shim's alone", frameTypes(frames))
 	}
 	r.stop(t)
-	// The renewer went with the shim.
 	if raw, _ := os.ReadFile(filepath.Join(keyDir, "renew.log")); strings.Count(string(raw), "renew ") != 1 {
 		t.Fatalf("renew.log %q, want exactly one renewer", raw)
 	}
+}
+
+func TestPermanentlyRefusedRenewerStopsWithoutRestarting(t *testing.T) {
+	path := socketPath(t)
+	stub := listen(t, path)
+	o := newOMP(t)
+	cfg, _, _ := agentSecretsConfig(t, path, o)
+	cfg.Env = append(cfg.Env, "AGENT_SECRETS_TEST_RENEW_EXIT=76")
+	clock := newClock()
+	r := run(t, cfg, clock)
+	peer := stub.accept(t)
+	peer.open(t)
+	peer.send(t, shimwire.AgentSecretsEnrollment{ID: "req-1", EnrollmentID: "enr-1"})
+	peer.expect(t, shimwire.AgentSecretsEnrollmentResult{ID: "req-1", OK: true})
+	r.log.await(t, "renewer permanently refused for enrollment enr-1 (exit 76): \"agent-secrets renew: enrollment enr-1 permanently refused by broker: HTTP 403 POD_TOKEN_REQUIRED: fake refusal\"; not restarting", 1)
+	clock.idle(t)
+	if r.log.count("renewer started") != 1 || r.log.count("renewer exited") != 0 {
+		t.Fatalf("permanently refused renewer log:\n%s", r.log)
+	}
+	r.stop(t)
+}
+
+func TestTransientRenewerExitRestarts(t *testing.T) {
+	path := socketPath(t)
+	stub := listen(t, path)
+	o := newOMP(t)
+	cfg, _, _ := agentSecretsConfig(t, path, o)
+	cfg.Env = append(cfg.Env, "AGENT_SECRETS_TEST_RENEW_EXIT=1")
+	clock := newClock()
+	r := run(t, cfg, clock)
+	peer := stub.accept(t)
+	peer.open(t)
+	peer.send(t, shimwire.AgentSecretsEnrollment{ID: "req-1", EnrollmentID: "enr-1"})
+	peer.expect(t, shimwire.AgentSecretsEnrollmentResult{ID: "req-1", OK: true})
+	clock.next(t, fakeRenewRestartDelay).elapse()
+	clock.next(t, fakeRenewRestartDelay) // second child exited and scheduled the next retry
+	if r.log.count("renewer started") != 2 || r.log.count("restarting") != 2 {
+		t.Fatalf("transient renewer log:\n%s", r.log)
+	}
+	r.stop(t)
 }
 
 func TestAnEnrollmentFrameOnAPaneWithoutAgentSecretsIsRefused(t *testing.T) {
@@ -156,7 +204,7 @@ func TestATokenRequestIsAnsweredWithTheTokenTheMountHoldsNow(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, _ := agentSecretsConfig(t, path, o)
+	cfg, _, _ := agentSecretsConfig(t, path, o)
 	r := run(t, cfg, newClock())
 	peer := stub.accept(t)
 	peer.open(t)
@@ -192,7 +240,7 @@ func TestKeygenFailureEndsTheShimBeforeAnyDial(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, _ := agentSecretsConfig(t, path, o)
+	cfg, _, _ := agentSecretsConfig(t, path, o)
 	if err := os.WriteFile(cfg.AgentSecrets.Binary, []byte("#!/bin/sh\necho 'keygen: disk full' >&2; exit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}

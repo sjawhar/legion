@@ -41,7 +41,7 @@ func TestAnApprovalStopsWhenItsSecretChangesHands(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			m, _, _, _ := newFixture(t)
 			ctx := context.Background()
-			enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+			enr, key := newEnrollment(t, m.Store, "session", "box-mallory-"+t.Name(), new(mallory), nil)
 			req, err := m.Create(ctx, enr, signRequest(t, m, key, "need it", c.secret), "")
 			if err != nil || req.RecordID == nil {
 				t.Fatalf("Create = %+v, %v, want pending", req, err)
@@ -81,8 +81,8 @@ func TestAnApprovalStopsWhenItsSecretChangesHands(t *testing.T) {
 func TestAPendingRequestIsApprovedByWhomTheTagsNameNow(t *testing.T) {
 	m, _, _, _ := newFixture(t)
 	ctx := context.Background()
-	enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
-	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-mallory-other-"+t.Name(), new(mallory), nil)
+	enr, key := newEnrollment(t, m.Store, "session", "box-mallory-"+t.Name(), new(mallory), nil)
+	otherEnr, otherKey := newEnrollment(t, m.Store, "session", "box-mallory-other-"+t.Name(), new(mallory), nil)
 	pending := func(enrollment string, key *ecdsa.PrivateKey, name string) Request {
 		t.Helper()
 		req, err := m.Create(ctx, enrollment, signRequest(t, m, key, "need "+name, name), "")
@@ -149,7 +149,7 @@ func TestAPendingRequestIsApprovedByWhomTheTagsNameNow(t *testing.T) {
 func TestADenialAfterAnOwnerChangeReleasesNothingAndClosesTheRecord(t *testing.T) {
 	m, _, _, _ := newFixture(t)
 	ctx := context.Background()
-	enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	enr, key := newEnrollment(t, m.Store, "session", "box-mallory-"+t.Name(), new(mallory), nil)
 	pending := func(name string) Request {
 		t.Helper()
 		req, err := m.Create(ctx, enr, signRequest(t, m, key, "need "+name, name), "")
@@ -234,7 +234,7 @@ func TestAnOwnersApprovalSurvivesLooseningToShared(t *testing.T) {
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(alice) = %+v, %v, want granted", dec, err)
 	}
-	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	otherEnr, otherKey := newEnrollment(t, m.Store, "session", "box-mallory-"+t.Name(), new(mallory), nil)
 	waiting, err := m.Create(ctx, otherEnr, signRequest(t, m, otherKey, "need alice's too", "ALICE_KEY"), "")
 	if err != nil || waiting.RecordID == nil {
 		t.Fatalf("Create(mallory) = %+v, %v, want pending", waiting, err)
@@ -260,7 +260,7 @@ func TestAnOwnersApprovalSurvivesLooseningToShared(t *testing.T) {
 func TestAnApprovalGivenWhileItsSecretWasRefusedReleasesNothing(t *testing.T) {
 	m, _, _, _ := newFixture(t)
 	ctx := context.Background()
-	enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	enr, key := newEnrollment(t, m.Store, "session", "box-mallory-"+t.Name(), new(mallory), nil)
 	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need the shared one", "SHARED_KEY"), "")
 	if err != nil || req.RecordID == nil {
 		t.Fatalf("Create = %+v, %v, want pending", req, err)
@@ -295,7 +295,7 @@ func TestAnApprovalGivenWhileItsSecretWasRefusedReleasesNothing(t *testing.T) {
 func TestAnApprovalOfASecretNoLongerServedIsLeftToItsApprover(t *testing.T) {
 	m, _, _, _ := newFixture(t)
 	ctx := context.Background()
-	enr, key := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	enr, key := newEnrollment(t, m.Store, "session", "box-mallory-"+t.Name(), new(mallory), nil)
 	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need alice's", "ALICE_KEY"), "")
 	if err != nil || req.RecordID == nil {
 		t.Fatalf("Create = %+v, %v, want pending", req, err)
@@ -319,7 +319,7 @@ func TestAnApprovalOfASecretNoLongerServedIsLeftToItsApprover(t *testing.T) {
 func TestAnOwnersApprovalSurvivesHerRaisingTheTier(t *testing.T) {
 	m, _, _, _ := newFixture(t)
 	ctx := context.Background()
-	enr, key := newEnrollment(t, m.Store, "box", "box-bob-"+t.Name(), new(bob), nil)
+	enr, key := newEnrollment(t, m.Store, "session", "box-bob-"+t.Name(), new(bob), nil)
 	req, err := m.Create(ctx, enr, signRequest(t, m, key, "need alice's", "ALICE_KEY"), "")
 	if err != nil || req.RecordID == nil {
 		t.Fatalf("Create = %+v, %v, want pending", req, err)
@@ -343,7 +343,7 @@ func TestAnOwnersApprovalSurvivesHerRaisingTheTier(t *testing.T) {
 func TestRequestsNeedingTwoApproversAreRefused(t *testing.T) {
 	m, ownerEnr, ownerKey, _ := newFixture(t)
 	ctx := context.Background()
-	otherEnr, otherKey := newEnrollment(t, m.Store, "box", "box-mallory-"+t.Name(), new(mallory), nil)
+	otherEnr, otherKey := newEnrollment(t, m.Store, "session", "box-mallory-"+t.Name(), new(mallory), nil)
 	for _, c := range []struct {
 		who        string
 		enrollment string

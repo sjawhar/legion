@@ -172,6 +172,32 @@ func TestAFailedRevocationIsRetriedThenLeftToTheLease(t *testing.T) {
 	}
 }
 
+// TestARevocationTheBrokerRefusesIsNotRetried: a daemon restarted under a new machine login cannot
+// end an enrollment its earlier login made (the broker answers 403 NOT_ENROLLING_CREDENTIAL, a
+// refusal no retry changes), so the machine makes one attempt, retries nothing, and logs that the
+// enrollment's lease ends it once the pod stops renewing.
+func TestARevocationTheBrokerRefusesIsNotRetried(t *testing.T) {
+	h := newHarness(t)
+	broker := h.withSecrets()
+	broker.revokeErr = permanentErr{"broker answered 403 NOT_ENROLLING_CREDENTIAL: only the machine login that enrolled a pod may end its enrollment"}
+	h.launch()
+	h.helloWithIdentity()
+	h.register()
+	h.observe(runtime.Gone)
+	for range revokeAttempts {
+		h.advance(revokeRetryDelay)
+	}
+	if broker.revokeCalls() != 1 {
+		t.Fatalf("%d revocation attempts for a refusal no retry changes, want 1", broker.revokeCalls())
+	}
+	if lines := h.logs.lines("agent-secrets: enrollment revocation refused", "NOT_ENROLLING_CREDENTIAL", "its lease ends it"); len(lines) != 1 {
+		t.Fatalf("log %q, want the refusal line once", h.logs.lines("agent-secrets"))
+	}
+	if lines := h.logs.lines("agent-secrets: enrollment not revoked after every attempt"); len(lines) != 0 {
+		t.Fatalf("log %q: a refusal is not a run of failed attempts", lines)
+	}
+}
+
 func TestATransientEnrollmentFailureIsRetriedOnTheNextAliveObservation(t *testing.T) {
 	h := newHarness(t)
 	broker := h.withSecrets()

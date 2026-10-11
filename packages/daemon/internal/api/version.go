@@ -128,11 +128,30 @@ package api
 // branch first took 19; LEGION-631 landed at 19 first, pi-legion 8.10.1 declaring it without this
 // route, so a daemon at 19 would pass the gate against it. Renumbered, as the collision note says.)
 //
-// 21: LEGION-670 -- api.State gains `strandedClaims`, every claim nothing will wake
+// 21: LEGION-663 -- every Legion session reports the six live capability rows with its ready, and
+// the daemon renders them from those reports. `claim.RegisterResponse` gains `promptAgents`, the
+// sorted names of the task agents the role's prompts dispatch, which the session's subagents check
+// measures against; `claim.ReadyRequest` gains an optional `capabilities` report (`measuredAt`,
+// `elapsedMs`, `rows[{name, ok, detail}]`), which the daemon normalises (capabilities.Normalize)
+// and never refuses: a session runs and reports, whatever it reports. `api.ClaimView` gains
+// `capabilities` (`measuredAt`, `incarnation`, `ok`, `open`), the claim's latest report as the
+// state shows it, and `api.CapabilityState.status` loses `live`: a live row is `present`, `open` or
+// `unchecked` from the sessions' reports, never a promise of a check to come. A 20 plugin's strict
+// reader refuses a state whose claim views carry `capabilities`, and a 21 plugin's `capabilities`
+// on `claims/ready` is an unknown field a 20 daemon's `readBody` refuses with 400, which exits the
+// plugin, so the boot gate and `legion probe-image` refuse the mixed pair. (This branch first took
+// 19, based on LEGION-631's branch while that branch declared 18; LEGION-631 landed at 19 first,
+// pi-legion 8.11.0 declaring it without the report. Renumbered to 20 at the retarget to main; then
+// LEGION-668 landed at 20 first, pi-legion 8.14.0 declaring it without the report, so a daemon at
+// 20 would pass the gate against it. Renumbered twice, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says.)
+//
+// 22: LEGION-670 -- api.State gains `strandedClaims`, every claim nothing will wake
 // (workflow.Stranded): a suspended or failed worker of its issue's phase, or tree architect, in a
 // tree that runs, each named by its issue, role and state. Never null, so a plugin built before it
-// refuses the state, and the bump is why the two never meet. (This branch first took 19, then 20;
-// LEGION-631 landed at 19 and LEGION-668 at 20 first, so a daemon at either would pass the gate
-// against a plugin whose strict reader lacks the field. Renumbered twice, as the collision note
-// says.)
-const DaemonAPIVersion = 21
+// refuses the state, and the bump is why the two never meet. (This branch first took 19, then 20,
+// then 21; LEGION-631 landed at 19, LEGION-668 at 20 and LEGION-663 at 21 first, so a daemon at
+// any of them would pass the gate against a plugin whose strict reader lacks the field.
+// Renumbered three times, as the collision note says.)
+const DaemonAPIVersion = 22

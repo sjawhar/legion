@@ -109,7 +109,7 @@ func (ts *testServer) statusOf(t *testing.T, key *ecdsa.PrivateKey, enrollmentID
 // pod, or a service's secret denied to a person's session - answers approver null, present.
 func TestARequestNamesWhomItWaitsOn(t *testing.T) {
 	ts := newApproverTestServer(t)
-	person, personKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "carol@example.com")
+	person, personKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "carol@example.com")
 	pod, podKey := ts.newServicePod(t)
 	for _, c := range []struct {
 		name       string
@@ -157,7 +157,7 @@ func TestARequestNamesWhomItWaitsOn(t *testing.T) {
 func TestARequestKeepsTheApproverItsRecordNamesAfterTheOwnerChanges(t *testing.T) {
 	ts := newTestServer(t)
 	const newOwner = "bob@example.com"
-	session, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "carol@example.com")
+	session, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "carol@example.com")
 	first := ts.ask(t, sessionKey, session, "DEEL_API_KEY")
 	owner, wantOwner := testApprover, approverJSON(testApprover)
 	if first.State != "pending" || string(first.Approver) != wantOwner {
@@ -187,7 +187,7 @@ func TestARequestKeepsTheApproverItsRecordNamesAfterTheOwnerChanges(t *testing.T
 		t.Fatalf("GET /v1/requests/{id} once denied = %s; want denied, still naming %s", body, owner)
 	}
 
-	other, otherKey := ts.newSessionEnrollment(t, "box", "box-other-"+t.Name(), "carol@example.com")
+	other, otherKey := ts.newSessionEnrollment(t, "session-other-"+t.Name(), "carol@example.com")
 	fresh := ts.ask(t, otherKey, other, "DEEL_API_KEY")
 	if fresh.State != "pending" || string(fresh.Approver) != approverJSON(newOwner) {
 		t.Fatalf("a new session's request after the owner change = state %q approver %q; want pending on %s", fresh.State, fresh.Approver, newOwner)

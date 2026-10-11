@@ -45,7 +45,24 @@ mock.module("@oh-my-pi/pi-coding-agent", () => ({
 // cross-module role-claim bridge documented in envoy.ts. The Envoy entry is the sibling plugin's,
 // reached by path: this test is the one place the two entries meet in one process.
 const { default: envoyExtension } = await import("../../pi-envoy/extensions/envoy.ts?envoy-entry");
-const { default: legionExtension } = await import("./legion.ts?legion-entry");
+const { default: legionExtension, setLegionCapabilityHostForTests } = await import(
+  "./legion.ts?legion-entry"
+);
+// The boot's capability report measures through this host rather than the production one, which
+// reaches Oh My Pi's own modules and runs the pane's `gh` and `dispatch`; what the rows say is
+// `legion.test.ts`'s to pin.
+setLegionCapabilityHostForTests(() => ({
+  discoverAgents: async () => ({ agents: [] }),
+  disabledAgents: async () => [],
+  runSearchQuery: async () => ({ content: [], details: {} }),
+  loadMCPConfigs: async () => ({ configs: {}, sources: {} }),
+  discoverMCPServers: async () => {
+    throw new Error("no MCP server is configured in this test");
+  },
+  discoverExtensionPaths: async () => [],
+  loadSkills: async () => ({ skills: [] }),
+  run: async () => ({ code: 1, stdout: "", stderr: "no command runs in this test" }),
+}));
 type Context = {
   readonly cwd: string;
   readonly sessionManager: {
