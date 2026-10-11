@@ -2172,7 +2172,7 @@ issue's pod (every role container of it alike) and the image probe's.
   token`, or `agent-secrets: the token login failed; retrying` with the broker's answer), and
   `GET /legion/v1/state`'s `agentSecretsLogin` reads its `state`: `none` before the first login
   finishes, `issued` while a credential that has not expired is held (a renewal that failed beside
-  it included), or `failed` (daemon API contract 23). Pod enrollment fails closed and retries until
+  it included), or `failed` (daemon API contract 22). Pod enrollment fails closed and retries until
   a login succeeds. After a failed login the daemon waits 30 s before the next, doubling each time
   to at most 5 minutes, whether or not it still holds a credential, and a successful login resets
   the wait. Running the daemon off the cluster (the Stage 4a live proof), `token_file` holds a

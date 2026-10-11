@@ -45,11 +45,11 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- `legion.daemonApiVersion` is 23 (LEGION-618). The daemon logs in to the secrets broker with its
+- `legion.daemonApiVersion` is 22 (LEGION-618). The daemon logs in to the secrets broker with its
   own Kubernetes ServiceAccount token, which no person approves, so `agentSecretsLogin` on
   `GET /legion/v1/state` has no `code` any more and its `state` is `none`, `issued` or `failed`.
   Install this release with a Go `legion` built from the same commit: this release's strict state
-  reader refuses an older daemon's `code`, and an older release's refuses a 23 daemon's state
+  reader refuses an older daemon's `code`, and an older release's refuses a 22 daemon's state
   without it, so the boot gate and `legion probe-image` refuse the mixed pair.
 - `legion.daemonApiVersion` is 21 (LEGION-663). Contract 21 adds an optional `capabilities`
   report to `POST /legion/v1/claims/ready` — what a session measured of the six live capability
