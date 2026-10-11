@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Runs check-private-names.sh over a pull request's title, body, branch name and commits (each
 # commit's message, author name and email, and committer name and email), and over every issue
-# comment, review and review comment on it. The first four are as public as the tree: with this
+# comment, review and review comment on it that a trusted author posted (see "Who counts" below).
+# The first four are as public as the tree: with this
 # repository's squash settings (the commit-or-PR title, then the commit messages), the title or a
 # commit subject becomes main's commit subject and the commit messages its body; the release
 # workflows' generated notes list merged titles; the branch name keeps showing on the pull
@@ -24,8 +25,10 @@
 # total, so a list that comes back shorter than that total is refused loudly here instead of
 # silently scanning part of it; and the issue comments, reviews and review comments from their
 # list routes, which report no total, so each is read 100 at a time until a page comes back short.
-# A NUL byte in any of them, which would make `grep -I` treat the file as binary and skip it, is
-# stripped first.
+# There is no total to cross-check those lists against, and none is needed: posting, editing or
+# deleting one starts its own run, which reads after the change, so a list that shifted while one
+# run read it is read again by the run its change started. A NUL byte in any of them, which would
+# make `grep -I` treat the file as binary and skip it, is stripped first.
 #
 # Usage: GITHUB_EVENT_PATH=<payload> GITHUB_REPOSITORY=<owner>/<repo> .github/scripts/check-pr-text.sh
 # CI runs it in the required lint job of pr-and-main.yaml on every pull request push, and in
@@ -79,11 +82,21 @@ fi
 jq -r '.commits[] | .commit.message, .commit.author.name, .commit.author.email, .commit.committer.name, .commit.committer.email' \
   "$compare_json" | tr -d '\000' > "$text/commits"
 
-# read_list <kind> <route>: writes the body of every item the list route answers to
+# Who counts: an issue comment, review or review comment is scanned only when an App installed on
+# this repository posted it (it posts as a Bot, which only such an App or github-actions can do;
+# Legion's role Apps carry the CONTRIBUTOR association here, so association alone would drop them)
+# or its author is the repository's owner, a member of its organization or a collaborator. On a
+# public repository anyone signed in can comment or review, and every run reports the required
+# check; a stranger's text skipped this way can neither fail the check nor clear one that failed.
+# Each skipped item is printed as `skipped <kind>:<id>: author <login> (<association>) is not
+# trusted`, with no text.
+trusted='.user.type == "Bot" or (.author_association // "" | IN("OWNER", "MEMBER", "COLLABORATOR"))'
+
+# read_list <kind> <route>: writes the body of every trusted item the list route answers to
 # $text/<kind>/<id>, reading 100 items a page until a page holds fewer. An answer that is not a
 # list, or an item whose id is not a whole number, is refused rather than scanned in part.
 read_list() {
-  local kind=$1 route=$2 page=1 count id body
+  local kind=$1 route=$2 page=1 id trust author body
   mkdir "$text/$kind"
   while :; do
     gh api "repos/$repository/$route?per_page=100&page=$page" > "$work/answer"
@@ -92,31 +105,48 @@ read_list() {
         "checked" >&2
       exit 1
     fi
-    jq -r '.[] | "\(.id | tojson)\t\(.body // "" | @base64)"' "$work/answer" > "$work/items"
-    while IFS=$'\t' read -r id body; do
+    jq -r ".[] | [(.id | tojson), ($trusted | tostring),
+        \"\(.user.login // \"<none>\") (\(.author_association // \"<none>\"))\",
+        (.body // \"\" | explode | map(select(. != 0)) | implode | @base64)] | @tsv" \
+      "$work/answer" > "$work/items"
+    while IFS=$'\t' read -r id trust author body; do
       if ! [[ $id =~ ^[0-9]+$ ]]; then
         echo "::error::page $page of the $route route lists a $kind whose id is not a whole" \
           "number, so it cannot be reported" >&2
         exit 1
       fi
-      base64 -d <<< "$body" | tr -d '\000' > "$text/$kind/$id"
+      if [ "$trust" = true ]; then
+        base64 -d <<< "$body" > "$text/$kind/$id"
+      else
+        echo "skipped $kind:$id: author $author is not trusted"
+      fi
     done < "$work/items"
-    count=$(jq 'length' "$work/answer")
-    if [ "$count" -lt 100 ]; then break; fi
+    if [ "$(wc -l < "$work/items")" -lt 100 ]; then break; fi
     page=$((page + 1))
   done
 }
-read_list comment "issues/$number/comments"
-read_list review "pulls/$number/reviews"
-read_list review-comment "pulls/$number/comments"
+# Each kind a hit is reported under, beside its route; the reads, the scan and the report below
+# all take the kinds from here.
+lists=(
+  comment "issues/$number/comments"
+  review "pulls/$number/reviews"
+  review-comment "pulls/$number/comments"
+)
+kinds=()
+for ((i = 0; i < ${#lists[@]}; i += 2)); do
+  kinds+=("${lists[i]}")
+  read_list "${lists[i]}" "${lists[i + 1]}"
+done
 
 # The guard scans these by their absolute names; the log names each by the part after the
 # temporary directory, and an item as <kind>:<id>.
+kind_pattern="($(IFS='|'; echo "${kinds[*]}"))"
 status=0
 "$script_dir/check-private-names.sh" "$text/title" "$text/body" "$text/branch" "$text/commits" \
-  "$text/comment" "$text/review" "$text/review-comment" > "$work/report" 2>&1 || status=$?
-sed -E -e "s|$text/||g" -e 's#(review-comment|comment|review)/([0-9]+)#\1:\2#g' "$work/report"
-if [ "$status" -ne 0 ] && grep -q -E '(comment|review)/[0-9]+:' "$work/report"; then
+  "${kinds[@]/#/$text/}" 2>&1 | sed -E -e "s|$text/||g" -e "s#(^|[:=])$kind_pattern/([0-9]+)#\\1\\2:\\3#g" \
+  > "$work/report" || status=$?
+cat "$work/report"
+if [ "$status" -ne 0 ] && grep -q -E "(^|[:=])$kind_pattern:[0-9]+:" "$work/report"; then
   echo "  - a comment, review or review comment reported above is public on the pull request's page"
   echo "    now: delete each comment and review comment, since an edit keeps the old text in its"
   echo "    edit history, which anyone who can read the repository can open; a submitted review"

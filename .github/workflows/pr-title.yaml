@@ -17,6 +17,17 @@ name: PR Title
 # issue_comment run reports on the default branch's latest commit, so an issue comment fails its
 # own run there; the head's required check reads it at the head's next pull_request or review run,
 # since every run reads every comment, and passes again at the next such run after its deletion.
+#
+# Anyone signed in can comment on or review a public pull request, so anyone can start these runs.
+# Every run therefore runs the whole check over the same set of comments, and check-pr-text.sh
+# decides whose text counts (an App installed here, or the repository's owner, members and
+# collaborators), so a run's result never depends on who started it. The job has no `if:` on the
+# author: a job skipped that way finishes `skipped`, which GitHub and the daemon
+# (classify.RunResult) count as a pass, and since the newest `pr-title` run on a head is the one
+# that stands, a stranger's comment would turn a real failure green.
+#
+# Cost: each comment, review, review comment, edit and deletion is one run of about ten seconds
+# (the job is a checkout and a few API reads), and a review with N inline comments is N + 1 runs.
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
