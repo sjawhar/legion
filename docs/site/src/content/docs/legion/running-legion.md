@@ -374,27 +374,40 @@ Closing the terminal leaves the project without one, and the daemon logs
    `suspensionHeld`. The resumed agent continues the same conversation in a new pod.
 
    **An operator's suspension holds until the operator resumes the claim.** The daemon resumes a
-   suspended claim on its own only when the claim owns its issue's current phase (at boot, at
-   re-admission, and whenever the phase moves to its role) and the daemon or the agent's own exit
-   suspended it; a phase start for a claim an operator suspended waits instead. A notice for a
-   suspended architect resumes nothing: it waits until the architect holds its role again, so an
-   operator-suspended architect receives it when the operator resumes it. A drain therefore ends
-   with the operator resuming every claim they suspended, one `legion claims resume` each;
-   `legion claims list --json` names each one's `suspendedBy` (`unknown`, `operator`, `daemon` or
-   `exit`). The daemon's own suspension of a claim in a turn (its issue left the workflow, or its
-   tree lingers) waits for the turn however long it takes, and a lingering tree's claims stay
-   suspended until the tree is re-admitted.
+   suspended claim on its own when its issue's phase moves to the claim's role (a phase start,
+   re-admission, a child's return to `todo`), and keeps its own controller running, unless an
+   operator suspended it; a phase start for a claim an operator suspended waits instead. At boot
+   it also resumes a claim that owns its issue's current phase, but only one the daemon or the
+   agent's own exit suspended. A notice for a suspended architect resumes nothing: it waits until
+   the architect holds its role again, so an operator-suspended architect receives it when the
+   operator resumes it. A drain therefore ends with the operator resuming every claim they
+   suspended, one `legion claims resume` each; `legion claims list --json` names each one's
+   `suspendedBy` (`operator`, `daemon`, `exit`, or `unknown` for one suspended before this
+   release). The daemon's own suspension of a claim in a turn waits for the turn however long it
+   takes, with no stop timeout: a child parked in Dispatch (`backlog` or `icebox`) stops its worker
+   only once the worker's current turn ends, and a lingering tree's claims stay suspended until the
+   tree is re-admitted.
 
-   **After the first upgrade to a release that records `suspendedBy`, inspect every `unknown`
-   claim before declaring the drain complete.** Those claims were already suspended before the
-   column existed, so the daemon conservatively leaves them held:
+   **After the first upgrade to a release that records `suspendedBy`,** every claim already
+   suspended reads `unknown`. The next phase start, re-admission and the controller keeper resume
+   those as before; the boot does not, so it never overrides a drain made before the upgrade. Act
+   only on the claims the state names as nothing will wake (`legion state`'s `claims nothing will
+   wake` line, or `strandedClaims` in `--json`), and skip those you drained on purpose: resume a
+   suspended architect, and deliver a suspended phase worker its phase's resume task, as
+   [A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)
+   shows. Never resume by hand a claim of a lingering tree or of an issue parked out of the
+   workflow: re-admission or the issue's return to `todo` starts it.
 
-   ```sh
-   legion claims list --config legion.yaml --operator-token-file operator-token --json
-   legion claims resume --config legion.yaml --operator-token-file operator-token --claim <unknown-claim>
+   **Rolling back across this release.** The earlier daemon boots on this schema but never writes
+   `suspendedBy`, so a value this release wrote survives the earlier daemon's own suspends and
+   resumes, an operator's included. Before starting this release again, run against the daemon's
+   database, with no daemon of the project running:
+
+   ```sql
+   update claims set suspended_by = 'unknown' where state = 'suspended';
    ```
 
-   Resume every `unknown` claim that was not deliberately drained.
+   The boot then resumes none of the claims the earlier daemon left suspended.
 5. **Restart the controller** with the new binary and plugins.
 
 ## Observe
