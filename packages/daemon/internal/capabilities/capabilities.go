@@ -8,6 +8,7 @@
 package capabilities
 
 import (
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -127,18 +128,31 @@ func namesAtSite(site Site) []Name {
 
 // Row is one live row's measurement as a session reported it, normalised (Normalize). Its JSON is
 // the daemon log's `rows` attribute on a report (one object per row, as the wire spells them); the
-// store and the state each keep a shape of their own.
+// store and the state each keep a shape of their own. A row built from what a session sent or what
+// the store kept is built by NewRow.
 type Row struct {
 	Name Name `json:"name"`
 	// OK is whether the session's check of the row passed.
 	OK bool `json:"ok"`
-	// Detail is the fact the check found, passed or not, as one line of at most MaxReportDetail
-	// bytes (cleanDetail): it reaches the daemon log, the store and the controller's daily report
-	// with nothing delimiting it, so no newline or control character the session sent survives.
-	// A row that is not OK always has one — "no detail reported" when the session sent none — since
-	// the state's `open[].detail` is a non-empty string; an OK row's may be empty, a passing check
-	// with nothing to add.
+	// Detail is the fact the check found, passed or not, cleaned (cleanDetail): it reaches the daemon
+	// log, the store, the unauthenticated state route and the controller's daily report with nothing
+	// delimiting it. A row that is not OK always has one — "no detail reported" when the session
+	// sent none — since the state's `open[].detail` is a non-empty string; an OK row's may be empty,
+	// a passing check with nothing to add.
 	Detail string `json:"detail"`
+}
+
+// NewRow is the row a detail from outside the daemon makes, a session's ready or the store: the
+// detail cleaned (cleanDetail), and "no detail reported" for a failing row left with none. Every
+// such row is built here, so a detail reaches the log, the store and the state cleaned whichever
+// way it came in, and a stored report a daemon kept before it cleaned something is cleaned when a
+// later one reads it.
+func NewRow(name Name, ok bool, detail string) Row {
+	detail = cleanDetail(detail)
+	if !ok && detail == "" {
+		detail = "no detail reported"
+	}
+	return Row{Name: name, OK: ok, Detail: detail}
 }
 
 // Report is one session's normalised report of the live rows, as the daemon keeps and persists it:
@@ -173,10 +187,9 @@ type Session struct {
 const MaxReportDetail = 1024
 
 // Normalize turns a wire report's rows into the rows the daemon keeps: a name Table has no live
-// row for is dropped (returned in dropped, in wire order), a detail is cleaned to one line and cut
-// at MaxReportDetail (cleanDetail), a row that is not OK with no detail left reads "no detail
-// reported", a live row the wire lacks is appended as not OK with the detail "not reported by this
-// session", and the kept rows are in Table order; a name sent twice keeps the first.
+// row for is dropped (returned in dropped, in wire order), each kept row is built by NewRow, a live
+// row the wire lacks is appended as not OK with the detail "not reported by this session", and the
+// kept rows are in Table order; a name sent twice keeps the first.
 func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 	live := Live()
 	byName := make(map[Name]Row, len(live))
@@ -189,11 +202,7 @@ func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 		if _, seen := byName[name]; seen {
 			continue
 		}
-		detail := cleanDetail(row.Detail)
-		if !row.OK && detail == "" {
-			detail = "no detail reported"
-		}
-		byName[name] = Row{Name: name, OK: row.OK, Detail: detail}
+		byName[name] = NewRow(name, row.OK, row.Detail)
 	}
 	kept = make([]Row, 0, len(live))
 	for _, name := range live {
@@ -206,19 +215,72 @@ func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 	return kept, dropped
 }
 
-// cleanDetail is a reported detail as one printed line: every control rune — a newline, a tab,
-// an escape — is a space, whitespace runs are one space with none at either end, and the line is
-// cut at MaxReportDetail on a rune boundary. A detail quotes names the worked repository chooses
-// (a server in `.mcp.json`, a file under `.omp/`), and a name must neither split a log line nor
-// put a line of its own into the controller's instructions.
+// cleanDetail is a reported detail as one printed line with no credential in it, cut at
+// MaxReportDetail on a rune boundary. A detail quotes upstream errors and names the worked
+// repository chooses (a server in `.mcp.json`, a file under `.omp/`): neither may split a log line,
+// put a line of its own into the controller's instructions, or show a credential on the state.
+//
+// Every space rune (unicode.IsSpace: a newline, a tab, a next line, a Unicode space) is a space.
+// Every other control rune (an escape, a C1 control) is replaced by held while credentials are
+// redacted, then is a space too: a credential value runs on across held, since nothing delimited
+// it there, so a control rune inside a credential never leaves part of it unredacted. Space runs
+// then collapse to one space with none at either end. Redaction runs on the one line, so a
+// credential a session split across lines is still found, and before the cut, so a cut never
+// leaves a credential's head too short to match. The Legion plugin cleans its report the same way
+// before it sends it (`cleanDetail` in `packages/pi-legion/src/capability-report.ts`), so
+// cleaning is idempotent; both are held to `packages/contracts/fixtures/capability-redaction.json`.
 func cleanDetail(text string) string {
-	spaced := strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+	marked := strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
 			return ' '
+		case unicode.IsControl(r):
+			return held
 		}
 		return r
 	}, text)
-	return truncate(strings.Join(strings.Fields(spaced), " "), MaxReportDetail)
+	redacted := strings.ReplaceAll(redactCredentials(marked), string(held), " ")
+	return truncate(strings.Join(strings.Fields(redacted), " "), MaxReportDetail)
+}
+
+// held is what cleanDetail holds a control rune as while it redacts: a noncharacter, which no text
+// carries, so it stands for nothing else.
+const held = '\uFFFF'
+
+// credentialRules are the credential shapes redactCredentials replaces, each keeping what names
+// the credential and replacing the secret with `***`; the shared fixture names each with an
+// example. They run on cleanDetail's line, where a space is the only whitespace and held stands for
+// a control rune: a value class takes held, and a separator a space or held. Order matters: the
+// Authorization header runs before the bare bearer rule, so a header under any scheme loses its
+// whole value and keeps a listed scheme's label, and the GitHub rule runs before the JWT rule, so a
+// stateless installation token (`ghs_<app id>_<JWT>`) reads `ghs_***`. A JWT starts only where a
+// run of base64url characters starts, as the plugin's lookbehind has it: JavaScriptCore would
+// otherwise read a long run once per `eyJ` in it. An Authorization value in quotes ends at a quote;
+// one without runs to a closing bracket or the end of the line, since an AWS signature or a Digest
+// credential carries commas, semicolons and quotes of its own. A rule whose value may be short
+// takes `*` in its value class, so a value already redacted is matched whole and left as it is;
+// the others need more than `***` to match at all.
+var credentialRules = []struct {
+	pattern     *regexp.Regexp
+	replacement string
+}{
+	{regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^ /?#]+@`), "${1}***@"},
+	{regexp.MustCompile(`(?i)([?&](?:token|key|secret|password|access_token|refresh_token|id_token|api_key|apikey|client_secret|sig|x-amz-security-token|x-amz-signature)=)[^ &#"'<>]+`), "${1}***"},
+	{regexp.MustCompile(`(?i)(authorization["']?[ \x{FFFF}]*[:=][ \x{FFFF}]*)(?:(["'])((?:bearer|basic|token|digest)[ \x{FFFF}]+)?[^"']+|(\[?)((?:bearer|basic|token|digest)[ \x{FFFF}]+)?[^)\]}>]+)`), "${1}${2}${3}${4}${5}***"},
+	{regexp.MustCompile(`(?i)(x-api-key["']?[ \x{FFFF}]*[:=][ \x{FFFF}]*["']?)[A-Za-z0-9._~+/=*\x{FFFF}-]+`), "${1}***"},
+	{regexp.MustCompile(`(?i)\b(bearer[ \x{FFFF}]+)[A-Za-z0-9._~+/=*\x{FFFF}-]+`), "${1}***"},
+	{regexp.MustCompile(`\b(gh[pousr]_|github_pat_)[A-Za-z0-9._\x{FFFF}-]{20,}`), "${1}***"},
+	{regexp.MustCompile(`(^|[^A-Za-z0-9_\x{FFFF}-])eyJ[A-Za-z0-9_\x{FFFF}-]{8,}\.[A-Za-z0-9_\x{FFFF}-]{8,}\.[A-Za-z0-9_\x{FFFF}-]*`), "${1}***"},
+	{regexp.MustCompile(`\b(sk-|dsp_)[A-Za-z0-9_\x{FFFF}-]{20,}`), "${1}***"},
+	{regexp.MustCompile(`\b(AKIA|ASIA)[A-Z0-9]{16}\b`), "${1}***"},
+}
+
+// redactCredentials is text with every credentialRules match replaced, rule by rule.
+func redactCredentials(text string) string {
+	for _, rule := range credentialRules {
+		text = rule.pattern.ReplaceAllString(text, rule.replacement)
+	}
+	return text
 }
 
 // truncate is text cut to at most max bytes on a rune boundary, so a cut never leaves a partial

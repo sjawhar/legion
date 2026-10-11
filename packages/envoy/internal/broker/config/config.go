@@ -75,9 +75,12 @@ type Config struct {
 	// logged in as the service enrolled it and it is a pod whose projected token proved it runs as
 	// that account. A machine login's service name is the machine's own claim, approved by whoever
 	// its login names, so the pod's verified service account is what proves the service, and an
-	// account bound to two names would prove neither. A secret owned by a listed service goes at
-	// once to those pods and is refused to every other session. Unset, no service is registered,
-	// and a secret whose owner tag names one is refused as owner-tag-malformed.
+	// account bound to two names would prove neither. A namespace's default account
+	// (system:serviceaccount:<namespace>:default) is refused: every pod in the namespace whose spec
+	// names no account runs as it and can mount a token for the broker's audience, so it proves
+	// nothing about which pods are the service's. A secret owned by a listed service goes at once
+	// to those pods and is refused to every other session. Unset, no service is registered, and a
+	// secret whose owner tag names one is refused as owner-tag-malformed.
 	ServiceAccounts map[string]string
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
@@ -148,6 +151,10 @@ var removedVars = []struct{ name, reason string }{
 // carries: system:serviceaccount:<namespace>:<name>, the namespace a DNS label and the name a DNS
 // subdomain.
 var serviceAccountPattern = regexp.MustCompile(`^system:serviceaccount:[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?:[a-z0-9]([-.a-z0-9]{0,251}[a-z0-9])?$`)
+
+// defaultServiceAccount is the account name Kubernetes gives every namespace and runs every pod
+// whose spec names no account as.
+const defaultServiceAccount = "default"
 
 // databasePasswordPlaceholder is the removed BROKER_DATABASE_PASSWORD's placeholder. Load refuses a
 // BROKER_DATABASE_URL that names it, as it refuses the variable, rather than sign in with it as a
@@ -288,6 +295,9 @@ func Load(getenv func(string) string) (Config, error) {
 		_, duplicate := cfg.ServiceAccounts[name]
 		if !ok || !record.ValidService(name) || name == policy.OwnerShared || !serviceAccountPattern.MatchString(subject) || duplicate {
 			return Config{}, fmt.Errorf("BROKER_SERVICES must be name=system:serviceaccount:<namespace>:<name> entries, each name lowercase letters, digits and hyphens, at most 64, not %s and given once, got %q", policy.OwnerShared, entry)
+		}
+		if _, account, _ := strings.Cut(strings.TrimPrefix(subject, "system:serviceaccount:"), ":"); account == defaultServiceAccount {
+			return Config{}, fmt.Errorf("BROKER_SERVICES binds a namespace's default service account, got %q: every pod in that namespace whose spec names no account runs as it and can get a token for the broker's audience, so it proves nothing; bind the service to a dedicated account its pods name", entry)
 		}
 		if other, shared := boundTo[subject]; shared {
 			return Config{}, fmt.Errorf("BROKER_SERVICES binds the service account %s to both %q and %q; each account proves one service, so bind it to one", subject, other, name)

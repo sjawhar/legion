@@ -1,16 +1,11 @@
 package delivery
 
-import (
-	"context"
+import "context"
 
-	"github.com/sjawhar/envoy/internal/dispatch/store"
-)
-
-// ResolveSessionTitles answers the Delivery page's "parent agent" and "session" facet display
-// labels (LEGION-567). There is no grouping: a subagent's own commit trailer carries no
-// parent-session reference, so "the agent is the session the Omp-Session trailer names, shown by
-// its Dispatch-recorded title" (Main's ruling) -- each session id resolves to its own most recent
-// known title, nothing more.
+// ResolveSessionTitles answers each session's most recent known title, which the Delivery page
+// shows a session by (LEGION-567): a subagent's own commit trailer carries no parent-session
+// reference, so a pull request's Parent agent is the first session its Omp-Session trailers name,
+// shown by that title, unless a session group holds it (ParentAgents, parent_agent.go; LEGION-682).
 //
 // A session's title is never stored in a dedicated table; every write stamps a model.Actor
 // (including its ActorOrigin.SessionTitle) as JSONB onto the row it wrote and onto the matching
@@ -18,16 +13,15 @@ import (
 // recent known title" one indexed query per id. This is durable -- it survives the session ending,
 // unlike Envoy's live, TTL-expiring session registry -- for any session that ever claimed an
 // issue, posted a message/comment/ask, or wrote a document. A session with no Dispatch footprint
-// at all is simply absent from the returned map; the caller falls back to the bare session id
-// ("show the session as itself"), never a generic placeholder.
-func ResolveSessionTitles(ctx context.Context, pool *store.Pool, sessionIDs []string) (map[string]string, error) {
+// at all is simply absent from the returned map; SessionTitle falls back to its bare id.
+func ResolveSessionTitles(ctx context.Context, q Querier, sessionIDs []string) (map[string]string, error) {
 	titles := make(map[string]string, len(sessionIDs))
 	if len(sessionIDs) == 0 {
 		return titles, nil
 	}
 	// One sessionIDs lookup table joined against the index, rather than one query per id: a
 	// Delivery timeline page can name hundreds of distinct sessions across its window.
-	rows, err := pool.Query(ctx, `
+	rows, err := q.Query(ctx, `
 		select distinct on (actor->>'id')
 			actor->>'id' as session_id,
 			actor->'origin'->>'session_title' as session_title
@@ -52,11 +46,30 @@ func ResolveSessionTitles(ctx context.Context, pool *store.Pool, sessionIDs []st
 	return titles, rows.Err()
 }
 
-// DisplayAgent is the "parent agent" or "session" facet value the API returns for one session id:
-// its resolved title when ResolveSessionTitles found one, else the bare id.
-func DisplayAgent(sessionID string, titles map[string]string) string {
-	if title, ok := titles[sessionID]; ok {
+// SessionTitle is the title Dispatch knows for session, or session itself when it has no
+// Dispatch footprint. ParentAgents and the timeline's editor payload share this fallback.
+func SessionTitle(titles map[string]string, session string) string {
+	if title, ok := titles[session]; ok {
 		return title
 	}
-	return sessionID
+	return session
+}
+
+// ListPopulationSessionIDs lists every session any stored delivery population pull request names.
+// The group title rule reads this population, while the timeline reads only its current window.
+func ListPopulationSessionIDs(ctx context.Context, q Querier) ([]string, error) {
+	rows, err := q.Query(ctx, `select distinct unnest(sessions) from delivery_pull_requests order by 1`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

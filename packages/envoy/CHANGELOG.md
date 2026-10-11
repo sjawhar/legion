@@ -13,6 +13,26 @@
   issue, mapping a repository, search) now says the rule the same way: `project "x" is not a project
   key: an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE`. Creating an
   issue without a title answers `title is required`.
+- The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
+  (migration 0093), is a stable id, a name and the sessions it holds; a pull request whose first
+  session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,
+  colours, lanes, list and measures all follow the group while the Session facet keeps each
+  session apart. `POST /api/v1/delivery/session-groups` and `PATCH` and `DELETE
+  /api/v1/delivery/session-groups/{id}` write them on the delivery settings' rule (any signed-in
+  person or agent), refusing a session another group holds (`409 SESSION_IN_GROUP`), a name another
+  group has (`409 SESSION_GROUP_NAME_TAKEN`) and a name that is the title of a session outside the
+  group (`409 SESSION_GROUP_NAME_IS_SESSION_TITLE`). A session that takes a group's name as its
+  title afterwards shows as `<title> (<session id>)`. The timeline gains `session_groups`,
+  `session_titles` and `session_pr_counts`. The dashboard edits groups from the Parent agent
+  facet's **Edit groups**, chooses which Parent agents get their own colour and lane (the rest
+  share **Other**), and sets the window from its header: the last 7, 14, 28 or 84 days, rolling,
+  or a custom range of whole UTC days, refused past 84 days. A facet change no longer writes the
+  window into the address as fixed dates.
+
+- Dispatch's **Machine logins** list shows each login's **Credential** id, the broker's
+  `credential_id` that every enrollment the login made names. A login's machine name is what its
+  machine reported, so two logins of one service on one host read alike there; the id tells them
+  apart, and the broker's operate page uses it to find the login behind a token-less renewal.
 - `Ctrl+Alt+M` (`⌘+⌥+M` on a Mac), Google Docs' shortcut, comments on the text selected in a
   document, as the selection bar's **Comment** does: it opens the margin's composer on the
   selection and puts the cursor in it. It works in an issue's documents and a project's documents
@@ -200,6 +220,57 @@
 
 ### Changed
 
+- **Breaking:** the secrets broker refuses to start when `BROKER_SERVICES` binds a namespace's
+  `default` service account (`system:serviceaccount:<namespace>:default`), naming the entry: every
+  pod in that namespace whose spec names no account runs as it and can get a token for the broker's
+  audience, so the binding proves nothing about which pods are the service's. Bind each service to
+  a dedicated account its pods set as `serviceAccountName` before taking this release.
+- **Breaking:** a renewal (`POST /v1/enrollments/{id}/renew`) of an enrollment that has ended,
+  lapsed or never existed answers `401 ENROLLMENT_NOT_LIVE` where it answered `401 PROOF_INVALID`;
+  the renew route alone answers it, and every other session route still answers a not-live proof
+  `PROOF_INVALID`, the code that stays for retryable proof failures such as iat skew. A pod's
+  renewal carries the pod's current projected token as `pod_token`, and the broker refuses it
+  `403 POD_IDENTITY_MISMATCH` unless the token names the pod UID and service account the enrollment
+  was made for, and `403 POD_TOKEN_EXPIRED` (naming its expiry, and retried by the renewer with the
+  token its file holds next) once it has expired. A machine session's renewal carrying a token is
+  `403 POD_IDENTITY_MISMATCH`. The token is not yet required, and the broker ratchets each pod UID
+  instead: every pod enrollment, new or found by migration 0014, starts unmarked, and the first
+  renewal that carries the pod's token marks it. Once any enrollment naming a pod UID, live or ended, is
+  marked, a renewal without the token from any enrollment naming that pod, whichever machine login
+  made it, is `403 POD_TOKEN_REQUIRED`; until then it is accepted and logged as `broker: pod
+  enrollment renewed without its projected token`. So the copied-token gap closes for every pod UID
+  a current-image pod has renewed under, and stays open for old-image UIDs until the release that
+  requires the token. A current-image pod still leaves one window: a copied token used before the
+  pod's own first renewal with its token. That is seconds while the Legion daemon holds an approved
+  machine login; after a daemon restart its pods enroll only once a person approves its new login,
+  and a pod that ends before it enrolls never renews with its token, so its UID stays open as an
+  old-image pod's does. A pod UID names one pod for ever, so a mark refuses nothing of another pod,
+  and it keeps refusing a copy between the pod's role generations and after the pod is gone. The
+  renewer stops on `POD_TOKEN_REQUIRED` and `ENROLLMENT_NOT_LIVE` and
+  retries `POD_IDENTITY_MISMATCH`, which the broker also answers for a token it could not verify
+  while its issuer was unreachable; a real mismatch ends with the lease. `agent-secrets renew
+  --pod-token-file FILE` reads the file before every renewal and sends it, and Legion's worker shim
+  passes the projected token file. **Rollout:** any order keeps every pod renewing (an older
+  broker reads no renew body, and this broker accepts a token-less renewal from a pod no
+  enrollment of which has sent one), but it does not bound exposure: a grant lasts until its
+  session ends, so a copy renewing an old-image pod's UID keeps one approval's grant for as long as
+  it renews. Before or right after the broker deploys, replace every old-image issue pod, then
+  revoke the machine login that made each enrollment a remaining token-less WARN line names (the
+  line's own enrollment) on Dispatch's machine-login page, by its **Credential** id once its code
+  shows it is not the daemon's, never by its machine name, which a copy's login can share (the
+  operate page gives the query). The release that requires the token is safe once all three hold:
+  `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null and created_at < now() - interval '1 minute'`
+  answers 0; the broker has logged no token-less WARN line for one full `BROKER_LEASE_SECONDS`; and
+  no issue pod runs a worker image older than the one whose renewer sends the token (an old-image
+  issue pod between role generations holds no enrollment, so the count and the log miss it, yet its
+  next phase enrolls an unmarked row).
+- **Breaking:** only the machine login that enrolled a pod may end its enrollment:
+  `DELETE /v1/enrollments/{id}` of a pod enrollment by any other login, another service's or a
+  second login of the same service, is `403 NOT_ENROLLING_CREDENTIAL` and ends nothing. A Legion
+  daemon that logs in again (after a restart, or when its login reaches its expiry,
+  `BROKER_LAUNCHER_CREDENTIAL_SECONDS`, 7 days by default) cannot end its earlier login's pods;
+  each ends one lease after its pod stops renewing, or at once when someone revokes that earlier
+  login, and the daemon no longer retries that refusal.
 - `agent-secrets renew --pod-token-file FILE` re-reads the projected pod token before each renewal
   and sends the token as `pod_token`. A blank or unreadable file posts no renewal: the renewer
   prints `ERROR: enrollment <id> cannot read its pod token (<reason>); nothing was sent, so its
@@ -526,6 +597,14 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A listener's shutdown drain no longer waits out 5 s of its 10 s budget when its NATS connection
+  closes while nats.go drains it. nats.go v1.50.0 marks a connection closed during its drain as
+  draining again and waits 5 s for a reply on the socket it closed, and the drain read the
+  connection's state, so it could miss the close; it now waits for the connection's closed event.
+  The listener's own reconnect callback was one such close: nats.go can run the callback for a
+  reconnect that came before the drain once the drain is under way, and it closed the connection
+  there, cutting off the deliveries still in their handlers. A reconnect callback now closes the
+  connection only for a reconnect that came after the drain began.
 - A person's new comment on a document reaches the agents that wrote it, each once, on its own
   `notifications.agent.<session_id>` topic, whatever the issue's route: a comment on a passage of
   an issue's document or a project document, a comment on a whole project document, a suggestion,

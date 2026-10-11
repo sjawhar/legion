@@ -15,11 +15,38 @@ workflows are set in **Settings → Delivery timeline**, the Delivery page shows
 
 ## The window and filters
 
-The page opens on the last seven days. The window, the search box and every filter (Repository,
-Parent agent, Session, Dispatch issue, Priority, Component, Author, rework, and whether a pull
-request has deployed) are written into the address, so a link shows the same figures to whoever
-opens it. Dragging across the timeline narrows the measures to the stretch you dragged over; the
-timeline itself keeps the whole window. **clear brush window** puts the measures back.
+The page opens on the last 28 days. **Window**, in the page header, sets it: the last 7, 14, 28 or
+84 days, or a custom range of whole days in UTC, both ends included. A preset rolls, so a link to
+the last 7 days always shows the latest 7; a custom range keeps its dates. The page reads at most
+84 days, and refuses a longer custom range, saying so. Changing the window clears a dragged
+stretch.
+
+The window, the search box and every filter (Repository, Parent agent, Session, Dispatch issue,
+Priority, Component, Author, rework, and whether a pull request has deployed) are written into the
+address, so a link shows the same figures to whoever opens it. Dragging across the timeline narrows
+the measures to the stretch you dragged over; the timeline itself keeps the whole window. **clear
+brush window** puts the measures back.
+
+## Grouping sessions
+
+A pull request's **Parent agent** is the first agent session that wrote it, shown by the session's
+title. One agent often runs as several sessions (it restarted, or it was resumed), and a session
+group puts them back together: every pull request a member wrote first counts under the group's
+name, in the Parent agent filter, the colours, the lanes, the list, the details and the measures.
+The Session filter still lists each session on its own.
+
+**Edit groups**, under the Parent agent filter, lists the window's sessions with their titles and
+how many pull requests each wrote first. Select sessions and name them to make a group, and rename
+a group, add the selected sessions to it, remove a member, or delete it. Groups are shared: everyone
+who opens the page sees the same ones. A session can be in one group only, and two groups cannot
+share a name. A group may take a session's title as its name only when it holds every session with
+that title, so one name never means two things. A session that later takes a group's name as its
+title, without joining it, shows with its id beside the title. Deleting a group shows its sessions
+on their own again.
+
+Colouring the merges by Parent agent adds **Own colour and lane**: the values you choose there each
+get a colour of their own, and a lane of their own when swimlanes are on, and every other value
+shares one **Other** colour and lane. With none chosen, the colours and lanes are as usual.
 
 ## The measures
 
@@ -77,8 +104,18 @@ signed-in person or agent token reads it. `GET /api/v1/delivery/timeline` carrie
 answer as its `measures` for its own window and filters, so an agent reading both needs only the
 timeline. The page and the route compute from the same stored facts on every request, so they
 always agree. `flags_source` says whether recorded flags fed the change failure rate; `none`
-means no flags are recorded yet. The [HTTP API reference](/legion/dispatch/reference/api/) lists
-it with every other route.
+means no flags are recorded yet.
+
+A session group's Parent agent value is `group:<id>`, so a rename keeps every filter and link that
+names it; the timeline's `session_groups` lists every group with its name and sessions, beside
+`session_titles` and `session_pr_counts` for the window's sessions. `POST
+/api/v1/delivery/session-groups` (`{name, sessions}`) makes a group, `PATCH
+/api/v1/delivery/session-groups/{id}` (`{name?, add?, remove?}`) changes one, and `DELETE` removes
+it. Any signed-in person or agent token may write them. A session another group holds is `409
+SESSION_IN_GROUP`, a name another group has `409 SESSION_GROUP_NAME_TAKEN`, and a name that is the
+title of a session outside the group `409 SESSION_GROUP_NAME_IS_SESSION_TITLE`, each naming what it
+refers to. The [HTTP API reference](/legion/dispatch/reference/api/) lists them with every other
+route.
 
 ## Pipeline
 
