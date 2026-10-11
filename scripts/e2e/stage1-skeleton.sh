@@ -176,12 +176,14 @@ jq -e --arg p "$project" \
 }
 # The deployment's capability report rides the same document (LEGION-578): every row of the table,
 # and under tmux with nothing decided the resource-limits row open with the legion.yaml line that
-# records a decision — a report, never a refusal, so the daemon served it.
-jq -e '(.capabilities | length) == 19
+# records a decision — a report, never a refusal, so the daemon served it — and the pool-capacity
+# row present, since the tmux runtime runs no probe pod.
+jq -e '(.capabilities | length) == 20
   and (.capabilities | map(select(.name == "resource-limits" and .status == "open"
-    and .configLine == "capabilities.decided.resource-limits: \"<reason>\"")) | length) == 1' \
+    and .configLine == "capabilities.decided.resource-limits: \"<reason>\"")) | length) == 1
+  and (.capabilities | map(select(.name == "pool-capacity" and .status == "present")) | length) == 1' \
   "$work/state1.json" || {
-  echo "the state does not carry the 19-row capability report with resource-limits open under tmux"
+  echo "the state does not carry the 20-row capability report with resource-limits open and pool-capacity present under tmux"
   exit 1
 }
 "$work/legion" legions --json |

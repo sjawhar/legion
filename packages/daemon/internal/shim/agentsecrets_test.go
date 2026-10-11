@@ -150,6 +150,44 @@ func TestAnEnrollmentFrameOnAPaneWithoutAgentSecretsIsRefused(t *testing.T) {
 	r.stop(t)
 }
 
+// The kubelet rewrites the projected token in place before it expires, so the daemon's request
+// is answered with the token as the mount holds it now, not as it held it at the hello.
+func TestATokenRequestIsAnsweredWithTheTokenTheMountHoldsNow(t *testing.T) {
+	path := socketPath(t)
+	stub := listen(t, path)
+	o := newOMP(t)
+	cfg, _ := agentSecretsConfig(t, path, o)
+	r := run(t, cfg, newClock())
+	peer := stub.accept(t)
+	peer.open(t)
+
+	rotated := "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjF9.rotated"
+	if err := os.WriteFile(cfg.AgentSecrets.TokenFile, []byte(rotated+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	peer.send(t, shimwire.AgentSecretsToken{ID: "req-1"})
+	peer.expect(t, shimwire.AgentSecretsTokenResult{ID: "req-1", OK: true, PodToken: rotated})
+	if frames := o.received(t); len(frames) != 0 {
+		t.Fatalf("OMP received %v; the token request is the shim's alone", frameTypes(frames))
+	}
+	r.stop(t)
+}
+
+func TestATokenRequestOnAPaneWithoutAgentSecretsIsRefused(t *testing.T) {
+	path := socketPath(t)
+	stub := listen(t, path)
+	o := newOMP(t)
+	r := run(t, config(t, path, o), newClock())
+	peer := stub.accept(t)
+	peer.open(t)
+	peer.send(t, shimwire.AgentSecretsToken{ID: "req-1"})
+	result := peer.next(t).(shimwire.AgentSecretsTokenResult)
+	if result.OK || result.PodToken != "" || !strings.Contains(result.Error, "--agent-secrets-key-dir") {
+		t.Fatalf("result %+v, want a refusal naming the flag", result)
+	}
+	r.stop(t)
+}
+
 func TestKeygenFailureEndsTheShimBeforeAnyDial(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)

@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   type AgentStreamControlMessage,
@@ -8,8 +8,6 @@ import {
   agentSubject,
   DELIVERY_CAPABILITIES,
   type DeliveryCapability,
-  dispatchToolSchema,
-  dispatchToolSpecs,
   type OpenAsk,
   type OpenAsksResponse,
   ROLE_TOPIC_PREFIX,
@@ -32,7 +30,6 @@ import {
   activeDispatchConfig,
   resolveDispatchConfig,
 } from "@legion/envoy-client/dispatch-config";
-import { executeDispatchTool } from "@legion/envoy-client/dispatch-execute";
 import {
   dispatchFirstSkillFile,
   readDispatchFirstContext,
@@ -41,9 +38,12 @@ import { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { forgetShownPictures, shownPictures } from "@legion/envoy-client/dispatch-picture-tools";
 import { pictureAddresses } from "@legion/envoy-client/dispatch-pictures";
 import {
-  createFollowAnnouncer,
-  subscriptionRemovedTopics,
-} from "@legion/envoy-client/dispatch-subscribe";
+  sessionDirectory as dispatchSessionDirectory,
+  readResultsSince,
+  resultsEnd,
+  writeSessionTitle,
+} from "@legion/envoy-client/dispatch-session-state";
+import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
@@ -81,12 +81,13 @@ import {
   legionRoleClaimBridge,
   type RoleRegainReason,
 } from "@legion/pi-shared/role-claim-bridge";
+import { dispatchCommandHead } from "@legion/pi-shared/shell-command";
 import {
   type SessionIdentityContext,
   subagentSessionCheck,
 } from "@legion/pi-shared/subagent-session";
 import { toolFailure, toolSuccess } from "@legion/pi-shared/tool-result";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, procmgr } from "@oh-my-pi/pi-utils";
 import { encode } from "@toon-format/toon";
 import { connect, type NatsConnection, StringCodec, type Subscription } from "nats";
 import { AgentStreamPublisher } from "../src/agent-stream";
@@ -101,7 +102,7 @@ import {
   turnFromAccept,
 } from "../src/dispatch-user-turn";
 import { recordEnvoySession, resolveEnvoySession } from "../src/envoy-session";
-import { deviceTool, opensAsk } from "../src/opens-ask";
+import { opensAsk } from "../src/opens-ask";
 import { sideTurn } from "../src/side-turn";
 import { registerEnvoyMessageRenderer } from "./envoy-message-renderer";
 import { registerEnvoyWhoamiCommand } from "./envoy-whoami-command";
@@ -262,20 +263,17 @@ const ASK_CHECKS_PER_PERIOD = 5;
 
 const UNASKED_WAIT_REMINDER =
   "You just said you are waiting on a human for something no open ask in Dispatch covers. " +
-  "Open it now: a decision block in the document it concerns (dispatch_doc_edit with an ask block), or " +
-  "dispatch_ask for a to-do only a human can do, naming exactly what you need and from whom.";
-
-/** Name prefix of every native Dispatch tool: talking to the humans, not the work itself. */
-const DISPATCH_TOOL_PREFIX = "dispatch_";
+  "Open it now: a decision block in the document it concerns (dispatch doc-edit with an ask block), or " +
+  "dispatch ask for a to-do only a human can do, naming exactly what you need and from whom.";
 
 /**
  * One arming period of the run-end nudge. A genuine user turn arms a period. `check_due` is the
  * outstanding check, in the shape of the host's own todo reminder: arming owes one, a completed
- * check spends it, the agent's next real work — a successful tool call that is not a Dispatch
- * write — owes another, and opening the ask itself spends it, since the nudge has nothing left
- * to say about that stop. A turn that only replies and stops does no work, so the nudge's own
- * continuation can never owe one, which is what keeps it from nudging itself forever. `checks`
- * counts the ones spent, capped at `ASK_CHECKS_PER_PERIOD`.
+ * check spends it, the agent's next real work — a successful tool call that ran anything but
+ * `dispatch` commands — owes another, and opening the ask itself spends it, since the nudge has
+ * nothing left to say about that stop. A turn that only replies and stops does no work, so the
+ * nudge's own continuation can never owe one, which is what keeps it from nudging itself forever.
+ * `checks` counts the ones spent, capped at `ASK_CHECKS_PER_PERIOD`.
  *
  * `baseline_as_of` is the server clock the period's next Dispatch read asks from, and it moves
  * after every self-check to that snapshot's `as_of`. This keeps the check's view current while
@@ -365,6 +363,16 @@ const SKILLS_DIRECTORY = resolveSkillsDirectory();
 // inside the `context` handler would not do that: Oh My Pi catches it and sends the request anyway.
 const DISPATCH_FIRST_CONTEXT = readDispatchFirstContext(dispatchFirstSkillFile(SKILLS_DIRECTORY));
 
+// The `dispatch` command this plugin ships: `bin/` is one directory above this module in both
+// layouts (`<pkg>/dist/envoy.js` packed, `<pkg>/extensions/envoy.ts` in the repository). Oh My Pi
+// snapshots `process.env` for its shell when it first runs one, after every extension has loaded,
+// so both reach every shell command.
+const PLUGIN_BIN = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin");
+if (!(process.env.PATH ?? "").split(delimiter).includes(PLUGIN_BIN)) {
+  process.env.PATH = `${PLUGIN_BIN}${delimiter}${process.env.PATH ?? ""}`;
+}
+process.env.DISPATCH_HOST = "omp";
+
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
   // The interface the Legion plugin reads (`@legion/pi-shared/interface`). `undefined` when an
@@ -372,13 +380,12 @@ export default function envoyExtension(pi: PiApi): void {
   // Legion finds, and this instance pushes no claim instance onto it (first wins).
   const publishedInterface = publishEnvoyPluginInterface(import.meta.url);
   const defaults = envoyDefaultsFromEnvironment(process.env);
-  // One loader for the shared envoy.json contract: the dispatch tools are
-  // registered only where the file names a service at load, and an invalid file
-  // is reported at session start, not silently treated as off. The URL and
-  // token themselves are re-read on every call (`currentDispatchConfig`) so a
-  // Dispatch that moved - a new dispatch.serverUrl in envoy.json - takes effect
-  // without /reload-plugins; a file that has since broken fails the call with
-  // its own error instead of quietly using the stale endpoint.
+  // One loader for the shared envoy.json contract: the dispatch-first context is injected only
+  // where the file names a service at load, and an invalid file is reported at session start, not
+  // silently treated as off. The URL and token themselves are re-read on every use
+  // (`currentDispatchConfig`) so a Dispatch that moved - a new dispatch.serverUrl in envoy.json -
+  // takes effect without /reload-plugins; a file that has since broken fails with its own error
+  // instead of quietly using the stale endpoint.
   const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() });
   const currentDispatchConfig = (): ActiveDispatchConfig => {
     const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
@@ -568,6 +575,45 @@ export default function envoyExtension(pi: PiApi): void {
     // id the session left is no longer served, so what it was shown is forgotten.
     markPicturesShown(shownPictures(sessionID), transcriptPictures(branch));
     if (previousSessionID !== sessionID) forgetShownPictures(previousSessionID);
+  };
+
+  // Where this instance has read the `dispatch` command's ledger to (`results.jsonl` in the
+  // session's state directory, a line per call), so the run-end check sees each call once.
+  let dispatchLedger: { readonly sessionID: string; offset: number } | undefined;
+
+  // Names the top-level session in the environment every later shell command takes, and starts
+  // its ledger at the end, so a resumed or switched session never reads an earlier run's calls.
+  // Oh My Pi refreshes the shell's environment after `session_start`, `session_switch` and
+  // `session_branch`; any other caller refreshes it itself.
+  const bindDispatchSession = (id: string): void => {
+    if (id === "") {
+      delete process.env.DISPATCH_SESSION_ID;
+      dispatchLedger = undefined;
+      return;
+    }
+    process.env.DISPATCH_SESSION_ID = id;
+    dispatchLedger = {
+      sessionID: id,
+      offset: resultsEnd(dispatchSessionDirectory(process.env, id)),
+    };
+  };
+
+  // The ledger lines appended since the last read, under the id the `dispatch` command writes
+  // under, which is the environment's and not a fresh `getSessionId()`. A line that is not JSON is
+  // logged with its file and line number and skipped, so it never stalls the run-end check.
+  const readNewDispatchResults = () => {
+    const id = process.env.DISPATCH_SESSION_ID;
+    if (id === undefined || id === "") return [];
+    const dir = dispatchSessionDirectory(process.env, id);
+    if (dispatchLedger?.sessionID !== id) {
+      dispatchLedger = { sessionID: id, offset: resultsEnd(dir) };
+      return [];
+    }
+    const read = readResultsSince(dir, dispatchLedger.offset, (problem) =>
+      logger.warn(`envoy: ${problem}`)
+    );
+    dispatchLedger.offset = read.offset;
+    return read.entries;
   };
 
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
@@ -1140,6 +1186,13 @@ export default function envoyExtension(pi: PiApi): void {
       const drifted = liveSessionID !== sessionID;
       if (healing) return;
       healing = true;
+      if (drifted) {
+        // The host minted an id with no session event (a fresh TUI's first, or a session file
+        // it moved off), so it refreshed no shell environment: name the live id, and refresh
+        // the snapshot the shell takes, as the host does after a session event.
+        bindDispatchSession(liveSessionID);
+        procmgr.refreshShellConfigCache();
+      }
       // A drifted id re-establishes the whole session (reclaimHeldRoles included); a steady one
       // re-registers, then checks the listener still resolves this session's role.
       const afterOutage = registrationFailed;
@@ -1443,10 +1496,11 @@ export default function envoyExtension(pi: PiApi): void {
 
   pi.on("session_start", async (_event, context) => {
     if (await isSubagent(context)) return;
+    bindDispatchSession(context.sessionManager.getSessionId());
     const previousSessionID = sessionID;
     restoreLocalSessionState(context);
     if (dispatchConfig.error !== null) {
-      context.ui.notify(`envoy: dispatch tool disabled — ${dispatchConfig.error}`, "warning");
+      context.ui.notify(`envoy: Dispatch disabled — ${dispatchConfig.error}`, "warning");
     }
     if (defaults.natsUrls.length === 0) {
       context.ui.notify(
@@ -1535,9 +1589,18 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   // Only a switch reports why the session changed; a branch or a tree
-  // navigation carries no reason at all.
-  pi.on("session_switch", (event, context) => rebind(event.reason, context));
-  pi.on("session_branch", (_event, context) => rebind(undefined, context));
+  // navigation carries no reason at all. A switch and a branch change the id the `dispatch`
+  // command names; Oh My Pi refreshes the shell's environment after those two, and never after
+  // a tree navigation, which keeps the session's id.
+  const rebindDispatch = async (
+    reason: SessionSwitchReason | undefined,
+    context: SessionContext
+  ): Promise<void> => {
+    if (!(await isSubagent(context))) bindDispatchSession(context.sessionManager.getSessionId());
+    await rebind(reason, context);
+  };
+  pi.on("session_switch", (event, context) => rebindDispatch(event.reason, context));
+  pi.on("session_branch", (_event, context) => rebindDispatch(undefined, context));
   pi.on("session_tree", (_event, context) => rebind(undefined, context));
 
   pi.on("session_shutdown", async (_event, context) => {
@@ -1599,40 +1662,7 @@ export default function envoyExtension(pi: PiApi): void {
   }
 
   if (dispatchConfig.enabled) {
-    // Deliberately NOT registered strict: on installed OMP hosts a strict host schema makes
-    // the coercion pass delete an unknown key beside valid required fields and validation then
-    // "succeeds" with silently narrowed args, while the non-strict schema preserves unknown
-    // root fields so they reach `executeDispatchTool`, whose own always-strict parse names the
-    // field the caller invented. The xd:// write path's half of this contract is
-    // can1357/oh-my-pi#12871.
-    for (const spec of dispatchToolSpecs) {
-      pi.registerTool({
-        name: spec.name,
-        label: spec.name,
-        description: spec.description,
-        parameters: dispatchToolSchema(spec, zodSchemaApi(pi.zod)),
-        lenientArgValidation: true,
-        execute: async (_id, params, signal, _onUpdate, context) => {
-          try {
-            const result = await executeDispatchTool({
-              tool: spec.name,
-              args: params,
-              cwd: context.cwd,
-              host: "omp",
-              sessionId: context.sessionManager.getSessionId(),
-              sessionTitle: context.sessionManager.getSessionName?.(),
-              config: currentDispatchConfig(),
-              signal,
-              env: process.env,
-            });
-            return toolSuccess(result.text, result.details, result.images);
-          } catch (error) {
-            return toolFailure(error);
-          }
-        },
-      });
-    }
-    // Every session with the Dispatch tools, Legion panes and `task` subagents included, carries
+    // Every session that reaches Dispatch, Legion panes and `task` subagents included, carries
     // the dispatch-first skill on every request: any of them can file, ask, or start work.
     pi.on("context", async (event) => {
       const messages = withDispatchFirst(event.messages, DISPATCH_FIRST_CONTEXT);
@@ -1900,47 +1930,63 @@ export default function envoyExtension(pi: PiApi): void {
     );
   }
 
-  // A write follows the ask it touched; nothing subscribes the session to the whole
-  // issue (that is the agent's own envoy_subscribe). The host does not let a
-  // tool_result handler amend the result the model already saw, so the notice goes
-  // through the same steer channel `deliver` uses for inbound envelopes.
-  const announceFollow = createFollowAnnouncer((text) => {
-    pi.sendMessage(
-      { customType: "envoy-message", content: text, display: true, details: LOCAL_ENVOY_NOTICE },
-      { deliverAs: "steer", triggerTurn: false }
-    );
+  // The session title the `dispatch` command reads from the session's `title` file. A shell
+  // command takes the environment Oh My Pi captured at the last session event, and a session is
+  // named after it starts (the host's automatic title, a Legion pane's), so the name goes
+  // through a file, rewritten before a main-agent shell command whenever it changed.
+  let writtenTitle: { readonly sessionID: string; readonly title: string } | undefined;
+  pi.on("tool_call", async (event, context) => {
+    if (event.toolName !== "bash" && event.toolName !== "eval") return undefined;
+    if (context.agent?.kind !== "main") return undefined;
+    const id = process.env.DISPATCH_SESSION_ID;
+    if (id === undefined || id === "") return undefined;
+    const title = context.sessionManager.getSessionName?.() ?? "";
+    if (writtenTitle?.sessionID === id && writtenTitle.title === title) return undefined;
+    writeSessionTitle(dispatchSessionDirectory(process.env, id), title);
+    writtenTitle = { sessionID: id, title };
+    return undefined;
   });
+
   pi.on("tool_result", async (event, context) => {
+    // Read, and the offset advanced, on every result, failed or not and armed period or not, so a
+    // later result never counts the calls this one ran.
+    const entries = readNewDispatchResults();
     if (event.isError) return;
     // The host's live id, never the module's `sessionID`, for the reason the stop guard reads
     // it: in a fresh TUI's drift window the two disagree, and the period is armed against the
     // live one, so a comparison against the module copy matched nothing for up to a heartbeat —
     // the window this nudge was opened up for.
     if (
-      askAwareness.session_id === context.sessionManager.getSessionId() &&
-      askAwareness.period > 0
+      askAwareness.session_id !== context.sessionManager.getSessionId() ||
+      askAwareness.period === 0
     ) {
-      // A tool-device `write` (to `xd://<tool>`) opens no ask and counts as work by the tool it
-      // names. A device backed by a registered tool reports that tool first, under its own name,
-      // input and details, which is the report that opens an ask; Oh My Pi's own devices
-      // (`resolve`, `report_issue`, …) report only the `write`, and a help write runs nothing.
-      const tool = deviceTool(event) ?? event.toolName;
-      if (opensAsk(event)) {
-        // The agent asked the humans itself, so this stop has nothing left for the nudge to
-        // say: it spends the check the period owed rather than ending the period, and aborts a
-        // check in flight before its verdict can be used. Later real work can re-arm a fresh
-        // check, whose prompt names the ask.
-        askAwareness = { ...askAwareness, check_due: false };
-        abortSelfCheck("the agent opened the ask itself");
-      } else if (!tool.startsWith(DISPATCH_TOOL_PREFIX)) {
-        // Real work: it owes the period another check, the way finishing a step re-arms the
-        // host's todo reminder. A Dispatch write is the agent talking to the humans this nudge
-        // is about, not work, so it owes nothing — and a turn that only replies calls no tool
-        // at all, which is what stops the nudge's own continuation from re-arming itself.
-        askAwareness = { ...askAwareness, check_due: true };
-      }
+      return;
     }
-    announceFollow(event.details);
+    const openedAsk = entries.some(
+      (entry) =>
+        entry.details !== undefined && opensAsk({ toolName: entry.tool, details: entry.details })
+    );
+    // A call that owes no check: a bash command that is one `dispatch` command and wrote to the
+    // ledger, or any eval cell during which the ledger grew. The two differ on purpose: a bash
+    // command's text is scanned, while an eval cell runs `dispatch` only through a shell its code
+    // starts, which no scan reads, so for it the ledger growing is the only signal.
+    const bashRanDispatchAlone =
+      event.toolName === "bash" && dispatchCommandHead(event.input.command) !== undefined;
+    const owesNoCheck = entries.length > 0 && (bashRanDispatchAlone || event.toolName === "eval");
+    if (openedAsk) {
+      // The agent asked the humans itself, so this stop has nothing left for the nudge to
+      // say: it spends the check the period owed rather than ending the period, and aborts a
+      // check in flight before its verdict can be used. Later real work can re-arm a fresh
+      // check, whose prompt names the ask.
+      askAwareness = { ...askAwareness, check_due: false };
+      abortSelfCheck("the agent opened the ask itself");
+    } else if (!owesNoCheck) {
+      // Real work: it owes the period another check, the way finishing a step re-arms the
+      // host's todo reminder. A `dispatch` command is the agent talking to the humans this
+      // nudge is about, not work, so it owes nothing — and a turn that only replies calls no
+      // tool at all, which is what stops the nudge's own continuation from re-arming itself.
+      askAwareness = { ...askAwareness, check_due: true };
+    }
   });
 
   async function execute(

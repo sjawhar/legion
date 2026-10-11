@@ -26,90 +26,92 @@ exec "$WINIT_REAL_GIT" "$@"
 func TestWorkspaceInitFetchRefusesBeforeFetching(t *testing.T) {
 	for _, tc := range []struct {
 		name string
-		args func(v *treeVolume) []string
-		env  func(t *testing.T, v *treeVolume)
+		args func(v *issueVolume) []string
+		env  func(t *testing.T, v *issueVolume)
 		code int
-		says func(v *treeVolume) string
+		says func(v *issueVolume) string
 	}{
 		{
 			name: "a --repo that is not owner/name",
-			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "acme", "--feed", v.feed} },
+			args: func(v *issueVolume) []string { return []string{"fetch", "--repo", "acme", "--feed", v.feed} },
 			code: 1,
-			says: func(*treeVolume) string { return `--repo must be "owner/name" (got "acme")` },
+			says: func(*issueVolume) string { return `--repo must be "owner/name" (got "acme")` },
 		},
 		{
 			name: "a --repo with a .. segment",
-			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "../x", "--feed", v.feed} },
+			args: func(v *issueVolume) []string { return []string{"fetch", "--repo", "../x", "--feed", v.feed} },
 			code: 1,
-			says: func(*treeVolume) string { return `--repo "../x" has a ".." segment` },
+			says: func(*issueVolume) string { return `--repo "../x" has a ".." segment` },
 		},
 		{
 			name: "a --repo holding whitespace",
-			args: func(v *treeVolume) []string { return []string{"fetch", "--repo", "acme/wid gets", "--feed", v.feed} },
+			args: func(v *issueVolume) []string { return []string{"fetch", "--repo", "acme/wid gets", "--feed", v.feed} },
 			code: 1,
-			says: func(*treeVolume) string { return `--repo "acme/wid gets" holds whitespace` },
+			says: func(*issueVolume) string { return `--repo "acme/wid gets" holds whitespace` },
 		},
 		{
 			// --repo is read first: the feed and the token are wrong too.
 			name: "a bad --repo, before every other input",
-			args: func(*treeVolume) []string { return []string{"fetch", "--repo", "acme/..", "--feed", "feed"} },
-			env:  func(t *testing.T, _ *treeVolume) { unsetenv(t, "LEGION_PROVISION_TOKEN_FILE") },
+			args: func(*issueVolume) []string { return []string{"fetch", "--repo", "acme/..", "--feed", "feed"} },
+			env:  func(t *testing.T, _ *issueVolume) { unsetenv(t, "LEGION_PROVISION_TOKEN_FILE") },
 			code: 1,
-			says: func(*treeVolume) string { return `--repo "acme/.." has a ".." segment` },
+			says: func(*issueVolume) string { return `--repo "acme/.." has a ".." segment` },
 		},
 		{
 			name: "a relative --feed",
-			args: func(*treeVolume) []string { return []string{"fetch", "--repo", winitRepo, "--feed", "feed"} },
+			args: func(*issueVolume) []string { return []string{"fetch", "--repo", winitRepo, "--feed", "feed"} },
 			code: 1,
-			says: func(*treeVolume) string { return `--feed must be an absolute path (got "feed")` },
+			says: func(*issueVolume) string { return `--feed must be an absolute path (got "feed")` },
 		},
 		{
 			name: "LEGION_PROVISION_TOKEN_FILE unset",
-			env:  func(t *testing.T, _ *treeVolume) { unsetenv(t, "LEGION_PROVISION_TOKEN_FILE") },
+			env:  func(t *testing.T, _ *issueVolume) { unsetenv(t, "LEGION_PROVISION_TOKEN_FILE") },
 			code: 1,
-			says: func(*treeVolume) string { return "LEGION_PROVISION_TOKEN_FILE is not set" },
+			says: func(*issueVolume) string { return "LEGION_PROVISION_TOKEN_FILE is not set" },
 		},
 		{
 			name: "a provisioning token file that is absent",
-			env: func(t *testing.T, v *treeVolume) {
+			env: func(t *testing.T, v *issueVolume) {
 				t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token+".absent")
 			},
 			code: 1,
-			says: func(v *treeVolume) string {
+			says: func(v *issueVolume) string {
 				return "LEGION_PROVISION_TOKEN_FILE names " + v.token + ".absent, which could not be read"
 			},
 		},
 		{
 			name: "a provisioning token file that is blank",
-			env: func(t *testing.T, v *treeVolume) {
+			env: func(t *testing.T, v *issueVolume) {
 				if err := os.WriteFile(v.token, []byte(" \n"), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			},
 			code: 1,
-			says: func(v *treeVolume) string { return "LEGION_PROVISION_TOKEN_FILE names " + v.token + ", which is empty" },
+			says: func(v *issueVolume) string {
+				return "LEGION_PROVISION_TOKEN_FILE names " + v.token + ", which is empty"
+			},
 		},
 		{
 			name: "no git on PATH",
-			env:  func(t *testing.T, _ *treeVolume) { t.Setenv("PATH", t.TempDir()) },
+			env:  func(t *testing.T, _ *issueVolume) { t.Setenv("PATH", t.TempDir()) },
 			code: 1,
-			says: func(*treeVolume) string { return "git is not on PATH" },
+			says: func(*issueVolume) string { return "git is not on PATH" },
 		},
 		{
 			name: "an unknown flag",
-			args: func(v *treeVolume) []string { return append(v.fetchArgs(), "--root", v.root) },
+			args: func(v *issueVolume) []string { return append(v.fetchArgs(), "--root", v.root) },
 			code: 2,
-			says: func(*treeVolume) string { return "-root" },
+			says: func(*issueVolume) string { return "-root" },
 		},
 		{
 			name: "a positional argument",
-			args: func(v *treeVolume) []string { return append(v.fetchArgs(), "extra") },
+			args: func(v *issueVolume) []string { return append(v.fetchArgs(), "extra") },
 			code: 2,
-			says: func(*treeVolume) string { return `unexpected argument "extra"` },
+			says: func(*issueVolume) string { return `unexpected argument "extra"` },
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			v := newTreeVolume(t)
+			v := newIssueVolume(t)
 			v.setenv(t)
 			t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 			if tc.env != nil {
@@ -143,7 +145,7 @@ func TestWorkspaceInitFetchRefusesBeforeFetching(t *testing.T) {
 // handed as a one-shot credential on the container's own filesystem (its TMPDIR) and which is gone
 // once it returns; the feed never holds it.
 func TestWorkspaceInitFetchFillsTheFeed(t *testing.T) {
-	v := newTreeVolume(t).withRemote(t)
+	v := newIssueVolume(t).withRemote(t)
 	v.setenv(t)
 	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 

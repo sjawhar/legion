@@ -10,7 +10,7 @@ import (
 )
 
 // SyncInterval is how often the server re-imports every enabled architecture
-// source. The Refresh button and the dispatch_architecture_sync tool are the
+// source. The Refresh button and the `dispatch architecture-sync` command are the
 // impatient paths; this one keeps a model honest on its own.
 const SyncInterval = 5 * time.Minute
 

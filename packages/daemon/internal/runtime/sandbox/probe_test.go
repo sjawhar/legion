@@ -17,7 +17,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -312,7 +311,7 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed daemon-api-version=3")
 		}, []string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: none, where the daemon's probe requires resolved)"}},
 		{"a CLI that predates the capability check", func(g *probeRig) {
-			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved daemon-api-version=3")
+			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=resolved daemon-api-version=3")
 		}, []string{"Succeeded without checking the capability list (its legion CLI predates the check): build the image from this daemon's commit", "log tail: probe-image: OK"}},
 		{"a CLI that predates a flag the probe passes", func(g *probeRig) {
 			g.fails("flag provided but not defined: -role-references\nUsage of legion probe-image:")
@@ -325,6 +324,9 @@ func TestProbeImageRefusesWhatTheProbePodAnswered(t *testing.T) {
 			g.succeeds(bootprobe.OKLine("/opt/omp/bin/omp", 3, bootprobe.AgentModelsSkipped, "off"))
 		},
 			[]string{"without resolving the prompt-named agents' models (its OK line's agent-models mark: skipped, where the daemon's probe requires resolved)"}},
+		{"a CLI that predates the discovery-on pod lane", func(g *probeRig) {
+			g.succeeds("probe-image: OK (/opt/omp/bin/omp) session-storage=probed agent-models=resolved capabilities=checked model-fallback=on daemon-api-version=3")
+		}, []string{"Succeeded without the extensions=discovered mark: its legion CLI predates the discovery-on pod lane and its profile links the plugins a pod names explicitly, which a pod of this daemon would load twice — build the image from this daemon's commit"}},
 		{"an image name the kubelet cannot use", func(g *probeRig) { g.waits("InvalidImageName") },
 			[]string{"container probe waiting: InvalidImageName"}},
 		{"an image the node may never pull", func(g *probeRig) { g.waits("ErrImageNeverPull") },
@@ -598,7 +600,7 @@ func TestEveryBootProbesTheImage(t *testing.T) {
 		t.Fatalf("the first boot's probe = %v, want a pass", err)
 	}
 	g.eventually("the first probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
-	g.fails("legion probe-image: Oh My Pi, loading the plugins from /opt/legion/pi-envoy and /opt/legion/pi-legion with discovery off, as a pod does, " +
+	g.fails("legion probe-image: Oh My Pi, loading the plugins from /opt/legion/pi-envoy and /opt/legion/pi-legion with discovery on, as a pod does, " +
 		"cannot run task agent oracle (dispatched by roles/core/planner.md) on its model @oracle: role oracle is not configured.")
 
 	err := g.probe(probeOptions(t))
@@ -658,6 +660,92 @@ func TestProbeImageRefusesAProvidersSecretThePodCannotMount(t *testing.T) {
 	}
 }
 
+// unschedulable leaves a probe pod as the scheduler leaves one the pool has no room for: Pending,
+// on no node, with PodScheduled=False Unschedulable and the scheduler's message, since age before
+// the rig's clock.
+func unschedulable(age time.Duration) func(*corev1.Pod) {
+	return func(p *corev1.Pod) {
+		p.Spec.NodeName = ""
+		p.Status = corev1.PodStatus{Phase: corev1.PodPending, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+			Message:            unschedulableMessage,
+			LastTransitionTime: metav1.NewTime(rigNow.Add(-age)),
+		}}}
+	}
+}
+
+const unschedulableMessage = "0/83 nodes are available: 25 Insufficient cpu, 58 node(s) didn't match Pod's node affinity/selector. preemption: 0/83 nodes are available: 25 No preemption victims found for incoming pod, 58 Preemption is not helpful for scheduling."
+
+// A probe pod the pool has no room for says nothing about the image, and no number of them does: a
+// pod Pending with PodScheduled=False Unschedulable for longer than the boot timeout ends the
+// attempt waiting on capacity (bootprobe.Outcome.Waiting) — well within the attempt's budget, its
+// Sandbox deleted — logged as a capacity wait and never a transient failure, so it spends none of
+// the retry's attempts; the next attempt's pod schedules and passes, and the report counts the one
+// wait with the scheduler's reason. A pod Unschedulable for less than the boot timeout is a pool
+// still adding a node: the attempt waits on it to its budget, as it does any Pending pod.
+func TestProbeImageWaitsOnAProbePodThePoolCannotPlace(t *testing.T) {
+	t.Run("unschedulable past the boot timeout, then placed", func(t *testing.T) {
+		logged := &lockedLog{}
+		g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(logged) }))
+		g.with(func() { g.log = okLine(3) + "\n" })
+		var pods atomic.Int32
+		g.finishes(func(p *corev1.Pod) {
+			if pods.Add(1) == 1 {
+				unschedulable(testOptions().BootTimeout + time.Second)(p)
+				return
+			}
+			p.Status = corev1.PodStatus{Phase: corev1.PodSucceeded, ContainerStatuses: []corev1.ContainerStatus{{
+				Name: probeContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0, Reason: "Completed"}},
+			}}}
+		})
+		// One attempt: the pass needs two, so a wait that spent an attempt would fail the run.
+		p := probeOptions(t)
+		p.Retry.Attempts = 1
+
+		report, err := g.r.ProbeImage(g.ctx, p)
+
+		if err != nil {
+			t.Fatalf("ProbeImage = %v, want the pass after one capacity wait", err)
+		}
+		if n := g.creates.Load(); n != 2 {
+			t.Errorf("created the probe Sandbox %d times, want the unplaceable pod's and the one that passed", n)
+		}
+		wantReason := "probe pod " + probeSandboxName + " is Unschedulable: " + unschedulableMessage
+		if report.CapacityWaits != 1 || report.CapacityReason != wantReason {
+			t.Errorf("report = %d waits, reason %q; want 1 and %q", report.CapacityWaits, report.CapacityReason, wantReason)
+		}
+		if got := strings.Count(logged.String(), "boot probe is waiting on capacity; running it again"); got != 1 {
+			t.Errorf("logged %d capacity waits, want 1:\n%s", got, logged.String())
+		}
+		if !strings.Contains(logged.String(), `probe="worker image"`) || !strings.Contains(logged.String(), unschedulableMessage) {
+			t.Errorf("the wait was not logged with the probe and the scheduler's reason:\n%s", logged.String())
+		}
+		if strings.Contains(logged.String(), "failed transiently") {
+			t.Errorf("a capacity wait was logged as a transient failure:\n%s", logged.String())
+		}
+		g.eventually("the probe Sandbox to be deleted", func() bool { return g.sandbox(probeSandboxName) == nil })
+	})
+
+	t.Run("unschedulable within the boot timeout waits to the budget", func(t *testing.T) {
+		logged := &lockedLog{}
+		g := newProbeRig(t, nil, withOptions(func(o *Options) { o.Log = slogTo(logged) }))
+		g.finishes(unschedulable(testOptions().BootTimeout / 2))
+		p := probeOptions(t)
+		p.Budget = unfinishedBudget
+
+		err := g.probe(p)
+
+		wantContains(t, err, "the worker image probe never completed within its retry budget (2 attempts)",
+			"probe pod "+probeSandboxName+" still Pending after 300ms")
+		if strings.Contains(logged.String(), "waiting on capacity") {
+			t.Errorf("a pod unschedulable for less than the boot timeout was read as a capacity wait:\n%s", logged.String())
+		}
+		if n := g.creates.Load(); n != 2 {
+			t.Errorf("ran the probe %d times, want the retry's 2", n)
+		}
+	})
+}
+
 // The probe runs as a worker runs: it resolves the daemon's role prompts' references, always, and
 // with provider keys configured it exports the providers Secret's keys as the worker's shim does.
 func TestTheProbeRunsAsAWorkerRuns(t *testing.T) {
@@ -714,17 +802,14 @@ func TestTheProbeIsToldTheOperatorsVariablesAsWritten(t *testing.T) {
 }
 
 // The golden pins every byte of the probe Sandbox, and every field is one the v1.0.3 CRD declares
-// with that type: the lifecycle fields the worker Sandboxes never set included.
+// with that type: the lifecycle fields the worker Sandboxes never set included. Its container
+// carries what the daemon hands it, the probe's own reservation (probeReservation).
 func TestProbeManifestGoldenAndSchema(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	small := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("1Gi")},
-		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
-	}
-	u, err := encodeProbe(r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: small, RoleReferences: testRoleReferences}, time.Date(2026, 9, 23, 12, 5, 30, 0, time.UTC)))
+	u, err := encodeProbe(r.probeManifest(probeSandboxName, ImageProbe{Contract: 3, Resources: probeReservation(), RoleReferences: testRoleReferences}, time.Date(2026, 9, 23, 12, 5, 30, 0, time.UTC)))
 	if err != nil {
 		t.Fatal(err)
 	}

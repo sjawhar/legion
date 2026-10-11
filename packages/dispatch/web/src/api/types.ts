@@ -71,12 +71,39 @@ export type {
   CreateProjectInput,
   CreateVersionInput,
   DeliveryCapability,
+  DeliveryColorFacet,
+  DeliveryComponent,
+  DeliveryDailyPoint,
+  DeliveryDeployFlagCounts,
+  DeliveryDeployJobTiming,
+  DeliveryFacet,
+  DeliveryFailingJob,
+  DeliveryFlagCounts,
+  DeliveryJobConclusion,
+  DeliveryJobTiming,
+  DeliveryKpiStatus,
+  DeliveryLeadTimeCell,
+  DeliveryLeadTimeDay,
+  DeliveryLeadTimeTiming,
+  DeliveryMeasures,
+  DeliveryMeasuresResponse,
+  DeliveryPipelineResponse,
   DeliveryPR,
   DeliveryRun,
+  DeliveryRunDetail,
   DeliveryRunJob,
+  DeliveryRunJobDetail,
+  DeliveryRunProduction,
   DeliverySettings,
   DeliverySettingsInput,
+  DeliverySpread,
+  DeliveryTargets,
   DeliveryTimelineResponse,
+  DeliveryTiming,
+  DeliveryTimingCell,
+  DeliveryTimingDay,
+  DeliveryUnownedIssue,
+  DeliveryWaitingPR,
   DispatchEvent,
   DispatchUser,
   DocEditOp,
@@ -243,15 +270,18 @@ export interface CredentialGrantsResponse {
   grants: CredentialGrant[];
 }
 
-/** One of the machine logins the viewer approved on `GET /api/v1/machine-logins`: the launcher
- *  credential it minted, for one of the viewer's machines or for a service, not revoked, and
- *  either unexpired or expired with a session it started still running. */
+/** One of the machine logins the viewer may revoke on `GET /api/v1/machine-logins`: the launcher
+ *  credential it minted, for one of the viewer's machines or for a service, whoever approved a
+ *  service's, not revoked, and either unexpired or expired with a session it started still
+ *  running. */
 export interface MachineLogin {
   credential_id: string;
   host: string;
   /** The service a service's login is for (`legion-daemon`), whose sessions are its worker pods;
    *  null for the viewer's own machine. */
   service: string | null;
+  /** The login of the person who approved it. */
+  approved_by: string;
   issued_at: string;
   expires_at: string;
   /** True once `expires_at` has passed: the login starts no more sessions, but sessions it

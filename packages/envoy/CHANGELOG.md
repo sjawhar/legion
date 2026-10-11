@@ -4,6 +4,74 @@
 
 ### Added
 
+- `Ctrl+Alt+M` (`⌘+⌥+M` on a Mac), Google Docs' shortcut, comments on the text selected in a
+  document, as the selection bar's **Comment** does: it opens the margin's composer on the
+  selection and puts the cursor in it. It works in an issue's documents and a project's documents
+  while the cursor is in the document and text is selected, and does nothing in a comment being
+  written or on a document the reader cannot edit. The `?` help lists it under **Document** and
+  shows `⌥` for Alt on a Mac. On a Mac, shortcuts that hold Alt also match the key's position,
+  since Option changes the character (Option+M types `µ`); every other system keeps
+  character-only matching, so AltGr continues typing its layout's character (LEGION-680).
+- Every document version now carries `size`, the bytes of the markdown it stores, as file and
+  image versions already carried theirs: on the issue and project artifact lists, the issue read,
+  an artifact's read, each version's read, the reference closure and outgoing reference reads, the
+  version an upload, a named version or an edit answers with, and the version on every
+  `artifact.created` and `artifact.version` event, settlement's and a rebuild's included. Dispatch
+  reads it from the version row's own stored length (`octet_length`), so listing a document near
+  the 1 MiB cap neither renders it nor loads its stored history, and a person or a monitor can find
+  such a document from the list alone (LEGION-481). The dashboard's issue Artifacts tab and project
+  Documents tab show each document's latest size beside its kind, and a document's version list
+  shows every version's.
+- A person lists and ends their own machines' logins and their live grants from their own shell.
+  `agent-secrets machine list` and `machine revoke ID`, and `agent-secrets grant list` and
+  `grant revoke ID`, call four new broker routes, `GET /v1/operator/machines`,
+  `POST /v1/operator/machines/{id}/revoke`, `GET /v1/operator/grants` and
+  `POST /v1/operator/grants/{id}/revoke`, which take the machine's own login (a launcher proof)
+  rather than Dispatch's UI token and act for its operator, the person who approved the login. The
+  grant routes answer and decide as Dispatch's Live grants page does, a revoke of a grant the
+  operator's own session got without asking withholding it. The machine routes cover the person's
+  own machines' logins alone: their rows of Dispatch's machine-login page, byte for byte, while a
+  service's login, such as the Legion daemon's, is neither listed nor revocable there
+  (`404 NOT_FOUND`) and is revoked on that page. A service's login, which has no operator, is
+  refused every route, `403 SERVICE_CREDENTIAL`. The helper signs these calls with the machine's
+  credential through a new `sign-launcher` op, for those four routes under its own broker alone
+  (`BAD_REQUEST` otherwise). It refuses `IN_SESSION` to a process inside a registered session's
+  process tree, and to one whose ancestry it cannot follow to init (a parent it cannot read, a
+  loop, or past 64 processes), so an agent's own commands cannot act as its operator. The check
+  covers the session's process tree only: a process the session sends out of it (`( cmd & )`,
+  `setsid -f`, a tmux server it started) passes, and the same user can stop the helper anyway. Such
+  a process can list and revoke the operator's own machine logins, never a service's machine
+  login, and the operator's grants, which include grants the operator approved on any session. It
+  can also enroll a box through the helper (`agent-secrets enroll --helper`, open to any process of
+  the user) and read the operator's agent secrets. A revoke made this way records
+  `launcher:<credential id>` as its actor on every row it writes; a revoke from Dispatch still
+  records `human:<email>`.
+  `machine list` prints the credential, host, approver, issue and expiry times and state,
+  `grant list` the grant, secrets, how it was granted, approver, session, operator and expiry, and
+  `--json` prints the broker's body verbatim. `machine revoke` warns on stderr when it ends this
+  machine's own login, its id typed in any case.
+- A pending secret request names whom it waits on. `POST /v1/requests` and
+  `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
+  names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than
+  the current policy, so it is the person whose Inbox lists the request even after the secret's
+  owner tag changes; null when no person decides. `agent-secrets request` and
+  `agent-secrets status` print, after a waiting request's id and state, a line naming that approver
+  and where they decide it (`waiting for ada@example.com to approve it in Dispatch: <record page>`),
+  and the exec form's wait prints the same line in place of `approve or deny it …`. `--json` prints
+  the field verbatim; exit codes are unchanged (LEGION-666).
+- The secrets broker can sign in to an Amazon RDS or Aurora database by IAM token. When
+  `BROKER_DATABASE_URL` names a user and no password and its host ends in `.rds.amazonaws.com`, every
+  new pooled connection, and the migration lock watch's own connection, signs in with an RDS IAM
+  auth token minted for that user and host from the AWS SDK's default credentials, in the region
+  `AWS_REGION`, `AWS_DEFAULT_REGION` or the shared AWS config names (it needs `rds-db:connect` on
+  the database user), so no database password exists for RDS to rotate under the broker. Such a URL
+  must name that one host with `sslmode=verify-full` and an `sslrootcert` file, or the broker
+  refuses to start naming the host, since a token is a password for 15 minutes,
+  `sslmode=require` verifies nothing and `sslrootcert=system` holds no RDS CA. A password pgx reads
+  for the URL (`PGPASSWORD`, a passfile) keeps it on that password. The Envoy image ships the RDS global CA bundle at
+  `/etc/ssl/rds/global-bundle.pem`, outside the system trust store, so no binary in the image
+  trusts an RDS CA for any other connection. A URL with a password, or any other host, connects as
+  before (LEGION-662).
 - `GET /api/v1/me/answers` lists a person's own answers and replies on asks, newest first,
   with whether each answer is still current. `POST /api/v1/asks/{id}/answer` takes
   `expected_answer_at` to change the current answer; the change is another `ask.answered`
@@ -105,8 +173,61 @@
   a fence or indented code counts nothing, nor does a block the edit moved or reworded. An issue
   document's edit carries it beside the issue advice; a project document's edit, which before
   carried no advice, now carries `advice` holding the count alone (LEGION-470).
+- The secrets broker logs at boot how it signs in to its database, `database sign-in
+  method=rds-iam` or `method=password`, before it reaches for AWS or the database, so an operator
+  tells a token sign-in from a password one in the log rather than the task's environment.
 
 ### Changed
+
+- `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
+  naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
+  Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not
+  identify this pod", which reads as another pod's token. `POD_IDENTITY_MISMATCH` now means only a
+  token that does not prove the pod. A launcher that branches on the code presents the pod's
+  current token with the same key; the Legion daemon reads the new code as not permanent, keeps
+  the key, and enrolls it with the pod's current token, which it asks the shim for at its next
+  observation.
+- **Breaking:** `agent-secrets launcher login` and `launcher login-status` are removed, with no
+  alias: `agent-secrets machine login` and `machine login-status` replace them, beside
+  `machine list` and `machine revoke`. A script that still calls `launcher` gets the usage and
+  exit 2, so a session launcher gating on `launcher login-status` reads that as no login and starts
+  its sessions with no broker identity. Move every caller to `machine login` and
+  `machine login-status` before it pins this release. Every message that said to run
+  `agent-secrets launcher login`, from the CLI and from the helper, now names `machine login`.
+- The secrets broker takes no database password apart from its URL, and refuses to start while
+  `BROKER_DATABASE_PASSWORD` is set or `BROKER_DATABASE_URL` names its
+  `${BROKER_DATABASE_PASSWORD}` placeholder, naming the variable and why: on Amazon RDS it signs in
+  by IAM token, and any other database's password goes in the URL itself, URL-escaped. A deployment
+  that still sets either must stop before it runs this broker: put the password in the URL, or move
+  to an IAM-form URL on RDS. Going back to the password once a broker runs this release takes the
+  reverse order, since a broker on this release exits 1 at boot while either is set: roll the image
+  back to legion-envoy v7.6.0 or later, the 7.x releases that sign in by IAM token, which hold every
+  broker migration to date and still accept the variable. Once the Legion daemon sends no
+  `login_hint` (sjawhar/legion#1870), roll back to v7.10.0 or later instead: earlier brokers need
+  that hint on a service's machine login and answer the daemon's next fresh login with a 500. Then
+  restore the variable and the `${BROKER_DATABASE_PASSWORD}` placeholder in the URL together.
+  Undoing the configuration change that moved a deployment off the variable therefore brings no
+  broker up on this release. Before going back, check that the RDS master user does not hold
+  `rds_iam`, directly or through a role (if it does, its password sign-in is refused), and that its
+  secret's value is current. When IAM sign-in itself is what is broken, make the rollback one
+  change: the image and the variable in one task-definition revision, so no broker boots on this
+  release with the variable or on 7.x without a working sign-in.
+- Anyone signed in to Dispatch decides a service's machine login, such as the Legion daemon's, not
+  only the person its request names: the broker reads the service from the signed request, opens
+  its record with the approver `anyone` and ignores any `login_hint` it carries, and the decision,
+  the credential's chain re-check, the machine-login list and its revoke all follow that service,
+  so a login a daemon starts while still naming one person is anyone's to decide, and so is one a
+  broker before this change opened naming a person. The pending list keys on the record's stored
+  approver, so it shows every new service login to everyone, but a service login an older broker
+  opened naming a person is listed for that person alone, though anyone who types its code may
+  decide it. Every signed-in
+  person lists and revokes every service's login, each row naming who approved it (`approved_by`),
+  and Dispatch's machine-login page calls the list **Machine logins**. A person's own machine login
+  is unchanged: only the person it names decides it, and a person's login naming no one, or
+  `anyone`, is refused `400 REQUEST_INVALID` before any record opens. Every service's login spends
+  one shared rate-limit bucket, whatever service it names, and a person's machine login the bucket
+  of the person it names (`service`, `person:<login>`), so an invented service name buys no bucket
+  of its own (LEGION-664).
 
 - An upload's kind is read from its bytes, never from the type its client declares: it is an
   `image` only when `http.DetectContentType` reads its bytes as a PNG, JPEG, GIF or WebP, the
@@ -307,9 +428,60 @@
   or Claude Code plugin built from the same executor) keeps that URL from being sent at all,
   because its `dispatch_search` refuses the same rules before any request.
 
-- A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, or an attribute value nesting more than 100 arrays and objects, is outside the Proof schema (LEGION-465). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
+- A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A person's new comment on a document reaches the agents that wrote it, each once, on its own
+  `notifications.agent.<session_id>` topic, whatever the issue's route: a comment on a passage of
+  an issue's document or a project document, a comment on a whole project document, a suggestion,
+  and an edit of any of these. The writers are the session that created the document and every
+  session one of its versions credits, which includes an agent whose anchored comment credited it
+  on a new version. Before, a new comment found no author to route to, so the agent heard of it
+  only by subscribing to the issue's or document's own topic (LEGION-681). A document only people
+  wrote sends nothing new, since a person has no topic. A reply still reaches its thread's root
+  author and its parent's author alone, an ask reply its followers, and a comment on an issue's
+  conversation, which names no document, no author. An agent's comment still notifies nobody, so a
+  session commenting on a document it wrote is not told of its own comment. A writer the comment
+  @-mentions hears it once, from the mention: a new comment's `suppressed_authors` now names every
+  session a mention resolved to.
+- `scripts/dev-postgres.sh` reuses its `dispatch-pg` container rather than failing on the name: it
+  starts a stopped one and serves a running one, when the container runs the pinned pgvector
+  image. It refuses one on any other image, such as a `postgres:16` an older version of the script
+  created, whose missing `vector` extension failed Dispatch's migrations at `0072`. The refusal
+  names both images and prints the commands that move the container's data volume onto the pinned
+  image, read from `docker inspect` and quoted so a bind mount's path with a space pastes whole;
+  the script itself stops, removes and recreates nothing. `scripts/dev-broker.sh` boots Postgres
+  through it, so it refuses that container too, before it creates a database.
+- A document whose search vector would pass Postgres's limit on one vector (1,048,575 bytes of lexemes and positions) can be versioned. Text of words no two alike passes it well inside a document's 1 MiB, at about 700 KB of `w000001 w000002 …` or 475 KB of UUIDs, and every write of such text failed with `string is too long for tsvector`: the document's version, so every settlement of it, its upload, an issue titled with it and that title's duplicate check, and an ask block holding it. Migrations `0087`–`0088` build every search vector with `search_vector`, which indexes the whole text where its vector fits, exactly as before, and otherwise the longest of its first half, quarter, eighth, … that fits, cut between two words, so keyword search finds such a text by the whole words that open it and by no part of a word the cut would split. A body with no whitespace before its cut contributes none of its own words; an issue's key is always indexed whole (LEGION-505).
+- An issue title is at most 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after the trim), on creation and on a retitle; a longer one is `400 CAP_EXCEEDED`, named as the comment, message and ask caps name theirs, before the duplicate check reads the project's titles. Titles had no cap, so one stored title could be as long as a request allowed: every later creation in its project read it in the duplicate check, and the `409 POSSIBLE_DUPLICATE` message quoted it whole. Beside 2,000 production titles, one stored 800 KB title raised the check from about 0.1 s to 0.56 s. A new title of 20,000 distinct words (10,000 did not) beside an issue whose title shared one of them overflowed Postgres's default 2 MB stack in the duplicate check's snippet (`stack depth limit exceeded`, `500`); a title at the cap holds at most 501 lexemes. Production's longest title is 326 characters. The dashboard's create dialog and issue-header title field stop at the cap, and a retitle Dispatch refuses shows Dispatch's reason in the header instead of the generic failure line (LEGION-505).
+- The duplicate-title check no longer parses every title in the project on each creation. It read each stored title's lexemes by building them from the title as it ran, several times over for a title that shared a word with the new one, so its cost grew with every title in the project: beside 2,000 titles at the 1,000-character cap, an ordinary creation's check took 2.1–2.5 s and one at the cap 7.6 s. Migrations `0088`–`0089` store each title's own lexemes in `issues.title_lexemes`, which the issues trigger fills on every insert and retitle and `0089` fills for every issue stored before, under a table lock that no reparent deadlocks against; the check reads them, so a creation parses one title. Beside those 2,000 titles the check takes 56–95 ms, and beside 2,000 production titles 15–19 ms where it took 120–154 ms (Postgres 16, load 60–80). It answers the same candidates, in the same order. A candidate's snippet marks the words its title shares with the new title: with a parent, a word that is both the parent's and a part of a hyphenated word of the new title is no longer marked, where the snippet marked it beside parent `Legion` in `launch window legion` for the new title `legion-resolve launch window` (LEGION-505).
+- The delivery timeline and measures no longer log `a successfully concluded run has no job
+  matching the configured production_job_name` for a deploy run that skipped its production job.
+  GitHub lists a skipped call of a reusable workflow under the calling job's name alone, so a
+  dev-only run lists `production-apply` where a deploy lists `production-apply / production-apply`.
+  The skip is taken as the reason only while another run the same read judges holds a job by the
+  configured name, so a typo whose first part names a skipped job (`staging-apply /
+  production-apply`) still warns; a window with no production deploy in it warns for each of its
+  successful runs. Such a run still counts as no deploy. Every warning is now logged once per run
+  and configured job name for the life of the process rather than on every read: one dev-only run
+  had been logging the line twice every three minutes (LEGION-567).
+- A document opens in the editor however many documents the process has touched: the 1,000-room
+  cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
+  nothing still holds it. Before, every document opened since a restart kept its state and counted
+  against the cap, so editors were refused with 503 after about 1,000 (LEGION-513).
+- A document's pending authors now survive room release, process restart and overlapping Dispatch
+  tasks in `doc_pending_authors` (migration `0084`). A browser update is first an in-flight,
+  room-local credit (F); its append moves an unconsumed credit to the durable record (R) under the
+  document lock. A joined write records its authors in R in its content transaction. A version
+  reads R under that lock and may capture F only from its own room; after its transaction commits,
+  it deletes the R rows it listed and consumes the F credits it listed. The scoped rule means a
+  task can list another task's durable R records but never that task's F, while the same task can
+  consume F before its queued append can re-record an author. Each author is consequently pending
+  in F or R, or listed on one committed version, rather than in more than one of them. A settlement
+  that writes no version leaves R intact, and an upload that writes a replacement clears all R and
+  only the F credits present at its last room read. The document room can therefore go idle without
+  retaining author state or losing the authors a later version, ask or event must name
+  (LEGION-513).
 - `GET /api/v1/asks/open` and `GET /api/v1/me/answers` give an issue ask's `ref` as its item
   route, `/issues/<KEY>/asks/<id>`, where they gave `/issues/<KEY>?ask=<id>`, which the bare
   issue page does not read, so following it landed on the issue and not the ask. A document ask's
@@ -374,9 +546,27 @@
 - A table whose rows hold an escaped pipe in a code span parsed in time quadratic in its size: goldmark's table transformer checked every code span's text against every escaped pipe in the document, and 1 MiB of such rows took over two minutes. Dispatch takes the backslash out of those pipes itself, in one pass, and 1 MiB parses in about two seconds (LEGION-465).
 - An id outside nats.go's key alphabet (`ses:bad`) failed whatever met it in the interest and role buckets, since nats.go refuses such a key on every read, write and delete and the stores took that refusal for a failure. A role claim over such a holder, which an earlier build's bare-string claim or a direct bucket write can leave in the role bucket, wrote the claim and then answered 500. A caller could cause the same 500 itself: a session subscribed to a role topic outside the alphabet (`notifications.role.bad:role`, which subscribe accepts) got it on every unsubscribe of that topic, every unsubscribe of all its topics and every `DELETE /v1/interests/<id>`, and its interest stayed. An interest or claim stored under such a key, which only a direct bucket write makes, stopped the interest reaper or the role reaper at that key every five minutes, logging `reaper cycle failed` or `role claim reaper cycle failed` at ERROR. The handle every bucket opens through now names nats.go's refusal as the refusal it is (`bus.ErrInvalidKey`, naming the key), so each of these skips the key as it already skipped one past the key bound: the claim and the unsubscribe answer 200, and the reapers go on, with a WARN naming the key they cannot delete, which an operator removes by hand (`packages/envoy/AGENTS.md`). A `/v1` route given a session id or role outside the alphabet answers 400 naming it, where it answered 500 (503 on subscribe, 404 reading the interests of a session it holds none for), and Dispatch reads a 400 or 413 from `GET /v1/interests/<id>` as no interest, as it reads a 404 (LEGION-456).
 - Marking or unmarking a document's text, and checking whether a concurrent change removed the text a write inserted, walked the live tree one stack frame per level with no bound, where an authenticated peer can grow the tree through any number of small websocket updates. Each now refuses a node more than 1,000 levels deep, text included, as the document's reads do, and a peer's update that deepens the tree between a write's read and its transaction is answered `500 DOC_SCHEMA` rather than `500 INTERNAL` (LEGION-465).
-- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork (at `v1.50.1-sami.2` since the entry below), which walks the deleted children iteratively and carries the transactional GC fix, both open upstream as reearth/ygo#263 and #262 (LEGION-465).
-- Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.50.1-sami.2` (commit
-  `e792b8c7`, on upstream `main` at `4d6865dc`), which adds six ygo fixes to the two above, each
+- Deleting an element of a live document took one stack frame per level of nesting inside it, so an ordinary delete of a tree an authenticated peer had grown through any number of small websocket updates needed more stack than the goroutine had. Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork (at `v1.51.3-sami.1` since the entries below), which walks the deleted children iteratively and carries the transactional GC fix, both open upstream as reearth/ygo#263 and #262 (LEGION-465).
+- Dispatch pins `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.51.3-sami.1` (commit
+  `e5c1aacf`): upstream v1.51.2 and seven fixes, each open upstream as a reearth/ygo pull
+  request - #258 (carried as the fork's own #262), #260, #263, #266, #268, #269 and #291
+  (LEGION-535). A browser's document connection now gets a `SyncStatus` frame (Hocuspocus tag 8)
+  for every SyncStep2 or Update it sends, in the order it sent them: 1 once the room applied the
+  update, 0 when the room refused it (the connection stays open) or the connection is read-only
+  and the update adds something the room lacks. ygo defined the tag but never sent it, so the
+  dashboard's `@hocuspocus/provider` counted every edit as unsynced for the life of the
+  connection. A sync frame that does not decode now closes the connection with 1002 rather than
+  being dropped (#291). A room's broadcast of an update Dispatch writes is checked with ygo's
+  bundled stores' check, which applies no pending cap, rather than under the server's
+  `MaxPendingItems` (#268, which replaces the withdrawn #267): the room has already applied the
+  update, and its document still decodes under `MaxPendingItems`. A complete state resolves its
+  own dependencies through a worklist rather than a re-scan per step, so a chain-shaped state near
+  the pending cap no longer takes time quadratic in its size (#260). A merged update's skip has
+  parked the items after it upstream since v1.51.0 (#257). Upstream v1.51.1's depth check on the
+  values `YText` stores is the entry below's.
+- A mark attribute value nesting exactly 100 arrays and objects, which the schema admitted, is now outside it: ygo stores a mark as one value, the map of its attributes, so that mark reached 101 levels, and from ygo v1.51.1 (reearth/ygo#288) `YText.Insert`, `Format` and `ApplyDelta` panic on a value nested past 100. `pmdoc.Update` writes marks through all three and `MarkRange` through `Format`, so on that ygo an edit rewriting text that carried such a mark answered `500` from a recovered panic. The bound is stated once in terms of ygo's limit (`ygoValueNesting`): 100 for a node's attribute value, which ygo stores as it is, and 99 for a mark's; `MarkRange` checks the mark it is given before it writes. A stored document holding such a mark, which only a crafted client can write, is a tree outside the schema like any other: its reads and edits answer `409 DOC_SCHEMA` naming the repair, settlement writes no version of it and never writes it back, and an upload of replacement markdown repairs it (LEGION-535).
+- Dispatch pinned `github.com/reearth/ygo` to the `sjawhar/ygo` fork at `v1.50.1-sami.2` (commit
+  `e792b8c7`, on upstream `main` at `4d6865dc`), which adds six ygo fixes to #263 and #262, each
   open upstream (LEGION-496, LEGION-502, LEGION-484). Text no longer changes order when a document
   is encoded again: ygo folded a character into the run before it even when the two were typed
   toward different right-hand neighbours, so a browser joining a room, settlement's copy of a room

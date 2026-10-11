@@ -145,10 +145,9 @@ func (s *Service) refuseLostWrite(ctx context.Context, room string, fork *crdt.D
 	if actor != nil {
 		credited = *actor
 	}
-	state := s.room(room)
-	state.mu.Lock()
+	state := s.lockState(room)
 	participants := otherParticipants(state, credited)
-	state.mu.Unlock()
+	s.unlockState(room, state)
 	refusal := &ErrEditLost{Suggestion: write.loss.suggestion, Participants: participants}
 	if refusal.Suggestion == "" {
 		refusal.Ops = lost

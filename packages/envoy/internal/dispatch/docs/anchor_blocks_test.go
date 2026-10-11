@@ -122,7 +122,7 @@ func TestAnchorRefreshKeepsABlockIDPinnedAfterItReadTheRow(t *testing.T) {
 	}
 	state := service.room(artifactID)
 	state.mu.Lock()
-	generation := state.gen
+	generation := state.roomGeneration
 	state.mu.Unlock()
 
 	hold, err := service.store.Pool.Begin(context.Background())

@@ -81,9 +81,11 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	secret := rand.Text()
-	// The decision is the machine's and runs to its end: a caller that hangs up mid-request does
-	// not get to leave a registration half-recorded.
-	err = m.Handle(context.WithoutCancel(r.Context()), supervise.RequestRegister{
+	// The decision is the machine's and runs to its end, or to the daemon's stop: a caller that hangs
+	// up mid-request does not get to leave a registration half-recorded.
+	ctx, decided := s.decision(r, launch.Claim)
+	defer decided()
+	err = m.Handle(ctx, supervise.RequestRegister{
 		Claim:          launch.Claim,
 		Generation:     launch.Generation,
 		Session:        req.SessionID,
@@ -121,7 +123,9 @@ func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
-	err := m.Handle(context.WithoutCancel(r.Context()), supervise.RequestReady{
+	ctx, decided := s.decision(r, req.ClaimToken)
+	defer decided()
+	err := m.Handle(ctx, supervise.RequestReady{
 		Claim: req.ClaimToken, Generation: req.Generation, Session: req.SessionID,
 	})
 	if err != nil {
@@ -149,7 +153,9 @@ func (s *server) exit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, claim.InvalidSecret.Status, claim.InvalidSecret)
 		return
 	}
-	err := m.Handle(context.WithoutCancel(r.Context()), supervise.RequestExit{
+	ctx, decided := s.decision(r, req.ClaimToken)
+	defer decided()
+	err := m.Handle(ctx, supervise.RequestExit{
 		Claim: req.ClaimToken, Generation: req.Generation, Session: req.SessionID, Reason: req.Reason,
 	})
 	if err != nil {
@@ -190,7 +196,7 @@ func (s *server) claimFailure(w http.ResponseWriter, request string, token claim
 		writeJSON(w, http.StatusConflict, errorBody(refused.Error()))
 		return
 	}
-	s.log.Error("api: a claim request failed", "request", request, "claim", token, "error", err)
+	s.logFailure("api: a claim request failed", "request", request, "claim", token, "error", err)
 	writeJSON(w, http.StatusInternalServerError, errorBody(request+" failed: the daemon could not record it"))
 }
 

@@ -28,9 +28,8 @@ func states(report []State) map[Name]State {
 }
 
 // A deployment that satisfies everything, its image probed, renders every row of Table in its
-// order: the image rows present — codegraph installed, the one row that awaits a pod launch — the
-// live and withheld rows as CheckImage renders them (the probe pod's log and `legion state` then
-// read alike), the deployment rows present, and nothing open.
+// order: the image rows present, the live and withheld rows as CheckImage renders them (the probe
+// pod's log and `legion state` then read alike), the deployment rows present, and nothing open.
 func TestReportRendersEveryRowInTableOrder(t *testing.T) {
 	report := satisfied.Report()
 
@@ -68,13 +67,13 @@ func TestReportRendersEveryRowInTableOrder(t *testing.T) {
 	}
 }
 
-// The codegraph row, once the probe passed, is installed, not present: the probe proved the image
-// carries the CLI and the plugin, and the detail says a pod's agent gets the tool only once its
-// launch loads profile plugins (dispatch://LEGION-629), since every pod is launched
-// `--no-extensions` today. Before a probe reports, it is unchecked like every other image row.
-func TestTheCodeGraphRowIsInstalledOnceProbedAndUncheckedBefore(t *testing.T) {
+// The codegraph row, once the probe passed, is present like every other image row: the probe proved
+// the image carries the CLI and the plugin, and a pod's launch loads that plugin now that
+// LEGION-629 turned extension discovery on. Before a probe reports, it is unchecked like every
+// other image row.
+func TestTheCodeGraphRowIsPresentOnceProbedAndUncheckedBefore(t *testing.T) {
 	probed := states(satisfied.Report())[CodeGraph]
-	want := State{Name: CodeGraph, Status: StatusInstalled, Detail: "the image carries it (checked by the daemon's probe of the worker image, which passed); a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)"}
+	want := State{Name: CodeGraph, Status: StatusPresent, Detail: "checked by the daemon's probe of the worker image, which passed"}
 	if !reflect.DeepEqual(probed, want) {
 		t.Errorf("probed codegraph row = %+v, want %+v", probed, want)
 	}
@@ -138,7 +137,8 @@ func TestImageRowsAreUncheckedUntilAProbeReports(t *testing.T) {
 // when that line is already written. A decision on a satisfied row is moot, so the row stays
 // present.
 func TestDeploymentRowsArePresentDecidedOrOpen(t *testing.T) {
-	decided := map[Name]string{Secrets: "dispatch://LEGION-205 enrolls pods later", ModelFallback: "one model", ResourceLimits: "one tree per node"}
+	decided := map[Name]string{Secrets: "dispatch://LEGION-205 enrolls pods later", ModelFallback: "one model", ResourceLimits: "one tree per node", PoolCapacity: "the pool is sized for the trees, and the probe waits"}
+	full := "probe pod legion-probe-legion-1d10089a0000 is Unschedulable: 0/83 nodes are available: 25 Insufficient cpu"
 	for _, tc := range []struct {
 		name       string
 		deployment Deployment
@@ -164,6 +164,13 @@ func TestDeploymentRowsArePresentDecidedOrOpen(t *testing.T) {
 		{"every role reserved", satisfied, ResourceLimits, StatusPresent, "every role has CPU and memory requests and limits under runtime.kubernetes.resources"},
 		{"roles without a reservation", Deployment{Runtime: "kubernetes", RolesWithoutResources: []claim.Role{claim.RoleTester, claim.RoleController}}, ResourceLimits, StatusOpen, "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester, controller"},
 		{"a decided limits gap", Deployment{Runtime: "tmux", Decided: decided}, ResourceLimits, StatusDecided, "the tmux runtime sets no requests or limits on a pane"},
+
+		{"tmux runs no probe pod", Deployment{Runtime: "tmux"}, PoolCapacity, StatusPresent, "the tmux runtime runs no probe pod"},
+		{"the probe pod scheduled at once", satisfied, PoolCapacity, StatusPresent, "the image probe pod scheduled at its first attempt"},
+		{"the probe pod waited on capacity", Deployment{Runtime: "kubernetes", Probed: true, ProbeCapacityWaits: 2, ProbeCapacityReason: full}, PoolCapacity, StatusOpen,
+			"the image probe pod was Unschedulable 2 time(s) at boot before it scheduled: " + full + "; the pool had no room for its 250m / 1Gi reservation"},
+		{"a decided capacity gap", Deployment{Runtime: "kubernetes", Probed: true, ProbeCapacityWaits: 1, ProbeCapacityReason: full, Decided: decided}, PoolCapacity, StatusDecided,
+			"the image probe pod was Unschedulable 1 time(s) at boot before it scheduled: " + full + "; the pool had no room for its 250m / 1Gi reservation"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := states(tc.deployment.Report())[tc.row]
@@ -220,7 +227,8 @@ func TestOpenAndLogNameTheGapsAlone(t *testing.T) {
 // OpenFromConfiguration is what `legion start --check-config` prints: the open rows the file alone
 // decides, each as Report renders it — secrets where no broker is configured, resource-limits where
 // a role lacks a reservation — and never a configured broker's secrets row, whose login boot
-// measures, nor model fallback, which the probe or the plugin gate reads.
+// measures, nor model fallback, which the probe or the plugin gate reads, nor pool capacity, which
+// the probe's run measures.
 func TestOpenFromConfigurationNamesTheGapsTheFileAloneDecides(t *testing.T) {
 	lacking := []claim.Role{claim.RoleTester}
 	for _, tc := range []struct {
@@ -233,6 +241,7 @@ func TestOpenFromConfigurationNamesTheGapsTheFileAloneDecides(t *testing.T) {
 		{"a broker whose login is not issued, a role lacking", Deployment{Runtime: "kubernetes", AgentSecrets: true, RolesWithoutResources: lacking}, []Name{ResourceLimits}},
 		{"a broker whose login is not issued, every role reserved", Deployment{Runtime: "kubernetes", AgentSecrets: true}, nil},
 		{"fallback off alone", Deployment{Runtime: "kubernetes", AgentSecrets: true, ModelFallback: bootprobe.ModelFallbackOff}, nil},
+		{"a probe that waited on capacity alone", Deployment{Runtime: "kubernetes", AgentSecrets: true, Probed: true, ProbeCapacityWaits: 1, ProbeCapacityReason: "the pool is full"}, nil},
 		{"tmux", Deployment{Runtime: "tmux"}, []Name{Secrets, ResourceLimits}},
 		{"tmux, both decided", Deployment{Runtime: "tmux", Decided: map[Name]string{Secrets: "later", ResourceLimits: "one tree per node"}}, nil},
 	} {

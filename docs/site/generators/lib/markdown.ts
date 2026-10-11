@@ -28,23 +28,25 @@ interface Page {
   path: string;
   title: string;
   description: string;
-  /** The repository file the page is generated from, named in its opening notice. */
-  source: string;
+  /** The repository files the page is generated from, named in its opening notice. */
+  sources: readonly string[];
   /** The page's Markdown below the notice. */
   body: () => string;
 }
 
 /** Writes a generated page into the content directory the generator was given as its one
- *  argument: frontmatter, a notice naming the source file and the generator, then the body. */
-export function writePage({ path, title, description, source, body }: Page): void {
+ *  argument: frontmatter, a notice naming the source files and the generator, then the body. */
+export function writePage({ path, title, description, sources, body }: Page): void {
   const generator = relative(REPO_ROOT, Bun.main);
   const [contentDir, ...extra] = process.argv.slice(2);
   if (contentDir === undefined || extra.length > 0) {
     console.error(`usage: ${generator} <content dir>`);
     process.exit(2);
   }
-  if (!existsSync(join(REPO_ROOT, source))) {
-    throw new Error(`${generator} names ${source} as its source, and that file does not exist`);
+  for (const source of sources) {
+    if (!existsSync(join(REPO_ROOT, source))) {
+      throw new Error(`${generator} names ${source} as a source, and that file does not exist`);
+    }
   }
   const markdown = [
     "---",
@@ -53,7 +55,7 @@ export function writePage({ path, title, description, source, body }: Page): voi
     "editUrl: false",
     "---",
     "",
-    `> Generated from \`${source}\` by \`${generator}\`. Edit the source, not this page.`,
+    `> Generated from ${sources.map((source) => `\`${source}\``).join(" and ")} by \`${generator}\`. Edit the source, not this page.`,
     "",
     body(),
   ].join("\n");

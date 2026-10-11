@@ -19,7 +19,7 @@ import (
 
 // The load probe resolves every task agent and skill Legion's prompts name through the real Oh My
 // Pi's own agent and skill discovery, on the lane the probed Oh My Pi loads the plugins by: a pod's
-// two explicit roots with discovery off, or a pane's installed plugins. Only the real binary shows
+// two explicit roots beside its discovery, or a pane's installed plugins. Only the real binary shows
 // that the probe's imports of that discovery work and see what the launch sees, the profile's skill
 // settings included, since a session drops a skill they disable or ignore. The profile's one model
 // is an operator's provider nothing listens on, so no credential the machine carries decides the

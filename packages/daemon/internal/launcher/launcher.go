@@ -16,13 +16,23 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
+
+// WorkspaceRecreatedVariable is how a role launcher tells the generation it starts whether that
+// generation resumes a session in a workspace recreated since the session was last written: "true"
+// or "false", set on every generation, so no value from the container's environment reaches the
+// child. The Legion plugin tells the agent so in a message it saves to the session at its start,
+// ahead of the next turn (pi-legion, src/workspace-recreated.ts).
+const WorkspaceRecreatedVariable = "LEGION_WORKSPACE_RECREATED"
 
 // Config is the role-private launcher configuration. Token is read from the role-private
 // projected Secret before Run is called. PrivateDir is the role container's own memory-backed
@@ -243,15 +253,17 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 		return shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("generation %d already exited", command.Generation)}
 	}
 	m.mu.Unlock()
-	// A resume of a session the tree volume no longer holds is a launch failure, never a fresh
-	// agent: the same rule workspace-init enforces for a pod's first start.
+	env := mergeEnv(os.Environ(), command.Env)
+	recreated := false
 	if command.ResumeFile != "" {
-		if _, err := os.Stat(command.ResumeFile); err != nil {
-			result := shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("resume session file %s: %v", command.ResumeFile, err)}
+		var err error
+		if recreated, err = resumable(env, command.ResumeFile, m.cfg.Stderr); err != nil {
+			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 			m.remember(command.ID, body, result)
 			return result
 		}
 	}
+	env = mergeEnv(env, []string{WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
 	dir, err := m.writeFiles(command)
 	if err != nil {
 		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
@@ -259,7 +271,7 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 		return result
 	}
 	cmd := exec.Command(command.Argv[0], command.Argv[1:]...)
-	cmd.Env = mergeEnv(os.Environ(), command.Env)
+	cmd.Env = env
 	cmd.Stdout, cmd.Stderr = m.cfg.Stdout, m.cfg.Stderr
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// The orphan reaper must see this PID as the direct child before it can observe its exit.
@@ -391,6 +403,107 @@ func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 		}
 	}
 	return dir, nil
+}
+
+// resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included;
+// a test shortens it. It sits well inside the daemon's wait on a launcher's start, its boot timeout
+// plus its stop grace (130 s by default: runtime/sandbox's relaunch), so a lookup that gives up
+// answers before the daemon stops waiting.
+var resumeLookupTimeout = 30 * time.Second
+
+// resumeLookupBackoff is the wait before each retry of a session table lookup that could not reach
+// the database, doubling up to its last value until resumeLookupTimeout; a test shortens it.
+var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2 * time.Second, 4 * time.Second}
+
+// resumable refuses a resume of a session nothing holds, so it is a launch failure and never a fresh
+// agent: Oh My Pi starts a new session at a --resume path it finds empty. It looks where the child's
+// Oh My Pi will, by the storage the child's environment names: the session table when
+// OMP_SESSION_STORAGE is sql (the runtime's runtime.kubernetes.session_store postgres), through the
+// URL file OMP_SESSION_SQL_DSN_FILE names, and otherwise the session file on the issue's volume.
+//
+// It also reports whether the workspace the child works in, LEGION_WORKSPACE, was recreated since the
+// session was last written: provisioning recorded its creation later than that write
+// (workspace.Created), so the agent's last turns ran in a workspace that is gone and this one holds
+// only what was pushed. A workspace with no record, or a child with no workspace (the controller),
+// was not. A record that cannot be read, which an init container killed mid-write can leave, only
+// decides that notice: it is written to log and taken as no record, and the resume goes ahead.
+func resumable(env []string, file string, log io.Writer) (recreated bool, err error) {
+	written, err := sessionWritten(env, file)
+	if err != nil {
+		return false, err
+	}
+	dir := envValue(env, "LEGION_WORKSPACE")
+	if dir == "" {
+		return false, nil
+	}
+	created, ok, err := workspace.Created(dir)
+	if err != nil {
+		if log != nil {
+			fmt.Fprintf(log, "legion launcher: resume session %s: %v; the workspace is taken as not recreated\n", file, err)
+		}
+		return false, nil
+	}
+	return ok && written.Before(created), nil
+}
+
+// sessionWritten is when the session a resume names was last written, from where the child's Oh My
+// Pi keeps it (resumable), refusing a session nothing holds. A session table it cannot reach is
+// asked again after each of resumeLookupBackoff's waits until resumeLookupTimeout, the URL file read
+// afresh each time, as a database that is briefly unreachable must not fail the launch; a session
+// the table answers it does not hold, or a URL file that is missing or empty, is refused at once.
+func sessionWritten(env []string, file string) (time.Time, error) {
+	if strings.TrimSpace(envValue(env, ompsessions.StorageVariable)) != ompsessions.SQLStorage {
+		info, err := os.Stat(file)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("resume session file %s: %v", file, err)
+		}
+		return info.ModTime(), nil
+	}
+	dsnFile := strings.TrimSpace(envValue(env, ompsessions.DSNFileVariable))
+	if dsnFile == "" {
+		return time.Time{}, fmt.Errorf("resume session %s: %s is %s and %s names no file", file, ompsessions.StorageVariable, ompsessions.SQLStorage, ompsessions.DSNFileVariable)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), resumeLookupTimeout)
+	defer cancel()
+	for attempt := 0; ; attempt++ {
+		dsn, err := ompsessions.ReadDSN(dsnFile)
+		if err != nil {
+			return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
+		}
+		written, found, err := lookupWritten(ctx, dsn, file)
+		switch {
+		case err == nil && found:
+			return written, nil
+		case err == nil:
+			return time.Time{}, fmt.Errorf("resume session %s: the session table holds no such session", file)
+		}
+		wait := resumeLookupBackoff[min(attempt, len(resumeLookupBackoff)-1)]
+		select {
+		case <-ctx.Done():
+			return time.Time{}, fmt.Errorf("resume session %s: %v (after %d attempts in %s)", file, err, attempt+1, resumeLookupTimeout)
+		case <-time.After(wait):
+		}
+	}
+}
+
+// lookupWritten is one session table lookup of file in the database at dsn.
+func lookupWritten(ctx context.Context, dsn, file string) (time.Time, bool, error) {
+	conn, err := ompsessions.ConnectURL(ctx, dsn)
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	defer conn.Close(context.Background())
+	return ompsessions.Written(ctx, conn, file)
+}
+
+// envValue is name's value in env, the last entry naming it, "" when none does.
+func envValue(env []string, name string) string {
+	for i := len(env) - 1; i >= 0; i-- {
+		if value, ok := strings.CutPrefix(env[i], name+"="); ok {
+			return value
+		}
+	}
+	return ""
 }
 
 func mergeEnv(base, updates []string) []string {

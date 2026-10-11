@@ -138,18 +138,22 @@ func stillAllowed(set *policy.Set, name, frozenDecision, decidedBy string, reque
 		return nil
 	case frozenDecision == policy.Automatic && !slices.Contains(requester.Withheld, name):
 		return fmt.Errorf("%w: the current policy requires approval for %s", ErrGrantNotLive, name)
-	case !record.MayDecide(record.KindAgentSecret, d.Approver, decidedBy):
+	case !record.MayDecide(record.KindAgentSecret, d.Approver, "", decidedBy):
 		return fmt.Errorf("%w: %s now needs its owner's approval, which this grant does not have", ErrGrantNotLive, name)
 	}
 	return nil
 }
 
+// Get reads one request by id. Its Approver is the approver column of its credential-request
+// record, the column PendingForApprover lists the record by, so the request names exactly the
+// person whose list shows it; a request with no record has none.
 func (m *Machine) Get(ctx context.Context, id string) (Request, error) {
 	var r Request
 	var enrollmentID string
-	err := m.Store.Pool.QueryRow(ctx, `select r.id, r.state, r.enrollment_id, r.decided_at, r.decided_by, r.decision_detail, r.record_id,
+	err := m.Store.Pool.QueryRow(ctx, `select r.id, r.state, r.enrollment_id, r.decided_at, r.decided_by, r.decision_detail, r.record_id, cr.approver,
 		(select g.id::text from grants g where g.request_id=r.id and g.revoked_at is null limit 1)
-		from requests r where r.id=$1`, id).Scan(&r.ID, &r.State, &enrollmentID, &r.DecidedAt, &r.DecidedBy, &r.Detail, &r.RecordID, &r.GrantID)
+		from requests r left join credential_requests cr on cr.id = r.record_id where r.id=$1`, id).
+		Scan(&r.ID, &r.State, &enrollmentID, &r.DecidedAt, &r.DecidedBy, &r.Detail, &r.RecordID, &r.Approver, &r.GrantID)
 	if err != nil {
 		return Request{}, err
 	}
@@ -291,13 +295,16 @@ const pendingForApproverQuery = `select cr.id, cr.kind, cr.body, cr.created_at, 
 	left join enrollments enr on enr.id = cr.enrollment_id
 	where (
 		cr.approver in ($1, $2) and cr.kind='agent_secret' and cr.id in (select r.record_id from requests r where r.state='pending')
-		or cr.approver=$1 and cr.kind='launcher_credential' and not exists (
+		or cr.approver in ($1, $2) and cr.kind='launcher_credential' and not exists (
 			select 1 from credential_request_events ev where ev.record_id=cr.id and ev.event in ('approved','denied','expired','cancelled'))
 	) order by cr.created_at desc`
 
 // PendingForApprover lists every still-pending credential-request record — of either kind — that
 // approver may decide, newest first: GET /v1/pending's exact contract. That is every record naming
-// approver, and every agent_secret record whose approver is record.AnyoneApprover. The rule for
+// approver, and every record whose approver is record.AnyoneApprover: a request for a shared
+// human-tier secret, and a service's machine login. A service's login a broker from before that
+// rule opened names a person instead and is listed for that person alone, though anyone who types
+// its code may decide it (record.MayDecide). The rule for
 // pending, which ReadRecord applies too: an agent_secret record is pending while its request is.
 // Every writer moves the request out of 'pending' together with the record's terminal event
 // (store.EndPendingRequests, ApplyDecision), but a request an ended enrollment cancelled before

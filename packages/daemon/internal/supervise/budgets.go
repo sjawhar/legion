@@ -86,14 +86,19 @@ func (m *Machine) chargePrompt(ctx context.Context, why string) error {
 	if m.held != nil {
 		return m.suspendHeld(ctx)
 	}
-	if err := m.suspendProcess(ctx); err != nil {
+	retires := m.claim.Budgets.PromptRetires + 1
+	last := retires >= m.deps.Limits.PromptRetires
+	retirement := m.suspendProcess
+	if last {
+		retirement = m.endProcess // the last retirement fails the claim, which does not run again
+	}
+	if err := retirement(ctx); err != nil {
 		return fmt.Errorf("retire %s after %d prompt failures: suspend: %w", m.claim.Token, failures, err)
 	}
-	retires := m.claim.Budgets.PromptRetires + 1
 	m.claim.Budgets.PromptRetires = retires
 	m.log.Warn("supervise: retired after prompt failures", "why", why, "promptFailures", failures,
 		"relaunchCycle", retires, "limit", m.deps.Limits.PromptRetires)
-	if retires >= m.deps.Limits.PromptRetires {
+	if last {
 		m.claim.Budgets.PromptFailures = failures
 		return m.fail(ctx, "prompt retirements ran out")
 	}

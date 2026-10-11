@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -79,7 +80,7 @@ type Claim struct {
 	// Every relaunch resumes that recorded session and refuses another one.
 	Session     string
 	SessionFile string
-	// WorkspaceLost is a claim whose session was lost with the tree volume it lived on — the one
+	// WorkspaceLost is a claim whose session was lost with the issue's volume it lived on — the one
 	// exception to resuming the agent a claim recorded. It records no session, and every launch
 	// recreates its workspace, fresh, until a new agent registers.
 	WorkspaceLost bool
@@ -115,13 +116,24 @@ type Claim struct {
 	SuspensionHeld bool
 }
 
+// ClaimView is a claim as its machine last published it (Machine.View), with what only the decision
+// in flight knows.
+type ClaimView struct {
+	Claim
+	// Stopping is whether the decision in flight is stopping the claim's process for good — a
+	// suspension, a failure, a release, a root's exit (endProcess, release) — while the claim still
+	// shows the state it is leaving. A process retired and relaunched in one decision
+	// (chargePrompt, the registration deadline) is not stopping: its claim keeps its role.
+	Stopping bool
+}
+
 // treeRoot is whether the claim is its tree's root claim (claim.IsTreeArchitect), which ends only
 // when its tree closes.
 func (c Claim) treeRoot() bool { return claim.IsTreeArchitect(c.Role, c.Issue, c.Tree) }
 
 // Event is everything that reaches a machine. The set is sealed: RuntimeObservation,
 // StreamHello, StreamTurnStart, StreamTurnEnd, StreamClosed, StreamLateRefusal, PromptAcked,
-// PromptRefused, Timer, TreeVolumeLost, and the nine requests. The transition table has a row or a
+// PromptRefused, Timer, IssueVolumeLost, and the nine requests. The transition table has a row or a
 // named ignore for every one of them in every state.
 type Event interface{ isEvent() }
 
@@ -203,9 +215,9 @@ type Deps struct {
 	// to the agent's working copy before the task. nil, for a daemon with no GitHub Apps, adopts
 	// nothing.
 	Identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
-	// VolumeLost is told of a claim whose tree volume was found lost as it relaunches that claim
-	// fresh, so the daemon can tell the tree's other claims (TreeVolumeLost): their sessions were on
-	// the same volume. nil tells no one.
+	// VolumeLost is told of a claim whose issue's volume was found lost as it relaunches that claim
+	// fresh, so the daemon can tell the issue's other claims (IssueVolumeLost): their sessions were
+	// on the same volume. nil tells no one.
 	VolumeLost func(c Claim)
 	// PhaseHolds says whether issue is still in phase: the workflow enqueues a task for the phase
 	// its issue was in, and the outbox refuses to start a role for a phase the issue has left
@@ -335,6 +347,16 @@ type Machine struct {
 	// goroutines counts sends whose outcome has not been handled yet; idle wakes Wait.
 	goroutines int
 	idle       *sync.Cond
+	// view is the claim View reports: published under mu as every locked section that can change
+	// the claim ends (unlock) and at every write of the claim (persist), and read without mu, so a
+	// reader never waits on a decision in flight. stopping is whether that decision is stopping
+	// the claim's process for good (ClaimView.Stopping).
+	view     atomic.Pointer[ClaimView]
+	stopping bool
+	// deciding is the event the decision in flight handles, nil between decisions (Deciding). It
+	// has a lock of its own, held only to set, clear or read it, so a reader never waits on mu.
+	decidingMu sync.Mutex
+	deciding   Event
 }
 
 type sending struct {
@@ -378,6 +400,7 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 	case StateWorking:
 		m.askFirst = true
 	}
+	m.publish()
 	return m, nil
 }
 
@@ -390,10 +413,11 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 // Handle returns when the decision is made, which includes the runtime call it makes: a stop
 // waits out its grace, a resume waits out the previous incarnation. A caller feeding many claims
 // from one source hands each machine its events on its own goroutine, so one claim's stop does
-// not hold another's hello.
+// not hold another's hello. Meanwhile Deciding names ev, whoever the caller.
 func (m *Machine) Handle(ctx context.Context, ev Event) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlock()
+	m.decide(ev)
 	if token := claimOf(ev); token != m.claim.Token {
 		return fmt.Errorf("supervise: %T for claim %s reached the machine of %s", ev, token, m.claim.Token)
 	}
@@ -437,18 +461,31 @@ func (m *Machine) Handle(ctx context.Context, ev Event) error {
 
 // ReleaseUncertainLaunch is the only path out of the persisted uncertain-launch state. The daemon
 // calls it only after reconciliation proves the unrecorded predecessor absent or reaped; concurrent
-// old-pane hellos move the state first, so the caller does not open a second pane.
+// old-pane hellos move the state first, so the caller does not open a second pane. The release is
+// written, queued at the generation the claim had, so the store and memory agree whatever the
+// relaunch then meets: a refused admission leaves both queued. A release the store does not take
+// is undone, the claim left launch_uncertain in both. A stop between the release and the launch's
+// own write leaves the claim stored queued at that generation, which ReleasedLaunch tells apart.
 func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlock()
 	if m.claim.State != StateLaunchUncertain || m.claim.Locator != nil {
 		return false, nil
 	}
 	m.claim.State = StateQueued
 	if err := m.persist(ctx); err != nil {
+		m.claim.State = StateLaunchUncertain
 		return false, err
 	}
 	return true, nil
+}
+
+// ReleasedLaunch is whether a stored claim is an uncertain launch ReleaseUncertainLaunch released
+// and no launch then recorded: queued at a generation above zero, with no process. A claim is
+// created queued at generation zero, and only a release makes one queued again after a launch, so
+// the daemon's next boot counts such a claim as a launch to finish.
+func (c Claim) ReleasedLaunch() bool {
+	return c.State == StateQueued && c.Generation > 0 && c.Locator == nil
 }
 
 // StartedBy records the outbox row of the start being run against this claim, so a stop written
@@ -457,7 +494,7 @@ func (m *Machine) ReleaseUncertainLaunch(ctx context.Context) (bool, error) {
 // includes a held suspension (holdSuspension), which the start drops.
 func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlock()
 	if row <= m.claim.LastStartRow {
 		return nil
 	}
@@ -502,13 +539,67 @@ func (c Claim) ServingRun() uint64 {
 	return c.ServingGeneration
 }
 
-// Claim is a copy of the claim as the machine holds it now.
+// Claim is a copy of the claim as the machine holds it now. It waits for the decision in flight,
+// so what it reports is what that decision left: a check a decision must not race reads it here.
 func (m *Machine) Claim() Claim {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.current()
+}
+
+// View is a copy of the claim as the machine last published it: as its latest decision left it, or
+// as the decision in flight last tried to write it to the store. It never waits, where Claim waits
+// out a decision that holds the machine through its runtime call — a Sandbox relaunch waits minutes
+// for its pods — so a reader of every claim, like the operator's listing, reads View.
+func (m *Machine) View() ClaimView {
+	v := *m.view.Load()
+	v.Claim = copyClaim(v.Claim)
+	return v
+}
+
+// Deciding is the event the decision in flight handles (Handle), or nil when the machine decides
+// nothing. It never waits on the decision.
+func (m *Machine) Deciding() Event {
+	m.decidingMu.Lock()
+	defer m.decidingMu.Unlock()
+	return m.deciding
+}
+
+// decide publishes ev as the event the decision now beginning handles (Deciding), and unlock
+// clears it. The caller holds mu.
+func (m *Machine) decide(ev Event) {
+	m.decidingMu.Lock()
+	defer m.decidingMu.Unlock()
+	m.deciding = ev
+}
+
+// current is a copy of the claim as the machine holds it now, with what only memory holds. The
+// caller holds mu.
+func (m *Machine) current() Claim {
 	c := copyClaim(m.claim)
 	c.SuspensionHeld = m.held != nil
 	return c
+}
+
+// publish makes the claim as the machine holds it now the one View reports. The caller holds mu.
+func (m *Machine) publish() {
+	m.view.Store(&ClaimView{Claim: m.current(), Stopping: m.stopping})
+}
+
+// stoppingProcess marks the claim's process as being stopped for good, for View, until the runtime
+// call that stops it returns; the end of the decision publishes what it left. The caller holds mu.
+func (m *Machine) stoppingProcess() func() {
+	m.stopping = true
+	m.publish()
+	return func() { m.stopping = false }
+}
+
+// unlock ends a locked section that may have changed the claim: it publishes the claim, says the
+// machine decides nothing, then releases mu.
+func (m *Machine) unlock() {
+	m.publish()
+	m.decide(nil)
+	m.mu.Unlock()
 }
 
 // OnTerminal installs the daemon callback for durable ready and failed transitions.
@@ -651,7 +742,7 @@ func (m *Machine) dropStale(event, fence, got, held string) {
 // failure and is tried again at once, waiting out the same process, until the budget runs out;
 // only a start that succeeds forgets it. A launch that fails stops the process it let go
 // (stopPrevious), whichever step failed. A launch the tree lifecycle refuses (checkLaunch) starts
-// nothing and is charged nothing.
+// nothing and is charged nothing, and so is one whose context ended under it — the daemon's stop.
 func (m *Machine) launch(ctx context.Context) error {
 	if err := m.checkLaunch(ctx); err != nil {
 		return err
@@ -674,6 +765,13 @@ func (m *Machine) launch(ctx context.Context) error {
 			m.log.Info("supervise: launched", "generation", m.claim.Generation, "incarnation", loc.Incarnation,
 				"resumed", m.claim.SessionFile != "")
 			return m.persist(ctx)
+		}
+		if ctx.Err() != nil {
+			// The runtime refused nothing: the launch ended with its context. The claim stays
+			// launching with no process recorded, which the next boot launches again once its orphan
+			// reconciliation has reaped every process no claim records, the one let go included.
+			m.log.Info("supervise: launch cut short; its context ended", "generation", m.claim.Generation, "error", err)
+			return err
 		}
 		err = errors.Join(err, m.stopPrevious(ctx))
 		m.claim.Budgets.LaunchFailures++
@@ -716,7 +814,7 @@ func (m *Machine) stopPrevious(ctx context.Context) error {
 
 // died is the claim's process found gone — or found to be some other process — while it was
 // live: one launch failure, and the same session relaunched after it, or failed when the budget
-// is spent. A resume that found the tree volume lost is the exception (relaunchFresh). A task whose
+// is spent. A resume that found the issue's volume lost is the exception (relaunchFresh). A task whose
 // turn the process was running goes back to waiting first (interrupted), for the relaunch to send,
 // and a death with work outstanding is counted as one (chargeDeath), failing the claim at the limit.
 // A process that dies while a suspension is held leaves the claim suspended instead (endHeld).
@@ -738,15 +836,16 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 	return m.relaunchAfterFailure(ctx)
 }
 
-// relaunchFresh is a resume whose workspace-init found the tree volume lost, the session file with
-// it: resuming again would fail the same way on every attempt until the budget ran out. It is the
-// one exception to the same-agent rule. The claim drops the session it recorded and relaunches as a
-// fresh session that recreates its workspace from the issue's branch, and the agent that registers
-// next is the session it resumes from then on. The volume ended the process, not the launch, so no
-// launch failure is charged; the fresh launch has no session to find missing, so it cannot end this
-// way again. The daemon is told first: the tree's other claims kept their sessions on that volume.
+// relaunchFresh is a resume whose workspace-init found the issue's volume lost, the session file
+// with it: resuming again would fail the same way on every attempt until the budget ran out. It is
+// the one exception to the same-agent rule. The claim drops the session it recorded and relaunches
+// as a fresh session that recreates its workspace from the issue's branch, and the agent that
+// registers next is the session it resumes from then on. The volume ended the process, not the
+// launch, so no launch failure is charged; the fresh launch has no session to find missing, so it
+// cannot end this way again. The daemon is told first: the issue's other claims kept their sessions
+// on that volume.
 func (m *Machine) relaunchFresh(ctx context.Context) error {
-	m.log.Warn("supervise: the tree volume was lost with the session; relaunching a fresh session", "session", m.claim.Session)
+	m.log.Warn("supervise: the issue's volume was lost with the session; relaunching a fresh session", "session", m.claim.Session)
 	m.loseSession()
 	if m.deps.VolumeLost != nil {
 		m.deps.VolumeLost(copyClaim(m.claim))
@@ -754,10 +853,18 @@ func (m *Machine) relaunchFresh(ctx context.Context) error {
 	return m.launch(ctx)
 }
 
-// loseSession drops the session the claim recorded, which lived on a tree volume since lost: the
-// claim expects no session until a new agent registers, and its launches recreate the workspace.
+// loseSession drops the session the claim recorded, which lived on an issue's volume since lost:
+// the claim expects no session until a new agent registers, and its launches recreate the workspace.
 func (m *Machine) loseSession() {
-	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", true
+	m.forgetSession()
+	m.claim.WorkspaceLost = true
+}
+
+// forgetSession drops the session the claim recorded and any loss recorded with it, leaving the
+// claim as one no agent has registered for: the next launch is a fresh spawn that provisions its
+// workspace anew. The issue's close releases the volume the session lived on (table's issueClose).
+func (m *Machine) forgetSession() {
+	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = "", "", false
 }
 
 // fail puts the claim where nothing relaunches it: its timers stop, its locator goes, and the
@@ -766,7 +873,7 @@ func (m *Machine) loseSession() {
 // on until the tree closes; a suspension that fails is logged, and the claim fails all the same.
 func (m *Machine) fail(ctx context.Context, why string) error {
 	if loc := m.claim.Locator; loc != nil {
-		if err := m.suspendProcess(ctx); err != nil {
+		if err := m.endProcess(ctx); err != nil {
 			m.log.Error("supervise: could not suspend the failed claim's process", "incarnation", loc.Incarnation, "error", err)
 		}
 	}
@@ -786,6 +893,7 @@ func (m *Machine) fail(ctx context.Context, why string) error {
 // runs. It is the one place the machine hands the runtime a claim to end, so the claim is taken
 // once, from the claim the machine holds, for the operator's stop, the tree's close, and an exit.
 func (m *Machine) release(ctx context.Context) error {
+	defer m.stoppingProcess()()
 	if err := m.deps.Runtime.Release(ctx, runtime.Known{Claim: m.claim.Token, Locator: m.claim.Locator}); err != nil {
 		return fmt.Errorf("release %s: %w", m.claim.Token, err)
 	}
@@ -794,13 +902,23 @@ func (m *Machine) release(ctx context.Context) error {
 
 // suspendProcess asks the runtime to stop the claim's process and keep its session — release's
 // counterpart for a claim that goes on — and lets the stopped process go, for the next launch of
-// the same session to wait out. A suspension that fails leaves the claim holding its process.
+// the same session to wait out. A suspension that fails leaves the claim holding its process. A
+// claim whose process is retired and relaunched in one decision (chargePrompt, the registration
+// deadline) calls it directly; one that does not run again afterwards calls endProcess.
 func (m *Machine) suspendProcess(ctx context.Context) error {
 	if err := m.deps.Runtime.Suspend(ctx, *m.claim.Locator); err != nil {
 		return err
 	}
 	m.letGo()
 	return nil
+}
+
+// endProcess is suspendProcess for a claim that does not run again afterwards — suspended, failed,
+// or a root that exited — so View says the process is being stopped (ClaimView.Stopping) while the
+// runtime stops it, and nothing is routed to the session it stops.
+func (m *Machine) endProcess(ctx context.Context) error {
+	defer m.stoppingProcess()()
+	return m.suspendProcess(ctx)
 }
 
 // retire ends the claim: nothing of it runs any more and nothing relaunches it.
@@ -934,6 +1052,9 @@ func (m *Machine) persist(ctx context.Context) error {
 	if !holdsCapability(m.claim.State) {
 		m.claim.CapabilityHash = nil
 	}
+	// Published here as well as when the decision ends: a launch writes the claim before it waits
+	// in the runtime, and View then shows the launch rather than what it replaced.
+	m.publish()
 	return m.deps.Store.PutClaim(ctx, m.stored())
 }
 
@@ -979,7 +1100,7 @@ func claimOf(ev Event) claim.Token {
 		return ev.Claim
 	case Timer:
 		return ev.Claim
-	case TreeVolumeLost:
+	case IssueVolumeLost:
 		return ev.Claim
 	case RequestSpawn:
 		return ev.Claim
@@ -994,6 +1115,8 @@ func claimOf(ev Event) claim.Token {
 	case RequestStop:
 		return ev.Claim
 	case RequestTreeClose:
+		return ev.Claim
+	case RequestIssueClose:
 		return ev.Claim
 	case RequestOperatorClose:
 		return ev.Claim

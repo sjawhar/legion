@@ -36,8 +36,8 @@ func TestMain(m *testing.M) {
 	// test-created repository ever registers a root with the operator's long-running watchman.
 	// watchman drops a root once its directory is deleted, so without this, the roots that pile
 	// up are the ones from a run this devbox's load killed before t.TempDir's cleanup ran. A test
-	// that sets its own JJ_CONFIG afterward (push_test.go's commit-trailer overlay, treeVolume's
-	// isolated one) still wins: os.Environ() is read fresh by every exec.Command.
+	// that sets its own JJ_CONFIG afterward (issueVolume's isolated one) still wins: os.Environ() is
+	// read fresh by every exec.Command.
 	configDir, err := os.MkdirTemp("", "legion-test-jj-config")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "TestMain:", err)
@@ -331,10 +331,8 @@ func TestDispatchersAnswerHelpWithTheirSubcommands(t *testing.T) {
 		table   map[string]command
 	}{
 		{"claims", claimsCommands},
-		{"handoff", handoffCommands},
 		{"workspace-init", workspaceInitCommands},
 		{"controller", controllerCommands},
-		{"threads", threadsCommands},
 	} {
 		var out, errb bytes.Buffer
 		code := run(context.Background(), []string{"legion", tc.command, "--help"}, &out, &errb)
@@ -592,6 +590,7 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 		{extra: "envoy_url: not a url\n", says: "envoy_url"},
 		{drop: "dispatch_token_file: ./dispatch-token\n", says: "dispatch_token_file is required when dispatch_url is configured"},
 		{extra: "nats_nkey_seed_file: ./nats-seed\nprovider_keys: {NATS_NKEY_SEED: NATS_NKEY_SEED_TESTS}\n", says: "provider_keys names NATS_NKEY_SEED, the launch secret every launch carries"},
+		{extra: "provider_keys: {GH_TOKEN: GH_TOKEN_TESTS}\n", says: "provider_keys names GH_TOKEN, which the daemon sets on every pane and pod"},
 	} {
 		config, marker := workflowConfig(t, 13370, variant.extra)
 		if variant.drop != "" {
@@ -619,9 +618,8 @@ func TestStartCheckConfigNamesTheBrokenKey(t *testing.T) {
 
 // --check-config makes every refusal boot makes from the configuration, the environment and the
 // files they name before boot writes anything (daemon.CheckStart, which boot's prepare shares): the
-// operator bearer's file, the Dispatch bearer's file, the instructions file, the OMP invocation,
-// and the host's gh, git and jj. Each is refused in boot's words, no App key command runs, and no
-// state directory is made.
+// operator bearer's file, the Dispatch bearer's file, the instructions file and the OMP invocation.
+// Each is refused in boot's words, no App key command runs, and no state directory is made.
 func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 	legionState(t)
 	for _, tc := range []struct {
@@ -651,10 +649,6 @@ func TestStartCheckConfigRefusesWhatBootRefuses(t *testing.T) {
 		{"no OMP invocation", "", func(t *testing.T, _ string) { t.Setenv("LEGION_OMP_PATH", "") },
 			func(string) string {
 				return "legion start: omp_invocation is not set: set it to 'mise x <tool> -- omp', or set LEGION_OMP_PATH to an absolute executable path\n"
-			}},
-		{"a relative LEGION_GIT_PATH", "", func(t *testing.T, _ string) { t.Setenv("LEGION_GIT_PATH", "bin/git") },
-			func(string) string {
-				return `legion start: LEGION_GIT_PATH is not an absolute executable path: "bin/git"` + "\n"
 			}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -945,33 +939,33 @@ current-context: legion-daemon
 }
 
 // After Config OK, --check-config prints one line per deployment capability the file alone leaves
-// open (daemon.Deployment: secrets with no broker configured, resource-limits with a role lacking
-// CPU and memory requests and limits), each in the words boot logs it with and naming the
-// legion.yaml line that records a decision — and exits 0, because a gap is reported, never
-// refused. A decision quiets its row, every role reserved closes the resource-limits row, and a
-// configured broker's secrets row is boot's to measure, so the check says nothing of it. Model
-// fallback is the probe's and never printed here.
+// open (daemon.Deployment: secrets with no broker configured), each in the words boot logs it with
+// and naming the legion.yaml line that records a decision — and exits 0, because a gap is reported,
+// never refused. A decision quiets its row, and a configured broker's secrets row is boot's to
+// measure, so the check says nothing of it. The resource-limits row is never open on a Kubernetes
+// file: the loader fills every role's reservation from the daemon's defaults, with or without a
+// `resources` block and whatever fields it sets (config.RoleResources.Reserved); the tmux cases
+// (tmuxCapabilityGaps) are where it is open. Model fallback is the probe's, and pool capacity the
+// probe's run's, and neither is printed here.
 func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 	legionState(t)
 	const everyRole = `    resources:
-      architect: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
-      planner: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
-      implementer: {requests: {cpu: "1", memory: 2Gi}, limits: {cpu: "4", memory: 6Gi}}
-      tester: {requests: {cpu: "2", memory: 4Gi}, limits: {cpu: "4", memory: 12Gi}}
-      reviewer: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
-      merger: {requests: {cpu: 500m, memory: 1Gi}, limits: {cpu: "2", memory: 3Gi}}
+      architect: {cpu: 500m, memory: 1Gi}
+      planner: {cpu: 500m, memory: 1Gi}
+      implementer: {cpu: "1", memory: 2Gi}
+      tester: {cpu: "2", memory: 4Gi}
+      reviewer: {cpu: 500m, memory: 1Gi}
+      merger: {cpu: 500m, memory: 1Gi}
 `
 	const secretsGap = "capability secrets is open: runtime.kubernetes.agent_secrets is not configured; to record a decision, add to legion.yaml: capabilities.decided.secrets: \"<reason>\"\n"
 	for _, tc := range []struct{ name, extra, want string }{
-		{"nothing reserved, no broker", "", secretsGap +
-			"capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: architect, planner, implementer, tester, reviewer, merger; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"},
-		{"a role with limits alone", "    resources: {tester: {limits: {cpu: \"4\", memory: 12Gi}}}\n", secretsGap +
-			"capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: architect, planner, implementer, tester, reviewer, merger; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"},
-		{"every role reserved", everyRole, secretsGap},
-		{"the controller's pod unreserved under controller: daemon", everyRole + "controller: daemon\n", secretsGap +
-			"capability resource-limits is open: roles without CPU and memory requests and limits under runtime.kubernetes.resources: controller; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: \"<reason>\"\n"},
-		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example, operator: operator@example.com}\n", ""},
-		{"both decided", "capabilities:\n  decided:\n    secrets: \"dispatch://LEGION-205 enrolls pods later\"\n    resource-limits: one tree per node\n", ""},
+		{"no resources block, no broker: every role at the defaults", "", secretsGap},
+		{"a role with one field set, the other the default", "    resources: {tester: {memory: 12Gi}}\n", secretsGap},
+		{"a role's disk bound set, its request the default", "    resources: {tester: {ephemeral_storage: 40Gi}}\n", secretsGap},
+		{"every role set", everyRole, secretsGap},
+		{"the controller at its default under controller: daemon", everyRole + "controller: daemon\n", secretsGap},
+		{"a broker configured, whose login is boot's", everyRole + "    agent_secrets: {url: https://secrets.internal.example}\n", ""},
+		{"secrets decided", "capabilities:\n  decided:\n    secrets: \"dispatch://LEGION-205 enrolls pods later\"\n", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			config := kubernetesCheckConfig(t, tc.extra)
@@ -987,12 +981,12 @@ func TestStartCheckConfigReportsTheConfigurationsCapabilityGaps(t *testing.T) {
 }
 
 // A decision may name only a capability the daemon measures from the deployment: anything else is
-// refused as an unknown key naming the three, and a blank reason records nothing, so it is refused
+// refused as an unknown key naming the four, and a blank reason records nothing, so it is refused
 // too — each with exit 1 and no Config OK.
 func TestStartCheckConfigRefusesAnUnknownCapabilityDecision(t *testing.T) {
 	legionState(t)
 	for _, tc := range []struct{ name, extra, want string }{
-		{"a name that is no deployment capability", "capabilities: {decided: {nonsense: \"because\"}}\n", "legion start: unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback or resource-limits\n"},
+		{"a name that is no deployment capability", "capabilities: {decided: {nonsense: \"because\"}}\n", "legion start: unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback, resource-limits or pool-capacity\n"},
 		{"a blank reason", "capabilities: {decided: {secrets: \"\"}}\n", "legion start: capabilities.decided.secrets must not be empty\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

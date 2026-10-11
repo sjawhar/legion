@@ -45,7 +45,7 @@ type interrupt struct {
 // claim that is in a turn then has that turn interrupted.
 func (m *Machine) Quiesce(ctx context.Context, row int64) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	defer m.unlock()
 	if row <= m.quiesced {
 		return nil
 	}

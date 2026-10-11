@@ -80,10 +80,10 @@ type Request struct {
 }
 
 // Workspace is the durable location and branch bookmark for one issue. Dir has the shape
-// <state>/workspaces/<owner>/<repo>/<lowercase issue>; Clone, the shared clone every issue
-// workspace of the repository is a jj workspace of, <state>/repos/github.com/<owner>/<repo>. A
-// tree volume's init containers serialize on the file beside the clone, Clone + ".lock". Repo is
-// the repository.
+// <state>/workspaces/<owner>/<repo>/<lowercase issue>; Clone, the clone the workspace is a jj
+// workspace of, <state>/repos/github.com/<owner>/<repo> — under tmux the one every issue workspace
+// of the repository shares, under Kubernetes the issue pod's own on its own volume. Repo is the
+// repository.
 type Workspace struct {
 	Dir      string
 	Bookmark string
@@ -198,7 +198,7 @@ type guardedWorkspace struct {
 // guardWorkspace holds every refusal a jj command can reach, in order: the workspace and clone
 // layout components; the .jj a workspace command opens; the shared clone's .jj and .jj/repo; and
 // the workspace's .jj/repo pointer. Callers that will write a workspace path but not yet open jj
-// (Provision, Remove and RemoveFinished) pass requireJJ false: the same layout guard refuses a
+// (Provision and Remove) pass requireJJ false: the same layout guard refuses a
 // symlinked target before it creates, renames or removes anything outside the layout.
 //
 // jj 0.38 and later keep a repository's and a workspace's own configuration in the config home,
@@ -583,9 +583,45 @@ func ensureFetchConfiguration(ctx context.Context, run Runner, cloneDir string, 
 	return err
 }
 
+// GitHubCredentialHelper is the `credential.helper` every shared clone gets: `gh auth
+// git-credential`, the helper `gh auth setup-git` itself writes, which answers git from the
+// hosts.yml under the process's GH_CONFIG_DIR (ghconfig.HostsFile). The `gh` in it is resolved on
+// PATH when git runs it, so the one it reaches is the process's own, and the value names no path
+// of this machine's that the clone would carry to another.
+const GitHubCredentialHelper = "!gh auth git-credential"
+
+// ConfigureRepositoryCredential brings the shared clone's helper to GitHubCredentialHelper
+// (configureRepositoryCredential) and reports whether it wrote anything: the daemon runs it at
+// every boot over a clone an earlier daemon provisioned, whose helper may still name that daemon's
+// `legion credential`, so a pane's git answers from its GH_CONFIG_DIR as a clone provisioned now
+// does. A clone whose two helper keys already end in GitHubCredentialHelper is left as it is, so
+// the ordinary boot runs one read per key rather than five writes, and logs no rewrite.
+func ConfigureRepositoryCredential(ctx context.Context, run Runner, cloneDir string) (bool, error) {
+	gitDir := cloneDir + "/.git"
+	current := true
+	for _, key := range []string{"credential.helper", "credential.https://github.com.helper"} {
+		// `git config --get-all` exits 1 for a key the clone never set, which is as stale as an old
+		// helper; a run that failed to start is an error.
+		result, err := runCommand(ctx, run, []string{"git", "--git-dir=" + gitDir, "config", "--get-all", key}, nil, "")
+		if err != nil {
+			return false, fmt.Errorf("read the shared clone's %s: %w", key, err)
+		}
+		values := strings.Split(strings.TrimRight(result.Stdout, "\n"), "\n")
+		if result.ExitCode != 0 || values[len(values)-1] != GitHubCredentialHelper {
+			current = false
+		}
+	}
+	if current {
+		return false, nil
+	}
+	return true, configureRepositoryCredential(ctx, run, cloneDir, GitHubCredentialHelper)
+}
+
 // configureRepositoryCredential keeps the clone's persisted helper for worker panes after the
-// one-shot clone/fetch environment has been removed. This ports the helper writes in workspace.ts's
-// provisionIssueWorkspace.
+// one-shot clone/fetch environment has been removed: the clone's own credential.helper, and the
+// one for github.com, each reset and then set to credentialHelper, with credential.interactive
+// off so a helper that answers nothing fails rather than prompts. This ports the helper writes in
+// workspace.ts's provisionIssueWorkspace.
 func configureRepositoryCredential(ctx context.Context, run Runner, cloneDir, credentialHelper string) error {
 	gitDir := cloneDir + "/.git"
 	for _, argv := range [][]string{

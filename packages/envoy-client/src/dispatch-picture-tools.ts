@@ -404,15 +404,15 @@ export async function readPictures(
   const showing: string[] = [];
   const lines = ["Pictures:"];
   let shownBytes = 0;
-  const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch_doc_read shows it`;
+  const overBudget = `past this read's ${PICTURES_SHOWN_MAX_BYTES / 1024 / 1024} MiB of pictures; dispatch doc-read shows it`;
   for (const address of addresses) {
     const skip = (reason: string) => lines.push(`- not shown: ${address} (${reason})`);
     if (shown?.has(address)) {
-      skip("shown earlier this session; dispatch_doc_read shows it again");
+      skip("shown earlier this session; dispatch doc-read shows it again");
       continue;
     }
     if (images.length === PICTURES_SHOWN_MAX) {
-      skip(`past this read's ${PICTURES_SHOWN_MAX} pictures; dispatch_doc_read shows it`);
+      skip(`past this read's ${PICTURES_SHOWN_MAX} pictures; dispatch doc-read shows it`);
       continue;
     }
     const target = pictureTarget(address);

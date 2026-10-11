@@ -395,7 +395,7 @@ func TestDenyOpensNoRecord(t *testing.T) {
 // is registered with gets SERVICE_KEY at once, with a grant and no record, and its value is
 // released; once another secret's tags move the policy, the grant still releases it and the same
 // request reuses it, since the session is still the service's. A machine login's service name is
-// the machine's own claim, approved by whoever its login names, so the service account is what
+// the machine's own claim, which anyone signed in to Dispatch may approve, so the service account is what
 // proves the service: a pod under the service's login running as another account, a pod running
 // as the service's account under a login for a service the broker does not register, the
 // operator's own host session, and a pod no service's launcher enrolled are each denied it with no
@@ -943,13 +943,13 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 	if err != nil || automatic.GrantID == nil {
 		t.Fatalf("Create(automatic) = %+v, %v", automatic, err)
 	}
-	if err := m.RevokeByApprover(ctx, *automatic.GrantID, "mallory"); !errors.Is(err, ErrNotApprover) {
+	if err := m.RevokeByApprover(ctx, *automatic.GrantID, "mallory", "human:mallory"); !errors.Is(err, ErrNotApprover) {
 		t.Fatalf("RevokeByApprover(mallory, not the operator) = %v, want ErrNotApprover", err)
 	}
 	if _, _, err := m.Values(ctx, *automatic.GrantID, enr); err != nil {
 		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
 	}
-	if err := m.RevokeByApprover(ctx, *automatic.GrantID, operator); err != nil {
+	if err := m.RevokeByApprover(ctx, *automatic.GrantID, operator, record.HumanActor(operator)); err != nil {
 		t.Fatalf("RevokeByApprover(the operator) = %v", err)
 	}
 
@@ -963,17 +963,17 @@ func TestRevokeByApproverIsLimitedToTheApproverOrOperator(t *testing.T) {
 	if err != nil || dec.GrantID == "" {
 		t.Fatalf("ApplyDecision(alice): %+v %v", dec, err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, "mallory"); !errors.Is(err, ErrNotApprover) {
+	if err := m.RevokeByApprover(ctx, dec.GrantID, "mallory", "human:mallory"); !errors.Is(err, ErrNotApprover) {
 		t.Fatalf("RevokeByApprover(a login that is neither approver nor operator) = %v, want ErrNotApprover", err)
 	}
 	if _, _, err := m.Values(ctx, dec.GrantID, enr); err != nil {
 		t.Fatalf("Values after a refused revoke = %v, want the grant still live", err)
 	}
-	if err := m.RevokeByApprover(ctx, dec.GrantID, "Alice@Example.com"); err != nil {
+	if err := m.RevokeByApprover(ctx, dec.GrantID, "Alice@Example.com", record.HumanActor(otherPerson)); err != nil {
 		t.Fatalf("RevokeByApprover(the approver) = %v", err)
 	}
 	var actor string
-	if err := m.Store.Pool.QueryRow(ctx, `select actor from audit where kind='grant.revoked' and grant_id=$1`, dec.GrantID).Scan(&actor); err != nil || actor != "human:"+otherPerson {
+	if err := m.Store.Pool.QueryRow(ctx, `select actor from audit where kind='grant.revoked' and grant_id=$1`, dec.GrantID).Scan(&actor); err != nil || actor != record.HumanActor(otherPerson) {
 		t.Fatalf("grant.revoked actor = %q, %v, want human:%s", actor, err, otherPerson)
 	}
 }

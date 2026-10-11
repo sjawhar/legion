@@ -38,7 +38,7 @@ func addressRuntime(t *testing.T, edit func(*Options)) *Runtime {
 // issue pod's launcher dials, then its generation-1 record.
 func movedSince(t *testing.T, launched, now *Runtime) []movedAddress {
 	t.Helper()
-	pod := &corev1.Pod{Spec: podOf(t, launched, workerSpec(t), false)}
+	pod := &corev1.Pod{Spec: podOf(t, launched, workerSpec(t))}
 	record, err := launched.recordFor(claim.RoleTester, 1)
 	if err != nil {
 		t.Fatal(err)

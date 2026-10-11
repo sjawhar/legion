@@ -37,7 +37,7 @@ import (
 // Image is the NATS server image every Envoy test container runs. The envoy-go CI job reads this
 // declaration and pulls the image before its first test step, so no test reaches the registry
 // mid-run; keep it a single-line string constant.
-const Image = "nats:2.10"
+const Image = "mirror.gcr.io/library/nats:2.10"
 
 var (
 	mainRuns   bool

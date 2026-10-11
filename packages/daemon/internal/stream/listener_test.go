@@ -160,6 +160,64 @@ func TestAHelloTheDaemonCouldNotResolveClosesUnrefused(t *testing.T) {
 	}
 }
 
+// Narrow, the start of the daemon's stop, closes every claim connection keep does not name, with
+// its Closed event, and keeps the ones it names; from then on a claim's hello is closed unacked,
+// unresolved and unlogged, so its shim keeps its frames for the next daemon, while a launcher's
+// hello is still answered.
+func TestNarrowKeepsTheNamedClaimsAndAnswersOnlyLaunchers(t *testing.T) {
+	const otherClaim claim.Token = "legion-acme-LEGION-2-tester"
+	two := &resolver{fn: func(bootToken string) (claim.Token, uint64, bool, bool, error) {
+		switch bootToken {
+		case testToken:
+			return testClaim, testGeneration, false, true, nil
+		case "boot-token-2":
+			return otherClaim, testGeneration, false, true, nil
+		}
+		return "", 0, false, false, nil
+	}}
+	h := startListener(t, harnessOptions{resolver: two})
+	kept := h.connect(testToken)
+	other := dial(t, h.listener.Addr())
+	other.hello("boot-token-2")
+	other.expect(shimwire.TypeHelloAck)
+	if event := h.next(); event != (Hello{Claim: otherClaim, Generation: testGeneration}) {
+		t.Fatalf("event = %#v, want the other claim's hello", event)
+	}
+	h.listener.SetLauncherResolver(func(shimwire.LauncherHello) (LauncherHandler, string) {
+		return &launcherServe{frames: make(chan shimwire.Frame, 4)}, ""
+	})
+
+	h.listener.Narrow(func(token claim.Token) bool { return token == testClaim })
+
+	other.awaitClosed()
+	if event := h.next(); event != (Closed{Claim: otherClaim}) {
+		t.Fatalf("event = %#v, want the other claim's close", event)
+	}
+	if _, ok := h.listener.Conn(testClaim); !ok {
+		t.Fatal("Narrow closed the connection of a claim it was told to keep")
+	}
+	calls := two.calls.Load()
+	redial := dial(t, h.listener.Addr())
+	redial.hello("boot-token-2")
+	redial.awaitClosed()
+	if got := two.calls.Load(); got != calls {
+		t.Fatalf("a hello after Narrow was resolved (%d calls, want %d)", got, calls)
+	}
+	launcher := dial(t, h.listener.Addr())
+	launcher.send(shimwire.LauncherHello{Token: "launcher-token", Sandbox: "legion-legion-legion-208", Role: "tester", PodUID: "pod-1", LauncherID: "l-1"})
+	launcher.expect(shimwire.TypeLauncherHelloAck)
+	kept.send(shimwire.AgentStart{})
+	if event := h.next(); event != (TurnStart{Claim: testClaim}) {
+		t.Fatalf("event = %#v, want the kept connection's frames to go on arriving", event)
+	}
+	if lines := h.logs.Lines(); len(lines) != 0 {
+		t.Fatalf("logs = %q, want nothing logged for a hello the stopping daemon does not answer", lines)
+	}
+	if events := h.stop(); !slices.Equal(events, []Event{Closed{Claim: testClaim}}) {
+		t.Fatalf("events = %#v, want only the kept connection's close at the listener's end", events)
+	}
+}
+
 // A hello of exactly MaxHelloBytes is still a hello; the bound is on the line, not the frame.
 func TestAHelloAtTheByteBoundIsRead(t *testing.T) {
 	h := startListener(t, harnessOptions{})

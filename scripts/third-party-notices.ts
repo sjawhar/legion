@@ -325,17 +325,22 @@ export async function viteBundleInputs(
   return inputs;
 }
 
-// `bun scripts/third-party-notices.ts <metafile> <out>` writes the notices for a `bun build
-// --metafile=<metafile>` run in the current directory, which the metafile's input paths are
-// relative to.
+// `bun scripts/third-party-notices.ts <metafile>... <out>` writes the notices for one or more `bun
+// build --metafile=<metafile>` runs in the current directory, which the metafiles' input paths are
+// relative to: a package that ships several bundles lists every package any of them inlines.
 if (import.meta.main) {
-  const [metafile, out] = process.argv.slice(2);
-  if (!metafile || !out) {
-    process.stderr.write("usage: bun scripts/third-party-notices.ts <metafile> <out>\n");
+  const args = process.argv.slice(2);
+  const out = args.pop();
+  if (out === undefined || args.length === 0) {
+    process.stderr.write("usage: bun scripts/third-party-notices.ts <metafile>... <out>\n");
     process.exit(2);
   }
-  const { inputs } = JSON.parse(await readFile(metafile, "utf8")) as {
-    inputs: Record<string, unknown>;
-  };
-  await writeFile(out, await thirdPartyNotices(Object.keys(inputs), process.cwd()));
+  const inputs: string[] = [];
+  for (const metafile of args) {
+    const parsed = JSON.parse(await readFile(metafile, "utf8")) as {
+      inputs: Record<string, unknown>;
+    };
+    inputs.push(...Object.keys(parsed.inputs));
+  }
+  await writeFile(out, await thirdPartyNotices(inputs, process.cwd()));
 }

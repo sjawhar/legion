@@ -64,7 +64,7 @@ func TestAForkThatLosesRoomContentIsRenderedAgain(t *testing.T) {
 	}
 	editLiveTree(t, service, artifactID, dropBlock(t, "doomed paragraph"))
 
-	_, markdown, _, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	_, markdown, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
 	if err != nil {
 		t.Fatalf("capture live text: %v", err)
 	}
@@ -157,7 +157,7 @@ func TestOneAbsorbedRoomChangeCostsOneRender(t *testing.T) {
 		t.Fatal("the second edit recorded no rendering")
 	}
 
-	tree, markdown, _, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	tree, markdown, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
 	if err != nil {
 		t.Fatalf("capture live text: %v", err)
 	}
@@ -172,7 +172,7 @@ func TestOneAbsorbedRoomChangeCostsOneRender(t *testing.T) {
 // A transaction may reuse the rendering it cached only while the fork it was taken from still
 // describes the document, and the only thing that can say so is the fork itself, read on either
 // side of the one update it absorbs. Two reads of the room are two snapshots - websocket
-// Server.Apply holds no lock across its callback (ygo provider/websocket/inject.go:295) - so a
+// Server.Apply holds no lock across its callback (ygo provider/websocket/inject.go:305) - so a
 // browser update landing between them is in one and not the other, and a signal built from that
 // pair concludes the room held while handing the fork the very update it missed. The version is
 // then written from a document that no longer exists.
@@ -259,7 +259,7 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 		}
 		write := ledger.liveWriteFor(artifactID)
 		if write != nil && write.tree != nil {
-			tree, markdown, _, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+			tree, markdown, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
 			if err != nil {
 				t.Fatalf("round %d: capture: %v", round, err)
 			}

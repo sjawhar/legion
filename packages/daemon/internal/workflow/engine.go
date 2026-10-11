@@ -39,7 +39,7 @@ type Config struct {
 	Clock           func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
-	// a round whatever GitHub gives its bot account (decidesRound) and can be the reviewer's answer
+	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
 	// to a round it left undecided (reviewersAnswer). Empty matches no one. A workflow boot never
 	// leaves it empty: it refuses a review lease that names no login (daemon.mintAtBoot).
 	ReviewAppLogin string
@@ -171,7 +171,7 @@ func (e *Engine) dispatchIssue(ctx context.Context, tx pgx.Tx, fact intake.Dispa
 
 // sessionStatusWrite takes a lifecycle status change written by a session whose write the workflow
 // does not act on. A session holding a claim in the issue's tree is an agent, never a human move,
-// since a phase ends only by its completion (legion handoff complete) and a tree only by the
+// since a phase ends only by its completion (the `legion` tool's `handoff_complete`) and a tree only by the
 // architect's sign-off. Any other session on the root of an admitted tree — another tree's agent, or
 // one outside Legion that took the issue for its own — has no part in the running tree it would end
 // or park, so the tree's architect is told who wrote what. Either way the workflow does not react:
@@ -341,6 +341,9 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, err
 	}
 	if phase.FileBacked(issue.Phase) {
+		// The commit a completion carries is the pushed commit carrying the phase's handoff, which
+		// the `legion` tool's handoff_complete found in the pane: the one the role reported for its
+		// previous phase means this phase wrote none.
 		if fact.Commit == row.LastHandoff {
 			return refused("HANDOFF_NOT_NEW", fmt.Sprintf("the %s reported commit %s for its previous phase of %s; write and commit this phase's handoff before completing", fact.Role, fact.Commit, issue.Key)), nil
 		}
@@ -364,9 +367,6 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		return intake.Result{}, e.transition(ctx, tx, *issue, TriggerImplementationReady, "", row, pr, "")
 	case phase.Testing:
 		if fact.Verdict == "fail" {
-			if err := e.recordRound(ctx, tx, fact.Issue); err != nil {
-				return intake.Result{}, err
-			}
 			return intake.Result{}, e.transition(ctx, tx, *issue, TriggerTesterFailed, "", row, pr, "")
 		}
 		if fact.Verdict == "pass" {
@@ -420,11 +420,15 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 // pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
 // request: its fix and blocked attempts are what bound the review rounds, so they are carried
 // over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap, and
-// so is its newest review, which orders every review it will have, and what its base branch
-// requires - its required checks, and its required workflows with their runs at the head they were
-// read at - as last read, so the reopened head's first settlement is judged by all of it
-// (classify.HeadChecks). A new generation deletes a pull request that is not open, and all of them
-// with it.
+// so is the counted attempt the cap holds a red in (classify.FixAttemptCapHolds), and its newest
+// review, which orders every review it will have, and what its base branch requires - its required
+// checks, and its required workflows with their runs at the head they were read at - as last read,
+// so the reopened head's first settlement is judged by all of it (classify.HeadChecks). A reopen at
+// another head than the recorded one - commits pushed while the pull request was closed, which no
+// synchronize reports - is judged as a synchronize to that head would be
+// (classify.AdvancePullRequestHead): onto a red verdict it counts, onto a green one it leaves the
+// counted attempt. A new generation deletes a pull request that is not open, and all of them with
+// it.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Branch)
 	if err != nil || issue == nil {
@@ -453,7 +457,12 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		if !fact.Reopened || recorded.State == record.PullRequestMerged {
 			return intake.Result{}, nil
 		}
-		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
+		carried := *recorded
+		if fact.HeadSHA != recorded.HeadSHA {
+			carried = classify.AdvancePullRequestHead(carried, fact.HeadSHA)
+		}
+		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = carried.FixAttempts, carried.BlockedAttempts, recorded.ReviewSeen
+		pr.HeadCounted, pr.HeadCountedBefore = carried.HeadCounted, carried.HeadCountedBefore
 		pr.Required, pr.Workflows, pr.WorkflowsHead = recorded.Required, recorded.Workflows, recorded.WorkflowsHead
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}
@@ -714,8 +723,12 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if RoleFor(issue.Phase) == "" || RoleFor(issue.Phase) != fact.Requester || phaseIndex(fact.To) >= phaseIndex(issue.Phase) || phaseIndex(fact.To) < 0 {
-		return intake.Result{Refusal: &intake.Refusal{Status: 409, Code: "BACKWARD_REFUSED", Message: "backward moves require the current role and an earlier workflow phase"}}, nil
+	// The table is the guard: a move no backward row serves - to awaiting_merge, which no worker
+	// holds, or to anything but an earlier phase - is refused rather than answered as if it moved.
+	// An empty target is refused first, since the row lookup takes it to match any row.
+	if _, ok := e.row(issue.Phase, TriggerBackward, fact.To, Snapshot{Phase: issue.Phase}); fact.To == "" || !ok || RoleFor(issue.Phase) != fact.Requester {
+		return refused("BACKWARD_REFUSED", fmt.Sprintf("a backward move needs the role running %s of %s and an earlier phase a backward move reaches from it; the %s's move to %s changed nothing",
+			issue.Phase, issue.Key, fact.Requester, fact.To)), nil
 	}
 	lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree)
 	if err != nil {
@@ -726,9 +739,6 @@ func (e *Engine) backward(ctx context.Context, tx pgx.Tx, fact intake.BackwardMo
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, fact.Requester)
 	if err != nil {
-		return intake.Result{}, err
-	}
-	if err := e.recordRound(ctx, tx, issue.Key); err != nil {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.transition(ctx, tx, *issue, TriggerBackward, fact.To, row, nil, fact.Reason)
@@ -762,6 +772,17 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
 		return err
+	}
+	// Every move back to an earlier phase counts the implementer a round: the tester's fail, a
+	// review's request for changes, a worker's backward move, and the move the daemon makes on its
+	// own for a red CI verdict or a head that conflicts with its base. The round tells each pass
+	// through a phase from the last (api/handoff.go): a pass that counted none would give a
+	// completion reporting the last pass's carrying commit that pass's key, answered as already
+	// received instead of refused as a handoff not written anew.
+	if movesBack(issue.Phase, row.To) {
+		if err := e.recordRound(ctx, tx, issue.Key); err != nil {
+			return err
+		}
 	}
 	if err := e.status(ctx, tx, issue, row.Status); err != nil {
 		return err
@@ -953,4 +974,9 @@ func phaseIndex(value phase.Phase) int {
 		}
 	}
 	return -1
+}
+
+// movesBack says whether to is a workflow phase before from.
+func movesBack(from, to phase.Phase) bool {
+	return phaseIndex(to) >= 0 && phaseIndex(to) < phaseIndex(from)
 }

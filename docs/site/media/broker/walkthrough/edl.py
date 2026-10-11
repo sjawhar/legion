@@ -50,14 +50,14 @@ NARRATION: dict[str, str] = json.loads((Path(__file__).parent / "narration.json"
 CLIPS: list[Clip] = [
     # The payoff: the command's line, just after the key reached it.
     Clip("open", "t4-ran.cast", At("key", 0.05), At("key", 4.35), (("open", At("key", 0.1)),)),
-    Clip("login", "t1-login.cast", At("start", 0.2), At("end"), (("login", At("start", 0.35)),)),
+    Clip("login", "t1-login.cast", At("start", 0.05), At("end"), (("login", At("start", 0.06)),)),
     Clip("machine", "b1-machine.webm", At("page", 0.2), At("result", 1.4),
          (("machine-code", At("typing", -1.2)), ("machine-approve", At("record", 0.6)))),
-    Clip("session", "t2-session.cast", At("status-typing", -0.3), At("self", 4.4),
+    Clip("session", "t2-session.cast", At("status-typing", -0.3), At("self", 4.6),
          (("session-issued", At("status-typing", -0.2)), ("session-register", At("register-typing", -0.1)),
           ("session-self", At("self-typing", -0.3)))),
     Clip("request", "t3-request.cast", At("typing", -0.4), At("end"),
-         (("request-ask", At("typing", -0.2)), ("request-wait", At("waiting", 0.0)))),
+         (("request-ask", At("typing", -0.2)), ("request-wait", At("waiting", 0.3)))),
     # Opens on the request in the Inbox: before `inbox` the page may still be loading.
     Clip("approve", "b2-approve.webm", At("inbox"), At("result", 1.3),
          (("approve-inbox", At("inbox", 0.0)), ("approve-record", At("record", -0.2)), ("approve-click", At("approve", -0.6)))),

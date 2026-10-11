@@ -13,18 +13,27 @@ export default async function probeLegionPluginLoaded(pi) {
   let answer = loaded
     ? `LEGION_PLUGIN_LOADED=yes\nLEGION_PLUGIN_LOADED_FROM=${loaded.from}\nLEGION_PLUGIN_ENVOY_INTERFACE=${loaded.envoyInterface}\n`
     : "LEGION_PLUGIN_LOADED=no\n";
-  const publisher = envoy?.publishers?.[0];
+  // Every Envoy entry that published, in load order: the interface's `publishers` holds each
+  // entry's import.meta.url once (publishEnvoyPluginInterface, packages/pi-shared/src/interface.ts),
+  // so a plugin both linked into the profile and named by --extension is two publishers — two load
+  // paths, two import URLs — while a `task` subagent re-running the factory on the same module
+  // instance adds none. Each LEGION_ENVOY_PUBLISHER line is one URL, so the gate can refuse a
+  // pod's double load naming every copy (bootgate.go judgeLoaded).
+  const publishers = envoy?.publishers ?? [];
+  const publisher = publishers[0];
   answer +=
     publisher === undefined
       ? "LEGION_ENVOY_INTERFACE=none\n"
-      : `LEGION_ENVOY_INTERFACE=${envoy.version}\nLEGION_ENVOY_LOADED_FROM=${publisher}\n`;
+      : `LEGION_ENVOY_INTERFACE=${envoy.version}\nLEGION_ENVOY_LOADED_FROM=${publisher}\n` +
+        publishers.map((from) => `LEGION_ENVOY_PUBLISHER=${from}\n`).join("");
   if (legacy !== undefined) answer += `LEGION_LEGACY_PLUGIN_LOADED_FROM=${legacy}\n`;
   process.stderr.write(answer);
   // The task agents and skills Legion's prompts name, each resolved as a worker's use resolves it:
   // Oh My Pi's own agent and skill discovery over this launch's extension roots. A pod names its
-  // two plugin roots, the Envoy plugin's then the Legion plugin's, with discovery off
-  // (LEGION_PROMPT_ROOTS, colon-separated); a pane discovers its installed plugins. Skills are
-  // filtered as a session filters them, by the launch's own `skills` settings and
+  // two plugin roots, the Envoy plugin's then the Legion plugin's, as explicit extensions beside
+  // its discovery (LEGION_PROMPT_ROOTS, colon-separated: the only place the plugins' agents and
+  // skills live, since the image's profile links neither); a pane discovers its installed plugins.
+  // Skills are filtered as a session filters them, by the launch's own `skills` settings and
   // `disabledExtensions` (session-tools.ts #applyDiscoveredSkills at the pin).
   const explicit = process.env.LEGION_PROMPT_ROOTS;
   const roots = explicit

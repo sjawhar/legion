@@ -17,8 +17,18 @@ test.beforeEach(async () => {
 test("a refused paste no longer breaks the next paste in the live document", async ({
   browser,
 }) => {
-  const { page } = await openWithCaret(browser, "Paste recovery", "Intro text.", "text.", "end");
-  await paste(page, { html: "", text: 'see <span data-dispatch="bogus">this</span> now' });
-  await paste(page, { html: "", text: "Fixed two bugs" });
-  await expect(documentEditor(page)).toContainText("Fixed two bugs");
+  const { alice, page } = await openWithCaret(
+    browser,
+    "Paste recovery",
+    "Intro text.",
+    "text.",
+    "end"
+  );
+  try {
+    await paste(page, { html: "", text: 'see <span data-dispatch="bogus">this</span> now' });
+    await paste(page, { html: "", text: "Fixed two bugs" });
+    await expect(documentEditor(page)).toContainText("Fixed two bugs");
+  } finally {
+    await alice.close();
+  }
 });

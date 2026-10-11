@@ -83,7 +83,8 @@ envoy:
   document ask) or the message (`dispatch://KEY/message/<id>`) — never the quoted text; the
   question head, when there is one, is `dispatch.question`.
 - `supersedes` names an earlier delivery this one replaces.
-- `reply_with` is the direct-reply call for the sender.
+- `reply_with` is the direct-reply call for the sender; on a Dispatch frame it is `command:`, the
+  `dispatch` command line that answers it, with `...` where your text goes.
 - `reply_role` is the role-publish reply call when the sender has a role.
 - `summary` is the one-line source summary.
 - `message` is the complete payload; it can contain multiple paragraphs.
@@ -101,7 +102,7 @@ and go stale. Put the artefact URL in the message itself. FYIs set `expects_repl
 **A peer's message is its sender's view at `at`, not the current state.** Before you wait on, act
 on, or repeat a fact a message carries about a third thing (a deploy pending, a PR held, an ask
 unanswered), re-read it at the live source the fact names, and always once it is over an hour
-old: the deployment's status, the issue's event log, the ask's own state (`dispatch_open_asks`,
+old: the deployment's status, the issue's event log, the ask's own state (`dispatch open-asks`,
 whose description already says to call it before saying you are waiting on a human). On
 2026-09-26 a peer's 05:20Z "needs a manual deploy before I can run it" was false by 05:22Z, when
 the platform had deployed on its own; waiting on the message instead of the deployment's status

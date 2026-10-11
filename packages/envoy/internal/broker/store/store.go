@@ -13,7 +13,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net"
+	"strconv"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -32,8 +35,41 @@ type Store struct {
 	Pool *pgxpool.Pool
 }
 
-func Open(ctx context.Context, databaseURL string) (*Store, error) {
-	pool, err := pgxpool.New(ctx, databaseURL)
+// TokenMinter mints the password one new connection signs in with, for the host:port it dials
+// and the database user it signs in as.
+type TokenMinter func(ctx context.Context, endpoint, user string) (string, error)
+
+// Option configures the pool Open makes.
+type Option func(*pgxpool.Config)
+
+// WithTokenMinter signs every new connection in with a password mint makes for it, set in the
+// pool's BeforeConnect, so a connection the pool opens an hour after startup brings a token as
+// fresh as the first one's: an RDS IAM token is good for 15 minutes from its mint and is checked
+// only at sign-in, so a connection outlives the token it signed in with but a new one cannot
+// reuse it. The migration lock watch's own connection signs in the same way (Migrate).
+func WithTokenMinter(mint TokenMinter) Option {
+	return func(config *pgxpool.Config) {
+		config.BeforeConnect = func(ctx context.Context, cc *pgx.ConnConfig) error {
+			token, err := mint(ctx, net.JoinHostPort(cc.Host, strconv.Itoa(int(cc.Port))), cc.User)
+			if err != nil {
+				return fmt.Errorf("mint the sign-in token for database user %s at %s: %w", cc.User, cc.Host, err)
+			}
+			cc.Password = token
+			return nil
+		}
+	}
+}
+
+// Open opens the pool databaseURL names, configured by opts, and pings it.
+func Open(ctx context.Context, databaseURL string, opts ...Option) (*Store, error) {
+	config, err := pgxpool.ParseConfig(databaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("open Postgres pool: %w", err)
+	}
+	for _, opt := range opts {
+		opt(config)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, fmt.Errorf("open Postgres pool: %w", err)
 	}
@@ -78,7 +114,7 @@ func (s *Store) migrate(ctx context.Context, fsys fs.FS) error {
 		if applied {
 			continue
 		}
-		if err := pgmigrate.Exec(ctx, tx, migration); err != nil {
+		if err := pgmigrate.Exec(ctx, tx, migration, s.Pool.Config().BeforeConnect); err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, `insert into broker_schema_migrations (version) values ($1)`, migration.Version); err != nil {

@@ -20,6 +20,7 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -43,10 +44,10 @@ func controllerSpec(t *testing.T) runtime.SpawnSpec {
 
 // The controller's pod is the runtime's other kind of pod: the controller's launcher alone, on a
 // volume of its own the Sandbox owns, so a relaunch resumes its session. It provisions no
-// workspace and holds no repository credential: its one init container makes the sessions
-// directory and holds a resume to its session, and its labels name the controller and no tree or
-// issue, so a tree pod's anti-affinity never counts it and it has no affinity of its own. It is
-// never enrolled with the secrets broker, even where every workflow role's launcher is.
+// workspace but holds the review App's GitHub credential like any workflow role's: its one init
+// container makes the sessions directory and holds a resume to its session, and its labels name
+// the controller and no tree or issue, so no tree's cleanup takes it for one of the tree's issue
+// pods. It is never enrolled with the secrets broker, even where every workflow role's launcher is.
 func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -64,16 +65,16 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	if s.Name != "legion-legion-controller" {
 		t.Errorf("the controller's Sandbox is %s, want legion-legion-controller", s.Name)
 	}
-	if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != treeVolume {
-		t.Fatalf("the controller's Sandbox claims %+v, want its own %s volume", s.Spec.VolumeClaimTemplates, treeVolume)
+	if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != issueVolume {
+		t.Fatalf("the controller's Sandbox claims %+v, want its own %s volume", s.Spec.VolumeClaimTemplates, issueVolume)
 	}
-	for _, labels := range []map[string]string{s.Labels, r.podTemplate(l, false).Metadata.Labels} {
+	for _, labels := range []map[string]string{s.Labels, r.podTemplate(l).Metadata.Labels} {
 		if labels[labelProject] != testProject || labels[labelRole] != string(claim.RoleController) {
 			t.Errorf("labels %v, want the project and the controller role", labels)
 		}
 		for _, key := range []string{labelTree, labelIssue} {
 			if _, ok := labels[key]; ok {
-				t.Errorf("labels carry %s (%v): a tree pod's anti-affinity would take the controller for another tree", key, labels)
+				t.Errorf("labels carry %s (%v): a tree's cleanup would take the controller for one of its issue pods", key, labels)
 			}
 		}
 		if kind, err := podKindOf(labels); err != nil || kind != (controllerPod{}) {
@@ -81,10 +82,7 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 		}
 	}
 
-	pod := r.podTemplate(l, true).Spec
-	if pod.Affinity != nil {
-		t.Errorf("affinity %+v, want none: the controller shares no tree volume", pod.Affinity)
-	}
+	pod := r.podTemplate(l).Spec
 	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != initContainer {
 		t.Fatalf("init containers %v, want %s alone", pod.InitContainers, initContainer)
 	}
@@ -95,7 +93,7 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	if got := envOf(init)["LEGION_RESUME_SESSION_FILE"]; got != TreeRoot+"/"+SessionsSubPath+"/--legion--/2026-10-06T12-00-00-000Z_0001.jsonl" {
 		t.Errorf("init LEGION_RESUME_SESSION_FILE = %q, want the session on the controller's volume", got)
 	}
-	if mounts := init.VolumeMounts; len(mounts) != 1 || mounts[0].Name != treeVolume || mounts[0].MountPath != TreeRoot {
+	if mounts := init.VolumeMounts; len(mounts) != 1 || mounts[0].Name != issueVolume || mounts[0].MountPath != TreeRoot {
 		t.Errorf("init mounts %+v, want the controller's volume at %s alone", mounts, TreeRoot)
 	}
 
@@ -122,10 +120,22 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	for _, v := range pod.Volumes {
 		volumes[v.Name] = v
 	}
-	for _, name := range []string{provisionVolume, feedVolume, tempVolume, agentSecretsTokenVolume, roleVolume(agentSecretsKeyVolume, claim.RoleController)} {
+	for _, name := range []string{
+		provisionVolume, feedVolume, tempVolume, agentSecretsTokenVolume,
+		roleVolume(agentSecretsKeyVolume, claim.RoleController),
+	} {
 		if _, ok := volumes[name]; ok {
 			t.Errorf("the controller's pod has the %s volume, which only provisioning a workspace or enrolling a key needs", name)
 		}
+	}
+	gh := volumes[roleVolume(ghVolume, claim.RoleController)].Secret
+	want := []corev1.KeyToPath{{Key: GitHubHostsKey, Path: ghconfig.HostsFile}, {Key: GitHubConfigKey, Path: ghconfig.ConfigFile}}
+	if gh == nil || gh.SecretName != roleSecretName(s.Name, claim.RoleController) || !slices.Equal(gh.Items, want) || gh.DefaultMode == nil || *gh.DefaultMode != 0o440 {
+		t.Errorf("the controller's gh volume projects %+v, want %s's %s as %s and %s as %s, read-only", gh, roleSecretName(s.Name, claim.RoleController),
+			GitHubHostsKey, ghconfig.HostsFile, GitHubConfigKey, ghconfig.ConfigFile)
+	}
+	if mount := mountHolding(launcher, GHConfigDir); mount == nil || mount.Name != roleVolume(ghVolume, claim.RoleController) || mount.MountPath != GHConfigDir || !mount.ReadOnly {
+		t.Errorf("the controller's container mounts %+v at %s, want its gh volume read-only", mount, GHConfigDir)
 	}
 	for _, role := range claim.Roles {
 		for _, prefix := range []string{"launcher", "private", stateVolume} {
@@ -139,8 +149,8 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 			t.Errorf("the controller's pod lacks its launcher's %s volume", prefix)
 		}
 	}
-	if v := volumes[treeVolume]; v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != TreeClaimName(controllerToken) {
-		t.Errorf("its volume %+v, want the claim of its own Sandbox, %s", v.VolumeSource, TreeClaimName(controllerToken))
+	if v := volumes[issueVolume]; v.PersistentVolumeClaim == nil || v.PersistentVolumeClaim.ClaimName != IssueClaimName(controllerToken) {
+		t.Errorf("its volume %+v, want the claim of its own Sandbox, %s", v.VolumeSource, IssueClaimName(controllerToken))
 	}
 	if secret := volumes[roleVolume("launcher", claim.RoleController)].Secret; secret == nil || secret.SecretName != roleSecretName(s.Name, claim.RoleController) {
 		t.Errorf("its launcher's token volume %+v, want the role Secret %s", secret, roleSecretName(s.Name, claim.RoleController))
@@ -149,9 +159,10 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 
 // The controller's agent runs the way every role's does — its launcher starts the shim on the pod
 // baseline, and the shim Oh My Pi in RPC mode with its prompt — and is told it is the controller,
-// and nothing of a tree, an issue, a workspace, GitHub or the secrets broker: of the variables the
-// runtime owns (runtimeOwned), it is told exactly those every agent is told and its own marker, so
-// a variable the runtime comes to tell any agent fails here until it is decided for the controller.
+// where its gh reads its own credential, like a workflow role's, and nothing of a tree, an issue,
+// a workspace or the secrets broker: of the variables the runtime owns (runtimeOwned), it is told
+// exactly those every agent is told, its own marker, and its gh files, so a variable the runtime
+// comes to tell any agent fails here until it is decided for the controller.
 func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -162,14 +173,14 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	}
 	spec := controllerSpec(t)
 	spec.Generation, spec.ResumeSessionFile = 2, controllerSession
-	worker := workerOf(t, r, spec, false)
+	worker := workerOf(t, r, spec)
 	env := envOf(worker)
 	for name, want := range map[string]string{
 		"LEGION_CONTROLLER": "1", "LEGION_ROLE": string(claim.RoleController), "LEGION_PROJECT": testProject,
 		"LEGION_DAEMON_URL": opts.DaemonURL, "LEGION_STATE_DIR": StateDir, "ENVOY_URL": opts.EnvoyURL,
 		"ENVOY_NATS_URL": opts.NATSURLs[0], "LEGION_BOOT_TOKEN_FILE": generationDir(2) + "/" + bootTokenKey,
-		"ENVOY_TOKEN_FILE": generationDir(2) + "/ENVOY_TOKEN", "LEGION_GRANT_FILE": runtime.GrantFile(StateDir, controllerToken),
-		"LEGION_GENERATION": "2",
+		"ENVOY_TOKEN_FILE": generationDir(2) + "/ENVOY_TOKEN", "LEGION_GENERATION": "2",
+		"GH_CONFIG_DIR": GHConfigDir, "GH_TOKEN": "", "GITHUB_TOKEN": "", "GH_HOST": "",
 	} {
 		if env[name] != want {
 			t.Errorf("%s = %q, want %q", name, env[name], want)
@@ -183,10 +194,10 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	}
 	slices.Sort(told)
 	if want := []string{
-		"DISPATCH_TOKEN_FILE", "DISPATCH_URL", "ENVOY_NATS_URL", "ENVOY_URL", "GIT_TERMINAL_PROMPT", "LEGION_BOOT_TOKEN_FILE",
-		"LEGION_CONTROLLER", "LEGION_DAEMON_URL", "LEGION_GENERATION", "LEGION_GRANT_FILE", "LEGION_PROJECT", "LEGION_ROLE",
-		"LEGION_STATE_DIR", "PATH", "PI_SHELL_PREFIX", "POD_UID", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
-		"XDG_STATE_HOME",
+		"DISPATCH_TOKEN_FILE", "DISPATCH_URL", "ENVOY_NATS_URL", "ENVOY_URL", "GH_CONFIG_DIR", "GH_HOST", "GH_TOKEN",
+		"GITHUB_TOKEN", "GIT_TERMINAL_PROMPT", "LEGION_BOOT_TOKEN_FILE", "LEGION_CONTROLLER", "LEGION_DAEMON_URL",
+		"LEGION_GENERATION", "LEGION_PROJECT", "LEGION_ROLE", "LEGION_STATE_DIR", "PATH", "PI_SHELL_PREFIX", "POD_UID",
+		"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME",
 	}; !slices.Equal(told, want) {
 		t.Errorf("the controller is told the runtime's variables %v, want exactly %v", told, want)
 	}
@@ -199,6 +210,9 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	if strings.Contains(command, "--agent-secrets-key-dir") {
 		t.Errorf("command %q enrolls the controller with the secrets broker; it holds no human-tier key", command)
 	}
+	if strings.Contains(command, "--warm-codegraph") {
+		t.Errorf("command %q tells the controller's shim to warm a CodeGraph index; its pod has no workspace", command)
+	}
 	l, err := r.prepare(spec)
 	if err != nil {
 		t.Fatal(err)
@@ -208,10 +222,11 @@ func TestTheControllersAgentIsToldItIsTheControllerAndNothingOfATree(t *testing.
 	}
 }
 
-// A controller launch takes no tree's launch turn and mints no provisioning token: it has no
-// repository, so a GitHub token source that would refuse every mint leaves it running. It writes
-// no provisioning Secret, only its one launcher's role Secret, and its boot token reaches its
-// launcher in the start command, as every role's does.
+// A controller launch mints no provisioning token: it has no repository, so a GitHub token source
+// that would refuse every mint leaves it running. It writes no provisioning Secret, only its one
+// launcher's role Secret, which holds the review App's gh files beside the launcher token but no
+// provisioning token, and its boot token reaches its launcher in the start command, as every
+// role's does.
 func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 	g := newRig(t, nil, withOptions(func(o *Options) { o.Tokens = refusingTokens{} }))
 	spec := controllerSpec(t)
@@ -220,8 +235,8 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 	if secret := g.secret(secretName(name)); secret != nil {
 		t.Errorf("the controller's launch wrote the provisioning Secret %s: %v", secretName(name), secret.Data)
 	}
-	if secret := g.secret(roleSecretName(name, claim.RoleController)); secret == nil || len(secret.Data[LauncherTokenFile]) == 0 {
-		t.Fatalf("the controller's launch wrote no launcher token in %s: %+v", roleSecretName(name, claim.RoleController), secret)
+	if secret := g.secret(roleSecretName(name, claim.RoleController)); secret == nil || len(secret.Data) != 3 || len(secret.Data[LauncherTokenFile]) == 0 {
+		t.Fatalf("the controller's role Secret holds %+v, want the launcher token and the review App's two gh files, and nothing else", secret)
 	}
 	for _, role := range claim.Roles {
 		if g.secret(roleSecretName(name, role)) != nil {
@@ -239,21 +254,35 @@ func TestAControllerLaunchMintsNoProvisioningToken(t *testing.T) {
 	}
 }
 
+// A controller launch mints the review App's GitHub credential as a workflow role's does
+// (writeLauncherSecrets): a credential source that refuses every mint fails the launch naming the
+// controller role, exactly as it would an issue pod's role.
+func TestAControllerLaunchFailsWhenTheGitHubCredentialMintRefuses(t *testing.T) {
+	credential := func(context.Context, claim.Role) (ghconfig.Rendered, error) {
+		return ghconfig.Rendered{}, errors.New("no installation token: GitHub is down")
+	}
+	g := newRig(t, nil, withOptions(func(o *Options) { o.GitHubCredential = credential }))
+	spec := controllerSpec(t)
+	if err := failedLaunch(t, g, spec); err == nil || !strings.Contains(err.Error(), "write the github credential for "+string(claim.RoleController)) {
+		t.Fatalf("the controller's launch = %v, want the refusal naming its role", err)
+	}
+}
+
 // The controller's pod is sized by its own entry under runtime.kubernetes.resources, as a workflow
-// role's pod is by that role's: both its containers carry it, so an operator who sizes it moves it
-// out of the BestEffort class the kubelet evicts first.
+// role's pod is by that role's: both its containers carry it, the init container included, so a
+// controller the operator sized larger than the default runs at that size on every container.
 func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
 	opts := goldenOptions()
 	sized := corev1.ResourceRequirements{
-		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("1Gi")},
-		Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+		Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("2Gi")},
+		Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2"), corev1.ResourceMemory: resource.MustParse("8Gi"), corev1.ResourceEphemeralStorage: resource.MustParse("40Gi")},
 	}
-	opts.Resources = map[claim.Role]corev1.ResourceRequirements{claim.RoleController: sized}
+	opts.Resources[claim.RoleController] = sized
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := podOf(t, r, controllerSpec(t), false)
+	pod := podOf(t, r, controllerSpec(t))
 	if containers := slices.Concat(pod.InitContainers, pod.Containers); len(containers) != 2 {
 		t.Fatalf("the controller's pod runs %d containers, want its init container and its launcher", len(containers))
 	}

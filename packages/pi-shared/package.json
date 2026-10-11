@@ -29,6 +29,10 @@
       "types": "./src/tool-result.ts",
       "bun": "./src/tool-result.ts"
     },
+    "./shell-command": {
+      "types": "./src/shell-command.ts",
+      "bun": "./src/shell-command.ts"
+    },
     "./test/cross-imports": {
       "types": "./test/cross-imports.ts",
       "bun": "./test/cross-imports.ts"

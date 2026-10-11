@@ -142,7 +142,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Failing: []string{"unit"}, Cancelled: []string{"e2e"}, CheckedHead: "b1c2d3",
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged,
+		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", HeadCountedBefore: "a0b1c2", PlannedRed: true, State: PullRequestMerged,
 		// A base that requires no check reads back as such, never as a set that was not read.
 		Required:  []string{},
 		Workflows: []RequiredWorkflow{{Path: ".github/workflows/review.yml", Result: "failure"}}, WorkflowsHead: "b1c2d3",
@@ -207,42 +207,30 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 }
 
-// PullRequestsByIssue is removableWorkspaces' own batched read (internal/daemon/removable.go):
-// one query for every candidate's pull request instead of one PullRequest call per candidate. An
-// issue with no pull request is simply absent from the map, the same as PullRequest's own nil;
-// an empty issues slice returns an empty map without a query, and an issue not asked for is never
-// in the result even when it has a pull request of its own.
-func TestPullRequestsByIssueBatchesOneQueryPerIssueIntoOne(t *testing.T) {
+// ClaimSession is the session claims records for the token (the workflow reads it for the
+// reviewer's claim to tell the reviewer's own review-App session from another's by the Legion
+// footer each carries). An unknown token answers "" and no error.
+func TestClaimSessionAnswersTheSeededSessionOrEmpty(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	records := NewStore()
-	withPR := issueFixture("LEGION-220")
-	withoutPR := issueFixture("LEGION-221")
-	notAsked := issueFixture("LEGION-222")
-	pr := PullRequest{
-		Issue: withPR.Key, Repo: "sjawhar/legion", Number: 1220, Branch: "legion/LEGION-220",
-		HeadSHA: "deadbeef", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC),
-		CheckedHead: "deadbeef", State: PullRequestMerged,
-		Cancelled: []string{}, CheckRuns: []AttemptRun{}, Pushes: []ClassifiedPush{},
-		Required: []string{}, Workflows: []RequiredWorkflow{},
-	}
 	inTx(t, st, func(tx pgx.Tx) {
-		must(t, records.PutIssue(ctx, tx, withPR))
-		must(t, records.PutIssue(ctx, tx, withoutPR))
-		must(t, records.PutIssue(ctx, tx, notAsked))
-		must(t, records.PutPullRequest(ctx, tx, pr))
+		_, err := tx.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+			state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+			values ($1, $2, $3, $4, $5, 0, $6, '', $7, 0, 0, 0, 0)`,
+			"review-claim", "LEGION", "LEGION-208", "LEGION-208", string(claim.RoleReviewer), "ses-reviewer", string(supervise.StateWorking))
+		must(t, err)
 	})
 	inTx(t, st, func(tx pgx.Tx) {
-		got, err := records.PullRequestsByIssue(ctx, tx, []string{withPR.Key, withoutPR.Key})
+		got, err := records.ClaimSession(ctx, tx, "review-claim")
 		must(t, err)
-		if len(got) != 1 {
-			t.Fatalf("pull requests by issue = %#v, want exactly one (withPR's)", got)
+		if got != "ses-reviewer" {
+			t.Fatalf("ClaimSession(review-claim) = %q, want ses-reviewer", got)
 		}
-		if !samePullRequest(got[withPR.Key], pr) {
-			t.Fatalf("pull requests by issue[%s] = %#v, want %#v", withPR.Key, got[withPR.Key], pr)
-		}
-		if empty, err := records.PullRequestsByIssue(ctx, tx, nil); err != nil || len(empty) != 0 {
-			t.Fatalf("pull requests of no issues = %#v, %v, want an empty map and no error", empty, err)
+		got, err = records.ClaimSession(ctx, tx, "no-such-claim")
+		must(t, err)
+		if got != "" {
+			t.Fatalf("ClaimSession(no-such-claim) = %q, want \"\"", got)
 		}
 	})
 }
@@ -323,14 +311,14 @@ func samePullRequest(got, want PullRequest) bool {
 		got.FixAttempts == want.FixAttempts &&
 		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot &&
-		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted &&
+		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted && got.HeadCountedBefore == want.HeadCountedBefore &&
 		got.PlannedRed == want.PlannedRed && reflect.DeepEqual(got.Required, want.Required) &&
 		reflect.DeepEqual(got.Workflows, want.Workflows) && got.WorkflowsHead == want.WorkflowsHead
 }
 
 // A new generation keeps an open pull request but none of the old generation's fix-attempt
-// accounting: its counts, its counted head, and its planned mark, which would otherwise exempt the
-// new generation's first red from counting.
+// accounting: its counts, its counted head and the mark that count replaced, and its planned mark,
+// which would otherwise exempt the new generation's first red from counting.
 func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -340,7 +328,7 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1359, Branch: "legion/LEGION-285",
 		HeadSHA: "red-tests", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC),
 		CheckedHead: "red-tests", Failing: []string{"test"}, CheckRuns: []AttemptRun{},
-		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", PlannedRed: true, State: PullRequestOpen,
+		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", HeadCountedBefore: "fix", PlannedRed: true, State: PullRequestOpen,
 	}
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, issue))
@@ -353,9 +341,9 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		if got == nil {
 			t.Fatal("the open pull request is gone, want it kept")
 		}
-		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.PlannedRed {
-			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q plannedRed=%v, want 0, 0, \"\" and false",
-				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.PlannedRed)
+		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.HeadCountedBefore != "" || got.PlannedRed {
+			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q headCountedBefore=%q plannedRed=%v, want 0, 0, \"\", \"\" and false",
+				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.HeadCountedBefore, got.PlannedRed)
 		}
 	})
 }
@@ -658,7 +646,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},

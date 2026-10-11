@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
@@ -102,6 +103,9 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	case errors.Is(err, enroll.ErrAlreadyEnrolled):
 		writeError(w, http.StatusConflict, "ALREADY_ENROLLED", err.Error())
 		return
+	case errors.Is(err, enroll.ErrPodTokenExpired):
+		writeError(w, http.StatusForbidden, "POD_TOKEN_EXPIRED", err.Error())
+		return
 	case errors.Is(err, enroll.ErrPodIdentity):
 		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
 		return
@@ -134,7 +138,7 @@ func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	if !ok {
 		return
 	}
-	err := s.deps.Enroll.Revoke(r.Context(), cred, id, "launcher:"+cred.ID.String())
+	err := s.deps.Enroll.Revoke(r.Context(), cred, id, record.LauncherActor(cred.ID.String()))
 	if errors.Is(err, enroll.ErrOperatorMismatch) {
 		writeError(w, http.StatusForbidden, "OPERATOR_MISMATCH", err.Error())
 		return

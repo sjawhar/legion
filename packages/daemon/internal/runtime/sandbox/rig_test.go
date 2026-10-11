@@ -31,7 +31,9 @@ import (
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
+	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -53,16 +55,18 @@ var (
 	childToken = claim.Token("legion-legion-legion-209-implementer")
 )
 
-// testOptions are the options every test starts from: production's shape, with budgets short
-// enough that a wait the test expects to end never slows the suite.
+// testOptions are the options every test starts from: production's shape, every role's reservation
+// at the daemon's defaults (reservations), with budgets short enough that a wait the test expects
+// to end never slows the suite.
 func testOptions() Options {
 	return Options{
 		Namespace:    testNamespace,
 		Project:      testProject,
-		Store:        newTreeStore(),
+		Store:        newFakeStore(),
 		Image:        testImage,
 		StorageClass: "gp2",
-		TreeVolume:   resource.MustParse("20Gi"),
+		IssueVolume:  resource.MustParse("20Gi"),
+		Resources:    reservations(),
 		StreamURL:    "tcp://192.0.2.250:13371",
 		DaemonURL:    "http://192.0.2.250:13370",
 		EnvoyURL:     "http://192.0.2.250:9020",
@@ -72,11 +76,11 @@ func testOptions() Options {
 			AgentSecrets: "/opt/legion/bin/agent-secrets",
 		},
 		BootTimeout:      2 * time.Second,
-		BootIntervals:    3,
 		TerminationGrace: 200 * time.Millisecond,
 		ProbeInterval:    time.Hour,
 		AdoptTimeout:     time.Minute,
 		Tokens:           staticTokens{},
+		GitHubCredential: staticCredential,
 		Conns:            fake.NewConns(),
 		Log:              slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	}
@@ -89,32 +93,48 @@ func (staticTokens) Token(_ context.Context, owner string) (string, error) {
 	return "ghs_provision_" + owner, nil
 }
 
-// treeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
-// unless closed says its cleanup confirmed, and a tree recorded sessions only when sessions says
+// staticCredentialExpiry is the lease expiry every rendered test credential carries.
+var staticCredentialExpiry = time.Date(2026, 10, 8, 13, 0, 0, 0, time.UTC)
+
+// staticCredentialToken is the token staticCredential renders for role: one per App, so a review
+// role's files and an implement role's differ as the two Apps' tokens do.
+func staticCredentialToken(role claim.Role) string {
+	return "ghs_" + string(appauth.AppRoleFor(role)) + "_token"
+}
+
+// staticCredential is the runtime's GitHubCredential in every test: the role's App's token
+// (appauth.AppRoleFor) rendered as gh's files, with a fixed expiry.
+func staticCredential(_ context.Context, role claim.Role) (ghconfig.Rendered, error) {
+	app := appauth.AppRoleFor(role)
+	return ghconfig.Render(staticCredentialToken(role), string(app), staticCredentialExpiry), nil
+}
+
+// fakeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
+// unless closed says its cleanup confirmed, and an issue recorded sessions only when sessions says
 // so.
-type treeStore struct {
+type fakeStore struct {
 	mu               sync.Mutex
 	closed, sessions map[string]bool
 }
 
-func newTreeStore() *treeStore {
-	return &treeStore{closed: map[string]bool{}, sessions: map[string]bool{}}
+func newFakeStore() *fakeStore {
+	return &fakeStore{closed: map[string]bool{}, sessions: map[string]bool{}}
 }
 
-func (s *treeStore) TreeHasSessions(_ context.Context, _, tree string) (bool, error) {
+func (s *fakeStore) IssueHasSessions(_ context.Context, _, issue string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sessions[tree], nil
+	return s.sessions[issue], nil
 }
 
-func (s *treeStore) TreeLive(_ context.Context, _, tree string) (bool, error) {
+func (s *fakeStore) TreeLive(_ context.Context, _, tree string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return !s.closed[tree], nil
 }
 
 // close records tree's cleanup as confirmed: what the tree left behind is then an orphan.
-func (s *treeStore) close(tree string) {
+func (s *fakeStore) close(tree string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.closed[tree] = true
@@ -187,7 +207,7 @@ type rig struct {
 	conns *fake.Conns
 	now   atomic.Pointer[time.Time]
 	// store is the runtime's in-memory durable state, unless an option handed it another.
-	store *treeStore
+	store *fakeStore
 
 	mu      sync.Mutex
 	actions []action
@@ -296,7 +316,7 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 	for _, option := range options {
 		option(g, &opts)
 	}
-	g.store, _ = opts.Store.(*treeStore)
+	g.store, _ = opts.Store.(*fakeStore)
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -711,7 +731,9 @@ func (g *rig) sent(token claim.Token) []shimwire.Frame {
 	return slices.Clone(g.commands[token])
 }
 
-// sandboxObject is a Sandbox as the API would hold it, for a test's starting state.
+// sandboxObject is a Sandbox as the API would hold it, for a test's starting state: one the runtime
+// made, so it owns its volume (the `issue` claim template). A test that needs the tree-volume layout,
+// a Sandbox owning no volume, drops the template itself (withoutVolume).
 func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]string, conditions ...metav1.Condition) *unstructured.Unstructured {
 	t.Helper()
 	s := sandbox{
@@ -720,13 +742,23 @@ func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]strin
 			Name: name, Namespace: testNamespace, UID: types.UID(uid), Labels: labels, Generation: 2,
 			CreationTimestamp: metav1.NewTime(time.Date(2026, 9, 23, 11, 0, 0, 0, time.UTC)),
 		},
-		Spec:   sandboxSpec{OperatingMode: mode, PodTemplate: podTemplate{Metadata: podMetadata{Labels: labels}}},
+		Spec: sandboxSpec{
+			OperatingMode: mode, PodTemplate: podTemplate{Metadata: podMetadata{Labels: labels}},
+			VolumeClaimTemplates: []volumeClaimTemplate{{Metadata: volumeClaimMetadata{Name: issueVolume, Labels: labels}}},
+		},
 		Status: sandboxStatus{Conditions: conditions},
 	}
 	u, err := encodeSandbox(s)
 	if err != nil {
 		t.Fatal(err)
 	}
+	return u
+}
+
+// withoutVolume is u in the tree-volume layout: a Sandbox that mounted its tree root's volume and
+// owns none of its own.
+func withoutVolume(u *unstructured.Unstructured) *unstructured.Unstructured {
+	unstructured.RemoveNestedField(u.Object, "spec", "volumeClaimTemplates")
 	return u
 }
 

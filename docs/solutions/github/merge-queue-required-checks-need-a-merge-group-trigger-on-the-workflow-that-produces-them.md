@@ -80,7 +80,7 @@ Turning the merge queue rule on before the workflow answers `merge_group` leaves
 request waiting for checks that never start, and the group fails at its timeout. The change has
 three ordered steps: (1) the trigger merges into `main` (this is an ordinary pull request); (2) an
 administrator adds the merge queue rule to the `main` ruleset (a repository setting, not code — on
-`sjawhar/legion` it is Sami's click, requested as one plain `dispatch_message` carrying the exact
+`sjawhar/legion` it is Sami's click, requested as one plain `dispatch message` carrying the exact
 settings, never an ask); (3) the merge-queue organizer's `gh pr merge --squash --match-head-commit
 <sha>` becomes an enqueue on its own, since GitHub routes the same command into the queue once the
 branch requires one. GitHub builds each queued pull request's merge commit **with the workflow

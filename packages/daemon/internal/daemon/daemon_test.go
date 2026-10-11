@@ -109,6 +109,7 @@ func testConfig(t *testing.T) config.Config {
 		PromptRetireLimit:                       2,
 		OperatorTokenFile:                       tokenFile,
 		EnvoyURL:                                "http://127.0.0.1:9020",
+		ControllerLaunch:                        config.ControllerLaunchOperator,
 	}
 }
 
@@ -269,11 +270,11 @@ type built struct {
 	store   *store.Store
 }
 
-// fakeRuntime is a daemon whose runtime is rt: the real stream listener, store, and machines,
-// with nothing launched for real.
-func fakeRuntime(rt *fake.Runtime, record *built) overrides {
+// fakeRuntime is a daemon whose runtime is rt — the fake, or a test's runtime built over it: the
+// real stream listener, store, and machines, with nothing launched for real.
+func fakeRuntime(rt runtime.Runtime, record *built) overrides {
 	return overrides{
-		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
+		runtime: func(_ context.Context, listener *stream.Listener, address string, apps appauth.Tokens, st *store.Store) (runtime.Runtime, error) {
 			record.mu.Lock()
 			defer record.mu.Unlock()
 			record.conns, record.address, record.apps, record.store = listener, address, apps, st
@@ -486,6 +487,19 @@ type daemon struct {
 // startDaemon runs the daemon until the test stops it, and returns once it answers /healthz.
 func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 	t.Helper()
+	return startDaemonLogging(t, cfg, o, quietLogger())
+}
+
+// startDaemonLogging is startDaemon writing the daemon's log to log.
+func startDaemonLogging(t *testing.T, cfg config.Config, o overrides, log *slog.Logger) *daemon {
+	t.Helper()
+	return startDaemonWithin(t, cfg, o, log, 10*time.Second)
+}
+
+// startDaemonWithin is startDaemonLogging failing the test unless the daemon answers /healthz
+// within the given time.
+func startDaemonWithin(t *testing.T, cfg config.Config, o overrides, log *slog.Logger, within time.Duration) *daemon {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	// One transport for every request, so the test can close its own connections before it asks
 	// the daemon to stop: net/http gives an idle connection five seconds before a Shutdown may
@@ -496,11 +510,14 @@ func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 		client: &http.Client{Transport: transport, Timeout: 10 * time.Second},
 		base:   "http://127.0.0.1:" + strconv.Itoa(cfg.Port),
 	}
-	go func() { d.done <- run(ctx, cfg, quietLogger(), o) }()
+	go func() { d.done <- run(ctx, cfg, log, o) }()
 	t.Cleanup(d.stop)
-	deadline := time.Now().Add(10 * time.Second)
+	// Each poll is bounded by a second, so within bounds the wait whatever a poll meets: until the
+	// daemon serves, the held listener queues the connection unanswered.
+	poll := &http.Client{Transport: transport, Timeout: time.Second}
+	deadline := time.Now().Add(within)
 	for {
-		response, err := d.client.Get(d.base + "/healthz")
+		response, err := poll.Get(d.base + "/healthz")
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode == http.StatusOK {
@@ -514,7 +531,7 @@ func startDaemon(t *testing.T, cfg config.Config, o overrides) *daemon {
 		default:
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the daemon never answered /healthz on %s: %v", d.base, err)
+			t.Fatalf("the daemon did not answer /healthz on %s within %s: %v", d.base, within, err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -753,7 +770,7 @@ func TestWorkflowBootLogsItsDependencyOrder(t *testing.T) {
 	if got := tokens.Roles(); len(got) != 2 || got[0] != appauth.Implement || got[1] != appauth.Review {
 		t.Fatalf("App token roles = %v, want implement then review", got)
 	}
-	want := []string{"prompts", "store", "config", "appauth", "worker-bin", "dispatch", "intake", "admission", "outbox", "api"}
+	want := []string{"prompts", "store", "config", "appauth", "launcher", "dispatch", "intake", "admission", "outbox", "api"}
 	var got []string
 	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
 		var entry struct {

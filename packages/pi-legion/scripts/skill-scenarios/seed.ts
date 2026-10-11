@@ -117,7 +117,7 @@ if (command === "project") {
         "unattached-issue guidance and the coordinator's architecture model. What never ran: the",
         "backfill itself. The dry-run table (attachment-dry-run.md, attached here) only proposed",
         "attachments for the Go refactor's and the roadmap's trees. Next: apply that table through",
-        "dispatch_issue_update, after re-checking each row against the live component model. Then",
+        "`dispatch issue-update`, after re-checking each row against the live component model. Then",
         "read both trees back and confirm every child carries components or a not-architectural",
         "reason.",
       ].join(" "),
@@ -186,7 +186,7 @@ if (command === "project") {
   // The to-do CLI's Dispatch project, the batch's only one, with two issues unrelated to the
   // prompt's feature (a crash already understood and a display tweak). Each title names the "todo
   // CLI" in plain words: Postgres's English parser reads `todo.py` and `to-do` as single lexemes, so
-  // a session's `dispatch_search` for "todo CLI" finds a title only where `todo` stands alone.
+  // a session's `dispatch search` for "todo CLI" finds a title only where `todo` stands alone.
   await createProject({ key: "TODO", name: "todo CLI" });
   for (const [title, problem] of [
     [

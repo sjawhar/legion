@@ -80,6 +80,16 @@ func fakeOMP() int {
 		}
 	}()
 
+	// FAKE_OMP_HOLD_READY names a file the fake waits for before its first line, so a test can
+	// tell what the shim does at the spawn from what it does on the child's first frame.
+	if hold := os.Getenv("FAKE_OMP_HOLD_READY"); hold != "" {
+		for {
+			if _, err := os.Stat(hold); err == nil {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+	}
 	emit(fmt.Sprintf(`{"type":"fake_ready","pid":%d}`, os.Getpid()))
 	if message := os.Getenv("FAKE_OMP_EXTENSION_ERROR"); message != "" {
 		emit(fmt.Sprintf(`{"type":"extension_error","extensionPath":"/opt/legion/pi-legion/dist/legion.js","event":"session_start","error":%q}`, message))
@@ -528,6 +538,172 @@ func TestOMPIsSpawnedOnlyAfterTheHelloAck(t *testing.T) {
 	}
 }
 
+// The workspace's CodeGraph warm-up (Config.WarmCodegraph) starts on the first line the child
+// writes, with the workspace LEGION_WORKSPACE names: not before the ack, not at the spawn — Oh My
+// Pi's first frame is its `ready`, once its extensions are loaded — and exactly once for the shim's
+// life, so neither a later frame nor a connection redialled while the child runs starts a second
+// one. A Config without the hook, a tmux pane's or the controller's, runs nothing.
+func TestTheCodegraphWarmUpStartsOnTheChildsFirstFrameOnce(t *testing.T) {
+	const workspace = "/legion/workspaces/acme/widgets/widgets-7"
+	path := socketPath(t)
+	daemon := listen(t, path)
+	hold := filepath.Join(t.TempDir(), "ready")
+	child := newOMP(t, "LEGION_WORKSPACE="+workspace, "FAKE_OMP_HOLD_READY="+hold)
+	var mu sync.Mutex
+	var warmed []string
+	calls := func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(warmed)
+	}
+	cfg := config(t, path, child)
+	cfg.WarmCodegraph = func(_ context.Context, dir string) {
+		mu.Lock()
+		defer mu.Unlock()
+		warmed = append(warmed, dir)
+	}
+	sh := run(t, cfg, newClock())
+
+	p := daemon.accept(t)
+	p.expectHello(t)
+	p.send(t, shimwire.HelloAck{})
+	sh.log.await(t, "[worker-shim] spawned ", 1)
+	for deadline := time.Now().Add(200 * time.Millisecond); time.Now().Before(deadline) && !child.started(); {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls(); len(got) != 0 {
+		t.Fatalf("the warm-up started at the spawn, before the child wrote anything: %v", got)
+	}
+	if err := os.WriteFile(hold, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	p.expectRaw(t, "fake_ready")
+	for deadline := time.Now().Add(waitLimit); len(calls()) == 0; {
+		if time.Now().After(deadline) {
+			t.Fatalf("the warm-up never started after the child's first frame; log:\n%s", sh.log)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := calls(); !slices.Equal(got, []string{workspace}) {
+		t.Fatalf("the warm-up was started with %v, want once with %q", got, workspace)
+	}
+
+	p.send(t, shimwire.Prompt{ID: "p1", DeliveryID: "d1", Message: "go"})
+	p.expect(t, shimwire.Response{ID: "p1", Command: "prompt", Success: true})
+	p.expect(t, shimwire.AgentStart{})
+	p.expect(t, shimwire.AgentEnd{})
+	_ = p.conn.Close()
+	sh.log.await(t, "reconnecting", 1)
+	p = daemon.accept(t)
+	p.expectHello(t)
+	p.send(t, shimwire.HelloAck{})
+	p.send(t, shimwire.GetState{ID: "probe"})
+	if raw := p.next(t).(shimwire.Response); raw.ID != "probe" {
+		t.Fatalf("the probe was answered as %#v", raw)
+	}
+	if got := calls(); !slices.Equal(got, []string{workspace}) {
+		t.Fatalf("later frames and a redial started the warm-up again: %v", got)
+	}
+
+	t.Run("nothing runs without the hook", func(t *testing.T) {
+		path := socketPath(t)
+		daemon := listen(t, path)
+		child := newOMP(t, "LEGION_WORKSPACE="+workspace)
+		sh := run(t, config(t, path, child), newClock())
+		p := daemon.accept(t)
+		p.open(t)
+		p.send(t, shimwire.GetState{ID: "probe"})
+		if raw := p.next(t).(shimwire.Response); raw.ID != "probe" {
+			t.Fatalf("the probe was answered as %#v", raw)
+		}
+		if sh.log.count("warm-up") != 0 {
+			t.Fatalf("a shim with no hook said something of a warm-up; log:\n%s", sh.log)
+		}
+	})
+}
+
+// The shim ends with its child, and the warm-up ends with the shim: the moment the child is told
+// to stop the warm-up's context is ended — the build it started stops on that, not at the child's
+// exit, so an agent that spends its whole grace ignoring SIGTERM costs the stop nothing more — and
+// Run returns the child's status only once the warm-up has returned, so the lease the warm-up
+// releases on its way out is gone before the launcher reads the shim as exited. A role stopped
+// mid-build (the launcher's one SIGTERM to the whole group) otherwise left `.codegraph/legion-warm.lock`
+// behind, and its relaunch within the minute read a live build and skipped its own.
+func TestTheShimEndsOnlyOnceAnInFlightWarmUpHasReturned(t *testing.T) {
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t, "LEGION_WORKSPACE=/legion/workspaces/acme/widgets/widgets-7", "FAKE_OMP_IGNORE_SIGTERM=1")
+	var mu sync.Mutex
+	var returned time.Time
+	ended := make(chan struct{})
+	cfg := config(t, path, child)
+	cfg.WarmCodegraph = func(ctx context.Context, _ string) {
+		<-ctx.Done()
+		close(ended)
+		// What a real warm-up does here: its codegraph child ends on the same context, it logs the
+		// end and releases the lease. That takes time the shim must wait out.
+		time.Sleep(300 * time.Millisecond)
+		mu.Lock()
+		returned = time.Now()
+		mu.Unlock()
+	}
+	clock := newClock()
+	sh := run(t, cfg, clock)
+	p := daemon.accept(t)
+	p.open(t)
+
+	p.send(t, shimwire.Shutdown{})
+	p.expectRaw(t, "fake_sigterm")
+	expired := clock.next(t, grace)
+	// The child is ignoring its SIGTERM and still running; the warm-up has already been ended.
+	select {
+	case <-ended:
+	case <-time.After(waitLimit):
+		t.Fatalf("the warm-up's context did not end when the child was told to stop; log:\n%s", sh.log)
+	}
+	expired.elapse()
+	if code := sh.wait(t); code != 128+int(syscall.SIGKILL) {
+		t.Fatalf("the shim exited %d, want the child's %d", code, 128+int(syscall.SIGKILL))
+	}
+	exited := time.Now()
+	mu.Lock()
+	defer mu.Unlock()
+	if returned.IsZero() || returned.After(exited) {
+		t.Fatalf("Run returned at %s with the warm-up still running (it returned at %s); log:\n%s", exited.Format(time.StampMilli), returned.Format(time.StampMilli), sh.log)
+	}
+}
+
+// The wait for the warm-up is what the role's stop grace leaves once the child's own grace and the
+// stdout drain are spent (warmUpDrain, pinned in drain_test.go), so a warm-up that never returns
+// cannot hold the shim past the grace at which its launcher kills it (with the lease then left
+// behind, the failure the wait prevents): Run returns without it, saying so, and a runtime whose
+// stop grace leaves nothing gets no wait at all.
+func TestTheWaitForTheWarmUpIsBoundedByTheStopGrace(t *testing.T) {
+	path := socketPath(t)
+	daemon := listen(t, path)
+	child := newOMP(t, "LEGION_WORKSPACE=/legion/workspaces/acme/widgets/widgets-7")
+	cfg := config(t, path, child)
+	// grace is the test's 3 s; a 3.5 s stop grace leaves half a second less the 1 s stdout drain:
+	// nothing, so Run returns at once without the warm-up, which never returns.
+	cfg.StopGrace = grace + 500*time.Millisecond
+	never := make(chan struct{})
+	cfg.WarmCodegraph = func(ctx context.Context, _ string) { <-never }
+	defer close(never)
+	clock := newClock()
+	sh := run(t, cfg, clock)
+	p := daemon.accept(t)
+	p.open(t)
+
+	p.send(t, shimwire.Shutdown{})
+	clock.next(t, grace)
+	if code := sh.wait(t); code != 128+int(syscall.SIGTERM) {
+		t.Fatalf("the shim exited %d, want the child's %d", code, 128+int(syscall.SIGTERM))
+	}
+	if sh.log.count("the CodeGraph warm-up is still running") != 1 {
+		t.Fatalf("the shim left without saying the warm-up still ran; log:\n%s", sh.log)
+	}
+}
+
 // A daemon that refuses the hello — closing the stream, as it does for an unknown or stale boot
 // token — never gets an OMP spawned: the shim redials, re-sending the hello each time, with a
 // backoff that doubles from 200 ms to its 5 s cap. A dial that finds no listener counts the same.
@@ -690,13 +866,12 @@ func TestShutdownOfAChildThatHonoursSIGTERMExitsWithItsStatus(t *testing.T) {
 	}
 }
 
-// fakeJJ writes a `jj` that records how it was run and then does what mode says, at the path the
-// test hands the shim as LEGION_JJ_PATH, and puts a decoy `jj` first on PATH that fails naming
-// itself: the shim runs the jj the daemon resolved at boot, never a PATH lookup.
-func fakeJJ(t *testing.T) (path, record string) {
+// fakeJJ writes a `jj` that records how it was run and then does what mode says, in a directory
+// of its own put first on PATH: the shim runs PATH's jj, the one the pane's own shell runs.
+func fakeJJ(t *testing.T) (record string) {
 	t.Helper()
 	record = filepath.Join(t.TempDir(), "jj-invocation")
-	path = filepath.Join(t.TempDir(), "jj")
+	bin := t.TempDir()
 	script := `#!/bin/sh
 printf '%s\n' "$@" >> "$FAKE_JJ_RECORD"
 printf 'JJ_USER=%s\nJJ_EMAIL=%s\n' "$JJ_USER" "$JJ_EMAIL" >> "$FAKE_JJ_RECORD"
@@ -705,16 +880,11 @@ fail) echo "Error: the working copy is stale" >&2; exit 3 ;;
 hang) exec sleep 30 ;;
 esac
 `
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := os.WriteFile(filepath.Join(bin, "jj"), []byte(script), 0o700); err != nil {
 		t.Fatalf("write the fake jj: %v", err)
 	}
-	decoys := t.TempDir()
-	decoy := "#!/bin/sh\necho 'the jj on PATH ran' >&2\nexit 97\n"
-	if err := os.WriteFile(filepath.Join(decoys, "jj"), []byte(decoy), 0o700); err != nil {
-		t.Fatalf("write the decoy jj: %v", err)
-	}
-	t.Setenv("PATH", decoys+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return path, record
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return record
 }
 
 // environWithout is os.Environ() less the named variables: the shim under test must not inherit
@@ -727,17 +897,16 @@ func environWithout(names ...string) []string {
 }
 
 // `adopt-working-copy` is answered by the shim itself: the one shared adoption command, run by
-// the jj the pane's environment names in LEGION_JJ_PATH on the workspace it names in
-// LEGION_WORKSPACE — never a PATH lookup, never the directory the shim happens to run in — under
-// the identity the daemon named and within its budget, and OMP never sees the frame. A shim
-// missing either variable refuses, naming it. A failure answers `ok: false` with the command's
-// report rather than taking the agent down.
+// the jj on the shim's PATH on the workspace LEGION_WORKSPACE names — never the directory the
+// shim happens to run in — under the identity the daemon named and within its budget, and OMP
+// never sees the frame. A shim missing LEGION_WORKSPACE refuses, naming it (a PATH without jj is
+// TestAdoptWorkingCopyRunsTheJJOnPATHWithNoLEGIONJJPATH's case). A failure answers `ok: false`
+// with the command's report rather than taking the agent down.
 func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		mode        string
 		noWorkspace bool
-		noJJPath    bool
 		request     shimwire.AdoptWorkingCopy
 		ok          bool
 		errorHas    []string
@@ -774,15 +943,9 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 			request:     shimwire.AdoptWorkingCopy{ID: "a5", JJUser: "u", JJEmail: "u@example.test", TimeoutMs: 5000},
 			errorHas:    []string{"LEGION_WORKSPACE is not set"},
 		},
-		{
-			name:     "a shim with no LEGION_JJ_PATH",
-			noJJPath: true,
-			request:  shimwire.AdoptWorkingCopy{ID: "a6", JJUser: "u", JJEmail: "u@example.test", TimeoutMs: 5000},
-			errorHas: []string{"LEGION_JJ_PATH is not set"},
-		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			jj, record := fakeJJ(t)
+			record := fakeJJ(t)
 			path := socketPath(t)
 			daemon := listen(t, path)
 			child := newOMP(t)
@@ -790,13 +953,10 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 			// The workspace is a directory of its own: not the test process's working
 			// directory, which is the shim's.
 			workspace := t.TempDir()
-			cfg.Env = append(environWithout("LEGION_WORKSPACE", "LEGION_JJ_PATH"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+			cfg.Env = append(environWithout("LEGION_WORKSPACE"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
 				"FAKE_OMP_LOG="+child.log, "FAKE_JJ_RECORD="+record, "FAKE_JJ_MODE="+tc.mode)
 			if !tc.noWorkspace {
 				cfg.Env = append(cfg.Env, "LEGION_WORKSPACE="+workspace)
-			}
-			if !tc.noJJPath {
-				cfg.Env = append(cfg.Env, "LEGION_JJ_PATH="+jj)
 			}
 			run(t, cfg, newClock())
 			p := daemon.accept(t)
@@ -839,6 +999,77 @@ func TestAdoptWorkingCopyRunsTheSharedMetaeditAndAnswersTheDaemon(t *testing.T) 
 			p.next(t)
 			if got := frameTypes(child.received(t)); !reflect.DeepEqual(got, []string{shimwire.TypeGetState}) {
 				t.Fatalf("OMP read %v; adopt-working-copy is the shim's own", got)
+			}
+		})
+	}
+}
+
+// No runtime tells a pane or a pod LEGION_JJ_PATH (internal/api/version.go, the LEGION-631 entry;
+// docs/kubernetes.md, "No container is told …"): a pane's jj is its PATH's, the one every role's
+// plain `jj git push` runs, and the shim's adoption runs that same jj. A PATH without one refuses
+// naming jj and the PATH it searched — never a variable no runtime sets, whose absence stopped every
+// role of every pod at its first jj operation (stage 4a's adopt-working-copy at 18dc1df2,
+// dispatch://LEGION-631/comment/b376473d-a4cb-492f-ac7d-e66b26f2bff1).
+func TestAdoptWorkingCopyRunsTheJJOnPATHWithNoLEGIONJJPATH(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		jjOnPath bool
+		ok       bool
+	}{
+		{name: "the PATH's jj adopts the working copy", jjOnPath: true, ok: true},
+		{name: "a PATH without jj refuses, naming jj and the PATH"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// PATH is one directory of the test's own: no other jj (the image's, a devbox's) can
+			// answer the lookup, and nothing an adoption runs needs another directory (the fake OMP
+			// is os.Args[0], absolute; the fake jj's interpreter is /bin/sh).
+			bin := t.TempDir()
+			record := filepath.Join(t.TempDir(), "jj-invocation")
+			if tc.jjOnPath {
+				script := "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"$FAKE_JJ_RECORD\"\nprintf 'JJ_USER=%s\\nJJ_EMAIL=%s\\n' \"$JJ_USER\" \"$JJ_EMAIL\" >> \"$FAKE_JJ_RECORD\"\n"
+				if err := os.WriteFile(filepath.Join(bin, "jj"), []byte(script), 0o700); err != nil {
+					t.Fatalf("write the fake jj: %v", err)
+				}
+			}
+			t.Setenv("PATH", bin)
+			path := socketPath(t)
+			daemon := listen(t, path)
+			child := newOMP(t)
+			cfg := config(t, path, child)
+			workspace := t.TempDir()
+			cfg.Env = append(environWithout("LEGION_WORKSPACE", "LEGION_JJ_PATH"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+				"FAKE_OMP_LOG="+child.log, "FAKE_JJ_RECORD="+record, "LEGION_WORKSPACE="+workspace)
+			run(t, cfg, newClock())
+			p := daemon.accept(t)
+			p.open(t)
+
+			request := shimwire.AdoptWorkingCopy{ID: "path", JJUser: "legion-implementer[bot]", JJEmail: "implementer@example.test", TimeoutMs: 5000}
+			p.send(t, request)
+			got, ok := p.next(t).(shimwire.AdoptWorkingCopyResult)
+			if !ok || got.ID != request.ID || got.OK != tc.ok {
+				t.Fatalf("the shim answered %#v, want a result for %s with ok=%v", got, request.ID, tc.ok)
+			}
+			invocation, err := os.ReadFile(record)
+			if !tc.ok {
+				if strings.Contains(got.Error, "LEGION_JJ_PATH") {
+					t.Fatalf("the refusal %q names LEGION_JJ_PATH, which no runtime sets", got.Error)
+				}
+				if !strings.Contains(got.Error, "jj") || !strings.Contains(got.Error, bin) {
+					t.Fatalf("the refusal %q does not name jj and the PATH searched (%s)", got.Error, bin)
+				}
+				if err == nil {
+					t.Fatalf("jj ran on a PATH without one: %s", invocation)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("the PATH's jj never ran: %v", err)
+			}
+			identity := []string{"JJ_USER=" + request.JJUser, "JJ_EMAIL=" + request.JJEmail}
+			read := append([]string{"log", "-r", `@ ~ description(exact:"")`, "--no-graph", "-T", "commit_id", "-R", workspace}, identity...)
+			metaedit := append([]string{"metaedit", "--update-author", "-r", `@ & description(exact:"")`, "-R", workspace}, identity...)
+			if want := strings.Join(append(read, metaedit...), "\n") + "\n"; string(invocation) != want {
+				t.Fatalf("the PATH's jj ran as\n%s\nwant the read, then the shared metaedit, under the requested identity\n%s", invocation, want)
 			}
 		})
 	}
@@ -893,19 +1124,20 @@ func TestAdoptWorkingCopyStartsTheIncomingRoleOnAFreshCommitOverADescribedOne(t 
 				jjAs("implementer", "describe", "-m", "feat: the pushed change")
 			}
 			before := jjAs("implementer", "log", "-r", "@", "--no-graph", "-T", "commit_id")
-			// The shim's jj, recording each command it runs.
+			// The shim's jj, recording each command it runs: first on PATH, where the shim looks.
 			record := filepath.Join(t.TempDir(), "jj-commands")
-			recording := filepath.Join(t.TempDir(), "jj")
-			if err := os.WriteFile(recording, []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+record+"\nexec "+jj+" \"$@\"\n"), 0o700); err != nil {
+			bin := t.TempDir()
+			if err := os.WriteFile(filepath.Join(bin, "jj"), []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> "+record+"\nexec "+jj+" \"$@\"\n"), 0o700); err != nil {
 				t.Fatal(err)
 			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 			path := socketPath(t)
 			daemon := listen(t, path)
 			child := newOMP(t)
 			cfg := config(t, path, child)
-			cfg.Env = append(environWithout("LEGION_WORKSPACE", "LEGION_JJ_PATH"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
-				"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace, "LEGION_JJ_PATH="+recording)
+			cfg.Env = append(environWithout("LEGION_WORKSPACE"), fakeOMPEnv+"=1", "FAKE_OMP_MARKER="+child.marker,
+				"FAKE_OMP_LOG="+child.log, "LEGION_WORKSPACE="+workspace)
 			run(t, cfg, newClock())
 			p := daemon.accept(t)
 			p.open(t)

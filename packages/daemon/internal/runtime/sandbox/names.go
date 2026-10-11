@@ -11,16 +11,23 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
-// The pod's own paths. The tree volume is mounted whole at TreeRoot in workspace-init and each
+// The pod's own paths. The issue's volume is mounted whole at TreeRoot in workspace-init and each
 // role launcher, and sessions stay on it. Each role container has its own launcher token
 // projection at LauncherDir, and its own memory-backed LauncherPrivateDir, where its launcher
-// writes the generation's boot token and launch credentials, and StateDir.
+// writes the generation's boot token and launch credentials, and StateDir. GHConfigDir is a role
+// container's GH_CONFIG_DIR, in an issue pod or the controller's: the read-only projection of its
+// role Secret's two gh files (GitHubHostsKey as ghconfig.HostsFile, GitHubConfigKey as
+// ghconfig.ConfigFile), mounted in that role's container alone, which its plain `gh` and the
+// clone's `gh auth git-credential` helper read the role's App token from. The kubelet rewrites a
+// whole-volume Secret projection in place when the Secret changes, so the refresher's Secret
+// update is what the next gh runs with.
 const (
 	TreeRoot           = "/legion"
 	SessionsSubPath    = "sessions"
 	LauncherDir        = "/var/run/legion/launcher"
 	LauncherPrivateDir = "/var/run/legion/private"
 	LauncherTokenFile  = "LAUNCHER_TOKEN"
+	GHConfigDir        = "/var/run/legion/gh"
 	ProvisionDir       = "/var/run/legion/provision"
 	FeedDir            = "/var/run/legion/feed"
 	StateDir           = "/var/run/legion/state"
@@ -58,8 +65,6 @@ const (
 	// legionPlugin is the packed pi-legion the image carries, whose package.json names its
 	// extension, skills and the daemon API contract it speaks.
 	legionPlugin = "/opt/legion/pi-legion"
-	// workerBin is where workspace-init installs the gh shim on the tree volume.
-	workerBin = TreeRoot + "/worker-bin"
 	// initTempDir is the workspace-fetch container's TMPDIR, an in-memory volume of its own:
 	// `workspace-init fetch` keeps its one-shot credential there, off every volume another
 	// container mounts.
@@ -83,9 +88,18 @@ const (
 	dispatchTokenKey  = "DISPATCH_TOKEN"
 )
 
+// The keys of a role's Secret that carry its GitHub credential beside the launcher token: the
+// rendered hosts.yml and config.yml (ghconfig.Rendered), written for every launcher role: every
+// workflow role of an issue pod and the controller's. credentialFromSecret hashes the launcher
+// token alone, so the refresher rewrites these two without changing the launcher's binding.
+const (
+	GitHubHostsKey  = "github-hosts"
+	GitHubConfigKey = "github-config"
+)
+
 // The labels every object of a claim carries: the Sandbox, its pod template (the only place the
-// controller copies pod labels from), the root's volume claim template (copied to the PVC), and
-// the claim's Secret. The informers select on the project label.
+// controller copies pod labels from), the claim's Secret, and, less the tree (claimLabels), its
+// volume claim template (copied to the PVC). The informers select on the project label.
 const (
 	labelProject = "legion.dev/project"
 	labelTree    = "legion.dev/tree"
@@ -93,10 +107,10 @@ const (
 	labelRole    = "legion.dev/role"
 )
 
-// treeVolume is the root Sandbox's volume claim template, and the pod volume every tree pod mounts.
-// The controller names the claim `<template>-<sandbox>` (agent-sandbox v1.0.3,
-// sandbox_controller.go:1641), which is TreeClaimName.
-const treeVolume = "tree"
+// issueVolume is every Sandbox's volume claim template, the issue's or the controller's, and the
+// pod volume its pod mounts. The controller names the claim `<template>-<sandbox>` (agent-sandbox
+// v1.0.3, sandbox_controller.go:1641), which is IssueClaimName.
+const issueVolume = "issue"
 
 // maxNameLength is a DNS-1123 label's length: a Sandbox name is also its pod's and, were one
 // asked for, its Service's.
@@ -137,9 +151,11 @@ func issueSandboxName(project, issue string) (string, error) {
 	return SandboxName(token), nil
 }
 
-// TreeClaimName is the tree volume's claim: the root Sandbox's `tree` template, as the controller
-// names the claim it makes from it. Every pod of the tree mounts it by this name.
-func TreeClaimName(root claim.Token) string { return treeVolume + "-" + SandboxName(root) }
+// IssueClaimName is the volume claim of the Sandbox that t's claim runs in, the issue's or the
+// controller's, as the controller names the claim it makes from the Sandbox's `issue` template.
+// Any role claim of the issue names it: the token is cut to the Sandbox's name as SandboxName
+// cuts it.
+func IssueClaimName(t claim.Token) string { return issueVolume + "-" + SandboxName(t) }
 
 // secretName is the claim's Secret, which its Sandbox owns.
 func secretName(sandbox string) string { return sandbox + "-boot" }

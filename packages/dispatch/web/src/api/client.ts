@@ -38,6 +38,9 @@ import type {
   CredentialGrantsResponse,
   CredentialPendingResponse,
   CredentialRecord,
+  DeliveryMeasuresResponse,
+  DeliveryPipelineResponse,
+  DeliveryRunDetail,
   DeliverySettings,
   DeliverySettingsInput,
   DeliveryTimelineResponse,
@@ -128,6 +131,12 @@ export function isSourceNotFound(error: unknown): boolean {
   return error instanceof ApiError && error.status === 404 && error.code === "SOURCE_NOT_FOUND";
 }
 
+// A document that no longer exists cannot be restored, so its browser-held edits are discarded
+// when the admission read confirms this exact server response. Other 404s remain retryable.
+export function isArtifactNotFound(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 404 && error.code === "ARTIFACT_NOT_FOUND";
+}
+
 // A Dispatch with no secrets broker configured (no DISPATCH_AGENT_SECRETS_URL) answers every
 // credential route but the pending list with this 404 — the same class as the architecture-source
 // 404 above it: retrying changes nothing. The pending list, which every page reads, answers `null`
@@ -179,6 +188,12 @@ export function apiErrorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
 }
 
+// Whether the server refused with one of `codes`: a refusal the same request meets every time,
+// which its caller shows without a Retry.
+export function apiErrorCodeIn(error: unknown, codes: ReadonlySet<string>): error is ApiError {
+  return error instanceof ApiError && error.code !== undefined && codes.has(error.code);
+}
+
 export interface ListIssuesOptions {
   pinned?: boolean;
   project?: string;
@@ -206,11 +221,12 @@ export interface CreateArtifactReviewInput {
   reason?: string;
 }
 
-/** `GET /api/v1/delivery/timeline?from&to&<facets>`'s query: the window plus the same
- *  repeatable facets the delivery page's URL carries (LEGION-567's plan, "API"). */
+/** `GET /api/v1/delivery/timeline?from&to&q&<facets>`'s query: the window, the search, plus the
+ *  same repeatable facets the delivery page's URL carries (LEGION-567's plan, "API"). */
 export interface DeliveryTimelineOptions {
   from: string;
   to: string;
+  q?: string;
   repo?: readonly string[];
   parent_agent?: readonly string[];
   session?: readonly string[];
@@ -689,9 +705,26 @@ export class DispatchApiClient {
   }
 
   /** The delivery timeline's one read: merges, deploys, pipeline failures and waiting-to-deploy
-   *  PRs within `[from, to)` and the given facets, all applied server-side. */
+   *  PRs within `[from, to)`, the search and the given facets, all applied server-side. */
   getDeliveryTimeline(options: DeliveryTimelineOptions): Promise<DeliveryTimelineResponse> {
     return this.json<DeliveryTimelineResponse>(pathWithQuery("/api/v1/delivery/timeline", options));
+  }
+
+  /** The delivery measures and their targets for `[from, to)`: the same query the timeline takes,
+   *  so the search and facets narrow the pull-request measures exactly as they narrow its PRs. */
+  getDeliveryMeasures(options: DeliveryTimelineOptions): Promise<DeliveryMeasuresResponse> {
+    return this.json<DeliveryMeasuresResponse>(pathWithQuery("/api/v1/delivery/measures", options));
+  }
+
+  /** One deploy-repository run with every job it ran, for the drill-down's job lists. */
+  getDeliveryRun(id: number): Promise<DeliveryRunDetail> {
+    return this.json<DeliveryRunDetail>(`/api/v1/delivery/runs/${id}`);
+  }
+
+  /** The Pipeline page's seven UTC days ending today, or ending on `at`'s day when it is given
+   *  (the page's test and screenshot hook). */
+  getDeliveryPipeline(options: { at?: string }): Promise<DeliveryPipelineResponse> {
+    return this.json<DeliveryPipelineResponse>(pathWithQuery("/api/v1/delivery/pipeline", options));
   }
 
   /** The delivery timeline's configuration record, or `null` until someone sets it. */
@@ -813,14 +846,16 @@ export class DispatchApiClient {
     });
   }
 
-  /** `GET /api/v1/machine-logins`: the machine logins the viewer approved, their own machines'
-   *  and any service's, that are unexpired or expired with a session still running. */
+  /** `GET /api/v1/machine-logins`: the machine logins the viewer may revoke, their own machines'
+   *  and every service's, whoever approved it, that are unexpired or expired with a session still
+   *  running. */
   getMachineLogins(): Promise<MachineLoginsResponse> {
     return this.json<MachineLoginsResponse>("/api/v1/machine-logins");
   }
 
-  /** Revoke a machine login the viewer approved, expired or not: Dispatch names the viewer as the
-   *  person revoking, and every session the login enrolled ends with it. */
+  /** Revoke a machine login, expired or not: a service's, or one of the viewer's machines'.
+   *  Dispatch names the viewer as the person revoking, and every session the login enrolled ends
+   *  with it. */
   async revokeMachineLogin(credentialId: string): Promise<void> {
     await this.response(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {
       body: JSON.stringify({}),

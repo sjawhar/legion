@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -23,8 +22,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/notify"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
-	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
-	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
@@ -266,8 +263,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 			return nil
 		}
 		closing := store.IssueClose{Issue: row.Issue, Tree: value.Tree, IssueGeneration: value.Generation,
-			TreeGeneration: value.TreeGeneration, Row: row.ID}
-		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, func(ctx context.Context) (bool, error) {
+			TreeGeneration: value.TreeGeneration, Row: row.ID, Release: value.Release}
+		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, value.Release, func(ctx context.Context) (bool, error) {
 			return r.trees.IssueSuspension(ctx, r.project, closing, record.OutOfWorkflow)
 		})
 	case record.WorkspaceRemove:
@@ -374,23 +371,22 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 		if err != nil {
 			return fmt.Errorf("the architect of %s: %w", tree.root.Key, err)
 		}
-		if catchUpSuperseded(*payload.CatchUp, r.supervisedClaim(root), &tree.root) {
+		if catchUpSuperseded(*payload.CatchUp, r.supervisedClaim(root).Claim, &tree.root) {
 			r.log.Info("outbox catch-up finished without publishing: a newer catch-up supersedes it", "row", row.ID, "issue", row.Issue,
 				"generation", payload.CatchUp.Generation, "launch", payload.CatchUp.Launch)
 			return nil
 		}
 	}
-	runs := func(token claim.Token) bool { return claimRuns(r.claimState(token)) }
-	architect, err := owningArchitect(tree.project, tree.issues, issue, payload.Kind, runs)
+	architect, err := owningArchitect(tree.project, tree.issues, issue, payload.Kind, r.holdsItsRole)
 	if err != nil {
 		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
 	}
-	if state := r.claimState(architect); stoppedWithTree(tree.root.Lingers(), state) {
+	if held := r.supervisedClaim(architect); stoppedWithTree(tree.root.Lingers(), held) {
 		r.log.Info("outbox notice finished undelivered: its architect stopped with its finished tree",
-			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", state)
+			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", held.State, "stopping", held.Stopping)
 		return nil
 	}
-	if earlier := earlierNoticeFor(tree, architect, runs); earlier != 0 {
+	if earlier := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
 	}
 	notice, key := payload.Published(row.ID)
@@ -512,9 +508,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		}
 		// A child of a closed tree re-admitted as a root of its own keeps its roles' claims, which
 		// still name the tree it left; each is re-pointed before it starts here, so it binds this
-		// tree's lifecycle and launches in this tree's resources.
+		// tree's lifecycle and launches in this tree's resources. The issue the supervisor keeps
+		// beside the machine (volumeLost) never moves with it: a claim's issue is fixed for its life.
 		if machine.Claim().Tree != issue.Tree {
-			if err := r.supervisor.retree(ctx, token, machine, issue.Tree); err != nil {
+			if err := machine.Retree(ctx, issue.Tree); err != nil {
 				return err
 			}
 		}
@@ -591,16 +588,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		return nil
 	case "suspend":
 		if !found {
-			// Creation persists before publishing the machine in memory. Do not consume a close
-			// in that interval: the later machine still needs this durable stop.
-			pending, err := r.trees.StoredClaimMayRun(ctx, token, row.ID)
-			if err != nil {
-				return err
-			}
-			if pending {
-				return wait.Errorf("suspend claim %s: waiting for its stored claim's supervising machine", token)
-			}
-			return nil
+			return r.stopWithoutMachine(ctx, row, token)
 		}
 		switch machine.Claim().State {
 		case supervise.StateFailed, supervise.StateRetired:
@@ -615,6 +603,24 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		}
 		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason}); err != nil {
 			return fmt.Errorf("suspend claim %s: %w", token, err)
+		}
+		return nil
+	case "issue_close":
+		// A child's close as done: the claim is closed as a tree close closes it, its session dropped
+		// with it, since the issue's volume the session lived on goes with the close's release
+		// (record.IssueSuspend's Release, which waits for every claim of the issue to retire). It is
+		// fenced as a suspend is, not as a tree close: no linger is involved, and a newer start
+		// means a person set the child todo again, whose run the close must not end.
+		if !found {
+			return r.stopWithoutMachine(ctx, row, token)
+		}
+		if last := machine.Claim().LastStartRow; !workflow.StopActs(row.ID, payload, last, nil) {
+			r.log.Info("outbox issue close superseded by a newer start; finished without acting",
+				"row", row.ID, "issue", issue.Key, "role", payload.Role, "start-row", last)
+			return nil
+		}
+		if err := machine.Handle(ctx, supervise.RequestIssueClose{Claim: token}); err != nil {
+			return fmt.Errorf("close the issue of claim %s: %w", token, err)
 		}
 		return nil
 	case "tree_close":
@@ -689,6 +695,22 @@ func (r *outbox) root(ctx context.Context, issue record.Issue) (*record.Issue, e
 	return root, nil
 }
 
+// stopWithoutMachine is a stop row — a suspend or an issue close — that finds no machine for its
+// claim. Creation persists a claim before publishing its machine in memory, and the stop must not
+// be consumed in that interval: while the stored claim may still hold a process, the row waits for
+// the machine the later publish brings; a claim that runs nothing, or none at all, leaves it
+// nothing to stop.
+func (r *outbox) stopWithoutMachine(ctx context.Context, row record.OutboxRow, token claim.Token) error {
+	pending, err := r.trees.StoredClaimMayRun(ctx, token, row.ID)
+	if err != nil {
+		return err
+	}
+	if pending {
+		return wait.Errorf("stop claim %s: waiting for its stored claim's supervising machine", token)
+	}
+	return nil
+}
+
 // quiesce asks the claim of role on issue, whose phase the start row takes over, to be out of its
 // turn (supervise.Machine.Quiesce): nil once it is, supervise.ErrQuiesceHeld while it is not, which
 // the runner retries on its backoff. A role with no claim runs nothing.
@@ -729,7 +751,7 @@ func (r *outbox) provisionWorkspace(ctx context.Context, issue record.Issue) err
 		return fmt.Errorf("mint implement App token to provision %s: %w", issue.Key, err)
 	}
 	if _, err := r.provision(ctx, workspace.Request{
-		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, CredentialHelper: credentialHelper(r.stateDir),
+		StateDir: r.stateDir, Repo: r.repo, Issue: issue.Key, CredentialHelper: workspace.GitHubCredentialHelper,
 		Source: workspace.FromGitHub(lease.Token, r.stateDir),
 		Log:    func(line string) { r.log.Warn("provisioning: "+line, "issue", issue.Key) },
 	}); err != nil {
@@ -879,10 +901,4 @@ func (r *outbox) issue(ctx context.Context, key string) (record.Issue, error) {
 		return record.Issue{}, fmt.Errorf("workflow issue %s is not recorded", key)
 	}
 	return *issue, nil
-}
-
-// credentialHelper is the git credential helper every issue workspace names: this daemon's pane
-// launcher by its absolute path, so a push from any directory reaches `legion credential`.
-func credentialHelper(stateDir string) string {
-	return "!" + shellprefix.Literal(filepath.Join(workerbin.LauncherDir(stateDir), "legion")) + " credential"
 }

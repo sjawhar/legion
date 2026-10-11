@@ -464,7 +464,7 @@ func TestARoomFailingDuringAJoinedWriteFailsTheWrite(t *testing.T) {
 	defer ledger.Discard()
 
 	failsFast(t, "a joined write whose room fails under it", func() error {
-		return service.applyLive(joined, artifactID, model.Actor{Kind: "user", ID: "alice"}, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) error {
+		return service.applyLive(joined, artifactID, model.Actor{Kind: "user", ID: "alice"}, func(doc *crdt.Doc, _ *pmdoc.Node, transact func(func(*crdt.Transaction))) error {
 			service.failRoom(artifactID, errors.New("injected room failure"))
 			tree, err := treeOf(doc)
 			if err != nil {
@@ -660,11 +660,11 @@ func (s *failingBrowserAppendStore) AppendUpdate(ctx context.Context, room strin
 	return s.VersionedStore.AppendUpdate(ctx, room, update)
 }
 
-func (s *failingBrowserAppendStore) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+func (s *failingBrowserAppendStore) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if err := s.fail(); err != nil {
 		return 0, err
 	}
-	return s.VersionedStore.(classifiedUpdateStore).AppendUpdateWithClass(ctx, room, update, contentChanged)
+	return s.VersionedStore.AppendUpdateWithCredit(ctx, room, update, contentChanged, credit)
 }
 
 func (s *failingBrowserAppendStore) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {

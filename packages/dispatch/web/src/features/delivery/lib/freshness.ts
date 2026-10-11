@@ -1,28 +1,42 @@
-// Pure freshness rule for the page's source row. Unlike the prototype this ports from — which
-// shows six independently-polled sources (PRs, deploy runs, PR CI, Dispatch, agents, events),
-// each on its own 600 s re-check cadence — this slice's API exposes only the two aggregate
-// timestamps `delivery_settings` carries (LEGION-567's plan, "Reconcile"): `last_reconcile_at`,
-// stamped by the one reconcile pass every 5 minutes, and `last_event_at`, stamped by intake on
-// each NATS envelope it processes. There is one underlying cadence here — the reconcile's 5-minute
-// ticker — not six, so this file states one interval rather than inventing six matching constants.
+// Pure freshness rule for the page's source row, the prototype's six sources (PRs, Deploy runs,
+// PR CI, Dispatch, Agents, Events) over what Dispatch records. One reconcile pass, every five
+// minutes, fetches the pull requests, the deploy runs and the PR CI runs together, so those three
+// share `last_reconcile_at` and `last_error`. Dispatch's issues and the agents' titles are read
+// from Dispatch's own tables while the server answers, so they are as old as the answer
+// (`readAtMs`). Events are the last GitHub event intake processed. No React.
 import type { DeliveryTimelineResponse } from "../../../api/types";
 
 export type DeliveryFreshness = DeliveryTimelineResponse["freshness"];
 
-/** The reconcile's own cadence (LEGION-567's plan, "Reconcile": `SyncInterval = 5 * time.Minute`). */
+/** The reconcile's own cadence (`SyncInterval = 5 * time.Minute`). */
 export const RECONCILE_INTERVAL_SECONDS = 5 * 60;
 
-/** The reconcile row is red past this many missed intervals without a pass — the same "three
- *  missed intervals" reasoning the prototype's six-source freshness rule uses, applied to the
- *  one interval that exists in this slice. */
+/** A reconciled source is red past this many missed intervals without a pass. */
 const STALE_INTERVALS = 3;
 
+const RECONCILED = [
+  { name: "prs", label: "PRs" },
+  { name: "runs", label: "Deploy runs" },
+  { name: "ci", label: "PR CI" },
+] as const;
+
+const READ_LIVE = [
+  { name: "dispatch", label: "Dispatch" },
+  { name: "agents", label: "Agents" },
+] as const;
+
+export type SourceName =
+  | (typeof RECONCILED)[number]["name"]
+  | (typeof READ_LIVE)[number]["name"]
+  | "events"
+  | "unfetchable";
+
 export interface FreshnessRow {
-  name: "reconcile" | "event" | "unfetchable";
+  name: SourceName;
   red: boolean;
-  /** "Reconcile 12 s ago", or "never checked"/"never received". */
+  /** "PRs 12 s ago", plus the error when the last pass failed. */
   text: string;
-  /** The hover: when it last happened, and why it is red. */
+  /** The hover: when it was last checked, and why it is red. */
   detail: string;
 }
 
@@ -32,90 +46,103 @@ export function formatAge(seconds: number): string {
   return `${Math.floor(seconds / 3600)} h ago`;
 }
 
-function reconcileRow(
-  lastReconcileAt: string | null,
-  lastError: string | null,
+function reconciledRow(
+  name: (typeof RECONCILED)[number]["name"],
+  label: string,
+  freshness: DeliveryFreshness,
   nowMs: number
 ): FreshnessRow {
-  // A named failure always wins over the age-based staleness text: last_reconcile_at not
-  // advancing on a failed pass (reconcile.go's RecordReconcileError/RecordReconcileSuccess
-  // contract) means the age alone can't tell "stale because nothing's happened" apart from
-  // "stale because every pass has been failing the same way" -- last_error is exactly that
-  // distinction, so a stale-but-healthy row must look different from a failing one.
-  if (lastError !== null) {
-    const last = lastReconcileAt === null ? "never" : new Date(lastReconcileAt).toLocaleString();
+  const { last_reconcile_at: at, last_error: error } = freshness;
+  if (at === null) {
+    if (error !== null) {
+      return {
+        name,
+        red: true,
+        text: `${label} never checked: ${error}`,
+        detail: `${label}: no reconcile pass has succeeded; the last one failed: ${error}`,
+      };
+    }
     return {
-      name: "reconcile",
+      name,
       red: true,
-      text: `Reconcile failing: ${lastError}`,
-      detail: `Reconcile: failing (${lastError}); last successful pass ${last}`,
+      text: `${label} never checked`,
+      detail: `${label}: no check recorded yet`,
     };
   }
-  if (lastReconcileAt === null) {
-    return {
-      name: "reconcile",
-      red: true,
-      text: "Reconcile never ran",
-      detail: "Reconcile: no pass recorded yet",
-    };
-  }
-  const ageSeconds = Math.max(0, (nowMs - Date.parse(lastReconcileAt)) / 1000);
-  const limit = STALE_INTERVALS * RECONCILE_INTERVAL_SECONDS;
+  const ageSeconds = Math.max(0, (nowMs - Date.parse(at)) / 1000);
   const age = formatAge(ageSeconds);
-  const checked = `Reconcile: last ran ${new Date(lastReconcileAt).toLocaleString()}`;
+  const checked = `${label}: last checked ${new Date(at).toLocaleString()} by the reconcile`;
+  // A named failure always shows: last_reconcile_at does not advance on a failed pass, so the age
+  // alone cannot tell "nothing happened" from "every pass has failed the same way".
+  if (error !== null) {
+    return {
+      name,
+      red: true,
+      text: `${label} ${age}: ${error}`,
+      detail: `${checked}; failed since: ${error}`,
+    };
+  }
+  const limit = STALE_INTERVALS * RECONCILE_INTERVAL_SECONDS;
   if (ageSeconds > limit) {
     return {
-      name: "reconcile",
+      name,
       red: true,
-      text: `Reconcile ${age}`,
-      detail: `${checked}; no pass for over ${limit / 60} min (expected every ${RECONCILE_INTERVAL_SECONDS / 60} min)`,
+      text: `${label} ${age}`,
+      detail: `${checked}; no check for over ${limit / 60} min (expected every ${RECONCILE_INTERVAL_SECONDS / 60} min)`,
     };
   }
-  return { name: "reconcile", red: false, text: `Reconcile ${age}`, detail: checked };
+  return { name, red: false, text: `${label} ${age}`, detail: checked };
 }
 
-function eventRow(lastEventAt: string | null, nowMs: number): FreshnessRow {
+function eventsRow(lastEventAt: string | null, nowMs: number): FreshnessRow {
   if (lastEventAt === null) {
     return {
-      name: "event",
+      name: "events",
       red: true,
       text: "Events never received",
-      detail: "Events: no NATS envelope processed yet",
+      detail: "Events: no GitHub event processed yet",
     };
   }
-  // Live events arrive irregularly (a push on merge, a workflow_run per job) rather than on a
-  // fixed interval, so unlike the reconcile row above there is no "stale past N minutes" rule
-  // here — the row is informational once at least one event has been seen.
+  // Live events arrive irregularly (a push on merge, a workflow run per job) rather than on a
+  // fixed interval, so there is no "stale past N minutes" rule here: the reconcile rows say
+  // whether the data is current.
   const ageSeconds = Math.max(0, (nowMs - Date.parse(lastEventAt)) / 1000);
   return {
-    name: "event",
+    name: "events",
     red: false,
-    text: `Last event ${formatAge(ageSeconds)}`,
-    detail: `Events: last processed ${new Date(lastEventAt).toLocaleString()}`,
+    text: `Events ${formatAge(ageSeconds)}`,
+    detail: `Events: last GitHub event processed ${new Date(lastEventAt).toLocaleString()}`,
   };
 }
 
-/** S3: a population pull request whose completing fetch answered a permanent 404/410 from GitHub
- *  (the pull request or its repository no longer exists, or no longer reaches the App) is marked
- *  unfetchable rather than retried every pass forever -- surfaced here, by count, distinctly from
- *  reconcile's own health, since it is a per-pull-request condition, not a pass-wide failure. */
-function unfetchableRow(count: number): FreshnessRow {
-  return {
-    name: "unfetchable",
-    red: true,
-    text: `${count} pull request${count === 1 ? "" : "s"} can no longer be fetched from GitHub`,
-    detail:
-      "A 404 or 410 from GitHub for this pull request (or its repository) -- see the drill-down for which one and why.",
-  };
-}
-
-export function sourceFreshness(freshness: DeliveryFreshness, nowMs: number): FreshnessRow[] {
-  const rows = [
-    reconcileRow(freshness.last_reconcile_at, freshness.last_error, nowMs),
-    eventRow(freshness.last_event_at, nowMs),
+export function sourceFreshness(
+  freshness: DeliveryFreshness,
+  nowMs: number,
+  readAtMs: number
+): FreshnessRow[] {
+  const readAge = formatAge(Math.max(0, (nowMs - readAtMs) / 1000));
+  const rows: FreshnessRow[] = [
+    ...RECONCILED.map(({ name, label }) => reconciledRow(name, label, freshness, nowMs)),
+    ...READ_LIVE.map(({ name, label }) => ({
+      name,
+      red: false,
+      text: `${label} ${readAge}`,
+      detail: `${label}: read when the page was last answered, ${new Date(readAtMs).toLocaleString()}`,
+    })),
+    eventsRow(freshness.last_event_at, nowMs),
   ];
+  // A population pull request whose completing fetch answered a permanent 404/410 from GitHub is
+  // marked unfetchable rather than retried every pass forever: surfaced here, by count, apart
+  // from the reconcile's own health, since it is a per-pull-request condition.
   if (freshness.unfetchable_count > 0) {
-    rows.push(unfetchableRow(freshness.unfetchable_count));
+    const count = freshness.unfetchable_count;
+    rows.push({
+      name: "unfetchable",
+      red: true,
+      text: `${count} pull request${count === 1 ? "" : "s"} can no longer be fetched from GitHub`,
+      detail:
+        "A 404 or 410 from GitHub for this pull request (or its repository) -- see the drill-down for which one and why.",
+    });
   }
   return rows;
 }

@@ -77,8 +77,8 @@ notification envelopes, and proves both the Go prompt text and the shared
 TypeScript renderer print the full direct message once, with no separate
 summary line repeating its first line.
 
-Docker downloads `nats:2.10-alpine` automatically on the first run when it is
-not already cached.
+Docker downloads it from `mirror.gcr.io/library/nats:2.10-alpine`, Google's
+Docker Hub mirror, on the first run when it is not already cached.
 
 ```bash
 packages/envoy/scripts/e2e-local.sh

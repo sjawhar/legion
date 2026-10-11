@@ -299,7 +299,7 @@ func TestASwitchedBackDaemonRegistersNoEarlierLaunchOfItsController(t *testing.T
 	rt.Emit(runtime.Observation{Locator: *d.claim(token).Locator, Kind: runtime.Gone, Detail: "pod gone"})
 	testwait.Eventually(t, "the controller's relaunch", func() bool {
 		c := d.claim(token)
-		return c.Generation == first.Generation+1 && c.State == string(supervise.StateLaunching)
+		return c.Generation == first.Generation+1 && c.State == string(supervise.StateLaunching) && c.Locator != nil
 	})
 	d.stop()
 

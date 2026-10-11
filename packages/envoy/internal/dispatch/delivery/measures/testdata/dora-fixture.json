@@ -1,0 +1,547 @@
+{
+  "settings": {
+    "deploy_repo": "acme/widgets",
+    "deploy_workflow_path": ".github/workflows/deploy.yml",
+    "production_job_name": "widgets-release / widgets-release",
+    "pr_checks_workflow_path": ".github/workflows/pr-checks.yml",
+    "population_authors": ["octocat"],
+    "excluded_repos": []
+  },
+  "window": {
+    "from": "2026-08-30T00:00:00Z",
+    "to": "2026-09-27T20:00:00Z"
+  },
+  "issues": [
+    {
+      "key": "ACME-100",
+      "title": "Build timeline UI",
+      "status": "in_progress",
+      "priority": 1,
+      "claimed": true,
+      "route": null
+    },
+    {
+      "key": "ACME-101",
+      "title": "DORA metrics module",
+      "status": "in_progress",
+      "priority": 2,
+      "claimed": false,
+      "route": "role:e2e"
+    },
+    {
+      "key": "ACME-102",
+      "title": "Collector schema",
+      "status": "done",
+      "priority": 1,
+      "claimed": false,
+      "route": null
+    },
+    {
+      "key": "ACME-103",
+      "title": "Production deploy gate flakes",
+      "status": "triage",
+      "priority": 0,
+      "claimed": false,
+      "route": null
+    }
+  ],
+  "prs": [
+    {
+      "repo": "acme/widgets",
+      "number": 101,
+      "title": "Add timeline zoom brush",
+      "author": "octocat",
+      "created_at": "2026-09-04T18:00:00Z",
+      "merged_at": "2026-09-05T12:00:00Z",
+      "first_commit_at": "2026-09-04T15:00:00Z",
+      "additions": 210,
+      "deletions": 12,
+      "rework": false,
+      "issue": "ACME-100",
+      "expected": {
+        "prototype": {
+          "deploy_run": 501,
+          "deployed_at": "2026-09-05T13:00:00Z",
+          "deployed_status": "deployed"
+        },
+        "stored": {
+          "deploy_run": 501,
+          "deployed_at": "2026-09-05T13:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 102,
+      "title": "fix: timeline brush jumps on resize",
+      "author": "octocat",
+      "created_at": "2026-09-06T09:00:00Z",
+      "merged_at": "2026-09-06T13:00:00Z",
+      "first_commit_at": "2026-09-06T08:30:00Z",
+      "additions": 18,
+      "deletions": 4,
+      "rework": true,
+      "issue": "ACME-100",
+      "expected": {
+        "prototype": {
+          "deploy_run": 502,
+          "deployed_at": "2026-09-06T14:00:00Z",
+          "deployed_status": "deployed"
+        },
+        "stored": {
+          "deploy_run": 502,
+          "deployed_at": "2026-09-06T14:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 103,
+      "title": "Add DORA lead-time calc",
+      "author": "octocat",
+      "created_at": "2026-09-07T10:00:00Z",
+      "merged_at": "2026-09-07T16:00:00Z",
+      "first_commit_at": "2026-09-07T08:00:00Z",
+      "additions": 140,
+      "deletions": 6,
+      "rework": false,
+      "issue": "ACME-101",
+      "expected": {
+        "prototype": {
+          "deploy_run": null,
+          "deployed_at": null,
+          "deployed_status": "waiting"
+        },
+        "stored": {
+          "deploy_run": 503,
+          "deployed_at": "2026-09-09T10:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 104,
+      "title": "Add facet filtering module",
+      "author": "octocat",
+      "created_at": "2026-09-08T09:00:00Z",
+      "merged_at": "2026-09-08T15:00:00Z",
+      "first_commit_at": "2026-09-08T07:00:00Z",
+      "additions": 260,
+      "deletions": 20,
+      "rework": false,
+      "issue": "ACME-100",
+      "expected": {
+        "prototype": {
+          "deploy_run": 503,
+          "deployed_at": "2026-09-09T10:00:00Z",
+          "deployed_status": "deployed"
+        },
+        "stored": {
+          "deploy_run": 503,
+          "deployed_at": "2026-09-09T10:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 105,
+      "title": "revert: Add facet filtering module",
+      "author": "octocat",
+      "created_at": "2026-09-09T08:00:00Z",
+      "merged_at": "2026-09-09T09:00:00Z",
+      "first_commit_at": "2026-09-09T07:45:00Z",
+      "additions": 20,
+      "deletions": 260,
+      "rework": true,
+      "issue": "ACME-100",
+      "expected": {
+        "prototype": {
+          "deploy_run": 503,
+          "deployed_at": "2026-09-09T10:00:00Z",
+          "deployed_status": "deployed"
+        },
+        "stored": {
+          "deploy_run": 503,
+          "deployed_at": "2026-09-09T10:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 106,
+      "title": "Add drill-down panel",
+      "author": "octocat",
+      "created_at": "2026-09-10T09:00:00Z",
+      "merged_at": "2026-09-10T17:00:00Z",
+      "first_commit_at": "2026-09-10T08:00:00Z",
+      "additions": 300,
+      "deletions": 15,
+      "rework": false,
+      "issue": "ACME-100",
+      "expected": {
+        "prototype": {
+          "deploy_run": null,
+          "deployed_at": null,
+          "deployed_status": "waiting"
+        },
+        "stored": {
+          "deploy_run": 504,
+          "deployed_at": "2026-09-13T09:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 107,
+      "title": "hotfix: drill-down panel crash on null issue",
+      "author": "octocat",
+      "created_at": "2026-09-11T10:00:00Z",
+      "merged_at": "2026-09-11T11:00:00Z",
+      "first_commit_at": "2026-09-11T09:45:00Z",
+      "additions": 8,
+      "deletions": 2,
+      "rework": true,
+      "issue": "ACME-100",
+      "expected": {
+        "prototype": {
+          "deploy_run": null,
+          "deployed_at": null,
+          "deployed_status": "waiting"
+        },
+        "stored": {
+          "deploy_run": 504,
+          "deployed_at": "2026-09-13T09:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/gadgets",
+      "number": 20,
+      "title": "Add dispatch API client",
+      "author": "octocat",
+      "created_at": "2026-09-12T09:00:00Z",
+      "merged_at": "2026-09-12T14:00:00Z",
+      "first_commit_at": "2026-09-12T08:00:00Z",
+      "additions": 190,
+      "deletions": 10,
+      "rework": false,
+      "issue": "ACME-102",
+      "expected": {
+        "prototype": {
+          "deploy_run": null,
+          "deployed_at": null,
+          "deployed_status": "not_tracked"
+        },
+        "stored": {
+          "deploy_run": null,
+          "deployed_at": null,
+          "deployed_status": "not_tracked"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 108,
+      "title": "Wire SSE events endpoint",
+      "author": "octocat",
+      "created_at": "2026-09-13T07:00:00Z",
+      "merged_at": "2026-09-13T08:00:00Z",
+      "first_commit_at": "2026-09-13T06:00:00Z",
+      "additions": 95,
+      "deletions": 5,
+      "rework": false,
+      "issue": "ACME-100",
+      "expected": {
+        "prototype": {
+          "deploy_run": 504,
+          "deployed_at": "2026-09-13T09:00:00Z",
+          "deployed_status": "deployed"
+        },
+        "stored": {
+          "deploy_run": 504,
+          "deployed_at": "2026-09-13T09:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 109,
+      "title": "Add priority facet counts",
+      "author": "octocat",
+      "created_at": "2026-09-13T08:00:00Z",
+      "merged_at": "2026-09-13T08:30:00Z",
+      "first_commit_at": "2026-09-13T07:00:00Z",
+      "additions": 60,
+      "deletions": 3,
+      "rework": false,
+      "issue": "ACME-101",
+      "expected": {
+        "prototype": {
+          "deploy_run": 504,
+          "deployed_at": "2026-09-13T09:00:00Z",
+          "deployed_status": "deployed"
+        },
+        "stored": {
+          "deploy_run": 504,
+          "deployed_at": "2026-09-13T09:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 110,
+      "title": "Improve waiting-to-deploy step line",
+      "author": "octocat",
+      "created_at": "2026-09-15T09:00:00Z",
+      "merged_at": "2026-09-15T15:00:00Z",
+      "first_commit_at": "2026-09-15T08:00:00Z",
+      "additions": 130,
+      "deletions": 8,
+      "rework": false,
+      "issue": "ACME-100",
+      "expected": {
+        "prototype": {
+          "deploy_run": null,
+          "deployed_at": null,
+          "deployed_status": "waiting"
+        },
+        "stored": {
+          "deploy_run": 505,
+          "deployed_at": "2026-09-17T08:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 111,
+      "title": "Add component hierarchy filter",
+      "author": "octocat",
+      "created_at": "2026-09-16T09:00:00Z",
+      "merged_at": "2026-09-16T16:00:00Z",
+      "first_commit_at": "2026-09-16T08:00:00Z",
+      "additions": 175,
+      "deletions": 9,
+      "rework": false,
+      "issue": null,
+      "expected": {
+        "prototype": {
+          "deploy_run": 505,
+          "deployed_at": "2026-09-17T08:00:00Z",
+          "deployed_status": "deployed"
+        },
+        "stored": {
+          "deploy_run": 505,
+          "deployed_at": "2026-09-17T08:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 112,
+      "title": "fix: component hierarchy includes grandchildren",
+      "author": "octocat",
+      "created_at": "2026-09-17T07:00:00Z",
+      "merged_at": "2026-09-17T07:30:00Z",
+      "first_commit_at": "2026-09-17T06:45:00Z",
+      "additions": 12,
+      "deletions": 3,
+      "rework": true,
+      "issue": null,
+      "expected": {
+        "prototype": {
+          "deploy_run": 505,
+          "deployed_at": "2026-09-17T08:00:00Z",
+          "deployed_status": "deployed"
+        },
+        "stored": {
+          "deploy_run": 505,
+          "deployed_at": "2026-09-17T08:00:00Z",
+          "deployed_status": "deployed"
+        }
+      }
+    },
+    {
+      "repo": "acme/widgets",
+      "number": 113,
+      "title": "Add rework share metric",
+      "author": "octocat",
+      "created_at": "2026-09-18T09:00:00Z",
+      "merged_at": "2026-09-18T15:00:00Z",
+      "first_commit_at": "2026-09-18T08:00:00Z",
+      "additions": 55,
+      "deletions": 4,
+      "rework": false,
+      "issue": "ACME-101",
+      "expected": {
+        "prototype": {
+          "deploy_run": null,
+          "deployed_at": null,
+          "deployed_status": "waiting"
+        },
+        "stored": {
+          "deploy_run": null,
+          "deployed_at": null,
+          "deployed_status": "waiting"
+        }
+      }
+    }
+  ],
+  "runs": [
+    {
+      "run_id": 501,
+      "head_sha": "aaa101",
+      "head_commit_at": "2026-09-05T12:30:00Z",
+      "started_at": "2026-09-05T12:00:00Z",
+      "completed_at": "2026-09-05T13:05:00Z",
+      "conclusion": "success",
+      "production": {
+        "conclusion": "success",
+        "completed_at": "2026-09-05T13:00:00Z"
+      },
+      "failed_jobs": [],
+      "expected_prs": ["acme/widgets#101"],
+      "head_branch": "main",
+      "event": "push",
+      "expected_prs_stored": ["acme/widgets#101"]
+    },
+    {
+      "run_id": 502,
+      "head_sha": "aaa102",
+      "head_commit_at": "2026-09-06T13:30:00Z",
+      "started_at": "2026-09-06T13:35:00Z",
+      "completed_at": "2026-09-06T14:05:00Z",
+      "conclusion": "success",
+      "production": {
+        "conclusion": "success",
+        "completed_at": "2026-09-06T14:00:00Z"
+      },
+      "failed_jobs": [],
+      "expected_prs": ["acme/widgets#102"],
+      "head_branch": "main",
+      "event": "push",
+      "expected_prs_stored": ["acme/widgets#102"]
+    },
+    {
+      "run_id": 506,
+      "head_sha": "aaa106",
+      "head_commit_at": "2026-09-11T08:00:00Z",
+      "started_at": "2026-09-11T08:30:00Z",
+      "completed_at": "2026-09-11T09:05:00Z",
+      "conclusion": "failure",
+      "production": null,
+      "failed_jobs": [
+        {
+          "name": "integration-test",
+          "completed_at": "2026-09-11T09:00:00Z"
+        }
+      ],
+      "expected_prs": [],
+      "head_branch": "main",
+      "event": "push",
+      "expected_prs_stored": []
+    },
+    {
+      "run_id": 503,
+      "head_sha": "aaa103",
+      "head_commit_at": "2026-09-09T09:30:00Z",
+      "started_at": "2026-09-09T09:35:00Z",
+      "completed_at": "2026-09-09T10:05:00Z",
+      "conclusion": "success",
+      "production": {
+        "conclusion": "success",
+        "completed_at": "2026-09-09T10:00:00Z"
+      },
+      "failed_jobs": [],
+      "expected_prs": ["acme/widgets#104", "acme/widgets#105"],
+      "head_branch": "main",
+      "event": "push",
+      "expected_prs_stored": ["acme/widgets#103", "acme/widgets#104", "acme/widgets#105"]
+    },
+    {
+      "run_id": 507,
+      "head_sha": "aaa107",
+      "head_commit_at": "2026-09-14T08:30:00Z",
+      "started_at": "2026-09-14T08:35:00Z",
+      "completed_at": "2026-09-14T09:05:00Z",
+      "conclusion": "failure",
+      "production": {
+        "conclusion": "failure",
+        "completed_at": "2026-09-14T09:00:00Z"
+      },
+      "failed_jobs": [
+        {
+          "name": "widgets-release / widgets-release",
+          "completed_at": "2026-09-14T09:00:00Z"
+        }
+      ],
+      "expected_prs": [],
+      "head_branch": "main",
+      "event": "push",
+      "expected_prs_stored": []
+    },
+    {
+      "run_id": 504,
+      "head_sha": "aaa104",
+      "head_commit_at": "2026-09-13T08:45:00Z",
+      "started_at": "2026-09-13T08:50:00Z",
+      "completed_at": "2026-09-13T09:05:00Z",
+      "conclusion": "success",
+      "production": {
+        "conclusion": "success",
+        "completed_at": "2026-09-13T09:00:00Z"
+      },
+      "failed_jobs": [],
+      "expected_prs": ["acme/widgets#108", "acme/widgets#109"],
+      "head_branch": "main",
+      "event": "push",
+      "expected_prs_stored": [
+        "acme/widgets#106",
+        "acme/widgets#107",
+        "acme/widgets#108",
+        "acme/widgets#109"
+      ]
+    },
+    {
+      "run_id": 505,
+      "head_sha": "aaa105",
+      "head_commit_at": "2026-09-17T07:45:00Z",
+      "started_at": "2026-09-17T07:50:00Z",
+      "completed_at": "2026-09-17T08:05:00Z",
+      "conclusion": "success",
+      "production": {
+        "conclusion": "success",
+        "completed_at": "2026-09-17T08:00:00Z"
+      },
+      "failed_jobs": [],
+      "expected_prs": ["acme/widgets#111", "acme/widgets#112"],
+      "head_branch": "main",
+      "event": "push",
+      "expected_prs_stored": ["acme/widgets#110", "acme/widgets#111", "acme/widgets#112"]
+    },
+    {
+      "run_id": 508,
+      "head_sha": "aaa108",
+      "head_commit_at": "2026-09-19T09:50:00Z",
+      "started_at": "2026-09-19T10:00:00Z",
+      "completed_at": null,
+      "conclusion": "cancelled",
+      "production": null,
+      "failed_jobs": [],
+      "expected_prs": [],
+      "head_branch": "main",
+      "event": "push",
+      "expected_prs_stored": []
+    }
+  ]
+}

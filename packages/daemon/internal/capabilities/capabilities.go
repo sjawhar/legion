@@ -26,6 +26,7 @@ const (
 	ModelFallback        Name = "model-fallback"
 	Toolchain            Name = "toolchain"
 	ResourceLimits       Name = "resource-limits"
+	PoolCapacity         Name = "pool-capacity"
 	Network              Name = "network"
 	OperatorSetup        Name = "operator-setup"
 	ProductionIdentities Name = "production-identities"
@@ -62,15 +63,11 @@ type Capability struct {
 	// the sentence that says so and names the issue whose landing changes that; "" otherwise. The
 	// report's job is to name what a worker lacks, so a tool the image carries but no pod loads is
 	// not present: CheckImage and Deployment.Report render such a row installed, with this sentence
-	// after the evidence, rather than present.
+	// after the evidence, rather than present. No row awaits at present: CodeGraph did, until
+	// LEGION-629 turned extension discovery on in the pod's launch (runtime/sandbox/manifest.go,
+	// agentArgv), so the profile's plugin now loads in every pod.
 	Awaits string
 }
-
-// codeGraphAwaits is why the codegraph row is installed, not present: a pod's agent is launched
-// `--no-extensions` with the Envoy and Legion plugins as its explicit extensions
-// (runtime/sandbox/manifest.go, agentArgv), so the profile's CodeGraph plugin never loads and no
-// worker has the tool until the launch loads profile plugins (LEGION-629).
-const codeGraphAwaits = "a pod's agent gets the codegraph tool once its launch loads profile plugins (dispatch://LEGION-629)"
 
 // Table is every capability, in the order the probe prints them: the declared list, printed
 // whole. Image rows are checked by CheckImage; the others are rendered as what they are.
@@ -80,17 +77,18 @@ var Table = []Capability{
 	{EvalPython, SiteImage, "evaluates Python through the interpreter `omp setup python` manages", "", ""},
 	{Browser, SiteImage, "drives a headless Chromium through the browser tools", "", ""},
 	{LSP, SiteImage, "reads diagnostics and symbols from the Go, TypeScript and Python language servers", "", ""},
-	{CodeGraph, SiteImage, "queries the CodeGraph index for affected tests, impact and callers", "", codeGraphAwaits},
+	{CodeGraph, SiteImage, "queries the CodeGraph index for affected tests, impact and callers", "", ""},
 	{WebSearch, SiteLive, "searches the web through the web-search tool", "", ""},
 	{Skills, SiteImage, "loads the skills Legion's prompts name", "", ""},
 	{MCP, SiteLive, "reaches the MCP servers the deployment configures", "", ""},
 	{RepositoryExtensions, SiteLive, "loads the Oh My Pi extensions the repository it works carries", "dispatch://LEGION-578", ""},
 	{DispatchEnvoyTools, SiteLive, "reaches Dispatch and Envoy through the pi-envoy tools", "", ""},
-	{GitHub, SiteLive, "reads and writes GitHub through `legion gh` on its role's App", "dispatch://LEGION-631", ""},
+	{GitHub, SiteLive, "reads and writes GitHub through its plain `gh` and `git` on its role's App token file", "dispatch://LEGION-631", ""},
 	{Secrets, SiteDeployment, "reads the secrets the deployment grants its pod generation through the agent-secrets broker", "", ""},
 	{ModelFallback, SiteDeployment, "falls back to another model when its own is unavailable (retry.modelFallback)", "", ""},
 	{Toolchain, SiteImage, "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun and uv", "", ""},
 	{ResourceLimits, SiteDeployment, "runs within the CPU and memory the deployment's pod resources give it", "", ""},
+	{PoolCapacity, SiteDeployment, "starts in a Legion pool with room for the image probe's reservation at boot", "", ""},
 	{Network, SiteWithheld, "reaches beyond the pod's own network: the pod is the boundary", "dispatch://LEGION-5", ""},
 	{OperatorSetup, SiteWithheld, "installs or configures its own dependencies in the pod: Legion owns its dependencies", "dispatch://LEGION-200", ""},
 	{ProductionIdentities, SiteWithheld, "acts under a production identity of its own", "dispatch://LEGION-551, dispatch://LEGION-205", ""},

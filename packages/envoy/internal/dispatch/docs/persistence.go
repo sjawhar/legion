@@ -24,7 +24,16 @@ const misreadWarning = "dispatch: a document's stored updates do not fold into a
 // PgVersioned persists a room's Yjs V1 updates in Dispatch's Postgres store.
 type PgVersioned struct {
 	store *store.Store
-	locks sync.Map
+	// locksMu guards locks: each room's in-process lock (lockRoom), kept while a caller holds it
+	// or waits for it and dropped with the last, so it holds only the rooms being written.
+	locksMu sync.Mutex
+	locks   map[string]*roomLock
+}
+
+// roomLock is one room's in-process lock and how many callers hold it or wait for it.
+type roomLock struct {
+	sync.Mutex
+	users int
 }
 
 // NewPgVersioned creates the versioned store for a Dispatch database.
@@ -86,32 +95,41 @@ func (p *PgVersioned) DocumentStamp(ctx context.Context, room string) (DocumentS
 
 // AppendUpdate validates and stores one incremental V1 update as content.
 func (p *PgVersioned) AppendUpdate(ctx context.Context, room string, update []byte) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, true)
+	return p.appendUpdate(ctx, room, update, true, nil)
 }
 
-// AppendUpdateWithClass validates and stores one incremental V1 update with its rendered-content classification.
-func (p *PgVersioned) AppendUpdateWithClass(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
-	return p.appendUpdate(ctx, room, update, contentChanged)
+// AppendUpdateWithCredit validates and stores one incremental V1 update of a room, with its
+// rendered-content classification and the browser edit's in-flight credit: in the update's own
+// transaction, under the document's advisory lock, it writes the credit's authors to the
+// document's pending authors unless a committed version already listed them (UpdateCredit.take),
+// and it lands the credit before it releases that lock (UpdateCredit.landed).
+func (p *PgVersioned) AppendUpdateWithCredit(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
+	return p.appendUpdate(ctx, room, update, contentChanged, credit)
 }
 
-func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
 		return 0, err
 	}
 	var version persistence.Version
 	err := p.withRoomLock(ctx, room, func(conn *pgxpool.Conn) error {
+		// The credit lands while withRoomLock still holds the document's lock, whether the
+		// transaction committed or not: no version reads the pending authors between its
+		// commit and its leaving the room's in-flight credits.
+		defer credit.landed()
 		tx, err := conn.Begin(ctx)
 		if err != nil {
 			return fmt.Errorf("begin document update: %w", err)
 		}
 		defer tx.Rollback(ctx)
-		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged)
+		version, err = p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, credit)
 		if err != nil {
 			return err
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return fmt.Errorf("commit document update: %w", err)
 		}
+		credit.held(version)
 		return nil
 	})
 	return version, err
@@ -121,16 +139,9 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 // the document's content: settlement versions a document only past a content update.
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
-		// ygo refuses an update declaring more than maxUpdateItems items with the same error it
-		// gives a malformed one. The server encoded this update itself, so when its header
-		// declares more than the cap, the cap is the cause and the document is the caller's to
-		// shrink (LEGION-465); any other refusal of a server-encoded update is a fault to log.
-		if items, ok := updateItems(update); ok && items > maxUpdateItems {
-			return 0, fmt.Errorf("%w: its %d items exceed the %d one document update can hold (%v)", ErrDocumentTooLarge, items, maxUpdateItems, err)
-		}
-		return 0, err
+		return 0, itemCapError(update, err)
 	}
-	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged)
+	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil)
 }
 
 // lockDocumentRoom serializes every durable mutation of one document. Callers
@@ -175,7 +186,7 @@ func lockDocumentRoom(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
+func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool, credit *UpdateCredit) (persistence.Version, error) {
 	if err := ctx.Err(); err != nil {
 		return 0, err
 	}
@@ -197,28 +208,22 @@ func (p *PgVersioned) appendUpdateTxClass(ctx context.Context, tx pgx.Tx, room s
 	`, room, int64(version), update, contentChanged); err != nil {
 		return 0, fmt.Errorf("append document update: %w", err)
 	}
-	if err := markSettlementPending(ctx, tx, room); err != nil {
+	authors, lastActor, include := credit.take()
+	// An edit credited to authors names its latest edit source, none included when no one
+	// peer made it; an update no one is credited with keeps the row's.
+	if include && (len(authors) > 0 || lastActor != nil) {
+		if err := markUpdateOwedBy(ctx, tx, room, lastActor); err != nil {
+			return 0, err
+		}
+	} else if err := markUpdateOwed(ctx, tx, room); err != nil {
 		return 0, err
 	}
-	return version, nil
-}
-
-// markSettlementPending records, in the transaction that appends a document update, that the
-// document owes a settlement. Every update a room persists arms a settlement, and the timer that
-// runs it lives only in memory, so a settlement a shutdown cut short is found here by the room's
-// next load (onLoadDocument) and by the resumption (RunSettlementResumption). The settlement that
-// covers the update deletes the row in the transaction that commits its writes
-// (clearSettlementPending). The caller holds the document's advisory lock, which orders this row's
-// writers as it orders the updates.
-func markSettlementPending(ctx context.Context, tx pgx.Tx, room string) error {
-	if _, err := tx.Exec(ctx, `
-		insert into doc_settlements_pending (artifact_id) values ($1)
-		on conflict (artifact_id) do update
-		set marked_at = now()
-	`, room); err != nil {
-		return fmt.Errorf("record the document's pending settlement: %w", err)
+	if include {
+		if err := upsertPendingAuthors(ctx, tx, room, pendingAuthorsAt(authors, version)); err != nil {
+			return 0, err
+		}
 	}
-	return nil
+	return version, nil
 }
 
 // clearSettlementPending deletes the document's pending settlement inside the settlement
@@ -232,8 +237,9 @@ func clearSettlementPending(ctx context.Context, tx pgx.Tx, room string) error {
 	return nil
 }
 
-// settlementPending reports whether the document owes a settlement that no settlement has
-// committed.
+// settlementPending reports whether room owes a settlement. Shutdown's drain uses this to skip
+// settling a document that already has none owed, rather than spending its budget repeating work
+// a settlement already finished.
 func settlementPending(ctx context.Context, q Queryer, room string) (bool, error) {
 	var pending bool
 	if err := q.QueryRow(ctx, `
@@ -540,7 +546,7 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 // the old merged history; this method never makes that destructive decision itself.
 func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
 	if err := validateUpdate(seed); err != nil {
-		return RebuildReport{}, fmt.Errorf("validate rebuilt document seed: %w", err)
+		return RebuildReport{}, wrapUnlessTooLarge(itemCapError(seed, err), "validate rebuilt document seed")
 	}
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		return RebuildReport{}, err
@@ -668,8 +674,8 @@ func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, fn f
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	value, _ := p.locks.LoadOrStore(room, &sync.Mutex{})
-	lock := value.(*sync.Mutex)
+	lock := p.acquireRoomLock(room)
+	defer p.releaseRoomLock(room, lock)
 	if wait {
 		lock.Lock()
 	} else if !lock.TryLock() {
@@ -701,6 +707,33 @@ func (p *PgVersioned) lockRoom(ctx context.Context, room string, wait bool, fn f
 	}
 	defer func() { _, _ = conn.Exec(context.Background(), `select pg_advisory_unlock(hashtext($1))`, room) }()
 	return fn(conn)
+}
+
+// acquireRoomLock counts the caller among room's lock's users, creating the lock for the first, so
+// every caller of one room shares one lock however many come and go.
+func (p *PgVersioned) acquireRoomLock(room string) *roomLock {
+	p.locksMu.Lock()
+	defer p.locksMu.Unlock()
+	if p.locks == nil {
+		p.locks = make(map[string]*roomLock)
+	}
+	lock := p.locks[room]
+	if lock == nil {
+		lock = &roomLock{}
+		p.locks[room] = lock
+	}
+	lock.users++
+	return lock
+}
+
+// releaseRoomLock ends a use acquireRoomLock counted, dropping room's lock with its last user.
+func (p *PgVersioned) releaseRoomLock(room string, lock *roomLock) {
+	p.locksMu.Lock()
+	defer p.locksMu.Unlock()
+	lock.users--
+	if lock.users == 0 {
+		delete(p.locks, room)
+	}
 }
 
 func (p *PgVersioned) pool() *store.Pool {
@@ -765,13 +798,15 @@ var _ persistence.VersionedPersistence = (*PgVersioned)(nil)
 //
 // It is also the pending queue every decode of document bytes takes, whether the service builds
 // the decoder (newDocumentCopy) or ygo builds it for the service (Server.MaxPendingItems: the
-// rooms, and ygo's check of each update the service broadcasts). ygo's decoder parks each item
-// whose parent it cannot place yet, and each later item of that client behind it, and refuses the
-// update once its queue is full, 100,000 items at ygo's default. An update decoded alone parks
-// every item that leans on the document it was written against, and no update carries more items
-// than this, so no decode parks past it.
+// rooms). ygo's decoder parks each item whose parent it cannot place yet, and each later item of
+// that client behind it, and refuses the update once its queue is full, 100,000 items at ygo's
+// default. An update decoded alone parks every item that leans on the document it was written
+// against, and no update carries more items than this, so no decode parks past it. ygo's own
+// check of each update the service broadcasts (Server.BroadcastUpdate) takes no pending queue at
+// all: it is the check ygo's bundled stores run, since the room has already applied the update
+// (reearth/ygo#268, in the pinned fork).
 // TestTheStoreTakesOneBrowserUpdateItsRoomTook and TestASettlementStampsMoreBlocksThanYgosDefaultQueue
-// are the updates ygo's default refuses.
+// are updates the store's check refuses at ygo's default queue.
 const maxUpdateItems = 1 << 20
 
 // updateItems is the number of items a V1 update of one client declares in its header: the
@@ -786,4 +821,16 @@ func updateItems(update []byte) (uint64, bool) {
 	}
 	items, err := decoder.ReadVarUint()
 	return items, err == nil
+}
+
+// itemCapError is ygo's refusal err of update, an update the server encoded itself, named as the
+// write too large to store it is when update's header declares more than maxUpdateItems items:
+// ygo refuses such an update with the same error it gives a malformed one, and a seed or a
+// replace over the cap is the caller's document to shrink, answered 413 CAP_EXCEEDED (LEGION-465).
+// Any other refusal of a server-encoded update is a fault, and is err unchanged.
+func itemCapError(update []byte, err error) error {
+	if items, ok := updateItems(update); ok && items > maxUpdateItems {
+		return fmt.Errorf("%w: its %d items exceed the %d one document update can hold (%v)", ErrDocumentTooLarge, items, maxUpdateItems, err)
+	}
+	return err
 }

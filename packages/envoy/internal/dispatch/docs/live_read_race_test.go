@@ -216,7 +216,7 @@ func TestReadsOfALiveDocumentRunBesideItsPeers(t *testing.T) {
 		overlapping(t, func() bool {
 			state := service.room(artifactID)
 			state.mu.Lock()
-			generation := state.gen
+			generation := state.roomGeneration
 			state.mu.Unlock()
 			read.Store(0)
 			service.settleRoom(artifactID, generation)
@@ -412,7 +412,7 @@ var typists sync.Map
 // resident, the peer's client id.
 func typeIntoDocument(t *testing.T, service *Service, serverURL, artifactID string, gap time.Duration) crdt.ClientID {
 	t.Helper()
-	peer := connectPeer(t, serverURL, artifactID)
+	peer := connectPeer(t, serverURL, artifactID, "alice")
 	fragment := peer.Doc.GetXmlFragment(fragmentName)
 	stopped := make(chan struct{})
 	first := make(chan struct{})

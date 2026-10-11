@@ -24,11 +24,13 @@ type Scheduling struct {
 	PriorityClass string
 }
 
-// Tools are absolute paths inside the worker image. GH, Git, and JJ reach the agent as
-// LEGION_GH_PATH, LEGION_GIT_PATH, and LEGION_JJ_PATH; Legion is the `legion` every container
-// runs (/opt/legion/bin/legion), whose directory also leads the pod's PATH. AgentSecrets is
-// the `agent-secrets` client (/opt/legion/bin/agent-secrets), which the shim runs only for a
-// pod the runtime enrolls with the secrets broker (Options.AgentSecrets).
+// Tools are absolute paths inside the worker image. Legion is the `legion` every container runs
+// (/opt/legion/bin/legion), whose directory also leads the pod's PATH. AgentSecrets is the
+// `agent-secrets` client (/opt/legion/bin/agent-secrets), which the shim runs only for a pod the
+// runtime enrolls with the secrets broker (Options.AgentSecrets). GH, Git, and JJ reach no agent: a
+// tree agent's gh, git and jj are the ones its PATH resolves in the image, and its credential is
+// the gh files under GH_CONFIG_DIR, so the three serve only CheckPod's refusal of an operator's
+// mount at, under, or above a path the image owns (operatorpod.go).
 type Tools struct{ GH, Git, JJ, Legion, AgentSecrets string }
 
 // Pod is what the operator adds to every pod Legion runs, the image probe's included
@@ -54,9 +56,9 @@ type ProvisionTokens interface {
 // Store is the durable state the runtime reads: the daemon's store (store.Store), or a test's
 // fake.
 type Store interface {
-	// TreeHasSessions is whether any stored claim of tree, retired ones included, recorded a
-	// session: the tree volume must then already hold the tree's clone.
-	TreeHasSessions(ctx context.Context, project, tree string) (bool, error)
+	// IssueHasSessions is whether any stored claim of issue, retired ones included, recorded a
+	// session: the issue's volume must then already hold the issue's clone and that session.
+	IssueHasSessions(ctx context.Context, project, issue string) (bool, error)
 	// TreeLive is whether tree's lifecycle is open, or its cleanup reserved and unconfirmed: the
 	// tree's issue Sandboxes are then its cleanup's alone, never the orphan sweep's.
 	TreeLive(ctx context.Context, project, tree string) (bool, error)
@@ -71,13 +73,19 @@ type Options struct {
 	Store Store
 	// Image is the worker image, pinned by digest: New refuses one without "@sha256:".
 	Image string
-	// StorageClass is the tree volume's class. Required: production has no default class.
+	// StorageClass is the issue volumes' class. Required: production has no default class.
 	StorageClass string
-	// TreeVolume is the tree volume's size, positive; the daemon's configuration supplies its
-	// default (runtime.kubernetes.tree_volume, 20Gi).
-	TreeVolume resource.Quantity
-	Scheduling Scheduling
-	// Resources are each role's container requests and limits; a role absent here gets none.
+	// IssueVolume is each issue volume's size, positive; the daemon's configuration supplies its
+	// default (runtime.kubernetes.issue_volume, 20Gi).
+	IssueVolume resource.Quantity
+	Scheduling  Scheduling
+	// Resources are each role's container requirements, the controller's included: the daemon
+	// hands one for every role (config.DefaultResources fills what its file leaves out), its cpu and
+	// memory the request and the limit alike, so every container of every pod the runtime builds —
+	// the init containers take the launching role's, the image probe's the controller's — is
+	// Guaranteed. New refuses a map that lacks a role of claim.Roles or the controller, or whose
+	// entry is not such a reservation: cpu and memory each requested as a positive quantity equal
+	// to its limit, and no other resource named.
 	Resources map[claim.Role]corev1.ResourceRequirements
 	// StreamURL is the worker stream listener every pod's shim dials, tcp://host:port.
 	StreamURL string
@@ -116,16 +124,22 @@ type Options struct {
 	// seed of this same user (bootprobe.NATSUser), so a providers Secret holding a blank, invalid,
 	// or other seed refuses boot instead of every agent's connection.
 	NATSUser string
+	// SessionDSNKey is the providers Secret's key that holds the postgres:// URL of the database
+	// every role's Oh My Pi keeps its session in (runtime.kubernetes.session_store postgres); ""
+	// keeps each session a file in the issue's volume's sessions directory. With one, every pod and the
+	// image probe mount that key at ProvidersDir/OMP_SESSION_SQL_DSN, and every generation is
+	// started with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming that file
+	// (mainEnvironment), which the shim, seeing the pointer, never exports; a resume is held to the
+	// session table rather than the volume (the role launcher's check, internal/launcher), and no
+	// launch expects the issue's volume to hold a session.
+	SessionDSNKey string
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
-	// (`--no-extensions --extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
+	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.
 	Agent []string
 	// BootTimeout bounds each wait of a relaunch, and is how long a pod may stay unscheduled
 	// before it counts as gone (worker_boot_timeout_seconds).
 	BootTimeout time.Duration
-	// BootIntervals is the registration deadline in boot intervals; workspace-init's lock
-	// wait is sized from it (worker_boot_registration_deadline_intervals).
-	BootIntervals int
 	// TerminationGrace is the pods' terminationGracePeriodSeconds, and how long Suspend and Release
 	// wait for a process to end itself after its shutdown frame (worker_stop_timeout_seconds).
 	TerminationGrace time.Duration
@@ -135,6 +149,14 @@ type Options struct {
 	// AdoptTimeout bounds a working-copy adoption (slow_command_timeout_seconds).
 	AdoptTimeout time.Duration
 	Tokens       ProvisionTokens
+	// GitHubCredential is the daemon's function for a role's gh files
+	// (runtime.GitHubCredential): hosts.yml and config.yml rendered from the role's App token. It
+	// is called for every launcher role when the pod's role Secrets are written
+	// (writeLauncherSecrets), and again for each by the refresher (refreshGitHubCredentials), which
+	// rewrites the Secret when the render changed: every workflow role of an issue pod and the
+	// controller's, which acts as the review App. Required: configure refuses nil as it refuses a
+	// nil Tokens.
+	GitHubCredential runtime.GitHubCredential
 	// Conns is the worker stream listener: Suspend's and Release's shutdown frames, and
 	// AdoptWorkingCopy, go through it.
 	Conns runtime.Conns
@@ -142,15 +164,6 @@ type Options struct {
 	Now func() time.Time
 	// Log receives what the runtime decides without being asked; slog.Default() when nil.
 	Log *slog.Logger
-	// Removable computes a tree's removable-workspace candidates (dispatch://LEGION-583):
-	// removableWorkspaces (internal/daemon/removable.go) states the candidate rule from the
-	// daemon's own claim store; relaunch also drops any candidate that still has a live pod of
-	// the tree, a second guarantee on different evidence (withoutLiveTreePods). relaunch calls
-	// this itself, after the tree's launch turn is held and its other pods have finished
-	// initializing, so the list a pod's manifest carries is as fresh as this launch can make it —
-	// never computed this far ahead that a relaunch's own waits could leave it stale.
-	// nil removes nothing (a narrow test that does not exercise it).
-	Removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
 }
 
 // AgentSecrets is the secrets broker the runtime enrolls every pod with: the URL the
