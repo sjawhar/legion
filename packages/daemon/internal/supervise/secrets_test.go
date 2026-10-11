@@ -3,6 +3,7 @@ package supervise
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -188,6 +189,44 @@ func TestATransientEnrollmentFailureIsRetriedOnTheNextAliveObservation(t *testin
 	}
 	if got := h.conn.Enrollments(); len(got) != 1 {
 		t.Fatalf("the shim was told %v", got)
+	}
+}
+
+// A projected token is valid for an hour at most, and the shim reads it once per hello. An
+// enrollment held up past the hello token's expiry (the daemon's machine login waiting for a
+// person to approve it) presents a token the shim reads again then, never the expired one, which
+// the broker refuses as POD_IDENTITY_MISMATCH.
+func TestAnEnrollmentHeldPastTheHelloTokensExpiryPresentsAFreshToken(t *testing.T) {
+	h := newHarness(t)
+	broker := h.withSecrets()
+	broker.now = h.clock.Now
+	broker.enrollErr = errors.New("broker answered 0 NO_MACHINE_CREDENTIAL: machine login pending; code ABCD-1234")
+	h.launch()
+	h.helloWithToken(podToken(h.clock.Now().Add(time.Hour)))
+	h.register()
+	h.ready()
+	if c := h.claim(); c.Enrollment != nil {
+		t.Fatalf("enrolled %+v while the login was pending", c.Enrollment)
+	}
+
+	h.clock.Advance(80 * time.Minute) // the login is approved long after the hello
+	broker.enrollErr = nil
+	fresh := podToken(h.clock.Now().Add(time.Hour))
+	h.conn.SetAgentSecretsToken(fresh)
+	h.observe(runtime.Alive)
+
+	if refused := h.logs.lines("agent-secrets: enrollment refused"); len(refused) != 0 {
+		t.Fatalf("the enrollment was refused: %q", refused)
+	}
+	enrollments := broker.enrolled()
+	if len(enrollments) != 1 || enrollments[0].PodToken != fresh {
+		t.Fatalf("enrolled %+v, want one enrollment presenting the token the shim read after the hello's expired", enrollments)
+	}
+	if c := h.claim(); c.Enrollment == nil || c.Enrollment.ID != "enr-1" {
+		t.Fatalf("stored enrollment %+v", c.Enrollment)
+	}
+	if h.m.identity.PodToken != "" {
+		t.Fatal("the machine kept the pod token past the enrollment")
 	}
 }
 

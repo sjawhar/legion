@@ -36,6 +36,8 @@ type Conn struct {
 	prompts     []Prompt
 	adoptions   []Adoption
 	enrollments []string
+	podToken    string
+	tokenReads  int
 	shutdowns   int
 	aborts      int
 	state       runtime.ConnState
@@ -106,6 +108,32 @@ func (c *Conn) AgentSecretsEnrollment(_ context.Context, enrollmentID string) er
 	defer c.mu.Unlock()
 	c.enrollments = append(c.enrollments, enrollmentID)
 	return c.failures["AgentSecretsEnrollment"]
+}
+
+// AgentSecretsToken answers the daemon asking the agent's shim to read its projected token again:
+// the token SetAgentSecretsToken gave it.
+func (c *Conn) AgentSecretsToken(_ context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tokenReads++
+	if err := c.failures["AgentSecretsToken"]; err != nil {
+		return "", err
+	}
+	return c.podToken, nil
+}
+
+// SetAgentSecretsToken is the projected token the shim reads from its mount from now on.
+func (c *Conn) SetAgentSecretsToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.podToken = token
+}
+
+// TokenReads is how many times the daemon asked the shim to read its projected token again.
+func (c *Conn) TokenReads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tokenReads
 }
 
 // Prompts is every prompt frame sent over this connection, in order.
