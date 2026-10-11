@@ -1990,9 +1990,12 @@ each fallback names its removal condition at its definition: the broker records 
 older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box`
 (`helper/broker.go`, `enroll`: gone once the production broker records `session`); the CLI asks an
 older helper, which answers `unknown op enroll-session-key`, its `enroll-box`/`unenroll-box`
-(`cmd/agent-secrets`, `legacySessionKeyOps`: gone once no helper older than this release runs); and
-`enroll --helper` drops the `--kind box` dotfiles' agentbox passes, refusing any other `--kind`
-(`dropLegacyKind`: gone once agentbox passes none).
+(`cmd/agent-secrets`, `legacySessionKeyOps`: gone once no helper older than this release runs); the
+helper answers an older CLI's `enroll-box`/`unenroll-box` as the kind-free pair and logs `a client
+asked a legacy op` (`helper/server.go`, `legacySessionKeyOps`: gone once dotfiles' pin is at this
+release and no helper has logged that line for 30 days); and `enroll --helper` drops the
+`--kind box` dotfiles' agentbox passes, refusing any other `--kind` (`dropLegacyKind`: gone once
+agentbox passes none).
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or

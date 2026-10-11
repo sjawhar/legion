@@ -1,7 +1,11 @@
 package helper
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"testing"
 	"time"
@@ -56,11 +60,83 @@ func TestEnrollSessionKeyEnrollsAndRevokesAnExternalKey(t *testing.T) {
 	if status, body := self(); status != http.StatusUnauthorized {
 		t.Fatalf("GET /v1/enrollments/self after unenroll-session-key = %d %s, want 401", status, body)
 	}
-	for _, op := range []string{"enroll-box", "unenroll-box"} {
-		if resp := cr.call(t, Request{Op: op, RuntimeID: "x", Thumbprint: "y", EnrollmentID: enrolled.EnrollmentID}); resp.OK || resp.Code != CodeBadRequest {
-			t.Fatalf("%s: %+v, want %s: the box ops are gone", op, resp, CodeBadRequest)
+}
+
+// TestAnOlderCLIsBoxOpsStillEnrollAndRevoke: an agent-secrets CLI from before the session key
+// (agentbox's enroll and unenroll, run from whatever release the box host's PATH holds) asks
+// enroll-box and unenroll-box, with the "kind" field older CLIs also sent. This helper answers
+// both as the kind-free pair: the key enrolls as kind session, its proof is accepted, and
+// unenroll-box ends it.
+func TestAnOlderCLIsBoxOpsStillEnrollAndRevoke(t *testing.T) {
+	cr := newContractRig(t)
+	b := cr.srv.Broker
+	code, err := b.Login(context.Background(), cr.srv.Hostname)
+	if err != nil {
+		t.Fatalf("Broker.Login: %v", err)
+	}
+	cr.broker.DecideMachineLogin(t, code, true)
+	waitForIssued(t, b)
+
+	key, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	thumbprint, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The line a CLI before this release writes: its Request named the op enroll-box and carried Kind.
+	enrolled := rawCall(t, cr.sock, fmt.Sprintf(`{"op":"enroll-box","runtime_id":"box-%s","thumbprint":%q,"kind":"box"}`, t.Name(), thumbprint))
+	if !enrolled.OK || enrolled.EnrollmentID == "" || enrolled.LeaseExpires == "" {
+		t.Fatalf("enroll-box from an older CLI: %+v", enrolled)
+	}
+	self := func() (int, []byte) {
+		url := cr.broker.URL + "/v1/enrollments/self"
+		p, err := proof.Sign(key, enrolled.EnrollmentID, http.MethodGet, url, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cr.broker.Req(t, http.MethodGet, "/v1/enrollments/self", map[string]string{"Proof": p}, nil)
+	}
+	status, body := self()
+	if got := contractDecode[contractSelfResponse](t, body); status != http.StatusOK || got.Kind != "session" {
+		t.Fatalf("GET /v1/enrollments/self with the key enroll-box enrolled = %d %s, want kind session", status, body)
+	}
+	if un := rawCall(t, cr.sock, fmt.Sprintf(`{"op":"unenroll-box","enrollment_id":%q}`, enrolled.EnrollmentID)); !un.OK {
+		t.Fatalf("unenroll-box from an older CLI: %+v", un)
+	}
+	if status, body := self(); status != http.StatusUnauthorized {
+		t.Fatalf("GET /v1/enrollments/self after unenroll-box = %d %s, want 401", status, body)
+	}
+	for _, line := range []string{`{"op":"enroll-box","kind":"box"}`, `{"op":"unenroll-box"}`} {
+		if resp := rawCall(t, cr.sock, line); resp.OK || resp.Code != CodeBadRequest {
+			t.Fatalf("%s: %+v, want %s for a missing field", line, resp, CodeBadRequest)
 		}
 	}
+}
+
+// rawCall writes line to the helper's socket as a client of another release would and reads its
+// one reply, so a test pins the bytes an older client sends rather than this release's Request.
+func rawCall(t *testing.T, sock, line string) Response {
+	t.Helper()
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	if _, err := conn.Write([]byte(line + "\n")); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := bufio.NewReader(conn).ReadBytes('\n')
+	if err != nil {
+		t.Fatal(err)
+	}
+	var resp Response
+	if err := json.Unmarshal(reply, &resp); err != nil {
+		t.Fatalf("helper reply %q: %v", reply, err)
+	}
+	return resp
 }
 
 // TestABrokerBeforeTheSessionKindStillEnrollsEverySession: a broker that refuses kind session
