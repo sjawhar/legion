@@ -663,17 +663,53 @@ export default function envoyExtension(pi: PiApi): void {
     await postDeliveryReply(currentDispatchConfig(), replySessionID, delivery, result);
   };
 
-  // The pictures a person's typed input carries, by its text, until the host's input handlers ask
-  // for them: `sendUserInput` takes text alone and gets its images from an `input` handler, as
-  // typed input at the terminal does.
-  const pendingInputImages = new Map<string, ImageContent[][]>();
+  interface PendingTypedImageAdmission {
+    readonly body: string;
+    readonly injectionSessionID: string;
+    readonly messageID: string;
+    readonly pictureAddresses: readonly string[];
+    readonly images: ImageContent[];
+    handed: boolean;
+  }
+
+  // A typed input's pictures, admitted under its Dispatch id until the host's message carrying
+  // that id as its `tag` starts. The `input` event names its turn by text alone, so same-text
+  // sends are handed their images in send order; only a hand-over (`handed`) lets that tagged
+  // start mark the pictures shown. An earlier extension's rewrite of the text leaves the
+  // admission unhanded: the turn goes without its pictures, which stay unshown for a retry.
+  const pendingTypedImageAdmissions = new Map<string, PendingTypedImageAdmission>();
+  const pendingTypedImageAdmissionIDsByText = new Map<string, string[]>();
+  const removePendingTypedImageAdmission = (
+    messageID: string
+  ): PendingTypedImageAdmission | undefined => {
+    const admission = pendingTypedImageAdmissions.get(messageID);
+    if (admission === undefined) return undefined;
+    pendingTypedImageAdmissions.delete(messageID);
+    const queue = pendingTypedImageAdmissionIDsByText.get(admission.body);
+    if (queue !== undefined) {
+      const index = queue.indexOf(messageID);
+      if (index !== -1) queue.splice(index, 1);
+      if (queue.length === 0) pendingTypedImageAdmissionIDsByText.delete(admission.body);
+    }
+    return admission;
+  };
+  const queuePendingTypedImageAdmission = (admission: PendingTypedImageAdmission): void => {
+    removePendingTypedImageAdmission(admission.messageID);
+    pendingTypedImageAdmissions.set(admission.messageID, admission);
+    const queue = pendingTypedImageAdmissionIDsByText.get(admission.body) ?? [];
+    queue.push(admission.messageID);
+    pendingTypedImageAdmissionIDsByText.set(admission.body, queue);
+  };
   pi.on("input", async (event) => {
     if (event.source !== "extension") return undefined;
-    const queue = pendingInputImages.get(event.text);
-    const images = queue?.shift();
-    if (queue?.length === 0) pendingInputImages.delete(event.text);
-    if (images === undefined) return undefined;
-    return { images: [...(event.images ?? []), ...images] };
+    const queue = pendingTypedImageAdmissionIDsByText.get(event.text);
+    const messageID = queue?.shift();
+    if (queue?.length === 0) pendingTypedImageAdmissionIDsByText.delete(event.text);
+    if (messageID === undefined) return undefined;
+    const admission = pendingTypedImageAdmissions.get(messageID);
+    if (admission === undefined) return undefined;
+    admission.handed = true;
+    return { images: [...(event.images ?? []), ...admission.images] };
   });
 
   // Runs a person's accepted Send or Aside as if typed at the terminal (`pi.sendUserInput`): a
@@ -689,26 +725,23 @@ export default function envoyExtension(pi: PiApi): void {
     replySessionID: string,
     turn: AcceptedUserTurn,
     content: string | readonly ContentBlock[],
-    pictureAddresses: readonly string[],
-    shown: Set<string>
+    pictureAddresses: readonly string[]
   ): void => {
     const images =
       typeof content === "string"
         ? []
         : content.filter((block): block is ImageContent => block.type === "image");
-    if (images.length > 0) {
-      const queue = pendingInputImages.get(turn.body) ?? [];
-      queue.push(images);
-      pendingInputImages.set(turn.body, queue);
-    }
-    const releasePendingImages = () => {
-      const queue = pendingInputImages.get(turn.body);
-      if (queue === undefined) return;
-      const index = queue.indexOf(images);
-      if (index !== -1) queue.splice(index, 1);
-      if (queue.length === 0) pendingInputImages.delete(turn.body);
-    };
     const noted = sessionID;
+    if (images.length > 0) {
+      queuePendingTypedImageAdmission({
+        body: turn.body,
+        handed: false,
+        images,
+        injectionSessionID: noted,
+        messageID: turn.messageId,
+        pictureAddresses,
+      });
+    }
     noteTypedUserTurn(noted, turn.messageId);
     void Promise.resolve()
       .then(() =>
@@ -720,17 +753,19 @@ export default function envoyExtension(pi: PiApi): void {
       .then(
         (result) => {
           const submitted = result.handled === "prompt" || result.handled === "skill";
-          if (submitted) markPicturesShown(shown, pictureAddresses);
-          else dropInjectedUserTurn(noted, turn.messageId);
+          if (!submitted) {
+            dropInjectedUserTurn(noted, turn.messageId);
+            removePendingTypedImageAdmission(turn.messageId);
+          }
           return typedInputReply(turn.body, result);
         },
         (error: unknown) => {
           dropInjectedUserTurn(noted, turn.messageId);
+          removePendingTypedImageAdmission(turn.messageId);
           return typedInputReply(turn.body, { error: messageFor(error) });
         }
       )
       .then(async (reply) => {
-        releasePendingImages();
         if (reply !== undefined) await postDispatchReply(delivery, { body: reply }, replySessionID);
       })
       .catch((error: unknown) => {
@@ -890,7 +925,8 @@ export default function envoyExtension(pi: PiApi): void {
           // only once the host took the send: one that throws releases the claim, and the delivery
           // Dispatch retries must carry them again.
           // Fetched once for the delivery: the same set is read for what to name and, once the
-          // host took the send, written with what it showed.
+          // host took a card, written with what it showed. A person's turn writes the set of the
+          // session it is sent into, which a switch while the pictures load can change.
           const shown = shownPictures(acceptedSessionID);
           if (accepted === undefined) {
             const card = await withDeliveredPictures(
@@ -928,12 +964,13 @@ export default function envoyExtension(pi: PiApi): void {
               } else {
                 // Noted right before the send, after the pictures load: a run that ends while they
                 // load clears every text note (endInjectedUserTurns), and this turn must still be found.
-                noteInjectedUserTurn(acceptedSessionID, turn.body, turn.messageId);
+                const injectionSessionID = sessionID;
+                noteInjectedUserTurn(injectionSessionID, turn.body, turn.messageId);
                 pi.sendUserMessage(
                   delivery.content,
                   turn.mode === "aside" ? { deliverAs: "aside" } : undefined
                 );
-                markPicturesShown(shown, delivery.shown);
+                markPicturesShown(shownPictures(injectionSessionID), delivery.shown);
               }
             } else {
               runTypedInput(
@@ -942,8 +979,7 @@ export default function envoyExtension(pi: PiApi): void {
                 acceptedSessionID,
                 turn,
                 delivery.content,
-                delivery.shown,
-                shown
+                delivery.shown
               );
             }
           }
@@ -1210,7 +1246,27 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   pi.on("message_start", async (event) => {
-    recordAgentStreamMessage(event.message, true);
+    const message = event.message;
+    const tag =
+      typeof message === "object" &&
+      message !== null &&
+      "tag" in message &&
+      typeof message.tag === "string"
+        ? message.tag
+        : undefined;
+    if (tag !== undefined) {
+      const admission = pendingTypedImageAdmissions.get(tag);
+      if (admission !== undefined) {
+        if (admission.handed) {
+          markPicturesShown(
+            shownPictures(admission.injectionSessionID),
+            admission.pictureAddresses
+          );
+        }
+        removePendingTypedImageAdmission(tag);
+      }
+    }
+    recordAgentStreamMessage(message, true);
   });
   pi.on("message_update", async (event) => {
     recordAgentStreamMessage(event.message, true);

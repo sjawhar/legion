@@ -48,6 +48,7 @@ interface HostMessage {
   readonly isError?: unknown;
   readonly model?: unknown;
   readonly provider?: unknown;
+  readonly tag?: unknown;
 }
 
 interface HostPart {
@@ -75,6 +76,8 @@ interface ReadableMessage {
    *  both as strings; undefined for a user message, a tool result, and an assistant message
    *  whose host object names neither (an adapter with no access to its own model identity). */
   readonly model: string | undefined;
+  /** The tag the host kept on a typed input's user message (its Dispatch message id). */
+  readonly tag: string | undefined;
   readonly host: HostMessage;
 }
 
@@ -99,6 +102,10 @@ export interface AgentStreamPublisherDeps {
 
 const encoder = new TextEncoder();
 
+/** A character no command name a person types holds: whitespace, or a control character (C0, DEL
+ *  or C1). JSON writes a C0 one as a six-byte escape. */
+const UNTYPABLE_NAME = /[\s\p{Cc}]/u;
+
 /** `provider/model` combined and capped (e.g. `anthropic/claude-opus-5`), or undefined when
  *  either is missing or empty — an empty string still satisfies `typeof x === "string"`, and
  *  combining one anyway would publish a malformed `/claude-opus-5` or `anthropic/`. */
@@ -122,16 +129,21 @@ function readMessage(raw: unknown): ReadableMessage | null {
     timestamp: message.timestamp,
     toolCallId: typeof message.toolCallId === "string" ? message.toolCallId : undefined,
     toolName: typeof message.toolName === "string" ? message.toolName : undefined,
+    tag: typeof message.tag === "string" ? message.tag : undefined,
   };
 }
 
-/** The ring slot a message occupies, or null for a message this build does not carry. */
+/** The ring slot a message occupies, or null for a message this build does not carry. A tagged
+ *  user message's slot names its tag too: two Sends can be stamped in the same millisecond. */
 function keyFor(message: ReadableMessage): string | null {
   if (message.role === "toolResult") {
     return message.toolCallId === undefined ? null : `t:${message.toolCallId}`;
   }
-  if (message.role !== "assistant" && message.role !== "user") return null;
-  return `m:${message.role === "assistant" ? "a" : "u"}${message.timestamp}`;
+  if (message.role === "assistant") return `m:a${message.timestamp}`;
+  if (message.role !== "user") return null;
+  return message.tag === undefined
+    ? `m:u${message.timestamp}`
+    : `m:u${message.timestamp}:${message.tag}`;
 }
 
 /** Flattens a message's content parts to plain text, which is how a tool result reads. */
@@ -283,19 +295,24 @@ export class AgentStreamPublisher {
   /**
    * The session's slash commands: kept for every replay, whose last frame they are, and published
    * at once when they differ from the list last kept while a viewer is attached. Each name is
-   * capped and kept once, empty names and names with whitespace dropped, since a person types a
-   * command as one token.
+   * capped and kept once, empty names and names holding whitespace or a control character dropped,
+   * since a person types a command as one token. The list keeps the host-order prefix whose frame
+   * fits the replay's byte budget on its own: the caps count characters, and a character JSON
+   * escapes (`\u0001`) costs six bytes.
    */
   setCommands(subject: string, commands: readonly AgentStreamCommand[]): void {
+    // Measured as `replay` pays for it: the frame inside the brackets of `frames`, under the
+    // highest sequence number it can carry, then each command and the comma before it.
+    const limit = AGENT_STREAM_LIMITS.historyBytes - 2;
+    let bytes = encoder.encode(JSON.stringify(this.#commandsFrame([], this.#seq + 1))).length;
     const seen = new Set<string>();
     const kept: AgentStreamCommand[] = [];
     for (const command of commands) {
       if (kept.length >= AGENT_STREAM_LIMITS.commands) break;
-      if (command.name.length > AGENT_STREAM_LIMITS.commandNameChars) continue;
       const name = command.name;
-      if (name === "" || /\s/.test(name) || seen.has(name)) continue;
-      seen.add(name);
-      kept.push({
+      if (name.length > AGENT_STREAM_LIMITS.commandNameChars) continue;
+      if (name === "" || UNTYPABLE_NAME.test(name) || seen.has(name)) continue;
+      const listed: AgentStreamCommand = {
         name,
         source: command.source,
         ...(command.description !== undefined && {
@@ -305,7 +322,12 @@ export class AgentStreamPublisher {
           ),
         }),
         ...(command.terminalOnly === true && { terminalOnly: true as const }),
-      });
+      };
+      const cost = encoder.encode(JSON.stringify(listed)).length + (kept.length === 0 ? 0 : 1);
+      if (bytes + cost > limit) break;
+      bytes += cost;
+      seen.add(name);
+      kept.push(listed);
     }
     if (JSON.stringify(kept) === JSON.stringify(this.#commands)) return;
     this.#commands = kept;
@@ -314,8 +336,11 @@ export class AgentStreamPublisher {
     if (this.watched) this.#deps.publish(subject, JSON.stringify(this.#commandsFrame(kept)));
   }
 
-  #commandsFrame(commands: readonly AgentStreamCommand[]): AgentStreamFrame {
-    return { commands, kind: "commands", seq: this.#commandsSeq, v: AGENT_STREAM_PROTOCOL };
+  #commandsFrame(
+    commands: readonly AgentStreamCommand[],
+    seq = this.#commandsSeq
+  ): AgentStreamFrame {
+    return { commands, kind: "commands", seq, v: AGENT_STREAM_PROTOCOL };
   }
 
   /**
@@ -375,7 +400,8 @@ export class AgentStreamPublisher {
    *
    * The budget is UTF-8 bytes, which is what NATS measures. Counting UTF-16 code units would let
    * a history of box-drawing tool output or CJK text build a reply three times its measured size,
-   * over the server's 1 MiB `max_payload`, and the publish would throw.
+   * over the server's 1 MiB `max_payload`, and the publish would throw. It bounds what `frames`
+   * serialises to: every frame, the commas between them and the array's brackets.
    */
   replay(sessionID: string): AgentStreamReplay {
     if (!this.watched) return { frames: [], session_id: sessionID, v: AGENT_STREAM_PROTOCOL };
@@ -383,17 +409,23 @@ export class AgentStreamPublisher {
       left.at === right.at ? left.seq - right.seq : left.at - right.at
     );
     // The command list rides last and is paid for first, so a full history never crowds it out.
-    const commands = this.#commands === undefined ? undefined : this.#commandsFrame(this.#commands);
-    let budget =
-      AGENT_STREAM_LIMITS.historyBytes -
-      (commands === undefined ? 0 : encoder.encode(JSON.stringify(commands)).length);
+    // `setCommands` keeps it inside the budget; one that does not fit is left out, never sent over.
+    const listed = this.#commands === undefined ? undefined : this.#commandsFrame(this.#commands);
+    const listedBytes = listed === undefined ? 0 : encoder.encode(JSON.stringify(listed)).length;
+    const commands =
+      listed !== undefined && 2 + listedBytes <= AGENT_STREAM_LIMITS.historyBytes
+        ? listed
+        : undefined;
+    let used = 2 + (commands === undefined ? 0 : listedBytes);
     const kept: AgentStreamFrame[] = [];
     for (let index = ordered.length - 1; index >= 0; index -= 1) {
       const entry = ordered[index];
       if (entry === undefined) continue;
       const frame = frameFor(entry);
-      budget -= encoder.encode(JSON.stringify(frame)).length;
-      if (budget < 0) break;
+      const separated = kept.length > 0 || commands !== undefined;
+      const cost = encoder.encode(JSON.stringify(frame)).length + (separated ? 1 : 0);
+      if (used + cost > AGENT_STREAM_LIMITS.historyBytes) break;
+      used += cost;
       kept.unshift(frame);
     }
     if (commands !== undefined) kept.push(commands);

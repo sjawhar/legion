@@ -566,6 +566,7 @@ function directDispatchEnvelope(
     readonly attempt?: number;
     readonly body?: string;
     readonly broadcastID?: string;
+    readonly messageID?: string;
   } = {}
 ): string {
   const actor = frame.actor ?? { id: "alice", kind: "user" };
@@ -584,7 +585,7 @@ function directDispatchEnvelope(
           ...(frame.broadcastID === undefined ? {} : { broadcast_id: frame.broadcastID }),
           created_at: "2026-09-30T00:00:00Z",
           deliveries: [],
-          id: DIRECT_MESSAGE_ID,
+          id: frame.messageID ?? DIRECT_MESSAGE_ID,
           in_reply_to: null,
           issue_key: null,
           target: "session:ses_delivery",
@@ -605,6 +606,7 @@ function directDispatchEnvelope(
 function storedAttempt(
   attempt: number,
   mode: "aside" | "btw" | "steer",
+  messageID = DIRECT_MESSAGE_ID,
   requestedBy: { readonly kind: string; readonly id: string } = { id: "alice", kind: "user" }
 ) {
   return {
@@ -616,7 +618,7 @@ function storedAttempt(
     duplicate: false,
     envelope_id: null,
     error: null,
-    message_id: DIRECT_MESSAGE_ID,
+    message_id: messageID,
     reply_id: null,
     requested_by: requestedBy,
     session_id: "ses_delivery",
@@ -642,7 +644,11 @@ const acceptOnce = (count: number): AcceptAnswer =>
   count === 1 ? { accepted: true } : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
 
 /** The accept route's response for `answer` to an accept of `attempt`. */
-function acceptResponse(attempt: number, answer: AcceptAnswer): Response {
+function acceptResponse(
+  attempt: number,
+  answer: AcceptAnswer,
+  messageID = DIRECT_MESSAGE_ID
+): Response {
   if ("reject" in answer) throw new TypeError(answer.reject);
   if (!("accepted" in answer)) {
     return new Response(JSON.stringify({ code: answer.code, error: "refused" }), {
@@ -651,7 +657,7 @@ function acceptResponse(attempt: number, answer: AcceptAnswer): Response {
     });
   }
   const accepted = {
-    ...storedAttempt(attempt, answer.delivery ?? "steer"),
+    ...storedAttempt(attempt, answer.delivery ?? "steer", messageID),
     accepted_as: "user_turn",
   };
   const body = answer.body === undefined ? DIRECT_MESSAGE_BODY : answer.body;
@@ -712,7 +718,8 @@ async function bootDirectSession(
         });
         return acceptResponse(
           Number(url.pathname.split("/").at(-2)),
-          await (options.accept ?? acceptOnce)(accepts.length)
+          await (options.accept ?? acceptOnce)(accepts.length),
+          url.pathname.split("/").at(-4)
         );
       }
       // The session asks Dispatch nothing else about a direct message but its reply: any other
@@ -5679,7 +5686,7 @@ describe("envoy OMP extension", () => {
           .map((published) => JSON.parse(new TextDecoder().decode(published.data)))
           .filter((frame) => frame.kind === "message");
         expect(frames.map((frame) => [frame.message.id, frame.message.dispatchMessageId])).toEqual([
-          ["u10", DIRECT_MESSAGE_ID],
+          [`u10:${DIRECT_MESSAGE_ID}`, DIRECT_MESSAGE_ID],
         ]);
       });
     });
@@ -5704,6 +5711,48 @@ describe("envoy OMP extension", () => {
           ),
         },
       ]);
+    });
+
+    // `sendUserMessage` sends into whichever session is live once the pictures load, so the turn's
+    // note and its shown picture belong to that session: the session the message lands in must tie
+    // it to its Dispatch message, or Legion takes it for the daemon's assignment.
+    test("notes a picture Send under the session it is sent into after a switch during the picture read", async () => {
+      const slug = "untyped-host-picture-switch";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]);
+      const picture = Promise.withResolvers<Response>();
+      const requested = Promise.withResolvers<void>();
+      const { agent, delivered, fixture } = await bootDirectSession(slug, {
+        accept: () => ({ accepted: true, body }),
+        dispatch: ((url: URL) => {
+          if (url.pathname === `/api/v1/issues/LEGION-1/artifacts/${slug}`) {
+            return Response.json({
+              id: `${slug}-id`,
+              kind: "image",
+              name: "shot.png",
+              versions: [{ mime: "image/png", number: 1, size: png.length }],
+            });
+          }
+          if (url.pathname === `/api/v1/artifacts/${slug}-id/versions/1`) {
+            requested.resolve();
+            return picture.promise as unknown as Response;
+          }
+          return undefined;
+        }) as (url: URL) => Response | undefined,
+      });
+
+      agent.push(directDispatchEnvelope("steer", slug, { body }));
+      await requested.promise;
+      await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_picture_read"));
+      picture.resolve(new Response(png, { headers: { "Content-Type": "image/png" } }));
+      // The switch's own notice is the first delivery; the Send is the second.
+      await delivered(2);
+      expect(fixture.userMessages).toHaveLength(1);
+      const message = { content: [{ text: body, type: "text" }], role: "user", timestamp: 10 };
+      expect(matchInjectedUserTurn("ses_after_picture_read", message)).toBe(DIRECT_MESSAGE_ID);
+      expect(shownPictures("ses_after_picture_read").has(address)).toBe(true);
+      expect(shownPictures("ses_delivery").has(address)).toBe(false);
     });
   });
 
@@ -6013,15 +6062,144 @@ describe("envoy OMP extension", () => {
         agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
         await delivered(2);
         await asked.promise;
-        for (let index = 0; index < 10 && !shownPictures("ses_delivery").has(address); index += 1) {
-          await Promise.resolve();
-        }
         expect(images).toEqual([
           { data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" },
         ]);
+        expect(shownPictures("ses_delivery").has(address)).toBe(false);
+        await fixture.handlers.get("message_start")?.(
+          {
+            message: {
+              content: [{ text: body, type: "text" }],
+              role: "user",
+              tag: DIRECT_MESSAGE_ID,
+              timestamp: 10,
+            },
+          },
+          context
+        );
         expect(shownPictures("ses_delivery").has(address)).toBe(true);
       });
     }
+
+    test("does not mark a picture shown when an earlier input extension rewrites the text, and retry hands it over", async () => {
+      const slug = "typed-rewrite-picture";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+        {};
+      const asked = Promise.withResolvers<void>();
+      const retryAsked = Promise.withResolvers<void>();
+      const retryImages: unknown[] = [];
+      let attempts = 0;
+      const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
+        accept: () => ({ accepted: true, body }),
+        dispatch: pictureRoutes(slug),
+        sendUserInput: async (text) => {
+          attempts++;
+          const inputText = attempts === 1 ? "rewritten before Envoy" : text;
+          const answer = (await handlers.input?.(
+            { source: "extension", text: inputText },
+            context
+          )) as { readonly images?: readonly unknown[] } | undefined;
+          if (attempts === 2) {
+            retryImages.push(...(answer?.images ?? []));
+            retryAsked.resolve();
+          }
+          asked.resolve();
+          return { handled: "prompt" };
+        },
+      });
+      handlers.input = fixture.handlers.get("input");
+
+      agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
+      await delivered(1);
+      await asked.promise;
+      await fixture.handlers.get("message_start")?.(
+        {
+          message: {
+            content: [{ text: "rewritten before Envoy", type: "text" }],
+            role: "user",
+            tag: DIRECT_MESSAGE_ID,
+            timestamp: 10,
+          },
+        },
+        context
+      );
+      expect(shownPictures("ses_delivery").has(address)).toBe(false);
+
+      agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
+      await delivered(2);
+      await retryAsked.promise;
+      await fixture.handlers.get("message_start")?.(
+        {
+          message: {
+            content: [{ text: body, type: "text" }],
+            role: "user",
+            tag: DIRECT_MESSAGE_ID,
+            timestamp: 20,
+          },
+        },
+        context
+      );
+      expect(retryImages).toEqual([
+        { data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" },
+      ]);
+      expect(shownPictures("ses_delivery").has(address)).toBe(true);
+    });
+
+    test("does not mark a picture shown after prompt admission aborts before tagged message_start, and retry hands it over", async () => {
+      const slug = "typed-abort-picture";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
+        {};
+      const asked = Promise.withResolvers<void>();
+      const retryAsked = Promise.withResolvers<void>();
+      const retryImages: unknown[] = [];
+      let attempts = 0;
+      const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
+        accept: () => ({ accepted: true, body }),
+        dispatch: pictureRoutes(slug),
+        sendUserInput: async (text) => {
+          attempts++;
+          const answer = (await handlers.input?.({ source: "extension", text }, context)) as
+            | { readonly images?: readonly unknown[] }
+            | undefined;
+          if (attempts === 2) {
+            retryImages.push(...(answer?.images ?? []));
+            retryAsked.resolve();
+          }
+          asked.resolve();
+          return { handled: "prompt" };
+        },
+      });
+      handlers.input = fixture.handlers.get("input");
+
+      agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
+      await delivered(1);
+      await asked.promise;
+      // The host reported prompt but dropped it before it emitted a tagged message_start.
+      expect(shownPictures("ses_delivery").has(address)).toBe(false);
+
+      agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
+      await delivered(2);
+      await retryAsked.promise;
+      await fixture.handlers.get("message_start")?.(
+        {
+          message: {
+            content: [{ text: body, type: "text" }],
+            role: "user",
+            tag: DIRECT_MESSAGE_ID,
+            timestamp: 20,
+          },
+        },
+        context
+      );
+      expect(retryImages).toEqual([
+        { data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" },
+      ]);
+      expect(shownPictures("ses_delivery").has(address)).toBe(true);
+    });
 
     test("hands both identical in-flight typed turns their own pictures", async () => {
       const slug = "typed-same-body-pictures";
@@ -6045,8 +6223,18 @@ describe("envoy OMP extension", () => {
       });
       handlers.input = fixture.handlers.get("input");
 
-      agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
-      agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
+      agent.push(
+        directDispatchEnvelope("steer", `${slug}-1`, {
+          body,
+          messageID: "11111111-1111-4111-8111-111111111111",
+        })
+      );
+      agent.push(
+        directDispatchEnvelope("steer", `${slug}-2`, {
+          body,
+          messageID: "22222222-2222-4222-8222-222222222222",
+        })
+      );
       await delivered(2);
       expect(requests).toHaveLength(2);
       for (const request of requests) {

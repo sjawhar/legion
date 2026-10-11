@@ -125,7 +125,8 @@ export interface AgentStreamToolResult {
  * user message; and `skill`, a skill (`skill:<name>`).
  */
 export interface AgentStreamCommand {
-  /** The command without its slash: `compact`, `skill:dispatch`; one non-empty token, no whitespace. */
+  /** The command without its slash: `compact`, `skill:dispatch`; one non-empty token, with no
+   *  whitespace and no control character. */
   readonly name: string;
   readonly description?: string;
   readonly source: "builtin" | "extension" | "prompt" | "skill";

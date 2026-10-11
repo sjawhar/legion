@@ -11,10 +11,11 @@ import { envoyPluginInterface } from "./interface";
  * since the host can run it as a turn of its own after that run. A turn sent through
  * `pi.sendUserMessage` (`noteInjectedUserTurn`), on a host without `sendUserInput`, is linked to
  * nothing the host records, so it is found by its text: the first user message that equals it,
- * until the session's run ends. A message found is remembered under its host timestamp until the
- * run ends, so every handler that asks about it gets the same answer whichever asks first: envoy.ts's
- * stream recorder tags its frames, and Legion's phase-stall check (`extensions/legion.ts`) counts it
- * as an inbound event rather than the daemon's assignment.
+ * until the session's run ends. A message found is remembered until the run ends, under its tag
+ * when the host kept one (two Sends can be stamped in the same millisecond) and under its host
+ * timestamp otherwise, so every handler that asks about it gets the same answer whichever asks
+ * first: envoy.ts's stream recorder tags its frames, and Legion's phase-stall check
+ * (`extensions/legion.ts`) counts it as an inbound event rather than the daemon's assignment.
  *
  * The record is the `injectedUserTurns` member of the versioned interface (`interface.ts`):
  * envoy.ts writes what legion.ts reads, and each plugin bundles its own copy of this module.
@@ -26,7 +27,9 @@ export type SentUserTurn =
 export interface SessionUserTurns {
   /** Typed input is found by tag; `sendUserMessage` input is found by body text. */
   readonly sent: SentUserTurn[];
-  readonly found: Map<number, string>;
+  /** What each message asked about was found to be: by `tag:<tag>` for a tagged message, by its
+   *  host timestamp for an untagged one. */
+  readonly found: Map<string, string>;
 }
 
 /** A user message's own text: its text parts alone, which is what a sent prompt's text became. */
@@ -85,9 +88,10 @@ export function matchInjectedUserTurn(sessionID: string, message: unknown): stri
   if (!("timestamp" in message) || typeof message.timestamp !== "number") return undefined;
   const session = envoyPluginInterface().injectedUserTurns.get(sessionID);
   if (session === undefined) return undefined;
-  const known = session.found.get(message.timestamp);
-  if (known !== undefined) return known;
   const tag = "tag" in message && typeof message.tag === "string" ? message.tag : undefined;
+  const memo = tag === undefined ? String(message.timestamp) : `tag:${tag}`;
+  const known = session.found.get(memo);
+  if (known !== undefined) return known;
   let index = tag === undefined ? -1 : session.sent.findIndex((sent) => sent.messageId === tag);
   if (index === -1 && message.role === "user") {
     const text = userMessageText("content" in message ? message.content : undefined);
@@ -96,7 +100,7 @@ export function matchInjectedUserTurn(sessionID: string, message: unknown): stri
   const sent = session.sent[index];
   if (sent === undefined) return undefined;
   session.sent.splice(index, 1);
-  session.found.set(message.timestamp, sent.messageId);
+  session.found.set(memo, sent.messageId);
   return sent.messageId;
 }
 

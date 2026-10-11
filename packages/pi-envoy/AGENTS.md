@@ -29,7 +29,14 @@ A card whose text embeds Dispatch pictures (`RenderInboundResult.pictures`) carr
 blocks after the text (`src/delivery-pictures.ts`, the same bounds as `dispatch read`), and so does
 a person's turn (below): `sendUserMessage` takes the blocks with the text, and `sendUserInput`, which
 takes text alone, gets them from the extension's own `input` handler when the host asks for that
-input's images (`source: "extension"`), as a picture pasted at the terminal reaches it.
+input's images (`source: "extension"`), as a picture pasted at the terminal reaches it. A typed
+turn's pictures wait under its Dispatch message id until that handler hands them to the input with
+the turn's text (same text: in send order), and count as shown only once the host's message
+carrying that id as its `tag` starts: a prompt the host dropped (an abort as it was admitted)
+leaves them unshown, and Dispatch's retry carries them. Their limit: an extension whose `input`
+handler runs ahead of pi-envoy's and rewrites the text leaves that turn without its pictures, since
+the text is the only part of the event naming the turn; they are never marked shown, so a retry
+carries them.
 
 A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
 steer) becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate
@@ -77,7 +84,9 @@ stays in the record past the run's `agent_end` until that message arrives, and g
 answers that the input submitted no message. A `sendUserMessage` turn is found by its text: the
 first user message that equals it, forgotten at the run's `agent_end`, so on such a host a Send or
 an Aside the host runs as a turn of its own after that run matches nothing. What the record answers
-for a message is remembered under its host timestamp until the run ends, and the phase-stall section
+for a message is remembered until the run ends, under its tag when it has one (two Sends can be
+stamped in the same millisecond) and its host timestamp otherwise, and the stream keys a tagged user
+message by its timestamp and tag for the same reason. The phase-stall section
 of `packages/pi-legion/AGENTS.md` says what a miss costs a phase worker. Which turns the page shows
 twice: one the record missed, which the stream carries untagged; and a prompt template or file
 command, whose streamed user message is the expanded text while Dispatch stores what the person
@@ -100,8 +109,11 @@ host without the registry export, or one listing no session under this id, lists
 and publishes the rest. Replay always refreshes commands; attached watch pings refresh at most once
 per ten seconds. Every built-in's name and aliases are reserved before anything else is listed,
 since the host runs a built-in by either before `prompt()`; among the rest a repeated name keeps its
-first source, which is the one the host runs. A host without `sendUserInput` publishes no list, and
-its viewer offers no completion.
+first source, which is the one the host runs. A name is listed only if a person can type it: not
+empty, no whitespace, no control character. The list keeps the host-order prefix whose frame fits
+the replay's byte budget (`historyBytes`, UTF-8 bytes of JSON) on its own, and a replay leaves out
+a list that does not fit. A host without `sendUserInput` publishes no list, and its viewer offers no
+completion.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
 (every authenticated caller's event stream carries it, and Dispatch publishes it before its own

@@ -33,13 +33,16 @@
   `/new`, or a host mode that cannot run typed input), is the session's reply to that message on
   Dispatch. On a host without the method a message starting with `/` is not sent, and the reply
   names the host's Oh My Pi version; other text arrives as before. The pictures a message embeds
-  reach the host through the extension's `input` handler.
+  reach the host through the extension's `input` handler, and count as shown only once the host's
+  message carrying that Dispatch id starts, so a prompt the host dropped leaves them for the retry.
 - The live agent conversation stream lists the slash commands a person can send the session (a
   `commands` frame, the last of every replay): the host's built-ins, `/new` and the others only the
   terminal runs marked as such; extension, custom and skill commands; and the file commands and
   prompt templates the live session expands. Each name is listed once, in the terminal picker's
   order, so a name a built-in answers to by name or alias, or an earlier source already takes, is
-  not offered again (LEGION-394). A host without `pi.sendUserInput` lists none.
+  not offered again (LEGION-394); a name holding whitespace or a control character is not offered,
+  and the list keeps the commands that fit the replay's byte budget. A host without
+  `pi.sendUserInput` lists none.
 - The live agent conversation stream names the `provider/model` that produced each assistant turn
   (LEGION-548), read off the host's own assistant message: the Dispatch live view shows it next to
   the session's title and on the turn itself, and it switches within one turn of `/model`. Absent

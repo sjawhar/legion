@@ -94,6 +94,20 @@ describe("the user turns sent into a session", () => {
     expect(matchInjectedUserTurn("s1", { ...user(40, "ship it"), tag: "m-2" })).toBe("m-2");
   });
 
+  // Two Sends can be submitted in one host millisecond, so two tagged messages can share a
+  // timestamp. Each is its own Dispatch message, and asking about either again gives its own answer.
+  test("tell apart two tagged messages the host stamped in the same millisecond", () => {
+    noteTypedUserTurn("s1", "m-1");
+    noteTypedUserTurn("s1", "m-2");
+    const first = { ...user(20, "ship it"), tag: "m-1" };
+    const second = { ...user(20, "ship it"), tag: "m-2" };
+
+    expect(matchInjectedUserTurn("s1", first)).toBe("m-1");
+    expect(matchInjectedUserTurn("s1", second)).toBe("m-2");
+    expect(matchInjectedUserTurn("s1", first)).toBe("m-1");
+    expect(matchInjectedUserTurn("s1", second)).toBe("m-2");
+  });
+
   // A typed command that submits nothing (`/compact`, `/session`) leaves its turn noted until the
   // host answers. A user message the tag does not name (the daemon's assignment, text typed at the
   // terminal) is never that turn, whatever its text: otherwise Legion's phase-stall check counts
