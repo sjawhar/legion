@@ -113,3 +113,38 @@ test("Ctrl+Alt+M comments on a project document", async ({ browser }) => {
     await alice.close();
   }
 });
+
+// Playwright's Linux keyboard cannot produce Mac Option's µ character. The iphone project has
+// the iPhone user agent, so this raw event is the real browser path for Cmd+Option+M's key shape.
+test("Cmd+Option+M comments on a project document on a Mac user agent", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the physical-key fallback is Mac-only");
+  await createProject({ key: "CORE", name: "Core" });
+  await createProjectDocument("CORE", {
+    content: "# Handbook\n\nThe quick brown fox\n",
+    name: "Handbook",
+  });
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    await page.goto("/projects/CORE/documents/handbook");
+    await expect(documentEditor(page)).toContainText("The quick brown fox");
+    await expect(connectedDot(page)).toHaveText("connected");
+    const form = composer(page);
+
+    await selectEditorText(page, "fox");
+    await documentEditor(page).dispatchEvent("keydown", {
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+      code: "KeyM",
+      key: "µ",
+      metaKey: true,
+    });
+    await expect(form).toContainText("fox");
+    await expect(form.getByLabel("Comment")).toBeFocused();
+  } finally {
+    await alice.close();
+  }
+});

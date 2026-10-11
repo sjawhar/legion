@@ -169,8 +169,6 @@ function matchesCombo(combo: KeyCombo, press: KeyPress, isMac: boolean): boolean
     press.key.length === 1
       ? press.key.toLowerCase() === combo.key.toLowerCase()
       : press.key === combo.key;
-  // Option rewrites the character on a Mac (`µ` for M). Other platforms retain character
-  // matching, so AltGr keeps typing its layout's character instead of opening a shortcut.
   const samePosition = combo.alt && isMac && press.code === physicalCode(combo.key);
   if (!(sameCharacter || samePosition) || combo.alt !== press.altKey) {
     return false;
