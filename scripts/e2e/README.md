@@ -684,7 +684,7 @@ LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar
 STAGE4B_UNTIL=<checkpoint> …                      # a development run: stops after that checkpoint, never PASS
 STAGE4B_DESIGN_GATE=root-issues STAGE4B_UNTIL=spec-posted …   # the design gate, armed, on tree 1 alone
 LEGION_E2E_PROJECT=S4B2 LEGION_E2E_DAEMON_PORT=13370 LEGION_E2E_WORKER_STREAM_PORT=13371 \
-  bash scripts/e2e/stage4b-sandbox-tree.sh        # a second lane beside a default-identity run; S4B2 must already exist as a Dispatch project
+  bash scripts/e2e/stage4b-sandbox-tree.sh        # a second lane beside a default-identity run; S4B2 is created if missing
 ```
 
 The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
@@ -815,9 +815,10 @@ devbox's admitted range ([Port admission](#port-admission)); the run's daemon ma
 its two takes the API and which the worker stream (`address-moved-stream-new-pod`), never a third.
 Left at their defaults, a run collides with another default run exactly as it always has; set all
 three to distinct values and two runs proceed at once, on the same devbox, against the
-same production cluster. `LEGION_E2E_PROJECT` must already exist as a Dispatch project:
-production Dispatch has no auto-create, and only a signed-in human may create one
-(`createProject` refuses a bearer actor, `HUMAN_ONLY`).
+same production cluster. `LEGION_E2E_PROJECT` need not already exist as a Dispatch project:
+`prerequisites` creates it before the lock when it is missing (`ensure_project`, `lib/workflow.sh`),
+through the same proof-human bearer every other proof-human write uses — an agent session may
+create a project like any other write (LEGION-684).
 - The run takes its own lock, derived from the project (above).
 - It owns its identity's shared objects only after four checks pass: that lock, both its ports
   free, no leftover `run_label` object in the namespace, and no `legion-go-<project>-` consumer on

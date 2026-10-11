@@ -37,6 +37,17 @@
 
 # ---- Dispatch -------------------------------------------------------------------------------------
 
+# write_dispatch_header writes $work/dispatch-token, dispatch-auth-header and dispatch-human-header
+# from LEGION_E2E_DISPATCH_TOKEN_FILE alone: the bearer dispatch_get, dispatch_human and
+# ensure_project all send, needed before any of them runs. read_bearers calls it for the run
+# proper; prerequisites calls it again, before the lock, so ensure_project can run there too.
+write_dispatch_header() {
+  (umask 077 &&
+    tr -d '[:space:]' <"$dispatch_token_file" >"$work/dispatch-token" &&
+    printf 'Authorization: Bearer %s\n' "$(cat "$work/dispatch-token")" >"$work/dispatch-auth-header" &&
+    cp "$work/dispatch-auth-header" "$work/dispatch-human-header")
+}
+
 dispatch_url() { printf '%s' "$dispatch_base"; }
 dispatch_get() {
   curl -sS --fail-with-body --max-time 20 -H "@$work/dispatch-auth-header" "$(dispatch_url)/api/v1/$1"
@@ -69,6 +80,31 @@ dispatch_human() {
   else
     curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
   fi
+}
+# ensure_project creates $project before the lock when production Dispatch does not already hold
+# it: an agent session may create a project like any other write now (LEGION-684), so this is a
+# proof-human write like any other, over the bearer write_dispatch_header already wrote. 201 and
+# 409 PROJECT_EXISTS both leave the project ready for the run; anything else fails loudly, naming
+# the status and the body. Unlike dispatch_human, which only needs the body, this call needs the
+# status to tell a created project from a refusal, so it writes the body to a file and reads
+# %{http_code} off curl's own stdout, the pattern every other status-checking call in this proof
+# uses (e.g. stage4b-sandbox-tree.sh's invalid-bearer control).
+ensure_project() {
+  local status body_file=$work/create-project.json
+  status=$(curl -sS --max-time 20 -o "$body_file" -w '%{http_code}' -X POST \
+    -H "@$work/dispatch-human-header" -H 'content-type: application/json' \
+    --data "$(jq -cn --arg key "$project" --arg name "$project" '{key: $key, name: $name}')" \
+    "$(dispatch_url)/api/v1/projects" 2>&1) ||
+    fail "production Dispatch could not be reached to create $project: $(scrub <<<"$status")"
+  case "$status" in
+    201) note "[dispatch] created project $project" ;;
+    409)
+      jq -e '.code == "PROJECT_EXISTS"' "$body_file" >/dev/null 2>&1 ||
+        fail "production Dispatch answered 409 creating $project, not PROJECT_EXISTS: $(cat "$body_file")"
+      note "[dispatch] project $project already exists"
+      ;;
+    *) fail "production Dispatch answered $status creating project $project: $(cat "$body_file")" ;;
+  esac
 }
 # new_issue TITLE [PARENT] [SPEC] creates an issue in the run's project and prints its key. A root
 # carries the `legion` label, which hands it to the Go daemon (it admits no unlabeled root), and SPEC
