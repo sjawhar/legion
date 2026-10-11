@@ -61,6 +61,18 @@ const server = Bun.serve({
     if (pathname === "/api/v1/issues/DSP-1" && request.method === "GET") {
       return Response.json(issue);
     }
+    if (pathname === "/api/v1/projects" && request.method === "POST") {
+      if (body.key === "TAKEN") {
+        return Response.json(
+          { code: "PROJECT_EXISTS", error: "a project with this key already exists" },
+          { status: 409 }
+        );
+      }
+      return Response.json(
+        { key: body.key, name: body.name, open_asks: 0, created_at: "2026-10-11T00:00:00Z" },
+        { status: 201 }
+      );
+    }
     if (pathname === "/api/v1/agents/ses-pic/artifacts/shot-png") {
       return Response.json({
         id: "pic-1",
@@ -334,6 +346,27 @@ describe("the dispatch CLI", () => {
     expect(stdout).toContain("Picture shot.png");
     expect(stdout).not.toContain("- picture: ");
     expect(stdout).toContain("dispatch: Dispatch took the call, but this session's state");
+  });
+
+  test("dispatch project prints the created project, and a taken key exits 1 naming PROJECT_EXISTS", async () => {
+    const created = await run(["project", "--key", "SMOKE684", "--name", "Smoke"], omp);
+    expect(created.code).toBe(0);
+    expect(created.stdout).toContain("Created project SMOKE684 (Smoke)");
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/projects",
+        body: expect.objectContaining({
+          key: "SMOKE684",
+          name: "Smoke",
+          actor: expect.objectContaining({ kind: "session", id: "ses-1" }),
+        }),
+      },
+    ]);
+
+    const taken = await run(["project", "--key", "TAKEN", "--name", "Smoke"], omp);
+    expect(taken.code).toBe(1);
+    expect(taken.stdout).toContain("PROJECT_EXISTS: a project with this key already exists");
   });
 });
 

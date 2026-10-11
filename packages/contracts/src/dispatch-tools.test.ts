@@ -104,6 +104,7 @@ const validCalls = {
   dispatch_read: { issue: "DSP-1" },
   dispatch_search: { query: "astrolabe" },
   dispatch_issues: { project: "ACME" },
+  dispatch_project: { key: "CORE", name: "Core" },
   dispatch_architecture_sync: { project: "CORE" },
   dispatch_open_asks: {},
   dispatch_whoami: {},
@@ -163,6 +164,7 @@ describe("dispatchToolSpecs", () => {
       "dispatch_read",
       "dispatch_search",
       "dispatch_issues",
+      "dispatch_project",
       "dispatch_architecture_sync",
       "dispatch_open_asks",
       "dispatch_whoami",
@@ -346,6 +348,16 @@ describe("dispatchToolSpecs", () => {
 
     expect(schema.safeParse({}).success).toBe(true);
     expect(schema.safeParse({ session_id: "another-session" }).success).toBe(false);
+  });
+
+  test("dispatch_project takes a key and a name and nothing else", () => {
+    const schema = schemaFor("dispatch_project");
+
+    expect(schema.safeParse({ key: "CORE", name: "Core" }).success).toBe(true);
+    for (const args of [{ key: "CORE" }, { name: "Core" }, {}]) {
+      expect(schema.safeParse(args).success, JSON.stringify(args)).toBe(false);
+    }
+    expect(schema.safeParse({ key: "CORE", name: "Core", force: true }).success).toBe(false);
   });
 
   test("dispatch_issue accepts an assignee login", () => {

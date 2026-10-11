@@ -33,6 +33,7 @@ import type {
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
+  Project,
   Suggestions,
   WriteAdvice,
   WriteSuggestion,
@@ -397,6 +398,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_follow: true,
   dispatch_search: true,
   dispatch_issues: true,
+  dispatch_project: true,
   dispatch_open_asks: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true,
@@ -2488,6 +2490,25 @@ export async function executeDispatchTool(
                 }),
               ].join("\n"),
         details: { issues: rows, total, offset, limit },
+      };
+    }
+    case "dispatch_project": {
+      let project: Project;
+      try {
+        project = await client.createProject({
+          key: stringArg(args, "key"),
+          name: stringArg(args, "name"),
+          actor,
+        });
+      } catch (error) {
+        // PROJECT_EXISTS and INVALID_PROJECT ask for different things, and the description names
+        // both by code.
+        throw refusalWithCode(error);
+      }
+      const href = new URL(`/projects/${encodeURIComponent(project.key)}`, configUrl).toString();
+      return {
+        text: `Created project ${project.key} (${project.name}) at ${project.created_at}: ${href}`,
+        details: { project: project.key, name: project.name, created_at: project.created_at },
       };
     }
     case "dispatch_architecture_sync": {

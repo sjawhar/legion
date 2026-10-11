@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added the `dispatch_project` spec, `{ key, name }` (strict), behind the `dispatch project`
+  command: the twenty-second Dispatch spec (LEGION-684).
 - Added `LegionReadyRequest`, the body of the Legion daemon's `POST /legion/v1/claims/ready`, and
   `LegionCapabilityReport`, its optional `capabilities`: what a session measured of the six live
   capability rows at boot (`measuredAt`, `elapsedMs`, `rows[{name, ok, detail}]`; a `detail` may

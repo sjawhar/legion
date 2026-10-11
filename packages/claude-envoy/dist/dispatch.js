@@ -14394,6 +14394,16 @@ var dispatchToolSpecs = [
     })
   },
   {
+    name: "dispatch_project",
+    example: { key: "CORE", name: "Core" },
+    description: "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " + "A key that already exists is refused with 409 PROJECT_EXISTS whoever created it, so after a retry it can " + "mean the first call made the project. No route renames " + "or deletes a project, so search first with dispatch search and pick the key with care. A key that is " + "not a project key (an uppercase letter, then 1 to 9 uppercase letters or digits) or an empty name is " + "refused with 400 INVALID_PROJECT. Do not use it when an existing project already covers the work; " + "file an issue there with dispatch issue instead.",
+    arguments: (z2) => ({
+      key: z2.string().describe("The new project's key, such as CORE."),
+      name: z2.string().describe("The project's name, shown beside its key.")
+    }),
+    strict: true
+  },
+  {
     name: "dispatch_architecture_sync",
     example: { project: "CORE" },
     description: "Import a project's architecture model from its configured source repository now, instead of " + "waiting for the server's five-minute schedule. Returns the imported commit and component " + "count, or the recorded error when the model was rejected (the previous model stays up). " + "The source itself is configured by a human in Settings; 404 SOURCE_NOT_FOUND without one.",
@@ -15437,6 +15447,9 @@ class DispatchClient {
   async whoami() {
     return this.#json("GET", ["api", "v1", "whoami"]);
   }
+  async createProject(input) {
+    return this.#json("POST", ["api", "v1", "projects"], input);
+  }
   async syncArchitectureSource(project) {
     return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
   }
@@ -16419,6 +16432,7 @@ var issueFreeTools = {
   dispatch_follow: true,
   dispatch_search: true,
   dispatch_issues: true,
+  dispatch_project: true,
   dispatch_open_asks: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true
@@ -17775,6 +17789,23 @@ async function executeDispatchTool(input) {
         ].join(`
 `),
         details: { issues: rows, total, offset, limit }
+      };
+    }
+    case "dispatch_project": {
+      let project;
+      try {
+        project = await client.createProject({
+          key: stringArg(args, "key"),
+          name: stringArg(args, "name"),
+          actor
+        });
+      } catch (error48) {
+        throw refusalWithCode(error48);
+      }
+      const href = new URL(`/projects/${encodeURIComponent(project.key)}`, configUrl).toString();
+      return {
+        text: `Created project ${project.key} (${project.name}) at ${project.created_at}: ${href}`,
+        details: { project: project.key, name: project.name, created_at: project.created_at }
       };
     }
     case "dispatch_architecture_sync": {

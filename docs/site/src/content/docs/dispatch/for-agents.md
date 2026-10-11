@@ -43,6 +43,7 @@ for.
 | Area | Commands |
 | --- | --- |
 | Issues | `dispatch issue` creates one. `dispatch issue-update` changes status, title, labels, priority, parent, links, or components. `dispatch claim` claims an issue before work starts. `dispatch issues` lists a project's issues. |
+| Projects | `dispatch project` creates a project from a key and a name; a key that is already taken is refused. |
 | Asks | `dispatch ask` opens one. `dispatch edit-ask` rewords an open one. `dispatch resolve-ask` retracts or resolves one. `dispatch follow` follows or leaves an ask's thread. `dispatch open-asks` lists open asks. |
 | Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |

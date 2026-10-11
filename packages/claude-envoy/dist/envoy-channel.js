@@ -37044,6 +37044,16 @@ var dispatchToolSpecs = [
     })
   },
   {
+    name: "dispatch_project",
+    example: { key: "CORE", name: "Core" },
+    description: "Create a Dispatch project from a key and a name, so issues and project documents can be filed under it. " + "A key that already exists is refused with 409 PROJECT_EXISTS whoever created it, so after a retry it can " + "mean the first call made the project. No route renames " + "or deletes a project, so search first with dispatch search and pick the key with care. A key that is " + "not a project key (an uppercase letter, then 1 to 9 uppercase letters or digits) or an empty name is " + "refused with 400 INVALID_PROJECT. Do not use it when an existing project already covers the work; " + "file an issue there with dispatch issue instead.",
+    arguments: (z2) => ({
+      key: z2.string().describe("The new project's key, such as CORE."),
+      name: z2.string().describe("The project's name, shown beside its key.")
+    }),
+    strict: true
+  },
+  {
     name: "dispatch_architecture_sync",
     example: { project: "CORE" },
     description: "Import a project's architecture model from its configured source repository now, instead of " + "waiting for the server's five-minute schedule. Returns the imported commit and component " + "count, or the recorded error when the model was rejected (the previous model stays up). " + "The source itself is configured by a human in Settings; 404 SOURCE_NOT_FOUND without one.",

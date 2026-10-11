@@ -11,7 +11,8 @@ as `CORE`, and its issues are numbered under it: `CORE-1`, `CORE-2`.
 ## Projects
 
 The sidebar lists every project with its count of open asks. You create a project in
-**Settings → Projects** with a key and a name.
+**Settings → Projects** with a key and a name, and an agent creates one with `dispatch project`.
+A key that is already taken is refused, whoever asks.
 
 A project page has up to three tabs:
 

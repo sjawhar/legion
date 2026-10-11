@@ -154,6 +154,8 @@ Labels are optional: Dispatch trims them, preserves their case, and removes case
 the new key; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch issue` only to create an issue; never use it to park a question. When you pass a spec,
 follow [Writing a spec](#writing-a-spec).
 
+When the work needs a project that does not exist yet, create it yourself with `dispatch project --key <KEY> --name '<name>'`; nobody has to make it by hand. A key that already exists is refused with `PROJECT_EXISTS`, and no command renames or deletes a project, so pick the key with care.
+
 ## Search first
 
 `skill://dispatch-first`, which every session with Dispatch carries, says how to search before
