@@ -22,7 +22,8 @@ const workerShimUsage = "legion worker-shim --connect <unix:///path|tcp://host:p
 // the Sandbox runtime passes and a tmux pane never does, OMP starts on the pod's baseline
 // (podsafety.Apply: the turn-scoping overlay written to LEGION_STATE_DIR and named first in
 // PI_CONFIG_FILES, under the operator's, and the two variables that place a pod's sessions where
-// the pod leaves them unset; nothing of a repository's settings held off). With --warm-codegraph,
+// the pod leaves them unset; nothing of a repository's settings held off) with Oh My Pi's profile
+// directory made under the role's XDG_STATE_HOME (podsafety.EnsureStateHome). With --warm-codegraph,
 // which the Sandbox runtime passes for a role in an issue pod — never for a tmux pane, whose
 // workspace the daemon warms itself (internal/daemon/outbox.go), nor for the controller, which has
 // no workspace — the shim builds the CodeGraph index of the workspace LEGION_WORKSPACE names in the
@@ -69,13 +70,24 @@ func runWorkerShim(ctx context.Context, args []string, stdout, stderr io.Writer)
 
 // podSafeEnvironment is environ on the pod's baseline: the turn-scoping overlay written to the
 // pod's state directory, which the runtime names as LEGION_STATE_DIR, and named first in
-// PI_CONFIG_FILES, and PI_CONFIG_DIR and OMP_SESSION_STORAGE set where environ leaves them unset.
+// PI_CONFIG_FILES, and PI_CONFIG_DIR and OMP_SESSION_STORAGE set where environ leaves them unset;
+// then Oh My Pi's profile directory made under the XDG_STATE_HOME the runtime hands this role,
+// without which Oh My Pi would not read the variable and its browser broker's lock would be the
+// name every role of the pod takes. A directory that cannot be made is a refusal to start, naming
+// it, as a providers key that cannot be read is.
 func podSafeEnvironment(environ []string) ([]string, error) {
 	state := os.Getenv("LEGION_STATE_DIR")
 	if state == "" {
 		return nil, errors.New("--pod-safety needs LEGION_STATE_DIR, the pod's state directory, to write the baseline overlay to")
 	}
-	return podsafety.Apply(environ, state)
+	environ, err := podsafety.Apply(environ, state)
+	if err != nil {
+		return nil, err
+	}
+	if err := podsafety.EnsureStateHome(environ); err != nil {
+		return nil, err
+	}
+	return environ, nil
 }
 
 // workerShimFlags are the command's flag values, as parsed, apart from --pod-safety, which

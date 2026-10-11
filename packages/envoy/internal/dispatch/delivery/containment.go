@@ -27,8 +27,10 @@ type Apply struct {
 // job, or whose matching job did not succeed, is not an apply. A run that *concluded successfully*
 // overall but matched no job by that name is logged loudly (a misconfigured or renamed
 // production_job_name silently produces zero deploys forever otherwise -- the Python prototype's
-// own `successful_applies` raises for exactly this case, naming every job it actually saw).
-// Sorted by CompletedAt ascending.
+// own `successful_applies` raises for exactly this case, naming every job it actually saw). Both
+// callers pass deploy runs on main alone (ListRuns and ListRunsStartedIn with branch "main"), so a
+// dev-only run, which skips its production job, never reaches the warning. Sorted by CompletedAt
+// ascending.
 func ProductionApplies(runs []DeliveryRun, jobsByRun map[int64][]DeliveryRunJob, productionJobName string) []Apply {
 	var applies []Apply
 	for _, run := range runs {

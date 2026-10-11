@@ -19,6 +19,7 @@ import (
 
 	authnv1 "k8s.io/api/authentication/v1"
 	authzv1 "k8s.io/api/authorization/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -262,7 +263,11 @@ func (r *liveRig) checkBootRefusal() error {
 // image-probe: the probe Sandbox, carrying the operator's pod, passes on the stage image, confirms
 // the daemon API contract, resolved the model of every task agent the prompts dispatch, and checked
 // the capability list, every image-site capability present; the report carries the model-fallback
-// mark the pod read.
+// mark the pod read. Its pod is read while the probe runs: the one container carries the
+// controller's reservation as both request and limit (imageProbe), so the probe pod is Guaranteed
+// as every Legion pod is, and it asks nothing of its placement. The negative control is the same
+// pod with its container's cpu limit raised past its request, which the reservation rule refuses
+// naming the container.
 func (r *liveRig) checkImageProbe() error {
 	if err := r.startRuntimeOnce(); err != nil {
 		return err
@@ -273,10 +278,31 @@ func (r *liveRig) checkImageProbe() error {
 		return err
 	}
 	p := r.imageProbe()
+	// The probe pod lives from the controller's create until ProbeImage deletes the Sandbox, so a
+	// poll started before the probe sees it in whatever phase it is in; its spec and qosClass are
+	// set at creation.
+	watching, stopWatching := context.WithCancel(r.ctx)
+	defer stopWatching()
+	probePod := make(chan *corev1.Pod, 1)
+	go func() {
+		defer close(probePod)
+		for {
+			if pod, err := r.getPod(name); err == nil {
+				probePod <- pod
+				return
+			}
+			select {
+			case <-watching.Done():
+				return
+			case <-time.After(time.Second):
+			}
+		}
+	}()
 	report, err := r.rt.ProbeImage(r.ctx, p)
 	if err != nil {
 		return err
 	}
+	stopWatching()
 	passed, ok := r.logs.find("sandbox runtime: the worker image passed its probe")
 	if !ok {
 		return errors.New("ProbeImage returned nil without logging a pass")
@@ -299,6 +325,25 @@ func (r *liveRig) checkImageProbe() error {
 		return fmt.Errorf("the probe reports model-fallback=%q, want on or off: %s", report.ModelFallback, passed["log"])
 	}
 	note("runtime", "model-fallback=%s reported: the image's retry.modelFallback under the operator's pod", report.ModelFallback)
+	pod, ok := <-probePod
+	if !ok || pod == nil {
+		return fmt.Errorf("the probe pod %s was never read while the probe ran, so its reservation and QoS are unproven", name)
+	}
+	if err := guaranteedPod(pod, map[string]corev1.ResourceRequirements{probeContainer: p.Resources}, nil); err != nil {
+		return fmt.Errorf("probe pod %s (phase %s): %w", name, pod.Status.Phase, err)
+	}
+	container := pod.Spec.Containers[0]
+	note("operator", "probe pod %s read in phase %s: container %s cpu %s, memory %s, request = limit, the probe's own reservation, ephemeral-storage %s under a limit of %s; qosClass %s; no affinity",
+		name, pod.Status.Phase, container.Name, container.Resources.Limits.Cpu().String(), container.Resources.Limits.Memory().String(), container.Resources.Requests.StorageEphemeral().String(), container.Resources.Limits.StorageEphemeral().String(), pod.Status.QOSClass)
+	bursting := pod.DeepCopy()
+	doubled := bursting.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+	doubled.Add(doubled)
+	bursting.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU] = doubled
+	err = guaranteedPod(bursting, map[string]corev1.ResourceRequirements{probeContainer: p.Resources}, nil)
+	if err == nil || !strings.Contains(err.Error(), "container "+probeContainer) {
+		return fmt.Errorf("negative control: the reservation rule accepted the probe pod with its cpu limit raised to %s, or did not name the container: %v", doubled.String(), err)
+	}
+	note("runtime", "negative control: the same pod with its container's cpu limit raised to %s is refused: %v", doubled.String(), err)
 	if err := r.poll(liveGoneLimit, "probe Sandbox "+name+" to be deleted", func() (bool, error) {
 		_, err := r.getSandbox(name)
 		return apierrors.IsNotFound(err), ignoreNotFound(err)
@@ -413,13 +458,17 @@ func (r *liveRig) checkImageProbeCapabilityRefusal() error {
 	return nil
 }
 
-// imageProbe is the probe as the daemon asks for it: its contract, and the references of the role
-// prompts it hands every pod (prompts.RoleReferences). The probe command it sends, with
+// imageProbe is the probe as the daemon asks for it: its contract, the references of the role
+// prompts it hands every pod (prompts.RoleReferences), and the probe's own fixed reservation
+// (internal/daemon/kubernetes.go imageProbe, probeReservation) — 250m and 1Gi, not a role's share,
+// so a probe pod fits a pool with little room — with cpu and memory the request and the limit
+// alike, so the probe pod is Guaranteed as every Legion pod is. The probe command it sends, with
 // --role-references and, the run having a provider key, --provider-env-dir, is noted.
 func (r *liveRig) imageProbe() ImageProbe {
 	p := ImageProbe{
 		Contract: api.DaemonAPIVersion, Budget: 10 * time.Minute, RoleReferences: prompts.RoleReferences(),
-		Retry: bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
+		Retry:     bootprobe.Retry{Initial: 15 * time.Second, Max: time.Minute, Attempts: 3},
+		Resources: probeReservation(),
 	}
 	command := r.rt.probeManifest("probe", p, time.Now()).Spec.PodTemplate.Spec.Containers[0].Command
 	note("runtime", "the probe command: %s", strings.Join(command, " "))

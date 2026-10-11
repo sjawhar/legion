@@ -11,17 +11,18 @@
 #
 # Three roots are set todo under admission_cap 2. Tree 1 runs the whole workflow with real agents to
 # `done`, through one changes-requested review round whose thread the reviewer opens, lingers, and
-# closes. Tree 2 runs through its planner beside tree 1's implementer, on its own
-# node, carrying the repository-configuration fixture, and is then moved to backlog. Tree 3 is
-# admitted when tree 2 leaves the line, supplies the held phase the controller checkpoint needs, and
-# is taken out from an operator shell. Tree 4 is admitted once tree 3 has left, supplies a planner
-# killed mid-turn and an implementer killed until it is held, and is taken out the same way. Between
-# the operator's controller and tree 4, the daemon runs under `controller: daemon` and back
-# (daemon-controller-liveness). Each
-# checkpoint prints `== <name>`, what it observed with the source revision, the image digest and the
-# two plugins' versions recorded once in `run.json`, and `CHECK <name>: PASS`. The first that fails ends the
-# run non-zero with `CHECK <name>: FAIL`, naming it; a checkpoint that cannot run prints
-# `CHECK <name>: BLOCKED`, naming the command that failed and the record it checked.
+# closes; while its planner holds, the driver files two children under it, each in an issue pod and
+# on a volume of its own, then closes one as done and parks the other in backlog. Tree 2 runs
+# through its planner beside tree 1, carrying the repository-configuration fixture, and is then moved
+# to backlog. Tree 3 is admitted when tree 2 leaves the line, supplies the held phase the controller
+# checkpoint needs, and is taken out from an operator shell. Tree 4 is admitted once tree 3 has left,
+# supplies a planner killed mid-turn and an implementer killed until it is held, and is taken out the
+# same way. Between the operator's controller and tree 4, the daemon runs under `controller: daemon`
+# and back (daemon-controller-liveness). Each checkpoint prints `== <name>`, what it observed with
+# the source revision, the image digest and the two plugins' versions recorded once in `run.json`,
+# and `CHECK <name>: PASS`. The first that fails ends the run non-zero with `CHECK <name>: FAIL`,
+# naming it; a checkpoint that cannot run prints `CHECK <name>: BLOCKED`, naming the command that
+# failed and the record it checked.
 #
 # The proof human's GitHub writes (the merge, the teardown's closes and branch deletes, and the
 # fixture push) are the devbox gh's and its git credential helper's, acting as the sjawhar-agent
@@ -140,8 +141,63 @@ bind=0.0.0.0
 port_daemon=13372
 port_worker_stream=13373
 stream=ENVOY_NOTIFICATIONS
-# Trees the run's daemon runs at once, each on a node of its own (pool_tree_room).
+# Roots the run's daemon runs at once. Trees 3 and 4 each take the slot the tree before them leaves,
+# so the run's roots never exceed the cap.
 admission_cap=2
+# Tree 1's children, filed while its planner holds (issue-independence): each runs in an issue pod
+# of its own under tree 1's architect, outside the cap, which counts roots.
+tree1_children=2
+# The pods the run needs placed at once: the cap's roots (tree 1 and tree 2) and tree 1's children,
+# every one an issue pod. The run launches no controller pod: its controller starts from the
+# operator shell (controller). preflight refuses, BLOCKED, a pool with room for fewer.
+run_pods_at_once=$((admission_cap + tree1_children))
+# The run's reservations: the cpu and memory every container of a role carries as both its request
+# and its limit, and the ephemeral storage it carries as a limit over a smaller request
+# (runtime.kubernetes.resources, write_legion_config), which preflight sizes the pool's room by (cpu
+# and memory) and pod-shape holds every container of every pod to. The defaults are the daemon's,
+# config.DefaultResources() in packages/daemon/internal/config/kubernetes.go, written once here as
+# data. The overrides are this run's, chosen so that an issue pod carries a reservation from each
+# path the loader has — the tester's cpu, memory and ephemeral-storage limit overridden, the
+# reviewer's cpu and memory, the merger's cpu alone with its memory the default, and the architect's,
+# planner's and implementer's the defaults, every ephemeral-storage request the default 1Gi — while
+# the pod's sum (2.95 CPU, 16 GiB) stays within the defaults' 3 CPU and 19 GiB. The controller's
+# default is data for the checks alone: the file names the controller only while controller_cpu is
+# set (daemon-controller-liveness, under `controller: daemon`), and the image probe pod carries its
+# own fixed 250m / 1Gi (internal/daemon/kubernetes.go probeReservation), never the controller's —
+# so that checkpoint's restart with the controller at 100000 CPU still places its probe pod.
+declare -A default_cpu=([architect]=250m [planner]=250m [implementer]=750m [tester]=750m [reviewer]=750m [merger]=250m [controller]=1)
+declare -A default_memory=([architect]=1Gi [planner]=1Gi [implementer]=6Gi [tester]=6Gi [reviewer]=4Gi [merger]=1Gi [controller]=4Gi)
+declare -A default_ephemeral_storage=([architect]=10Gi [planner]=10Gi [implementer]=20Gi [tester]=20Gi [reviewer]=10Gi [merger]=10Gi [controller]=10Gi)
+declare -A default_ephemeral_storage_request=([architect]=1Gi [planner]=1Gi [implementer]=1Gi [tester]=1Gi [reviewer]=1Gi [merger]=1Gi [controller]=1Gi)
+declare -A override_cpu=([tester]=1 [reviewer]=500m [merger]=200m)
+declare -A override_memory=([tester]=5Gi [reviewer]=2Gi)
+declare -A override_ephemeral_storage=([tester]=30Gi)
+declare -A override_ephemeral_storage_request=()
+run_roles="architect planner implementer tester reviewer merger controller"
+# expected_cpu ROLE, expected_memory ROLE, expected_ephemeral_storage ROLE and
+# expected_ephemeral_storage_request ROLE are ROLE's reservation: the override where the run sets
+# one, the default otherwise, as resolveKubernetes settles the file's block field by field.
+expected_cpu() { printf '%s' "${override_cpu[$1]:-${default_cpu[$1]}}"; }
+expected_memory() { printf '%s' "${override_memory[$1]:-${default_memory[$1]}}"; }
+expected_ephemeral_storage() { printf '%s' "${override_ephemeral_storage[$1]:-${default_ephemeral_storage[$1]}}"; }
+expected_ephemeral_storage_request() { printf '%s' "${override_ephemeral_storage_request[$1]:-${default_ephemeral_storage_request[$1]}}"; }
+# run_resources is every role's expected reservation as JSON, {role: {cpu, memory, ephemeral_storage,
+# ephemeral_storage_request}}: the shape the jq rules take (lib/stage4b-pods.jq reservation_problems;
+# lib/stage4b-room.jq, which reads cpu and memory).
+run_resources='{'
+for role in $run_roles; do
+  run_resources+="\"$role\":{\"cpu\":\"$(expected_cpu "$role")\",\"memory\":\"$(expected_memory "$role")\",\"ephemeral_storage\":\"$(expected_ephemeral_storage "$role")\",\"ephemeral_storage_request\":\"$(expected_ephemeral_storage_request "$role")\"},"
+done
+run_resources="${run_resources%,}}"
+unset role
+# The daemon's log texts the children's and tree 1's volumes are judged by: the release a child's
+# close as done logs (internal/runtime/sandbox/issue_suspend.go); the lost volume a resume finds
+# (internal/supervise/machine.go), which child-release requires absent and re-admission exactly
+# once; and the prefix of the runtime's detail for the process that death ends
+# (internal/runtime/sandbox/observe.go), which pod_watch_verdict exempts.
+released_msg="sandbox runtime: released the closed issue's Sandbox and the volume it owned"
+lost_msg="supervise: the issue's volume was lost with the session; relaunching a fresh session"
+lost_detail="the issue's volume was lost: "
 # How long a planner the driver has told to plan gets to finish: before its handoff it runs its two
 # model-backed plan checks, the gap analyst and up to three plan-review rounds (each a subagent
 # call), so planning takes a whole loop of its own (wait_for_phase).
@@ -181,9 +237,16 @@ host=
 service_hosts=()
 pin=
 tree1=
+child1=
+child2=
 tree2=
 tree3=
 tree4=
+# How preflight read the legion NodePool's instance bounds against two of the run's pods
+# (lib/stage4b-room.jq two_pods_per_instance): issue-independence asserts two or more nodes only
+# when no allowed instance can hold two.
+two_pods_fit=
+two_pods_reason=
 pr_number=
 smoke_file=
 prod_baseline=
@@ -248,41 +311,38 @@ blocked() {
 
 rk() { timeout --foreground 300 kubectl --kubeconfig "$runtime_kubeconfig" --context "$runtime_context" "$@"; }
 
-# ---- capacity: one tree per node, across every project in the namespace -------------------------
-# Every tree pod refuses a node that holds another tree's pod in its own namespace, whatever that
-# tree's project (manifest.go affinity, docs/kubernetes.md "Tree sizing"): the anti-affinity term has
-# no namespaceSelector. Every daemon on the legion pool runs its trees in namespace legion, and the
-# legion NodePool's limits bound its nodes. A tree therefore needs a ready pool node no live tree
-# pod of the namespace is on, or room under the limits for one more node of the floor's size.
+# ---- capacity: the pool's room for the run's pods ------------------------------------------------
+# No pod asks for or keeps off another pod's node (LEGION-632: every issue pod owns its volume and
+# shares nothing with another pod), so the scheduler bin-packs the run's pods where the legion pool
+# has room, and Karpenter adds nodes under the pool's limits. Every container reserves cpu and memory
+# (run_resources), so the room is counted in pods of the run's largest reservation, an issue pod's
+# six-role sum, against what the pool's Ready nodes have free and what its limits leave.
 
-# pool_tree_room prints the trees the legion pool can place now, as JSON: its pool nodes that are
-# Ready, schedulable, not tainted karpenter.sh/disrupted and not being deleted, with no non-terminal
-# tree pod of the namespace on them; and the nodes of the floor's size (instance-cpu and
-# instance-memory Gt) that its cpu and memory limits leave room for beside what it already runs.
-# The reads go through files in the run's work directory: a namespace's pods and events can exceed
-# the argument list a --argjson would put them in.
-pool_tree_room() {
+# pool_pod_room prints, as JSON, how many of the run's pods the legion pool can place now
+# (lib/stage4b-room.jq pool_room): the pod's reservation (cores, bytes); each pool node that is
+# Ready, schedulable, not tainted karpenter.sh/disrupted and not being deleted, with what its
+# allocatable has free beside every non-terminal pod's effective request there, of every namespace,
+# and how many of the run's pods fit in it; the pods the pool's cpu and memory limits leave room for
+# beside what it already runs; and their sum, null when the pool has no limits to bound it. The
+# reads go through files in the run's work directory: a cluster's pods can exceed the argument list
+# a --argjson would put them in.
+pool_pod_room() {
   kubectl --context "$operator" --request-timeout=30s get nodepool legion -o json >"$work/room-pool.json" || return 1
   kubectl --context "$operator" --request-timeout=30s get nodes -l karpenter.sh/nodepool=legion -o json >"$work/room-nodes.json" || return 1
-  kubectl --context "$operator" -n "$namespace" --request-timeout=30s get pods -l legion.dev/tree -o json >"$work/room-pods.json" || return 1
-  jq -cn --slurpfile pool "$work/room-pool.json" --slurpfile nodes "$work/room-nodes.json" --slurpfile pods "$work/room-pods.json" '
-    $pool[0] as $pool | $nodes[0] as $nodes | $pods[0] as $pods
-    | def qty: tostring | capture("^(?<n>[0-9.]+)(?<u>[a-zA-Z]*)$")
-      | (.n | tonumber) * {"": 1, m: 0.001, k: 1e3, M: 1e6, G: 1e9, T: 1e12, Ki: 1024, Mi: 1048576, Gi: 1073741824, Ti: 1099511627776}[.u];
-    def gt($key): [$pool.spec.template.spec.requirements[] | select(.key == $key and .operator == "Gt") | .values[0] | tonumber] | max // 0;
-    ($pool.spec.limits // {}) as $limit | ($pool.status.resources // {}) as $used
-    | [ if $limit.cpu then ((($limit.cpu | qty) - (($used.cpu // 0) | qty)) / (gt("karpenter.k8s.aws/instance-cpu") + 1) | floor) else empty end,
-        if $limit.memory then ((($limit.memory | qty) - (($used.memory // 0) | qty)) / ((gt("karpenter.k8s.aws/instance-memory") + 1) * 1048576) | floor) else empty end
-      ] as $by_limit
-    | ([$pods.items[] | select(.status.phase != "Succeeded" and .status.phase != "Failed") | .spec.nodeName // empty] | unique) as $held
-    | [$nodes.items[]
-        | select((.spec.unschedulable // false) | not)
-        | select(.metadata.deletionTimestamp == null)
-        | select(any(.spec.taints[]?; .key == "karpenter.sh/disrupted") | not)
-        | select(any(.status.conditions[]?; .type == "Ready" and .status == "True"))
-        | .metadata.name | . as $n | select($held | index($n) | not)] as $free
-    | {free_nodes: $free, new_nodes: (if ($by_limit | length) == 0 then null else ([$by_limit | min, 0] | max) end), tree_nodes: $held}
-    | .room = (if .new_nodes == null then null else (.free_nodes | length) + .new_nodes end)'
+  kubectl --context "$operator" --request-timeout=60s get pods -A -o json >"$work/room-pods.json" || return 1
+  jq -cn -L "$root/scripts/e2e/lib" --slurpfile pool "$work/room-pool.json" --slurpfile nodes "$work/room-nodes.json" \
+    --slurpfile pods "$work/room-pods.json" --argjson expected "$run_resources" '
+    include "stage4b-room";
+    pool_room($pool[0]; $nodes[0]; $pods[0]; issue_pod_reservation($expected))'
+}
+# pool_two_pods_per_instance prints, as JSON, whether an instance type the legion NodePool allows
+# can hold two of the run's pods, from the pool's instance-cpu and instance-memory requirements
+# alone (lib/stage4b-room.jq two_pods_per_instance): {fit: true|false|null, reason}, null when the
+# requirements bound no maximum. It reads the NodePool pool_pod_room fetched.
+pool_two_pods_per_instance() {
+  jq -c -L "$root/scripts/e2e/lib" --argjson expected "$run_resources" '
+    include "stage4b-room";
+    two_pods_per_instance(issue_pod_reservation($expected))' "$work/room-pool.json"
 }
 
 # limit_pending SELECTOR prints each pod of the run matching SELECTOR (label pairs added to the
@@ -345,6 +405,11 @@ on_tree() {
   local tree=$1
   shift
   on_subject "legion.dev/tree=$tree" "$@"
+}
+on_issue() {
+  local issue=$1
+  shift
+  on_subject "legion.dev/issue=$issue" "$@"
 }
 
 # limit_pending_blocked is the run's timeout_hook (lib/rig.sh until_true). A wait that timed out
@@ -545,13 +610,27 @@ set_back_by_daemon() {
       and ([.[] | select(.seq > $write.seq and .payload.status != "backlog")] | first | .actor.id) == $daemon
   ' "$1" >/dev/null
 }
-# tree_pod TREE prints a Running pod of the tree. Each issue has one pod: the caller supplies the
-# role container it means to inspect or run in.
-tree_pod() {
-  op get pods -l "legion.dev/project=$run_label,legion.dev/tree=$1" --field-selector=status.phase=Running \
+# issue_pod ISSUE prints ISSUE's Running pod: each issue has one pod of its own, labelled with its
+# key, and the caller supplies the role container it means to inspect or run in. A tree's key is
+# its root issue's, so a read of the root never lands in a child's pod: each child runs in a pod of
+# its own.
+issue_pod() {
+  op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$1" --field-selector=status.phase=Running \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null | grep .
 }
-issue_tree() { daemon_state | jq -er --arg issue "$1" '.issues[$issue].tree // $issue'; }
+# issue_sandbox_modes ISSUE prints the operating mode of each Sandbox labelled with ISSUE, the CRD's
+# default Running for one that sets none.
+issue_sandbox_modes() {
+  op get sandboxes -l "legion.dev/project=$run_label,legion.dev/issue=$1" -o json | jq -r '.items[] | .spec.operatingMode // "Running"'
+}
+# assert_one_bound_pvc ISSUE CONTEXT fails unless ISSUE has exactly one PVC and it is Bound, and
+# leaves the row in $found, whose first field is the PVC's name. Called at top level, never in a
+# command substitution: fail must end the run, not a subshell.
+assert_one_bound_pvc() {
+  found=$(issue_pvcs "$1") || fail "the operator could not read $1's PVCs"
+  [ "$(grep -c . <<<"$found")" = 1 ] && [ "${found#* }" = Bound ] ||
+    fail "$1's PVCs$2 are '${found:-none}', want its one, Bound"
+}
 pod_exec() {
   local pod=$1 role=$2
   shift 2
@@ -633,12 +712,13 @@ pair_dispatch() {
          | ($d.text | [scan("<task-result [^>]*agent=\"" + $agent + "\"[^>]*>[\\s\\S]*?</task-result>")])[]
          | {timestamp: $d.timestamp, via: $d.via, content: .}]}'
 }
-# pair_text prints the reviewer's session, read from the tree volume with no call to the daemon, so
-# the teardown can still read it after a signal to the run's process group has ended the daemon.
+# pair_text prints the reviewer's session, read from tree 1's root's own volume with no call to the
+# daemon, so the teardown can still read it after a signal to the run's process group has ended the
+# daemon.
 pair_text() {
   local pod
   [ -n "$pair_session" ] || return 1
-  pod=$(tree_pod "$tree1") || return 1
+  pod=$(issue_pod "$tree1") || return 1
   pod_exec "$pod" reviewer cat -- "$pair_session"
 }
 # pair_settled: the reviewer dispatched both agents and each dispatch has an outcome: a refused call,
@@ -646,7 +726,7 @@ pair_text() {
 pair_settled() {
   local text agent ids id pod
   text=$(pair_text) || return 1
-  pod=$(tree_pod "$tree1") || return 1
+  pod=$(issue_pod "$tree1") || return 1
   for agent in $pair_agents; do
     ids=$(pair_dispatch "$agent" <<<"$text" | jq -r '
       if (.calls | length) == 0 then "none"
@@ -668,7 +748,7 @@ record_pair() {
   local pod text agent
   [ -z "$pair_recorded" ] || return 0
   text=$(pair_text) || return 1
-  pod=$(tree_pod "$tree1") || return 1
+  pod=$(issue_pod "$tree1") || return 1
   mkdir -p "$evidence/review-pair"
   printf '%s\n' "$text" >"$evidence/review-pair/reviewer.jsonl"
   op exec "$pod" -c reviewer -- tar -C "$(dirname "$pair_session")" -cf - "$(basename "$pair_session" .jsonl)" 2>/dev/null |
@@ -706,7 +786,7 @@ claim_session_text() {
 workspace_jj() {
   local issue=$1 pod
   shift
-  pod=$(tree_pod "$(issue_tree "$issue")") || return 1
+  pod=$(issue_pod "$issue") || return 1
   pod_exec "$pod" architect jj -R "/legion/workspaces/$repo/${issue,,}" "$@"
 }
 # assert_claim_endpoints ISSUE ROLE: the claim's Oh My Pi names production's services and has no
@@ -846,8 +926,10 @@ runtime:
     namespace: $namespace
     image: $image
     storage_class: gp2
+    issue_volume: 20Gi
     kubeconfig: $runtime_kubeconfig
     context: $runtime_context
+$(resources_block)
     pod:
 EOF
   # The operator route's pod, its token audience the operator's and its ConfigMap reference pointed
@@ -855,18 +937,32 @@ EOF
   render_operator_pod
   sed -e 's/^/      /' -e "s/name: legion-operator-route\$/name: $route_configmap/" "$work/pod.yml" >>"$work/legion.yaml"
   grep -qF "name: $route_configmap" "$work/legion.yaml" || fail "the operator route's pod.yml mounts no ConfigMap legion-operator-route"
+  # The controller's own reservation is resources_block's (controller_cpu set): only `controller:
+  # daemon` is appended, since a second `resources:` key under runtime.kubernetes would be refused.
   if [ -n "$controller_cpu" ]; then
-    cat >>"$work/legion.yaml" <<EOF
-    resources:
-      controller:
-        requests:
-          cpu: "$controller_cpu"
-          memory: 1Gi
-        limits:
-          memory: 2Gi
-controller: daemon
-EOF
+    echo "controller: daemon" >>"$work/legion.yaml"
   fi
+}
+# resources_block prints the run's `runtime.kubernetes.resources` block: one entry per role the run
+# overrides (override_cpu, override_memory, override_ephemeral_storage,
+# override_ephemeral_storage_request), with only the fields it sets, so the daemon fills the rest
+# from config.DefaultResources() and the file exercises both paths; and, while controller_cpu is set
+# (daemon-controller-liveness, under `controller: daemon`), the controller's entry with that cpu as
+# both request and limit — the reservation's one shape — and 1Gi of memory. The data is the
+# reservations' (run_resources), so the file and the checks cannot drift apart.
+resources_block() {
+  local role fields
+  echo "    resources:"
+  for role in $run_roles; do
+    [ -n "${override_cpu[$role]:-}${override_memory[$role]:-}${override_ephemeral_storage[$role]:-}${override_ephemeral_storage_request[$role]:-}" ] || continue
+    fields=
+    [ -z "${override_cpu[$role]:-}" ] || fields="cpu: ${override_cpu[$role]}"
+    [ -z "${override_memory[$role]:-}" ] || fields="${fields:+$fields, }memory: ${override_memory[$role]}"
+    [ -z "${override_ephemeral_storage[$role]:-}" ] || fields="${fields:+$fields, }ephemeral_storage: ${override_ephemeral_storage[$role]}"
+    [ -z "${override_ephemeral_storage_request[$role]:-}" ] || fields="${fields:+$fields, }ephemeral_storage_request: ${override_ephemeral_storage_request[$role]}"
+    echo "      $role: { $fields }"
+  done
+  [ -z "$controller_cpu" ] || echo "      controller: { cpu: \"$controller_cpu\", memory: 1Gi }"
 }
 # render_operator_pod writes the run's copy of the operator route's pod.yml, the gateway's audience
 # in place of its placeholder.
@@ -1168,9 +1264,9 @@ hold_end_charged() {
 # other form is named and accounts for nothing, so the verdict never judges against a record it
 # cannot read.
 # A pod the daemon suspended, released or closed ends without either, so it needs no match. The
-# resume that finds the tree volume lost dies by design (the runtime's detail begins "the tree volume
-# was lost: "), and
-# re-admission counts those itself. A pod the scheduler never placed is no unexplained death either:
+# resume that finds the issue's volume lost dies by design (the runtime's detail begins "the issue's
+# volume was lost: ", internal/runtime/sandbox/observe.go), and re-admission counts those itself. A
+# pod the scheduler never placed is no unexplained death either:
 # the daemon retires a pod still unscheduled at its boot deadline and relaunches the claim, so a
 # death whose pod the watch saw `PodScheduled=False Unschedulable` and never `PodScheduled=True` (nor
 # on a node) is accounted for (never_scheduled_deaths); a pod that was scheduled and then died is
@@ -1178,7 +1274,7 @@ hold_end_charged() {
 # must have been seen OOMKilled.
 pod_watch_verdict() {
   local watch=$1 actions=$2 log=$3
-  jq -s -r --rawfile actions "$actions" --rawfile log "$log" --arg unscheduled "$(never_scheduled_deaths "$watch" "$log")" '
+  jq -s -r --rawfile actions "$actions" --rawfile log "$log" --arg unscheduled "$(never_scheduled_deaths "$watch" "$log")" --arg lost "$lost_detail" '
     def readable: (.[0] == "kill-container" and length == 4) or ((.[0] == "delete-pod" or .[0] == "close") and length == 3);
     ($actions | split("\n") | map(select(. != "") | split(" "))) as $lines
     | [ $lines[] | select(readable | not)
@@ -1197,7 +1293,7 @@ pod_watch_verdict() {
         | select($podReason == "Evicted" or any($terms[]; .reason == "OOMKilled"))
         | "\($p.metadata.name) uid \($p.metadata.uid): \($podReason) \([$terms[] | "\(.reason) exit \(.exitCode)"] | join(", "))" ]
       + $unreadable
-      + [ $died[] | select((.detail // "") | startswith("the tree volume was lost: ") | not)
+      + [ $died[] | select((.detail // "") | startswith($lost) | not)
           | .incarnation as $i | ($i | split("/")[0]) as $pod | ((.claim // "") | split("-") | last) as $role
           | select(any($driver[]; .uid == $pod and (.kind != "kill-container" or .role == $role)) | not)
           | select(($retired | index($i)) == null)
@@ -1354,16 +1450,21 @@ hog_oomkilled() {
 # check_pod_shape SPEC prints each way the pod object SPEC departs from the shared issue-pod shape,
 # or nothing, with its Secrets' values as they are now: gVisor; the operator's ServiceAccount and one
 # projected token; all six fixed role launchers with the route ConfigMap where their profiles read
-# it; the pool; restricted security; every role launcher dialing the worker stream the daemon served
-# when the pod was created, at advertise_host; no Secret value in a container's environment, command
-# or args; and split provisioning (only workspace-fetch reaches the provisioning credential).
+# it; the pool; restricted security; every container, the init containers included, reserving cpu
+# and memory as both request and limit and ephemeral-storage as a request under its limit, a role
+# container its role's reservation under the run's overrides and defaults (run_resources) and an
+# init container the launching role's, so the pod is Guaranteed and bounded on the node's disk, and
+# no affinity (lib/stage4b-pods.jq reservation_problems); every role launcher
+# dialing the worker stream the daemon served when the pod was created, at advertise_host; no
+# Secret value in a container's environment, command or args; and split provisioning (only
+# workspace-fetch reaches the provisioning credential).
 # shape_problems prints each way the pod object on stdin departs from that shape, or nothing. It
 # judges the object alone, so a pod the watch recorded is judged after it is gone, and it reads the
 # streams the run's daemons served from record_stream's record each time, so the shape watcher,
 # forked before a restart that moves the stream, holds each pod to the stream of its own creation as
 # the main shell does.
 shape_problems() {
-  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --slurpfile streams "$evidence/worker-streams.jsonl" '
+  jq -r -L "$root/scripts/e2e/lib" --arg route "$route_configmap" --arg audience "$gateway_audience" --slurpfile streams "$evidence/worker-streams.jsonl" --argjson expected "$run_resources" '
     include "stage4b-pods";
     ["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
     | def role_containers: [.containers[] | select(.name as $name | $roles | index($name))];
@@ -1417,7 +1518,11 @@ shape_problems() {
         | "container \($c.name) mounts \(.name) under /var/run/legion/gh"),
       (if $s.shareProcessNamespace == true then "shareProcessNamespace is set" else empty end),
       ([$s.initContainers[]? | select(.name == "workspace-init")] | .[] | (.command | index("--credential-helper")) as $i
-        | if $i == null or .command[$i + 1] != "!gh auth git-credential" then "the --credential-helper of workspace-init is \(if $i == null then "absent" else .command[$i + 1] end), not !gh auth git-credential" else empty end)
+        | if $i == null or .command[$i + 1] != "!gh auth git-credential" then "the --credential-helper of workspace-init is \(if $i == null then "absent" else .command[$i + 1] end), not !gh auth git-credential" else empty end),
+      # Every container reserves the cpu and memory of its role, request and limit alike, and its
+      # ephemeral-storage bound, request under limit; the pod is Guaranteed and asks nothing of its
+      # placement.
+      reservation_problems($expected)
   '
 }
 # check_pod_shape SPEC prints the pod's shape problems, then whether any Secret value of the pod's
@@ -1698,13 +1803,16 @@ remove_run_branches() {
   return 0
 }
 # collect_transcripts copies every Oh My Pi session the run held into $evidence/transcripts: each
-# tree pod's, from its tree volume, and the operator's controller's, which lives in the run's own
+# issue pod's, from the issue's own volume (the roots' and tree 1's children's, a child's planner
+# container the one that ran there), and the operator's controller's, which lives in the run's own
 # profile on this machine and goes with that profile at teardown (transcripts/controller).
 collect_transcripts() {
-  local pod
-  for tree in $tree1 $tree2 $tree3 $tree4; do
-    pod=$(tree_pod "$tree") || continue
-    op exec "$pod" -c architect -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
+  local issue role pod
+  for issue in $tree1 $tree2 $tree3 $tree4 $child1 $child2; do
+    pod=$(issue_pod "$issue") || continue
+    role=architect
+    case $issue in "$child1" | "$child2") role=planner ;; esac
+    op exec "$pod" -c "$role" -- tar -C /home/legion/.omp/profiles/legion/agent/sessions -cf - . 2>/dev/null |
       tar -C "$evidence/transcripts" -xf - 2>/dev/null || true
   done
   if [ -d "$profile_agent/sessions" ]; then
@@ -2015,6 +2123,11 @@ esac
 gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
 require_proof_human
+# The devbox's `gh` on PATH is a dotfiles wrapper acting as the proof human; it refuses an inherited
+# GH_TOKEN rather than passing it on, so a check that must present a raw token (the expired and the
+# refreshed lease at github-credential-refresh) runs the real gh, mise's, as stage 3 does. Every
+# other gh call of the proof is the proof human's and stays the wrapper's.
+real_gh=$(mise which gh) || fail "mise has no gh (the raw-token checks run it past the devbox's gh wrapper)"
 mkdir -p "$(dirname "$lock")"
 exec 9>"$lock"
 flock -n 9 || fail "another Stage 4b run holds $lock: one run at a time"
@@ -2076,12 +2189,20 @@ floor=$(kubectl --context "$operator" get nodepool legion -o json |
   jq -c '[.spec.template.spec.requirements[] | select(.key == "karpenter.k8s.aws/instance-cpu")]')
 jq -e 'any(.[]; .operator == "Gt" and (.values | index("3")))' <<<"$floor" >/dev/null || fail "the legion NodePool has no instance-cpu Gt 3 floor: $floor"
 note "[operator] CRD sandboxes.agents.x-k8s.io installed; NodePool legion floor $floor"
-# The run needs admission_cap trees placed at once, each on a node of its own; trees of any other
-# project already on the pool's nodes count against it.
-room=$(pool_tree_room) || blocked "the operator context could not read the legion NodePool, its nodes or the tree pods"
-note "[operator] legion pool room for trees: $room"
-jq -e --argjson need "$admission_cap" '.room == null or .room >= $need' <<<"$room" >/dev/null ||
-  blocked "capacity: the legion pool can place $(jq -r .room <<<"$room") more trees (free nodes $(jq -c .free_nodes <<<"$room"), new nodes under its limits $(jq -r .new_nodes <<<"$room")), and the run needs $admission_cap at once"
+# The run needs run_pods_at_once pods placed at once (tree 1's root and its two children beside tree
+# 2's root), each reserving an issue pod's six-role sum; whatever already runs on the pool's nodes,
+# of any namespace, counts against it, as does what the pool's limits already hold.
+room=$(pool_pod_room) || blocked "the operator context could not read the legion NodePool, its nodes or the cluster's pods"
+pod_reservation=$(jq -r '"\(.pod.cpu) CPU, \(.pod.memory / 1073741824) GiB"' <<<"$room")
+note "[operator] legion pool room for the run's pods ($pod_reservation each, an issue pod under this run's reservations): $(jq -c '{room, new_pods, free_nodes: [.free_nodes[] | {node, fits, free: {cpu: .free.cpu, memoryGiB: (.free.memory / 1073741824 * 100 | floor / 100)}}]}' <<<"$room")"
+jq -e --argjson need "$run_pods_at_once" '.room == null or .room >= $need' <<<"$room" >/dev/null ||
+  blocked "capacity: the legion pool can place $(jq -r .room <<<"$room") more pods of $pod_reservation ($(jq -r '[.free_nodes[].fits] | add // 0' <<<"$room") on its $(jq -r '.free_nodes | length' <<<"$room") Ready nodes, $(jq -r .new_pods <<<"$room") under its limits), and the run needs $run_pods_at_once at once: tree 1's root, its $tree1_children children and tree 2's root"
+# Whether two of the run's pods can share a node, read from the NodePool's instance bounds alone:
+# issue-independence asserts two or more nodes for tree 1's root and children only when they cannot.
+two_pods=$(pool_two_pods_per_instance) || fail "the legion NodePool's instance requirements could not be read against the run's pod reservation"
+two_pods_fit=$(jq -r '.fit' <<<"$two_pods")
+two_pods_reason=$(jq -r '.reason' <<<"$two_pods")
+note "[operator] NodePool legion instance bounds against two of the run's pods: $two_pods_reason"
 # The run's Dispatch bearer authenticates as an agent session, the actor Dispatch's routes and its
 # document websocket require, and the read is what says so: the same read with an invalid bearer
 # is refused 401.
@@ -2207,6 +2328,14 @@ handoffs, and do not create work outside the issue's smoke branch.
 The controller hands Legion no issue itself: this proof admits only the issues its driver sets to
 `todo`. LEGSMOKE holds earlier runs' roots, and a slot the proof frees stays for the tree the driver
 admits next.
+
+## A tree's children in this proof
+
+The driver files child issues under a root itself, in `todo`, and later closes one as `done` and
+parks another in `backlog`; each child's planner holds for the driver like every other role. A
+`child-closed` or `child-status` notice of this run needs no action from the root architect: start,
+re-run, park or close nothing for it, write nothing about it, and keep waiting for the next
+targeted message.
 EOF
 # The daily report is the one controller action that waits for no targeted message (daily-report).
 report_title="Legion daily report ($work)"
@@ -2403,9 +2532,86 @@ esac
 note "bind 127.0.0.1 beside advertise_host: $out"
 pass
 
-begin tree-separation
+begin issue-independence
+# Acceptance 1. While tree 1's planner holds for the driver, the driver files two children of tree 1
+# in Dispatch and sets them todo (new_child): no `legion` label, since the daemon enters a child of
+# a live tree itself (workflow's recordChildUnderLiveTree) and starts its planner under tree 1's
+# open gate, and that planner holds too. The root and its two children then run at once, each in an
+# issue pod of its own: three Sandboxes, three distinct Bound PVCs each selected by the issue label
+# its Sandbox's claim template put on it, no affinity on any of the three pods, and no pod able to
+# read another issue's workspace, the root's and child 1's each way. Where the three land is the
+# scheduler's: with no affinity they bin-pack where the pool has room, so two or more nodes are
+# asserted only when preflight read the NodePool's instance bounds as holding no two of the run's
+# pods (two_pods_fit); otherwise the placement is recorded and the count noted. Tree 2's planner
+# holds for the driver as before. The memory hog stays: it is the pod watch's negative control, the
+# one OOMKilled container pod-watch-verdict must have seen.
 on_tree "$tree1" wait_for_worker "$tree1" planner
 record_resident "$tree1" planner || fail "tree 1's planner has no session and pod to keep: $(claim_view "$tree1" planner)"
+child1=$(new_child "Stage 4b proof tree 1 child 1: an issue pod and volume of its own, closed done ($work)" "$tree1") ||
+  fail "Dispatch could not create tree 1's first child"
+child2=$(new_child "Stage 4b proof tree 1 child 2: an issue pod and volume of its own, parked in backlog ($work)" "$tree1") ||
+  fail "Dispatch could not create tree 1's second child"
+note "[dispatch] tree 1's children $child1 and $child2: todo under $tree1, no legion label (a child of a live tree is the daemon's to enter)"
+for child in "$child1" "$child2"; do
+  # A child's pod starts now, where the roots' started at admission: a node may have to come up
+  # and pull the image first, so this wait is a pod placement's, not a registration's.
+  on_issue "$child" until_true 900 "planner worker on $child, a child of $tree1, to register from an issue pod of its own" issue_worker_live "$child" planner
+  assert_claim_endpoints "$child" planner
+  record_resident "$child" planner || fail "$child's planner has no session and pod to keep: $(claim_view "$child" planner)"
+  # The tree an issue runs under is recorded on its claims (legion claims list, OperatorClaim.tree),
+  # not on the state view's issue entry, which carries no tree.
+  child_tree=$(claims_cli list --json | jq -r --arg issue "$child" '[.claims[] | select(.issue == $issue and .role == "planner") | .tree] | first // ""') ||
+    fail "legion claims list could not be read for $child's planner"
+  [ "$child_tree" = "$tree1" ] ||
+    fail "the daemon records $child's planner claim under tree '${child_tree:-none}', not $tree1: $(claims_cli list --json | jq -c --arg issue "$child" '[.claims[] | select(.issue == $issue) | {role, tree, state}]')"
+done
+root_pod=$(claim_sandbox "$tree1" architect) || fail "tree 1's architect has no Sandbox locator"
+child1_pod=$(claim_sandbox "$child1" planner) || fail "$child1's planner has no Sandbox locator"
+child2_pod=$(claim_sandbox "$child2" planner) || fail "$child2's planner has no Sandbox locator"
+[ "$root_pod" != "$child1_pod" ] && [ "$root_pod" != "$child2_pod" ] && [ "$child1_pod" != "$child2_pod" ] ||
+  fail "tree 1's root and children do not run in three pods: $root_pod, $child1_pod, $child2_pod"
+at=$(date -u +%FT%TZ)
+op get pods "$root_pod" "$child1_pod" "$child2_pod" -o wide >"$evidence/issue-independence-pods.txt" ||
+  fail "the operator could not read the three pods of tree 1"
+while IFS= read -r line; do note "[operator] $line"; done <"$evidence/issue-independence-pods.txt"
+for pod in "$root_pod" "$child1_pod" "$child2_pod"; do
+  spec=$(op get pod "$pod" -o json) || fail "the operator could not read pod $pod"
+  [ "$(jq -r .status.phase <<<"$spec")" = Running ] || fail "pod $pod is $(jq -r .status.phase <<<"$spec") at $at, want Running"
+  jq -e '.spec.affinity == null' <<<"$spec" >/dev/null || fail "pod $pod carries an affinity, which no Legion pod asks for: $(jq -c .spec.affinity <<<"$spec")"
+done
+note "at $at the three pods are Running, none with an affinity"
+pvcs=
+for issue in "$tree1" "$child1" "$child2"; do
+  assert_one_bound_pvc "$issue" ""
+  pvcs+="${pvcs:+ }${found%% *}"
+  note "[operator] $issue: PVC ${found%% *} Bound (by legion.dev/issue=$issue)"
+done
+[ "$(tr ' ' '\n' <<<"$pvcs" | sort -u | grep -c .)" = 3 ] || fail "the three issues' PVCs are not three: $pvcs"
+# Negative control, each way: the root's pod cannot list child 1's workspace, which exists in child
+# 1's pod, and child 1's pod cannot list the root's.
+for pair in "$root_pod architect $child1_pod planner $child1" "$child1_pod planner $root_pod architect $tree1"; do
+  read -r own own_role other other_role other_issue <<<"$pair"
+  path=/legion/workspaces/$repo/${other_issue,,}
+  pod_exec "$other" "$other_role" ls "$path" >/dev/null || fail "$other_issue's own workspace $path is not in its pod $other"
+  if out=$(pod_exec "$own" "$own_role" ls "$path" 2>&1); then
+    fail "pod $own lists $other_issue's workspace $path, another issue's: $(head -3 <<<"$out" | tr '\n' ' ')"
+  fi
+  case $out in
+    *"No such file or directory"*) ;;
+    *) fail "pod $own failed to list $path for another reason than its absence: $(tr '\n' ' ' <<<"$out" | cut -c1-300)" ;;
+  esac
+  note "[operator] exec $own -- ls $path: No such file or directory; the same path exists in $other"
+done
+nodes=$(op get pods "$root_pod" "$child1_pod" "$child2_pod" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u | grep .)
+node_count=$(grep -c . <<<"$nodes")
+case $two_pods_fit in
+  false)
+    [ "$node_count" -ge 2 ] || fail "tree 1's root and children are all on node $nodes, though $two_pods_reason"
+    note "the three pods are on $node_count nodes ($(paste -sd ',' <<<"$nodes")): two or more, as asserted because $two_pods_reason"
+    ;;
+  true) note "the three pods are on $node_count nodes ($(paste -sd ',' <<<"$nodes")); no node count is asserted: $two_pods_reason" ;;
+  *) note "the three pods are on $node_count nodes ($(paste -sd ',' <<<"$nodes")); no node count is asserted, since $two_pods_reason" ;;
+esac
 send_agent "$tree1" planner "Stage 4b proof planning operation: write the required plan handoff for the one-file smoke change, then call the legion tool's handoff_complete with a concise summary. Do not start another role."
 on_tree "$tree1" wait_for_phase "$tree1" implementing "$plan_seconds"
 on_tree "$tree1" wait_for_worker "$tree1" implementer
@@ -2419,17 +2625,12 @@ if left=$(on_tree "$tree2" left_planning "$tree2"); then
   fail "tree 2's planner did not hold for the driver's instruction: $tree2 left planning on its own ($left) before the driver sent it anything"
 fi
 assert_claim_endpoints "$tree2" planner
-node_of_tree() { op get pods -l "legion.dev/project=$run_label,legion.dev/tree=$1" -o jsonpath='{range .items[*]}{.spec.nodeName}{"\n"}{end}' | sort -u; }
-at=$(date -u +%FT%TZ)
-nodes1=$(node_of_tree "$tree1")
-nodes2=$(node_of_tree "$tree2")
-[ "$(wc -l <<<"$nodes1")" = 1 ] && [ "$(wc -l <<<"$nodes2")" = 1 ] || fail "a tree spans nodes at $at: tree 1 $nodes1, tree 2 $nodes2"
-[ "$nodes1" != "$nodes2" ] || fail "at $at tree 1 and tree 2 share node $nodes1"
-note "at $at: tree 1 ($tree1, implementer running) on $nodes1; tree 2 ($tree2, planner running) on $nodes2"
-start_memory_hog "$nodes1"
-until_true 300 "the memory hog on $nodes1 to be OOMKilled" hog_oomkilled
+note "tree 2 ($tree2)'s planner holds for the driver in pod $(claim_sandbox "$tree2" planner)"
+root_node=$(op get pod "$root_pod" -o jsonpath='{.spec.nodeName}')
+start_memory_hog "$root_node"
+until_true 300 "the memory hog on $root_node to be OOMKilled" hog_oomkilled
 op delete pod "legion-e2e4b-memory-hog-$$" --wait=false >/dev/null
-note "the memory hog on tree 1's node $nodes1 was OOMKilled by its own 64Mi limit"
+note "the memory hog on tree 1's root's node $root_node was OOMKilled by its own 64Mi limit: the pod watch's negative control (pod-watch-verdict)"
 # The architect's GitHub credential as it is now, for github-credential-refresh: the hash of its
 # hosts.yml and the token itself, read into this shell alone. The architect container is the pod's
 # longest-lived, so the hour boundary is observed on it.
@@ -2440,6 +2641,54 @@ gh_before_token=$(gh_hosts_token "$gh_pod" architect) || fail "could not read th
 gh_before_at=$(date -u +%FT%TZ)
 gh_before_uid=$(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')
 note "the architect's hosts.yml in $gh_pod hashes to ${gh_before_hash:0:12}… at $gh_before_at (its token kept in this shell for the refresh check)"
+pass
+
+begin child-release
+# Acceptance 3, both paths, while the parent keeps running. Child 1 set done by the proof human: the
+# daemon retires every claim of the child with its session dropped (issue_close) and its durable
+# close effect foreground-deletes the child's Sandbox, the volume it owns with it (SuspendIssue with
+# release, internal/runtime/sandbox/issue_suspend.go), logging the release; the root's Sandbox stays
+# Running, its PVC Bound and its pod the same, and no volume is reported lost. Child 2 set backlog:
+# its Sandbox is Suspended and its pod gone, its PVC kept Bound, the path a parked child takes until
+# its tree closes (close takes it with the tree).
+root_uid=$(op get pod "$root_pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read the root's pod $root_pod"
+lost_before=$(grep -c 'volume was lost' "$daemon_log" || true)
+released_lines() { log_lines "$released_msg" | jq -c --arg issue "$1" 'select(.issue == $issue)'; }
+# grep -c exits 1 on a count of 0, which errexit would take as a failure; `|| true` keeps the count.
+released=$(released_lines "$child1" | grep -c . || true)
+[ "$released" = 0 ] || fail "the daemon logged $child1's release before its done: $(released_lines "$child1" | head -1)"
+set_status "$child1" done
+# A gone-wait holds the read to its exit status: `[ -z "$(...)" ]` would take a failed read (an API
+# refusal, a throttle, op's timeout) for an empty answer and pass at once.
+child1_released() {
+  local out
+  out=$(op get sandboxes,pvc -l "legion.dev/project=$run_label,legion.dev/issue=$child1" -o name) && [ -z "$out" ]
+}
+until_true 600 "$child1's Sandbox and PVC to be gone after its done" child1_released
+at=$(date -u +%FT%TZ)
+root_mode=$(op get sandbox "$root_pod" -o jsonpath='{.spec.operatingMode}') || fail "the operator could not read the root's Sandbox $root_pod"
+[ -z "$root_mode" ] || [ "$root_mode" = Running ] || fail "the root's Sandbox $root_pod is $root_mode after $child1's release, want Running"
+assert_one_bound_pvc "$tree1" " after $child1's release"
+uid_now=$(op get pod "$root_pod" -o jsonpath='{.metadata.uid}') || fail "the root's pod $root_pod could not be read after $child1's release"
+[ "$uid_now" = "$root_uid" ] || fail "the root's pod $root_pod changed from uid $root_uid to $uid_now across $child1's release"
+released=$(released_lines "$child1" | grep -c . || true)
+[ "$released" = 1 ] || fail "the daemon logged \"$released_msg\" for $child1 $released times, want once"
+lost_now=$(grep -c 'volume was lost' "$daemon_log" || true)
+[ "$lost_now" = "$lost_before" ] || fail "the daemon reported a lost volume across $child1's release: $(grep 'volume was lost' "$daemon_log" | tail -3 | cut -c1-300 | tr '\n' ' ')"
+retired=$(claims_cli list --json | jq -c --arg issue "$child1" '[.claims[] | select(.issue == $issue) | {role, state, session: (.session // ""), sessionFile: (.sessionFile // "")}]')
+jq -e 'length > 0 and all(.[]; .state == "retired" and .session == "" and .sessionFile == "")' <<<"$retired" >/dev/null ||
+  fail "$child1's claims after its done are $retired, want every one retired with no session"
+note "at $at $child1 is done: its Sandbox and PVC are gone (kubectl get sandboxes,pvc -l legion.dev/issue=$child1: nothing); the daemon logged \"$released_msg\" for it once and no lost volume; its claims: $retired"
+note "the root $tree1 kept Sandbox $root_pod Running, PVC ${found%% *} Bound and pod uid $root_uid"
+set_status "$child2" backlog
+child2_parked() {
+  local mode pods
+  mode=$(op get sandbox "$child2_pod" -o jsonpath='{.spec.operatingMode}') && [ "$mode" = Suspended ] &&
+    pods=$(op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$child2" -o name) && [ -z "$pods" ]
+}
+until_true 600 "$child2's Sandbox to be Suspended and its pod gone after its backlog" child2_parked
+assert_one_bound_pvc "$child2" " after its backlog"
+note "at $(date -u +%FT%TZ) $child2 is in backlog: Sandbox $child2_pod Suspended, no pod, PVC ${found%% *} Bound (kept until the tree closes)"
 pass
 
 begin repository-configuration
@@ -2589,8 +2838,17 @@ grep -q "x-access-token" <<<"$status" || fail "gh auth status in the implementer
 for pair in implementer:legion-implementer[bot] reviewer:legion-reviewer[bot]; do
   viewer=$(pod_viewer "$gh_pod" "${pair%%:*}") || fail "gh in the ${pair%%:*} container of $gh_pod answered no viewer"
   [ "$viewer" = "${pair#*:}" ] || fail "gh in the ${pair%%:*} container of $gh_pod acts as $viewer, want ${pair#*:}"
-  listed=$(pod_exec "$gh_pod" "${pair%%:*}" sh -c "ls -A $gh_config_dir | sort | tr '\n' ' '")
-  [ "$listed" = "config.yml hosts.yml " ] || fail "the ${pair%%:*} container's $gh_config_dir holds '$listed', want config.yml and hosts.yml alone"
+  # The directory is a whole-volume Secret projection (the mount the hour-boundary refresh needs:
+  # the kubelet rewrites it in place when the Secret changes, where a subPath mount never sees an
+  # update), so beside the two gh files it always lists the kubelet's atomic-writer entries, `..data`
+  # and a `..<timestamp>` directory. The two files are required; a `..`-prefixed entry is the
+  # kubelet's; anything else is a stranger, named.
+  listed=$(pod_exec "$gh_pod" "${pair%%:*}" sh -c "ls -A $gh_config_dir") || fail "could not list the ${pair%%:*} container's $gh_config_dir"
+  for want in config.yml hosts.yml; do
+    grep -qxF -- "$want" <<<"$listed" || fail "the ${pair%%:*} container's $gh_config_dir lacks $want; it holds: $(tr '\n' ' ' <<<"$listed")"
+  done
+  strangers=$(grep -vxF -e config.yml -e hosts.yml <<<"$listed" | grep -v '^\.\.' || true)
+  [ -z "$strangers" ] || fail "the ${pair%%:*} container's $gh_config_dir holds an entry that is neither a gh file nor the kubelet's: $(tr '\n' ' ' <<<"$strangers")"
 done
 impl_hash=$(gh_hosts_hash "$gh_pod" implementer) || fail "could not hash the implementer's hosts.yml"
 rev_hash=$(gh_hosts_hash "$gh_pod" reviewer) || fail "could not hash the reviewer's hosts.yml"
@@ -2603,10 +2861,15 @@ for absent in LEGION_GH_PATH LEGION_GIT_PATH LEGION_JJ_PATH LEGION_CREDENTIAL_HE
   ! grep -q "^$absent=" <<<"$impl_env" || fail "the implementer's Oh My Pi environment still carries $(grep "^$absent=" <<<"$impl_env")"
 done
 impl_path=$(sed -n 's/^PATH=//p' <<<"$impl_env")
-case ":$impl_path:" in
-  *worker-bin*) fail "the implementer's PATH names a worker-bin shim directory: $impl_path" ;;
+# Two subjects: the prefix is read on the PATH with one colon appended (so a PATH that is the legion
+# directory alone holds too), and worker-bin on the colon-wrapped PATH, so a `worker-bin` directory
+# anywhere in it matches without a false match inside another name.
+case "$impl_path:" in
   "/opt/legion/bin:"*) ;;
   *) fail "the implementer's PATH is $impl_path, want the image's legion directory first" ;;
+esac
+case ":$impl_path:" in
+  *worker-bin*) fail "the implementer's PATH names a worker-bin shim directory: $impl_path" ;;
 esac
 op get pod "$gh_pod" -o json >"$evidence/github-credential-pod.json"
 jq -e '["architect", "planner", "implementer", "tester", "reviewer", "merger"] as $roles
@@ -2637,35 +2900,57 @@ on_tree "$tree1" until_true 600 "the implementer to report jj undo --help's firs
 # is the App whose token the pane pushes with) is read for each head: the repository's events feed
 # is lossy (a push can be missing from it while later ones are listed), so it is no oracle.
 pr_head=$(gh -R "$repo" pr view "$pr_number" --json headRefOid --jq .headRefOid)
-plan_head=$(workspace_jj "$tree1" log -r 'description(glob:"plan: record handoff*")' --no-graph -T 'commit_id ++ "\n"' | head -1)
-[ -n "$plan_head" ] || fail "no 'plan: record handoff' commit on tree 1's workspace"
+[ -n "$pr_head" ] || fail "pull request #$pr_number has no head"
+# The planner's handoff is the newest such commit on tree 1's own chain, `::$pr_head` — the ancestors
+# of the pull request's head as GitHub reads it, pushed from this very clone — never a match over the
+# whole repository: the clone sees every branch it fetched, and a sibling tree's later planner
+# handoff is the newest `plan: record handoff` there (the seventh live run read LEGSMOKE-650's for
+# LEGSMOKE-649's). One line is asked of jj (`--limit 1`, newest first in jj's order), never cut from
+# more with `head`: under pipefail a consumer that stops reading sends the kubectl-backed producer
+# SIGPIPE, and the pipeline exits 141 whenever the log holds a second match.
+plan_head=$(workspace_jj "$tree1" log -r "description(glob:\"plan: record handoff*\") & ::$pr_head" --no-graph --limit 1 -T 'commit_id ++ "\n"')
+[ -n "$plan_head" ] || fail "no 'plan: record handoff' commit among the ancestors of pull request #$pr_number's head $pr_head in tree 1's workspace"
 for pair in "$plan_head:legion-reviewer[bot]:the planner's handoff commit" "$pr_head:legion-implementer[bot]:the implementer's head"; do
   IFS=: read -r sha want what <<<"$pair"
   actor=$(timeout 60 gh api "repos/$repo/commits/$sha" --jq '.committer.login // "nobody"') || fail "GitHub could not read $what $sha on $repo"
   printf '%s %s %s\n' "$sha" "$actor" "$what" >>"$evidence/github-credential-pushes.txt"
   [ "$actor" = "$want" ] || fail "$what $sha on legion/$tree1 was committed by $actor, want $want"
 done
-# The planner's push touched only .legion/ (a handoff-only push): its head's message ends with
-# `skip-checks: true`, GitHub started no check run on it, and the daemon recorded that head as the
-# planner's completion. The implementer's code head (its newest commit on the pull request touching
-# a path outside .legion/) carries no such line and has its check runs, and the daemon recorded the
-# branch head as the implementer's completion (acceptance 4a).
+# The planner's push touched only .legion/ (a handoff-only push): its head's message ends with two
+# empty lines and `skip-checks: true` as the last line — the one shape GitHub honours (its "Skipping
+# workflow runs": the trailer last, preceded by two empty lines; the rule's first live run wrote one
+# empty line and GitHub started both workflows) — with the pane's `Omp-Session:` trailer above it;
+# GitHub started no check run on it, and the daemon recorded that head as the planner's completion.
+# The implementer's code head (its newest commit on the pull request touching a path outside
+# .legion/) carries no such line and has its check runs, and the daemon recorded the branch head as
+# the implementer's completion (acceptance 4a).
 plan_message=$(timeout 60 gh api "repos/$repo/commits/$plan_head" --jq .commit.message) || fail "GitHub could not read the planner's handoff commit $plan_head"
-[ "$(awk 'NF {last = $0} END {print last}' <<<"$plan_message")" = "skip-checks: true" ] ||
-  fail "the planner's handoff commit $plan_head does not end its message with 'skip-checks: true': $(tail -2 <<<"$plan_message" | tr '\n' '|')"
+plan_tail=$(tail -3 <<<"$plan_message" | tr '\n' '|')
+[ "$plan_tail" = "||skip-checks: true|" ] ||
+  fail "the planner's handoff commit $plan_head does not end its message with two empty lines and 'skip-checks: true' (the shape GitHub honours); its last three lines are '$plan_tail': $(tr '\n' '|' <<<"$plan_message")"
+grep -q '^Omp-Session: ' <<<"$plan_message" || fail "the planner's handoff commit $plan_head carries no Omp-Session trailer above skip-checks: $(tr '\n' '|' <<<"$plan_message")"
 plan_checks=$(timeout 60 gh api "repos/$repo/commits/$plan_head/check-runs" --jq .total_count) || fail "GitHub could not list the check runs on $plan_head"
 [ "$plan_checks" = 0 ] || fail "GitHub started $plan_checks check run(s) on the planner's handoff-only push $plan_head"
 [ "$(role_handoff "$tree1" planner)" = "$plan_head" ] || fail "the daemon recorded the planner's completion at $(role_handoff "$tree1" planner), not the pushed head $plan_head"
 [ "$(role_handoff "$tree1" implementer)" = "$pr_head" ] || fail "the daemon recorded the implementer's completion at $(role_handoff "$tree1" implementer), not the branch head $pr_head"
-code_head=$(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].sha' | tac | while read -r sha; do
-  if timeout 60 gh api "repos/$repo/commits/$sha" --jq '.files[].filename' | grep -qv '^\.legion/'; then printf '%s\n' "$sha" && break; fi
-done)
+# The pull request's commits newest first, then each one's files, read whole before they are
+# judged: a `grep -q` or a `break` downstream of a live `gh api` would close its pipe early and
+# turn the pipeline's status into the producer's SIGPIPE under pipefail.
+pr_commits=$(gh api --paginate "repos/$repo/pulls/$pr_number/commits" --jq '.[].sha' | tac)
+code_head=
+for sha in $pr_commits; do
+  files=$(timeout 60 gh api "repos/$repo/commits/$sha" --jq '.files[].filename') || fail "GitHub could not list the files of $sha on $repo"
+  if grep -qv '^\.legion/' <<<"$files"; then
+    code_head=$sha
+    break
+  fi
+done
 [ -n "$code_head" ] || fail "pull request #$pr_number has no commit touching a path outside .legion/"
 code_message=$(timeout 60 gh api "repos/$repo/commits/$code_head" --jq .commit.message) || fail "GitHub could not read the implementer's code head $code_head"
 ! grep -qE 'skip-checks: true|\[(skip ci|ci skip|no ci|skip actions|actions skip)\]' <<<"$code_message" || fail "the implementer's code head $code_head carries a CI-skipping line: $(tr '\n' '|' <<<"$code_message")"
 code_checks() { [ "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" -gt 0 ] 2>/dev/null; }
 on_tree "$tree1" until_true 300 "a check run on the implementer's code head $code_head" code_checks
-printf 'planner handoff %s: 0 check runs, last line skip-checks: true\nimplementer code head %s: %s check runs\n' "$plan_head" "$code_head" "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" >>"$evidence/github-credential-pushes.txt"
+printf 'planner handoff %s: 0 check runs, two empty lines then skip-checks: true as the last line\nimplementer code head %s: %s check runs\n' "$plan_head" "$code_head" "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" >>"$evidence/github-credential-pushes.txt"
 # Negative control: the same gh with a GH_CONFIG_DIR holding no files is nobody, and says so.
 if pod_viewer "$gh_pod" implementer /nonexistent >/dev/null 2>"$evidence/github-credential-negative.txt"; then
   fail "gh in the implementer container with GH_CONFIG_DIR=/nonexistent still answered a viewer"
@@ -2753,7 +3038,12 @@ pass
 begin tree-reviewed
 send_agent "$tree1" tester "Stage 4b proof test operation: inspect the implementer's actual one-file change and pull request #$pr_number, run a focused observable check, record the required test handoff with verdict pass, then call the legion tool's handoff_complete with verdict pass."
 on_tree "$tree1" wait_for_phase "$tree1" reviewing 1200
-assert_handoff_committer "$tree1" tester testing 0
+# The daemon's checks-red move back (ci-red-takeover, Testing → Implementing) counted the
+# implementer a round, as every move back does since #1850 (workflow/engine.go movesBack →
+# recordRound), so tree 1 stands at round 1 here and at round 2 once the review below requests
+# changes; `round_line 1` and `round_correction_pushed 1` below label the proof's correction, not
+# the daemon's round.
+assert_handoff_committer "$tree1" tester testing 1
 on_tree "$tree1" wait_for_worker "$tree1" reviewer
 record_resident "$tree1" reviewer || fail "tree 1's reviewer has no session and pod to keep: $(claim_view "$tree1" reviewer)"
 # A round no review decides (LEGION-326): the reviewer comments instead of deciding, and completes.
@@ -2805,8 +3095,8 @@ notice_line "$tree1" reviewer "notifications.role.$(claim_token "$tree1" archite
 on_tree "$tree1" until_true 1800 "legion-reviewer[bot]'s round 1 decision on pull request #$pr_number" reviewer_decision 1
 [ "$(<"$work/review-decision")" = changes ] || fail "the reviewer approved pull request #$pr_number in round 1, which the proof asked to request changes"
 on_tree "$tree1" wait_for_phase "$tree1" implementing 1200
-assert_handoff_committer "$tree1" reviewer reviewing 1
-assert_review_of_own_handoff "$tree1" 1 CHANGES_REQUESTED
+assert_handoff_committer "$tree1" reviewer reviewing 2
+assert_review_of_own_handoff "$tree1" 2 CHANGES_REQUESTED
 thread_id=$(reviewer_thread 2>"$work/reviewer-thread.err") ||
   fail "the reviewer's round 1 review did not leave one thread of its own: $(cat "$work/reviewer-thread.err")"
 note "the reviewer's round 1 review opened one thread, $thread_id"
@@ -2814,15 +3104,15 @@ on_tree "$tree1" wait_for_worker "$tree1" implementer
 on_tree "$tree1" send_agent "$tree1" implementer "Stage 4b proof correction round 1: make the correction the review names (append the line \`$(round_line 1)\` to $smoke_file), push it to pull request #$pr_number, answer the review's thread as your role says, write the implementation handoff, then call the legion tool's handoff_complete: a push alone does not finish this round."
 on_tree "$tree1" wait_for_phase "$tree1" testing 1200
 on_tree "$tree1" until_true 120 "round 1's correction on pull request #$pr_number" round_correction_pushed 1
-assert_round_handoff "$tree1" 1
-assert_handoff_committer "$tree1" implementer implementing 1
+assert_round_handoff "$tree1" 2
+assert_handoff_committer "$tree1" implementer implementing 2
 review_thread "$thread_id" >"$evidence/review-thread-after-correction.json" ||
   fail "read the reviewer's thread $thread_id after the correction round"
 note "after the correction round the reviewer's thread reads isResolved $(jq -r .isResolved "$evidence/review-thread-after-correction.json"), newest comment by $(jq -r '[.comments[] | select(.state == "SUBMITTED")] | last | .author' "$evidence/review-thread-after-correction.json")"
 on_tree "$tree1" wait_for_worker "$tree1" tester
 on_tree "$tree1" send_agent "$tree1" tester "Stage 4b proof retest round 1: verify the correction on pull request #$pr_number, write the tester handoff with verdict pass, and complete the phase."
 on_tree "$tree1" wait_for_phase "$tree1" reviewing 1200
-assert_handoff_committer "$tree1" tester testing 1
+assert_handoff_committer "$tree1" tester testing 2
 on_tree "$tree1" wait_for_worker "$tree1" reviewer
 # A bot's thread for the re-review (acceptance 4d): the proof human, a GitHub App and so a bot
 # account that is none of Legion's role Apps, opens one now, after the implementer's correction
@@ -3048,52 +3338,73 @@ begin github-credential-refresh
 # The hour boundary (LEGION-631): the review App's lease the daemon minted at boot lasts an hour,
 # the daemon re-mints it once fewer than twenty minutes remain and rewrites the architect's role
 # Secret, and the kubelet rewrites the projected hosts.yml in the architect's container in place,
-# so the file read at tree-separation and the file now differ, in the same pod, with nothing sent
+# so the file read at issue-independence and the file now differ, in the same pod, with nothing sent
 # to the agent between the reads; the old token stops working at its own expiry while the new one
-# answers. The daemon log gives the first lease's expiry (its `written` line) and the refresh.
+# answers. Every assertion on the daemon's timing is a property of the log's own pairs: each
+# `refreshed` line is judged against the line before it in the architect's lease chain (`written`,
+# then `refreshed`…), never against a remembered first expiry — by the time this checkpoint runs,
+# any number of cycles may have elapsed, and the first live run compared the second refresh against
+# the first lease and failed on a daemon that had obeyed the rule twice.
 gh_pod=$(claim_sandbox "$tree1" architect) || fail "tree 1's architect has no Sandbox locator"
-[ "$(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')" = "$gh_before_uid" ] || fail "the architect's pod $gh_pod ($(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')) is not the one whose hosts.yml was read at tree-separation ($gh_before_uid), so its file is a new pod's first, not a refresh"
-written=$(gh_log_line written "$gh_pod" architect) || fail "the daemon log has no 'github credential written' line for the architect of $gh_pod"
-first_expiry=$(jq -r .expiresAt <<<"$written")
-first_expiry_s=$(date -d "$first_expiry" +%s) || fail "the written line's expiresAt is not a time: $written"
-note "the architect's first lease (app $(jq -r .app <<<"$written")) expires at $first_expiry"
-# The read at tree-separation must precede the refresh it is compared with. Planning that ran past
-# the first lease's refresh (some forty minutes after boot) leaves that read already on the second
-# lease: then the second lease is the one whose boundary is observed, read now, and its own
-# refresh is awaited, which can be most of an hour away.
-if early=$(gh_log_line refreshed "$gh_pod" architect) && [ "$(date -d "$(jq -r .time <<<"$early")" +%s)" -gt "$(date -d "$gh_before_at" +%s)" ]; then
-  :
-elif [ -n "${early:-}" ]; then
-  note "the architect's credential was already refreshed at $(jq -r .time <<<"$early"), before the read at $gh_before_at; observing the next boundary from the file as it is now"
-  first_expiry=$(jq -r .expiresAt <<<"$early")
-  first_expiry_s=$(date -d "$first_expiry" +%s) || fail "the refreshed line's expiresAt is not a time: $early"
-  gh_before_hash=$(gh_hosts_hash "$gh_pod" architect) || fail "could not hash the architect's hosts.yml in $gh_pod"
-  gh_before_token=$(gh_hosts_token "$gh_pod" architect) || fail "could not read the architect's hosts.yml in $gh_pod"
-  gh_before_at=$(date -u +%FT%TZ)
-fi
+[ "$(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')" = "$gh_before_uid" ] || fail "the architect's pod $gh_pod ($(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')) is not the one whose hosts.yml was read at issue-independence ($gh_before_uid), so its file is a new pod's first, not a refresh"
+# gh_lease_lines prints the architect's lease chain as the daemon log has it: every `written` and
+# `refreshed` line for this pod and role, time-ordered, one JSON object per line.
+gh_lease_lines() {
+  jq -R -s -c --arg sandbox "$gh_pod" --arg role architect \
+    '[split("\n")[] | fromjson? | select((.msg == "sandbox runtime: github credential written" or .msg == "sandbox runtime: github credential refreshed") and .sandbox == $sandbox and .role == $role)] | sort_by(.time) | .[]' "$daemon_log"
+}
+lease_lines=$(gh_lease_lines)
+[ -n "$lease_lines" ] || fail "the daemon log has no 'github credential written' or 'refreshed' line for the architect of $gh_pod"
+[ "$(sed -n 1p <<<"$lease_lines" | jq -r .msg)" = "sandbox runtime: github credential written" ] ||
+  fail "the architect's lease chain in the daemon log does not start with a 'written' line: $(sed -n 1p <<<"$lease_lines")"
+note "the architect's first lease (app $(sed -n 1p <<<"$lease_lines" | jq -r .app)) was written at $(sed -n 1p <<<"$lease_lines" | jq -r .time) and expires at $(sed -n 1p <<<"$lease_lines" | jq -r .expiresAt); $(grep -c refreshed <<<"$lease_lines") refresh(es) logged so far"
+# The lease the file read at issue-independence belonged to: the newest line at or before that read
+# (a file lagging the log by the kubelet's sync names an older token, which expires no later).
+before_s=$(date -d "$gh_before_at" +%s)
+before_expiry=
+while IFS= read -r line; do
+  [ "$(date -d "$(jq -r .time <<<"$line")" +%s)" -le "$before_s" ] || break
+  before_expiry=$(jq -r .expiresAt <<<"$line")
+done <<<"$lease_lines"
+[ -n "$before_expiry" ] || fail "no lease line of the architect's precedes the read at $gh_before_at: $(tr '\n' ' ' <<<"$lease_lines")"
+before_expiry_s=$(date -d "$before_expiry" +%s) || fail "a lease line's expiresAt is not a time: $before_expiry"
+# A refresh after that read is what the file-change and token checks below observe; the daemon's
+# period is forty minutes, so one lands within the bound whenever the read fell in a cycle.
 refreshed_after_read() {
   local line
   line=$(gh_log_line refreshed "$gh_pod" architect) || return 1
-  [ "$(date -d "$(jq -r .time <<<"$line")" +%s)" -gt "$(date -d "$gh_before_at" +%s)" ]
+  [ "$(date -d "$(jq -r .time <<<"$line")" +%s)" -gt "$before_s" ]
 }
 on_tree "$tree1" until_true 2700 "the daemon to refresh the architect's github credential" refreshed_after_read
-refreshed=$(gh_log_line refreshed "$gh_pod" architect)
-refreshed_at=$(jq -r .time <<<"$refreshed")
-[ "$(jq -r .app <<<"$refreshed")" = review ] || fail "the architect's credential was refreshed with app $(jq -r .app <<<"$refreshed"), want review"
-[ "$(date -d "$(jq -r .expiresAt <<<"$refreshed")" +%s)" -gt "$first_expiry_s" ] || fail "the refreshed lease expires no later than the first: $refreshed"
-refreshed_s=$(date -d "$refreshed_at" +%s) || fail "the refreshed line's time is not a time: $refreshed"
-# The daemon re-mints once fewer than twenty minutes of the lease remain (appauth refreshWindow),
-# so its write lands at least fifteen minutes before the first lease expires, whenever this check
-# happens to read it.
-[ "$refreshed_s" -le $((first_expiry_s - 900)) ] || fail "the daemon refreshed the architect's credential at $refreshed_at, fewer than fifteen minutes before the first lease's expiry $first_expiry"
+lease_lines=$(gh_lease_lines)
+# Every refresh against its own antecedent: made with the review App, at least fifteen minutes
+# before the lease it replaces expires (the daemon re-mints once fewer than twenty remain, appauth
+# refreshWindow, and its write follows within the minute), for a lease that expires later.
+previous=
+refreshed_at=
+while IFS= read -r line; do
+  if [ -n "$previous" ]; then
+    [ "$(jq -r .msg <<<"$line")" = "sandbox runtime: github credential refreshed" ] || fail "the architect's lease chain carries a second 'written' line after the first; the pod's Secret was written anew: $line"
+    [ "$(jq -r .app <<<"$line")" = review ] || fail "the architect's credential was refreshed with app $(jq -r .app <<<"$line"), want review: $line"
+    line_s=$(date -d "$(jq -r .time <<<"$line")" +%s) || fail "a refreshed line's time is not a time: $line"
+    antecedent_expiry=$(jq -r .expiresAt <<<"$previous")
+    antecedent_expiry_s=$(date -d "$antecedent_expiry" +%s) || fail "a lease line's expiresAt is not a time: $previous"
+    [ "$line_s" -le $((antecedent_expiry_s - 900)) ] || fail "the daemon refreshed the architect's credential at $(jq -r .time <<<"$line"), fewer than fifteen minutes before the expiry $antecedent_expiry of the lease it replaced: $line"
+    [ "$(date -d "$(jq -r .expiresAt <<<"$line")" +%s)" -gt "$antecedent_expiry_s" ] || fail "the refreshed lease expires no later than the one it replaced ($antecedent_expiry): $line"
+    if [ -z "$refreshed_at" ] && [ "$line_s" -gt "$before_s" ]; then refreshed_at=$(jq -r .time <<<"$line"); refreshed_s=$line_s; fi
+  fi
+  previous=$line
+done <<<"$lease_lines"
+[ -n "$refreshed_at" ] || fail "no refresh of the architect's credential follows the read at $gh_before_at in the daemon log: $(tr '\n' ' ' <<<"$lease_lines")"
+note "the architect's lease chain holds $(grep -c refreshed <<<"$lease_lines") refresh(es), each at least fifteen minutes before the expiry of the lease it replaced; the first after the read at $gh_before_at was at $refreshed_at"
 # The kubelet's projection: the file in the container changes within its sync period.
 hosts_changed() { [ "$(gh_hosts_hash "$gh_pod" architect)" != "$gh_before_hash" ]; }
-until_true 300 "the architect container's hosts.yml to carry the refreshed token" hosts_changed
+until_true 300 "the architect container's hosts.yml to carry a refreshed token" hosts_changed
 propagated_at=$(date -u +%FT%TZ)
 [ "$(op get pod "$gh_pod" -o jsonpath='{.metadata.uid}')" = "$gh_before_uid" ] || fail "the architect's pod $gh_pod was replaced while the refresh was awaited"
 propagation=$(( $(date -d "$propagated_at" +%s) - refreshed_s ))
 gh_after_token=$(gh_hosts_token "$gh_pod" architect) || fail "could not read the architect's refreshed hosts.yml"
-[ -n "$gh_after_token" ] && [ "$gh_after_token" != "$gh_before_token" ] || fail "the architect's hosts.yml changed but names the token it had at tree-separation"
+[ -n "$gh_after_token" ] && [ "$gh_after_token" != "$gh_before_token" ] || fail "the architect's hosts.yml changed but names the token it had at issue-independence"
 viewer=$(pod_viewer "$gh_pod" architect) || fail "the architect's gh answered no viewer after the refresh"
 [ "$viewer" = "legion-reviewer[bot]" ] || fail "the architect's gh acts as $viewer after the refresh, want legion-reviewer[bot]"
 note "the daemon refreshed the architect's credential at $refreshed_at; the container's hosts.yml had changed by $propagated_at ($propagation s after the daemon's write — an upper bound when the change predates this check, which polls every few seconds), and the architect's gh is legion-reviewer[bot] on it"
@@ -3101,32 +3412,39 @@ note "the daemon refreshed the architect's credential at $refreshed_at; the cont
 # lets a gh that started on it finish. Both calls run from this shell; the tokens are its variables
 # alone and reach no file.
 now_s=$(date +%s)
-if [ "$now_s" -lt $((first_expiry_s + 60)) ]; then
-  note "waiting $((first_expiry_s + 60 - now_s)) s for the first lease to expire"
-  sleep $((first_expiry_s + 60 - now_s))
+if [ "$now_s" -lt $((before_expiry_s + 60)) ]; then
+  note "waiting $((before_expiry_s + 60 - now_s)) s for the lease read at issue-independence to expire"
+  sleep $((before_expiry_s + 60 - now_s))
 fi
-old_answer=$(GH_TOKEN="$gh_before_token" GH_CONFIG_DIR="$work/no-gh" gh api graphql -f query='{viewer{login}}' 2>&1 | scrub) && fail "the architect's first token still answers GitHub after its expiry: $old_answer"
-grep -qi "bad credentials\|401" <<<"$old_answer" || fail "the architect's first token was refused for another reason than its expiry: $old_answer"
-new_answer=$(GH_TOKEN="$gh_after_token" GH_CONFIG_DIR="$work/no-gh" gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1 | scrub) || fail "the architect's refreshed token does not answer GitHub: $new_answer"
+old_answer=$(GH_TOKEN="$gh_before_token" GITHUB_TOKEN= GH_HOST= GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' 2>&1 | scrub) && fail "the architect's token read at issue-independence still answers GitHub after its lease's expiry $before_expiry: $old_answer"
+grep -qi "bad credentials\|401" <<<"$old_answer" || fail "the architect's token read at issue-independence was refused for another reason than its expiry: $old_answer"
+new_answer=$(GH_TOKEN="$gh_after_token" GITHUB_TOKEN= GH_HOST= GH_CONFIG_DIR="$work/no-gh" "$real_gh" api graphql -f query='{viewer{login}}' --jq .data.viewer.login 2>&1 | scrub) || fail "the architect's refreshed token does not answer GitHub: $new_answer"
 [ "$new_answer" = "legion-reviewer[bot]" ] || fail "the architect's refreshed token answers as $new_answer, want legion-reviewer[bot]"
 unset gh_before_token gh_after_token
-note "after $first_expiry the first token answers 401 and the refreshed one legion-reviewer[bot]"
+note "after $before_expiry the token read at issue-independence answers 401 and the refreshed one legion-reviewer[bot]"
 pass
 
 begin idle-resident
-# Every completed role still names the same process, its one shared issue pod is Running, its
-# Sandbox is Running, and the tree volume is Bound.
+# Every completed role still names the same process, its one shared issue pod is Running, the
+# root's Sandbox is Running and its PVC Bound; of tree 1's children, child 2, parked in backlog,
+# keeps its Sandbox Suspended and its PVC Bound, and child 1, done, has neither (child-release).
+# Each volume is read by its own issue's label: a tree's issues share no volume.
 for role in planner implementer tester reviewer; do
   resident_kept "$tree1" "$role" || fail "$role on $tree1 left the pod or session it first registered with while tree 1 is open: $(resident_lost "$tree1" "$role")"
   pod=$(claim_sandbox "$tree1" "$role") || fail "$role on $tree1 has no Sandbox"
   running=$(op get pod "$pod" -o jsonpath='{.metadata.uid} {.status.phase}') || fail "the operator could not read $role's pod $pod"
   [ "$running" = "$(jq -r .podUid "$work/resident-$tree1-$role.json") Running" ] || fail "$role on $tree1 runs in pod $pod as '$running', want its first pod Running"
 done
-suspended=$(op get sandboxes -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o json | jq -c '[.items[] | select(.spec.operatingMode == "Suspended") | .metadata.name]')
-[ "$suspended" = "[]" ] || fail "Sandboxes of $tree1 are Suspended while its issue is open: $suspended"
-bound=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].status.phase}')
-[ "$bound" = Bound ] || fail "the tree volume of $tree1 is '$bound', want Bound"
-note "planner, implementer, tester and reviewer of $tree1 each run in their first process in one issue pod; its Sandbox is Running and tree volume Bound"
+[ "$(issue_sandbox_modes "$tree1")" = Running ] || fail "the root $tree1's Sandboxes are '$(issue_sandbox_modes "$tree1" | paste -sd ' ' -)' while its issue is open, want its one, Running"
+[ "$(issue_sandbox_modes "$child2")" = Suspended ] || fail "the parked child $child2's Sandboxes are '$(issue_sandbox_modes "$child2" | paste -sd ' ' -)', want its one, Suspended"
+modes=$(issue_sandbox_modes "$child1") || fail "the operator could not read the done child $child1's Sandboxes"
+[ -z "$modes" ] || fail "the done child $child1 still has a Sandbox: $(paste -sd ' ' - <<<"$modes")"
+for issue in "$tree1" "$child2"; do
+  assert_one_bound_pvc "$issue" ""
+done
+gone=$(issue_pvcs "$child1") || fail "the operator could not read the done child $child1's PVCs"
+[ -z "$gone" ] || fail "the done child $child1 still has a PVC: $(paste -sd ' ' - <<<"$gone")"
+note "planner, implementer, tester and reviewer of $tree1 each run in their first process in one issue pod; its Sandbox is Running and its PVC Bound; $child2's Sandbox is Suspended with its PVC Bound; $child1 has neither"
 pass
 
 begin kill-launcher-resume
@@ -3183,6 +3501,10 @@ boot_rotated() {
 }
 on_tree "$tree1" until_true 600 "the merger's boot token to rotate in its replacement role container" boot_rotated
 refused_msg="worker-stream: rejected hello (stale worker generation)"
+# A deliberately run-wide count: the daemon's rejected-hello line names no pod, claim or
+# generation (`internal/stream/listener.go`, `l.log.Warn("worker-stream: rejected hello (" + reason
+# + ")")`), so the replayed token's refusal is read as the count's rise over the next thirty seconds;
+# the one other tree live here, tree 3, sits between phases with nothing replacing its pods.
 refused_before=$(log_lines "$refused_msg" | wc -l)
 if out=$(timeout 60 "$work/legion" worker-shim --connect "tcp://$host:$port_worker_stream" --boot-token-file "$work/old-boot-token" -- true 2>&1); then
   fail "the worker stream accepted a hello with the previous generation's boot token"
@@ -3972,15 +4294,17 @@ note "$tree1's architect claimed its root issue, and the done released the claim
 pass
 
 begin node-release
-# Tree 1 lingers (linger_hours 0.3): its Sandboxes stay Suspended, its volume stays Bound, and no pod
-# of the run is left on its node. The pool consolidates a node only once it is empty, so the node is
-# gone after consolidateAfter unless another project's pod is now on it: a tree pod refuses only a
-# node holding another tree's pod (the runtime's affinity, internal/runtime/sandbox/manifest.go), and
-# the image probe carries no tree label, so a production daemon running beside the run can place a
-# pod on the node tree 1 emptied. That pod keeps the node from the moment it is bound, Pending through
-# its init containers included. Either case passes, and the note says which one it saw.
-node=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/tree"] == "'"$tree1"'") | .spec.nodeName // empty' "$evidence/pod-watch.json" | tail -1)
-[ -n "$node" ] || fail "the pod watch saw no pod of tree 1 on a node, so there is no node whose release to wait for"
+# Tree 1 lingers (linger_hours 0.3): the Sandboxes of its issues still alive stay Suspended, each
+# with its own PVC Bound, and no pod of the run is left on any node a pod of tree 1 ran on. No pod
+# asks for or keeps off a node (LEGION-632): a node empties when the pods on it stop, and the pool
+# consolidates an empty node after consolidateAfter. So each such node is gone, unless another
+# project's pod is now on it (a production daemon running beside the run places where the pool has
+# room, the node tree 1 emptied included); that pod keeps the node from the moment it is bound,
+# Pending through its init containers included. Either case passes for each node, and the note says
+# which it saw where. Every node any pod of tree 1 — the root's, its children's, the replacements the
+# fence and the stream move made — was on is read from the pod watch.
+tree1_nodes=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/tree"] == "'"$tree1"'") | .spec.nodeName // empty' "$evidence/pod-watch.json" | sort -u | grep .) ||
+  fail "the pod watch saw no pod of tree 1 on a node, so there is no node whose release to wait for"
 node_release=
 node_released() {
   local out pods others
@@ -4011,34 +4335,60 @@ report_node_release() {
   timeout 120 kubectl --context "$operator" get pods -A --field-selector "spec.nodeName=$node" -o json |
     jq -r '.items[] | "     \(.metadata.namespace)/\(.metadata.name) \(.metadata.labels["legion.dev/project"] // "-") \(.status.phase)"'
 }
-timeout_hook=report_node_release
-until_true 1500 "tree 1's node $node to be released, or to carry no pod of the run while another project's pod is on it" node_released "$node"
-timeout_hook=limit_pending_blocked
-modes=$(op get sandboxes -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].spec.operatingMode}')
-bound=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/tree=$tree1" -o jsonpath='{.items[*].status.phase}')
-if [ -z "$modes" ] || grep -qv Suspended <<<"$(tr ' ' '\n' <<<"$modes")"; then fail "tree 1's Sandboxes are '$modes' after its node was released ($node_release), want all Suspended"; fi
-[ "$bound" = Bound ] || fail "tree 1's volume is '$bound' after its node was released ($node_release), want Bound"
-note "at $(date -u +%FT%TZ) $node_release; tree 1's Sandboxes Suspended ($modes), its volume Bound"
+releases=
+for node in $tree1_nodes; do
+  timeout_hook=report_node_release
+  until_true 1500 "tree 1's node $node to be released, or to carry no pod of the run while another project's pod is on it" node_released "$node"
+  timeout_hook=limit_pending_blocked
+  releases+="${releases:+; }$node_release"
+done
+at=$(date -u +%FT%TZ)
+[ "$(issue_sandbox_modes "$tree1")" = Suspended ] || fail "the root $tree1's Sandboxes are '$(issue_sandbox_modes "$tree1" | paste -sd ' ' -)' after its nodes were released ($releases), want its one, Suspended"
+[ "$(issue_sandbox_modes "$child2")" = Suspended ] || fail "the parked child $child2's Sandboxes are '$(issue_sandbox_modes "$child2" | paste -sd ' ' -)' after tree 1's nodes were released, want its one, Suspended"
+for issue in "$tree1" "$child2"; do
+  assert_one_bound_pvc "$issue" " after tree 1's nodes were released ($releases)"
+done
+note "at $at: $releases; the Sandboxes of $tree1 and $child2 are Suspended, each PVC Bound ($(grep -c . <<<"$tree1_nodes") nodes carried a pod of tree 1)"
 pass
 
 begin close
-until_true 1500 "tree 1 to close at linger expiry" sh -c \
-  "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get sandboxes,pvc -l 'legion.dev/project=$run_label,legion.dev/tree=$tree1' -o name) && [ -z \"\$out\" ]"
-note "tree 1's Sandboxes and tree volume are deleted"
+# At linger expiry the tree's cleanup foreground-deletes every Sandbox of tree 1, each with the
+# volume it owns: the root's, and child 2's kept from child-release (child 1's went with its done).
+# The Sandboxes are read by the tree label, which the cleanup selects them by; the PVCs by issue,
+# since a claim carries no tree label (the volume is the issue's: its tree changes on re-admission
+# and the claim is never relabelled), one read per issue of tree 1 that still owned a volume.
+# tree_gone TREE ISSUE...: TREE has no Sandbox or pod, and no ISSUE of it a PVC. Each read is held
+# to its exit status (see child1_released).
+tree_gone() {
+  local tree=$1 out issue
+  shift
+  out=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/tree=$tree" -o name) && [ -z "$out" ] || return 1
+  for issue in "$@"; do
+    out=$(issue_pvcs "$issue") && [ -z "$out" ] || return 1
+  done
+}
+until_true 1500 "tree 1 to close at linger expiry" tree_gone "$tree1" "$tree1" "$child2"
+note "tree 1's Sandboxes and the volumes they owned, the root's and $child2's, are deleted"
 pass
 
 begin re-admission
+# The volume-lost line names the session of the claim it relaunched (`supervise/machine.go`,
+# `"session", m.claim.Session`) and nothing else, so it is read for tree 1's own sessions — those
+# its suspended claims kept through the close — never counted over the whole log, where another
+# tree's loss would satisfy the wait early or push the count past one.
+tree1_sessions=$(daemon_state | jq -c --arg issue "$tree1" '[.issues[$issue] | (.architect.session // empty), ((.workers // {}) | .[] | .claim.session // empty)]')
+[ "$(jq length <<<"$tree1_sessions")" -gt 0 ] || fail "tree 1's suspended claims keep no session to read the volume-lost line for: $(daemon_state | jq -c --arg issue "$tree1" '.issues[$issue] | {architect, workers}')"
+lost_lines() { log_lines "$lost_msg" | jq -c --argjson sessions "$tree1_sessions" 'select(.session as $s | $sessions | index($s))'; }
 set_status "$tree1" todo
-lost_msg="supervise: the tree volume was lost with the session; relaunching a fresh session"
-lost_seen() { [ "$(log_lines "$lost_msg" | wc -l)" -ge 1 ]; }
-on_tree "$tree1" until_true 900 "the re-admitted tree 1 to report its tree volume lost and relaunch a fresh architect" lost_seen
+lost_seen() { [ "$(lost_lines | wc -l)" -ge 1 ]; }
+on_tree "$tree1" until_true 900 "the re-admitted tree 1 to report its issue's volume lost and relaunch a fresh architect" lost_seen
 on_tree "$tree1" wait_for_worker "$tree1" architect
-pod=$(tree_pod "$tree1")
+pod=$(issue_pod "$tree1")
 recovered=$(pod_exec "$pod" architect cat "/legion/workspaces/$repo/${tree1,,}/.legion/$tree1/workspace-recovered.json")
 jq -e --arg b "legion/$tree1" 'tostring | contains($b)' <<<"$recovered" >/dev/null || fail "the recovery marker does not name legion/$tree1: $recovered"
-lost=$(log_lines "$lost_msg" | wc -l)
-[ "$lost" = 1 ] || fail "the daemon reported the tree volume lost $lost times, want exactly once"
-note "the tree volume reported lost once, then a fresh session whose workspace holds .legion/$tree1/workspace-recovered.json naming legion/$tree1"
+lost=$(lost_lines | wc -l)
+[ "$lost" = 1 ] || fail "the daemon reported tree 1's issue volume lost $lost times for its sessions $tree1_sessions, want exactly once"
+note "the daemon logged \"$lost_msg\" once, then a fresh session whose workspace holds .legion/$tree1/workspace-recovered.json naming legion/$tree1"
 pass
 
 begin operator-close
@@ -4046,14 +4396,22 @@ begin operator-close
 # workflow's to close: the close of re-admitted tree 1's live root is refused 409, and its claims,
 # Sandboxes and pods are untouched. A tree no workflow issue backs, which the operator spawns here,
 # closes with its worker live: the root and the worker are retired, and the tree's Sandboxes, pods
-# and volume are gone.
+# and volumes (the root's and the worker's issue's) are gone.
+# tree_objects TREE ISSUE... prints, as one sorted JSON array, the Sandboxes and pods labelled with
+# TREE and the PVCs of each ISSUE of it: a claim carries no tree label (the volume is the issue's),
+# so a tree's volumes are read by its issues. A read that fails fails the function.
 tree_objects() {
-  op get sandboxes,pods,pvc -l "legion.dev/project=$run_label,legion.dev/tree=$1" -o json |
-    jq -c '[.items[] | {kind, name: .metadata.name, uid: .metadata.uid}] | sort_by(.kind, .name)'
+  local tree=$1 objects issue
+  shift
+  objects=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/tree=$tree" -o json) || return 1
+  for issue in "$@"; do
+    objects+=$(op get pvc -l "legion.dev/project=$run_label,legion.dev/issue=$issue" -o json) || return 1
+  done
+  jq -cs '[.[].items[] | {kind, name: .metadata.name, uid: .metadata.uid}] | sort_by(.kind, .name)' <<<"$objects"
 }
 root1=$(claim_token "$tree1" architect)
 states1() { claims_cli list --json | jq -c --arg t "$tree1" '[.claims[] | select(.tree == $t) | {token, state, generation}] | sort_by(.token)'; }
-objects_before=$(tree_objects "$tree1")
+objects_before=$(tree_objects "$tree1" "$tree1" "$child2")
 claims_before=$(states1)
 if refusal=$(claims_cli close --claim "$root1" 2>&1 >/dev/null); then
   fail "the operator's close of workflow tree $tree1 through $root1 was accepted"
@@ -4062,7 +4420,7 @@ case "$refusal" in
   *"409"*) ;;
   *) fail "the operator's close of workflow tree $tree1 was refused with '$refusal', not 409" ;;
 esac
-[ "$(tree_objects "$tree1")" = "$objects_before" ] || fail "the refused close changed tree 1's objects: $objects_before, then $(tree_objects "$tree1")"
+[ "$(tree_objects "$tree1" "$tree1" "$child2")" = "$objects_before" ] || fail "the refused close changed tree 1's objects: $objects_before, then $(tree_objects "$tree1" "$tree1" "$child2")"
 [ "$(states1)" = "$claims_before" ] || fail "the refused close changed tree 1's claims: $claims_before, then $(states1)"
 note "the operator's close of workflow tree $tree1 was refused ($refusal); its claims $claims_before and objects $objects_before are unchanged"
 take_out "$tree1"
@@ -4074,16 +4432,15 @@ op_worker=$(claims_cli spawn --json --tree "$optree" --issue "$opchild" --role i
   fail "the operator could not spawn a worker of $optree"
 on_tree "$optree" until_true 900 "$optree's root $op_root to be live" claim_live "$op_root"
 on_tree "$optree" until_true 900 "$optree's worker $op_worker to be live" claim_live "$op_worker"
-objects=$(tree_objects "$optree")
+objects=$(tree_objects "$optree" "$optree" "$opchild")
 jq -e 'map(select(.kind == "Pod")) | length == 2' <<<"$objects" >/dev/null || fail "$optree does not have its two pods before the close: $objects"
 for uid in $(jq -r '.[] | select(.kind == "Pod") | .uid' <<<"$objects"); do driver_action close "$uid"; done
 note "before the close, $optree has: $objects"
 closed=$(claims_cli close --json --claim "$op_root") || fail "the operator's close of $optree through $op_root was refused: $closed"
 jq -e '.state == "retired"' <<<"$closed" >/dev/null || fail "the close left $optree's root $(jq -c '{state}' <<<"$closed")"
 claim_retired "$op_worker" || fail "the close of $optree left its worker $op_worker $(claim_by_token "$op_worker" | jq -c '{state}')"
-until_true 600 "$optree's Sandboxes, pods and volume to be gone" sh -c \
-  "out=\$(timeout 120 kubectl --context '$operator' -n '$namespace' get sandboxes,pods,pvc -l 'legion.dev/project=$run_label,legion.dev/tree=$optree' -o name) && [ -z \"\$out\" ]"
-note "the operator's close of $optree, with its worker $op_worker live, retired the root and the worker; afterwards $optree has: $(tree_objects "$optree")"
+until_true 600 "$optree's Sandboxes, pods and volumes to be gone" tree_gone "$optree" "$optree" "$opchild"
+note "the operator's close of $optree, with its worker $op_worker live, retired the root and the worker; afterwards $optree has: $(tree_objects "$optree" "$optree" "$opchild")"
 pass
 
 begin pod-shape
@@ -4099,12 +4456,30 @@ leaks_pid=
 jq -e '.leaks == [] and .unseen == [] and .unreadable == 0' "$work/secret-leaks.json" >/dev/null ||
   fail "Sandbox pods carry a value of their Sandbox's Secret, name a Secret the check never saw, or the pod watch holds unreadable lines: $(jq -c '{leaks, unseen, unreadable}' "$work/secret-leaks.json")"
 note "$judged Sandbox pods judged from the pod watch's record, deleted ones included; every pod another source names is in it"
+note "every container of each, the init containers included, reserves its role's cpu and memory as both request and limit and its role's ephemeral-storage limit over its request (the node-disk bound) under the run's reservations $run_resources (overrides: $(resources_block | tail -n +2 | sed 's/^ *//' | paste -sd ';' -)); each pod is Guaranteed and carries no affinity"
 note "no pod's command, args or environment carries a value of its Sandbox's Secret: $(jq -r '"\(.pods) pods, \(.secrets) Secrets, \(.values) values held in memory, none printed"' "$work/secret-leaks.json")"
-# Negative controls: a recorded pod with another runtime class, and a pod the watch never recorded.
+# Negative controls: a recorded pod with another runtime class, one whose tester container bursts
+# past its request, one pinned to a node by an affinity, and a pod the watch never recorded. Each
+# of the first three is the last ready pod event the watch recorded (wrong_runtime_control, and
+# the same event read here for the other two), edited, appended to a copy of the record as the
+# watch event it is ({type, object}): the verdict judges each pod from its last event, so the
+# edited one is the one judged.
 wrong_runtime_control "$evidence/pod-watch.json" >"$work/wrong-shape.json"
 [ -s "$work/wrong-shape.json" ] || fail "the pod watch holds no ready Sandbox pod to build the wrong-runtime control from"
+jq -c -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pod_event' "$evidence/pod-watch.json" | tail -1 >"$work/last-ready-pod.json"
 cat "$evidence/pod-watch.json" "$work/wrong-shape.json" >"$evidence/controls/pod-watch-wrong-shape.json"
 expect_failure pod-shape-wrong-runtime test -z "$(pod_shape_verdict "$evidence/controls/pod-watch-wrong-shape.json")"
+jq -c '.object.spec.containers |= map(if .name == "tester" then .resources.limits.cpu = "2" else . end) | .object.status.qosClass = "Burstable"' "$work/last-ready-pod.json" >"$work/bursting-shape.json"
+cat "$evidence/pod-watch.json" "$work/bursting-shape.json" >"$evidence/controls/pod-watch-bursting.json"
+bursting=$(pod_shape_verdict "$evidence/controls/pod-watch-bursting.json")
+grep -qF "container tester requests" <<<"$bursting" && grep -qF "qosClass Burstable" <<<"$bursting" ||
+  fail "the pod shape did not refuse a recorded pod whose tester container is limited past its request and that is Burstable: ${bursting:-no departure}"
+note "negative control: a recorded pod whose tester container bursts past its request departs from the pod shape: $(tr '\n' ' ' <<<"$bursting" | cut -c1-300)"
+jq -c '.object.spec.affinity = {podAffinity: {requiredDuringSchedulingIgnoredDuringExecution: [{topologyKey: "kubernetes.io/hostname", labelSelector: {matchLabels: {"legion.dev/tree": .object.metadata.labels["legion.dev/tree"]}}}]}}' "$work/last-ready-pod.json" >"$work/pinned-shape.json"
+cat "$evidence/pod-watch.json" "$work/pinned-shape.json" >"$evidence/controls/pod-watch-pinned.json"
+pinned=$(pod_shape_verdict "$evidence/controls/pod-watch-pinned.json")
+grep -qF "affinity " <<<"$pinned" || fail "the pod shape did not refuse a recorded pod pinned to its tree's node by an affinity: ${pinned:-no departure}"
+note "negative control: a recorded pod given a pod affinity on its tree departs from the pod shape: $(tr '\n' ' ' <<<"$pinned" | cut -c1-300)"
 cp "$evidence/driver-actions.txt" "$work/driver-actions.saved"
 printf 'kill 00000000-e2e4-4b00-0000-000000000000 control\n' >>"$evidence/driver-actions.txt"
 expect_failure pod-shape-unrecorded-pod test -z "$(stream_missing "$evidence/pod-watch.json")"

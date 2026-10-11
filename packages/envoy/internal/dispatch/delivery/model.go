@@ -32,31 +32,33 @@ type DeliverySettings struct {
 // DeliverySettings.PopulationAuthors, merged, not in an excluded repository, not a task PR.
 // CreatedAt, MergedAt, Additions and Deletions are nil until the completing GitHub fetch (or a
 // reconcile pass) fills them in — GitHub's webhook payload alone never carries them — and
-// Partial is true for exactly as long as that is so. IssueKey is resolved by the title/body rule
-// only (LEGION-567 slice 1); Sessions are the raw `Omp-Session` commit trailer values.
+// Partial is true for exactly as long as that is so. IssueKey is resolved from five sources
+// (attribution.go), Attribution holding what GitHub said for them (nil until it has been read);
+// Sessions are the raw `Omp-Session` commit trailer values.
 // UnfetchableAt/UnfetchableReason are set when a completing fetch answers a permanent 404/410
 // (the pull request or its repository no longer exists, or no longer reaches this token) rather
 // than retrying forever; both nil for every normal row, and cleared by any later successful
 // fetch of the same pull request.
 type DeliveryPullRequest struct {
-	Repo              string     `json:"repo"`
-	Number            int        `json:"number"`
-	Title             string     `json:"title"`
-	URL               string     `json:"url"`
-	Author            string     `json:"author"`
-	CreatedAt         *time.Time `json:"created_at"`
-	MergedAt          *time.Time `json:"merged_at"`
-	FirstCommitAt     *time.Time `json:"first_commit_at"`
-	MergeCommitSHA    *string    `json:"merge_commit_sha"`
-	Additions         *int       `json:"additions"`
-	Deletions         *int       `json:"deletions"`
-	Rework            bool       `json:"rework"`
-	IssueKey          *string    `json:"issue"`
-	Sessions          []string   `json:"sessions"`
-	Partial           bool       `json:"partial"`
-	UnfetchableAt     *time.Time `json:"unfetchable_at"`
-	UnfetchableReason *string    `json:"unfetchable_reason"`
-	UpdatedAt         time.Time  `json:"updated_at"`
+	Repo              string             `json:"repo"`
+	Number            int                `json:"number"`
+	Title             string             `json:"title"`
+	URL               string             `json:"url"`
+	Author            string             `json:"author"`
+	CreatedAt         *time.Time         `json:"created_at"`
+	MergedAt          *time.Time         `json:"merged_at"`
+	FirstCommitAt     *time.Time         `json:"first_commit_at"`
+	MergeCommitSHA    *string            `json:"merge_commit_sha"`
+	Additions         *int               `json:"additions"`
+	Deletions         *int               `json:"deletions"`
+	Rework            bool               `json:"rework"`
+	IssueKey          *string            `json:"issue"`
+	Sessions          []string           `json:"sessions"`
+	Partial           bool               `json:"partial"`
+	UnfetchableAt     *time.Time         `json:"unfetchable_at"`
+	UnfetchableReason *string            `json:"unfetchable_reason"`
+	UpdatedAt         time.Time          `json:"updated_at"`
+	Attribution       *AttributionInputs `json:"-"`
 }
 
 // DeliveryRunKind distinguishes a deploy-workflow run (on pushes to the configured repository's
@@ -95,7 +97,9 @@ const (
 
 // DeliveryRun is one run of the deploy workflow or the PR-checks workflow on the configured
 // deploy repository, identified by (Repo, RunID). CompletedAt and Conclusion are nil while the
-// run is still in progress.
+// run is still in progress. HeadBranch and Event are GitHub's head_branch and event; both are nil
+// on a row stored before they were (the reconcile's backfill step fills them), and a nil counts in
+// no measure that filters on it.
 type DeliveryRun struct {
 	Repo         string                 `json:"repo"`
 	RunID        int64                  `json:"run_id"`
@@ -107,6 +111,8 @@ type DeliveryRun struct {
 	CompletedAt  *time.Time             `json:"completed_at"`
 	Conclusion   *DeliveryRunConclusion `json:"conclusion"`
 	URL          string                 `json:"url"`
+	HeadBranch   *string                `json:"head_branch"`
+	Event        *string                `json:"event"`
 }
 
 // DeliveryRunJob is one job of a DeliveryRun, identified within it by Name (GitHub does not
@@ -142,8 +148,9 @@ type DeliveryRunJobView struct {
 }
 
 // DeliveryPRView is one population pull request on `GET /api/v1/delivery/timeline` -- LEGION-294's
-// facts plus the two fields the server derives at read time from the stored facts,
-// DeployedStatus and (on DeliveryRunView) RootFailingJob. Mirrors
+// facts plus what the server derives at read time from the stored facts: DeployedStatus, the
+// linked issue's title, priority and effective components (the nearest ancestor's attachment, as
+// the issue read resolves it), and (on DeliveryRunView) RootFailingJob. Mirrors
 // packages/contracts/src/dispatch-api.ts's DeliveryPR exactly; ParentAgent and Sessions resolve to
 // the same set of sessions today (LEGION-567: no grouping link exists between sessions) -- see
 // agents.go's comment on the pair for why both still exist.
@@ -162,6 +169,9 @@ type DeliveryPRView struct {
 	Partial           bool           `json:"partial"`
 	Rework            bool           `json:"rework"`
 	Issue             *string        `json:"issue"`
+	IssueTitle        *string        `json:"issue_title"`
+	Priority          *string        `json:"priority"`
+	Components        []string       `json:"components"`
 	Sessions          []string       `json:"sessions"`
 	ParentAgent       *string        `json:"parent_agent"`
 	DeployRun         *int64         `json:"deploy_run"`
@@ -170,22 +180,38 @@ type DeliveryPRView struct {
 	UnfetchableReason *string        `json:"unfetchable_reason"`
 }
 
-// DeliveryRunView is one `kind: "deploy"` run on `GET /api/v1/delivery/timeline`: a successful
-// production deploy (sized by PRs, the PRs it shipped first) or a pipeline failure (FailedJobs,
-// RootFailingJob). Mirrors packages/contracts/src/dispatch-api.ts's DeliveryRun exactly. PRs is
-// always a slice, never nil, so it always serializes as `[]`, never `null`, for a run that shipped
-// no population PR (an ordinary case, not an edge case).
+// DeliveryRunProductionView is a run's production job (DeliverySettings.ProductionJobName): its
+// result and when it finished, both null while it runs. A successful one is a production deploy,
+// drawn at CompletedAt; a failed one is a pipeline failure even when no other job failed.
+type DeliveryRunProductionView struct {
+	Conclusion  *DeliveryJobConclusion `json:"conclusion"`
+	CompletedAt *time.Time             `json:"completed_at"`
+}
+
+// DeliveryShippedPRView is one population pull request a deploy run shipped first.
+type DeliveryShippedPRView struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+// DeliveryRunView is one deploy run on `GET /api/v1/delivery/timeline`: a production deploy
+// (Production succeeded; sized by PRs) and/or a pipeline failure (FailedJobs, RootFailingJob, or a
+// failed Production). Mirrors packages/contracts/src/dispatch-api.ts's DeliveryRun exactly. PRs
+// is every population pull request in the window the run shipped first, whatever facets the
+// request names, and is always a slice, never nil, so it serializes as `[]` for a run that
+// shipped none.
 type DeliveryRunView struct {
-	ID             int64                  `json:"id"`
-	URL            string                 `json:"url"`
-	HeadSHA        string                 `json:"head_sha"`
-	HeadAt         time.Time              `json:"head_at"`
-	StartedAt      time.Time              `json:"started_at"`
-	CompletedAt    *time.Time             `json:"completed_at"`
-	Conclusion     *DeliveryRunConclusion `json:"conclusion"`
-	FailedJobs     []DeliveryRunJobView   `json:"failed_jobs"`
-	RootFailingJob *DeliveryRunJobView    `json:"root_failing_job"`
-	PRs            []string               `json:"prs"`
+	ID             int64                      `json:"id"`
+	URL            string                     `json:"url"`
+	HeadSHA        string                     `json:"head_sha"`
+	HeadAt         time.Time                  `json:"head_at"`
+	StartedAt      time.Time                  `json:"started_at"`
+	CompletedAt    *time.Time                 `json:"completed_at"`
+	Conclusion     *DeliveryRunConclusion     `json:"conclusion"`
+	Production     *DeliveryRunProductionView `json:"production"`
+	FailedJobs     []DeliveryRunJobView       `json:"failed_jobs"`
+	RootFailingJob *DeliveryRunJobView        `json:"root_failing_job"`
+	PRs            []DeliveryShippedPRView    `json:"prs"`
 }
 
 // DeliveryFreshnessView is `GET /api/v1/delivery/timeline`'s freshness object: when intake last
@@ -205,12 +231,57 @@ type DeliveryWindowView struct {
 	To   time.Time `json:"to"`
 }
 
-// DeliveryTimelineResponse is `GET /api/v1/delivery/timeline?from&to&<facets>`: merges, deploys,
+// DeliveryComponentView names one architecture component a pull request's issue can carry: the
+// facet panel, the swimlanes and the drill-down show its title, and the component facet's
+// selection of a parent includes its children through Parent.
+type DeliveryComponentView struct {
+	Title  string  `json:"title"`
+	Parent *string `json:"parent"`
+}
+
+// DeliveryWaitingPRView is one pull request of the deploy repository that merged before the
+// window and had not shipped by its start, matching the request's facets and search: the
+// waiting-to-deploy line starts the window counting it, and stops when it ships.
+type DeliveryWaitingPRView struct {
+	MergedAt   time.Time  `json:"merged_at"`
+	DeployedAt *time.Time `json:"deployed_at"`
+}
+
+// DeliveryTimelineResponse is `GET /api/v1/delivery/timeline?from&to&q&<facets>`: merges, deploys,
 // pipeline failures and waiting-to-deploy PRs within [from, to) and the given facets. Runs holds
-// kind: "deploy" runs only; a deploy's shipped PRs are on each PR's DeployRun field.
+// deploy runs only. Waiting holds the pull requests that merged before the window and had not
+// shipped by its start, under the same facets and search. FacetCounts counts, per facet, the
+// window's pull requests by that facet's values with every other facet and the search applied and
+// its own selection ignored, so picking a value never zeroes its own count. ColorCounts counts
+// the window's pull requests by each colour-by facet's value with no facet applied, so a value
+// keeps its colour while facets change. Components names every component of the projects the
+// window's issues belong to, and IssueTitles every issue the window's pull requests name, so a
+// facet value a selection filtered out of PRs still has its label.
 type DeliveryTimelineResponse struct {
-	Window    DeliveryWindowView    `json:"window"`
-	PRs       []DeliveryPRView      `json:"prs"`
-	Runs      []DeliveryRunView     `json:"runs"`
-	Freshness DeliveryFreshnessView `json:"freshness"`
+	Window      DeliveryWindowView               `json:"window"`
+	PRs         []DeliveryPRView                 `json:"prs"`
+	Waiting     []DeliveryWaitingPRView          `json:"waiting"`
+	Runs        []DeliveryRunView                `json:"runs"`
+	FacetCounts map[string]map[string]int        `json:"facet_counts"`
+	ColorCounts map[string]map[string]int        `json:"color_counts"`
+	Components  map[string]DeliveryComponentView `json:"components"`
+	IssueTitles map[string]string                `json:"issue_titles"`
+	Freshness   DeliveryFreshnessView            `json:"freshness"`
+}
+
+// DeliveryRunJobDetailView is one job of `GET /api/v1/delivery/runs/{id}`: the drill-down's job
+// list, with each job's result and timings.
+type DeliveryRunJobDetailView struct {
+	Name        string                 `json:"name"`
+	StartedAt   *time.Time             `json:"started_at"`
+	CompletedAt *time.Time             `json:"completed_at"`
+	Conclusion  *DeliveryJobConclusion `json:"conclusion"`
+}
+
+// DeliveryRunDetailView is `GET /api/v1/delivery/runs/{id}`: one run of the deploy repository with
+// every job it ran, ordered by when each started (a job that never started last, then by name).
+type DeliveryRunDetailView struct {
+	ID   int64                      `json:"id"`
+	URL  string                     `json:"url"`
+	Jobs []DeliveryRunJobDetailView `json:"jobs"`
 }

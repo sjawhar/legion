@@ -167,7 +167,7 @@ dependency's license cannot be determined:
 | Documentation site (GitHub Pages) | [`THIRD_PARTY_NOTICES.txt`](https://sjawhar.github.io/legion/THIRD_PARTY_NOTICES.txt) |
 | `ghcr.io/sjawhar/legion/envoy`, `ghcr.io/sjawhar/legion-worker` images | `/usr/share/doc/legion/THIRD_PARTY_NOTICES` |
 | `legion-<os>-<arch>.tar.gz` (`legion-v*` releases) | `legion-<os>-<arch>/THIRD_PARTY_NOTICES` |
-| `legion-envoy-<arch>.tar.gz`, `agent-secrets-<arch>.tar.gz` (`legion-envoy-v*` releases) | `THIRD_PARTY_NOTICES`, `agent-secrets/THIRD_PARTY_NOTICES` |
+| `legion-envoy-<arch>.tar.gz`, `agent-secrets-<arch>.tar.gz`, `agent-secrets-darwin-<arch>.tar.gz` (`legion-envoy-v*` releases) | `THIRD_PARTY_NOTICES`, `agent-secrets/THIRD_PARTY_NOTICES` |
 
 `scripts/third-party-notices.ts` writes the JavaScript bundles' notices from the bundler's module
 list, `scripts/go-third-party-notices.sh` the Go programs' with go-licenses, and each image assembles

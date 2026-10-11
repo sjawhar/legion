@@ -1220,6 +1220,7 @@ func TestLoadReadsCapabilityDecisions(t *testing.T) {
     secrets: "dispatch://LEGION-205 enrolls pods later"
     model-fallback: one model route, nothing to fall back to
     resource-limits: "one tree per node; the pool's floor sizes it"
+    pool-capacity: "the pool is sized for the trees; the probe waits for room"
 `), noEnv)
 		if err != nil {
 			t.Fatalf("Load: %v", err)
@@ -1228,6 +1229,7 @@ func TestLoadReadsCapabilityDecisions(t *testing.T) {
 			capabilities.Secrets:        "dispatch://LEGION-205 enrolls pods later",
 			capabilities.ModelFallback:  "one model route, nothing to fall back to",
 			capabilities.ResourceLimits: "one tree per node; the pool's floor sizes it",
+			capabilities.PoolCapacity:   "the pool is sized for the trees; the probe waits for room",
 		}
 		if !reflect.DeepEqual(cfg.Capabilities.Decided, want) {
 			t.Errorf("Capabilities.Decided = %#v, want %#v", cfg.Capabilities.Decided, want)
@@ -1245,8 +1247,8 @@ func TestLoadReadsCapabilityDecisions(t *testing.T) {
 		}
 	})
 	for _, tc := range []struct{ name, line, want string }{
-		{"a name that is no deployment capability", `capabilities: {decided: {nonsense: "because"}}`, "unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback or resource-limits"},
-		{"an image row, which no decision covers", `capabilities: {decided: {browser: "no Chromium"}}`, "unknown key capabilities.decided.browser: a decision may name secrets, model-fallback or resource-limits"},
+		{"a name that is no deployment capability", `capabilities: {decided: {nonsense: "because"}}`, "unknown key capabilities.decided.nonsense: a decision may name secrets, model-fallback, resource-limits or pool-capacity"},
+		{"an image row, which no decision covers", `capabilities: {decided: {browser: "no Chromium"}}`, "unknown key capabilities.decided.browser: a decision may name secrets, model-fallback, resource-limits or pool-capacity"},
 		{"a blank reason", `capabilities: {decided: {secrets: "  "}}`, "capabilities.decided.secrets must not be empty"},
 		{"a null reason", `capabilities: {decided: {secrets: }}`, "capabilities.decided.secrets must not be empty"},
 		{"a reason that is not a string", `capabilities: {decided: {secrets: [a, b]}}`, "capabilities.decided.secrets must be a string"},

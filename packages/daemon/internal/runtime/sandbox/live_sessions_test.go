@@ -25,7 +25,7 @@ const liveSessionsSecretKey = "stage4a_sessions"
 // (session_store postgres), a new issue pod's role starts with Oh My Pi's two session variables and
 // the URL file mounted, and never the URL itself, in its agent's environment. The harness writes the
 // role's session into the table, as `legion sessions import` copies one whose volume is gone, dated
-// before the pod's workspace was created, under a path the tree volume holds no file at. Suspended,
+// before the pod's workspace was created, under a path the issue's volume holds no file at. Suspended,
 // the role is resumed from that path: a resume of a path the table lacks is refused by the role's
 // launcher, naming the table, before any child runs; the resume from the copied path registers,
 // though the volume holds no such file, since the launcher looked the session up in the table
@@ -73,14 +73,14 @@ func (r *liveRig) checkPostgresResume() error {
 
 	session := ompSessionsDir + "/" + SandboxName(c.token) + "-postgres.jsonl"
 	if out, err := r.exec(c, "sh", "-c", `test -e "$1" || echo absent`, "absent", session); err != nil || out != "absent" {
-		return fmt.Errorf("the tree volume holds %s (%q, %v), want no file there: the resume must be the table's alone", session, out, err)
+		return fmt.Errorf("the issue's volume holds %s (%q, %v), want no file there: the resume must be the table's alone", session, out, err)
 	}
 	written := since.Add(-time.Hour)
 	content := `{"type":"session","version":3,"id":"` + string(c.token) + `"}` + "\n"
 	if err := r.writeSession(session, content, written); err != nil {
 		return err
 	}
-	note("harness", "the session table holds %s (%d bytes, mtime_ms %s, before the pod's workspace was created); the tree volume holds no such file", session, len(content), written.UTC().Format(time.RFC3339))
+	note("harness", "the session table holds %s (%d bytes, mtime_ms %s, before the pod's workspace was created); the issue's volume holds no such file", session, len(content), written.UTC().Format(time.RFC3339))
 
 	if err := r.suspend(c); err != nil {
 		return err

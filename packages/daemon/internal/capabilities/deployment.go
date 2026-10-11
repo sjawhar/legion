@@ -10,9 +10,10 @@ import (
 )
 
 // Deployment is what the daemon knows of its deployment's capabilities: what its configuration
-// decides and sets, and what boot learned of the image, the broker and the pod's Oh My Pi. Report
-// renders every row of Table from it. A gap is reported, never refused (LEGION-578, "The check"):
-// a daemon that will not run its pods would itself keep workers from working.
+// decides and sets, and what boot learned of the image, the broker, the pod's Oh My Pi and the
+// pool's room for the probe. Report renders every row of Table from it. A gap is reported, never
+// refused (LEGION-578, "The check"): a daemon that will not run its pods would itself keep workers
+// from working.
 type Deployment struct {
 	// Decided is legion.yaml's capabilities.decided: the deployment rows the operator has decided,
 	// each with the reason, which the report shows in the gap's place.
@@ -37,6 +38,13 @@ type Deployment struct {
 	// (bootprobe.ImageReport) or the plugin gate read it under tmux, and "" when nothing has read
 	// it.
 	ModelFallback string
+	// ProbeCapacityWaits is how many of the image probe's attempts at boot ended with its pod
+	// Unschedulable — the pool had no room for the probe's reservation — before one scheduled
+	// (bootprobe.ImageReport.CapacityWaits); zero when the first pod scheduled, and under tmux,
+	// which runs no probe pod. ProbeCapacityReason is the scheduler's message on the last such
+	// pod; "" with no wait.
+	ProbeCapacityWaits  int
+	ProbeCapacityReason string
 }
 
 // The statuses a State carries: an image row is present or installed (as a Line is) or unchecked,
@@ -107,8 +115,9 @@ func (d Deployment) Open() []Name {
 
 // OpenFromConfiguration is the open rows the configuration alone decides, in Table order, which
 // `legion start --check-config` prints: resource-limits, and secrets where no broker is configured.
-// The rest is boot's to measure — a configured broker's login, and model fallback, which the probe
-// or the plugin gate reads — so the check says nothing of them.
+// The rest is boot's to measure — a configured broker's login, model fallback, which the probe or
+// the plugin gate reads, and pool capacity, which the probe's run measures — so the check says
+// nothing of them.
 func (d Deployment) OpenFromConfiguration() []State {
 	var open []State
 	for _, state := range d.openStates() {
@@ -232,6 +241,16 @@ func (d Deployment) measure(name Name) (bool, string) {
 				roles[i] = string(role)
 			}
 			return false, "roles without CPU and memory requests and limits under runtime.kubernetes.resources: " + strings.Join(roles, ", ")
+		}
+	case PoolCapacity:
+		switch {
+		case tmux:
+			return true, "the tmux runtime runs no probe pod"
+		case d.ProbeCapacityWaits == 0:
+			return true, "the image probe pod scheduled at its first attempt"
+		default:
+			return false, fmt.Sprintf("the image probe pod was Unschedulable %d time(s) at boot before it scheduled: %s; the pool had no room for its 250m / 1Gi reservation",
+				d.ProbeCapacityWaits, d.ProbeCapacityReason)
 		}
 	}
 	// Table names no other deployment row; TestEveryDeploymentRowIsMeasured holds it to this switch.

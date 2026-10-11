@@ -26,6 +26,7 @@ const (
 	ModelFallback        Name = "model-fallback"
 	Toolchain            Name = "toolchain"
 	ResourceLimits       Name = "resource-limits"
+	PoolCapacity         Name = "pool-capacity"
 	Network              Name = "network"
 	OperatorSetup        Name = "operator-setup"
 	ProductionIdentities Name = "production-identities"
@@ -86,6 +87,7 @@ var Table = []Capability{
 	{ModelFallback, SiteDeployment, "falls back to another model when its own is unavailable (retry.modelFallback)", "", ""},
 	{Toolchain, SiteImage, "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun and uv", "", ""},
 	{ResourceLimits, SiteDeployment, "runs within the CPU and memory the deployment's pod resources give it", "", ""},
+	{PoolCapacity, SiteDeployment, "starts in a Legion pool with room for the image probe's reservation at boot", "", ""},
 	{Network, SiteWithheld, "reaches beyond the pod's own network: the pod is the boundary", "dispatch://LEGION-5", ""},
 	{OperatorSetup, SiteWithheld, "installs or configures its own dependencies in the pod: Legion owns its dependencies", "dispatch://LEGION-200", ""},
 	{ProductionIdentities, SiteWithheld, "acts under a production identity of its own", "dispatch://LEGION-551, dispatch://LEGION-205", ""},

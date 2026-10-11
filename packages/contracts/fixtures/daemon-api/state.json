@@ -197,6 +197,11 @@
       "configLine": "capabilities.decided.resource-limits: \"\u003creason\u003e\""
     },
     {
+      "name": "pool-capacity",
+      "status": "present",
+      "detail": "the image probe pod scheduled at its first attempt"
+    },
+    {
       "name": "network",
       "status": "withheld",
       "detail": "dispatch://LEGION-5: reaches beyond the pod's own network: the pod is the boundary"

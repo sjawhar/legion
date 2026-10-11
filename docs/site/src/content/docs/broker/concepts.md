@@ -106,6 +106,10 @@ one KMS key, `BROKER_SECRETS_KMS_KEY_ARN`, and tagged with its owner and its tie
   or a service the broker is configured with (`BROKER_SERVICES`).
 - **`tier`** is `agent` or `human`.
 
+People write the secrets and their tags, not the broker: `agent-secrets secret` creates and
+changes them under the person's own AWS sign-in
+([manage a secret](/legion/broker/guides/manage-a-secret/)).
+
 Who gets a secret follows from those two tags alone:
 
 | The secret | Its owner's own session | Any other session or pod |
@@ -147,11 +151,12 @@ the person's own included, still get the secrets at once.
 The broker reads the namespace when it starts, and refuses to start when it cannot, then again every
 five minutes, a fixed time rather than a setting (`policyRefresh` in
 `packages/envoy/cmd/broker/main.go`). A change is served at once when something asks the broker to
-reread it: `POST /v1/secrets/{name}/reread`, which any caller may send right after writing a
-secret, and a request naming a secret the broker does not serve yet, which makes it reread that one
-name before refusing it (up to ten such rereads at once per session, refilled one every ten
-seconds: `DefaultMissRereads` in `packages/envoy/internal/broker/requests/machine_state.go`), so a
-secret created a moment ago is served on its first request. A reread reads the one secret from
+reread it: `POST /v1/secrets/{name}/reread`, which `agent-secrets secret` sends after each write it
+makes and any caller may send right after writing a secret, and a request naming a secret the
+broker does not serve yet, which makes it reread that one name before refusing it (up to ten such
+rereads at once per session, refilled one every ten seconds: `DefaultMissRereads` in
+`packages/envoy/internal/broker/requests/machine_state.go`), so a secret created a moment ago is
+served on its first request. A reread reads the one secret from
 Secrets Manager (`DescribeSecret`, which shows a write at once) and serves it, or stops serving it,
 as it finds it; a read of the whole namespace in the five minutes after reads that secret again
 alone, so a listing that has not caught up never undoes it (`Current.Refresh` in

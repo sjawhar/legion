@@ -91,6 +91,17 @@ smoke_spec() {
     "A review of the pull request may ask for one more line appended to that same file; that is in scope. Nothing else changes."
 }
 set_status() { dispatch_human PATCH "issues/$1" "$(jq -cn --arg status "$2" '{status:$status}')" >/dev/null; }
+# new_child TITLE PARENT creates a child issue of PARENT in the run's project, sets it todo, and
+# prints its key: a child of a live tree needs no `legion` label, since the daemon enters it under
+# its tree's architect itself once it is todo (the workflow's recordChildUnderLiveTree), and no spec,
+# since a proof's instructions hold its planner until the driver speaks. Both writes are the proof
+# human's (dispatch_human).
+new_child() {
+  local key
+  key=$(new_issue "$1" "$2") || return 1
+  set_status "$key" todo || return 1
+  printf '%s\n' "$key"
+}
 
 # ---- the daemon's state ---------------------------------------------------------------------------
 
