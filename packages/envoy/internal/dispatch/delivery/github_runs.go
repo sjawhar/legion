@@ -248,22 +248,42 @@ func ListWorkflowRunJobs(ctx context.Context, client *githubapp.Client, owner, r
 		if err := githubapp.CheckResponse(status, header, body); err != nil {
 			return nil, fmt.Errorf("list jobs of %s/%s run %d (page %d): %w", owner, repo, runID, page, err)
 		}
-		var payload jobsPayload
-		if err := json.Unmarshal(body, &payload); err != nil {
+		fetched, pageTotal, err := DecodeJobsPage(body)
+		if err != nil {
 			return nil, fmt.Errorf("decode jobs of %s/%s run %d (page %d): %w", owner, repo, runID, page, err)
 		}
-		total = payload.TotalCount
-		if len(payload.Jobs) == 0 {
+		total = pageTotal
+		if len(fetched) == 0 {
 			break
 		}
-		for _, j := range payload.Jobs {
-			jobs = append(jobs, FetchedJob{
-				Name:        j.Name,
-				StartedAt:   j.StartedAt,
-				CompletedAt: j.CompletedAt,
-				Conclusion:  j.Conclusion,
-			})
-		}
+		jobs = append(jobs, fetched...)
 	}
 	return jobs, nil
+}
+
+// DecodeJobsPage decodes one page of GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs: its
+// jobs, and how many jobs the run has in all.
+func DecodeJobsPage(body []byte) ([]FetchedJob, int, error) {
+	var payload jobsPayload
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return nil, 0, err
+	}
+	jobs := make([]FetchedJob, len(payload.Jobs))
+	for i, j := range payload.Jobs {
+		jobs[i] = FetchedJob{Name: j.Name, StartedAt: j.StartedAt, CompletedAt: j.CompletedAt, Conclusion: j.Conclusion}
+	}
+	return jobs, payload.TotalCount, nil
+}
+
+// RunJobs is one run's fetched jobs as intake and the reconcile store them (UpsertRunJobs), each
+// GitHub conclusion mapped to the schema's (mapJobConclusion).
+func RunJobs(repo string, runID int64, fetched []FetchedJob) []DeliveryRunJob {
+	jobs := make([]DeliveryRunJob, len(fetched))
+	for i, job := range fetched {
+		jobs[i] = DeliveryRunJob{
+			Repo: repo, RunID: runID, Name: job.Name, StartedAt: job.StartedAt,
+			CompletedAt: job.CompletedAt, Conclusion: mapJobConclusion(job.Conclusion),
+		}
+	}
+	return jobs
 }

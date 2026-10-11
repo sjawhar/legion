@@ -515,12 +515,7 @@ func deliveryProductionView(jobs []delivery.DeliveryRunJob, productionJobName st
 func (s *server) productionApplies(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, productionJobName string) []delivery.Apply {
 	applies, unmatched := delivery.ProductionApplies(runs, jobsByRun, productionJobName)
 	for _, missing := range unmatched {
-		type warnedRun struct {
-			repo    string
-			runID   int64
-			jobName string
-		}
-		if _, warned := s.warnedUnmatchedRuns.LoadOrStore(warnedRun{missing.Run.Repo, missing.Run.RunID, productionJobName}, struct{}{}); warned {
+		if _, warned := s.warnedUnmatchedRuns.LoadOrStore(warnedProductionRun{missing.Run.Repo, missing.Run.RunID, productionJobName}, struct{}{}); warned {
 			continue
 		}
 		slog.Warn("dispatch delivery: a successfully concluded run has no job matching the configured production_job_name -- it will never count as a deploy",

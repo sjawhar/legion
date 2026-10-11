@@ -412,9 +412,12 @@
   matching the configured production_job_name` for a deploy run that skipped its production job.
   GitHub lists a skipped call of a reusable workflow under the calling job's name alone, so a
   dev-only run lists `production-apply` where a deploy lists `production-apply / production-apply`.
-  Such a run still counts as no deploy. A run with no job by either name still warns, now once per
-  run and configured job name for the life of the process rather than on every read: one dev-only
-  run had been logging the line twice every three minutes (LEGION-567).
+  The skip is taken as the reason only while another run the same read judges holds a job by the
+  configured name, so a typo whose first part names a skipped job (`staging-apply /
+  production-apply`) still warns; a window with no production deploy in it warns for each of its
+  successful runs. Such a run still counts as no deploy. Every warning is now logged once per run
+  and configured job name for the life of the process rather than on every read: one dev-only run
+  had been logging the line twice every three minutes (LEGION-567).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

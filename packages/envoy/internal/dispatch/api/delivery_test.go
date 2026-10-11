@@ -511,11 +511,12 @@ func TestGetDeliveryRunListsEveryJob(t *testing.T) {
 // timeline and the measures, warn about a successfully concluded run on main that holds no job by
 // the configured production job name, and only once for it however often they read it. A dev-only
 // run is no deploy and draws no warning, whether it ran off main (neither read judges it) or on
-// main: dev-only-run-jobs.json is GitHub's job list for a main run whose dispatch applied dev
-// alone, where the configured production job (`production-apply / production-apply`, a reusable
-// workflow's job) is skipped and so listed under its calling job's name alone (`production-apply`).
-// The run on main with neither spelling of the job is the warning's case, a renamed or
-// misconfigured job, and shows the capture sees the WARN when one is written.
+// main beside a deploy: dev-only-run-jobs.json is GitHub's job list for a main run whose dispatch
+// applied dev alone, where the configured production job (`production-apply / production-apply`, a
+// reusable workflow's job) is skipped and so listed under its calling job's name alone
+// (`production-apply`), and the deploy's job of the configured name shows that name is real. The
+// run on main with neither spelling of the job is the warning's case, a renamed or misconfigured
+// job, and shows the capture sees the WARN when one is written.
 func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	ctx := t.Context()
@@ -530,34 +531,21 @@ func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read the recorded job list: %v", err)
 	}
-	var recorded struct {
-		Jobs []struct {
-			Name        string     `json:"name"`
-			Conclusion  string     `json:"conclusion"`
-			StartedAt   *time.Time `json:"started_at"`
-			CompletedAt *time.Time `json:"completed_at"`
-		} `json:"jobs"`
-	}
-	if err := json.Unmarshal(data, &recorded); err != nil {
+	recorded, _, err := delivery.DecodeJobsPage(data)
+	if err != nil {
 		t.Fatalf("decode the recorded job list: %v", err)
 	}
-	devOnly := make([]delivery.DeliveryRunJob, len(recorded.Jobs))
-	for i, job := range recorded.Jobs {
-		devOnly[i] = delivery.DeliveryRunJob{
-			Name: job.Name, StartedAt: job.StartedAt, CompletedAt: job.CompletedAt,
-			Conclusion: new(delivery.DeliveryJobConclusion(job.Conclusion)),
-		}
-	}
-	renamed := []delivery.DeliveryRunJob{{Name: "prod-apply / prod-apply", Conclusion: new(delivery.DeliveryJobConclusionSuccess)}}
 
 	start := time.Date(2026, 10, 10, 9, 47, 17, 0, time.UTC)
 	success := delivery.DeliveryRunConclusionSuccess
-	const offMain, devOnlyOnMain, renamedOnMain = int64(38041790207), int64(38041790208), int64(38041790209)
+	const offMain, devOnlyOnMain, renamedOnMain, deployOnMain = int64(38041790207), int64(38041790208), int64(38041790209), int64(38041790210)
+	renamed := []delivery.FetchedJob{{Name: "prod-apply / prod-apply", Conclusion: new("success")}}
+	deploy := []delivery.FetchedJob{{Name: "production-apply / production-apply", Conclusion: new("success"), CompletedAt: new(start.Add(10 * time.Minute))}}
 	for _, run := range []struct {
 		id     int64
 		branch string
-		jobs   []delivery.DeliveryRunJob
-	}{{offMain, "test/dev-only", renamed}, {devOnlyOnMain, "main", devOnly}, {renamedOnMain, "main", renamed}} {
+		jobs   []delivery.FetchedJob
+	}{{offMain, "test/dev-only", renamed}, {devOnlyOnMain, "main", recorded}, {renamedOnMain, "main", renamed}, {deployOnMain, "main", deploy}} {
 		id := strconv.FormatInt(run.id, 10)
 		if err := delivery.UpsertRun(ctx, database.Pool, delivery.DeliveryRun{
 			Repo: "acme/widgets", RunID: run.id, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha" + id,
@@ -566,11 +554,7 @@ func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("seed run %d: %v", run.id, err)
 		}
-		jobs := slices.Clone(run.jobs)
-		for i := range jobs {
-			jobs[i].Repo, jobs[i].RunID = "acme/widgets", run.id
-		}
-		if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", run.id, jobs); err != nil {
+		if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", run.id, delivery.RunJobs("acme/widgets", run.id, run.jobs)); err != nil {
 			t.Fatalf("seed run %d's jobs: %v", run.id, err)
 		}
 	}
