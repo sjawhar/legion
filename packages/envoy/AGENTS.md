@@ -2002,7 +2002,10 @@ renewal carrying it sets the column. 0012 is forward-only too: an older broker i
 with the column null, and so lets them renew without a token. A pod enrollment is ended only by the
 launcher credential that made it (`DELETE` by any other is `403 NOT_ENROLLING_CREDENTIAL`), so a
 Legion daemon that logs in again (a restart, or its login's expiry) leaves its earlier login's pods
-to their leases or to a revoke of that login.
+to their leases or to a revoke of that login. The renew route alone maps proof.ErrNotLive to
+`401 ENROLLMENT_NOT_LIVE`: a pod renewer stops only on it, `POD_IDENTITY_MISMATCH`, or
+`POD_TOKEN_REQUIRED`. Its iat/key/URL failures remain `PROOF_INVALID` and retry. Other session
+routes map a not-live proof to `PROOF_INVALID` as before.
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
@@ -2412,9 +2415,10 @@ launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route
 proves the caller is Dispatch, so every UI handler takes its subject from the path or body: a
 decision or a revoke names the deciding human in `approver`, and a list the person it lists for in
 `?approver=`, which Dispatch filled from its own session; an empty one is `400 APPROVER_REQUIRED`),
-so a handler cannot be wired to the wrong kind of caller. A bad
-credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); a store that cannot
-answer while authenticating is a 503 naming it. Every 500 is logged with its cause
+so a handler cannot be wired to the wrong kind of caller. A bad credential is a 401
+(`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); `renewAuth` alone adds
+`ENROLLMENT_NOT_LIVE` for a valid session proof that names an ended enrollment. A store that
+cannot answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
 against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
@@ -2663,11 +2667,12 @@ changes nothing. It locks the credential's row before the enrollments', and `Cre
 either commits first and is ended by it, or finds the credential revoked and is
 `401 LAUNCHER_INVALID`; the credential lock also makes two concurrent revokes write one
 `launcher_credential.revoked` row, and the enrollments' `for update` makes a revoke racing a
-launcher's own `Revoke` of one enrollment end it once. Nothing tells the machine: its helper's next
-renewal of a session is refused `PROOF_INVALID`, revoking that lapsed enrollment is refused
-`LAUNCHER_INVALID`, and the helper drops the credential as for any refusal; a helper with no live
-session learns it at its next enrollment, and the Legion daemon at its next pod enrollment or
-unenrollment, after which it starts a new
+launcher's own `Revoke` of one enrollment end it once. A helper renew that gets
+`ENROLLMENT_NOT_LIVE` (or an older broker's `PROOF_INVALID` whose message says `not live`) marks
+the session lapsed and re-enrolls it; a skewed/key/URL `PROOF_INVALID` keeps the lease and retries.
+Revoking that lapsed enrollment is refused `LAUNCHER_INVALID`, and the helper drops the credential
+as for any refusal; a helper with no live session learns it at its next enrollment, and the Legion
+daemon at its next pod enrollment or unenrollment, after which it starts a new
 machine login. Dispatch's machine-login page lists and revokes, through these two routes, the
 signed-in person's own machines' logins and every service's.
 

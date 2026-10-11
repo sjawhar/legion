@@ -113,7 +113,7 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 	case authLauncher:
 		subject, err := s.proofSubject(r)
 		switch {
-		case errors.Is(err, proof.ErrInvalid):
+		case errors.Is(err, proof.ErrInvalid), errors.Is(err, proof.ErrNotLive):
 			writeError(w, http.StatusUnauthorized, "LAUNCHER_INVALID", "the launcher credential is not valid")
 			return caller{}, false
 		case err != nil:
@@ -130,9 +130,16 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 			return caller{}, false
 		}
 		return caller{launcher: cred}, true
-	case authProof:
+	case authProof, authRenewProof:
 		subject, err := s.proofSubject(r)
 		switch {
+		case errors.Is(err, proof.ErrNotLive):
+			if auth == authRenewProof {
+				writeError(w, http.StatusUnauthorized, "ENROLLMENT_NOT_LIVE", "enrollment is not live")
+			} else {
+				writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "proof invalid: not live")
+			}
+			return caller{}, false
 		case errors.Is(err, proof.ErrInvalid):
 			writeError(w, http.StatusUnauthorized, "PROOF_INVALID", err.Error())
 			return caller{}, false

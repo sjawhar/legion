@@ -49,9 +49,9 @@ lease lapses. A `pod` enrollment's launcher is the one machine login that made i
 even another login of the same service, such as the Legion daemon's after a restart or after its
 login reached its expiry and it logged in again, is refused
 `NOT_ENROLLING_CREDENTIAL`, and that pod's enrollment ends with its lease or with that machine
-login. From the moment the lease lapses, the session's calls are refused `PROOF_INVALID`; the
-broker's sweep, which runs every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run
-after the lapse. Ending an enrollment any of these ways revokes every grant it held and cancels
+login. From the moment the lease lapses, its next renewal is refused
+`ENROLLMENT_NOT_LIVE`; other session calls remain `PROOF_INVALID`. The broker's sweep, which runs
+every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run after the lapse. Ending an
 every request it still had pending, so those leave the approver's Inbox and an approval can never
 land on a session that is gone
 (`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).

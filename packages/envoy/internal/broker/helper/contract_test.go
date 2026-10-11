@@ -417,8 +417,8 @@ func TestContractRevokingTheMachineLoginEndsItsSessionsAndTheHelperDropsIt(t *te
 	}
 	log := cr.logBuf.String()
 	if !strings.Contains(log, `msg="renew refused; revoking the lapsed enrollment before enrolling again"`) ||
-		!strings.Contains(log, "code=PROOF_INVALID enrollment_id="+reg.EnrollmentID) {
-		t.Fatalf("log:\n%s\nwant the session's renew refused PROOF_INVALID for %s", log, reg.EnrollmentID)
+		!strings.Contains(log, "code=ENROLLMENT_NOT_LIVE enrollment_id="+reg.EnrollmentID) {
+		t.Fatalf("log:\n%s\nwant the session's renew refused ENROLLMENT_NOT_LIVE for %s", log, reg.EnrollmentID)
 	}
 	if status := cr.call(t, Request{Op: "login-status"}); !status.OK || status.CredentialHeld || !status.LoginRefused || status.CredentialDropped != dropRefused || status.LoginState != "expired" {
 		t.Fatalf("login-status after the revoke: %+v; want expired, refused by the broker, none held", status)

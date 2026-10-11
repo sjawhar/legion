@@ -251,8 +251,8 @@ func TestAnyoneRevokesAServiceLogin(t *testing.T) {
 		t.Fatalf("revoke by bob, who approved nothing = %d %s, want 200 revoked", status, body)
 	}
 	for slot, pod := range pods {
-		if status, body := renew(pod); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "PROOF_INVALID" {
-			t.Fatalf("pod %s's renew after the revoke = %d %s, want 401 PROOF_INVALID", slot, status, body)
+		if status, body := renew(pod); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ENROLLMENT_NOT_LIVE" {
+			t.Fatalf("pod %s's renew after the revoke = %d %s, want 401 ENROLLMENT_NOT_LIVE", slot, status, body)
 		}
 		if status, body := values(slot); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "PROOF_INVALID" {
 			t.Fatalf("pod %s's values after the revoke = %d %s, want 401 PROOF_INVALID", slot, status, body)

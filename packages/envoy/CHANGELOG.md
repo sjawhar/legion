@@ -179,10 +179,12 @@
 - **Breaking:** a pod's renewal (`POST /v1/enrollments/{id}/renew`) carries the pod's current
   projected token as `pod_token`, and the broker refuses it `403 POD_IDENTITY_MISMATCH` unless the
   token names the pod UID and service account the enrollment was made for, and `403
-  POD_TOKEN_REQUIRED` without one. `agent-secrets renew --pod-token-file FILE` reads the file
-  before every renewal and sends it, and Legion's worker shim passes the projected token file. For
-  every pod enrollment this broker makes, a token copied out of a pod no longer keeps the
-  enrollment alive past the token's expiry. The pod enrollments that exist when migration 0012 runs
+  POD_TOKEN_REQUIRED` without one. A lapsed/revoked enrollment's next renewal is `401
+  ENROLLMENT_NOT_LIVE`, distinct from retryable `PROOF_INVALID` proof failures such as iat skew.
+  `agent-secrets renew --pod-token-file FILE` reads the file before every renewal and sends it, and
+  Legion's worker shim passes the projected token file. For every pod enrollment this broker makes,
+  a token copied out of a pod no longer keeps the enrollment alive past the token's expiry. The pod
+  enrollments that exist when migration 0012 runs
   still renew without a token, logged as `broker: pod enrollment renewed without its projected
   token`, until their first renewal with one; the hole stays open for those until they end. A box's
   or host's renewal carrying a token is `403 POD_IDENTITY_MISMATCH`. **Rollout:** ship the worker image whose

@@ -184,7 +184,7 @@ func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id stri
 	renewal, err := s.deps.Enroll.Renew(r.Context(), id, derefOr(body.PodToken, ""))
 	switch {
 	case errors.Is(err, enroll.ErrNotLive):
-		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "enrollment is not live")
+		writeError(w, http.StatusUnauthorized, "ENROLLMENT_NOT_LIVE", "enrollment is not live")
 		return
 	case errors.Is(err, enroll.ErrPodIdentity):
 		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
