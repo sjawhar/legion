@@ -236,14 +236,13 @@ func (s *Service) warmFork(ctx context.Context, write *liveWrite) (*crdt.Doc, er
 	if !incremental {
 		// The fork being replaced goes before its replacement is built, so the two are never
 		// held at once.
-		write.fork, write.forkedFrom, write.cold = nil, weak.Pointer[crdt.Doc]{}, false
+		write.releaseFork()
 	}
 	fork, err := buildFork(write, incremental, gained)
 	if err != nil {
 		// A fork an update failed to reach is in an unknown state, and so is the rendering taken
 		// from it: the next operation rebuilds both.
-		write.fork, write.forkedFrom = nil, weak.Pointer[crdt.Doc]{}
-		write.dropRendering()
+		write.releaseFork()
 		return nil, err
 	}
 	write.fork, write.forkedFrom, write.forkSeq, write.forkHold, write.cold = fork, weak.Make(room), seq, s.holdOf(room), false
