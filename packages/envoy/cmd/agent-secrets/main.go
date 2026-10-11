@@ -615,10 +615,7 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
-	flagArgs, ok := dropLegacyKind(flagArgs, takesValue, stderr)
-	if !ok {
-		return exitUsageError
-	}
+	flagArgs, kind, kindSet := dropLegacyKind(flagArgs, takesValue)
 	flags := newFlagSet("enroll", stderr)
 	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
@@ -631,16 +628,22 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls only through the local agent-secrets-helper socket)")
 		return exitUsageError
 	}
+	if kindSet && kind != "box" {
+		fmt.Fprintf(stderr, "agent-secrets enroll: --kind %q is not a kind enroll takes: every session a launcher enrolls is one kind, so leave --kind out\n", kind)
+		return exitUsageError
+	}
 	return cmdEnrollHelper(*runtimeID, *thumbprint, *sessionID, stdout, stderr)
 }
 
-// dropLegacyKind removes `--kind box` from enroll's flags: dotfiles' scripts/agentbox passes it on
-// every box it enrolls (`enroll --helper --kind box`), and agentbox runs from the shared dotfiles
-// checkout, which moves onto a call without it only after this CLI's release is pinned. Any other
-// --kind is a usage error naming the flag. This goes once scripts/agentbox on dotfiles' main passes
-// no --kind (`git grep -- '--kind' scripts/agentbox` finds none).
-func dropLegacyKind(flagArgs []string, takesValue map[string]bool, stderr io.Writer) ([]string, bool) {
-	kept := make([]string, 0, len(flagArgs))
+// dropLegacyKind removes --kind and its value from enroll's flags and returns that value, which
+// enroll accepts only as box: dotfiles' scripts/agentbox passes `--kind box` on every box it enrolls
+// (`enroll --helper --kind box`), and agentbox runs from the shared dotfiles checkout, which moves
+// onto a call without it only after this CLI's release is pinned. Enroll refuses any other --kind,
+// after --helper, so an enroll without --helper is refused for that first, as before. This goes
+// once scripts/agentbox on dotfiles' main passes no --kind (`git grep -- '--kind' scripts/agentbox`
+// finds none).
+func dropLegacyKind(flagArgs []string, takesValue map[string]bool) (kept []string, kind string, set bool) {
+	kept = make([]string, 0, len(flagArgs))
 	for i := 0; i < len(flagArgs); i++ {
 		name, value, inline := strings.Cut(strings.TrimLeft(flagArgs[i], "-"), "=")
 		if name != "kind" {
@@ -655,12 +658,9 @@ func dropLegacyKind(flagArgs []string, takesValue map[string]bool, stderr io.Wri
 			i++
 			value = flagArgs[i]
 		}
-		if value != "box" {
-			fmt.Fprintf(stderr, "agent-secrets enroll: --kind %q is not a kind enroll takes: every session a launcher enrolls is one kind, so leave --kind out\n", value)
-			return nil, false
-		}
+		kind, set = value, true
 	}
-	return kept, true
+	return kept, kind, set
 }
 
 // cmdEnrollHelper asks the local agent-secrets-helper daemon, over its unix socket, to enroll a

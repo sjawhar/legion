@@ -107,6 +107,25 @@ func TestEnrollHelperAsksForASessionKey(t *testing.T) {
 	}
 }
 
+// TestEnrollWithoutHelperNamesHelperWhateverKind: enroll without --helper is refused for that
+// first, whatever --kind it carries, as every release before the session kind refused it, so a
+// caller that pins that refusal (stage 4a's self-enroll negative, which runs `enroll --kind pod`
+// in a pod against whatever worker image it is given) reads the same answer from either release.
+func TestEnrollWithoutHelperNamesHelperWhateverKind(t *testing.T) {
+	binary := buildAgentSecrets(t)
+	sock, reqs := fakeHelperByOp(t, map[string]helper.Response{})
+	env := []string{"AGENT_SECRETS_HELPER_SOCK=" + sock}
+	for _, kind := range [][]string{{"--kind", "pod"}, {"--kind=box"}, {}} {
+		args := append(append([]string{"enroll"}, kind...), "--runtime-id", "pod-1", "--thumbprint", "tp-1")
+		if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", t.TempDir(), env, args...); exit != exitUsageError || !strings.Contains(stderr, "--helper is required") {
+			t.Fatalf("enroll %v without --helper = %d (stderr %q), want exit %d naming --helper", kind, exit, stderr, exitUsageError)
+		}
+	}
+	if ops := drainOps(reqs); len(ops) != 0 {
+		t.Fatalf("an enroll without --helper asked the helper %v, want nothing", ops)
+	}
+}
+
 // TestEnrollHelperFallsBackToAHelperBeforeTheSessionKey: a helper from before enroll-session-key
 // (every release before it, running until it restarts) answers it as an unknown op, and the CLI
 // asks it enroll-box and unenroll-box instead, saying so on stderr, so a session a launcher
