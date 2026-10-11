@@ -66,9 +66,9 @@ const (
 )
 
 // SuspendSource is who suspended a claim. The daemon resumes a suspended claim by rule — when it
-// owns its issue's current phase, or a notice waits for it (RequestRuleResume) — only when a known
-// daemon or exit suspension stopped it. An operator's suspension, and SuspendedByUnknown from a
-// pre-0038 row, hold until an operator resumes the claim.
+// owns its issue's current phase (RequestRuleResume) — only when a known daemon or exit suspension
+// stopped it. An operator's suspension, and SuspendedByUnknown from a pre-0038 row, hold until an
+// operator resumes the claim.
 type SuspendSource string
 
 const (

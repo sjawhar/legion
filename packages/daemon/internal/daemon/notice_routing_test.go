@@ -476,21 +476,16 @@ func TestANoticeForAnEndedArchitectFinishesWithoutDelivery(t *testing.T) {
 	}
 }
 
-// A root architect the operator suspended outside a linger comes back only when the operator
-// resumes it (`legion claims resume` or `deliver`): the rule resumes no claim an operator suspended,
-// so its notices are held for it, not finished, and do not resume it: the row waits, logged once,
-// and is delivered once the architect holds its role again. The fence is per architect, so the held
-// rows hold no other architect's notices.
+// A root architect the operator suspended outside a linger comes back when the operator resumes it
+// (`legion claims resume` or `deliver`), so its notices are held for it, not finished: the row waits,
+// logged once, and is delivered once the architect holds its role again. The fence is per
+// architect, so the held rows hold no other architect's notices.
 func TestANoticeForAnOperatorSuspendedRootIsHeldUntilItHoldsItsRoleAgain(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
 	noticeTree(t, pool, records, false)
-	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
-	root := mustClaimToken(t, "LEGION-1", claim.RoleArchitect)
-	if _, _, err := sup.Create(context.Background(), supervise.Claim{Token: root, Project: "legion", Tree: "LEGION-1", Issue: "LEGION-1",
-		Role: claim.RoleArchitect, State: supervise.StateSuspended, SuspendedBy: supervise.SuspendedByOperator}, ""); err != nil {
-		t.Fatalf("create the operator-suspended root: %v", err)
-	}
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	architectClaim(t, sup, "LEGION-1", supervise.StateSuspended)
 	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, time.Now()))
 	var logged bytes.Buffer
 	clock := time.Now()
@@ -507,9 +502,6 @@ func TestANoticeForAnOperatorSuspendedRootIsHeldUntilItHoldsItsRoleAgain(t *test
 	}
 	if _, delivered := publisher.snapshot(); len(delivered) != 0 || outboxRows(t, pool) != 1 || strings.Count(logged.String(), "msg=\"outbox row waits\" row=1 kind=notice ") != 1 {
 		t.Fatalf("while the suspended root holds no role: delivered %+v, %d rows, log %q; want the row held, logged once", delivered, outboxRows(t, pool), logged.String())
-	}
-	if machine, _ := sup.Machine(root); len(resumesOf(rt, root)) != 0 || machine.Claim().State != supervise.StateSuspended {
-		t.Fatalf("the operator-suspended root was resumed %d times and is %s, want it left suspended", len(resumesOf(rt, root)), machine.Claim().State)
 	}
 	publisher.setAbsent()
 	if err := runner.RunOnce(context.Background()); err != nil {

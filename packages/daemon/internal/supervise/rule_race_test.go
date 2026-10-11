@@ -5,13 +5,13 @@ import (
 	"testing"
 )
 
-// The operator's suspend can arrive after a notice's RequestRuleResume changed the claim from
+// The operator's suspend can arrive after a phase start's RequestRuleResume changed the claim from
 // suspended to launching. It is retained through that launch and takes the claim over as soon as
 // the agent is ready, rather than being refused in launching and losing the operator's hold.
 func TestAnOperatorSuspendRacingARuleResumeIsHeldAcrossTheLaunch(t *testing.T) {
 	h := newHarness(t)
 	suspendedBy(h, SuspendedByDaemon)
-	h.must(RequestRuleResume{Claim: testToken, Reason: "a notice waits for it"})
+	h.must(RequestRuleResume{Claim: testToken, Reason: "it owns its issue's phase"})
 	h.wantState(StateLaunching)
 
 	if err := h.handle(RequestSuspend{Claim: testToken, Reason: "the operator suspended it", By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {

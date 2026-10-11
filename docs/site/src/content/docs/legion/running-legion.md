@@ -372,9 +372,11 @@ Closing the terminal leaves the project without one, and the daemon logs
    `suspensionHeld`. The resumed agent continues the same conversation in a new pod.
 
    **An operator's suspension holds until the operator resumes the claim.** The daemon resumes a
-   suspended claim on its own when the claim owns its issue's current phase (at boot, at
-   re-admission, and whenever the phase moves to its role) or when a notice waits for it, but never
-   one an operator suspended: a phase start or a notice for it waits instead. A drain therefore ends
+   suspended claim on its own only when the claim owns its issue's current phase (at boot, at
+   re-admission, and whenever the phase moves to its role) and the daemon or the agent's own exit
+   suspended it; a phase start for a claim an operator suspended waits instead. A notice for a
+   suspended architect resumes nothing: it waits until the architect holds its role again, so an
+   operator-suspended architect receives it when the operator resumes it. A drain therefore ends
    with the operator resuming every claim they suspended, one `legion claims resume` each;
    `legion claims list --json` names each one's `suspendedBy` (`unknown`, `operator`, `daemon` or
    `exit`). The daemon's own suspension of a claim in a turn (its issue left the workflow, or its

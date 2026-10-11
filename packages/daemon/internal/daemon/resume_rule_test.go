@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"errors"
-	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -65,23 +64,6 @@ func launchedClaim(t *testing.T, sup *supervisor, tree, issue string, role claim
 	return token
 }
 
-// exitedArchitect is LEGION-1's tree architect, ready, whose agent then reported its own exit: an
-// exit suspends a tree's root (supervise's exit), which is what an architect leaves behind while it
-// waits for its tree's workers.
-func exitedArchitect(t *testing.T, sup *supervisor) claim.Token {
-	t.Helper()
-	token := launchedClaim(t, sup, "LEGION-1", "LEGION-1", claim.RoleArchitect)
-	machine, _ := sup.Machine(token)
-	if err := machine.Handle(context.Background(), supervise.RequestExit{Claim: token, Generation: machine.Claim().Generation,
-		Session: "ses-architect", Reason: "the tree waits on its workers"}); err != nil {
-		t.Fatalf("the architect's exit: %v", err)
-	}
-	if got := machine.Claim().State; got != supervise.StateSuspended {
-		t.Fatalf("the exited architect is %s, want suspended", got)
-	}
-	return token
-}
-
 // resumesOf is the runtime's Resume calls for token's claim.
 func resumesOf(rt *fake.Runtime, token claim.Token) []fake.Call {
 	var of []fake.Call
@@ -93,137 +75,49 @@ func resumesOf(rt *fake.Runtime, token claim.Token) []fake.Call {
 	return of
 }
 
-// A worker's completion reaches its architect only as a notice on the architect's role topic. An
-// architect whose agent exited holds no role, so the notice waits; nothing else would resume the
-// architect, and the notice would wait for ever. The notice resumes it instead: the architect
-// relaunches its own session, and once it holds its role again every notice held for it arrives,
-// in the order the notices were written.
-func TestANoticeForAnArchitectThatExitedResumesItAndArrivesInOrder(t *testing.T) {
+// The boot's start of a daemon-suspended phase owner resumes it by rule. If that owner can never
+// launch, the resume spends its launch budget and the claim fails; the start row then finishes
+// rather than retrying the failed claim with fresh budgets (RequestRetry), so the owner is launched
+// exactly the budget's times however many ticks follow, and stays failed for the boot report.
+func TestABootRuleResumeThatSpendsTheLaunchBudgetFinishes(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()
-	noticeTree(t, pool, records, false)
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: phase.Testing, Generation: 1, Status: "testing"}
+	putOutboxIssue(t, pool, records, issue)
 	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
-	architect := exitedArchitect(t, sup)
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now()))
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-3", record.Notice{Kind: "pr-blocked", Role: claim.RoleArchitect, Reason: "max_fix_attempts"}, time.Now()))
-	clock := time.Now()
-	publisher := &holderPublisher{}
-	publisher.setAbsent(architectTopic(t, "LEGION-1"))
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
-		project: "legion", now: func() time.Time { return clock }}
-	ctx := context.Background()
-
-	if err := runner.RunOnce(ctx); err != nil {
-		t.Fatalf("run the held notices: %v", err)
+	tester := launchedClaim(t, sup, issue.Tree, issue.Key, claim.RoleTester)
+	machine, _ := sup.Machine(tester)
+	if err := machine.Handle(context.Background(), supervise.RequestSuspend{Claim: tester, Reason: "LEGION-208 is backlog", By: supervise.SuspendedByDaemon}); err != nil {
+		t.Fatalf("the daemon's suspend: %v", err)
 	}
-	machine, _ := sup.Machine(architect)
-	testwait.Eventually(t, "the exited architect to be resumed for the notice waiting on it", func() bool {
-		return machine.View().State == supervise.StateLaunching && len(resumesOf(rt, architect)) == 1
-	})
-	if resume := resumesOf(rt, architect)[0]; resume.Spec.ResumeSessionFile != "/tmp/architect.jsonl" {
-		t.Fatalf("resumed %+v, want the architect's own session", resume.Spec)
-	}
-	if _, delivered := publisher.snapshot(); len(delivered) != 0 || outboxRows(t, pool) != 2 {
-		t.Fatalf("before the architect holds its role: delivered %+v with %d rows, want both notices held", delivered, outboxRows(t, pool))
-	}
-
-	// The relaunched architect takes its role back.
-	readyClaimOf(t, sup, architect, claim.RoleArchitect)
-	publisher.setAbsent()
-	for tick := range 3 {
-		clock = clock.Add(2 * time.Minute)
-		if err := runner.RunOnce(ctx); err != nil {
-			t.Fatalf("tick %d after the architect returned: %v", tick, err)
-		}
-	}
-	_, delivered := publisher.snapshot()
-	if got := deliveredKinds(t, delivered); fmt.Sprint(got) != "[phase-finished to LEGION-1 pr-blocked to LEGION-1]" || outboxRows(t, pool) != 0 {
-		t.Fatalf("delivered %v with %d rows left, want both notices in the order written and none left", got, outboxRows(t, pool))
-	}
-	if resumes := resumesOf(rt, architect); len(resumes) != 1 {
-		t.Fatalf("the architect was resumed %d times, want once", len(resumes))
-	}
-}
-
-// A claim the rule resumes and whose launch keeps failing is not resumed for ever: each attempt is
-// charged to its launch budget as any other launch is, the claim fails once the budget is spent,
-// and a failed claim is never resumed by rule. The notice waiting on it then finishes undelivered,
-// and later ticks launch nothing.
-func TestAnArchitectResumedForANoticeStopsAtItsLaunchBudget(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	noticeTree(t, pool, records, false)
-	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
-	architect := exitedArchitect(t, sup)
 	unschedulable := errors.New("the pod was never scheduled")
-	for range 10 {
+	for range 20 {
 		rt.ScriptResume(fake.SpawnResult{Err: unschedulable})
 	}
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "phase-finished", Role: claim.RolePlanner, Phase: phase.Planning}, time.Now()))
 	clock := time.Now()
-	publisher := &holderPublisher{}
-	publisher.setAbsent(architectTopic(t, "LEGION-1"))
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
-		project: "legion", now: func() time.Time { return clock }}
-	ctx := context.Background()
-	machine, _ := sup.Machine(architect)
+	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, supervisor: sup, project: "legion",
+		now: func() time.Time { return clock }}
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "start", Tree: issue.Tree, Role: claim.RoleTester,
+		Generation: 1, Phase: phase.Testing, Task: workflow.ResumePhaseTask(issue), ResumeTask: true, RuleResume: true}, clock))
 
-	if err := runner.RunOnce(ctx); err != nil {
-		t.Fatalf("run the held notice: %v", err)
-	}
-	testwait.Eventually(t, "the resumed architect to fail at its launch budget", func() bool {
-		return machine.View().State == supervise.StateFailed
-	})
-	for tick := range 5 {
-		clock = clock.Add(2 * time.Minute)
-		if err := runner.RunOnce(ctx); err != nil {
-			t.Fatalf("tick %d after the architect failed: %v", tick, err)
+	for tick := range 6 {
+		if err := runner.RunOnce(context.Background()); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
 		}
+		machine.Wait()
+		clock = clock.Add(2 * time.Minute)
 	}
-	machine.Wait()
 	limit := sup.deps.Limits.LaunchFailures
-	if resumes := resumesOf(rt, architect); len(resumes) != limit {
-		t.Fatalf("the architect was launched %d times, want its launch budget of %d and no more", len(resumes), limit)
-	}
-	if got := machine.Claim().State; got != supervise.StateFailed {
-		t.Fatalf("the architect is %s, want failed", got)
-	}
-	if _, delivered := publisher.snapshot(); len(delivered) != 0 || outboxRows(t, pool) != 0 {
-		t.Fatalf("delivered %+v with %d rows left, want the notice finished undelivered", delivered, outboxRows(t, pool))
-	}
-}
-
-// A lingering tree's claims stay suspended: the rule resumes nothing of a tree that has left the
-// workflow, and a notice of it finishes undelivered rather than resuming the architect that
-// exited. Re-admission, a person's todo, is what runs the tree again.
-func TestANoticeOfALingeringTreeDoesNotResumeItsArchitect(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	noticeTree(t, pool, records, true)
-	sup, rt := newOutboxSupervisor(t, "legion", t.TempDir())
-	architect := exitedArchitect(t, sup)
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, "LEGION-2", record.Notice{Kind: "child-closed", Role: claim.RoleArchitect, Reason: "LEGION-2 is done"}, time.Now()))
-	publisher := &holderPublisher{}
-	publisher.setAbsent(architectTopic(t, "LEGION-1"))
-	runner := &outbox{log: quietLogger(), pool: pool, dispatchProject: "LEGION", records: records, notices: publisher, supervisor: sup,
-		project: "legion", now: time.Now}
-
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("run the notice: %v", err)
-	}
-	machine, _ := sup.Machine(architect)
-	machine.Wait()
-	if got := machine.Claim().State; got != supervise.StateSuspended || len(resumesOf(rt, architect)) != 0 || outboxRows(t, pool) != 0 {
-		t.Fatalf("the lingering tree's architect is %s with %d resumes and %d rows left, want it suspended, never resumed, the notice finished",
-			got, len(resumesOf(rt, architect)), outboxRows(t, pool))
+	if got := machine.Claim().State; got != supervise.StateFailed || len(resumesOf(rt, tester)) != limit || outboxRows(t, pool) != 0 {
+		t.Fatalf("after six ticks the tester is %s after %d launches with %d rows left; want failed after its budget of %d launches and the row finished",
+			got, len(resumesOf(rt, tester)), outboxRows(t, pool), limit)
 	}
 }
 
 // The linger's suspension of a claim in a turn waits for that turn to end. An architect's sign-off,
-// which moves its tree into linger, is a tool call inside a turn that goes on after it, and a
-// resumed architect's turn acting on a notice is no shorter: stopping either at the stop timeout
-// cuts off what the turn was doing. The linger's own expiry, which closes the tree whatever its
-// claims are doing, bounds the wait.
+// which moves its tree into linger, is a tool call inside a turn that goes on after it: stopping it
+// at the stop timeout cuts off what the turn was doing. The linger's own expiry, which closes the
+// tree whatever its claims are doing, bounds the wait.
 func TestTheLingersSuspensionWaitsForTheArchitectsTurnToEnd(t *testing.T) {
 	pool := isolatedOutboxPool(t)
 	records := record.NewStore()

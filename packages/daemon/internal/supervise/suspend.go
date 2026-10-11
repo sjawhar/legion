@@ -40,7 +40,7 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 //     to drain the daemon, say — needs the stop bounded. The daemon's own suspension (its issue left
 //     the workflow, or its tree lingers) waits for the turn however long it takes: what bounds it is
 //     what ends the process anyway, the tree's close when its linger expires or the child's close
-//     as done, and a turn a notice started is cut off by neither. Asked again meanwhile, it is the
+//     as done. Asked again meanwhile, it is the
 //     same hold, its timeout unchanged, except that the operator's suspend takes a daemon's hold
 //     over: from then on it is the operator's, and its stop timeout runs from then. Until it runs the
 //     agent keeps its process and its capability.

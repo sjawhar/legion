@@ -298,7 +298,7 @@ func fenced(ev Event, c Claim) Event {
 	case RequestResume:
 		return RequestResume{Claim: c.Token}
 	case RequestRuleResume:
-		return RequestRuleResume{Claim: c.Token, Reason: "a notice waits for it"}
+		return RequestRuleResume{Claim: c.Token, Reason: "it owns its issue's phase"}
 	case RequestStop:
 		return RequestStop{Claim: c.Token}
 	case RequestRetry:

@@ -381,21 +381,10 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if err != nil {
 		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
 	}
-	held := r.supervisedClaim(architect)
-	if stoppedWithTree(tree.root.Lingers(), held) {
+	if held := r.supervisedClaim(architect); stoppedWithTree(tree.root.Lingers(), held) {
 		r.log.Info("outbox notice finished undelivered: its architect stopped with its finished tree",
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", held.State, "stopping", held.Stopping)
 		return nil
-	}
-	// A notice waiting on an architect the daemon or its own exit suspended resumes it, on the
-	// claim's own goroutine so no relaunch holds the runner: once it holds its role again its ready
-	// releases the notices held for it (releaseWaiting), in the order they were written. An
-	// operator-suspended or unknown pre-0038 architect is not resumed; the publish below meets no
-	// holder, and the notice waits for the operator's resume.
-	if held.Claim.RuleMayResume() {
-		r.supervisor.post(architect, supervise.RequestRuleResume{Claim: architect,
-			Reason: fmt.Sprintf("notice row %d (%s on %s) waits for it", row.ID, payload.Kind, row.Issue)})
-		return fmt.Errorf("%w: %s is suspended, and is resumed for notice row %d", errNoticeWaits, architect, row.ID)
 	}
 	if earlier := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)

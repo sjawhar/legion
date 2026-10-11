@@ -10,7 +10,7 @@ import (
 func TestAnOperatorLaunchHoldOutranksADaemonSuspendBeforeReady(t *testing.T) {
 	h := newHarness(t)
 	suspendedBy(h, SuspendedByDaemon)
-	h.must(RequestRuleResume{Claim: testToken, Reason: "a notice waits for it"})
+	h.must(RequestRuleResume{Claim: testToken, Reason: "it owns its issue's phase"})
 	if err := h.handle(RequestSuspend{Claim: testToken, Reason: "the operator suspended it", By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("operator suspend = %v, want ErrSuspendHeld", err)
 	}
@@ -39,7 +39,7 @@ func TestAnOperatorLaunchHoldOutranksADaemonSuspendAfterRegistration(t *testing.
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			suspendedBy(h, SuspendedByDaemon)
-			h.must(RequestRuleResume{Claim: testToken, Reason: "a notice waits for it"})
+			h.must(RequestRuleResume{Claim: testToken, Reason: "it owns its issue's phase"})
 			if err := h.handle(RequestSuspend{Claim: testToken, Reason: "the operator suspended it", By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 				t.Fatalf("operator suspend = %v, want ErrSuspendHeld", err)
 			}

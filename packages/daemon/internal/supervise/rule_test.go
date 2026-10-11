@@ -96,13 +96,13 @@ func TestTheRuleResumesOnlyKnownDaemonOrExitSuspensions(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			tc.suspend(h)
-			h.must(RequestRuleResume{Claim: testToken, Reason: "a notice waits for it"})
+			h.must(RequestRuleResume{Claim: testToken, Reason: "it owns its issue's phase"})
 			if tc.resumed {
 				h.wantState(StateLaunching)
 				if resume := h.wantCalls("Resume", 1)[0]; resume.Spec.ResumeSessionFile != sessionFile {
 					t.Errorf("resumed %+v, want the claim's own session", resume.Spec)
 				}
-				if lines := h.logs.lines(`msg="supervise: resuming by rule"`, `rule="a notice waits for it"`); len(lines) != 1 {
+				if lines := h.logs.lines(`msg="supervise: resuming by rule"`, `rule="it owns its issue's phase"`); len(lines) != 1 {
 					t.Errorf("resume lines %q, want one naming the rule", lines)
 				}
 				return

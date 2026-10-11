@@ -11,7 +11,7 @@ import (
 func TestAReadyTimeOperatorSuspendFailureRetriesItsHold(t *testing.T) {
 	h := newHarness(t)
 	suspendedBy(h, SuspendedByDaemon)
-	h.must(RequestRuleResume{Claim: testToken, Reason: "a notice waits for it"})
+	h.must(RequestRuleResume{Claim: testToken, Reason: "it owns its issue's phase"})
 	if err := h.handle(RequestSuspend{Claim: testToken, Reason: "the operator suspended it", By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("operator suspend during launch = %v, want ErrSuspendHeld", err)
 	}
@@ -38,7 +38,7 @@ func TestAReadyTimeOperatorSuspendFailureRetriesItsHold(t *testing.T) {
 func TestRegistrationDeadlineCompletesTheHeldOperatorSuspend(t *testing.T) {
 	h := newHarness(t)
 	suspendedBy(h, SuspendedByDaemon)
-	h.must(RequestRuleResume{Claim: testToken, Reason: "a notice waits for it"})
+	h.must(RequestRuleResume{Claim: testToken, Reason: "it owns its issue's phase"})
 	if err := h.handle(RequestSuspend{Claim: testToken, Reason: "the operator suspended it", By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("operator suspend during launch = %v, want ErrSuspendHeld", err)
 	}

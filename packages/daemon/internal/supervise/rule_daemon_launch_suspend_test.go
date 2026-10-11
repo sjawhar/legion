@@ -11,7 +11,7 @@ import (
 func TestADaemonSuspendDuringARuleResumeLaunchIsHeldUntilReady(t *testing.T) {
 	h := newHarness(t)
 	suspendedBy(h, SuspendedByDaemon)
-	h.must(RequestRuleResume{Claim: testToken, Reason: "a notice waits for it"})
+	h.must(RequestRuleResume{Claim: testToken, Reason: "it owns its issue's phase"})
 	if err := h.handle(RequestSuspend{Claim: testToken, Reason: "the tree lingers", By: SuspendedByDaemon}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("daemon suspend during launch = %v, want ErrSuspendHeld", err)
 	}
