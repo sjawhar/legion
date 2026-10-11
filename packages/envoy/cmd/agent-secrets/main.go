@@ -72,22 +72,19 @@ import (
 	"github.com/sjawhar/envoy/internal/buildversion"
 )
 
-// Exit codes beyond 0 (done) and 1 (failed): 75 (EX_TEMPFAIL) and 77 (EX_NOPERM) follow BSD
-// sysexits.h, chosen so a caller of the "request" and NAME... -- <command> forms can tell "still
-// waiting" from "refused" without parsing stderr, and 126 and 127 are the shell's own for a command
-// that cannot run or is not there. Each carries a comment, and every exit code is 0, 1 or one of
-// these: the broker's generated error reference (cmd/broker-refgen) prints them and refuses a code
-// without a comment or a function that returns any other.
+// Exit codes beyond 0 and 1 use BSD sysexits.h values where applicable. Every value returned by
+// this command is listed here so broker-refgen can document it.
 const (
-	exitUsageError  = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
-	exitPending     = 75  // the request is still waiting for a person to approve it; nothing was run
-	exitDenied      = 77  // the request was denied; nothing was run
-	exitCannotRun   = 126 // the command `register --exec` was given exists but could not be run
-	exitNotFound    = 127 // the command `register --exec` was given was not found
-	exitHangup      = 129 // the value prompt received SIGHUP: the terminal is restored and the process ends by SIGHUP; nothing was written
-	exitInterrupted = 130 // `secret create` or `secret set` was interrupted (Ctrl-C) at the value prompt: the process ends by SIGINT, which a shell's $? reads as 130; nothing was written
-	exitQuit        = 131 // `secret create` or `secret set` quit (Ctrl-\) at the value prompt: the process ends by SIGQUIT, which a shell's $? reads as 131; nothing was written
-	exitTerminated  = 143 // `secret create` or `secret set` was terminated (SIGTERM) at the value prompt: the process ends by SIGTERM, which a shell's $? reads as 143; nothing was written
+	exitUsageError   = 2   // usage error: a flag, argument, token file, or required environment value is invalid
+	exitPending      = 75  // request still waiting for a person to approve it
+	exitRenewRefused = 76  // renew reached a permanent broker refusal; the worker shim must not restart it
+	exitDenied       = 77  // request denied
+	exitCannotRun    = 126 // register --exec command exists but could not run
+	exitNotFound     = 127 // register --exec command was not found
+	exitHangup       = 129 // secret prompt received SIGHUP
+	exitInterrupted  = 130 // secret prompt received SIGINT
+	exitQuit         = 131 // secret prompt received SIGQUIT
+	exitTerminated   = 143 // secret prompt received SIGTERM
 )
 
 // command is one form of agent-secrets, as usage lists it and its own -h describes it.
@@ -164,7 +161,7 @@ environment:
                              form needs a sign-in in the broker's account, and a write your own
                              Identity Center sign-in there
 
-exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
+exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 76 permanent renewal refusal, 77 denied;
 register --exec exits 127 when COMMAND is not found and 126 when it cannot run;
 secret create and set end by the signal on hang-up (SIGHUP), interrupt (Ctrl-C), quit (Ctrl-\)
 or termination (SIGTERM) at the value prompt: a shell reports 129, 130, 131 or 143
@@ -369,6 +366,20 @@ func readTrimmed(path string) (string, error) {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
 	return strings.TrimSpace(string(data)), nil
+}
+
+// readPodToken reads a projected pod token through the package's one file-reader and refuses an
+// empty trimmed value. The caller never converts a blank file into a bodyless renewal: a pod given
+// --pod-token-file either sends a token or makes no request.
+func readPodToken(path string) (string, error) {
+	token, err := readTrimmed(path)
+	if err != nil {
+		return "", err
+	}
+	if token == "" {
+		return "", fmt.Errorf("pod token file %s is empty", path)
+	}
+	return token, nil
 }
 
 // writeFileAtomic writes data to path by renaming a finished temporary file into place, so no
@@ -676,12 +687,17 @@ func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
 // renew
 // ---------------------------------------------------------------------------
 
+// renewAfter is the renewal loop's one wait. Tests replace it so every renewal step is a channel
+// send, not a wall-clock delay.
+var renewAfter = time.After
+
 // cmdRenew renews this session's enrollment until interrupted. With --pod-token-file (a pod; the
 // Legion worker shim passes the projected token file the runtime mounts) every renewal reads the
 // file again and sends its contents as pod_token, since the kubelet rotates the token in place;
 // the broker verifies it against the enrollment's pod UID and service account. Without the flag a
 // renewal has no body, a box's renewal. A broker that predates the token reads no renew body, so a
-// renewal carrying one still renews there.
+// renewal carrying one still renews there. A permanent 4xx refusal exits exitRenewRefused (76), so
+// the worker shim stops rather than restarting an identity or token error forever.
 func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, map[string]bool{"pod-token-file": true})
 	flags := newFlagSet("renew", stderr)
@@ -704,13 +720,7 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	}
 	podToken := func() (string, error) { return "", nil }
 	if *podTokenFile != "" {
-		podToken = func() (string, error) {
-			raw, err := os.ReadFile(*podTokenFile)
-			if err != nil {
-				return "", fmt.Errorf("read the pod's projected token: %w", err)
-			}
-			return strings.TrimSpace(string(raw)), nil
-		}
+		podToken = func() (string, error) { return readPodToken(*podTokenFile) }
 		if _, err := podToken(); err != nil {
 			fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
 			return exitUsageError
@@ -718,7 +728,10 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	c := newClient(base)
+	return renewLoop(ctx, newClient(base), signer, enrollmentID, podToken, stderr, renewAfter)
+}
+
+func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, podToken func() (string, error), stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
 	backoff := 2 * time.Second
 	for {
 		token, err := podToken()
@@ -730,19 +743,16 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 			if ctx.Err() != nil {
 				return 0
 			}
-			// The broker answering with a refusal (401 PROOF_INVALID: the enrollment is gone) is
-			// final; anything else — a restart, a network blip, a 5xx — is retried until the lease
-			// would be lost anyway.
 			var refused *apiError
-			if errors.As(err, &refused) && refused.Status/100 == 4 {
+			if errors.As(err, &refused) && refused.Permanent() {
 				fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
-				return 1
+				return exitRenewRefused
 			}
 			fmt.Fprintf(stderr, "agent-secrets renew: %v; retrying in %s\n", err, backoff)
 			select {
 			case <-ctx.Done():
 				return 0
-			case <-time.After(backoff):
+			case <-after(backoff):
 			}
 			backoff = nextBackoff(backoff)
 			continue
@@ -755,7 +765,7 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 		select {
 		case <-ctx.Done():
 			return 0
-		case <-time.After(lease / 3):
+		case <-after(lease / 3):
 		}
 	}
 }
