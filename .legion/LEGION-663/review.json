@@ -1,0 +1,72 @@
+{
+  "codeHead": "cee5c6fc86a0",
+  "completed": "2026-10-11T06:32:20.09259244Z",
+  "critical": 0,
+  "fastFollow": "One sweep, no behaviour: the round-2 list (redaction at the row-assembly funnel incl. thrown errors and query-string credentials; unicode.Cf in cleanDetail and a re-floor in CapabilityReportViewOf; one collapse() for cleanDetail and oneLine; docs/kubernetes.md no-detail-reported / one-line / empty-incarnation; LIVE_CAPABILITIES pinned to a Go-written fixture; the gh api user sample details in ready.json:23, state.json, state-controller-claim.json, the goldens and tests, and ready.json:18 dispatch-envoy detail, to the strings the checks emit; the write-only incarnation column and unread Report.Generation; capabilityRowDocument; dead if s.reports == nil; the tautological budgets test; the nested report budget; the harness parallel slices) plus this round: cap the joined open-row detail; move the daemon.go capability-report block to capability_reports.go; README:691 four SKIPPED checkpoints naming daily-report and the script :58/:2219 scope text; delete LegionReadyRequestBody; nil-normalise promptAgents once at construction; type MCPServerManager/SearchQueryResult off the ambient declarations; full-agent via capability_open_lines over $live_names; fold putCapabilityReport.",
+  "fingerprint": "jj diff --from \u003cbase\u003e --to \u003chead\u003e --git --context 0 ~(.legion | docs/solutions) | sed -e /^@@/d -e /^index /d | sha256sum: 2273d927a24b29a4cd7ee26cb6e1c51a8f8235e9efbeeb5b1bd588f83164595e at 124527b6 (fork 9b5a6854 on main); before the retarget a59021a8f0f00ed164b2cffce98a7f300058d3f7dc5281ead242b8be7fc5a4a3 at a47cde79 (old base 57077591 by SHA)",
+  "forgeFacts": "PR #1874 base main (retargeted), head 124527b6 (tester handoff, skip-checks), code head cee5c6fc, MERGEABLE/BLOCKED (review required), reviewDecision APPROVED from round 2 (5478588338 at a47cde79). CI at b4ee076e: Tests 38115970827 success (lint, typecheck, test), Legion Envoy and Contracts 38115970855 every job success bar dispatch (not required) still running, Worker Image 38115970841 success, Docs 38115970800 success, PR Title 38115970843 success; read_record checksVerdict green at 124527b6. main@origin 78dbd77b declares 19, migrations top at 0036. Threads: four, all mine, each with my Accepted: as newest, none resolved (implementer/merger step). Both E2E lines present at the retargeted head; the tester round 4 drove the merged tree on its rig at contract 20 / migration 0037 and the extension at cee5c6fc, and verified the implementer proof independently.",
+  "important": 0,
+  "issue": "LEGION-663",
+  "keyFindings": [
+    {
+      "description": "The 19 -\u003e 20 renumber missed this site: the Added bullet describing LegionReadyRequest, LegionCapabilityReport, promptAgents and the claim view capabilities ends `daemon API contract` / `19 (LEGION-663).` (the number on a wrapped line, invisible to a `contract 19` grep) while line 34 of the same Unreleased block says contract 20 for the same issue. On main, 19 is LEGION-631 number. Fix: 19 -\u003e 20 on line 14. No behaviour change; no CI reads a CHANGELOG.",
+      "file": "packages/contracts/CHANGELOG.md:13-14",
+      "severity": "minor"
+    },
+    {
+      "description": "Contract 20 collision note names `pi-legion 8.10.0` as the release that burned 19; v8.10.0 and v8.10.1 declare 18 (tags read), v8.11.0 is the first at 19 (then 8.12.0, 8.13.0 = main). The note exists so the next renumber sees which published release burned the number; it names one that did not. Fix: 8.10.0 -\u003e 8.11.0.",
+      "file": "packages/daemon/internal/api/version.go:132",
+      "severity": "minor"
+    },
+    {
+      "description": "The rollout sentence says `the 8.10.1 release declares 19`; v8.10.1 declares 18, v8.11.0 is the first at 19 — and it disagrees with version.go:132 (8.10.0). An operator pinning the named predecessor gets a plugin two contracts behind. Fix: 8.10.1 -\u003e 8.11.0, together with version.go so the two agree.",
+      "file": "packages/pi-legion/CHANGELOG.md:57",
+      "severity": "minor"
+    },
+    {
+      "description": "Not head changes, for retro body update: the census tail still says `the migration 0036_claim_capabilities is additive` (now 0037), `an 18 plugin ... and a 19 plugin` (now 19/20) and `This branch is based on #1843 18 while main declares 17` (stale); the Chain line fingerprints are not the reference command figures (a59021a8 -\u003e 2273d927); the Threads section says each thread awaits its opener Accepted: while my four acceptances are posted (run legion threads resolve).",
+      "file": "pull request body",
+      "severity": "body"
+    }
+  ],
+  "mergeCorrectness": "Verified lossless two ways: my per-file comparison of the branch diff against its base before (57077591..a47cde79) and after (9b5a6854..124527b6) shows differing hunks in exactly the 14 files above plus the migration rename, byte-identical elsewhere; the deep-review pass diffed the auto-merge tree (git merge-tree 3c811b0b 9b5a6854: 36 conflicted files) against cee5c6fc and found nothing authored outside the conflicts and the renumber, 20 files to main side none in the PR delta, 3 to the branch side each addition-only, 13 by hand. No conflict markers in the tree; main pool-capacity row (SiteDeployment) renders through measure() as before, openStates() over Report() adds live rows only, OpenFromConfiguration unchanged; migration 0037 beside main 0036, embed.go globs; FK claims(token) untouched by every migration; CI green at b4ee076e (Tests 38115970827, Envoy and Contracts 38115970855 bar the non-required dispatch job still running, Worker Image 38115970841, Docs 38115970800, PR Title 38115970843); read_record checksVerdict green at 124527b6.",
+  "minor": 3,
+  "notProven": [
+    "Spec acceptance 1, 2 and the Stage 4b half of 4 at this head (the six rows present in real pods, full-agent and full-agent-negative at this branch image, the tick naming an open live row): the tester unreached; the architect queued the run for the retargeted head (Worker Image 38115970841 built at b4ee076e). Written into the PR body.",
+    "The present deployment row judged over every live session opens deployment-wide on one tree disabled tool (plan concern).",
+    "The github row pod-side proof ran on today grant shim through a proxy; the Stage 4b run proves plain gh on the token file.",
+    "Contract 20 also declared by #1878 (LEGION-668): whichever merges second renumbers to 21 (implementer note; main declares 19 now).",
+    "Hardening in the Fast-follow: userinfo-only redaction; Cf runes; no re-floor on a store reload; no cap on an open row joined detail."
+  ],
+  "phase": "review",
+  "previousRounds": [
+    {
+      "fingerprint": "f7385b31485a44b17533b039705dcebe102ee94f040531ed9443c6329019e0fa at 4c65aebd (fork 57077591)",
+      "review": "https://github.com/sjawhar/legion/pull/1874#pullrequestreview-5478264108",
+      "reviewedHead": "f1e4879c3ab0ff3f7939905bd5336bd333dbdb47",
+      "round": 1,
+      "verdict": "changes_requested"
+    },
+    {
+      "fingerprint": "a59021a8f0f00ed164b2cffce98a7f300058d3f7dc5281ead242b8be7fc5a4a3 at aaf75632 and a47cde79 (fork 57077591)",
+      "review": "https://github.com/sjawhar/legion/pull/1874#pullrequestreview-5478588338",
+      "reviewedHead": "a47cde7938955c0c2d68481ef213ec8ab51343ce",
+      "round": 2,
+      "verdict": "approved"
+    }
+  ],
+  "retarget": {
+    "fingerprintAfter": "2273d927a24b29a4cd7ee26cb6e1c51a8f8235e9efbeeb5b1bd588f83164595e at 124527b6 against fork 9b5a6854 (the tester reports the same at cee5c6fc)",
+    "fingerprintBefore": "a59021a8f0f00ed164b2cffce98a7f300058d3f7dc5281ead242b8be7fc5a4a3 at my approved head a47cde79 against the old base 57077591 by SHA (legion/LEGION-631@origin is deleted, so fork_point errors; the empty-input hash e3b0c442... is what the reference command yields then and is not a figure)",
+    "perFile": "14 files with differing hunks plus the migration rename 0036 -\u003e 0037 (identical modulo the number): version.go, pi-legion package.json, contracts version.json, legion-api.ts and its test, daemon-client.ts, both CHANGELOGs, pi-legion AGENTS.md, docs/kubernetes.md, troubleshooting.md (renumber); deployment.go, daemon.go, stage4b header (comment composition with main pool-capacity / issue-volume text). Every other hunk byte-identical. The body Chain line figures c16a6244/fb00d1be are the raw diff without the reference sed (reproduced: fb00d1be = cee5c6fc vs 9b5a6854 without dropping @@/index lines); the reference figures are a59021a8 -\u003e 2273d927, which the tester and I both got.",
+    "reason": "#1843 squash-merged (e8fcbd2f); GitHub retargeted the PR to main when legion/LEGION-631 was deleted; the implementer forward-merged main 9b5a6854 onto the retro tip 3c811b0b as cee5c6fc (40 conflicted files: 21 main, 5 branch, 12 by hand; contract 19 -\u003e 20 since main declares 19 for LEGION-631; migration 0036 -\u003e 0037 since main took 0036).",
+    "verdict": "changed -\u003e a new round: thermonuclear again, one review"
+  },
+  "reviewedHead": "124527b681023bac16d309e84335c2eb3295b7a1",
+  "round": 3,
+  "schemaVersion": 1,
+  "securityLine": "Security: authz — claims/ready gains the optional capabilities field and claims/register promptAgents, no new route, command or tool; only the claim-token-and-secret holder calls either (claims.go:137-141), an unauthenticated caller gets InvalidSecret, and the report never refuses the ready (:152-157) (v5.0.0-1.2.2). untrusted-input — a session-supplied detail boundary is cleanDetail at ingest (capabilities.go:214-222) before every sink; later passes (deployment.go:84-89, :210-219; json.Marshal in capabilityReported) join cleaned text and daemon-owned text only, re-creating no newline (v5.0.0-1.3.1); Cf runes survive — hardening (v5.0.0-16.4.1). agent-def — skills/legion-controller/SKILL.md and packages/pi-legion/AGENTS.md describe the rows and the controller report-only duty; nothing steers a reviewer. secret — unchanged from round 2 hardening (userinfo-only redaction on the errors[] branch, v5.0.0-16.2.5). supply-chain, sandbox, transport, prompt — no surface in this merge (no dependency, Action, manifest, capability, policy or crypto touched; the detail reaches the controller as a JSON string under read_state). Cited from the pair at 124527b6.",
+  "thermonuclear": "Pair re-run at 124527b6 over the retarget. deep-review: 0 High/Medium, 2 Low (findings 1-3 as two items), 2 hardening Minors (an open live row joined detail has no cap on the join, 3 x 1024 bytes; Cf runes survive cleanDetail), merge lossless by auto-merge-tree comparison, contract-20 census internally consistent, goldens regenerate-consistent at 20 with main pool-capacity row, stage4b composition sound (helpers defined, SKIPPED stubs in the skip_controller branch, interests_sample via pass). code-quality: the same three prose items as fix-in-PR (High/Medium/Medium by its label), plus Fast-follow: daemon.go capability-report block into capability_reports.go beside its test file; ready.json:23 and the Go literals still say `gh api user` (the REST call the branch forbids) and ready.json:18 a dispatch-envoy detail the code never emits; README:691 says three SKIPPED checkpoints where the script prints four (daily-report) and the script usage comment at :58 and :2219 still name the old scope; LegionReadyRequestBody exported with no consumer; promptAgentsList() per request; MCPServerManager/SearchQueryResult declared twice; full-agent inlines the six-name regex beside capability_open_lines; putCapabilityReport execer split with one caller.",
+  "threads": "Four threads from round 1, each with my Accepted: fixed in 59dac7013aab as newest; unresolved (the implementer or merger runs legion threads resolve). This round opens three inline threads (the three prose sites).",
+  "verdict": "changes_requested"
+}
