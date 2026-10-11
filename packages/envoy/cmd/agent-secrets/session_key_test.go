@@ -60,7 +60,9 @@ func drainOps(reqs <-chan helper.Request) []string {
 }
 
 // TestEnrollHelperAsksForASessionKey: enroll --helper takes no --kind and asks the helper's
-// kind-free enroll-session-key; unenroll --helper asks unenroll-session-key.
+// kind-free enroll-session-key; unenroll --helper asks unenroll-session-key. The `--kind box`
+// dotfiles' agentbox passes until it moves onto this release still enrolls the same way, and any
+// other --kind is a usage error naming the flag, asking the helper nothing.
 func TestEnrollHelperAsksForASessionKey(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	lease := time.Now().Add(time.Hour).UTC().Format(time.RFC3339Nano)
@@ -85,9 +87,23 @@ func TestEnrollHelperAsksForASessionKey(t *testing.T) {
 	if ops := drainOps(reqs); len(ops) != 2 || ops[0] != "enroll-session-key" || ops[1] != "unenroll-session-key" {
 		t.Fatalf("helper ops = %v, want enroll-session-key then unenroll-session-key", ops)
 	}
-	if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, env,
-		"enroll", "--helper", "--kind", "box", "--runtime-id", "container-1", "--thumbprint", "tp-1"); exit != exitUsageError || !strings.Contains(stderr, "kind") {
-		t.Fatalf("enroll --helper --kind box = %d (stderr %q), want a usage error naming the flag", exit, stderr)
+	for _, kind := range [][]string{{"--kind", "box"}, {"--kind=box"}} {
+		args := append(append([]string{"enroll", "--helper"}, kind...), "--runtime-id", "container-1", "--thumbprint", "tp-1")
+		if stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, env, args...); exit != 0 || stdout != "enr-key-1\n" {
+			t.Fatalf("enroll %v = %d %q (stderr %q), want agentbox's call to enroll as before", kind, exit, stdout, stderr)
+		}
+		if ops := drainOps(reqs); len(ops) != 1 || ops[0] != "enroll-session-key" {
+			t.Fatalf("enroll %v helper ops = %v, want enroll-session-key", kind, ops)
+		}
+	}
+	for _, kind := range [][]string{{"--kind", "pod"}, {"--kind=host"}, {"--kind", "session"}, {"-kind", "box2"}} {
+		args := append(append([]string{"enroll", "--helper"}, kind...), "--runtime-id", "container-1", "--thumbprint", "tp-1")
+		if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, env, args...); exit != exitUsageError || !strings.Contains(stderr, "--kind") {
+			t.Fatalf("enroll %v = %d (stderr %q), want a usage error naming the flag", kind, exit, stderr)
+		}
+	}
+	if ops := drainOps(reqs); len(ops) != 0 {
+		t.Fatalf("a refused --kind asked the helper %v, want nothing", ops)
 	}
 }
 

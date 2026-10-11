@@ -63,7 +63,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -610,11 +609,14 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 // box); a session the helper registers enrolls itself through `agent-secrets register`, and a
 // pod's enrollment is its own launcher's job.
 func cmdEnroll(args []string, stdout, stderr io.Writer) int {
-	flagArgs, positional := splitArgs(args, map[string]bool{
-		"kind": true, "runtime-id": true, "thumbprint": true, "session-id": true,
-	})
+	takesValue := map[string]bool{"kind": true, "runtime-id": true, "thumbprint": true, "session-id": true}
+	flagArgs, positional := splitArgs(args, takesValue)
 	if len(positional) > 0 {
 		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
+		return exitUsageError
+	}
+	flagArgs, ok := dropLegacyKind(flagArgs, takesValue, stderr)
+	if !ok {
 		return exitUsageError
 	}
 	flags := newFlagSet("enroll", stderr)
@@ -622,12 +624,6 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
 	sessionID := flags.String("session-id", "", "the agent session the broker notifies if one of this session's pending requests expires")
 	helperFlag := flags.Bool("helper", false, "enroll through this machine's agent-secrets-helper, which holds its launcher credential (required: a launcher credential is a key held only by a helper or a launcher, never a token this CLI could read)")
-	if slices.ContainsFunc(flagArgs, func(a string) bool {
-		return a == "--kind" || a == "-kind" || strings.HasPrefix(a, "--kind=") || strings.HasPrefix(a, "-kind=")
-	}) {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --kind is gone: every session a launcher enrolls is one kind, so leave it out")
-		return exitUsageError
-	}
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
@@ -636,6 +632,35 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 		return exitUsageError
 	}
 	return cmdEnrollHelper(*runtimeID, *thumbprint, *sessionID, stdout, stderr)
+}
+
+// dropLegacyKind removes `--kind box` from enroll's flags: dotfiles' scripts/agentbox passes it on
+// every box it enrolls (`enroll --helper --kind box`), and agentbox runs from the shared dotfiles
+// checkout, which moves onto a call without it only after this CLI's release is pinned. Any other
+// --kind is a usage error naming the flag. This goes once scripts/agentbox on dotfiles' main passes
+// no --kind (`git grep -- '--kind' scripts/agentbox` finds none).
+func dropLegacyKind(flagArgs []string, takesValue map[string]bool, stderr io.Writer) ([]string, bool) {
+	kept := make([]string, 0, len(flagArgs))
+	for i := 0; i < len(flagArgs); i++ {
+		name, value, inline := strings.Cut(strings.TrimLeft(flagArgs[i], "-"), "=")
+		if name != "kind" {
+			kept = append(kept, flagArgs[i])
+			if takesValue[name] && !inline && i+1 < len(flagArgs) {
+				i++
+				kept = append(kept, flagArgs[i])
+			}
+			continue
+		}
+		if !inline && i+1 < len(flagArgs) {
+			i++
+			value = flagArgs[i]
+		}
+		if value != "box" {
+			fmt.Fprintf(stderr, "agent-secrets enroll: --kind %q is not a kind enroll takes: every session a launcher enrolls is one kind, so leave --kind out\n", value)
+			return nil, false
+		}
+	}
+	return kept, true
 }
 
 // cmdEnrollHelper asks the local agent-secrets-helper daemon, over its unix socket, to enroll a

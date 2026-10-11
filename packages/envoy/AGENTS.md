@@ -1945,7 +1945,8 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Secrets broker
 
-The secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
+The secrets broker (`cmd/broker`, `internal/broker/`) issues secret grants, each lasting until its
+session ends or for the shorter lifetime its request signed,
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
@@ -1968,17 +1969,30 @@ service-account token). An operator credential's enrollment is its operator's, t
 person who approved its machine login: a launcher may leave `operator` out of the enrollment, and
 one naming anyone else is `403 OPERATOR_MISMATCH`. A live enrollment is unique per launcher
 credential, runtime id and slot: `POST /v1/enrollments` takes an optional pod-only `slot`
-(`^[a-z][a-z0-9-]{0,62}$`, else `400 INVALID_SLOT`, and a slot on a box or host is refused the
+(`^[a-z][a-z0-9-]{0,62}$`, else `400 INVALID_SLOT`, and a slot on a `session` enrollment is refused the
 same way) naming one of several independent identities in one pod. The launcher whose proof
 authenticates the enrollment chooses the slot; a session's proof cannot enroll anything
 (`401 LAUNCHER_INVALID`). So each slot of a pod holds its own key, lease, requests and grants,
 while a pod's `runtime_id` stays the pod UID its token proves. Omitted or `""` is the runtime's
-one enrollment, every box's and host's. The same key
+one enrollment, every `session` enrollment's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
 ALREADY_ENROLLED`, and the policy never sees the slot: a pod is a requester with no operator, whose
 service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`. Migration 0007 is forward-only: an
 older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds
 two slots, so the binary is never rolled back past it once a slotted enrollment exists.
+An enrollment's kind is `session` (an agent session on a machine its person logged in: the
+helper's own, or a key a launcher such as agentbox brings through the helper's
+`enroll-session-key`) or `pod`; migration 0012 rewrote every stored `box`/`host` to `session`.
+Each side still meets the other's old shape until every running client is on this release, and
+each fallback names its removal condition at its definition: the broker records an old helper's
+`host`/`box` as `session` and logs `an enrollment named a legacy kind` (`api/handlers_enroll.go`,
+`legacyKinds`: gone after 30 days of no such line from the production broker); the helper asks an
+older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box`
+(`helper/broker.go`, `enroll`: gone once the production broker records `session`); the CLI asks an
+older helper, which answers `unknown op enroll-session-key`, its `enroll-box`/`unenroll-box`
+(`cmd/agent-secrets`, `legacySessionKeyOps`: gone once no helper older than this release runs); and
+`enroll --helper` drops the `--kind box` dotfiles' agentbox passes, refusing any other `--kind`
+(`dropLegacyKind`: gone once agentbox passes none).
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
@@ -2232,7 +2246,7 @@ human approves a new machine login`, the cause being `the launcher credential re
 broker that names no expiry gets a WARN that the helper cannot warn ahead. A refusal of a
 credential a newer login has already replaced drops nothing, and the enrollment it failed retries
 at once with the new one after the ordinary `enroll failed; retrying` WARN. While it holds none,
-every enrollment attempt, a session's or an `enroll-box`'s (and every revoke a re-pinned or lapsed
+every enrollment attempt, a session's or an `enroll-session-key`'s (and every revoke a re-pinned or lapsed
 session needs before it enrolls), logs at ERROR `session cannot enroll` with that `why`; an
 attempt that failed for want of a credential a login has installed since logs the WARN instead.
 SIGINT or SIGTERM, from systemd or anything else, stops the helper with exit 0 after a WARN
@@ -2269,7 +2283,7 @@ user. The check covers the session's process tree only: a process the session se
 uid can stop the helper. Through these routes such a process can list and revoke the operator's own
 machine logins, never a service's machine login, and the operator's grants, which include grants the
 operator approved on any session, a service's pod among them. The helper's `enroll --helper` path
-(`enroll-box`) is open to any process of the user, so the same process can enroll a box and read the
+(`enroll-session-key`) is open to any process of the user, so the same process can enroll a box and read the
 operator's agent secrets that way. Every refusal the helper gives reaches the CLI
 as one `launcherRefusal`, printed as it stands: no credential, a helper from before the op (which
 answers `unknown op sign-launcher`, read as a helper to restart on the pinned release), or the
@@ -2303,8 +2317,7 @@ to one name — any other entry is refused naming it, and an account given twice
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
 set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600),
-`BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_MAX_GRANT_SECONDS` (default 43200, max
-43200 — how long every grant lives, unless its session ends first), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
+`BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
 (default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
 re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
@@ -2408,7 +2421,8 @@ for the current, authoritative route list.
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
 object verbatim, the approver, the enrollment's tab-separated kind, runtime id and operator, plus
-a pod's slot as a fourth field only when it has one, lifetime, policy version (the `rules_version`
+a pod's slot as a fourth field only when it has one, lifetime (`-` for a grant that lasts until its
+session ends; `ParseBody` refuses `0`), policy version (the `rules_version`
 line), expiry, and the
 machine-login code or `-`), `Body.ID()` is the lowercase-hex SHA-256 of that canonical form — the
 record's own content-addressed id, which a slotless record keeps byte for byte — and `ParseBody`
@@ -2468,8 +2482,14 @@ record written at all; a name the policy does not serve aborts the whole call wi
 `policy.ErrUnknownSecret` (`400 UNKNOWN_SECRET`, per the broker's design overview) instead of being
 folded into an ordinary `deny` decision — no request row is written either, matching the "at record
 time" wording; a name needing approval that names a *different* approver than an
-already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; every grant
-lives `BROKER_MAX_GRANT_SECONDS`; when every name is decided (`granted`/`denied`) with nothing
+already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; the grant lasts
+the request object's `lifetime_seconds` (`record.ValidLifetime`: 1 to the int32 the column holds;
+refused on a machine login), or, when it names none, until its session ends (`grants.expires_at`
+null, migration 0013; `requests.GrantUnexpired` is the one liveness test, and reuse, coalescing and
+the advisory lock key on the lifetime too, so `--ttl 2m` never reuses a grant that lasts longer);
+`POST /v1/requests` and `GET /v1/requests/{id}` echo `lifetime_seconds` (null for none), which the
+CLI checks against its `--ttl`, revoking the grant or cancelling the request when a broker or
+helper from before the claim dropped it; when every name is decided (`granted`/`denied`) with nothing
 pending, the request and, if granted, its grant are written with no record; a request needing
 approval writes the request row and a `credential_requests` record together, and an identical
 concurrent request coalesces onto the same record (`coalesced: true`) instead of writing a second

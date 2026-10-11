@@ -58,15 +58,17 @@ your user, so such a process can also enroll a box and read your agent secrets.
 
 ```console
 $ agent-secrets grant list
-GRANT_ID                              SECRETS          GRANTED    APPROVER         SESSION                                    OPERATOR         EXPIRES
-f26b6b78-2819-4b1d-abbd-d6990ca1a776  DEMO_API_KEY     approval   ada@example.com  host/example-host-laptop:1989345:35362384  ada@example.com  2026-10-10T15:56:07Z
-cc63d479-ddae-4052-b93b-b4b5df37adf0  DEMO_READ_TOKEN  automatic  -                host/example-host-devbox:1989344:35362384  ada@example.com  2026-10-10T15:56:06Z
+GRANT_ID                              SECRETS          GRANTED    APPROVER         SESSION                                       OPERATOR         EXPIRES
+f26b6b78-2819-4b1d-abbd-d6990ca1a776  DEMO_API_KEY     approval   ada@example.com  session/example-host-laptop:1989345:35362384  ada@example.com  2026-10-10T15:56:07Z
+cc63d479-ddae-4052-b93b-b4b5df37adf0  DEMO_READ_TOKEN  automatic  -                session/example-host-devbox:1989344:35362384  ada@example.com  session-end
 $ agent-secrets grant revoke f26b6b78-2819-4b1d-abbd-d6990ca1a776
 revoked f26b6b78-2819-4b1d-abbd-d6990ca1a776
 ```
 
-`GRANTED` is `automatic` or `approval`, and `APPROVER` is `-` for an automatic grant. `--json`
-prints the broker's answer, the same body the **Live grants** page reads.
+`GRANTED` is `automatic` or `approval`, and `APPROVER` is `-` for an automatic grant. `EXPIRES` is
+`session-end` for a grant that lasts until its session ends, and a time for one its request gave a
+`--ttl`. `--json` prints the broker's answer, the same body the **Live grants** page reads, whose
+`expires_at` is null for a grant that lasts until its session ends.
 
 ## Revoke a grant from its session
 
@@ -78,7 +80,7 @@ $ agent-secrets revoke b51e58bc-3b7b-4144-a2ed-5821f232d612
 revoked
 $ agent-secrets self
 enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
-kind: host
+kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
 ```
