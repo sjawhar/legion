@@ -2648,12 +2648,11 @@ operator's machine logins at a low rate; this is inherent to a per-login limit o
 unauthenticated route and is an accepted risk, not a bug. A request object `Login` refuses (a
 person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQUEST_INVALID`.
 `POST /v1/launcher-credentials/token`, a service's token login, spends its source address's bucket
-(`refuseAddress`) before the token verifies only when the token's unverified subject
-(`enroll.ClaimedSubject`) is no listed account; a verified listed account spends an
-`account:<subject>` bucket of the per-login limit instead (`refuseAccount`), so a flood from an
-address the daemon shares cannot keep it from logging in. A token claiming a listed account that
-does not verify spends no bucket; the broker verifies each such token. Read `routes()` for the
-current, authoritative route list.
+before the token verifies (`refuseAddress`), whatever account the token claims, since a refused
+token signature makes the verifier fetch the issuer's keys again; a verified account then spends
+an `account:<subject>` bucket of the per-login limit (`refuseAccount`), the same address-then-key
+pair the device-code route spends. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the address
+bucket on the caller's own address. Read `routes()` for the current, authoritative route list.
 
 A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
 token (`POST /v1/launcher-credentials/token`: `machine.Service.VerifyServiceToken`, then

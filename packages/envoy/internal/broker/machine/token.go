@@ -54,12 +54,6 @@ type TokenCredential struct {
 	ExpiresAt time.Time
 }
 
-// ListsAccount reports whether BROKER_SERVICE_LOGINS names subject.
-func (s *Service) ListsAccount(subject string) bool {
-	_, listed := s.Enroll.ServiceLogins[subject]
-	return listed
-}
-
 // VerifyServiceToken verifies a service's projected ServiceAccount token against the broker's
 // Kubernetes issuer and audience (s.Enroll.Pod, the verifier pod enrollment uses), holds it to
 // MaxTokenLoginLifetime from its issue, and maps its subject through BROKER_SERVICE_LOGINS

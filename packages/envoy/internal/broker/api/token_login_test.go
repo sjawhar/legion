@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 // wireTokenLogin is POST /v1/launcher-credentials/token's answer.
@@ -134,25 +135,40 @@ func TestATokenLoginRefusesAKeyAnotherLoginHolds(t *testing.T) {
 	}
 }
 
-// TestAnAddressFloodDoesNotKeepTheDaemonFromLoggingIn: tokens claiming no listed account spend
-// their source address's bucket before they verify, and are refused 429 once it is empty; the
-// daemon's verified token, from the same address, spends its account's own bucket instead and logs
-// in, until that bucket is empty in turn.
-func TestAnAddressFloodDoesNotKeepTheDaemonFromLoggingIn(t *testing.T) {
+// TestAForgedTokenFloodIsLimitedByAddress: every token login spends its source address's bucket
+// before the token is verified, whatever account it claims, so tokens that name the daemon's
+// listed account but that the issuer never signed are refused 429 once the address's bucket is
+// empty, rather than each costing a verification (and possibly a fetch of the issuer's keys).
+func TestAForgedTokenFloodIsLimitedByAddress(t *testing.T) {
 	ts := newTestServerWith(t, func(d *api.Deps) {
 		d.LauncherLimits = &api.LauncherLimits{
-			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 1},
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 2},
+			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 100},
+		}
+	})
+	forger := oidctest.NewKey(t, "forger")
+	for i, want := range []int{http.StatusUnauthorized, http.StatusUnauthorized, http.StatusTooManyRequests, http.StatusTooManyRequests} {
+		claims := ts.podIssuer.Claims(daemonAccount, podAudience)
+		status, body := ts.tokenLogin(t, ts.podIssuer.Mint(t, forger, claims), ts.daemonRequest(t, newSigningKey(t)))
+		if status != want {
+			t.Fatalf("forged token claiming %s, attempt %d = %d %s, want %d", daemonAccount, i, status, body, want)
+		}
+	}
+}
+
+// TestAVerifiedAccountSpendsItsOwnBucketToo: a verified token login spends its account's own
+// bucket after its address's, so the daemon's account logs in only as often as that bucket allows
+// even from an address with requests to spare.
+func TestAVerifiedAccountSpendsItsOwnBucketToo(t *testing.T) {
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.LauncherLimits = &api.LauncherLimits{
+			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 100},
 			PerLogin:   ratelimit.Limit{Every: time.Hour, Burst: 2},
 		}
 	})
-	for i, want := range []int{http.StatusForbidden, http.StatusTooManyRequests, http.StatusTooManyRequests} {
-		if status, body := ts.tokenLogin(t, ts.accountToken(t, workerAccount, "", time.Hour), ts.daemonRequest(t, newSigningKey(t))); status != want {
-			t.Fatalf("unlisted token %d = %d %s, want %d", i, status, body, want)
-		}
-	}
 	for i, want := range []int{http.StatusOK, http.StatusOK, http.StatusTooManyRequests} {
 		if status, body := ts.tokenLogin(t, ts.accountToken(t, daemonAccount, "", time.Hour), ts.daemonRequest(t, newSigningKey(t))); status != want {
-			t.Fatalf("the daemon's login %d after the flood = %d %s, want %d", i, status, body, want)
+			t.Fatalf("the daemon's login %d = %d %s, want %d", i, status, body, want)
 		}
 	}
 }

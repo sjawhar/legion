@@ -96,9 +96,12 @@ the daemon's namespace is that boundary: anyone who may create pods there naming
 create `serviceaccounts/token` for it, or exec into the daemon's pod and read its token file can
 get one. Deleting the daemon's ServiceAccount stops new tokens, but a token already issued keeps
 verifying until it expires, at most an hour after it was minted, because the broker checks tokens
-against the cluster's published keys rather than asking the API server. A verified token login
-spends a rate-limit bucket of its account's own, never its source address's, so another caller
-behind the same address cannot keep the daemon from logging in.
+against the cluster's published keys rather than asking the API server. A token login spends its
+source address's rate-limit bucket before its token is verified and its account's own after, so a
+daemon behind an address other callers share is held to that address's bucket: set
+`BROKER_TRUSTED_PROXY_HEADER` behind a proxy, so each caller is keyed on its own address. The
+daemon renews halfway through its credential's life, so a refused login has half an hour to
+succeed.
 
 A service login a person approved through a device code before this broker keeps working until
 it expires, at most `BROKER_LAUNCHER_CREDENTIAL_SECONDS` (7 days by default) after its approval.

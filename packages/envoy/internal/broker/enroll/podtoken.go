@@ -60,20 +60,6 @@ func (k K8sPodVerifier) VerifyAccount(ctx context.Context, raw string) (AccountC
 	return AccountClaims{Subject: claims.Subject, PodUID: private.Kubernetes.Pod.UID, Expiry: claims.Expiry, IssuedAt: issuedAt}, nil
 }
 
-// ClaimedSubject is the subject raw claims, read without verifying anything: "" for a token that
-// does not parse. Only a rate limiter may use it, to pick a bucket before the token verifies.
-func ClaimedSubject(raw string) string {
-	parsed, err := jwt.ParseSigned(raw, []jose.SignatureAlgorithm{jose.RS256, jose.ES256})
-	if err != nil {
-		return ""
-	}
-	var claims jwt.Claims
-	if err := parsed.UnsafeClaimsWithoutVerification(&claims); err != nil {
-		return ""
-	}
-	return claims.Subject
-}
-
 func (k K8sPodVerifier) Verify(ctx context.Context, raw string) (PodClaims, error) {
 	claims, err := k.VerifyAccount(ctx, raw)
 	if err != nil {

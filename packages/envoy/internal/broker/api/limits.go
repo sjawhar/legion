@@ -11,12 +11,18 @@ import (
 )
 
 // LauncherLimits bounds POST /v1/launcher-credentials and POST /v1/launcher-credentials/token, the
-// routes an unauthenticated caller can use to make the broker do work on their behalf. Every source
-// address has its own token bucket, and so does every person a machine login's login_hint names
-// and every account a verified token login proves (PerLogin): a flood from one address cannot keep
-// the broker busy verifying machine-login requests and tokens, a flood naming one operator cannot
-// bury that operator's pending machine logins, and a flood from an address the Legion daemon shares
-// cannot keep it from logging in.
+// routes an unauthenticated caller can use to make the broker do work on their behalf. Every
+// source address has its own token bucket (PerAddress), and so does every person a machine login's
+// login_hint names and every account a verified token login proves (PerLogin). A token login
+// spends its address's bucket before its token is verified, since a refused token signature makes
+// the verifier fetch the issuer's keys again, and its account's only after; a machine login
+// verifies its request object locally first, to read the person its bucket is keyed on, then
+// spends both. So a flood from one address cannot keep the broker verifying tokens or writing
+// machine logins, a flood naming one operator cannot bury that operator's pending machine logins,
+// and one account cannot log in faster than its bucket allows. A daemon behind an address others
+// share is held to that address's bucket too: BROKER_TRUSTED_PROXY_HEADER keys the bucket on the
+// caller's own address behind a proxy, and the daemon renews its credential halfway through its
+// life, so a refused login has half an hour to succeed before the credential it holds expires.
 type LauncherLimits struct {
 	PerAddress ratelimit.Limit
 	PerLogin   ratelimit.Limit
@@ -102,8 +108,8 @@ func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, login s
 }
 
 // refuseAddress writes 429 RATE_LIMITED and reports true when r's source address has no request
-// left in its bucket: POST /v1/launcher-credentials/token's limit for a token whose subject is no
-// listed account, spent before the token is verified.
+// left in its bucket: POST /v1/launcher-credentials/token's first limit, spent before the token is
+// verified.
 func (l *launcherLimiter) refuseAddress(w http.ResponseWriter, r *http.Request) bool {
 	if l.addressAllows(r) {
 		return false
@@ -114,7 +120,7 @@ func (l *launcherLimiter) refuseAddress(w http.ResponseWriter, r *http.Request) 
 
 // refuseAccount writes 429 RATE_LIMITED and reports true when subject, an account a token login
 // has just verified, has no login left in its account:<subject> bucket. Only a verified token
-// spends it, so no other caller can.
+// spends it, after its address's bucket.
 func (l *launcherLimiter) refuseAccount(w http.ResponseWriter, subject string) bool {
 	if l.perLogin.AllowAt("account:"+subject, time.Now()) {
 		return false
