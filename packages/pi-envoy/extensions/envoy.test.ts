@@ -551,6 +551,8 @@ function targetedCommentEnvelope(mode: "aside" | "btw" | "steer", dedupeKey: str
 
 const DIRECT_MESSAGE_ID = "44444444-4444-4444-8444-444444444444";
 const DIRECT_MESSAGE_BODY = "Where is the dashboard?";
+/** Another direct message from the same person: their next Send, not a retry of the first. */
+const NEXT_MESSAGE_ID = "55555555-5555-4555-8555-555555555555";
 
 /**
  * A person's direct message to ses_delivery from Dispatch's Agents page, as the listener hands the
@@ -5267,6 +5269,12 @@ describe("envoy OMP extension", () => {
           { handled: "command", output: "3 jobs running" },
           "3 jobs running",
         ],
+        // `/force:<tool> <prompt>` prints its confirmation, then submits the prompt.
+        [
+          "a built-in that printed its output and then submitted a prompt",
+          { handled: "prompt", output: "Next turn forced to use read." },
+          "Next turn forced to use read.",
+        ],
       ] as const satisfies readonly (readonly [string, UserInputResult, string])[]) {
         test(`answers ${name} with the session's reply`, async () => {
           const { agent, delivered, replied, replies } = await bootDirectSession(
@@ -5295,6 +5303,7 @@ describe("envoy OMP extension", () => {
         ["a skill", { handled: "skill" }],
         ["a command with no output", { handled: "command" }],
         ["a command with whitespace output", { handled: "command", output: "  \n" }],
+        ["a prompt with whitespace output", { handled: "prompt", output: "  \n" }],
       ] as const satisfies readonly (readonly [string, UserInputResult])[]) {
         test(`posts no reply for ${name}`, async () => {
           let inputs = 0;
@@ -5951,6 +5960,13 @@ describe("envoy OMP extension", () => {
       mimeType: "image/png",
     };
 
+    /** Dispatch's once-only accept of a message whose stored body is `body`: the first accept
+     *  succeeds with it, and every later one answers `ACCEPT_ALREADY_ACCEPTED`
+     *  (`message_delivery.go`). */
+    const acceptBodyOnce =
+      (body: string) =>
+      (count: number): AcceptAnswer =>
+        count === 1 ? { accepted: true, body } : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
     /** Dispatch serving LEGION-1's upload `slug`, a 10-byte PNG named shot.png. */
     const pictureRoutes =
       (slug: string) =>
@@ -6020,6 +6036,41 @@ describe("envoy OMP extension", () => {
       });
     }
 
+    // A card goes into whichever session is live once the accept answers, so its pictures count
+    // as shown there; the id the session left was forgotten at the switch and stays forgotten.
+    test("a card refused after a switch during the accept counts its picture shown in the session it went into", async () => {
+      const slug = "card-after-accept-switch";
+      const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
+      const body = `Look:\n\n![shot.png](${address})`;
+      const answer = Promise.withResolvers<AcceptAnswer>();
+      const acceptRequested = Promise.withResolvers<void>();
+      const { agent, delivered, fixture } = await bootDirectSession(slug, {
+        accept: () => {
+          acceptRequested.resolve();
+          return answer.promise;
+        },
+        dispatch: pictureRoutes(slug),
+      });
+
+      agent.push(directDispatchEnvelope("steer", slug, { body }));
+      await acceptRequested.promise;
+      await fixture.handlers.get("session_switch")?.({}, sessionContext("ses_after_accept"));
+      answer.resolve({ code: "UNAUTHORIZED", status: 401 });
+      // The switch's own notice is the first delivery; the card is the second.
+      await delivered(2);
+
+      const card = fixture.deliveries.at(-1);
+      expect(card?.content).toEqual([
+        {
+          type: "text",
+          text: expect.stringContaining(`- image 1: ${address} (shot.png, image/png, 10 bytes)`),
+        },
+        image,
+      ]);
+      expect(shownPictures("ses_after_accept").has(address)).toBe(true);
+      expect(shownPictures("ses_delivery").size).toBe(0);
+    });
+
     for (const [name, first] of [
       ["the host's terminal-only answer", async () => ({ handled: "terminal-only" as const })],
       [
@@ -6029,7 +6080,7 @@ describe("envoy OMP extension", () => {
         },
       ],
     ] as const) {
-      test(`${name} leaves a typed turn's picture unshown, and its prompt retry hands it to the input handler`, async () => {
+      test(`${name} leaves a typed turn's picture unshown, and the person's next Send with it hands it to the input handler`, async () => {
         const slug = `typed-retry-${name.replaceAll(/\W+/g, "-")}`;
         const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
         const body = `Look:\n\n![shot.png](${address})`;
@@ -6059,7 +6110,10 @@ describe("envoy OMP extension", () => {
         await replied(1);
         expect(shownPictures("ses_delivery").has(address)).toBe(false);
 
-        agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
+        // Dispatch accepts each message once, so the picture's next chance is a new Send of it.
+        agent.push(
+          directDispatchEnvelope("steer", `${slug}-2`, { body, messageID: NEXT_MESSAGE_ID })
+        );
         await delivered(2);
         await asked.promise;
         expect(images).toEqual([
@@ -6071,7 +6125,7 @@ describe("envoy OMP extension", () => {
             message: {
               content: [{ text: body, type: "text" }],
               role: "user",
-              tag: DIRECT_MESSAGE_ID,
+              tag: NEXT_MESSAGE_ID,
               timestamp: 10,
             },
           },
@@ -6081,30 +6135,21 @@ describe("envoy OMP extension", () => {
       });
     }
 
-    test("does not mark a picture shown when an earlier input extension rewrites the text, and retry hands it over", async () => {
+    // Dispatch accepts a message once (`ACCEPT_ALREADY_ACCEPTED` for every later attempt), so the
+    // retry of a typed turn whose message went without its picture arrives as a card: the card
+    // must carry the picture, since it was never marked shown.
+    test("does not mark a picture shown when an earlier input extension rewrites the text, and the retry's card carries it", async () => {
       const slug = "typed-rewrite-picture";
       const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
       const body = `Look:\n\n![shot.png](${address})`;
       const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
         {};
       const asked = Promise.withResolvers<void>();
-      const retryAsked = Promise.withResolvers<void>();
-      const retryImages: unknown[] = [];
-      let attempts = 0;
       const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
-        accept: () => ({ accepted: true, body }),
+        accept: acceptBodyOnce(body),
         dispatch: pictureRoutes(slug),
-        sendUserInput: async (text) => {
-          attempts++;
-          const inputText = attempts === 1 ? "rewritten before Envoy" : text;
-          const answer = (await handlers.input?.(
-            { source: "extension", text: inputText },
-            context
-          )) as { readonly images?: readonly unknown[] } | undefined;
-          if (attempts === 2) {
-            retryImages.push(...(answer?.images ?? []));
-            retryAsked.resolve();
-          }
+        sendUserInput: async () => {
+          await handlers.input?.({ source: "extension", text: "rewritten before Envoy" }, context);
           asked.resolve();
           return { handled: "prompt" };
         },
@@ -6129,46 +6174,32 @@ describe("envoy OMP extension", () => {
 
       agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
       await delivered(2);
-      await retryAsked.promise;
-      await fixture.handlers.get("message_start")?.(
+      expect(fixture.deliveries.at(-1)?.content).toEqual([
         {
-          message: {
-            content: [{ text: body, type: "text" }],
-            role: "user",
-            tag: DIRECT_MESSAGE_ID,
-            timestamp: 20,
-          },
+          type: "text",
+          text: expect.stringContaining(`- image 1: ${address} (shot.png, image/png, 10 bytes)`),
         },
-        context
-      );
-      expect(retryImages).toEqual([
-        { data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" },
+        image,
       ]);
       expect(shownPictures("ses_delivery").has(address)).toBe(true);
     });
 
-    test("does not mark a picture shown after prompt admission aborts before tagged message_start, and retry hands it over", async () => {
+    test("does not mark a picture shown after prompt admission aborts before tagged message_start, and the retry's card carries it", async () => {
       const slug = "typed-abort-picture";
       const address = `dispatch://LEGION-1/artifact/${slug}@v1`;
       const body = `Look:\n\n![shot.png](${address})`;
       const handlers: { input?: (event: unknown, context: SessionContext) => Promise<unknown> } =
         {};
       const asked = Promise.withResolvers<void>();
-      const retryAsked = Promise.withResolvers<void>();
-      const retryImages: unknown[] = [];
-      let attempts = 0;
+      const images: unknown[] = [];
       const { agent, context, delivered, fixture } = await bootDirectSession(slug, {
-        accept: () => ({ accepted: true, body }),
+        accept: acceptBodyOnce(body),
         dispatch: pictureRoutes(slug),
         sendUserInput: async (text) => {
-          attempts++;
           const answer = (await handlers.input?.({ source: "extension", text }, context)) as
             | { readonly images?: readonly unknown[] }
             | undefined;
-          if (attempts === 2) {
-            retryImages.push(...(answer?.images ?? []));
-            retryAsked.resolve();
-          }
+          images.push(...(answer?.images ?? []));
           asked.resolve();
           return { handled: "prompt" };
         },
@@ -6178,25 +6209,19 @@ describe("envoy OMP extension", () => {
       agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
       await delivered(1);
       await asked.promise;
-      // The host reported prompt but dropped it before it emitted a tagged message_start.
+      // The host took the picture and reported prompt, but dropped the prompt before it emitted a
+      // tagged message_start.
+      expect(images).toEqual([image]);
       expect(shownPictures("ses_delivery").has(address)).toBe(false);
 
       agent.push(directDispatchEnvelope("steer", `${slug}-2`, { attempt: 2, body }));
       await delivered(2);
-      await retryAsked.promise;
-      await fixture.handlers.get("message_start")?.(
+      expect(fixture.deliveries.at(-1)?.content).toEqual([
         {
-          message: {
-            content: [{ text: body, type: "text" }],
-            role: "user",
-            tag: DIRECT_MESSAGE_ID,
-            timestamp: 20,
-          },
+          type: "text",
+          text: expect.stringContaining(`- image 1: ${address} (shot.png, image/png, 10 bytes)`),
         },
-        context
-      );
-      expect(retryImages).toEqual([
-        { data: Buffer.from(png).toString("base64"), mimeType: "image/png", type: "image" },
+        image,
       ]);
       expect(shownPictures("ses_delivery").has(address)).toBe(true);
     });

@@ -31,10 +31,12 @@
   included, reaches the model as the person's message, carrying its Dispatch id as the host's
   `tag`. What a command printed, or why it did not run (a built-in only the terminal runs, such as
   `/new`, or a host mode that cannot run typed input), is the session's reply to that message on
-  Dispatch. On a host without the method a message starting with `/` is not sent, and the reply
-  names the host's Oh My Pi version; other text arrives as before. The pictures a message embeds
-  reach the host through the extension's `input` handler, and count as shown only once the host's
-  message carrying that Dispatch id starts, so a prompt the host dropped leaves them for the retry.
+  Dispatch, including what a built-in prints before the prompt it submits
+  (`/force:<tool> <prompt>`). On a host without the method a message starting with `/` is not
+  sent, and the reply names the host's Oh My Pi version; other text arrives as before. The pictures
+  a message embeds reach the host through the extension's `input` handler, and count as shown only
+  once the host's message carrying that Dispatch id starts, so a prompt the host dropped leaves
+  them for the next delivery that names them.
 - The live agent conversation stream lists the slash commands a person can send the session (a
   `commands` frame, the last of every replay): the host's built-ins, `/new` and the others only the
   terminal runs marked as such; extension, custom and skill commands; and the file commands and

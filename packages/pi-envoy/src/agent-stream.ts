@@ -7,6 +7,7 @@ import {
   type AgentStreamPart,
   type AgentStreamReplay,
   capAgentStreamText,
+  isTypableCommandName,
 } from "@legion/contracts";
 
 /**
@@ -102,9 +103,14 @@ export interface AgentStreamPublisherDeps {
 
 const encoder = new TextEncoder();
 
-/** A character no command name a person types holds: whitespace, or a control character (C0, DEL
- *  or C1). JSON writes a C0 one as a six-byte escape. */
-const UNTYPABLE_NAME = /[\s\p{Cc}]/u;
+/** What a replay's `frames` array costs beyond its frames: its two brackets. Each frame after the
+ *  first adds a comma. */
+const REPLAY_ARRAY_BYTES = 2;
+
+/** The UTF-8 bytes `value` serialises to, which is what NATS measures. */
+function jsonBytes(value: unknown): number {
+  return encoder.encode(JSON.stringify(value)).length;
+}
 
 /** `provider/model` combined and capped (e.g. `anthropic/claude-opus-5`), or undefined when
  *  either is missing or empty — an empty string still satisfies `typeof x === "string"`, and
@@ -295,23 +301,22 @@ export class AgentStreamPublisher {
   /**
    * The session's slash commands: kept for every replay, whose last frame they are, and published
    * at once when they differ from the list last kept while a viewer is attached. Each name is
-   * capped and kept once, empty names and names holding whitespace or a control character dropped,
-   * since a person types a command as one token. The list keeps the host-order prefix whose frame
-   * fits the replay's byte budget on its own: the caps count characters, and a character JSON
-   * escapes (`\u0001`) costs six bytes.
+   * capped and kept once, a name a person could not type dropped (`isTypableCommandName`). The
+   * list keeps the host-order prefix whose frame fits the replay's byte budget on its own: the
+   * caps count characters, and a character JSON escapes (`\u0001`) costs six bytes.
    */
   setCommands(subject: string, commands: readonly AgentStreamCommand[]): void {
-    // Measured as `replay` pays for it: the frame inside the brackets of `frames`, under the
-    // highest sequence number it can carry, then each command and the comma before it.
-    const limit = AGENT_STREAM_LIMITS.historyBytes - 2;
-    let bytes = encoder.encode(JSON.stringify(this.#commandsFrame([], this.#seq + 1))).length;
+    // Measured as `replay` pays for it: the frame alone in `frames`, under the highest sequence
+    // number it can carry, then each command and the comma before it.
+    const limit = AGENT_STREAM_LIMITS.historyBytes - REPLAY_ARRAY_BYTES;
+    let bytes = jsonBytes(this.#commandsFrame([], this.#seq + 1));
     const seen = new Set<string>();
     const kept: AgentStreamCommand[] = [];
     for (const command of commands) {
       if (kept.length >= AGENT_STREAM_LIMITS.commands) break;
       const name = command.name;
       if (name.length > AGENT_STREAM_LIMITS.commandNameChars) continue;
-      if (name === "" || UNTYPABLE_NAME.test(name) || seen.has(name)) continue;
+      if (!isTypableCommandName(name) || seen.has(name)) continue;
       const listed: AgentStreamCommand = {
         name,
         source: command.source,
@@ -323,7 +328,7 @@ export class AgentStreamPublisher {
         }),
         ...(command.terminalOnly === true && { terminalOnly: true as const }),
       };
-      const cost = encoder.encode(JSON.stringify(listed)).length + (kept.length === 0 ? 0 : 1);
+      const cost = jsonBytes(listed) + (kept.length === 0 ? 0 : 1);
       if (bytes + cost > limit) break;
       bytes += cost;
       seen.add(name);
@@ -408,22 +413,17 @@ export class AgentStreamPublisher {
     const ordered = [...this.#history.values()].sort((left, right) =>
       left.at === right.at ? left.seq - right.seq : left.at - right.at
     );
-    // The command list rides last and is paid for first, so a full history never crowds it out.
-    // `setCommands` keeps it inside the budget; one that does not fit is left out, never sent over.
-    const listed = this.#commands === undefined ? undefined : this.#commandsFrame(this.#commands);
-    const listedBytes = listed === undefined ? 0 : encoder.encode(JSON.stringify(listed)).length;
-    const commands =
-      listed !== undefined && 2 + listedBytes <= AGENT_STREAM_LIMITS.historyBytes
-        ? listed
-        : undefined;
-    let used = 2 + (commands === undefined ? 0 : listedBytes);
+    // The command list rides last and is paid for first, so a full history never crowds it out;
+    // `setCommands` keeps it inside the budget on its own.
+    const commands = this.#commands === undefined ? undefined : this.#commandsFrame(this.#commands);
+    let used = REPLAY_ARRAY_BYTES + (commands === undefined ? 0 : jsonBytes(commands));
     const kept: AgentStreamFrame[] = [];
     for (let index = ordered.length - 1; index >= 0; index -= 1) {
       const entry = ordered[index];
       if (entry === undefined) continue;
       const frame = frameFor(entry);
       const separated = kept.length > 0 || commands !== undefined;
-      const cost = encoder.encode(JSON.stringify(frame)).length + (separated ? 1 : 0);
+      const cost = jsonBytes(frame) + (separated ? 1 : 0);
       if (used + cost > AGENT_STREAM_LIMITS.historyBytes) break;
       used += cost;
       kept.unshift(frame);

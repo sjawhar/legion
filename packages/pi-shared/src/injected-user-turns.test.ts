@@ -108,6 +108,18 @@ describe("the user turns sent into a session", () => {
     expect(matchInjectedUserTurn("s1", second)).toBe("m-2");
   });
 
+  // A message is its host timestamp and its tag, the identity the stream keys it by. The same tag
+  // at another timestamp is another message (the same Dispatch message sent in again), which must
+  // take its own noted turn, or that turn is never found and stays in the record.
+  test("take a noted turn for each message carrying the same tag at another timestamp", () => {
+    noteTypedUserTurn("s1", "m-1");
+    expect(matchInjectedUserTurn("s1", { ...user(10, "ship it"), tag: "m-1" })).toBe("m-1");
+    noteTypedUserTurn("s1", "m-1");
+    expect(matchInjectedUserTurn("s1", { ...user(20, "ship it"), tag: "m-1" })).toBe("m-1");
+
+    expect(envoyPluginInterface().injectedUserTurns.get("s1")?.sent).toEqual([]);
+  });
+
   // A typed command that submits nothing (`/compact`, `/session`) leaves its turn noted until the
   // host answers. A user message the tag does not name (the daemon's assignment, text typed at the
   // terminal) is never that turn, whatever its text: otherwise Legion's phase-stall check counts

@@ -125,12 +125,18 @@ export interface AgentStreamToolResult {
  * user message; and `skill`, a skill (`skill:<name>`).
  */
 export interface AgentStreamCommand {
-  /** The command without its slash: `compact`, `skill:dispatch`; one non-empty token, with no
-   *  whitespace and no control character. */
+  /** The command without its slash: `compact`, `skill:dispatch`; see `isTypableCommandName`. */
   readonly name: string;
   readonly description?: string;
   readonly source: "builtin" | "extension" | "prompt" | "skill";
   readonly terminalOnly?: true;
+}
+
+/** Whether `name` is a command name a person can type after the slash: one non-empty token, with
+ *  no whitespace and no control character. The session lists only such names, and a viewer
+ *  refuses a list holding any other. */
+export function isTypableCommandName(name: string): boolean {
+  return /^[^\s\p{Cc}]+$/u.test(name);
 }
 
 /**

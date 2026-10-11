@@ -30,13 +30,16 @@ blocks after the text (`src/delivery-pictures.ts`, the same bounds as `dispatch 
 a person's turn (below): `sendUserMessage` takes the blocks with the text, and `sendUserInput`, which
 takes text alone, gets them from the extension's own `input` handler when the host asks for that
 input's images (`source: "extension"`), as a picture pasted at the terminal reaches it. A typed
-turn's pictures wait under its Dispatch message id until that handler hands them to the input with
-the turn's text (same text: in send order), and count as shown only once the host's message
-carrying that id as its `tag` starts: a prompt the host dropped (an abort as it was admitted)
-leaves them unshown, and Dispatch's retry carries them. Their limit: an extension whose `input`
-handler runs ahead of pi-envoy's and rewrites the text leaves that turn without its pictures, since
-the text is the only part of the event naming the turn; they are never marked shown, so a retry
-carries them.
+turn's pictures wait under its Dispatch message id (`src/typed-pictures.ts`) until that handler
+hands them to the input with the turn's text (same text: in send order), which releases their
+bytes to the host, and count as shown only once the host's message carrying that id as its `tag`
+starts. A session change drops the turns sent into the session left, whose queued messages the
+host discarded. Dispatch accepts a message once, so a retry of one whose message went without its
+pictures arrives as a card, which carries them: a prompt the host dropped (an abort as it was
+admitted) leaves them unshown. Their limit: an extension whose `input` handler runs ahead of
+pi-envoy's and rewrites the text leaves that turn without its pictures, since the text is the
+only part of the event naming the turn; they are never marked shown, so a later delivery carries
+them.
 
 A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
 steer) becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate
@@ -67,13 +70,14 @@ once the run it started ends, and the pump must keep taking the person's next Se
 already accepted, so what the host answers is the session's reply to it on Dispatch
 (`typedInputReply`, posted with `POST /api/v1/messages/{id}/reply`), never a failed delivery: what a
 built-in printed (`/session`'s `Session:`, `Title:` and `CWD:` lines; `/compact`'s
-`Compaction complete. …`), that a built-in only the terminal runs (`/new`, `/resume`) runs only in
-the session's own terminal and nothing was sent, that a host mode which does not wire the method
-(an SDK embedder, a guest in a shared session) did not run it and nothing was sent, or why the host
-failed it; a prompt or skill the model now works on, and a command that printed nothing, get no
-reply. On a host without `sendUserInput` a body that starts with `/` is not sent, since the host
-would hand it to the model as words, and the reply names the host's Oh My Pi version and says
-nothing was sent; any other body goes through `pi.sendUserMessage` as before.
+`Compaction complete. …`; `/force:<tool> <prompt>`'s confirmation, printed before the prompt it
+submits), that a built-in only the terminal runs (`/new`, `/resume`) runs only in the session's own
+terminal and nothing was sent, that a host mode which does not wire the method (an SDK embedder, a
+guest in a shared session) did not run it and nothing was sent, or why the host failed it; a
+prompt, skill or command that printed nothing gets no reply. On a host without `sendUserInput` a
+body that starts with `/` is not sent, since the host would hand it to the model as words, and the
+reply names the host's Oh My Pi version and says nothing was sent; any other body goes through
+`pi.sendUserMessage` as before.
 
 The stream tags the person's message with its Dispatch id (`dispatchMessageId`, passed to
 `AgentStreamPublisher.record` and kept on the ring entry) so the dashboard shows it once; which
@@ -83,11 +87,11 @@ message the input submits, a user message or a `skill-prompt` custom message, an
 stays in the record past the run's `agent_end` until that message arrives, and goes when the host
 answers that the input submitted no message. A `sendUserMessage` turn is found by its text: the
 first user message that equals it, forgotten at the run's `agent_end`, so on such a host a Send or
-an Aside the host runs as a turn of its own after that run matches nothing. What the record answers
-for a message is remembered until the run ends, under its tag when it has one (two Sends can be
-stamped in the same millisecond) and its host timestamp otherwise, and the stream keys a tagged user
-message by its timestamp and tag for the same reason. The phase-stall section
-of `packages/pi-legion/AGENTS.md` says what a miss costs a phase worker. Which turns the page shows
+an Aside the host runs as a turn of its own after that run matches nothing. A message's identity
+is its host timestamp and, when the host kept one, its tag (two Sends can be stamped in the same
+millisecond): the stream keys it by that, and what the record answers for it is remembered under
+that until the run ends. The phase-stall section of `packages/pi-legion/AGENTS.md` says what a
+miss costs a phase worker. Which turns the page shows
 twice: one the record missed, which the stream carries untagged; and a prompt template or file
 command, whose streamed user message is the expanded text while Dispatch stores what the person
 typed, and the page takes the stored copy away only when the two texts are equal

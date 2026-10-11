@@ -42,7 +42,8 @@ as that skill's prompt, and slash text that names no command as the words themse
 as you would typed. A command that runs without reaching you (`/session`, `/compact`), or that
 did not run (one only your own terminal runs, such as `/new`), is answered on Dispatch by your
 plugin, as your reply to that message: what the command printed, or why it did not run. You
-receive nothing for it and write nothing for it.
+receive nothing for it and write nothing for it. A command that prints and then submits a prompt
+(`/force:<tool> <prompt>`) gets the same reply, and you answer only the prompt it submitted.
 
 Everything else still arrives as a Dispatch frame: a **BTW**, a broadcast, a direct message on a
 host that takes no user turn from its plugin (Claude Code), and one Dispatch did not accept.

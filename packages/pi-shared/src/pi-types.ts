@@ -360,10 +360,11 @@ export type { ExtensionAgentsApi };
 
 /**
  * What `sendUserInput` did with its text: `prompt` and `skill` submitted a message carrying the
- * caller's tag; `command` ran something locally (`output` is what a built-in printed, and
- * `agentInvoked` says it started a turn without a message, as `/retry` does); `terminal-only` is a
- * built-in only the interactive terminal runs (`/new`, `/resume`), and nothing ran; `unavailable`
- * is a host mode that does not wire the method, or a guest in a shared session, and nothing ran.
+ * caller's tag; `command` ran something locally (`agentInvoked` says it started a turn without a
+ * message, as `/retry` does); `terminal-only` is a built-in only the interactive terminal runs
+ * (`/new`, `/resume`), and nothing ran; `unavailable` is a host mode that does not wire the method,
+ * or a guest in a shared session, and nothing ran. `output` is what a built-in printed, on a
+ * `command` or on the `prompt` it then submitted (`/force:<tool> <prompt>`).
  */
 export interface UserInputResult {
   readonly handled: "prompt" | "command" | "skill" | "terminal-only" | "unavailable";

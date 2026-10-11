@@ -70,8 +70,8 @@ mode the session does not take, the message box warns you and suggests a prefix 
 On an Oh My Pi session, your Send or Aside arrives as your own message in its conversation, and the
 agent answers there. A Send or Aside that starts with `/` runs as the session's terminal would run
 it. A command that prints output, such as `/session` or `/compact`, posts that output as the
-session's **Reply via Dispatch** instead; one that runs only in the session's own terminal says it
-did not run. Watch either result in the [live view](#the-live-view).
+session's **Reply via Dispatch**; one that runs only in the session's own terminal says it did not
+run. Watch either result in the [live view](#the-live-view).
 
 ## Broadcasts
 
