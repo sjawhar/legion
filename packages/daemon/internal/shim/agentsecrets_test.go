@@ -29,6 +29,9 @@ case "$1" in
     umask 077; printf 'fake key\n' >"$3/key.pem"; printf '%s\n' "` + fakeThumbprint + `"; exit 0 ;;
   renew)
     shift; printf 'renew %s %s\n' "$$" "$*" >>"$AGENT_SECRETS_KEY_DIR/renew.log"
+    if [ "$AGENT_SECRETS_TEST_RENEW_EXIT" = 76 ]; then
+      printf 'agent-secrets renew: enrollment %s permanently refused by broker: HTTP 403 POD_TOKEN_REQUIRED: fake refusal\n' "$(cat "$AGENT_SECRETS_KEY_DIR/enrollment")" >&2
+    fi
     if [ -n "$AGENT_SECRETS_TEST_RENEW_EXIT" ]; then exit "$AGENT_SECRETS_TEST_RENEW_EXIT"; fi
     exec sleep 300 ;;
 esac
@@ -152,7 +155,7 @@ func TestPermanentlyRefusedRenewerStopsWithoutRestarting(t *testing.T) {
 	peer.open(t)
 	peer.send(t, shimwire.AgentSecretsEnrollment{ID: "req-1", EnrollmentID: "enr-1"})
 	peer.expect(t, shimwire.AgentSecretsEnrollmentResult{ID: "req-1", OK: true})
-	r.log.await(t, "renewer permanently refused (exit 76); not restarting", 1)
+	r.log.await(t, "renewer permanently refused for enrollment enr-1 (exit 76): \"agent-secrets renew: enrollment enr-1 permanently refused by broker: HTTP 403 POD_TOKEN_REQUIRED: fake refusal\"; not restarting", 1)
 	clock.idle(t)
 	if r.log.count("renewer started") != 1 || r.log.count("renewer exited") != 0 {
 		t.Fatalf("permanently refused renewer log:\n%s", r.log)

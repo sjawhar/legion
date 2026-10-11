@@ -121,7 +121,7 @@ var commands = []command{
 	{"--version", "agent-secrets --version",
 		"Print the release this binary was built as."},
 	{"renew", "agent-secrets renew [--pod-token-file FILE]",
-		"Keep an agent box's or pod's enrollment lease alive, renewing it until interrupted. A pod\nnames its projected service-account token's file: each renewal sends the token the file holds\nthen, which the broker checks names the pod and service account the enrollment was made for."},
+		"Keep an agent box's or pod's enrollment lease alive, renewing it until interrupted. A pod\nnames its projected service-account token's file: each renewal sends the token the file holds\nthen, which the broker checks names the pod and service account the enrollment was made for. A\npermanent broker refusal exits 76, naming the enrollment, HTTP status and broker code."},
 	{"request", "agent-secrets request NAME... [--reason TEXT] [--json]",
 		"Request secrets and print the request's id and state, and who approves it and where while\nit waits; exit 75 while it waits for approval and 77 when it is denied."},
 	{"status", "agent-secrets status <request_id> [--json]",
@@ -687,10 +687,6 @@ func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
 // renew
 // ---------------------------------------------------------------------------
 
-// renewAfter is the renewal loop's one wait. Tests replace it so every renewal step is a channel
-// send, not a wall-clock delay.
-var renewAfter = time.After
-
 // cmdRenew renews this session's enrollment until interrupted. With --pod-token-file (a pod; the
 // Legion worker shim passes the projected token file the runtime mounts) every renewal reads the
 // file again and sends its contents as pod_token, since the kubelet rotates the token in place;
@@ -728,7 +724,7 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return renewLoop(ctx, newClient(base), signer, enrollmentID, podToken, stderr, renewAfter)
+	return renewLoop(ctx, newClient(base), signer, enrollmentID, podToken, stderr, time.After)
 }
 
 func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, podToken func() (string, error), stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
@@ -745,7 +741,11 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 			}
 			var refused *apiError
 			if errors.As(err, &refused) && refused.Permanent() {
-				fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
+				code := refused.Code
+				if code == "" {
+					code = "UNKNOWN"
+				}
+				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by broker: HTTP %d %s: %s\n", enrollmentID, refused.Status, code, refused.Message)
 				return exitRenewRefused
 			}
 			fmt.Fprintf(stderr, "agent-secrets renew: %v; retrying in %s\n", err, backoff)

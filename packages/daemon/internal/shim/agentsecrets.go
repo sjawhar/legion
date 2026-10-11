@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +35,32 @@ const renewRestartDelay = 5 * time.Second
 // boundary because a permanent broker refusal must stop the shim rather than crash-looping a pod
 // whose projected token is wrong or absent.
 const permanentRenewExitCode = 76
+
+// lastLineWriter forwards a child stream while retaining its final nonblank line for the shim's
+// terminal log. exec.Cmd waits for its copy goroutine before Wait returns, so Last is complete
+// when startRenewer classifies the child's exit.
+type lastLineWriter struct {
+	partial string
+	last    string
+}
+
+func (w *lastLineWriter) Write(p []byte) (int, error) {
+	lines := strings.Split(w.partial+string(p), "\n")
+	for _, line := range lines[:len(lines)-1] {
+		if line = strings.TrimSpace(line); line != "" {
+			w.last = line
+		}
+	}
+	w.partial = lines[len(lines)-1]
+	return len(p), nil
+}
+
+func (w *lastLineWriter) Last() string {
+	if line := strings.TrimSpace(w.partial); line != "" {
+		return line
+	}
+	return w.last
+}
 
 // identity runs `agent-secrets keygen --out <key dir>` once and reads the projected token: the
 // hello2 payload. It runs before the first dial, so a pod that cannot generate its key never
@@ -99,7 +126,7 @@ func (s *shim) enroll(f shimwire.AgentSecretsEnrollment) {
 		return
 	}
 	s.log.Printf("[worker-shim] agent-secrets: enrolled as %s", f.EnrollmentID)
-	s.startRenewer()
+	s.startRenewer(f.EnrollmentID)
 	answer(nil)
 }
 
@@ -134,7 +161,7 @@ func writeEnrollment(dir, id string) error {
 // agent-secrets ship in one worker image, so the renewer always knows the flag. It reads
 // AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR from the shim's own environment, where the runtime
 // set them. One renewer per shim: a second enrollment frame starts no second one.
-func (s *shim) startRenewer() {
+func (s *shim) startRenewer(enrollmentID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.renewing {
@@ -147,8 +174,10 @@ func (s *shim) startRenewer() {
 		defer s.renewers.Done()
 		for s.loop.Err() == nil {
 			cmd := exec.CommandContext(s.loop, a.Binary, "renew", "--pod-token-file", a.TokenFile)
+			tail := &lastLineWriter{}
 			cmd.Env = s.cfg.Env
-			cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+			cmd.Stdout = os.Stderr
+			cmd.Stderr = io.MultiWriter(os.Stderr, tail)
 			if err := cmd.Start(); err != nil {
 				s.log.Printf("[worker-shim] agent-secrets: renewer could not start: %v; retrying in %s", err, renewRestartDelay)
 			} else {
@@ -159,7 +188,7 @@ func (s *shim) startRenewer() {
 				}
 				var exited *exec.ExitError
 				if errors.As(err, &exited) && exited.ExitCode() == permanentRenewExitCode {
-					s.log.Printf("[worker-shim] agent-secrets: renewer permanently refused (exit %d); not restarting", permanentRenewExitCode)
+					s.log.Printf("[worker-shim] agent-secrets: renewer permanently refused for enrollment %s (exit %d): %q; not restarting", enrollmentID, permanentRenewExitCode, tail.Last())
 					return
 				}
 				s.log.Printf("[worker-shim] agent-secrets: renewer exited (%v); restarting in %s", err, renewRestartDelay)
