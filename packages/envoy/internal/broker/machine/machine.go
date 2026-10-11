@@ -309,7 +309,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 
 	if _, err := tx.Exec(ctx, `insert into credential_request_events (record_id, event, login, credential_id, actor) values ($1,$2,$3,$4,$5)`,
-		recordID, event, login, credID, "human:"+login); store.IsUniqueViolation(err) {
+		recordID, event, login, credID, record.HumanActor(login)); store.IsUniqueViolation(err) {
 		// Only ExpirePending can win this race: see the row-lock comment above.
 		return "", "", ErrLoginExpired
 	} else if err != nil {

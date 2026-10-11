@@ -55,7 +55,8 @@ as a person; it records the service account the pod's projected token proved ins
 A launcher (a machine's helper, or the Legion daemon) cannot enroll anything until a person has
 approved a **machine login** for it. The login works like a device code:
 
-1. The machine generates a fresh key and asks the broker to log in. A person's machine names the
+1. The machine generates a fresh key and asks the broker to log in (`agent-secrets machine login`
+   asks the helper to). A person's machine names the
    person who should approve it (the helper reads that person's Dispatch login from
    `AGENT_SECRETS_OPERATOR_FILE`); a service's login, such as the Legion daemon's, names its service
    instead.
@@ -74,9 +75,12 @@ its code, not for one named person. The broker reads the service from the machin
 so a login the daemon starts while still naming a person in it is anyone's to decide too.
 
 A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. It may be revoked from Dispatch's
-machine-login page, before or after it expires, which also ends every session it enrolled
+machine-login page, or, for a person's own machine, from any of their machines under its machine
+login (`agent-secrets machine revoke`), before or after
+it expires, which also ends every session it enrolled
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)): a person's
-machine login by the person who approved it and no one else, a service's by anyone signed in. Its
+machine login by the person who approved it and no one else, a service's by anyone signed in, on
+the machine-login page. Its
 sessions outlive its expiry: a session renews its lease with its own key, never with the machine's
 credential, so a box keeps working after the machine's credential expires, and the page lists an
 expired login, marked as expired with sessions still running, until its last session ends. On a
@@ -105,6 +109,10 @@ one KMS key, `BROKER_SECRETS_KMS_KEY_ARN`, and tagged with its owner and its tie
 - **`owner`** is `shared`, a person's email in lowercase, the email they sign in to Dispatch with,
   or a service the broker is configured with (`BROKER_SERVICES`).
 - **`tier`** is `agent` or `human`.
+
+People write the secrets and their tags, not the broker: `agent-secrets secret` creates and
+changes them under the person's own AWS sign-in
+([manage a secret](/legion/broker/guides/manage-a-secret/)).
 
 Who gets a secret follows from those two tags alone:
 
@@ -147,11 +155,12 @@ the person's own included, still get the secrets at once.
 The broker reads the namespace when it starts, and refuses to start when it cannot, then again every
 five minutes, a fixed time rather than a setting (`policyRefresh` in
 `packages/envoy/cmd/broker/main.go`). A change is served at once when something asks the broker to
-reread it: `POST /v1/secrets/{name}/reread`, which any caller may send right after writing a
-secret, and a request naming a secret the broker does not serve yet, which makes it reread that one
-name before refusing it (up to ten such rereads at once per session, refilled one every ten
-seconds: `DefaultMissRereads` in `packages/envoy/internal/broker/requests/machine_state.go`), so a
-secret created a moment ago is served on its first request. A reread reads the one secret from
+reread it: `POST /v1/secrets/{name}/reread`, which `agent-secrets secret` sends after each write it
+makes and any caller may send right after writing a secret, and a request naming a secret the
+broker does not serve yet, which makes it reread that one name before refusing it (up to ten such
+rereads at once per session, refilled one every ten seconds: `DefaultMissRereads` in
+`packages/envoy/internal/broker/requests/machine_state.go`), so a secret created a moment ago is
+served on its first request. A reread reads the one secret from
 Secrets Manager (`DescribeSecret`, which shows a write at once) and serves it, or stops serving it,
 as it finds it; a read of the whole namespace in the five minutes after reads that secret again
 alone, so a listing that has not caught up never undoes it (`Current.Refresh` in
@@ -213,9 +222,10 @@ what its environment holds (`printenv NAME` prints it). A session holding a gran
 the value: approve a secret only for a session you would trust with the value itself.
 
 A grant ends when it expires, when its session revokes it (`agent-secrets revoke`), when its
-approver or its enrollment's operator revokes it in Dispatch, or when its enrollment ends. A grant
-the session got without asking is revoked like any other, and when its operator revokes it the
-session asks for approval before it gets the same secrets again (the operator
+approver or its enrollment's operator revokes it in Dispatch or from one of their machines
+(`agent-secrets grant revoke`), or when
+its enrollment ends. A grant the session got without asking is revoked like any other, and when its
+operator revokes it the session asks for approval before it gets the same secrets again (the operator
 [withholds](#owner-and-tier-who-may-have-which-secret) them, even when the grant had already
 ended); a session revoking its own grant, and anyone but the operator revoking one, withholds
 nothing. To end every session's automatic access to a secret, change its tags
@@ -294,6 +304,8 @@ that revoke ended, the withheld secrets that grant held), `grant.withheld` (an o
 a grant already revoked, naming under `withheld` the secrets it withheld from the session) and
 `launcher_credential.revoked` (naming the machine login's `credential_id`, its `host`, its
 `service` for a service's login, and under `enrollments` the sessions the revoke ended). Each row
-names its actor: `human:<email>`, `session:<enrollment id>`, `launcher:<credential id>` or
-`broker`. No record, event or audit row ever holds a secret value.
+names its actor: `human:<email>` for a change Dispatch made for its signed-in person,
+`session:<enrollment id>` for a session's own, `launcher:<credential id>` for one a machine login
+made under its own credential, a person's revoke from their machine included, or `broker`. No
+record, event or audit row ever holds a secret value.
 [Operating the broker](/legion/broker/operate/#the-audit-record) shows how to read them.

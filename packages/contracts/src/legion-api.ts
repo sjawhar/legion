@@ -111,7 +111,7 @@ const legionLocator = z.discriminatedUnion("runtime", [
  * the fact the check found (`open`). `incarnation` is the reporting process's: the daemon keeps a
  * claim's latest report whatever its incarnation, so a reader compares it with
  * `locator.incarnation` to tell a report of the running process from one a relaunch has outlived
- * (contract 19). It is empty for a report the API recorded from a claim whose machine held no
+ * (contract 20). It is empty for a report the API recorded from a claim whose machine held no
  * process (`runtime.Locator{Claim}`), which no reader compares with a locator. `ok` and `open`
  * are never null; the daemon floors an open row's detail (`capabilities.Normalize`), and the
  * schema stays the guard. */
@@ -230,7 +230,8 @@ const legionControllerLocator = z.strictObject({
 
 /** `api.AgentSecretsLoginView` — the daemon's own agent-secrets machine login's current status
  * (runtime.kubernetes.agent_secrets): `state` is one of "none" (no login has
- * ever been started), "pending", "issued", "denied", or "expired"; `code` is the confirmation
+ * ever been started), "pending", "issued", "denied", "expired", or "failed" (the broker never
+ * opened the most recent login: it refused it, or did not answer); `code` is the confirmation
  * code shown on the Dispatch credential page for a pending login, "" otherwise. */
 const legionAgentSecretsLoginView = z.strictObject({
   state: z.string(),
@@ -245,7 +246,7 @@ const legionAgentSecretsLoginView = z.strictObject({
  * deployment row carrying `configLine`, the `legion.yaml` line that records a decision. A live row
  * (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) is
  * `present` or `open` from the sessions' reports (`legionCapabilityReportView`), and carries no
- * `configLine`; `live` is no status since contract 19. A gap is reported here, never refused
+ * `configLine`; `live` is no status since contract 20. A gap is reported here, never refused
  * (contract 16). */
 const legionCapabilityState = z.strictObject({
   name: nonEmptyString,
@@ -276,7 +277,7 @@ export type LegionIssue = LegionState["issues"][string];
 /** `claim.RegisterResponse`, the body of `POST /legion/v1/claims/register`: the claim the agent
  * holds, the secret its ready and exit authenticate with, and `promptAgents`, the sorted names of
  * the task agents the role's prompts dispatch — what the session's subagents check measures its
- * discovered agents against (contract 19). Never null: a role whose prompts name none gets `[]`. */
+ * discovered agents against (contract 20). Never null: a role whose prompts name none gets `[]`. */
 export const LegionRegisterResponse = z.strictObject({
   claimToken: nonEmptyString,
   tree: nonEmptyString,
@@ -293,7 +294,7 @@ export type LegionRegistration = z.output<typeof LegionRegisterResponse>;
  * measured, how long the measuring took, and one row per capability it checked, `ok` with the fact
  * the check found in `detail`. A `detail` may be empty on the wire: a passing check with nothing
  * to add. The daemon normalises the rows (unknown names dropped, a live row not reported marked
- * open, details cut) and never refuses a report (contract 19). */
+ * open, details cut) and never refuses a report (contract 20). */
 export const LegionCapabilityReport = z.strictObject({
   measuredAt: timestamp,
   elapsedMs: z.number().int().nonnegative(),

@@ -36,20 +36,30 @@ var Daemon = Retry{Initial: 10 * time.Second, Max: 5 * time.Minute}
 // supervisor and must finish.
 var Image = Retry{Initial: 10 * time.Second, Max: 5 * time.Minute, Attempts: 6}
 
-// Outcome is one attempt: passed; refused, an answer no retry changes; or neither — transient,
-// with the detail its retry is logged with.
+// Outcome is one attempt: passed; refused, an answer no retry changes; waiting, on a condition
+// outside the probed thing that waiting resolves; or neither — transient, with the detail its retry
+// is logged with.
 type Outcome struct {
 	Passed  bool
 	Refusal error
+	// Waiting is set when the attempt could not run for want of something outside what it probes
+	// — capacity: a probe pod the pool had no room for — and says what it waits on. Such an attempt
+	// is logged with that detail and run again after the policy's longest wait, and counts against
+	// no attempt budget: it said nothing about the probed thing, and no number of them is a verdict.
+	Waiting string
 	Detail  string
 }
 
 // Run runs attempt until it passes, is refused, or has failed transiently retry.Attempts times,
 // logging each transient failure with the wait before the next attempt. A refusal is returned as
-// it is. A ctx that ends — during an attempt, whatever the attempt then returned, or during a
-// wait — ends Run with an error wrapping ctx's, and starts no other attempt.
+// it is. A waiting outcome is logged with what it waits on and retried after retry.Max, counted
+// against neither the attempt budget nor the backoff: transient failures before and after it are
+// counted together as if it had not happened. A ctx that ends — during an attempt, whatever the
+// attempt then returned, or during a wait — ends Run with an error wrapping ctx's, and starts no
+// other attempt.
 func Run(ctx context.Context, name string, retry Retry, log *slog.Logger, attempt func(context.Context) Outcome) error {
-	for i := 0; ; i++ {
+	transients := 0
+	for {
 		if err := ctx.Err(); err != nil {
 			return abandoned(name, err)
 		}
@@ -57,29 +67,36 @@ func Run(ctx context.Context, name string, retry Retry, log *slog.Logger, attemp
 		if err := ctx.Err(); err != nil {
 			return abandoned(name, err)
 		}
+		var delay time.Duration
 		switch {
 		case outcome.Passed:
 			return nil
 		case outcome.Refusal != nil:
 			return outcome.Refusal
-		case retry.Attempts > 0 && i+1 >= retry.Attempts:
+		case outcome.Waiting != "":
+			delay = retry.Max
+			log.Warn("boot probe is waiting on capacity; running it again",
+				"probe", name, "detail", outcome.Waiting, "retryIn", delay.String())
+		case retry.Attempts > 0 && transients+1 >= retry.Attempts:
 			message := fmt.Sprintf("the %s probe never completed within its retry budget (%d attempts)", name, retry.Attempts)
 			if outcome.Detail != "" {
 				message += ": " + outcome.Detail
 			}
 			return errors.New(message)
+		default:
+			delay = retry.Initial
+			for n := 0; n < transients && delay < retry.Max; n++ {
+				delay *= 2
+			}
+			delay = min(delay, retry.Max)
+			transients++
+			label := strconv.Itoa(transients)
+			if retry.Attempts > 0 {
+				label += "/" + strconv.Itoa(retry.Attempts)
+			}
+			log.Warn("boot probe failed transiently; waiting to run it again",
+				"probe", name, "attempt", label, "retryIn", delay.String(), "detail", outcome.Detail)
 		}
-		delay := retry.Initial
-		for n := 0; n < i && delay < retry.Max; n++ {
-			delay *= 2
-		}
-		delay = min(delay, retry.Max)
-		label := strconv.Itoa(i + 1)
-		if retry.Attempts > 0 {
-			label += "/" + strconv.Itoa(retry.Attempts)
-		}
-		log.Warn("boot probe failed transiently; waiting to run it again",
-			"probe", name, "attempt", label, "retryIn", delay.String(), "detail", outcome.Detail)
 		wait := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -149,12 +166,22 @@ func OKLine(omp string, contract int, agentModels, modelFallback string) string 
 		capabilitiesMark, modelFallbackMark, modelFallback, contract)
 }
 
-// ImageReport is what the daemon keeps of a passed probe's OK line.
+// ImageReport is what the daemon keeps of a passed probe: what its OK line said of the image, and
+// what the run itself saw of the pool on the way to that line.
 type ImageReport struct {
 	// ModelFallback is the line's model-fallback mark, ModelFallbackOn or ModelFallbackOff: whether
 	// the image's Oh My Pi, under the operator's configuration, falls back to another model when an
 	// agent's own is unavailable.
 	ModelFallback string
+	// CapacityWaits is how many attempts ended waiting on capacity (Outcome.Waiting: a probe pod
+	// the pool had no room for) before one scheduled and passed; zero when the first attempt's pod
+	// scheduled. Not the OK line's: the run that reads the line counts them itself
+	// (sandbox.Runtime.ProbeImage), for the pool-capacity row of the deployment's capability
+	// report.
+	CapacityWaits int
+	// CapacityReason is what the last such attempt waited on — the scheduler's own message, naming
+	// the nodes and the resource they lacked; "" when no attempt waited.
+	CapacityReason string
 }
 
 // markThenContract ends an OK-line pattern after a mark: whatever later marks the line carries,

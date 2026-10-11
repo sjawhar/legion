@@ -29,11 +29,13 @@ type rig struct {
 	// callerPID is the pid PeerOf presents for the next connection; 0 means the real peer.
 	// Atomic: the server goroutine reads it while the test goroutine writes it.
 	callerPID atomic.Int64
+	// parentOf, when set, is the parent lookup the registry's ancestry walks use; unset, /proc.
+	parentOf atomic.Pointer[func(int) (int, error)]
 }
 
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
 // log it in (see rig.login) before any Enroll — host session or box — can succeed, since Task
-// 1's Broker fails closed until a human has run `agent-secrets launcher login`. startRig below
+// 1's Broker fails closed until a human has run `agent-secrets machine login`. startRig below
 // is newRig plus that login, for every test that doesn't care about the pre-login state itself.
 func newRig(t *testing.T, statePath string) *rig {
 	t.Helper()
@@ -56,6 +58,12 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 		Hostname: "testhost",
 		Log:      log,
 		MinRenew: 50 * time.Millisecond,
+	}
+	r.srv.Registry.parent = func(pid int) (int, error) {
+		if parent := r.parentOf.Load(); parent != nil {
+			return (*parent)(pid)
+		}
+		return procParent(pid)
 	}
 	r.srv.PeerOf = func(conn *net.UnixConn) (*Peer, error) {
 		if pid := r.callerPID.Load(); pid != 0 {
@@ -928,7 +936,7 @@ func TestLoginOverTheSocketReturnsTheCodeAndEnrollBoxWorksAfterIssue(t *testing.
 		match:        "/v1/launcher-credentials/",
 	}}
 	before := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-1", Thumbprint: "tp-1"})
-	if before.OK || before.Code != CodeEnrollFailed || !strings.Contains(before.Error, "agent-secrets launcher login") {
+	if before.OK || before.Code != CodeEnrollFailed || !strings.Contains(before.Error, "agent-secrets machine login") {
 		t.Fatalf("enroll-box before any login must name the login command: %+v", before)
 	}
 	login1 := r.call(t, Request{Op: "login"})

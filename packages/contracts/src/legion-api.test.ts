@@ -42,7 +42,7 @@ const schemas: Record<string, z.ZodType> = {
   "state-controller-claim.json": LegionStateResponse,
   "register.json": LegionRegisterResponse,
   // The claim wire's `claim.ReadyRequest` with a capability report, the one request body a Go
-  // golden test writes: what a session posts on `claims/ready` (contract 19).
+  // golden test writes: what a session posts on `claims/ready` (contract 20).
   "ready.json": LegionReadyRequest,
   "register-controller.json": LegionControllerRegisterResponse,
   "controller-secret.json": LegionControllerSecretResponse,
@@ -259,7 +259,7 @@ test("a Stage 3 issue without its Dispatch status is refused", () => {
 // reason and an open row with the legion.yaml line that records a decision, beside the present
 // (codegraph among them: the image carries the tooling and a pod's launch loads it with extension
 // discovery on) and withheld rows, and the six live rows unchecked — no session has reported, so
-// the deployment renders each as `unchecked` with its ruling (contract 19) — and the report is
+// the deployment renders each as `unchecked` with its ruling (contract 20) — and the report is
 // never absent from a state. `installed` stays in the schema's enum with no row carrying it here:
 // it was codegraph's until LEGION-629.
 test("the state golden carries the deployment's capability report", () => {
@@ -305,7 +305,7 @@ test("a capability row's status is one the report renders, and the report cannot
   unknownStatus.capabilities = [{ ...unknownStatus.capabilities[0], status: "missing" }];
   expect(LegionStateResponse.safeParse(unknownStatus).success).toBeFalse();
 
-  // Contract 16's `live` promised a check to come; since contract 19 a live row is `present`,
+  // Contract 16's `live` promised a check to come; since contract 20 a live row is `present`,
   // `open` or `unchecked` from the sessions' reports, and a daemon still rendering `live` is one
   // the plugin was not built against.
   const live = fixture("state.json") as { capabilities: { status: string }[] };
@@ -317,7 +317,7 @@ test("a capability row's status is one the report renders, and the report cannot
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 
-// A session's own report (contract 19): `claims/ready` carries what the session measured of the
+// A session's own report (contract 20): `claims/ready` carries what the session measured of the
 // live rows, and the state shows each claim's latest report partitioned into the names that passed
 // and the gaps that did not, with the incarnation of the process that reported.
 test("the register golden names the task agents the role's prompts dispatch", () => {

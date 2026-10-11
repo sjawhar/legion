@@ -12,8 +12,11 @@
 # legion.dev/role=architect, legion.dev/tree and legion.dev/issue: `labels` in
 # internal/runtime/sandbox/manifest.go at that tag, which its Sandboxes and their volume claim
 # templates carry), and each pod is scheduled as that root Sandbox's pods were: its pod template's
-# node selector, tolerations, priority class and service account. Each pod runs under gVisor as the
-# image's user, prints the import's lines, and is deleted; the script exits 1 when any import did.
+# node selector, tolerations and priority class. It runs as the namespace's default ServiceAccount
+# with no token, not as the Sandbox's: it needs no identity, and a namespace admission policy may let
+# only the agent-sandbox controller create pods as the worker ServiceAccount. Each pod runs under
+# gVisor as the image's user, prints the import's lines, and is deleted; the script exits 1 when
+# any import did.
 #
 # usage: scripts/sessions-import-pods.sh <claims.json> <namespace> <worker image@sha256> <project> <url secret> <url key> [<kubectl args>…]
 #   <claims.json>  what `legion claims list --json` printed before the daemon stopped
@@ -23,8 +26,10 @@
 #   <kubectl args> passed to every kubectl call, e.g. --context <restricted context>
 set -euo pipefail
 
+# Prints the header's usage block, from its `# usage:` line through its `<kubectl args>` line, so a
+# header edit above or within it never shifts what is printed.
 usage() {
-  sed -n '17,22p' "$0" >&2
+  sed -n '/^# usage: /,/^#   <kubectl args>/p' "$0" >&2
   exit 2
 }
 
@@ -86,7 +91,7 @@ for tree in $trees; do
   # require of every pod on the Legion pool: an absent field is the API's default.
   scheduling=$("${kubectl[@]}" get sandboxes -l "$root" -o json | jq -ce 'if (.items | length) == 1 then .items[0].spec.podTemplate.spec |
     {nodeSelector: (.nodeSelector // {}), tolerations: (.tolerations // []),
-     priorityClassName: (.priorityClassName // ""), serviceAccountName: (.serviceAccountName // "")} else empty end') || {
+     priorityClassName: (.priorityClassName // "")} else empty end') || {
     echo "sessions-import-pods: tree $tree has no one root Sandbox labelled $root to schedule its import as; copy it by hand" >&2
     failed=1
     continue
@@ -108,7 +113,6 @@ spec:
   nodeSelector: $(jq -c .nodeSelector <<<"$scheduling")
   tolerations: $(jq -c .tolerations <<<"$scheduling")
   priorityClassName: $(jq -c .priorityClassName <<<"$scheduling")
-  serviceAccountName: $(jq -c .serviceAccountName <<<"$scheduling")
   securityContext: {runAsNonRoot: true, runAsUser: 1000, runAsGroup: 1000, fsGroup: 1000}
   volumes:
     - {name: tree, persistentVolumeClaim: {claimName: "$volume", readOnly: true}}

@@ -75,8 +75,13 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // launch sets would reach the agent's container twice, and one that places Oh My Pi's sessions
 // would move them off the store Legion resumes them from; a volume name would be in the pod twice;
 // a mount at, under, or above a path Legion mounts, the image owns (imageOwnedPaths), or a tool
-// runs from hides it or is hidden by it. A provider key must name a variable nothing else in the
-// pod sets, since the shim refuses one its own environment names and would replace one Oh My Pi's
+// runs from hides it or is hidden by it; and a mount at, under, or above the agents' state home
+// (xdgStateHome), under which every role's agent has a state home of its own (roleStateHome), would
+// have every role's shim refuse to start naming the directory it could not make — the shim makes
+// Oh My Pi's profile directory under the role's state home before Oh My Pi starts
+// (podsafety.EnsureStateHome), which a read-only or foreign mount there refuses — at launch rather
+// than here, at `--check-config`. A provider key must name a variable nothing else in the pod sets,
+// since the shim refuses one its own environment names and would replace one Oh My Pi's
 // environment gains after (the pod baseline), and skips one whose `<NAME>_FILE` pointer the pod
 // sets (shim.ReadProviderEnv); and it must read neither a providers secret's key nor the session
 // database's URL key (sessionDSNKey, "" when sessions are files), which the shim would export into
@@ -105,19 +110,22 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 	if tools.AgentSecrets != "" {
 		imageOwned = append(imageOwned, tools.AgentSecrets)
 	}
+	// Each owner's forbidden is the tail of its refusal, after "nor above": the first two own a
+	// set of paths, the last one directory.
 	owners := []struct {
-		paths       []string
-		owns, whose string
+		paths           []string
+		owns, forbidden string
 	}{
-		{legionMountPaths(), "Legion mounts in every pod", "Legion's"},
-		{imageOwned, "the worker image owns", "the image's"},
+		{legionMountPaths(), "Legion mounts in every pod", "one of Legion's"},
+		{imageOwned, "the worker image owns", "one of the image's"},
+		{[]string{xdgStateHome}, "every role's agent keeps its Oh My Pi state under", "the agents' state home"},
 	}
 	for i, mount := range pod.VolumeMounts {
 		for _, owner := range owners {
 			for _, owned := range owner.paths {
 				if overlaps(mount.MountPath, owned) {
-					return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s, which %s: a mount may be neither at, under, nor above one of %s",
-						i, mount.MountPath, owned, owner.owns, owner.whose)
+					return fmt.Errorf("runtime.kubernetes.pod.volume_mounts[%d].mount_path %s overlaps %s, which %s: a mount may be neither at, under, nor above %s",
+						i, mount.MountPath, owned, owner.owns, owner.forbidden)
 				}
 			}
 		}

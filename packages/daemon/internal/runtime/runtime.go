@@ -83,19 +83,14 @@ type Runtime interface {
 	// directory the daemon can see).
 	AdoptWorkingCopy(ctx context.Context, loc Locator, id GitIdentity) error
 	// ProvisionsWorkspaces is whether the runtime provisions each claim's workspace where its
-	// process runs (a pod's init containers, on the tree volume). When it does, the daemon
+	// process runs (a pod's init containers, on the issue's own volume). When it does, the daemon
 	// provisions and removes none on its own host.
 	ProvisionsWorkspaces() bool
-	// SessionsOnVolume is whether a claim's session is kept on its tree's volume, so moving the
-	// claim to another tree, whose pods mount another volume, loses it: the Sandbox runtime's file
-	// store. Under its session database (runtime.kubernetes.session_store postgres) and under tmux,
-	// whose sessions are on the daemon's host, a claim keeps its session wherever it runs.
-	SessionsOnVolume() bool
 	// ProvisionBound is how much longer a launch may run before its agent's own process has even
 	// started, beyond the registration deadline's base Boot×RegistrationIntervals bound: zero for
 	// a runtime whose process starts the agent at once (tmux), and the Sandbox runtime's own
-	// init-container budget (its fetch's clone plus its own lock wait) for a launch whose pod runs
-	// provisioning first. The supervisor adds it only while a claim is still StateLaunching.
+	// init-container budget (its fetch's clone bound) for a launch whose pod runs provisioning
+	// first. The supervisor adds it only while a claim is still StateLaunching.
 	ProvisionBound() time.Duration
 	// CleanupTree deletes what the runtime holds for tree beyond its claims' processes, once every
 	// claim of the tree has retired and the tree's cleanup is reserved (store.CleanupReservedTree);
@@ -105,17 +100,18 @@ type Runtime interface {
 
 // IssueSuspender stops an issue's pod once authorize, called under the runtime's issue launch
 // lock, says the issue's durable close and its complete stored role population allow it (false
-// finishes the close without acting). Process-only runtimes have no shared issue resources to
-// suspend.
+// finishes the close without acting). With release, the close is a child's as done: once the pod
+// is stopped, the issue's Sandbox is deleted with everything it owns, its volume included, and the
+// call returns once the cluster no longer has it; a Sandbox already gone is success, so a retried
+// close finishes. Without it the Sandbox is kept, Suspended, for a later re-admission to resume.
+// Process-only runtimes have no shared issue resources to suspend.
 type IssueSuspender interface {
-	SuspendIssue(ctx context.Context, issue, tree string, authorize func(context.Context) (bool, error)) error
+	SuspendIssue(ctx context.Context, issue, tree string, release bool, authorize func(context.Context) (bool, error)) error
 }
 
 // RegistrationDeadline is the registration deadline's base Boot×RegistrationIntervals bound plus
 // grace: the supervisor's armRegistration calls it with ProvisionBound before a claim's hello and
-// with zero after, and a runtime's own wait for a sibling's init to finish (the Sandbox runtime's
-// treeWaitBound) calls it with ProvisionBound too, so none of them can compute the deadline
-// differently from the others.
+// with zero after, so the one computation is the deadline's.
 func RegistrationDeadline(boot time.Duration, intervals int, grace time.Duration) time.Duration {
 	return boot*time.Duration(intervals) + grace
 }
@@ -145,30 +141,6 @@ func (k Known) Validate() error {
 		return fmt.Errorf("known claim %s: its locator is claim %s's process", k.Claim, k.Locator.Claim)
 	}
 	return nil
-}
-
-// RemovableWorkspace is one sibling of a tree the daemon has judged safe to remove by lifecycle
-// alone (dispatch://LEGION-583): Issue it belongs to, and MergedHead, the merged pull request's
-// head commit when it merged, empty for one that never did — GitHub deletes a squash merge's
-// branch, so that commit carries no remote bookmark of its own, and workspace-init's push-safety
-// check needs the head to tell that commit from one that was never pushed at all. internal/runtime
-// is as low as this type can live: internal/workspace already imports internal/runtime for its
-// credential helper's GitIdentity, so the reverse import internal/workspace's own type would need
-// is a cycle; internal/workspace uses this type directly instead of a type of its own.
-type RemovableWorkspace struct {
-	Issue      string `json:"issue"`
-	MergedHead string `json:"mergedHead,omitempty"`
-}
-
-// RemovableWorkspacesPayload is LEGION_REMOVABLE_WORKSPACES' own wire shape (dispatch://LEGION-583):
-// Workspaces, the daemon's removable-workspace candidates, and NotAfter, the absolute instant past
-// which workspace-init must no longer trust them, together in one JSON object so the two can
-// never arrive apart. relaunch (internal/runtime/sandbox) encodes it; workspace-init
-// (cmd/legion/workspace_init.go) decodes it strictly — an unknown field, a zero NotAfter, or an
-// empty Workspaces is the same malformed input as invalid JSON: remove nothing, logged why.
-type RemovableWorkspacesPayload struct {
-	NotAfter   time.Time            `json:"notAfter"`
-	Workspaces []RemovableWorkspace `json:"workspaces"`
 }
 
 // SpawnSpec is everything a runtime needs to start one agent: which claim it is, what it is

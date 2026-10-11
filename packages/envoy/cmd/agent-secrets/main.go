@@ -4,13 +4,15 @@
 // AGENT_SECRETS_HELPER_SOCK, to sign on its behalf (helper mode). It enrolls a runtime (box
 // enrollment only, through the local helper — see cmdEnrollHelper below), requests and reads
 // back secret grants, and — in its most common shape — requests one or more secrets and execs a
-// command with them in its environment.
+// command with them in its environment. A person manages the agent secrets themselves with the
+// secret forms (secret.go), which call AWS Secrets Manager under the person's own AWS sign-in
+// and then ask the broker to reread what they wrote.
 //
 //	agent-secrets keygen --out <dir>
 //	agent-secrets enroll --helper --kind box --runtime-id <id> --thumbprint <tp> [--session-id <id>]
 //	agent-secrets unenroll --helper --enrollment <id>
-//	agent-secrets launcher login
-//	agent-secrets launcher login-status
+//	agent-secrets machine login|login-status|list [--json]|revoke <credential_id>
+//	agent-secrets grant list [--json]|revoke <grant_id>
 //	agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]
 //	agent-secrets identity
 //	agent-secrets renew
@@ -21,6 +23,7 @@
 //	agent-secrets self [--json]
 //	agent-secrets whoami [--json]
 //	agent-secrets sign --method M --url U [--enrollment E]
+//	agent-secrets secret list|show|create|set|retag|delete|restore ...
 //	agent-secrets NAME... [--reason TEXT] [--wait DURATION] -- <command> [args...]
 //
 // Environment: AGENT_SECRETS_URL (the broker's base URL) and, for every session-authenticated
@@ -30,7 +33,7 @@
 // to its launcher's default path, $XDG_RUNTIME_DIR/agent-secrets and the helper socket inside it,
 // and a default counts only when its file is there (identity.go). AGENT_SECRETS_ENROLL_WAIT (a
 // duration, default 20s) bounds how long a call waits while a box's launcher is still enrolling
-// it. AGENT_SECRETS_APPROVE_URL (Dispatch's origin) makes `launcher login` print the Dispatch page
+// it. AGENT_SECRETS_APPROVE_URL (Dispatch's origin) makes `machine login` print the Dispatch page
 // where a person decides, and a pending request (request, status, the exec form's wait) name its
 // record's page beside the approver the broker names. The exec form's child keeps
 // AGENT_SECRETS_URL, AGENT_SECRETS_KEY_DIR and AGENT_SECRETS_HELPER_SOCK, since it is the same
@@ -39,7 +42,11 @@
 // enrollment path for either; only a box enrolls through it, and only via --helper (the shared
 // broker contract has no launcher bearer token:
 // nothing on a devbox can enroll except through a helper or the Legion daemon, the two processes
-// that hold a launcher's proof-signing key).
+// that hold a launcher's proof-signing key). The secret forms read AWS_PROFILE (or --profile) for
+// the person's AWS sign-in and need no session identity at all. The machine and grant forms act
+// under this machine's login: the helper signs each call with its launcher credential (sign-launcher)
+// for a process it can show is outside every registered session's process tree, the operator's
+// own shell, and only for the broker's four operator routes.
 package main
 
 import (
@@ -72,11 +79,15 @@ import (
 // these: the broker's generated error reference (cmd/broker-refgen) prints them and refuses a code
 // without a comment or a function that returns any other.
 const (
-	exitUsageError = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
-	exitPending    = 75  // the request is still waiting for a person to approve it; nothing was run
-	exitDenied     = 77  // the request was denied; nothing was run
-	exitCannotRun  = 126 // the command `register --exec` was given exists but could not be run
-	exitNotFound   = 127 // the command `register --exec` was given was not found
+	exitUsageError  = 2   // a usage error: an unknown flag or argument, or a required one or AGENT_SECRETS_URL missing
+	exitPending     = 75  // the request is still waiting for a person to approve it; nothing was run
+	exitDenied      = 77  // the request was denied; nothing was run
+	exitCannotRun   = 126 // the command `register --exec` was given exists but could not be run
+	exitNotFound    = 127 // the command `register --exec` was given was not found
+	exitHangup      = 129 // the value prompt received SIGHUP: the terminal is restored and the process ends by SIGHUP; nothing was written
+	exitInterrupted = 130 // `secret create` or `secret set` was interrupted (Ctrl-C) at the value prompt: the process ends by SIGINT, which a shell's $? reads as 130; nothing was written
+	exitQuit        = 131 // `secret create` or `secret set` quit (Ctrl-\) at the value prompt: the process ends by SIGQUIT, which a shell's $? reads as 131; nothing was written
+	exitTerminated  = 143 // `secret create` or `secret set` was terminated (SIGTERM) at the value prompt: the process ends by SIGTERM, which a shell's $? reads as 143; nothing was written
 )
 
 // command is one form of agent-secrets, as usage lists it and its own -h describes it.
@@ -94,10 +105,18 @@ var commands = []command{
 		"Enroll a box's key through this machine's agent-secrets-helper, write the enrollment id to\nAGENT_SECRETS_KEY_DIR/enrollment, and print it."},
 	{"unenroll", "agent-secrets unenroll --helper --enrollment <id>",
 		"Revoke a box's enrollment through this machine's agent-secrets-helper."},
-	{"launcher login", "agent-secrets launcher login",
+	{"machine login", "agent-secrets machine login",
 		"Log this machine in: print the confirmation code its operator types into Dispatch, then wait\nfor the decision (exit 0 once approved, 1 when denied or expired)."},
-	{"launcher login-status", "agent-secrets launcher login-status",
+	{"machine login-status", "agent-secrets machine login-status",
 		"Print \"issued\" and exit 0 while this machine's helper holds a launcher credential; otherwise\nprint the last login's state and exit 1."},
+	{"machine list", "agent-secrets machine list [--json]",
+		"List your own machines' logins that can still reach a secret, under this machine's login:\neach one's id, host, who approved it, when it was issued and expires, and whether it has\nexpired with sessions still running. Dispatch's machine-login page lists the same, and every\nservice's login beside them."},
+	{"machine revoke", "agent-secrets machine revoke <credential_id>",
+		"End one of your own machines' logins under this machine's login, as Dispatch's machine-login\npage does: it enrolls nothing more, and every session it enrolled ends. Revoking this\nmachine's own login ends this machine's broker access too."},
+	{"grant list", "agent-secrets grant list [--json]",
+		"List the live grants of your sessions and those you approved, under this machine's login:\neach one's id, secrets, how it was granted, who approved it, its session and operator, and\nwhen it expires. Dispatch's Live grants page lists the same."},
+	{"grant revoke", "agent-secrets grant revoke <grant_id>",
+		"End a grant as its operator or approver, under this machine's login, as Dispatch's Live\ngrants page does. Ending an automatic grant also makes its session ask before it gets those\nsecrets again."},
 	{"register", "agent-secrets register [--wait SECONDS] [--exec -- COMMAND [ARGS...]]",
 		"Register this process with agent-secrets-helper as a host session. With --exec, run COMMAND\nas this same process, so it and everything it starts are that session."},
 	{"identity", "agent-secrets identity",
@@ -134,15 +153,21 @@ environment:
                              (default $XDG_RUNTIME_DIR/agent-secrets/helper.sock, used when it is there)
   AGENT_SECRETS_ENROLL_WAIT  how long a call waits while a box's launcher is still enrolling it
                              (default 20s)
-  AGENT_SECRETS_APPROVE_URL  Dispatch's address; launcher login names the page under it where the
+  AGENT_SECRETS_APPROVE_URL  Dispatch's address; machine login names the page under it where the
                              operator types the code, and a waiting request names the page where
                              its approver decides it
   OMP_SESSION_ID             the agent session the broker names and notifies if a pending request
                              expires; falls back to ENVOY_SESSION_ID, then CLAUDE_CODE_SESSION_ID,
                              so a harness that sets one of those instead still names its session
+  AWS_PROFILE                the AWS profile the secret forms sign in with when --profile names
+                             none (else the AWS SDK's default credential chain); every secret
+                             form needs a sign-in in the broker's account, and a write your own
+                             Identity Center sign-in there
 
 exit codes: 0 done, 1 failed, 2 usage error, 75 still waiting for approval, 77 denied;
-register --exec exits 127 when COMMAND is not found and 126 when it cannot run
+register --exec exits 127 when COMMAND is not found and 126 when it cannot run;
+secret create and set end by the signal on hang-up (SIGHUP), interrupt (Ctrl-C), quit (Ctrl-\)
+or termination (SIGTERM) at the value prompt: a shell reports 129, 130, 131 or 143
 `
 
 func main() {
@@ -167,8 +192,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdEnroll(args[1:], stdout, stderr)
 	case "unenroll":
 		return cmdUnenroll(args[1:], stdout, stderr)
-	case "launcher":
-		return cmdLauncher(args[1:], stdout, stderr)
+	case "machine", "grant":
+		return cmdGroup(args[0], args[1:], stdout, stderr)
 	case "register":
 		return cmdRegister(args[1:], stdout, stderr)
 	case "renew":
@@ -193,6 +218,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return cmdSign(args[1:], stdout, stderr)
 	case "identity":
 		return cmdIdentity(args[1:], stdout, stderr)
+	case "secret":
+		return cmdSecret(args[1:], stdout, stderr)
 	default:
 		return cmdExec(args, stdout, stderr)
 	}
@@ -218,6 +245,57 @@ func lookupCommand(name string) command {
 		}
 	}
 	panic(fmt.Sprintf("agent-secrets: commands has no entry %q", name))
+}
+
+// groupForms is the forms of a command group (machine, grant): the commands rows named
+// "<group> <verb>", in usage's order.
+func groupForms(group string) []command {
+	var forms []command
+	for _, c := range commands {
+		if strings.HasPrefix(c.name, group+" ") {
+			forms = append(forms, c)
+		}
+	}
+	return forms
+}
+
+// cmdGroup dispatches the forms of a command group (machine, grant). The verbs it names and the
+// help it prints come from groupForms, so usage, -h and the refusal of an unknown verb agree; a
+// commands row with no case here is refused as unknown, which TestEveryFormAnswersHelp catches.
+func cmdGroup(group string, args []string, stdout, stderr io.Writer) int {
+	forms := groupForms(group)
+	verbs := make([]string, len(forms))
+	for i, c := range forms {
+		verbs[i] = strings.TrimPrefix(c.name, group+" ")
+	}
+	if len(args) == 0 {
+		fmt.Fprintf(stderr, "agent-secrets %s: a form is required: %s\n", group, strings.Join(verbs, ", "))
+		return exitUsageError
+	}
+	switch form := group + " " + args[0]; form {
+	case group + " -h", group + " -help", group + " --help":
+		for i, c := range forms {
+			if i > 0 {
+				fmt.Fprintln(stderr)
+			}
+			writeCommandHelp(stderr, c)
+		}
+		return 0
+	case "machine login":
+		return cmdMachineLogin(args[1:], stdout, stderr)
+	case "machine login-status":
+		return cmdMachineLoginStatus(args[1:], stdout, stderr)
+	case "machine list":
+		return cmdMachineList(args[1:], stdout, stderr)
+	case "machine revoke":
+		return cmdMachineRevoke(args[1:], stdout, stderr)
+	case "grant list":
+		return cmdGrantList(args[1:], stdout, stderr)
+	case "grant revoke":
+		return cmdGrantRevoke(args[1:], stdout, stderr)
+	}
+	fmt.Fprintf(stderr, "agent-secrets %s: unknown form %q; the forms are %s\n", group, args[0], strings.Join(verbs, ", "))
+	return exitUsageError
 }
 
 // writeCommandHelp prints one form's synopsis and summary.
@@ -477,7 +555,7 @@ func cmdKeygen(args []string, stdout, stderr io.Writer) int {
 // cmdEnroll implements "enroll --helper --kind box --runtime-id <id> --thumbprint <tp>
 // [--session-id <id>]". --helper is required: the broker's HTTP API has no launcher bearer
 // token, so this CLI has no other way to enroll anything — the host's one launcher credential
-// lives only in agent-secrets-helper's memory (a human installs it with `agent-secrets launcher
+// lives only in agent-secrets-helper's memory (a human installs it with `agent-secrets machine
 // login`), and only a box enrolls through this command at all (a host session enrolls itself
 // automatically via `agent-secrets register`; a pod's enrollment is its own launcher's job).
 func cmdEnroll(args []string, stdout, stderr io.Writer) int {
@@ -505,7 +583,7 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 }
 
 // cmdEnrollHelper asks the local agent-secrets-helper daemon, over its unix socket, to enroll
-// this box's key using the machine credential `agent-secrets launcher login` installed.
+// this box's key using the machine credential `agent-secrets machine login` installed.
 // --helper supports only kind "box" today: a host session enrolls itself through
 // `agent-secrets register`, not this flag, and a pod has no local helper daemon to ask. On
 // success it writes the enrollment id into AGENT_SECRETS_KEY_DIR/enrollment (buildSigner reads
@@ -577,7 +655,7 @@ func cmdUnenroll(args []string, stdout, stderr io.Writer) int {
 }
 
 // cmdUnenrollHelper asks the local agent-secrets-helper daemon to revoke a box enrollment over
-// its unix socket, using the machine credential `agent-secrets launcher login` installed.
+// its unix socket, using the machine credential `agent-secrets machine login` installed.
 // Idempotent: the helper's UnenrollBox treats 204 and 404 as done. Prints nothing on success,
 // matching the exit-code-only unenroll contract.
 func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {

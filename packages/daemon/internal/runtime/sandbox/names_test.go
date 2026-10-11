@@ -45,11 +45,18 @@ func TestSandboxNameOfALongTokenIsAnIssuePrefixAndHash(t *testing.T) {
 	}
 }
 
-// The root's tree volume claim is `tree-<root issue Sandbox>`: what the controller names the
-// claim it makes from the root's `tree` template (`<template>-<sandbox>`), and what every child
-// issue pod mounts.
-func TestTreeClaimNameIsTheControllersClaimName(t *testing.T) {
-	if got, want := TreeClaimName(rootToken), treeVolume+"-"+SandboxName(rootToken); got != want || got != "tree-legion-legion-legion-208" {
-		t.Fatalf("TreeClaimName = %q, want %q", got, want)
+// An issue's volume claim is `issue-<issue Sandbox>`: what the controller names the claim it makes
+// from the Sandbox's `issue` template (`<template>-<sandbox>`), and what the issue's pod mounts.
+// Every role claim of the issue names the same claim, and the controller's claim its own.
+func TestIssueClaimNameIsTheControllersClaimName(t *testing.T) {
+	for token, want := range map[claim.Token]string{
+		rootToken:       "issue-legion-legion-legion-208",
+		workerToken:     "issue-legion-legion-legion-208",
+		childToken:      "issue-legion-legion-legion-209",
+		controllerToken: "issue-legion-legion-controller",
+	} {
+		if got := IssueClaimName(token); got != want || got != issueVolume+"-"+SandboxName(token) {
+			t.Errorf("IssueClaimName(%q) = %q, want %q", token, got, want)
+		}
 	}
 }

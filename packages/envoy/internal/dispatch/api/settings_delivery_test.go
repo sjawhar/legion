@@ -80,6 +80,83 @@ func TestPutDeliverySettingsRefusesWithoutGitHubAccess(t *testing.T) {
 	}
 }
 
+// TestPutDeliverySettingsRoundTripsThePipelineJobNames proves the three optional job names the
+// Pipeline page follows are stored as sent and read back through the GET.
+func TestPutDeliverySettingsRoundTripsThePipelineJobNames(t *testing.T) {
+	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+	handler, _ := newArchitectureSourceServer(t, fake)
+
+	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
+		"deploy_repo":               "acme/widgets",
+		"deploy_workflow_path":      ".github/workflows/deploy.yml",
+		"production_job_name":       "widgets-release / widgets-release",
+		"pr_checks_workflow_path":   ".github/workflows/pr-checks.yml",
+		"population_authors":        []string{"octocat"},
+		"staging_e2e_job_name":      " staging-e2e / run ",
+		"staging_apply_job_name":    "staging-release / apply",
+		"pr_checks_rollup_job_name": "checks-complete",
+	}, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/settings/delivery", nil, "alice")
+	var got map[string]any
+	if err := json.Unmarshal(read.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode GET: %v (%s)", err, read.Body.String())
+	}
+	want := map[string]string{
+		"staging_e2e_job_name":      "staging-e2e / run",
+		"staging_apply_job_name":    "staging-release / apply",
+		"pr_checks_rollup_job_name": "checks-complete",
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("GET %s = %#v, want %q", key, got[key], value)
+		}
+	}
+}
+
+// TestPutDeliverySettingsWithoutThePipelineJobNamesStoresNull proves the three job names are
+// optional: a PUT that leaves them out, or sends one empty, stores null, and the GET answers null.
+func TestPutDeliverySettingsWithoutThePipelineJobNamesStoresNull(t *testing.T) {
+	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
+	handler, database := newArchitectureSourceServer(t, fake)
+
+	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/settings/delivery", map[string]any{
+		"deploy_repo":             "acme/widgets",
+		"deploy_workflow_path":    ".github/workflows/deploy.yml",
+		"production_job_name":     "widgets-release / widgets-release",
+		"pr_checks_workflow_path": ".github/workflows/pr-checks.yml",
+		"population_authors":      []string{"octocat"},
+		"staging_apply_job_name":  "  ",
+	}, "alice")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/settings/delivery", nil, "alice")
+	var got map[string]any
+	if err := json.Unmarshal(read.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode GET: %v (%s)", err, read.Body.String())
+	}
+	for _, key := range []string{"staging_e2e_job_name", "staging_apply_job_name", "pr_checks_rollup_job_name"} {
+		value, present := got[key]
+		if !present || value != nil {
+			t.Errorf("GET %s = %#v (present %v), want null", key, value, present)
+		}
+	}
+	var stored *string
+	if err := database.Pool.QueryRow(t.Context(), `
+		select staging_apply_job_name from delivery_settings where singleton
+	`).Scan(&stored); err != nil {
+		t.Fatalf("read staging_apply_job_name: %v", err)
+	}
+	if stored != nil {
+		t.Fatalf("stored staging_apply_job_name = %q, want null", *stored)
+	}
+}
+
 func TestAgentPutsDeliverySettingsWithItsActor(t *testing.T) {
 	fake := &fakeGitHubApp{installations: map[string]string{"acme/widgets": "read"}, commit: "deadbeef"}
 	handler, database := newArchitectureSourceServer(t, fake)

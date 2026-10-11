@@ -27,6 +27,8 @@ func (p *plan) attempt(context.Context) Outcome {
 
 func transient(detail string) Outcome { return Outcome{Detail: detail} }
 
+func waiting(detail string) Outcome { return Outcome{Waiting: detail} }
+
 var passed = Outcome{Passed: true}
 
 // quick is a policy whose waits cost the suite nothing: 1 ms doubling to a 4 ms cap.
@@ -135,6 +137,75 @@ func TestRunReportsTheStopOverAnInterruptedAttempt(t *testing.T) {
 
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run = %v, want the stop, not the interrupted attempt's refusal", err)
+	}
+}
+
+// An attempt that waits on capacity says nothing about the probed thing, so no number of them is a
+// verdict: more waits than the bound allows attempts, then a pass, is a pass. Each is logged with
+// what it waited on and retried after the policy's longest wait, never a transient failure.
+func TestRunWaitsOutCapacityBeyondItsAttemptBudget(t *testing.T) {
+	unschedulable := waiting("probe pod legion-probe-legion-1d10089a0000 is Unschedulable: 0/83 nodes are available: 25 Insufficient cpu")
+	p := &plan{outcomes: []Outcome{unschedulable, unschedulable, unschedulable, unschedulable, passed}}
+	var logged bytes.Buffer
+
+	if err := Run(context.Background(), "worker image", quick(3), logger(&logged), p.attempt); err != nil {
+		t.Fatalf("Run = %v, want the pass after four waits under a bound of three attempts", err)
+	}
+	if p.attempts != 5 {
+		t.Errorf("attempts = %d, want four waits and the pass", p.attempts)
+	}
+	if got := strings.Count(logged.String(), "boot probe is waiting on capacity; running it again"); got != 4 {
+		t.Errorf("logged %d capacity waits, want 4:\n%s", got, logged.String())
+	}
+	if strings.Contains(logged.String(), "failed transiently") {
+		t.Errorf("a capacity wait was logged as a transient failure:\n%s", logged.String())
+	}
+	var waits []string
+	for _, match := range regexp.MustCompile(`retryIn=(\S+)`).FindAllStringSubmatch(logged.String(), -1) {
+		waits = append(waits, match[1])
+	}
+	if got, want := strings.Join(waits, " "), "4ms 4ms 4ms 4ms"; got != want {
+		t.Errorf("waits = %q, want %q: the policy's longest wait every time", got, want)
+	}
+	if !strings.Contains(logged.String(), `detail="probe pod legion-probe-legion-1d10089a0000 is Unschedulable: 0/83 nodes are available: 25 Insufficient cpu"`) {
+		t.Errorf("the wait was not logged with what it waited on:\n%s", logged.String())
+	}
+}
+
+// A capacity wait neither counts as a transient failure nor resets the count: two transient
+// failures with a wait between them are the two the bound counts, so a bound of two gives up at the
+// second, naming it.
+func TestRunCountsTransientFailuresAcrossACapacityWait(t *testing.T) {
+	p := &plan{outcomes: []Outcome{transient("first"), waiting("the pool is full"), transient("second"), passed}}
+	var logged bytes.Buffer
+
+	err := Run(context.Background(), "worker image", quick(2), logger(&logged), p.attempt)
+
+	want := "the worker image probe never completed within its retry budget (2 attempts): second"
+	if err == nil || err.Error() != want {
+		t.Fatalf("Run = %v, want %q", err, want)
+	}
+	if p.attempts != 3 {
+		t.Errorf("attempts = %d, want a transient failure, a wait, and the transient failure that spends the bound", p.attempts)
+	}
+	if !strings.Contains(logged.String(), "attempt=1/2") || strings.Contains(logged.String(), "attempt=2/2") {
+		t.Errorf("the transient failures were not counted 1/2 then the bound, with the wait counted as neither:\n%s", logged.String())
+	}
+}
+
+// A refusal after a capacity wait is returned as it is: waiting changes what the pool holds, not
+// what the probed thing answers.
+func TestRunReturnsARefusalAfterACapacityWait(t *testing.T) {
+	refusal := errors.New("worker image sha256:1d10 failed its probe: the OK line confirms contract 2, not 3")
+	p := &plan{outcomes: []Outcome{waiting("the pool is full"), {Refusal: refusal}, passed}}
+
+	err := Run(context.Background(), "worker image", quick(6), logger(&bytes.Buffer{}), p.attempt)
+
+	if !errors.Is(err, refusal) || err.Error() != refusal.Error() {
+		t.Fatalf("Run = %v, want the refusal itself", err)
+	}
+	if p.attempts != 2 {
+		t.Errorf("attempts = %d, want the wait and the refusal", p.attempts)
 	}
 }
 

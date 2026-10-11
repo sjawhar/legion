@@ -23,8 +23,8 @@ import (
 // it, is deleted on its claim's account alone, never for want of a live tree.
 type liveTrees struct{}
 
-func (liveTrees) TreeHasSessions(context.Context, string, string) (bool, error) { return false, nil }
-func (liveTrees) TreeLive(context.Context, string, string) (bool, error)        { return true, nil }
+func (liveTrees) IssueHasSessions(context.Context, string, string) (bool, error) { return false, nil }
+func (liveTrees) TreeLive(context.Context, string, string) (bool, error)         { return true, nil }
 
 // The orphan sweep is told what knownClaims makes of the daemon's claims, and the Sandbox runtime
 // keeps the controller's Sandbox exactly while a known claim is the controller's. So the
@@ -46,7 +46,7 @@ func TestTheOrphanSweepKeepsASuspendedControllersSandboxAndDeletesARetiredOnes(t
 		t.Run(string(tc.state), func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			t.Cleanup(cancel)
-			api := &issueSandboxAPI{object: map[string]any{
+			api := newIssueSandboxAPI(map[string]any{
 				"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
 				"metadata": map[string]any{
 					"name": "legion-legion-controller", "namespace": "legion", "uid": "sandbox-uid", "resourceVersion": "1",
@@ -54,14 +54,14 @@ func TestTheOrphanSweepKeepsASuspendedControllersSandboxAndDeletesARetiredOnes(t
 					"labels":            map[string]any{"legion.dev/project": "legion", "legion.dev/role": "controller"},
 				},
 				"spec": map[string]any{"operatingMode": "Running"},
-			}}
+			})
 			server := httptest.NewServer(api)
 			t.Cleanup(func() { cancel(); server.Close() })
 			rt, err := sandbox.New(ctx, &rest.Config{Host: server.URL}, sandbox.Options{
 				Namespace: "legion", Project: "legion", Store: liveTrees{}, Image: "ghcr.io/example/worker@sha256:" + strings.Repeat("a", 64),
-				StorageClass: "standard", TreeVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371",
+				StorageClass: "standard", IssueVolume: resource.MustParse("1Gi"), StreamURL: "tcp://127.0.0.1:13371", Resources: defaultReservations(t),
 				Tools:       sandbox.Tools{GH: "/usr/bin/gh", Git: "/usr/bin/git", JJ: "/usr/bin/jj", Legion: "/opt/legion/bin/legion", AgentSecrets: "/opt/legion/bin/agent-secrets"},
-				BootTimeout: time.Second, BootIntervals: 2, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
+				BootTimeout: time.Second, TerminationGrace: time.Second, ProbeInterval: time.Hour, AdoptTimeout: time.Second,
 				Tokens: issueProvisionTokens{}, GitHubCredential: gitHubCredential(outboxTokens{}, "legion"), Conns: fake.NewConns(), Log: quietLogger(),
 			})
 			if err != nil {
@@ -78,7 +78,7 @@ func TestTheOrphanSweepKeepsASuspendedControllersSandboxAndDeletesARetiredOnes(t
 			if err := rt.ReconcileOrphans(ctx, known, orphanGrace); err != nil {
 				t.Fatal(err)
 			}
-			if got := api.mode(); got != tc.want {
+			if got := api.mode("legion-legion-controller"); got != tc.want {
 				t.Fatalf("the %s controller's Sandbox after the sweep is %s, want %s", tc.state, got, tc.want)
 			}
 		})

@@ -95,7 +95,9 @@ machine login, together with the reason the agent gave. The person approves or d
 Dispatch relays the decision to the broker under the signed-in person's own identity. The broker
 holds no Dispatch credential: Dispatch reads the pending requests from the broker and sends back
 each decision. A grant is short-lived, and `agent-secrets NAME -- <command>` runs a command with
-the granted value in that command's environment rather than printing it.
+the granted value in that command's environment rather than printing it. People create and change
+the secrets themselves, in AWS Secrets Manager under their own AWS sign-in, with
+`agent-secrets secret`, which has the broker serve each change at once.
 
 ## Envoy: the events between them
 

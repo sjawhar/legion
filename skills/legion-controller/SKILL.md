@@ -1,14 +1,14 @@
 ---
 name: legion-controller
-description: Use when handling Legion controller wakes for root-issue triage, keeping the admission slots full from `todo` issues, the daily report, architect escalation, or human interaction.
+description: Use when handling Legion controller wakes for weekly-plan ranking, backlog stewardship, root-issue triage, keeping the admission slots full from `todo` issues, the daily report, architect escalation, or human interaction.
 ---
 
 # Legion Controller
 
 The controller is the one persistent, wake-driven session for a Legion project. It keeps the
-project's admission slots full with the highest-priority work, and makes triage, escalation, and
-human-interaction judgments; it never does phase-worker work or routes raw events into an
-architect.
+project's admission slots full with the highest-priority work, keeps the weekly plan's order and
+owners current in Dispatch, and makes triage, escalation, and human-interaction judgments; it never
+does phase-worker work or routes raw events into an architect.
 
 ## Start and claim the controller role
 
@@ -24,6 +24,16 @@ alone: `op: "read_state"` returns the daemon's whole state (`issues.<KEY>.phase`
 `admission.waiting`, `capabilities[]`, `daemon.project`), and `op: "set_status"` with `issue` and
 `status` (`todo`, `backlog` or `icebox`) moves an issue. It never reads GitHub, and it runs no
 `legion` from bash.
+
+## Backlog stewardship
+
+The controller is the project's order keeper. It retains its startup role,
+`legion-<project>-controller`; `backlog-order` is retired. Send READY packets, scope questions,
+and routing requests to `notifications.role.legion-<project>-controller`, then follow
+[Backlog stewardship](skill://legion-controller/references/backlog-stewardship.md) for daily
+weekly-plan reconciliation, Sami's rulings, ownership routing, and stopped-session recovery.
+These duties change Dispatch's priority and board-rank data; they do not change the admission order
+in [Keeping the slots full](#keeping-the-slots-full-go-daemon).
 
 For an interactive takeover from a hand-started OMP session, start OMP with
 `LEGION_CONTROLLER_SECRET` (or `LEGION_CONTROLLER_SECRET_FILE`, a path to a file holding it),
@@ -332,11 +342,15 @@ priority first, then board rank ([Keeping the slots full](#keeping-the-slots-ful
 
 - **Direct user message always first.** If this turn includes a direct user message, answer
   it before handling every other wake.
+- **Sami's rulings.** A direct Dispatch message from Sami is a ruling: after answering it, run
+  the full [Backlog stewardship](#backlog-stewardship) reconciliation and record the current rule
+  in the weekly plan.
 - **One wake = one turn.** Handle exactly the wake's implication, then end the turn. Never
   poll, idle-loop, or wait for another event. Two additions, after any direct user message: every
   turn first rechecks the [trees waiting on a root
   claim](#trees-waiting-on-a-root-claim-go-daemon), and your first turn of each UTC day, whatever
-  woke you, also posts the day's report ([Daily report](#daily-report-go-daemon)).
+  woke you, also runs the [Backlog stewardship](#backlog-stewardship) reconciliation and posts the
+  day's report ([Daily report](#daily-report-go-daemon)).
 - **Wakes are advisory.** Before any side effect, verify the current daemon state and the
   relevant Dispatch issue. A stale or duplicate wake may cost a read, never a wrong action.
 - **Controller state is disposable.** Do not reconstruct or preserve local controller

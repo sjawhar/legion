@@ -379,12 +379,11 @@ func TestTheOperatorListingAnswersWhileRelaunchesWaitOnTheCluster(t *testing.T) 
 	}
 }
 
-// A daemon told to stop while its boot relaunches a launch the previous daemon left unrecorded
-// stops inside the same bound, boot included: the boot's relaunches run one after another before
-// the API serves, each waiting in the runtime. One that answers to its context ends with the stop;
-// one that answers to none is not waited on past the stop's budget, and the stop names it
-// (LEGION-650).
-func TestRunStopsInsideAPodGraceWhileItsBootRelaunchesAnUnfinishedLaunch(t *testing.T) {
+// A daemon told to stop while it relaunches a launch the previous daemon left unrecorded stops
+// inside the same bound: the relaunch runs once the boot has started the daemon, waiting in the
+// runtime. One that answers to its context ends with the stop; one that answers to none is not
+// waited on past the stop's budget, and the stop names it (LEGION-650, LEGION-653).
+func TestRunStopsInsideAPodGraceWhileItRelaunchesAnUnfinishedLaunch(t *testing.T) {
 	for _, tc := range []struct {
 		name           string
 		ignoresContext bool
@@ -409,16 +408,18 @@ func TestRunStopsInsideAPodGraceWhileItsBootRelaunchesAnUnfinishedLaunch(t *test
 			select {
 			case <-rt.entered:
 			case err := <-done:
-				t.Fatalf("run returned %v before its boot relaunched the unfinished launch; log:\n%s", err, logs)
+				t.Fatalf("run returned %v before it relaunched the unfinished launch; log:\n%s", err, logs)
 			case <-time.After(30 * time.Second):
-				t.Fatalf("the boot never relaunched the unfinished launch; log:\n%s", logs)
+				t.Fatalf("the daemon never relaunched the unfinished launch; log:\n%s", logs)
 			}
+			testwait.Eventually(t, "the daemon to say it started while its relaunch waits in the runtime", func() bool {
+				return logLine(logs.String(), "legion daemon started") != ""
+			})
 
 			took, stopLog := stopRun(t, cancel, done, logs, stopBound(o.stopBudget))
 
-			t.Logf("stopped in %s while its boot relaunched %s", took, token)
+			t.Logf("stopped in %s while it relaunched %s", took, token)
 			namesDeciding(t, logsStopping(t, stopLog), "supervise.RequestSpawn", token)
-			neverStarted(t, stopLog)
 			if tc.ignoresContext {
 				leftDeciding(t, stopLog, "supervise.RequestSpawn", token)
 			} else {

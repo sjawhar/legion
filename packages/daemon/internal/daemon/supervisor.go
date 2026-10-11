@@ -34,7 +34,9 @@ type supervisor struct {
 	stateDir string
 	log      *slog.Logger
 	// restored closes once every stored claim has its machine: a hello waits for it, so a shim
-	// reconnecting across a restart is admitted by a claim already supervised.
+	// reconnecting across a restart is admitted by a claim already supervised. Nothing that waits for
+	// a worker to reach the daemon may run before it closes: the boot's relaunches run after it
+	// (supervision.start), since a relaunched worker's hello would wait for the relaunch itself.
 	restored chan struct{}
 	terminal func(supervise.Claim, supervise.ClaimState)
 
@@ -48,11 +50,11 @@ type supervisor struct {
 	all atomic.Pointer[[]*supervise.Machine]
 }
 
-// member is one claim's machine, the queue its events wait in, and the tree the claim is of.
+// member is one claim's machine, the queue its events wait in, and the issue the claim is of.
 type member struct {
 	machine *supervise.Machine
 	inbox   *inbox
-	tree    string
+	issue   string
 }
 
 func newSupervisor(ctx context.Context, st *store.Store, project, stateDir string, log *slog.Logger) *supervisor {
@@ -160,7 +162,7 @@ func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]c
 func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 	m.OnTerminal(s.terminal)
 	queue := newInbox()
-	s.machines[token] = &member{machine: m, inbox: queue, tree: m.Claim().Tree}
+	s.machines[token] = &member{machine: m, inbox: queue, issue: m.Claim().Issue}
 	all := append(slices.Clip(s.supervised()), m)
 	s.all.Store(&all)
 	s.feeding.Add(1)
@@ -222,24 +224,10 @@ func (s *supervisor) post(token claim.Token, ev supervise.Event) {
 	m.inbox.put(ev)
 }
 
-// retree re-points m's claim to tree (supervise.Machine.Retree) and then the tree kept beside it,
-// which volumeLost reads. The machine is asked first, under its own lock alone: a machine calls
-// volumeLost under its lock, so taking mu around the machine's lock would invert that order.
-func (s *supervisor) retree(ctx context.Context, token claim.Token, m *supervise.Machine, tree string) error {
-	if err := m.Retree(ctx, tree); err != nil {
-		return err
-	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if member, ok := s.machines[token]; ok {
-		member.tree = tree
-	}
-	return nil
-}
-
-// volumeLost tells every other claim of c's tree that the tree volume was lost (TreeVolumeLost):
-// the sessions they recorded were on it. It is the machines' VolumeLost, called by c's machine
-// under its own lock, so it reads no machine — the tree of each is kept beside it — and only queues.
+// volumeLost tells every other claim of c's issue that the issue's volume was lost
+// (IssueVolumeLost): the sessions they recorded were on it. It is the machines' VolumeLost, called by
+// c's machine under its own lock, so it reads no machine — the issue of each is kept beside it — and
+// only queues.
 func (s *supervisor) volumeLost(c supervise.Claim) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -247,8 +235,8 @@ func (s *supervisor) volumeLost(c supervise.Claim) {
 		return
 	}
 	for token, m := range s.machines {
-		if token != c.Token && m.tree == c.Tree {
-			m.inbox.put(supervise.TreeVolumeLost{Claim: token})
+		if token != c.Token && m.issue == c.Issue {
+			m.inbox.put(supervise.IssueVolumeLost{Claim: token})
 		}
 	}
 }
@@ -308,12 +296,11 @@ func (s *supervisor) wait() {
 // s.ctx alone with no deadline of its own, since the shim it answers waits for hello_ack the same
 // way and supervision.stop cancels s.ctx before the stream closes, releasing every held hello
 // rather than leaving one to time out mid-boot naming a credential problem that does not exist.
-// The token is resolved again once restoration ends, under a fresh bound: restore (s.start, ahead
-// of close(s.restored)) can relaunch a claim that was mid-launch across the restart to a new
-// generation before this hello is ever judged, and the first resolve's generation and Stale flag
-// are only ever as fresh as the moment they were read. Judging the hold by that first result would
-// accept an old generation's shim after its claim has already relaunched, taking the stream slot
-// the new generation's own hello then finds "already bound to a live stream".
+// The token is resolved again once restoration ends, under a fresh bound: the hold lasts as long
+// as the boot's readiness gate waits, and the first resolve's generation and Stale flag are only
+// ever as fresh as the moment they were read. Judging the hold by that first result would accept a
+// generation its claim has left meanwhile, taking the stream slot the new generation's own hello
+// then finds "already bound to a live stream".
 //
 // A store that fails either read answers the hello with that error, never as an unknown token: the
 // failure says nothing about the token, and the listener closes the connection unrefused for the

@@ -37,6 +37,7 @@ events to the right session.
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`) |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
+| Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, its clock `?at=` or now; `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once |
 | Deploy/runtime         | `deploy/`                                 | compose, rollout scripts, NATS peer setup          |
 
 Every non-inline Proof node has a stable `blockId`. `pmdoc.Parse` mints IDs in document order,
@@ -335,6 +336,18 @@ to the document: settlement weighs each such answer and leaves out the ones the 
 room for (`withholdAnswers`). A joined
 operation never writes the room: it runs on the transaction's fork of the room's document
 (`docs/livewrite.go`), appends its update inside the transaction, and reads through the same fork.
+A document no room holds is forked from the store (`coldFork`) and loads no room until the
+committed write is published, so a cold edit holds one copy of the document rather than a room
+beside its fork; an upload's version on such a fork takes out the stored updates through the head
+that read loaded and no in-flight credit. A browser's room load takes no lock the write holds, so
+a room that loads while `coldFork` reads the store is forked from instead and the stored copy is
+dropped undecoded, and one that loads later is forked from at the write's next operation. Every
+mutate starts from the tree `applyLive` already read (`startTree`, `editTree`) rather than reading
+its own; `applyLive` lets that tree go before the one check that decodes a second copy of the
+state (`refuseUndecodable`); and a write drops its fork and rendering once it commits, before its
+publish loads the room (`releaseFork`), since a pooled connection's context can keep the write
+reachable long after it answered (LEGION-504). The `nodeToken` hash streams the token's encoding
+(`pmdoc.WriteTokenJSON`) rather than holding it whole.
 The handler ends the transaction with
 `ledger.Commit`, which records each settlement credit with the document content and takes each
 version's authors back out of that record, commits, credits the writes' actor to their rooms,
@@ -1016,10 +1029,13 @@ than through a transaction, so `withRoomLock` marks its context with `store.Hold
 for as long as it holds that connection and the room's advisory lock, and `Query` marks the
 caller for as long as its rows are open, so a cursor counts as the held connection it is. A
 refusal logs its stack once per call site, so a caller that trips it in a loop cannot flood the
-log; the error itself is returned every time. `store/pool_test.go` and
-`api/anchored_write_concurrency_test.go` hold the halves: the refusal on every guarded method,
-concurrent anchored writes, and two settlements queued behind one held write on a
-four-connection pool.
+log; the error itself is returned every time. A caller that runs independent reads side by side
+gives each its own mark with `store.ForConcurrentRead`, which refuses a caller already holding a
+connection: on one shared mark, one read's open cursor would refuse the others, and each read
+still takes one connection only (the delivery timeline's four reads do this). `store/pool_test.go`
+and `api/anchored_write_concurrency_test.go` hold the halves: the refusal on every guarded method,
+concurrent reads each holding one connection, concurrent anchored writes, and two settlements
+queued behind one held write on a four-connection pool.
 
 **Every pool's size is set in code.** `store.Open` fixes `MaxConns` at `store.sharedPoolSize`
 (16), so neither the task's CPU allotment nor the DSN another repository's URL builder writes
@@ -1946,15 +1962,19 @@ and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/age
 client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
-its environment. The broker holds no Dispatch credential and opens no Dispatch ask anywhere. Every
+its environment. Its `secret` forms are how a person manages the agent secrets themselves, in
+Secrets Manager under their own AWS sign-in (below); the broker writes no secret. The broker holds
+no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
-revoking a grant, ending a machine login — reaches the broker's UI routes from Dispatch's server,
-carrying the UI bearer and the deciding person's Dispatch login, their email, in the body's
-`approver` field. The bearer
+revoking a grant, ending a machine login — made in Dispatch reaches the broker's UI routes from
+its server, carrying the UI bearer and the deciding person's Dispatch login, their email, in the
+body's `approver` field. The bearer
 vouches for that login: Dispatch fills it from its own signed-in session, never from the browser,
 and the broker checks it against the record's approver and records it on the decision event. The
 UI bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
-agents is the deployment's job. `internal/broker/enroll` turns a launcher credential into a leased
+agents is the deployment's job; a person's own machine ends their machine logins and grants through
+the operator routes instead (below), under its machine login. `internal/broker/enroll` turns a
+launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
 service-account token). An operator credential's enrollment is its operator's, the email of the
 person who approved its machine login: a launcher may leave `operator` out of the enrollment, and
@@ -2038,6 +2058,128 @@ name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a
 request ended first; the public `GET /v1/settings`
 answers the prefix, the key ARN and its region and account (`policy.KeyARNParts`).
 
+`agent-secrets secret list|show|create|set|retag|delete|restore` (`cmd/agent-secrets/secret.go`,
+its AWS side in `secret_aws.go`) is the person's side of that reread. Each form reads the broker's
+settings from `AGENT_SECRETS_URL`, loads the person's AWS sign-in (`--profile`, else `AWS_PROFILE`,
+else the SDK's default chain) pinned to the key's region, and calls Secrets Manager itself, so IAM
+in that account, not the broker, decides what the person may read or write; it needs no session
+identity. `GetCallerIdentity` runs before anything else: every form refuses a sign-in in another
+account than the key's, naming both (`requireAccount`, so a read never lists another account's
+secrets as if they were the agent secrets), and a write also refuses any ARN but
+`assumed-role/AWSReservedSSO_*/<session>` in that account (`requireWriteSignIn`, naming the ARN,
+in any AWS partition). `--owner me` is that session name lowercased; create and retag refuse it
+before writing unless it matches the broker's email rule (`policy.ValidPersonOwner`).
+`create` and `set` check the sign-in before they read the value: at a terminal they read one line
+with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
+reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the
+shell's line until `fg`. Canonical mode is
+off, so no terminal line limit cuts the value. Enter or the terminal's end-of-file character ends
+it; erase, word erase and kill edit it. An unhandled control byte is refused, inside bracketed
+pastes too. The reader records the error, discards through the line ending (and through a
+bracketed paste's closing mark), then drains the post-line quiet window before returning it.
+The prompt enables bracketed paste and reads each such paste through its end, however far apart
+its writes arrive, as long as no more than `maxPasteDrain` (10 s) of quiet passes between them: the
+bound counts the quiet since the last input, restarted at each read, not the time since the paste
+began. Without brackets, it drains through 200 ms of quiet after the line with no total bound, and
+Ctrl-C ends it; that drain feeds the same reader (`drainAfterTheLine`), so a paste that begins in it
+restarts the same bound and is read through its closing mark, and a signal key inside it is pasted
+text. A paste-start mark split so only its first bytes arrive before the line ends holds the drain
+for `splitMarkGapMillis` (1 s) for the rest of the mark, so a late paste still opens.
+Anything but line endings after the first line is refused with exit 2. Bytes arriving after that
+quiet window can reach the shell; multi-line values should be piped, not pasted.
+A terminal hang-up before the line or paste ends returns an error, never a partial value, and so
+does a bracketed paste that falls quiet for `maxPasteDrain` (10 s) before its closing mark comes,
+where the signal keys pressed meanwhile were pasted text; input arriving after it is given up
+reaches the shell.
+Piped input is read to EOF, less one trailing newline. Empty and non-UTF-8 values are usage errors
+on either path.
+
+The reader alone changes the terminal, including its final flushing restore and bracketed-paste
+disable. It joins the signal watcher before restoring, and restores only while its process group
+holds the terminal (or the check fails, as on a hung-up terminal). A prompt that ends while
+another group holds it, by a terminating signal after Ctrl-Z and `bg` or orphaned by its shell's
+exit after `bg`, leaves the terminal as that group has it: a restore would stop the job until
+`fg`, or write the paste-off mark onto the other shell's line. A terminating signal then ends the
+CLI by that signal; bash resets its own terminal when a job dies by a signal. It reads the
+settings it restores only once its process group holds the
+terminal (`whenHeld`): a prompt started with `&` waits behind the shell's line editor, whose
+settings are not the ones `fg` hands back, so restoring what it read there would leave the shell's
+editing mode behind. A stop taken while it waits, before the label shows, discards nothing. An
+orphaned process group (`processGroupOrphaned`: on Linux the kernel's rule read from `/proc`, on
+Darwin the group's job-control count), which no shell can foreground and whose stops the kernel
+discards, ends the wait with exit 2 naming the pipe command. So does a terminal that was the
+prompt's controlling terminal and no longer is (TIOCGPGRP answers ENOTTY once the session-leader
+shell that started it exits). A prompt that first reaches the terminal after that exit sees
+ENOTTY at once, so `controllingTerminal` also refuses when the session's leader is a zombie,
+reaped, or exiting (`sessionLeaderGone`: PF_EXITING in `/proc` on Linux, P_WEXIT or SZOMB from
+sysctl on Darwin). A terminal that never was, as the unit tests' bare pseudo-terminal in a live
+session, counts as held. The watcher handles SIGINT, SIGQUIT,
+SIGTERM, SIGHUP and SIGTSTP; signals whose kernel disposition is SIG_IGN remain ignored. ISIG is
+off: the reader acts on the terminal's signal keys itself (`promptReader.keys`, from the settings
+the shell handed it), sending the signal to its process group and discarding the rest of that
+read, so bytes typed after Ctrl-Z in the same write never reach the shell. A key inside a
+bracketed paste is pasted text, refused as a control byte with the paste drained through its end,
+and the key of an ignored signal does nothing. `feed` scans the whole read, past the line's end, so
+a signal key in the rest of the read after the line, outside a paste, still sends its signal and the
+value is not stored.
+SIGTTIN and SIGTTOU are not caught, so background terminal access stops normally. The watcher
+(`promptWatch`) writes each signal's number as one byte to a pipe the reader polls with the
+terminal, so an event and its wake-up are one byte, taken only by `next`; it never changes the
+terminal's settings. On SIGTSTP it writes the byte first, discards unread input, then `stopBy`
+re-raises the stop, holding a lock until the process resumes, so the reader's baseline read and
+label never run in a prompt a stop
+has sent to the background (`whileHeld`). The reader reapplies its current mode on resume or
+EINTR, and before each poll after any stop or resume it rereads the mode and reapplies it when it
+differs, since a stop no handler sees (SIGSTOP from another process) lets the shell put echo back
+while the job is stopped; one poll waits for input or a
+watcher event and also times the quiet window. Reads never block. IXON is cleared, so Ctrl-S and
+Ctrl-Q reach the reader and are refused as control bytes rather than suspending the prompt's
+output or vanishing from a paste. IEXTEN is cleared too, since macOS acts on Ctrl-V and Ctrl-O
+under it whatever ICANON and ISIG say, and on Linux n_tty lowercases input under IUCLC only while
+IEXTEN is set (`I_IUCLC(tty) && L_IEXTEN(tty)`), even outside canonical mode. Before each caught
+stop the watcher discards what the terminal
+holds unread (`discardInput`: TCFLSH on Linux, TIOCFLUSH on Darwin) while the prompt's group
+holds it, so unread secret bytes never reach the shell at a stop; keys typed after the stop has
+taken effect go to the shell, which holds the terminal then. The kernel reports no
+count of flushed bytes, so every caught stop invalidates the entire entry. After `fg` the reader
+stays hidden only to discard the remaining line, then exits 2 and names the command to run again
+with the whole value. No partial value is returned or stored. An interactive shell restores its
+own terminal while the job is stopped. On Linux the stop is sent to the watcher's own thread with
+`tgkill` under `runtime.LockOSThread`, with SIG_DFL installed and the saved action restored.
+Darwin sends the stop to the process and reinstalls Go's handler through `signal.Ignore` and
+`signal.Notify`; its stop/resume behavior remains unverified on Darwin.
+After a terminating signal the reader restores, when its group holds the terminal, then re-raises
+it: SIGHUP, SIGINT, SIGQUIT and SIGTERM give shell statuses 129, 130, 131 and 143. SIGQUIT uses the
+kernel default, not Go's
+goroutine dump. Core dumps are disabled once, before the first value byte is read, for the rest
+of the process (`PR_SET_DUMPABLE` 0 on Linux, `RLIMIT_CORE` 0 on Darwin), not just on SIGQUIT.
+`secret_job_linux_test.go` hosts prompts under interactive bash to test Ctrl-Z/bg/fg, a start with
+`&` (the restored settings are compared with those bash hands a foreground job, and the label with
+the terminal's owner and echo when it is printed), a stop before the label, an orphaned group, a
+shell that exits under a background prompt, SIGTERM and SIGHUP after `bg`, an external SIGSTOP,
+bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins after the line,
+ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
+restoration.
+
+`create` writes on the settings' key with both tags
+and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
+one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
+secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are
+an administrator's to change (a person's own secret may be made shared where their access allows
+the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
+recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. Every write is
+followed by the broker's reread of that name (`rereadAfter`): exit 0 when it serves the secret, or
+no longer serves it after a delete; 1 when its answer contradicts the write (a refusal names its
+reason); and 1 when the broker cannot be asked (an unreachable broker, `429 RATE_LIMITED`), saying
+the write stands and is served only from the next reload. `list` (`ListSecrets` with
+`IncludePlannedDeletion`) and `show` never print a
+value; for a secret scheduled for deletion they print `DeletedDate` and `earliestPurge`, that date
+plus 7 days, Secrets Manager's shortest recovery window, since `DeletedDate` is when the delete ran
+and neither call answers the window it chose: a reader told that date never waits past the purge.
+`earliestPurge` is the one place `DeletedDate` is read. The forms' unit tests run in-process
+against `secrets.Local` and a fake STS and broker (`secret_test.go`), and `secret_e2e_test.go`
+runs create, delete, restore and retag against `brokertest.NewRig`'s real broker.
+
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
 Unset, each falls back to its launcher's path, `$XDG_RUNTIME_DIR/agent-secrets` and the
@@ -2055,7 +2197,7 @@ or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but c
 for callers that choose between the broker and another backend. A helper holding no launcher
 credential, from every restart until the operator logs the machine in, enrolls no one: its sign
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
-with the same not-logged-in notice naming `agent-secrets launcher login`. The login that installs
+with the same not-logged-in notice naming `agent-secrets machine login`. The login that installs
 a credential wakes every registered session's enrollment retry, so those sessions reach the broker
 within about a second of it rather than when a backoff of up to a minute comes round. A session
 whose renew the broker refuses (its lease lapsed) stops counting as enrolled at once, and its
@@ -2068,12 +2210,12 @@ login, still revokes it. A session that ends first takes its record with it and 
 bounded revoke (three tries); before a login those fail, and the broker's sweeper ends the id once
 its lease lapses. A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another
 operator's launcher credential) counts as done, and the session enrolls afresh.
-`agent-secrets launcher login-status`, which the helper answers, exits 0 while the helper holds a
+`agent-secrets machine login-status`, which the helper answers, exits 0 while the helper holds a
 launcher credential and prints `issued`. A
 re-login that is denied, expires unapproved or is still pending leaves the credential an earlier
 login installed in place, and the helper keeps enrolling sessions with it, so login-status still
 exits 0 and prints `issued`, and stderr names the most recent login and its code
-(`credential_held` beside `login_state`, the most recent login's state, which `launcher login`'s
+(`credential_held` beside `login_state`, the most recent login's state, which `machine login`'s
 own poll reads). A helper from before that field reports only the most recent login, so there a
 denied re-login still reads `denied` and exits 1 until the helper restarts on a release that
 carries it. While a credential is held, login-status's last stderr line says when it expires and
@@ -2093,7 +2235,7 @@ why the helper holds no credential in the words its journal uses for the same st
 a broker refusal on a helper from before `credential_dropped` (which sets `login_refused` only for
 one), a denied login, a login that expired before anyone approved it, or no login since the
 helper started. A re-login pending at the drop reports its own outcome once it settles, so its
-`launcher login` prints `denied` for a denial. The helper logs every change of the credential:
+`machine login` prints `denied` for a denial. The helper logs every change of the credential:
 `machine login issued` (credential id, its `expires_at`, and the operator the login was signed
 with) when a login installs one, a WARN that it expires soon a day before its expiry (at once when
 less is left), and one ERROR when it drops it, `<cause>; cleared: no session can enroll until a
@@ -2122,11 +2264,37 @@ Against an older helper an unconditional `--wait 10` stalls every launch 10 s wh
 exists. With `--wait N --exec`, a session the helper cannot enroll for want of a credential starts
 with a warning that its `agent-secrets` calls fail until the machine is logged in.
 
+`agent-secrets machine list|revoke` and `agent-secrets grant list|revoke` (`machine.go`,
+`grant.go`, dispatched by `cmdGroup` from the `commands` rows) are the operator routes from the
+person's own shell, under this machine's login: the CLI asks the helper for a launcher proof with
+the `sign-launcher` op (`launcherSigner`), whose key never leaves the helper, and calls
+`/v1/operator/*` with it. The helper signs only the four operator routes under its own
+`AGENT_SECRETS_URL` (`operatorRoute`; `BAD_REQUEST` naming them otherwise); refuses `IN_SESSION` to
+a process inside a registered session's process tree, and to one whose ancestry walk cannot reach
+init (a parent it cannot read, a loop, or past 64 processes: `Registry.RootOrUnknown`), re-reading
+the peer's pid after the walk as `sign` does; answers `NO_CREDENTIAL` while it holds no
+credential; and returns the credential's id with the proof, so `machine revoke` warns when it ends
+this machine's own login, its id in any case `uuid.Parse` reads. `IN_SESSION` keeps an agent's own
+commands from acting as its operator; it is not a boundary against code running as the operator's
+user. The check covers the session's process tree only: a process the session sends out of it
+(`( cmd & )`, `setsid -f`, a tmux server the session started) is reparented and passes, and the same
+uid can stop the helper. Through these routes such a process can list and revoke the operator's own
+machine logins, never a service's machine login, and the operator's grants, which include grants the
+operator approved on any session, a service's pod among them. The helper's `enroll --helper` path
+(`enroll-box`) is open to any process of the user, so the same process can enroll a box and read the
+operator's agent secrets that way. Every refusal the helper gives reaches the CLI
+as one `launcherRefusal`, printed as it stands: no credential, a helper from before the op (which
+answers `unknown op sign-launcher`, read as a helper to restart on the pinned release), or the
+helper's own code. Both lists print a table; `--json` prints the broker's body verbatim:
+`grant list`'s is byte-identical to the body Dispatch's Live grants page reads for the same
+person, and `machine list`'s holds that person's own machines' rows of Dispatch's machine-login
+page, byte for byte, without the service logins that page also lists (`machine_linux_test.go`
+drives both commands against a real helper and broker). A machine with no helper has no machine
+login to act as, so the commands refuse with exit 2 naming the socket they looked for.
+
 `config.Load` (`internal/broker/config/config.go`) reads the broker's `BROKER_*` environment:
-`BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required; a literal
-`${BROKER_DATABASE_PASSWORD}` placeholder is substituted, URL-escaped, from
-`BROKER_DATABASE_PASSWORD` — naming the placeholder without the variable, or the variable without
-the placeholder, is refused naming both; a URL naming a user and no password whose host ends in
+`BROKER_LISTEN_ADDR` (default `127.0.0.1:13380`), `BROKER_DATABASE_URL` (required, and the only
+database variable: nothing is substituted into it; a URL naming a user and no password whose host ends in
 `.rds.amazonaws.com`, for which `pgconn.ParseConfig` finds no password (none in the URL, `PGPASSWORD`
 or a passfile), sets `Config.DatabaseIAM` and must read as that one host with `sslmode=verify-full`
 and an `sslrootcert` file's pool (not `sslrootcert=system`), or `Load` refuses naming the host and
@@ -2167,7 +2335,10 @@ an unset value. `config.Load` refuses to start naming a stale removal still set 
 environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
 and asks/issues nothing), `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
-checks no WebAuthn origin), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
+checks no WebAuthn origin), `BROKER_DATABASE_PASSWORD` (on RDS the broker signs in by IAM token,
+and any other database's password goes in the URL itself; a `BROKER_DATABASE_URL` still naming its
+`${BROKER_DATABASE_PASSWORD}` placeholder is refused for the same reason, rather than tried as a
+literal password), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
 `BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file) —
 so a stale deployment fails loudly rather than silently running on configuration that means
 nothing any more. It also refuses: a missing required variable; a `BROKER_PUBLIC_URL` that isn't an
@@ -2176,9 +2347,20 @@ holds white space; a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alia
 elsewhere, and a bare key id names no account); exactly one of
 `BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable that isn't a
 whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
-same check as out of range). `cmd/broker/main.go` reads one thing `config.Load` does not:
+same check as out of range). `cmd/broker/main.go` logs at boot, before it loads the AWS config or
+opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`,
+else `method=password`), and reads one thing `config.Load` does not:
 `BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a
 `BROKER_PUBLIC_URL` on port 0. The broker takes no flags, and refuses any flag it is given.
+
+`docker/rds-global-bundle.pem`, the RDS CA bundle an IAM-form URL's `sslrootcert` names (the image
+ships it at `/etc/ssl/rds/global-bundle.pem`), is a dated snapshot of AWS's global bundle. Refresh it
+when a cluster moves to an RDS CA it does not hold, as its header says: download the source URL the
+header names, replace everything below the header, update the date and the SHA-256 line, and check
+that the body below the header hashes to that line. A broker on a cluster whose CA the bundle lacks
+fails the TLS handshake of every sign-in, its first (`store.Open`'s ping) included, so it refuses to
+start; `internal/smoke`'s `TestRDSBundle` checks that the image ships the vendored bytes outside the
+system trust store, not whether they are current.
 
 The docs site's broker reference pages are generated at site build from this source by
 `cmd/broker-refgen` (through `docs/site/generators/broker-reference.sh`), which fails the build on
@@ -2200,7 +2382,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 23 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 27 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -2280,9 +2462,16 @@ control, as it already was for grant rows.
 
 `internal/broker/requests.Machine` is the `agent_secret` request state machine. `Create` verifies
 the caller's signed request object (`iss` must be the requesting enrollment's own key, no
-`login_hint` — a session never names its own approver, only the policy does), first checks for a
-still-live grant covering the exact same name set (`reuseLiveGrant`: no new request, no new record,
-as long as the current policy still allows it and the grant's whole chain still verifies), then
+`login_hint` — a session never names its own approver, only the policy does), rereads each name
+the live policy does not serve before deciding (`rereadMissing`, the miss path: `RefreshOne` for
+that one name, bounded per enrollment by `DefaultMissRereads`, a burst of 10 refilled one every
+10 s; a name `Current.CheckName` refuses costs no token; a failed reread logs
+`policy.LoadFailedMessage` with the name and leaves it unknown, while one whose own request ended
+first logs nothing and fails the call with that request's error; it runs before the transaction,
+so no Secrets Manager call holds a row lock), so a secret created a moment ago, or one the console
+made, is served on its first request, then checks for a still-live grant covering the exact same
+name set (`reuseLiveGrant`: no new request, no new record, as long as the current policy still
+allows it and the grant's whole chain still verifies), then
 decides and writes in one transaction: it takes an advisory lock keyed on the enrollment and the
 sorted name set, then locks the requesting enrollment `for share` while it is live (that order;
 the reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
@@ -2345,7 +2534,8 @@ scheduled for deletion, which Secrets Manager keeps until its recovery window pa
 Migration 0009 defaults `request_secrets.delivery` to `inject`, which this broker neither writes nor
 reads, so a binary from before it can still be rolled back to.
 `RevokeGrant` lets a session end only its own grant (session proof); `RevokeByApprover` ends a grant
-on a human's Dispatch email, allowed only when that email is the grant's approver or its
+on a person's login (a Dispatch email, or the operator of the machine login calling
+`/v1/operator/grants/{id}/revoke`), allowed only when that login is the grant's approver or its
 enrollment's operator (`mayRevoke`, which also answers whether it is the operator, else
 `403 NOT_APPROVER`). When the enrollment's operator revokes, `withhold` withholds
 from the grant's session every name its request got automatically (a `withheld_secrets` row per
@@ -2379,8 +2569,14 @@ person's sessions, automatic ones included, and every grant the person approved,
 null `approver` and `record_id` for an automatic one. Audit rows never carry secret values:
 `audit()` takes only
 `kind`, `enrollment_id`, `request_id`, an optional
-`grant_id`, `actor` (`human:<login>`, `session:<enrollment id>`, `launcher:<credential id>`, or
-`broker`), and a non-secret JSON `detail`. The granted value itself is read fresh from
+`grant_id`, `actor`, and a non-secret JSON `detail`. The actor is what authenticated the change:
+`human:<login>` for one Dispatch relays from its signed-in person, `session:<enrollment id>` for a
+session's own, `launcher:<credential id>` for one a machine login's own proof made (an enrollment
+its launcher revoked, or a machine login or grant its operator ended through `/v1/operator/*`), and
+`broker` for what the broker ends on its own (a lapsed lease); `RevokeCredential` and
+`RevokeByApprover` take theirs from their caller, and record it on every row they write
+(`grants.revoked_by`, a cancelled request's `decided_by` and event, each audit row). The granted
+value itself is read fresh from
 `secrets.Reader` on release and never persisted.
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
@@ -2438,7 +2634,7 @@ no `launcher_credential` record (only `ApplyDecision` mints one, always from its
 In one transaction it sets the credential's `revoked_at`, so its launcher proofs stop
 authenticating, ends every enrollment the credential made through `endEnrollment` (a person's host
 sessions and boxes, or every pod a service's login enrolled: grants revoked, pending requests
-cancelled, actor `human:<email>`, an `enrollment.revoked` row each) and writes one
+cancelled, the caller's actor, an `enrollment.revoked` row each) and writes one
 `launcher_credential.revoked` audit row naming them, the host and any service; revoking it again
 changes nothing. It locks the credential's row before the enrollments', and `Create` holds that row
 `for share` while it inserts, so an enrollment whose launcher proof was verified just before a revoke
@@ -2452,6 +2648,26 @@ session learns it at its next enrollment, and the Legion daemon at its next pod 
 unenrollment, after which it starts a new
 machine login. Dispatch's machine-login page lists and revokes, through these two routes, the
 signed-in person's own machines' logins and every service's.
+
+The operator routes (`api/handlers_operator.go`) are the same lists and revokes for a person at
+their own machine, authenticated by that machine's launcher proof (`launcherAuth`) rather than the
+UI bearer, and acting for the calling credential's `operator`. `GET /v1/operator/grants` answers
+exactly what `GET /v1/grants` answers for that person, and `POST /v1/operator/grants/{id}/revoke`
+revokes as that person through `RevokeByApprover`, with the same refusals and the operator's
+withhold (one function each, `writeApproverGrants` and `revokeGrantAs`). The machine routes cover
+the person's own machines' logins alone: `GET /v1/operator/machines` lists them
+(`enroll.Service.OwnLiveCredentials`, the person's rows of `GET /v1/launcher-credentials`, byte for
+byte), and `POST /v1/operator/machines/{id}/revoke` ends one (`RevokeOwnCredential`, the same rule
+as `RevokeCredential` for a person's machine), while a service's login is `404 NOT_FOUND` there, as
+an unknown id is; its revoke stays on Dispatch's machine-login page, so a process a session sent
+out of its tree cannot end the Legion daemon's login. Both machine routes answer through the
+function their UI route uses (`writeLauncherCredentials`, `revokeCredentialAs`), handed the enroll
+method. Each refuses `403 NOT_APPROVER` as its UI route does. A service's login has no operator and
+is refused every one, `403 SERVICE_CREDENTIAL` (`operatorOf`). Every row an operator revoke writes
+names the calling machine login, `record.LauncherActor(<credential id>)`, whose own row names its
+operator, since no Dispatch sign-in vouched for it; a UI revoke names `record.HumanActor(<login>)`.
+Revoking the calling credential itself ends that machine's access: its next launcher proof is
+`401 LAUNCHER_INVALID`.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then
@@ -2485,9 +2701,11 @@ lane's own test mounts the real broker handlers (`api.Register` with real, Postg
 rather than a hand-rolled fake standing in for broker behavior — `internal/broker/api/api_test.go`,
 `internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real
 `enroll.Service`/`requests.Machine`/`machine.Service` behind an `httptest.Server`;
-`cmd/agent-secrets/main_test.go`'s own hand-rolled `fakeBroker` is the one sanctioned exception,
-since it exists to test the CLI binary's own request-building and response-parsing logic, not
-broker behavior. `packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
+`cmd/agent-secrets/main_test.go`'s hand-rolled `fakeBroker` and `secret_test.go`'s `secretBroker`
+(settings and reread alone) are the sanctioned exceptions, since they exist to test the CLI
+binary's own request-building and response-parsing logic, not broker behavior;
+`secret_e2e_test.go` runs the same forms against the real rig.
+`packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
 for Dispatch's relay: it sends the broker's UI routes the UI bearer and a login, as Dispatch does
 when a signed-in human clicks Approve) run a whole local broker stack by hand for manual smoke
 testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-listener`,
@@ -2495,9 +2713,11 @@ testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-liste
 shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_UI_TOKEN`, `AGENT_SECRETS_APPROVER`, the helper's
 `AGENT_SECRETS_HELPER_SOCK` and `AGENT_SECRETS_OPERATOR_FILE`, both in its workdir, where it writes
 the operator file, and `DEV_BROKER_DIR`, the workdir itself). Each `dev-broker.sh` run creates
-and drops its own isolated database, on the shared `dispatch-pg` container or, with
-`DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no Docker), so
-concurrent instances never see each other's enrollments, requests or grants, and listens on the
+and drops its own isolated database, on the shared `dispatch-pg` container, which it boots through
+`dev-postgres.sh` (so a `dispatch-pg` off that script's pinned image is refused before anything is
+created), or, with `DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no
+Docker), so concurrent instances never see each other's enrollments, requests or grants, and
+listens on the
 port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`), so
 concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
@@ -2511,15 +2731,20 @@ smoke-tests and pushes `ghcr.io/sjawhar/legion/envoy:<commit sha>`, labelled
 dispatch publishes one immutable image, for a dev slot to pin before merge, and moves no tag.
 
 `.github/workflows/release-envoy-listener.yaml`'s `legion-envoy-v*` release also ships
-`cmd/agent-secrets` and the host helper `cmd/agent-secrets-helper`: each of
-`agent-secrets-amd64.tar.gz` and `agent-secrets-arm64.tar.gz` wraps `bin/agent-secrets` and
-`bin/agent-secrets-helper` in one top-level `agent-secrets/` directory — mise's `github:`
-backend auto-strips exactly one leading directory, so the installed tree still ends up
-`bin/agent-secrets`, `bin/agent-secrets-helper`, the layout its installer expects; a bare
-`bin/...` top level would itself be the directory mise strips. The release job builds them, once
-it has decided the tag, so it can stamp that tag into both, and attests the two tarballs; the
+`cmd/agent-secrets` for Linux and macOS, and the host helper `cmd/agent-secrets-helper` for Linux
+alone, since its build constraints admit only Linux (a laptop runs the CLI, never the helper).
+For each architecture `.github/go-release-targets.json`'s `envoy` key names,
+`agent-secrets-<arch>.tar.gz` holds both binaries; for each target its `agent-secrets-client` key
+names, `agent-secrets-darwin-<arch>.tar.gz` holds `bin/agent-secrets` alone. Each wraps its
+`bin/` in one top-level `agent-secrets/` directory — mise's `github:` backend auto-strips exactly
+one leading directory, so the installed tree still ends up `bin/agent-secrets` (and
+`bin/agent-secrets-helper` on Linux), the layout its installer expects; a bare `bin/...` top level
+would itself be the directory mise strips. The release job builds them, once it has decided the
+tag, so it can stamp that tag into each binary, and attests every `agent-secrets-*.tar.gz`; the
 build job builds only `legion-envoy-<arch>.tar.gz` (envoy-listener alone, with its
 `THIRD_PARTY_NOTICES`). Each `agent-secrets` tarball also holds `agent-secrets/THIRD_PARTY_NOTICES`,
-the licenses of the Go modules both binaries compile in. This is the release a host installs both
-binaries from (through the operator's dotfiles, under the broker design's devbox-enrollment plan).
+the licenses of the Go modules its binaries compile in, and `pr-and-main.yaml` writes those
+notices for every archive and compiles the darwin client on each pull request. A host installs
+both binaries from this release (through the operator's dotfiles, under the broker design's
+devbox-enrollment plan), and a laptop the CLI.
 

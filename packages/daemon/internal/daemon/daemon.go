@@ -496,8 +496,9 @@ type plan struct {
 	// replaced runtime without one.
 	probe func(ctx context.Context, rt runtime.Runtime) (bootprobe.ImageReport, error)
 	// clusterCheck is the Kubernetes runtime's refusals before the store opens: Agent Sandbox's
-	// install check, then the census of per-claim Sandboxes (sandbox.CensusLegacyIssueSandboxes).
-	// Nil under tmux, and for a replaced runtime.
+	// install check, then the census of Sandboxes of a layout before this one — per-claim pods, or
+	// issue pods on one tree volume (sandbox.CensusLegacyIssueSandboxes). Nil under tmux, and for a
+	// replaced runtime.
 	clusterCheck func(ctx context.Context) error
 	// claimsCheck is the Kubernetes runtime's refusal once the store has opened, before it
 	// migrates: no stored claim may still carry a per-claim Sandbox locator of the layout before
@@ -525,11 +526,8 @@ type plan struct {
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
 // listener the stream listener, address the one every agent's shim dials (shimAddress), tokens the
-// workflow's App tokens (nil without a workflow), st the store the runtime reads, and removable the
-// tree's candidate function (removableWorkspaces), which needs sup — created before this is called
-// (openSupervision) — so it cannot be built inside the factory itself; a runtime that does not
-// provision workspaces in its own pods ignores it.
-type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens, st *store.Store, removable func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error)
+// workflow's App tokens (nil without a workflow), and st the store the runtime reads.
+type runtimeFactory func(ctx context.Context, listener *stream.Listener, address string, tokens appauth.Tokens, st *store.Store) (runtime.Runtime, error)
 
 // prepare is every refusal that needs nothing but the configuration and the machine (readBoot's,
 // then what writes or runs something: the state directory, the instructions copy, and what the
@@ -654,7 +652,7 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 // Apps hands the runtime none, and its panes hold no gh files. The private server's environment is
 // scrubbed before anything is launched on it.
 func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store, _ func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)) (runtime.Runtime, error) {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
 		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
 		if tokens != nil {
@@ -741,10 +739,10 @@ type supervision struct {
 	supervisor *supervisor
 	tokens     *api.BootTokens
 	claims     []supervise.Claim
-	// imageReport is what the worker image's passed probe reported of the image, from its OK
-	// line (bootprobe.ImageReport); under tmux, the model-fallback mark alone, read by
-	// plan.modelFallback. probed is whether the probe passed (kubernetes), so the image rows of the
-	// capability report read present.
+	// imageReport is what the worker image's passed probe reported: of the image, from its OK line,
+	// and of the pool, the attempts that waited on its capacity (bootprobe.ImageReport); under
+	// tmux, the model-fallback mark alone, read by plan.modelFallback. probed is whether the probe
+	// passed (kubernetes), so the image rows of the capability report read present.
 	imageReport bootprobe.ImageReport
 	probed      bool
 	// reportMu guards reportedGaps and reports: the tick's reads, the API's readies and boot's run
@@ -804,20 +802,22 @@ func Deployment(cfg config.Config) capabilities.Deployment {
 }
 
 // deployment is Deployment with what this boot learned: the broker login's state, whether the
-// image passed its probe, the model-fallback mark the probe or the gate read, and the live
-// sessions' reports of the live rows (LEGION-663). A session is live when its claim is ready,
-// working or idle with a process, and its report is that process's: a report from a claim since
-// relaunched, suspended or retired names a session that no longer runs and contributes nothing,
-// until the new process reports. The claims are read as their machines last published them
-// (supervise.Machine.View), never waiting on a decision in flight, so the tick and the state route
-// read the deployment while a relaunch waits on its pods; the sessions are in claim token order.
-// It reads memory alone: no store, no context.
+// image passed its probe, the model-fallback mark the probe or the gate read, how many of the
+// probe's attempts waited on the pool's capacity before one scheduled, with the scheduler's
+// reason, and the live sessions' reports of the live rows (LEGION-663). A session is live when its
+// claim is ready, working or idle with a process, and its report is that process's: a report from a
+// claim since relaunched, suspended or retired names a session that no longer runs and contributes
+// nothing, until the new process reports. The claims are read as their machines last published
+// them (supervise.Machine.View), never waiting on a decision in flight, so the tick and the state
+// route read the deployment while a relaunch waits on its pods; the sessions are in claim token
+// order. It reads memory alone: no store, no context.
 func (s *supervision) deployment() capabilities.Deployment {
 	d := Deployment(s.cfg)
 	if s.plan.secretsLogin != nil {
 		d.SecretsLogin = s.plan.secretsLogin.LoginStatus().State
 	}
 	d.Probed, d.ModelFallback = s.probed, s.imageReport.ModelFallback
+	d.ProbeCapacityWaits, d.ProbeCapacityReason = s.imageReport.CapacityWaits, s.imageReport.CapacityReason
 	if s.supervisor == nil {
 		return d
 	}
@@ -980,7 +980,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		endDrain()
 		return nil, err
 	}
-	rt, err := p.newRuntime(supervising, listener, dial, apps, st, removableWorkspaces(st.Pool(), record.NewStore(), sup))
+	rt, err := p.newRuntime(supervising, listener, dial, apps, st)
 	if err != nil {
 		cancel()
 		endDrain()
@@ -1026,18 +1026,20 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 }
 
 // start supervises every claim the store holds. A claim with a live locator is re-adopted — its
-// process told to the runtime and observed from now on, never launched again. An unrecorded launch
-// is relaunched only after boot orphan reconciliation proves any pre-crash pane absent or reaped;
-// a failed listing leaves it launch_uncertain until the bounded retry succeeds. Only then are
-// hellos resolved: a shim reconnecting across the restart is admitted by a claim already supervised.
-// A daemon that leaves the controller to its operator first stops the controller's claim an
-// earlier boot under `controller: daemon` left (stopLaunchedController), which leaves it absent or
-// retired. The only controller claim among the unrecorded launches is a launch a crash cut short,
-// and by then the stop has retired it, so launchUnfinished would not relaunch it: its
-// ReleaseUncertainLaunch acts only on a launch-uncertain claim. Dropping that token is a second
-// guard beside that check, so boot does not report the retired claim as an unrecorded launch. The
-// steps before the relaunches run on boot, and the relaunches on the machines' context; the
-// daemon's stop ends both (run).
+// process told to the runtime and observed from now on, never launched again. Once every claim has
+// its machine and the boot orphan reconciliation has run, hellos are resolved: a shim reconnecting
+// across the restart is admitted by a claim already supervised. An unrecorded launch is relaunched
+// only after that reconciliation proves any pre-crash pane absent or reaped; a failed listing
+// leaves it launch_uncertain until the bounded retry succeeds. The relaunches run after hellos are
+// resolved, on a goroutine of their own, so start returns, and the API serves, without waiting for
+// any (relaunchUnfinished). A daemon that leaves the controller to its operator first stops the
+// controller's claim an earlier boot under `controller: daemon` left (stopLaunchedController),
+// which leaves it absent or retired. The only controller claim among the unrecorded launches is a
+// launch a crash cut short, and by then the stop has retired it, so launchUnfinished would not
+// relaunch it: its ReleaseUncertainLaunch acts only on a launch-uncertain claim. Dropping that token
+// is a second guard beside that check, so boot does not report the retired claim as an unrecorded
+// launch. The steps before the relaunches run on boot, and the relaunches on the machines' context;
+// the daemon's stop ends both (run).
 func (s *supervision) start(boot context.Context) error {
 	unfinished, err := s.supervisor.restore(boot, s.claims)
 	if err != nil {
@@ -1051,15 +1053,11 @@ func (s *supervision) start(boot context.Context) error {
 		unfinished = slices.DeleteFunc(unfinished, func(token claim.Token) bool { return token == controller })
 	}
 	pruneAllBut(runtime.SecretsDir(s.cfg.StateDir), s.claims, s.log)
-	if s.reconcileBootOrphans(boot) {
-		if failed := s.launchUnfinished(unfinished); len(failed) > 0 {
-			s.retryUnfinished(failed, true)
-		}
-	} else if len(unfinished) > 0 {
+	reconciled := s.reconcileBootOrphans(boot)
+	if !reconciled {
 		for _, token := range unfinished {
 			s.log.Warn("supervise: unrecorded launch remains uncertain; not relaunching", "claim", token)
 		}
-		s.retryUnfinished(unfinished, false)
 	}
 	close(s.supervisor.restored)
 
@@ -1089,6 +1087,9 @@ func (s *supervision) start(boot context.Context) error {
 		defer s.wg.Done()
 		s.reconcileOrphans(s.supervisor.ctx)
 	}()
+	if len(unfinished) > 0 {
+		s.relaunchUnfinished(unfinished, reconciled)
+	}
 	return nil
 }
 
@@ -1124,49 +1125,85 @@ func (s *supervision) reconcileBootOrphans(ctx context.Context) bool {
 	return false
 }
 
-// launchUnfinished starts only claims that remain queued with no locator. A still-live old pane can
-// reconnect while reconciliation was uncertain; its hello changes the state before a later retry,
-// and it must never be joined by a second pane. It returns the claims whose release the store did
-// not take, outside the daemon's stop: each is still launch_uncertain, in memory as in the store,
-// and nothing else in this boot releases it, so the caller retries it (retryUnfinished).
+// launchUnfinished starts only claims that remain queued with no locator, each on a goroutine of
+// its own, and returns once every one has: one relaunch never waits out another's launch, which
+// under a Sandbox can take minutes. A still-live old pane can reconnect while reconciliation was
+// uncertain; its hello changes the state before a later retry, and it must never be joined by a
+// second pane. It returns the claims whose release the store did not take, outside the daemon's
+// stop: each is still launch_uncertain, in memory as in the store, and nothing else in this boot
+// releases it, so the caller retries it (relaunchUnfinished).
 func (s *supervision) launchUnfinished(tokens []claim.Token) []claim.Token {
-	var failed []claim.Token
-	for _, token := range tokens {
+	refused := make([]bool, len(tokens))
+	var launching sync.WaitGroup
+	for i, token := range tokens {
 		m, ok := s.supervisor.Machine(token)
 		if !ok {
 			continue
 		}
-		released, err := m.ReleaseUncertainLaunch(s.supervisor.ctx)
-		if err != nil {
-			if s.supervisor.decisionFailed(token, "release of an uncertain launch", err,
-				"supervise: release an uncertain launch; retrying at the next orphan sweep") {
-				failed = append(failed, token)
-			}
-			continue
-		}
-		c := m.Claim()
-		if !released || c.State != supervise.StateQueued || c.Locator != nil {
-			s.log.Info("supervise: unrecorded launch settled without relaunch", "claim", token, "state", c.State)
-			continue
-		}
-		s.log.Warn("supervise: launching again a launch the previous daemon did not finish", "claim", token)
-		spawn := supervise.RequestSpawn{Claim: token}
-		if err := m.Handle(s.supervisor.ctx, spawn); err != nil {
-			s.supervisor.decisionFailed(token, fmt.Sprintf("%T", spawn), err, "supervise: launch an unfinished launch again")
+		launching.Add(1)
+		go func() {
+			defer launching.Done()
+			refused[i] = s.launchUnfinishedClaim(token, m)
+		}()
+	}
+	launching.Wait()
+	var failed []claim.Token
+	for i, token := range tokens {
+		if refused[i] {
+			failed = append(failed, token)
 		}
 	}
 	return failed
 }
 
-// retryUnfinished launches tokens' unfinished launches on the normal orphan-sweep cadence, until
-// none is left or the daemon stops. Until the boot reconciliation has succeeded (reconciled), each
-// sweep retries it first — each reconciliation has the bounded retry above, and only a success
-// releases these claims to launch; once it has, a sweep retries only the releases the store did not
-// take (launchUnfinished), since the reconciliation's proof that no predecessor runs still holds.
-func (s *supervision) retryUnfinished(tokens []claim.Token, reconciled bool) {
+// launchUnfinishedClaim releases one unfinished launch and launches it again, and reports whether
+// the store refused the release (launchUnfinished).
+func (s *supervision) launchUnfinishedClaim(token claim.Token, m *supervise.Machine) bool {
+	released, err := m.ReleaseUncertainLaunch(s.supervisor.ctx)
+	if err != nil {
+		return s.supervisor.decisionFailed(token, "release of an uncertain launch", err,
+			"supervise: release an uncertain launch; retrying at the next orphan sweep")
+	}
+	c := m.Claim()
+	if !released || c.State != supervise.StateQueued || c.Locator != nil {
+		s.log.Info("supervise: unrecorded launch settled without relaunch", "claim", token, "state", c.State)
+		return false
+	}
+	s.log.Warn("supervise: launching again a launch the previous daemon did not finish", "claim", token)
+	spawn := supervise.RequestSpawn{Claim: token}
+	if err := m.Handle(s.supervisor.ctx, spawn); err != nil {
+		s.supervisor.decisionFailed(token, fmt.Sprintf("%T", spawn), err, "supervise: launch an unfinished launch again")
+	}
+	return false
+}
+
+// relaunchUnfinished launches tokens' unfinished launches on a goroutine of its own, never on the
+// boot: at once when the boot reconciliation succeeded (reconciled), then on the normal orphan-sweep
+// cadence, until none is left or the daemon stops. A relaunched worker reaches the daemon only once
+// the daemon is up — a Sandbox pod's launchers dial it through its Service, which routes only to a
+// pod whose probes pass, so only once the API answers /healthz, and a shim's hello is resolved only
+// once restoration has closed — so a relaunch the boot waited on could not register: it spent its
+// whole launch budget, launch_failure_limit × worker_boot_timeout_seconds, with the API unanswered.
+//
+// The pre-restart process of such a launch, when one still runs, may now say hello before its
+// relaunch writes the next generation, and be admitted: its claim, launch_uncertain or queued until
+// then, ignores the hello and refuses its registration, and at the next generation the fence drops
+// it. Its connection holds the claim's stream slot only while that process lives, and the relaunch
+// ends it before it starts the next generation: a tmux boot's reconciliation kills every pane no
+// claim records, and a Sandbox relaunch stops its launcher's earlier generation first. Once the next
+// generation is written, the old process's boot token resolves stale.
+//
+// Until the boot reconciliation has succeeded, each sweep retries it first — each reconciliation
+// has the bounded retry above, and only a success releases these claims to launch; once it has, a
+// sweep retries only the releases the store did not take (launchUnfinished), since the
+// reconciliation's proof that no predecessor runs still holds.
+func (s *supervision) relaunchUnfinished(tokens []claim.Token, reconciled bool) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
+		if reconciled {
+			tokens = s.launchUnfinished(tokens)
+		}
 		ticker := time.NewTicker(s.plan.orphanSweep)
 		defer ticker.Stop()
 		for len(tokens) > 0 {

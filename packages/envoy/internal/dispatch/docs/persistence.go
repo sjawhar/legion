@@ -139,14 +139,7 @@ func (p *PgVersioned) appendUpdate(ctx context.Context, room string, update []by
 // the document's content: settlement versions a document only past a content update.
 func (p *PgVersioned) AppendUpdateTx(ctx context.Context, tx pgx.Tx, room string, update []byte, contentChanged bool) (persistence.Version, error) {
 	if err := crdt.ApplyUpdateV1(newDocumentCopy(), update, nil); err != nil {
-		// ygo refuses an update declaring more than maxUpdateItems items with the same error it
-		// gives a malformed one. The server encoded this update itself, so when its header
-		// declares more than the cap, the cap is the cause and the document is the caller's to
-		// shrink (LEGION-465); any other refusal of a server-encoded update is a fault to log.
-		if items, ok := updateItems(update); ok && items > maxUpdateItems {
-			return 0, fmt.Errorf("%w: its %d items exceed the %d one document update can hold (%v)", ErrDocumentTooLarge, items, maxUpdateItems, err)
-		}
-		return 0, err
+		return 0, itemCapError(update, err)
 	}
 	return p.appendUpdateTxClass(ctx, tx, room, update, contentChanged, nil)
 }
@@ -553,7 +546,7 @@ func (p *PgVersioned) Compact(ctx context.Context, room string, keep int) (int, 
 // the old merged history; this method never makes that destructive decision itself.
 func (p *PgVersioned) RebuildTx(ctx context.Context, tx pgx.Tx, room string, seed []byte) (RebuildReport, error) {
 	if err := validateUpdate(seed); err != nil {
-		return RebuildReport{}, fmt.Errorf("validate rebuilt document seed: %w", err)
+		return RebuildReport{}, wrapUnlessTooLarge(itemCapError(seed, err), "validate rebuilt document seed")
 	}
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
 		return RebuildReport{}, err
@@ -828,4 +821,16 @@ func updateItems(update []byte) (uint64, bool) {
 	}
 	items, err := decoder.ReadVarUint()
 	return items, err == nil
+}
+
+// itemCapError is ygo's refusal err of update, an update the server encoded itself, named as the
+// write too large to store it is when update's header declares more than maxUpdateItems items:
+// ygo refuses such an update with the same error it gives a malformed one, and a seed or a
+// replace over the cap is the caller's document to shrink, answered 413 CAP_EXCEEDED (LEGION-465).
+// Any other refusal of a server-encoded update is a fault, and is err unchanged.
+func itemCapError(update []byte, err error) error {
+	if items, ok := updateItems(update); ok && items > maxUpdateItems {
+		return fmt.Errorf("%w: its %d items exceed the %d one document update can hold (%v)", ErrDocumentTooLarge, items, maxUpdateItems, err)
+	}
+	return err
 }
