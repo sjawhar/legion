@@ -105,7 +105,7 @@ func TestTheWaitingSQLAgreesWithTheShippingRule(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListRunJobsForRuns: %v", err)
 	}
-	applies := ProductionApplies(deployRuns, jobs, job)
+	applies, _ := ProductionApplies(deployRuns, jobs, job)
 	goSet := map[int]string{}
 	for _, pr := range stored {
 		if ComputeDeployedStatus(pr, repo, nil) == DeployedStatusNotTracked {

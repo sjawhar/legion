@@ -75,6 +75,22 @@ test("Documents requests unlinked project artifacts and links a document to its 
   }
 });
 
+test("a document's row names its latest version's stored size", async () => {
+  const latest = { ...document().versions[0], number: 2, size: 1_048_475 };
+  const { listProjectArtifacts, view } = renderList([
+    document({ versions: [{ ...latest, number: 1, size: 12 }, latest] }),
+  ]);
+
+  try {
+    const row = await screen.findByRole("listitem", { name: /Design notes/ });
+    expect(row.textContent).toContain("1023.9 KB");
+    expect(row.textContent).not.toContain("12 B");
+  } finally {
+    view.unmount();
+    listProjectArtifacts.mockRestore();
+  }
+});
+
 test("New document opens its document page", async () => {
   const { listProjectArtifacts, view } = renderList([]);
   const uploadArtifact = spyOn(api, "uploadArtifact").mockResolvedValue(uploadResponse());

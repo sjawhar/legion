@@ -583,10 +583,18 @@ type Version struct {
 	Summary   *string   `json:"summary"`
 	Authors   []Actor   `json:"authors"`
 	CreatedAt time.Time `json:"created_at"`
-	Size      *int      `json:"size,omitempty"`
-	MIME      *string   `json:"mime,omitempty"`
-	SHA256    *string   `json:"sha256,omitempty"`
+	// Size is how many bytes the version stores: a file's or an image's bytes, or a document's
+	// markdown, the rendering the version recorded.
+	Size   *int    `json:"size,omitempty"`
+	MIME   *string `json:"mime,omitempty"`
+	SHA256 *string `json:"sha256,omitempty"`
 }
+
+// VersionSize is the SQL a version's Size is selected with, over artifact_versions aliased v. A
+// file or image row records its size; a document row holds its markdown, whose length octet_length
+// takes from the stored value's header, so reading a document's size neither renders the document
+// nor reads its markdown, out of TOAST or otherwise.
+const VersionSize = `coalesce(v.size, octet_length(v.markdown))`
 
 // Ask is a question with either a human answer or a recorded closure reason.
 type Ask struct {
