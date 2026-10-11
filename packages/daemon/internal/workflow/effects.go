@@ -39,6 +39,17 @@ func RoleFor(p phase.Phase) claim.Role {
 	}
 }
 
+// workingPhase is the phase issue's worker works: its phase, or, while it is held, the phase its
+// hold left, the one whose worker's claim failed. RoleFor(workingPhase(issue)) is the role whose
+// failure holds the issue (claimFailed), and the one whose claim Stranded names when nothing will
+// wake it.
+func workingPhase(issue record.Issue) phase.Phase {
+	if issue.Hold != nil {
+		return issue.Hold.From
+	}
+	return issue.Phase
+}
+
 // StopActs is whether a queued stop, row id, still acts on its claim when the outbox runs it, with
 // lastStart the newest start the outbox ran against the claim (its last_start_row), and root the
 // issue's tree root as recorded, read only for a tree close. The outbox executor asks it of every
@@ -75,6 +86,9 @@ func StopActs(id int64, stop record.SuperviseRequest, lastStart int64, root *rec
 // resume task is delivered is the outbox executor's decision when the start runs: not to a claim
 // that holds a task for the same generation and phase by then (record.SuperviseRequest's
 // ResumeTask).
+//
+// Stranded reads the same rule: a suspended or failed claim for which StartFor is true has no
+// queued start that will wake it. The architect's start names no phase, so its current is "".
 func StartFor(run record.RoleRun, root record.Issue, generation uint64, current phase.Phase) bool {
 	held := run.Claim
 	var lastStart int64
@@ -134,6 +148,12 @@ func (e *Engine) noticeWithController(ctx context.Context, tx pgx.Tx, issue stri
 // fact rolled back writes nothing and one retried after a failed commit writes it once.
 func (e *Engine) logOnCommit(ctx context.Context, msg string, args ...any) {
 	intake.OnCommit(ctx, func() { e.log.Info(msg, args...) })
+}
+
+// warnOnCommit is logOnCommit at Warn, for a committed fact that stalls a round and tells nobody
+// else: a log monitor keys on it where an Info line would drown.
+func (e *Engine) warnOnCommit(ctx context.Context, msg string, args ...any) {
+	intake.OnCommit(ctx, func() { e.log.Warn(msg, args...) })
 }
 
 // refused is a committed 409: the fact changed nothing, and the caller is told why.

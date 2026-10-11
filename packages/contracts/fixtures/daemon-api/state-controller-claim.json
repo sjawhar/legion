@@ -43,6 +43,7 @@
     }
   },
   "pendingStatusWrites": [],
+  "strandedClaims": [],
   "controllerLocator": {
     "runtime": "kubernetes",
     "external": true,

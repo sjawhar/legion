@@ -1382,6 +1382,7 @@ describe("Legion OMP extension", () => {
           },
         },
         pendingStatusWrites: [],
+        strandedClaims: [],
         capabilities: [],
       };
       const booted = await bootPane({

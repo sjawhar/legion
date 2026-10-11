@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import {
   LegionChildRequest,
+  LegionControllerCredentialResponse,
   LegionControllerGrantRequest,
   LegionControllerRegisterResponse,
   LegionControllerSecretResponse,
@@ -42,6 +43,7 @@ const schemas: Record<string, z.ZodType> = {
   "register.json": LegionRegisterResponse,
   "register-controller.json": LegionControllerRegisterResponse,
   "controller-secret.json": LegionControllerSecretResponse,
+  "controller-github-credential.json": LegionControllerCredentialResponse,
   "error.json": LegionErrorResponse,
   "operator-claim.json": LegionOperatorClaimResponse,
   "operator-claims.json": LegionOperatorClaimsResponse,
@@ -86,9 +88,13 @@ test("state accepts optional fields emitted by later workflow slices", () => {
     admission: Record<string, unknown>;
     issues: Record<string, { phase: string; slot?: Record<string, unknown> }>;
   };
+  const laterIssue = later.issues["LEGION-208"];
+  if (laterIssue === undefined || laterIssue.slot === undefined) {
+    throw new Error("state fixture lacks LEGION-208 or its slot");
+  }
   later.admission.free = 1;
-  later.issues["LEGION-208"]!.phase = "integrating";
-  later.issues["LEGION-208"]!.slot!.lentTo = "LEGION-209";
+  laterIssue.phase = "integrating";
+  laterIssue.slot.lentTo = "LEGION-209";
 
   expect(LegionStateResponse.safeParse(later).success).toBeTrue();
 });
@@ -101,7 +107,11 @@ test("state rejects malformed optional workflow fields", () => {
   const malformedLender = fixture("state.json") as {
     issues: Record<string, { slot?: Record<string, unknown> }>;
   };
-  malformedLender.issues["LEGION-208"]!.slot!.lentTo = "not an issue key";
+  const malformedLenderIssue = malformedLender.issues["LEGION-208"];
+  if (malformedLenderIssue === undefined || malformedLenderIssue.slot === undefined) {
+    throw new Error("state fixture lacks LEGION-208 or its slot");
+  }
+  malformedLenderIssue.slot.lentTo = "not an issue key";
   expect(LegionStateResponse.safeParse(malformedLender).success).toBeFalse();
 });
 
@@ -109,7 +119,11 @@ test("state accepts the existing done phase", () => {
   const completed = fixture("state.json") as {
     issues: Record<string, { phase: string }>;
   };
-  completed.issues["LEGION-208"]!.phase = "done";
+  const completedIssue = completed.issues["LEGION-208"];
+  if (completedIssue === undefined) {
+    throw new Error("state fixture lacks LEGION-208");
+  }
+  completedIssue.phase = "done";
 
   expect(LegionStateResponse.safeParse(completed).success).toBeTrue();
 });
@@ -296,6 +310,24 @@ test("a capability row's status is one the report renders, and the report cannot
 
   const dropped = fixture("state.json") as Record<string, unknown>;
   delete dropped.capabilities;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+});
+
+// The claims nothing will wake (contract 21): the golden names LEGION-210's failed implementer,
+// whose issue is held, and a state with none carries an empty list rather than none.
+test("the state golden names the claims nothing will wake, and the list cannot be dropped", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+  expect(state.strandedClaims).toEqual([
+    { issue: "LEGION-210", role: "implementer", state: "failed" },
+  ]);
+  expect(LegionStateResponse.parse(fixture("state-stage3.json")).strandedClaims).toEqual([]);
+
+  const running = fixture("state.json") as { strandedClaims: unknown[] };
+  running.strandedClaims = [{ issue: "LEGION-210", role: "implementer", state: "idle" }];
+  expect(LegionStateResponse.safeParse(running).success).toBeFalse();
+
+  const dropped = fixture("state.json") as Record<string, unknown>;
+  delete dropped.strandedClaims;
   expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
 });
 

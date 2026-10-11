@@ -388,9 +388,15 @@ func publishFollowerRoutes(ctx context.Context, deps Deps, eventID int64, item c
 // different reviewer) and regardless of whether the event's owner is an issue or a project
 // document (which has no route at all). Without this, the agent that started the thread
 // or is the thread's own root author never learns about the human's reply, resolution,
-// reopening, or edit. Ask threads are not walked here: their asker and repliers are the
-// ask's followers (publishFollowerRoutes).
+// reopening, or edit, and the agent that wrote a document never learns of a new comment on it.
+// A reply reaches its thread's root author and its direct parent's author; a new comment on a
+// document (no reply_to and no ask_id), and its edit, reach every session that document credits
+// (loadDocumentSessionAuthors); a comment on an issue's conversation names no document and reaches
+// no author. Ask threads are not walked here: their asker and repliers are the ask's followers
+// (publishFollowerRoutes). The event's own actor is skipped, and so is a session the comment's
+// mentions already reach (suppressed_authors).
 func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item contracts.Envelope, event model.Event, a *attempt) error {
+	suppressedAuthors := payloadStringSet(event.Payload, "suppressed_authors")
 	seen := map[string]bool{}
 	var targets []string
 	consider := func(author model.Actor, found bool) {
@@ -401,7 +407,7 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 			return
 		}
 		seen[author.ID] = true
-		if _, suppressed := payloadStringSet(event.Payload, "suppressed_authors")[author.ID]; suppressed {
+		if _, suppressed := suppressedAuthors[author.ID]; suppressed {
 			return
 		}
 		targets = append(targets, author.ID)
@@ -444,6 +450,17 @@ func publishAuthorRoutes(ctx context.Context, deps Deps, eventID int64, item con
 		if err := considerLoaded(loadRootCommentAuthor(ctx, deps, commentID)); err != nil {
 			return err
 		}
+	} else if (event.Type == "comment.created" || event.Type == "comment.edited") && payloadString(event.Payload, "ask_id") == "" {
+		document := commentedDocument(event)
+		if document != "" {
+			authors, err := loadDocumentSessionAuthors(ctx, deps, document)
+			if err != nil {
+				return err
+			}
+			for _, author := range authors {
+				consider(model.Actor{Kind: "session", ID: author}, true)
+			}
+		}
 	}
 	if messageInReplyTo != "" {
 		if err := considerLoaded(loadMessageAuthor(ctx, deps, messageInReplyTo)); err != nil {
@@ -474,6 +491,57 @@ func loadCommentAuthor(ctx context.Context, deps Deps, commentID string) (model.
 		return model.Actor{}, false, fmt.Errorf("load comment author %q: %w", commentID, err)
 	}
 	return decodeAuthor(authorJSON, "comment", commentID)
+}
+
+// commentedDocument names the artifact a top-level comment is on: its anchor's for a comment on a
+// passage (of an issue's document or a project artifact), otherwise the event's own artifact for a
+// comment on a whole project artifact. The author lookup decides whether that artifact is a document.
+func commentedDocument(event model.Event) string {
+	document := ""
+	if values, ok := event.Payload.(map[string]any); ok {
+		document = payloadString(values["anchor"], "artifact_id")
+	}
+	if document == "" && event.ArtifactID != nil {
+		document = *event.ArtifactID
+	}
+	return document
+}
+
+// loadDocumentSessionAuthors lists, in one query, the sessions a document credits: the one that
+// created it (artifacts.created_by) and every one a version lists (artifact_versions.authors), each
+// once and in the order the document first credits it, its creator first. A person has no Envoy
+// topic, so people are left out, and so is a session credit naming no id, which has none either.
+// A version's authors are a JSON array, or JSON null where a writer encoded a nil list, which
+// every Go reader of the column decodes as no authors; the query reads null the same way rather
+// than failing the event's every publish on jsonb_array_elements' refusal of a scalar.
+func loadDocumentSessionAuthors(ctx context.Context, deps Deps, artifactID string) ([]string, error) {
+	rows, err := deps.Store.Pool.Query(ctx, `
+		with credited as (
+			select a.created_by as author, 0 as number, 0::bigint as position
+			from artifacts a
+			where a.id = $1 and a.kind = 'doc'
+			union all
+			select credit.author, v.number, credit.position
+			from artifact_versions v
+			join artifacts a on a.id = v.artifact_id and a.kind = 'doc'
+			cross join lateral jsonb_array_elements(nullif(v.authors, 'null'::jsonb))
+				with ordinality as credit(author, position)
+			where v.artifact_id = $1
+		)
+		select author->>'id'
+		from credited
+		where author->>'kind' = 'session' and coalesce(author->>'id', '') <> ''
+		group by author->>'id'
+		order by min(array[number, position])
+	`, artifactID)
+	if err != nil {
+		return nil, fmt.Errorf("load document %q session authors: %w", artifactID, err)
+	}
+	authors, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("load document %q session authors: %w", artifactID, err)
+	}
+	return authors, nil
 }
 
 // loadRootCommentAuthor walks a comment's reply_to chain up to its thread root - the comment

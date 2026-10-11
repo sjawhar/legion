@@ -207,6 +207,34 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 }
 
+// ClaimSession is the session claims records for the token (the workflow reads it for the
+// reviewer's claim to tell the reviewer's own review-App session from another's by the Legion
+// footer each carries). An unknown token answers "" and no error.
+func TestClaimSessionAnswersTheSeededSessionOrEmpty(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	inTx(t, st, func(tx pgx.Tx) {
+		_, err := tx.Exec(ctx, `insert into claims (token, project, tree, issue, role, generation, session, session_file,
+			state, launch_failures, prompt_failures, prompt_retires, uncertain_streak)
+			values ($1, $2, $3, $4, $5, 0, $6, '', $7, 0, 0, 0, 0)`,
+			"review-claim", "LEGION", "LEGION-208", "LEGION-208", string(claim.RoleReviewer), "ses-reviewer", string(supervise.StateWorking))
+		must(t, err)
+	})
+	inTx(t, st, func(tx pgx.Tx) {
+		got, err := records.ClaimSession(ctx, tx, "review-claim")
+		must(t, err)
+		if got != "ses-reviewer" {
+			t.Fatalf("ClaimSession(review-claim) = %q, want ses-reviewer", got)
+		}
+		got, err = records.ClaimSession(ctx, tx, "no-such-claim")
+		must(t, err)
+		if got != "" {
+			t.Fatalf("ClaimSession(no-such-claim) = %q, want \"\"", got)
+		}
+	})
+}
+
 func TestStoreRoundTripsLingerStateAndRefusesHeldFromHeld(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -827,6 +855,38 @@ func TestResidentRolesMigrationDropsOnlyTheQueuedPhaseEndSuspends(t *testing.T) 
 		}
 		if !reflect.DeepEqual(kept, want) {
 			t.Fatalf("supervise rows after 0035 = %+v, want %+v: the phase-end suspend deleted and every other row kept", kept, want)
+		}
+	})
+}
+
+// A queued supervise row that does not decode belongs to one role's run. Reading another role's run
+// of the same issue — what the state route's report does for every candidate — skips it before
+// decoding, so one bad row fails only its own role, never the state of the whole issue.
+func TestRoleRunsSkipsAnotherRolesUndecodableRow(t *testing.T) {
+	ctx := context.Background()
+	st := migratedStore(t)
+	records := NewStore()
+	start := SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RolePlanner, Generation: 1, Phase: phase.Planning}
+	inTx(t, st, func(tx pgx.Tx) {
+		row, err := NewOutboxRow("LEGION-208", start, time.Now())
+		must(t, err)
+		must(t, records.Enqueue(ctx, tx, row))
+		_, err = tx.Exec(ctx, `insert into outbox (kind, issue, payload, attempts, next_at, last_error)
+			values ('supervise', 'LEGION-208', '{"op": "bogus", "tree": "LEGION-208", "role": "tester", "generation": 1}', 0, now(), '')`)
+		must(t, err)
+	})
+	planner := RoleRunKey{Token: "legion-legion-legion-208-planner", Issue: "LEGION-208", Role: claim.RolePlanner, Generation: 1}
+	tester := RoleRunKey{Token: "legion-legion-legion-208-tester", Issue: "LEGION-208", Role: claim.RoleTester, Generation: 1}
+	inTx(t, st, func(tx pgx.Tx) {
+		runs, err := records.RoleRuns(ctx, tx, []RoleRunKey{planner})
+		if err != nil {
+			t.Fatalf("the planner's run beside the tester's undecodable row = %v, want it read", err)
+		}
+		if queued := runs[planner.Token].Queued; len(queued) != 1 || queued[0].Request != start {
+			t.Fatalf("the planner's queued rows = %+v, want its one start", queued)
+		}
+		if _, err := records.RoleRuns(ctx, tx, []RoleRunKey{tester}); err == nil {
+			t.Fatal("the tester's run read its own undecodable row without an error")
 		}
 	})
 }

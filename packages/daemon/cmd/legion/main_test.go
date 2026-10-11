@@ -1093,3 +1093,48 @@ func TestPlainStateSummarizesThePendingStatusWrites(t *testing.T) {
 		})
 	}
 }
+
+// An operator reading plain `legion state` is told which claims nothing will wake, each by issue
+// and role under the move that brings it back — resume for a suspended one, a workflow start for a
+// failed one, which resume does not move — on one line however many there are; with none the line
+// says so.
+func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"issues":{},"pendingStatusWrites":[]`
+	for _, tc := range []struct {
+		name, stranded, want string
+	}{
+		{
+			name: "both moves",
+			stranded: `[{"issue":"LEGION-208","role":"architect","state":"suspended"},{"issue":"LEGION-208","role":"implementer","state":"suspended"},` +
+				`{"issue":"LEGION-210","role":"architect","state":"failed"}]`,
+			want: "claims nothing will wake: 3 — resume LEGION-208 architect, LEGION-208 implementer; failed, needs a workflow start LEGION-210 architect\n",
+		},
+		{
+			name:     "only failed",
+			stranded: `[{"issue":"LEGION-210","role":"reviewer","state":"failed"}]`,
+			want:     "claims nothing will wake: 1 — failed, needs a workflow start LEGION-210 reviewer\n",
+		},
+		{name: "none", stranded: `[]`, want: "claims nothing will wake: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"strandedClaims":` + tc.stranded + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}

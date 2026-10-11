@@ -34,8 +34,10 @@ parks it, or leaves it for you.
 You do not have to hand work over yourself. When a slot is free, the controller takes the
 highest-priority `todo` issue that has no children and that nobody else is working, adds the
 `legion` label, and posts a comment saying it took the issue, who will be asked to approve the
-spec, and how to undo it. An issue that is claimed by someone, linked to a pull request, or still
-being designed (an open question, a spec awaiting approval) is left alone.
+spec, and how to undo it. An issue that is claimed by someone, or still being designed (an open
+question, a spec awaiting approval), is left alone; one linked to a pull request is skipped, with
+the pull request's state named in the controller's summary (open: work in flight; merged or
+closed: reported for a person to close or decide).
 
 Do not label child issues: a child runs under its tree once the root is admitted.
 

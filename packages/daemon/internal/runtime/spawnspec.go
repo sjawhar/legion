@@ -32,11 +32,11 @@ func SecretsDir(stateDir string) string { return filepath.Join(stateDir, "secret
 // SecretFilePath is the secret file name in SecretsDir: `<state_dir>/secrets/<name>`.
 func SecretFilePath(stateDir, name string) string { return filepath.Join(SecretsDir(stateDir), name) }
 
-// GitHubCredential is the daemon's one function a runtime calls for a tree role's GitHub
-// credential files: the gh `hosts.yml` and `config.yml` rendered from the role's App token
-// (ghconfig.Render), which the runtime puts under the agent's GH_CONFIG_DIR and rewrites from the
-// same function as the lease nears its expiry. Never for the controller: it works Dispatch, never
-// GitHub, and appauth.AppRoleFor has no App for it.
+// GitHubCredential is the daemon's one function a runtime calls for a role's GitHub credential
+// files: the gh `hosts.yml` and `config.yml` rendered from the role's App token (ghconfig.Render),
+// which the runtime puts under the agent's GH_CONFIG_DIR and rewrites from the same function as the
+// lease nears its expiry. The controller is a role like any other here: it acts as the review App
+// (appauth.AppRoleFor).
 type GitHubCredential func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error)
 
 // GHConfigDir is the tmux pane's GH_CONFIG_DIR: `<state_dir>/secrets/<claim>-gh`, the directory

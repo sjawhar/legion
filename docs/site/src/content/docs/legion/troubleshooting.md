@@ -238,6 +238,45 @@ kubectl -n legion logs <pod> -c <role>   # e.g. -c implementer
 kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 ```
 
+## A tree does not move after a restart
+
+A restart re-adopts every process still running, but a claim with no process runs again only when
+something starts it. A worker is started by the workflow when its phase begins, and a tree's
+architect by its admission; a notice to an architect with no process waits for it rather than
+starting it. So a worker of its issue's current phase, or a tree's architect, that an operator
+suspended (`legion claims suspend`, one claim at a time or a whole fleet before a restart) or whose
+launches ran out is woken by nothing: the daemon looks healthy and the state shows the tree active,
+but the tree stops for good at the worker's phase, or at the first decision that needs its
+architect. Once a boot has re-adopted its claims, the daemon names every such claim in one error
+line, under the move that brings it back:
+
+```text
+{"level":"ERROR","msg":"legion daemon started with claims nothing will wake","project":"WIDGETS","count":3,"resume":["WIDGETS-12 architect","WIDGETS-12 implementer"],"needsWorkflowStart":["WIDGETS-14 architect"]}
+```
+
+The state names the same claims on every read, after a restart or not, each with its `state`, and
+`legion state` prints them on its `claims nothing will wake` line:
+
+```sh
+legion state --config legion.yaml --json | jq '.strandedClaims'
+```
+
+- **`resume`** (`state` is `suspended`): resume each. Its token is
+  `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows:
+
+  ```sh
+  legion claims resume --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-implementer
+  ```
+
+- **`needsWorkflowStart`** (`state` is `failed`): a failed claim ignores `legion claims resume` and
+  `legion claims deliver`, and runs again only when the workflow starts it. A failed worker's issue
+  is held ([An issue is held](#an-issue-is-held)), and its tree's architect retries the phase or
+  escalates it to the controller. A failed architect waits for its tree's re-admission, as
+  [An issue is held](#an-issue-is-held) shows.
+
+The list leaves out claims that something will still start: a worker whose phase is not its own is
+started again when its phase comes, and a parked tree's claims wait for its re-admission.
+
 ## A pod does not come up
 
 - **`Pending`.** Usually scheduling: a pod reserves its roles' cpu and memory (3 CPU and 19 GiB for
@@ -301,18 +340,31 @@ These arrive as messages on the Dispatch issue, and the architect is told:
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
-  round, so an approval or request for changes from anyone else leaves it undecided too. The daemon
-  reads the author's permission from GitHub before it applies the review: an account GitHub answers
-  `404` for, or a `403` that is not its rate limit, has no write access, and stands so for five
-  minutes; write access is read again for every review. Any other failed read is retried, a rate
-  limit once the wait GitHub names has passed, and while that wait stands the daemon reads nothing
-  from GitHub. The daemon logs each review that decides nothing as `workflow: a review decides nothing:
-  its author is neither the review App nor an account with write access to the repository`, with
-  the author's login, and logs a permission it read as no write access with GitHub's own answer. A
-  `403` that is not a rate limit is logged at error as `workflow: GitHub refuses the review App's
-  installation a review author's repository permission`, naming the installation's owner: the
-  review App's installation cannot read the repository's collaborators, so until it can, no review
-  but the review App's decides a round.
+  round, so an approval or request for changes from anyone else leaves it undecided too. A review
+  from the review App decides a round only when it comes from the reviewer's own session: the
+  daemon reads the review's Legion footer
+  (`<!-- legion: {"session":"…","phase":"review"} -->`) and requires the session it names to match
+  the session recorded on the reviewer's claim. A review-App review with no footer, or whose
+  footer names another session (the controller's, an architect's), is set aside and decides
+  nothing, logged at warn as `workflow: a review decides nothing: the review App submitted it from
+  a session that is not the reviewer's`, with `footer_session`, `reviewer_session` and
+  `body_truncated`. While the reviewer's session is not yet recorded, the login alone decides,
+  logged as `workflow: the reviewer's session is not recorded; the review App's login decides`.
+  Envoy caps review bodies at 2048 runes, so the daemon restores a truncated review-App body from
+  GitHub before reading its footer; a review it cannot restore (no review id) stays set aside with
+  `body_truncated=true`. The remedy for this stall: the reviewer re-submits its review with the
+  footer naming its own session. The daemon reads the author's permission from GitHub before it
+  applies the review: an account GitHub answers `404` for, or a `403` that is not its rate limit,
+  has no write access, and stands so for five minutes; write access is read again for every review.
+  Any other failed read is retried, a rate limit once the wait GitHub names has passed, and while
+  that wait stands the daemon reads nothing from GitHub. The daemon logs each review that decides
+  nothing for permission reasons as `workflow: a review decides nothing: its author is neither the
+  review App nor an account with write access to the repository`, with the author's login, and logs
+  a permission it read as no write access with GitHub's own answer. A `403` that is not a rate limit
+  is logged at error as `workflow: GitHub refuses the review App's installation a review author's
+  repository permission`, naming the installation's owner: the review App's installation cannot
+  read the repository's collaborators, so until it can, no review but the review App's decides a
+  round.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head still carries
   the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
   to `retro`); until every check the base branch requires has succeeded on the head, and every
@@ -397,3 +449,15 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   `.agentSecretsLogin` and in the supervisor's `enrollment failed; retrying on the next
   observation` warning. The daemon waits 30 s after a failed login before the next, doubling to at
   most 5 minutes.
+- **`supervise: agent-secrets: the broker found the pod token expired; keeping the key for a fresh
+  token`** (`403 POD_TOKEN_EXPIRED: the projected token has expired (oidc: token expired at
+  <time>)`). The token the daemon presented for the pod expired before the broker checked it. The
+  daemon reads a fresh token from the shim when the one it holds is about to expire, so from a
+  current daemon this means the broker's clock runs more than a minute ahead of the daemon's. The
+  daemon keeps the pod's key, asks the shim for the pod's current token at its next observation,
+  and enrolls the key with it; check the two hosts' clocks.
+- **`supervise: agent-secrets: enrollment refused; waiting for the shim's next hello`** with
+  `403 POD_IDENTITY_MISMATCH: the projected token does not identify this pod`. The token is not
+  this pod's: it names another pod UID, it is not signed by the cluster the broker trusts
+  (`BROKER_K8S_OIDC_ISSUER`), or it is for another audience. An expired token is answered
+  `POD_TOKEN_EXPIRED` instead.
