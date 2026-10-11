@@ -97,8 +97,6 @@ type Config struct {
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
 	ProofSkewSeconds int
-	// BROKER_MAX_GRANT_SECONDS: how long a grant lives, unless its session ends first.
-	MaxGrantSeconds int
 	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login's credential lasts once
 	// approved; past it the machine logs in again, with a new key, a new code and a new approval.
 	LauncherCredentialSeconds int
@@ -125,6 +123,10 @@ const noDatabasePassword = "the broker substitutes no password into BROKER_DATAB
 // and its tier.
 const noRulesFile = "the broker reads each secret's owner and tier from the secret's own tags under BROKER_SECRETS_PREFIX, so there is no rules file"
 
+// noGrantCap is why BROKER_MAX_GRANT_SECONDS is gone: a request chooses a shorter lifetime, or
+// its grant lasts until the requesting session ends.
+const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts until the requesting session ends"
+
 // removedVars are environment variables the broker no longer reads. A stale deployment still
 // setting one must fail loudly rather than silently running on configuration that means nothing
 // any more.
@@ -139,6 +141,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_RULES_FILE", noRulesFile},
 	{"BROKER_RULES_S3_URI", noRulesFile},
 	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
+	{"BROKER_MAX_GRANT_SECONDS", noGrantCap},
 }
 
 // serviceAccountPattern is a Kubernetes service account's subject, the one a pod's projected token
@@ -321,7 +324,6 @@ func Load(getenv func(string) string) (Config, error) {
 	}{
 		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 1, 3600},
 		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 1, 300},
-		{"BROKER_MAX_GRANT_SECONDS", &cfg.MaxGrantSeconds, 43200, 1, 43200},
 		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
 	}

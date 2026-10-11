@@ -100,8 +100,8 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 
 	reqMachine := &requests.Machine{
 		Store: st, Policy: cur, Secrets: secrets.AWS{Client: local},
-		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
-		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
+		PendingTTL: 12 * time.Hour,
+		Audience:   srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{
@@ -122,12 +122,12 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	return &testServer{URL: srv.URL, Store: st, Secrets: local, podIssuer: issuer, podKey: podKey}
 }
 
-// newSessionEnrollment inserts a live box enrollment (and its backing launcher_credentials row)
-// directly, mirroring requests/machine_test.go's own newEnrollment: enroll.Service.Create is
+// newSessionEnrollment inserts a live session enrollment (and its backing launcher_credentials
+// row) directly, mirroring requests/machine_test.go's own newEnrollment: enroll.Service.Create is
 // exercised end to end by the launcher-proof enrollment routes themselves (see
 // TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment), so session-route tests
 // need only a live row to authenticate a session proof against.
-func (ts *testServer) newSessionEnrollment(t *testing.T, kind, runtimeID, operator string) (id string, key *ecdsa.PrivateKey) {
+func (ts *testServer) newSessionEnrollment(t *testing.T, runtimeID, operator string) (id string, key *ecdsa.PrivateKey) {
 	t.Helper()
 	ctx := context.Background()
 	key = newSigningKey(t)
@@ -142,7 +142,7 @@ func (ts *testServer) newSessionEnrollment(t *testing.T, kind, runtimeID, operat
 	}
 	id = uuid.NewString()
 	if _, err := ts.Store.Pool.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, launcher_credential_id, lease_expires_at)
-		values ($1,$2,$3,$4,$5,$6, now() + interval '1 hour')`, id, kind, runtimeID, operator, thumbprint, credentialID); err != nil {
+		values ($1,'session',$2,$3,$4,$5, now() + interval '1 hour')`, id, runtimeID, operator, thumbprint, credentialID); err != nil {
 		t.Fatalf("insert enrollments: %v", err)
 	}
 	return id, key
@@ -263,7 +263,7 @@ type wireRecord struct {
 	Identifiers     []string            `json:"identifiers"`
 	Service         *string             `json:"service"`
 	Reason          string              `json:"reason"`
-	LifetimeSeconds int                 `json:"lifetime_seconds"`
+	LifetimeSeconds *int                `json:"lifetime_seconds"`
 	RulesVersion    string              `json:"rules_version"`
 	ExpiresAt       time.Time           `json:"expires_at"`
 	RequestedAt     time.Time           `json:"requested_at"`
@@ -306,7 +306,7 @@ type wireApproverGrant struct {
 	Enrollment wireEnrollmentInfo `json:"enrollment"`
 	Names      []string           `json:"names"`
 	Approver   *string            `json:"approver"`
-	ExpiresAt  time.Time          `json:"expires_at"`
+	ExpiresAt  *time.Time         `json:"expires_at"`
 	CreatedAt  time.Time          `json:"created_at"`
 }
 
@@ -318,7 +318,20 @@ func signAgentSecretRequest(t *testing.T, key *ecdsa.PrivateKey, audience, reaso
 	for i, n := range names {
 		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: n, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(key, audience, details, reason, "", time.Now())
+	compact, err := record.Sign(key, audience, details, reason, "", nil, time.Now())
+	if err != nil {
+		t.Fatalf("record.Sign: %v", err)
+	}
+	return compact
+}
+
+func signAgentSecretRequestFor(t *testing.T, key *ecdsa.PrivateKey, audience, reason string, lifetime int, names ...string) string {
+	t.Helper()
+	details := make([]record.AuthorizationDetail, len(names))
+	for i, n := range names {
+		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: n, Actions: []string{"inject"}}
+	}
+	compact, err := record.Sign(key, audience, details, reason, "", &lifetime, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -331,7 +344,7 @@ func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, logi
 	t.Helper()
 	compact, err := record.Sign(key, audience, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: host, Service: service},
-	}, "", loginHint, time.Now())
+	}, "", loginHint, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -377,7 +390,7 @@ func TestEnrollmentRouteWithOldBearerHeaderIsLauncherInvalid(t *testing.T) {
 	ts := newTestServer(t)
 	status, body := ts.req(t, http.MethodPost, "/v1/enrollments",
 		map[string]string{"Authorization": "Bearer some-v8-style-launcher-token", "Content-Type": "application/json"},
-		map[string]any{"kind": "box", "runtime_id": "box-1", "operator": "sjawhar", "thumbprint": "irrelevant"})
+		map[string]any{"kind": "session", "runtime_id": "session-1", "operator": "sjawhar", "thumbprint": "irrelevant"})
 	if status != http.StatusUnauthorized {
 		t.Fatalf("POST /v1/enrollments (bearer) = %d, want 401: %s", status, body)
 	}
@@ -427,10 +440,10 @@ func (ts *testServer) approveMachineLogin(t *testing.T, compact, approver string
 // enroll.Credential and either fail differently downstream or, worse, succeed with the zero value.
 func TestSessionProofRejectedOnLauncherAuthRoute(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 
 	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/enrollments", map[string]any{
-		"kind": "box", "runtime_id": "box-other", "operator": "sjawhar", "thumbprint": "irrelevant",
+		"kind": "session", "runtime_id": "session-other", "operator": "sjawhar", "thumbprint": "irrelevant",
 	})
 	if status != http.StatusUnauthorized {
 		t.Fatalf("POST /v1/enrollments (valid session proof) = %d, want 401: %s", status, body)
@@ -511,6 +524,9 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 	if plainRead.Enrollment != nil {
 		t.Fatalf("machine record enrollment = %+v, want nil (no requesting enrollment)", plainRead.Enrollment)
 	}
+	if plainRead.LifetimeSeconds == nil || *plainRead.LifetimeSeconds != int((7*24*time.Hour).Seconds()) {
+		t.Fatalf("machine record lifetime_seconds = %v, want the credential's week", plainRead.LifetimeSeconds)
+	}
 
 	// The code selects the login, but only its approver (the login_hint) decides it.
 	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
@@ -568,7 +584,7 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 		t.Fatalf("thumbprint: %v", err)
 	}
 	status, body = ts.launcher(t, machineKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
-		"kind": "box", "runtime_id": "box-" + t.Name(), "operator": testApprover, "thumbprint": sessionThumbprint,
+		"kind": "session", "runtime_id": "session-" + t.Name(), "operator": testApprover, "thumbprint": sessionThumbprint,
 	})
 	if status != http.StatusCreated {
 		t.Fatalf("POST /v1/enrollments (launcher proof) = %d, want 201: %s", status, body)
@@ -633,7 +649,7 @@ func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 // refused for any login but the approver's.
 func TestAgentSecretRequestLifecycle(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), testApprover)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
 
 	const sessionID = "sess-agent-secret-lifecycle"
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it for the demo", "DEEL_API_KEY")
@@ -679,8 +695,11 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if readBack.State != "pending" || readBack.Approver != testApprover {
 		t.Fatalf("record read = %+v, want pending with approver %s", readBack, testApprover)
 	}
-	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "box" || readBack.Enrollment.Operator != testApprover || readBack.Enrollment.Slot != nil {
-		t.Fatalf("record enrollment = %+v, want kind=box operator=%s and no slot", readBack.Enrollment, testApprover)
+	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "session" || readBack.Enrollment.Operator != testApprover || readBack.Enrollment.Slot != nil {
+		t.Fatalf("record enrollment = %+v, want kind=session operator=%s and no slot", readBack.Enrollment, testApprover)
+	}
+	if readBack.LifetimeSeconds != nil {
+		t.Fatalf("record lifetime_seconds = %d, want null for a request naming no lifetime (until the session ends)", *readBack.LifetimeSeconds)
 	}
 	if readBack.Session.Request == nil || *readBack.Session.Request != sessionID || readBack.Session.Enrollment != nil {
 		t.Fatalf("record session = %+v, want request=%s and no enrollment session_id", readBack.Session, sessionID)
@@ -756,6 +775,9 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 		listed.RecordID == nil || *listed.RecordID != recordID || listed.Enrollment.Slot != nil {
 		t.Fatalf("listed grant = %+v, want names [DEEL_API_KEY] granted on approval by %s, resting on record %s, on an enrollment with no slot", listed, testApprover, recordID)
 	}
+	if listed.ExpiresAt != nil {
+		t.Fatalf("listed grant expires_at = %s, want null for a grant that lasts until its session ends", listed.ExpiresAt)
+	}
 
 	// Revoking by approver takes the grant's approver or its enrollment's operator (both
 	// testApprover here); any other login is refused.
@@ -797,7 +819,7 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 // field is refused: the two are disjoint JWS typ values by design.
 func TestCreateRequestWithProofTypJWSIs400(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 
 	proofNotRequest, err := proof.Sign(sessionKey, enrollmentID, http.MethodPost, ts.URL+"/v1/requests", time.Now())
 	if err != nil {
@@ -815,7 +837,7 @@ func TestCreateRequestWithProofTypJWSIs400(t *testing.T) {
 // an ordinary deny decision.
 func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it", "NOT_A_REAL_SECRET")
 	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
 		map[string]any{"request": compact, "session_id": nil})
@@ -833,12 +855,36 @@ func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 // refused 400 MIXED_APPROVERS rather than recorded as one decision.
 func TestCreateRequestNeedingTwoApproversIs400MixedApprovers(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), testApprover)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need both", "DEEL_API_KEY", "SHARED_KEY")
 	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
 		map[string]any{"request": compact, "session_id": nil})
 	if status != http.StatusBadRequest || decode[wireError](t, body).Code != "MIXED_APPROVERS" {
 		t.Fatalf("POST /v1/requests (DEEL_API_KEY, SHARED_KEY) = %d %s, want 400 MIXED_APPROVERS", status, body)
+	}
+}
+
+// TestCreateRequestWithAnotherLifetimeWhilePendingIs409RequestPending pins one pending request
+// per session and secret: changing --ttl cannot create another approver Inbox card.
+func TestCreateRequestWithAnotherLifetimeWhilePendingIs409RequestPending(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
+	first := signAgentSecretRequestFor(t, sessionKey, ts.URL, "two minutes", 120, "DEEL_API_KEY")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": first, "session_id": nil})
+	if status != http.StatusOK {
+		t.Fatalf("first POST /v1/requests = %d %s", status, body)
+	}
+	firstReply := decode[wireCreateRequestResponse](t, body)
+	if firstReply.RecordID == nil {
+		t.Fatalf("first request = %+v, want pending record", firstReply)
+	}
+	second := signAgentSecretRequestFor(t, sessionKey, ts.URL, "five minutes", 300, "DEEL_API_KEY")
+	status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": second, "session_id": nil})
+	err := decode[wireError](t, body)
+	if status != http.StatusConflict || err.Code != "REQUEST_PENDING" || !strings.Contains(err.Error, firstReply.RequestID) {
+		t.Fatalf("second POST /v1/requests = %d %+v, want 409 REQUEST_PENDING naming %s", status, err, firstReply.RequestID)
 	}
 }
 
@@ -850,7 +896,7 @@ func TestCreateRequestNeedingTwoApproversIs400MixedApprovers(t *testing.T) {
 // boundary, the way UNKNOWN_SECRET and MIXED_APPROVERS are already covered above.
 func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need it", "DEEL_API_KEY")
 	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
 		map[string]any{"request": compact, "session_id": strings.Repeat("a", 129)})
@@ -871,7 +917,7 @@ func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
 // NOT_APPROVER for another login.
 func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "", "DEEL_API_KEY")
 	_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
 		map[string]any{"request": compact, "session_id": nil})
@@ -931,7 +977,7 @@ func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 // is not.
 func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	create := func(reason string) wireCreateRequestResponse {
 		t.Helper()
 		_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
@@ -995,7 +1041,7 @@ func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
 // its own terminal guard.
 func TestCancelRequestThenCancelAgainIsTerminal(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "", "DEEL_API_KEY")
 	_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
 		map[string]any{"request": compact, "session_id": nil})
@@ -1024,7 +1070,7 @@ func TestCancelRequestThenCancelAgainIsTerminal(t *testing.T) {
 // ending its own grant, distinct from the UI's human revoke-by-approver route.
 func TestRevokeGrantBySession(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "", "DEEL_API_KEY")
 	_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
 		map[string]any{"request": compact, "session_id": nil})
@@ -1057,7 +1103,7 @@ func TestRevokeGrantBySession(t *testing.T) {
 // and reading its own enrollment plus live grants.
 func TestRenewAndReadSelf(t *testing.T) {
 	ts := newTestServer(t)
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 
 	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/enrollments/"+enrollmentID+"/renew", nil)
 	if status != http.StatusOK {
@@ -1079,8 +1125,8 @@ func TestRenewAndReadSelf(t *testing.T) {
 		Kind         string `json:"kind"`
 		Operator     string `json:"operator"`
 	}](t, body)
-	if self.EnrollmentID != enrollmentID || self.Kind != "box" || self.Operator != "sjawhar" {
-		t.Fatalf("self = %+v, want id=%s kind=box operator=sjawhar", self, enrollmentID)
+	if self.EnrollmentID != enrollmentID || self.Kind != "session" || self.Operator != "sjawhar" {
+		t.Fatalf("self = %+v, want id=%s kind=session operator=sjawhar", self, enrollmentID)
 	}
 }
 
@@ -1098,7 +1144,7 @@ func TestPathValidation(t *testing.T) {
 		t.Fatalf("code = %q, want RECORD_ID_INPUT", werr.Code)
 	}
 
-	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "box", "box-"+t.Name(), "sjawhar")
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
 	status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/not-a-uuid/values", nil)
 	if status != http.StatusBadRequest {
 		t.Fatalf("POST values with a bad grant id = %d, want 400: %s", status, body)

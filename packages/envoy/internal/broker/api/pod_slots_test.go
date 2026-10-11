@@ -129,14 +129,12 @@ func TestRolesAndGenerationsOfOnePodEnrollRequestAndReleaseIndependently(t *test
 		}
 	}
 	operatorCredential, operatorKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
-	for _, kind := range []string{"box", "host"} {
-		status, body = ts.launcher(t, operatorKey, operatorCredential, http.MethodPost, "/v1/enrollments", map[string]any{
-			"kind": kind, "runtime_id": kind + "-" + t.Name(), "operator": testApprover, "slot": "implementer-g1",
-			"thumbprint": thumbprintOf(t, newSigningKey(t)),
-		})
-		if status != http.StatusBadRequest || decode[wireError](t, body).Code != "INVALID_SLOT" {
-			t.Fatalf("%s with a slot = %d %s, want 400 INVALID_SLOT", kind, status, body)
-		}
+	status, body = ts.launcher(t, operatorKey, operatorCredential, http.MethodPost, "/v1/enrollments", map[string]any{
+		"kind": "session", "runtime_id": "session-" + t.Name(), "operator": testApprover, "slot": "implementer-g1",
+		"thumbprint": thumbprintOf(t, newSigningKey(t)),
+	})
+	if status != http.StatusBadRequest || decode[wireError](t, body).Code != "INVALID_SLOT" {
+		t.Fatalf("a session with a slot = %d %s, want 400 INVALID_SLOT", status, body)
 	}
 	status, body = ts.session(t, implementer.key, implementer.enrollmentID, http.MethodPost, "/v1/enrollments", map[string]any{
 		"kind": "pod", "runtime_id": podUID, "slot": "merger-g1", "thumbprint": thumbprintOf(t, implementer.key), "pod_token": token,

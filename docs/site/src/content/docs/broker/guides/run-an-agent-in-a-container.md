@@ -31,11 +31,12 @@ Name the box with a runtime id that stays the same for its whole life (its conta
 pass the thumbprint:
 
 ```console
-$ agent-secrets enroll --helper --kind box --runtime-id example-box-1 --thumbprint 8fa_6Q6_dZjxymPd1gyObzWQpCn06S3L9L2PqZzN5dM
+$ agent-secrets enroll --helper --runtime-id example-box-1 --thumbprint 8fa_6Q6_dZjxymPd1gyObzWQpCn06S3L9L2PqZzN5dM
 edd9a18c-41ff-46f9-8a15-bddb30f0abc3
 ```
 
-The helper enrolls the box under the machine's login, and `enroll` writes the enrollment id to
+The helper enrolls the box under the machine's login, as a `session` like any other session on the
+machine, and `enroll` writes the enrollment id to
 `$AGENT_SECRETS_KEY_DIR/enrollment`, where the box reads it. A box that may start before this, such
 as one whose agent connects at launch, needs its launcher to create
 `$AGENT_SECRETS_KEY_DIR/enrollment.pending` before the box starts and remove it once `enroll` has
@@ -58,7 +59,7 @@ The box's agent then uses secrets as any session does:
 ```console
 $ agent-secrets self
 enrollment_id: edd9a18c-41ff-46f9-8a15-bddb30f0abc3
-kind: box
+kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:39:03Z
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
@@ -87,7 +88,7 @@ enrollment: its grants are revoked, its pending requests are cancelled and leave
 Inbox (approving one now answers `request is already decided`), and the broker logs:
 
 ```text
-INFO broker sweeper: ended an enrollment whose lease lapsed enrollment_id=edd9a18c-41ff-46f9-8a15-bddb30f0abc3 kind=box runtime_id=example-box-1 slot="" lease_expired_at=2026-10-03T03:39:03.386Z grants_revoked=1 requests_cancelled=1
+INFO broker sweeper: ended an enrollment whose lease lapsed enrollment_id=edd9a18c-41ff-46f9-8a15-bddb30f0abc3 kind=session runtime_id=example-box-1 slot="" lease_expired_at=2026-10-03T03:39:03.386Z grants_revoked=1 requests_cancelled=1
 ```
 
 A lapsed lease cannot be renewed: to use the box again, start over from step 1 with a new key.

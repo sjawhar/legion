@@ -34,7 +34,7 @@ type rig struct {
 }
 
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
-// log it in (see rig.login) before any Enroll — host session or box — can succeed, since Task
+// log it in (see rig.login) before any Enroll — machine session or box — can succeed, since Task
 // 1's Broker fails closed until a human has run `agent-secrets machine login`. startRig below
 // is newRig plus that login, for every test that doesn't care about the pre-login state itself.
 func newRig(t *testing.T, statePath string) *rig {
@@ -117,8 +117,8 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 
 // startRig is newRig plus an immediate machine login, so the returned rig's Broker already
 // holds a credential and ordinary session enrollment (Enroll) can succeed. Tests exercising the
-// pre-login state itself (TestLoginOverTheSocketReturnsTheCodeAndEnrollBoxWorksAfterIssue,
-// TestSignStillRequiresDescendancyButEnrollBoxDoesNot) call newRig directly instead.
+// pre-login state itself (TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue,
+// TestSignStillRequiresDescendancyButEnrollSessionKeyDoesNot) call newRig directly instead.
 func startRig(t *testing.T, statePath string) *rig {
 	t.Helper()
 	r := newRig(t, statePath)
@@ -155,7 +155,7 @@ func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
 		t.Fatalf("runtime_id %q must be <hostname>:<pid>:<ticks>", resp.RuntimeID)
 	}
 	posts, _, _ := r.fake.snapshot()
-	if posts[0]["kind"] != "host" {
+	if posts[0]["kind"] != "session" {
 		t.Fatalf("enrolled as %v", posts[0]["kind"])
 	}
 	url := "https://secrets.test/v1/requests"
@@ -920,24 +920,24 @@ func (d *delayingTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	return d.RoundTripper.RoundTrip(req)
 }
 
-// TestLoginOverTheSocketReturnsTheCodeAndEnrollBoxWorksAfterIssue drives the socket protocol
-// end to end for the new pass-through ops: enroll-box before any
-// machine login names the login command (the same fail-closed error Broker.EnrollBox's
-// launcherProof call produces); login returns a human-facing code and a repeat while pending
-// returns the SAME code; once the fake issues it, login-status reports "issued" and enroll-box
-// succeeds; unenroll-box is idempotent (a second call for the same id is still OK, matching
+// TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue drives the socket
+// protocol end to end for the pass-through ops: enroll-session-key before any machine login names
+// the login command (the same fail-closed error Broker.EnrollSessionKey's launcherProof call
+// produces); login returns a human-facing code and a repeat while pending returns the SAME code;
+// once the fake issues it, login-status reports "issued" and enroll-session-key succeeds;
+// unenroll-session-key is idempotent (a second call for the same id is still OK, matching
 // Broker.Revoke's 204/404-both-succeed contract). newRig, not startRig: this test needs the
 // rig's OWN pre-login window, which startRig's automatic login would already have closed.
-func TestLoginOverTheSocketReturnsTheCodeAndEnrollBoxWorksAfterIssue(t *testing.T) {
+func TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue(t *testing.T) {
 	r := newRig(t, "")
 	r.srv.Broker.HTTP = &http.Client{Transport: &delayingTransport{
 		RoundTripper: r.fake.srv.Client().Transport,
 		delay:        300 * time.Millisecond,
 		match:        "/v1/launcher-credentials/",
 	}}
-	before := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-1", Thumbprint: "tp-1"})
+	before := r.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-1", Thumbprint: "tp-1"})
 	if before.OK || before.Code != CodeEnrollFailed || !strings.Contains(before.Error, "agent-secrets machine login") {
-		t.Fatalf("enroll-box before any login must name the login command: %+v", before)
+		t.Fatalf("enroll-session-key before any login must name the login command: %+v", before)
 	}
 	login1 := r.call(t, Request{Op: "login"})
 	if !login1.OK || login1.Code == "" || login1.LoginState != "pending" {
@@ -952,27 +952,27 @@ func TestLoginOverTheSocketReturnsTheCodeAndEnrollBoxWorksAfterIssue(t *testing.
 	if !status.OK || status.LoginState != "issued" {
 		t.Fatalf("login-status: %+v", status)
 	}
-	enroll := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-1", Thumbprint: "tp-1"})
+	enroll := r.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-1", Thumbprint: "tp-1"})
 	if !enroll.OK || enroll.EnrollmentID == "" || enroll.LeaseExpires == "" {
-		t.Fatalf("enroll-box after issue: %+v", enroll)
+		t.Fatalf("enroll-session-key after issue: %+v", enroll)
 	}
-	un1 := r.call(t, Request{Op: "unenroll-box", EnrollmentID: enroll.EnrollmentID})
+	un1 := r.call(t, Request{Op: "unenroll-session-key", EnrollmentID: enroll.EnrollmentID})
 	if !un1.OK {
-		t.Fatalf("unenroll-box: %+v", un1)
+		t.Fatalf("unenroll-session-key: %+v", un1)
 	}
-	un2 := r.call(t, Request{Op: "unenroll-box", EnrollmentID: enroll.EnrollmentID})
+	un2 := r.call(t, Request{Op: "unenroll-session-key", EnrollmentID: enroll.EnrollmentID})
 	if !un2.OK {
-		t.Fatalf("unenroll-box must be idempotent, like Revoke's 204/404-both-succeed contract: %+v", un2)
+		t.Fatalf("unenroll-session-key must be idempotent, like Revoke's 204/404-both-succeed contract: %+v", un2)
 	}
 }
 
-// TestSignStillRequiresDescendancyButEnrollBoxDoesNot pins the stated boundary: enroll-box is a
-// pass-through broker call available to ANY peer, while sign still requires the caller to be a
-// descendant of a registered session root. A peer that is refused sign as NOT_A_SESSION must
-// still be able to log in and enroll-box, proving the delta did not widen sign's own check.
-// newRig, not startRig: register (WaitSeconds omitted) only needs the child to be a registered
-// session for the descendancy check below, never for it to finish enrolling.
-func TestSignStillRequiresDescendancyButEnrollBoxDoesNot(t *testing.T) {
+// TestSignStillRequiresDescendancyButEnrollSessionKeyDoesNot pins the stated boundary:
+// enroll-session-key is a pass-through broker call available to ANY peer, while sign still
+// requires the caller to be a descendant of a registered session root. A peer that is refused sign
+// as NOT_A_SESSION must still be able to log in and enroll-session-key, proving the delta did not
+// widen sign's own check. newRig, not startRig: register (WaitSeconds omitted) only needs the child
+// to be a registered session for the descendancy check below, never for it to finish enrolling.
+func TestSignStillRequiresDescendancyButEnrollSessionKeyDoesNot(t *testing.T) {
 	r := newRig(t, "")
 	child := sleeper(t)
 	r.callerPID.Store(int64(child.Process.Pid))
@@ -986,14 +986,14 @@ func TestSignStillRequiresDescendancyButEnrollBoxDoesNot(t *testing.T) {
 	if signed.OK || signed.Code != CodeNotASession {
 		t.Fatalf("a non-descendant must still be refused sign: %+v", signed)
 	}
-	// The SAME non-descendant peer may enroll-box: it is not a registry-session op.
+	// The SAME non-descendant peer may enroll-session-key: it is not a registry-session op.
 	login := r.call(t, Request{Op: "login"})
 	if !login.OK {
 		t.Fatalf("login: %+v", login)
 	}
 	waitFor(t, func() bool { return r.srv.Broker.LoginStatus().State == "issued" })
-	enroll := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-2", Thumbprint: "tp-2"})
+	enroll := r.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-2", Thumbprint: "tp-2"})
 	if !enroll.OK || enroll.EnrollmentID == "" {
-		t.Fatalf("a non-descendant peer must still be able to enroll-box: %+v", enroll)
+		t.Fatalf("a non-descendant peer must still be able to enroll-session-key: %+v", enroll)
 	}
 }

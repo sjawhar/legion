@@ -80,10 +80,10 @@ type Enrollment struct {
 	PodToken   string
 	// Slot names one of several independent identities in one pod (record.ValidSlot): each slot
 	// of a pod is an enrollment of its own, with its own key, lease and grants. "" is the one
-	// identity of every box, host and single-identity pod enrollment.
+	// identity of every session and single-identity pod enrollment.
 	Slot string
 	// Subject is a pod enrollment's verified service-account subject, set by Create from the
-	// projected token itself and never from the caller; nil for box and host.
+	// projected token itself and never from the caller; nil for a session.
 	Subject      *string
 	LeaseExpires time.Time
 	Existing     bool // true when Create returned an already-live enrollment for the same key
@@ -391,7 +391,7 @@ type LapsedEnrollment struct {
 const lapsedBatch = 100
 
 // EndLapsed ends every enrollment whose lease has lapsed and that nothing has ended yet: a pod that
-// is gone, a box whose launcher stopped renewing, a host session whose helper died. Each is ended
+// is gone, a box whose launcher stopped renewing, a machine session whose helper died. Each is ended
 // as Revoke ends one (endEnrollment, actor "broker", an enrollment.expired audit row), so its
 // grants are revoked and its pending requests cancelled and dropped from the approver's list,
 // rather than waiting there for their own expiry with an approval that could grant nothing.
@@ -557,7 +557,7 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 
 // RevokeCredential ends launcher credential id on the word of person, expired or not: from then on
 // no launcher proof signed with it authenticates (AuthenticateLauncher), and every enrollment it
-// made that has not ended — a person's host sessions and boxes, or every pod a service's login
+// made that has not ended — a person's machine sessions and boxes, or every pod a service's login
 // enrolled, which outlive the credential's expiry — is ended as Revoke ends one (endEnrollment, an
 // enrollment.revoked audit row), revoking each one's grants and cancelling its pending requests,
 // all in one transaction with one launcher_credential.revoked audit row. person may revoke a

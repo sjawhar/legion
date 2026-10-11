@@ -243,12 +243,12 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 }
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from
-// its configuration: the grant lifetime, the audience and skew every request object is checked
-// against, and the service accounts that prove a pod is a registered service's.
+// its configuration: the audience and skew every request object is checked against, and the
+// service accounts that prove a pod is a registered service's. A grant lasts the lifetime its
+// request signed, or until its session ends.
 func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, reader secrets.Reader, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
 	m := &requests.Machine{
-		Store: st, Policy: current, Secrets: reader,
-		MaxGrant: time.Duration(cfg.MaxGrantSeconds) * time.Second, PendingTTL: agentSecretPendingTTL,
+		Store: st, Policy: current, Secrets: reader, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
 		ServiceAccounts: cfg.ServiceAccounts,
 	}

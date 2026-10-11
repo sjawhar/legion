@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -104,6 +105,9 @@ type RequestObject struct {
 	Details    []AuthorizationDetail
 	Reason     string
 	LoginHint  string // machine logins only
+	// LifetimeSeconds is how long an agent-secret grant lasts once granted; nil when it lasts
+	// until the session ends.
+	LifetimeSeconds *int
 }
 
 // Service is the service a machine login is for: its one launcher_credential detail's service, ""
@@ -116,7 +120,10 @@ func (o RequestObject) Service() string {
 }
 
 // requestClaims is the JSON payload of a credential-request object (RFC 9101 §4 shape, RAR
-// authorization_details per RFC 9396 §2).
+// authorization_details per RFC 9396 §2). lifetime_seconds is this broker's own claim: absent, the
+// grant lasts until its session ends. A broker from before it decodes the payload without
+// refusing unknown claims, so it ignores the claim and grants for its own fixed lifetime; a client
+// that asked for one reads the lifetime the answer echoes to tell.
 type requestClaims struct {
 	Issuer               string                `json:"iss"`
 	Audience             string                `json:"aud"`
@@ -126,14 +133,21 @@ type requestClaims struct {
 	AuthorizationDetails []AuthorizationDetail `json:"authorization_details"`
 	Reason               string                `json:"reason,omitempty"`
 	LoginHint            string                `json:"login_hint,omitempty"`
+	LifetimeSeconds      *int                  `json:"lifetime_seconds,omitempty"`
+}
+
+// ValidLifetime reports whether seconds may be a grant's lifetime: a whole number of seconds from
+// one up to the largest the requests table's integer column holds. There is no other cap.
+func ValidLifetime(seconds int) bool {
+	return seconds >= 1 && seconds <= math.MaxInt32
 }
 
 // VerifyRequestObject enforces the contract: single ES256 JWS, typ RequestTyp, embedded P-256 JWK,
 // iss == thumbprint(jwk), aud == audience, iat within skew, exp in (now, iat+10m], reason ≤400 runes
 // with categories Cc/Cf/Cs/Co/Zl/Zp refused, details non-empty and single-typed, launcher identifiers
-// matching the contract hostname pattern, service matching [a-z0-9-]{1,64}. Replay (jti) is the
-// caller's (it needs the store). Every failure wraps ErrRequestInvalid with a reason that never
-// quotes the JWS.
+// matching the contract hostname pattern, service matching [a-z0-9-]{1,64}, and a lifetime, when
+// named, on a request for agent secrets alone and ValidLifetime. Replay (jti) is the caller's (it
+// needs the store). Every failure wraps ErrRequestInvalid with a reason that never quotes the JWS.
 func VerifyRequestObject(compact, audience string, skew time.Duration, now time.Time) (RequestObject, error) {
 	sig, err := jose.ParseSigned(compact, []jose.SignatureAlgorithm{jose.ES256})
 	if err != nil || len(sig.Signatures) != 1 {
@@ -179,16 +193,25 @@ func VerifyRequestObject(compact, audience string, skew time.Duration, now time.
 	if err := validateReason(c.Reason); err != nil {
 		return RequestObject{}, fmt.Errorf("%w: %s", ErrRequestInvalid, err)
 	}
+	if c.LifetimeSeconds != nil {
+		switch {
+		case c.AuthorizationDetails[0].Type != KindAgentSecret:
+			return RequestObject{}, fmt.Errorf("%w: lifetime_seconds is only for a request for agent secrets", ErrRequestInvalid)
+		case !ValidLifetime(*c.LifetimeSeconds):
+			return RequestObject{}, fmt.Errorf("%w: lifetime_seconds is not between 1 and %d", ErrRequestInvalid, math.MaxInt32)
+		}
+	}
 	return RequestObject{
-		Compact:    compact,
-		Thumbprint: c.Issuer,
-		Audience:   c.Audience,
-		JTI:        c.JTI,
-		IssuedAt:   issued,
-		Expires:    expires,
-		Details:    c.AuthorizationDetails,
-		Reason:     c.Reason,
-		LoginHint:  c.LoginHint,
+		Compact:         compact,
+		Thumbprint:      c.Issuer,
+		Audience:        c.Audience,
+		JTI:             c.JTI,
+		IssuedAt:        issued,
+		Expires:         expires,
+		Details:         c.AuthorizationDetails,
+		Reason:          c.Reason,
+		LoginHint:       c.LoginHint,
+		LifetimeSeconds: c.LifetimeSeconds,
 	}, nil
 }
 
@@ -249,19 +272,22 @@ type Enrollment struct{ Kind, RuntimeID, Operator, Slot string }
 // Body is the credential-request record's decision fields, fixed at creation, plus the verbatim
 // signed request object. It is never updated after creation.
 type Body struct {
-	Request         string // compact JWS
-	Approver        string // canonical login, or AnyoneApprover
-	Enrollment      Enrollment
-	LifetimeSeconds int
+	Request  string // compact JWS
+	Approver string // canonical login, or AnyoneApprover
+	// Enrollment is the requesting session, "-" in every field for a machine login.
+	Enrollment Enrollment
+	// LifetimeSeconds is how long the grant or launcher credential lasts once approved; nil for a
+	// grant that lasts until its session ends, rendered "-".
+	LifetimeSeconds *int
 	RulesVersion    string
 	ExpiresAt       time.Time // UTC, seconds precision
 	Code            string    // "" for agent_secret records
 }
 
 // Canonical renders the body in the contract's exact line format. Every line is "\n"-terminated;
-// an empty operator or code renders as "-". The enrollment line carries a pod's slot as a fourth
-// tab-separated field only when there is one: a body with no slot keeps the three-field line, the
-// bytes and record id every slotless record is stored under.
+// an empty operator or code, and a nil lifetime, render as "-". The enrollment line carries a
+// pod's slot as a fourth tab-separated field only when there is one: a body with no slot keeps the
+// three-field line, the bytes and record id every slotless record is stored under.
 func (b Body) Canonical() string {
 	operator := b.Enrollment.Operator
 	if operator == "" {
@@ -292,7 +318,11 @@ func (b Body) Canonical() string {
 	}
 	sb.WriteByte('\n')
 	sb.WriteString("lifetime_seconds: ")
-	sb.WriteString(strconv.Itoa(b.LifetimeSeconds))
+	if b.LifetimeSeconds == nil {
+		sb.WriteByte('-')
+	} else {
+		sb.WriteString(strconv.Itoa(*b.LifetimeSeconds))
+	}
 	sb.WriteByte('\n')
 	sb.WriteString("rules_version: ")
 	sb.WriteString(b.RulesVersion)
@@ -357,9 +387,13 @@ func ParseBody(canonical string) (Body, error) {
 	if !ok {
 		return Body{}, fmt.Errorf("canonical body: bad lifetime_seconds line")
 	}
-	lifetime, err := strconv.Atoi(lifetimeStr)
-	if err != nil {
-		return Body{}, fmt.Errorf("canonical body: lifetime_seconds is not an integer")
+	var lifetime *int
+	if lifetimeStr != "-" {
+		n, err := strconv.Atoi(lifetimeStr)
+		if err != nil || !ValidLifetime(n) {
+			return Body{}, fmt.Errorf("canonical body: lifetime_seconds is neither - nor a positive integer")
+		}
+		lifetime = &n
 	}
 	rulesVersion, ok := strings.CutPrefix(lines[5], "rules_version: ")
 	if !ok {

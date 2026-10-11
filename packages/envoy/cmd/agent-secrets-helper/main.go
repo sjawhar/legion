@@ -2,11 +2,11 @@
 
 // packages/envoy/cmd/agent-secrets-helper/main.go
 
-// Command agent-secrets-helper is the host side of agent secrets: a per-user
-// daemon (dotfiles agent-secrets/agent-secrets-helper.service) that pins each registered host
-// agent session by pidfd, keeps its P-256 key in memory, enrolls it with the secrets broker as
-// kind "host" under the operator's launcher credential, signs broker proofs for the session's
-// descendants, and revokes the enrollment when the session's process exits.
+// Command agent-secrets-helper is the machine side of agent secrets: a per-user
+// daemon (dotfiles agent-secrets/agent-secrets-helper.service) that pins each registered agent
+// session on this machine by pidfd, keeps its P-256 key in memory, enrolls it with the secrets
+// broker as kind "session" under the operator's launcher credential, signs broker proofs for the
+// session's descendants, and revokes the enrollment when the session's process exits.
 //
 //	agent-secrets-helper [serve]     run (the unit's ExecStart)
 //	agent-secrets-helper sessions    list live sessions: pid, runtime_id, enrollment_id, state
@@ -58,7 +58,7 @@ func loadConfig(getenv func(string) string) (config, error) {
 }
 
 const usage = `usage:
-  agent-secrets-helper [serve]     run the helper: listen on its socket, sign for the host sessions
+  agent-secrets-helper [serve]     run the helper: listen on its socket, sign for the machine sessions
                                    registered with it, and enroll each with the broker
   agent-secrets-helper sessions    list live sessions: pid, runtime id, enrollment id, state
   agent-secrets-helper --version   print the release this binary was built as

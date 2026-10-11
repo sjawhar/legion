@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -25,15 +26,15 @@ func TestCanonicalBodyIsByteExactAndIDIsItsSHA256(t *testing.T) {
 	b := Body{
 		Request:         "eyJ.fake.jws",
 		Approver:        "sjawhar",
-		Enrollment:      Enrollment{Kind: "box", RuntimeID: "agentbox-1234", Operator: "sjawhar"},
-		LifetimeSeconds: 43200,
+		Enrollment:      Enrollment{Kind: "session", RuntimeID: "agentbox-1234", Operator: "sjawhar"},
+		LifetimeSeconds: new(43200),
 		RulesVersion:    "ab12",
 		ExpiresAt:       time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
 	}
 	want := "agent-secrets-record/v1\n" +
 		"request: eyJ.fake.jws\n" +
 		"approver: sjawhar\n" +
-		"enrollment: box\tagentbox-1234\tsjawhar\n" +
+		"enrollment: session\tagentbox-1234\tsjawhar\n" +
 		"lifetime_seconds: 43200\n" +
 		"rules_version: ab12\n" +
 		"expires_at: 2026-09-27T12:00:00Z\n" +
@@ -46,7 +47,7 @@ func TestCanonicalBodyIsByteExactAndIDIsItsSHA256(t *testing.T) {
 		t.Fatalf("id %s is not the body's sha256", b.ID())
 	}
 	back, err := ParseBody(want)
-	if err != nil || back != b {
+	if err != nil || back.Canonical() != b.Canonical() {
 		t.Fatalf("round trip: %+v %v", back, err)
 	}
 }
@@ -56,7 +57,7 @@ func TestVerifyRequestObjectAcceptsItsOwnSignAndRefusesTheProofTyp(t *testing.T)
 	now := time.Now()
 	compact, err := Sign(key, "https://secrets.test", []AuthorizationDetail{
 		{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}},
-	}, "deel sync for ACME-1", "", now)
+	}, "deel sync for ACME-1", "", nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +95,7 @@ func TestVerifyRequestObjectRefusals(t *testing.T) {
 		"login_hint on session": {details: secretDetail(), hint: "sjawhar", aud: "https://secrets.test"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			compact, err := Sign(key, tc.aud, tc.details, tc.reason, tc.hint, now)
+			compact, err := Sign(key, tc.aud, tc.details, tc.reason, tc.hint, nil, now)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -118,7 +119,7 @@ func TestParseBodyRefusesAnyEditedLine(t *testing.T) {
 	valid := "agent-secrets-record/v1\n" +
 		"request: eyJ.fake.jws\n" +
 		"approver: sjawhar\n" +
-		"enrollment: box\tagentbox-1234\tsjawhar\n" +
+		"enrollment: session\tagentbox-1234\tsjawhar\n" +
 		"lifetime_seconds: 43200\n" +
 		"rules_version: ab12\n" +
 		"expires_at: 2026-09-27T12:00:00Z\n" +
@@ -147,7 +148,7 @@ func TestParseBodyRefusesAnyEditedLine(t *testing.T) {
 func TestSignExpiresTenMinutesAfterIat(t *testing.T) {
 	key, _ := proof.NewKey()
 	now := time.Now()
-	compact, err := Sign(key, "https://secrets.test", secretDetail(), "reason", "", now)
+	compact, err := Sign(key, "https://secrets.test", secretDetail(), "reason", "", nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +166,7 @@ func TestMachineBodyUsesDashEnrollmentAndCarriesCode(t *testing.T) {
 		Request:         "eyJ.fake.jws",
 		Approver:        "sjawhar",
 		Enrollment:      Enrollment{Kind: "-", RuntimeID: "-", Operator: ""},
-		LifetimeSeconds: 604800,
+		LifetimeSeconds: new(604800),
 		RulesVersion:    "ab12",
 		ExpiresAt:       time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
 		Code:            "ABCD-EFGH",
@@ -178,7 +179,7 @@ func TestMachineBodyUsesDashEnrollmentAndCarriesCode(t *testing.T) {
 		t.Fatalf("canonical body missing code:\n%q", got)
 	}
 	back, err := ParseBody(got)
-	if err != nil || back != b {
+	if err != nil || back.Canonical() != b.Canonical() {
 		t.Fatalf("round trip: %+v %v", back, err)
 	}
 }
@@ -190,7 +191,7 @@ func podBody(request string) Body {
 		Request:         request,
 		Approver:        "sjawhar",
 		Enrollment:      Enrollment{Kind: "pod", RuntimeID: "0b6c2f6e-pod-uid"},
-		LifetimeSeconds: 3600,
+		LifetimeSeconds: new(3600),
 		RulesVersion:    "ab12",
 		ExpiresAt:       time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
 	}
@@ -214,7 +215,7 @@ func TestASlotIsAFourthEnrollmentFieldAndASlotlessBodyKeepsItsBytes(t *testing.T
 		t.Fatalf("slotless pod body:\n%q\nwant:\n%q", old, want)
 	}
 	parsed, err := ParseBody(old)
-	if err != nil || parsed.Canonical() != old || parsed != legacyBody {
+	if err != nil || parsed.Canonical() != legacyBody.Canonical() {
 		t.Fatalf("legacy signed record changed: %+v %v", parsed, err)
 	}
 
@@ -225,7 +226,7 @@ func TestASlotIsAFourthEnrollmentFieldAndASlotlessBodyKeepsItsBytes(t *testing.T
 		t.Fatalf("slotted pod body:\n%q\nwant:\n%q", got, want)
 	}
 	back, err := ParseBody(got)
-	if err != nil || back != implementer || back.Canonical() != got {
+	if err != nil || back.Canonical() != implementer.Canonical() || back.Canonical() != got {
 		t.Fatalf("slotted round trip: %+v %v", back, err)
 	}
 	reviewer := implementer
@@ -272,7 +273,7 @@ func TestParseBodyRefusesAnEnrollmentFourthFieldThatIsNotAPodSlot(t *testing.T) 
 func TestChainVerifierHoldsASlotlessAndASlottedRecordToTheirOwnBytes(t *testing.T) {
 	key, _ := proof.NewKey()
 	now := time.Now()
-	compact, err := Sign(key, "https://secrets.test", secretDetail(), "need it", "", now)
+	compact, err := Sign(key, "https://secrets.test", secretDetail(), "need it", "", nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +293,7 @@ func TestChainVerifierHoldsASlotlessAndASlottedRecordToTheirOwnBytes(t *testing.
 	}
 	for _, b := range []Body{legacyBody, slotted} {
 		got, err := verifier.Verify(context.Background(), b.ID())
-		if err != nil || got != b {
+		if err != nil || got.Canonical() != b.Canonical() {
 			t.Fatalf("Verify(%q slot) = %+v, %v; want the stored body back", b.Enrollment.Slot, got, err)
 		}
 	}
@@ -312,7 +313,7 @@ func TestChainVerifierHoldsASlotlessAndASlottedRecordToTheirOwnBytes(t *testing.
 func TestAnyoneApproverAdmitsEveryLoginButItself(t *testing.T) {
 	key, _ := proof.NewKey()
 	now := time.Now()
-	compact, err := Sign(key, "https://secrets.test", secretDetail(), "shared", "", now)
+	compact, err := Sign(key, "https://secrets.test", secretDetail(), "shared", "", nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -376,13 +377,13 @@ func machineLoginBody(t *testing.T, approver, service, loginHint string, now tim
 	key, _ := proof.NewKey()
 	compact, err := Sign(key, "https://secrets.test", []AuthorizationDetail{
 		{Type: KindLauncherCredential, Identifier: "example-host-cluster", Service: service},
-	}, "", loginHint, now)
+	}, "", loginHint, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return Body{
 		Request: compact, Approver: approver, Enrollment: Enrollment{Kind: "-", RuntimeID: "-"},
-		LifetimeSeconds: 3600, RulesVersion: "ab12", ExpiresAt: now.Add(15 * time.Minute).UTC().Truncate(time.Second),
+		LifetimeSeconds: new(3600), RulesVersion: "ab12", ExpiresAt: now.Add(15 * time.Minute).UTC().Truncate(time.Second),
 		Code: "ABCD-EFGH",
 	}
 }
@@ -570,5 +571,76 @@ func TestUnsignedTypHeaderFailsForRequestObject(t *testing.T) {
 	}
 	if _, err := VerifyRequestObject(string(jsonSerialized), "https://secrets.test", time.Minute, now); err == nil || !errors.Is(err, ErrRequestInvalid) {
 		t.Fatalf("typ present only in the unsigned header must be rejected with ErrRequestInvalid, got %v", err)
+	}
+}
+
+// TestARequestNamesItsGrantsLifetimeOrNone pins the lifetime_seconds claim: a request for agent
+// secrets may sign one, which verifies back as the grant's lifetime; one that names none verifies
+// as 0, a grant that lasts until its session ends; and a lifetime outside 1..MaxInt32, or on a
+// machine login, is refused.
+func TestARequestNamesItsGrantsLifetimeOrNone(t *testing.T) {
+	key, _ := proof.NewKey()
+	now := time.Now()
+	verify := func(compact string) (RequestObject, error) {
+		t.Helper()
+		return VerifyRequestObject(compact, "https://secrets.test", time.Minute, now)
+	}
+	lifetime := 120
+	withLifetime, err := Sign(key, "https://secrets.test", secretDetail(), "two minutes", "", &lifetime, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ro, err := verify(withLifetime); err != nil || ro.LifetimeSeconds == nil || *ro.LifetimeSeconds != lifetime {
+		t.Fatalf("a request naming 120 seconds = %+v, %v; want lifetime 120", ro, err)
+	}
+	without, err := Sign(key, "https://secrets.test", secretDetail(), "until the session ends", "", nil, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ro, err := verify(without); err != nil || ro.LifetimeSeconds != nil {
+		t.Fatalf("a request naming no lifetime = %+v, %v; want no lifetime", ro, err)
+	}
+	for _, seconds := range []int{0, -1, math.MaxInt32 + 1} {
+		compact, err := Sign(key, "https://secrets.test", secretDetail(), "", "", &seconds, now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := verify(compact); !errors.Is(err, ErrRequestInvalid) {
+			t.Fatalf("lifetime %d = %v, want ErrRequestInvalid", seconds, err)
+		}
+	}
+	loginLifetime := 120
+	login, err := Sign(key, "https://secrets.test", []AuthorizationDetail{{Type: KindLauncherCredential, Identifier: "h.example"}}, "", "", &loginLifetime, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := verify(login); !errors.Is(err, ErrRequestInvalid) {
+		t.Fatalf("a machine login naming a lifetime = %v, want ErrRequestInvalid", err)
+	}
+}
+
+// TestABodyWithNoLifetimeRendersADash pins the record line for a grant that lasts until its session
+// ends: lifetime_seconds is "-", the body round-trips, and a stored 0 or negative count is refused
+// rather than read as no lifetime, so no other spelling addresses the same record.
+func TestABodyWithNoLifetimeRendersADash(t *testing.T) {
+	b := Body{
+		Request:      "eyJ.fake.jws",
+		Approver:     "sjawhar",
+		Enrollment:   Enrollment{Kind: "session", RuntimeID: "example-host-devbox:1:2", Operator: "sjawhar"},
+		RulesVersion: "ab12",
+		ExpiresAt:    time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC),
+	}
+	got := b.Canonical()
+	if !strings.Contains(got, "\nlifetime_seconds: -\n") {
+		t.Fatalf("canonical body of a grant with no lifetime:\n%q\nwant the line lifetime_seconds: -", got)
+	}
+	back, err := ParseBody(got)
+	if err != nil || back.Canonical() != b.Canonical() {
+		t.Fatalf("round trip: %+v %v", back, err)
+	}
+	for _, spelled := range []string{"0", "-5", ""} {
+		if _, err := ParseBody(strings.Replace(got, "lifetime_seconds: -", "lifetime_seconds: "+spelled, 1)); err == nil {
+			t.Fatalf("lifetime_seconds: %q parsed, want it refused", spelled)
+		}
 	}
 }

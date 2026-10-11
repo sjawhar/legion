@@ -50,6 +50,18 @@
   `grant list` the grant, secrets, how it was granted, approver, session, operator and expiry, and
   `--json` prints the broker's body verbatim. `machine revoke` warns on stderr when it ends this
   machine's own login, its id typed in any case.
+- A request for agent secrets can ask for a shorter grant: `agent-secrets request NAME... --ttl 2m`
+  and the exec form's `agent-secrets NAME... --ttl 2m -- cmd` sign the lifetime into the request
+  object (`lifetime_seconds`), the record body carries it (`lifetime_seconds: 120`), and the grant
+  ends that long after it is granted while its session lives on. `--ttl` takes a whole number of
+  seconds from 1s to 2147483647s; `0`, a fraction of a second or anything else exits 2 before any
+  broker call. `POST /v1/requests` and `GET /v1/requests/{id}` answer the `lifetime_seconds` the
+  grant got (null for none), and the CLI checks it: a broker or helper from before `--ttl`, which
+  drops the claim and grants for longer, has the grant or pending request this call made revoked or
+  cancelled at once, and the command exits 1 naming why, running nothing. What an earlier call
+  made is left alone and named: an approved grant such a broker reuses, and a pending request it
+  answers this call joined (`coalesced`). A request with `--ttl` never reuses a live grant of
+  another lifetime.
 - A pending secret request names whom it waits on. `POST /v1/requests` and
   `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
   names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than
@@ -188,6 +200,56 @@
   quotes that terminal line beside its own enrollment and stops. Every other refusal retries,
   `POD_IDENTITY_MISMATCH` among them, which the broker also answers for a token it could not verify
   while its issuer was unreachable.
+- **Breaking:** an agent session on a machine its person logged in is one enrollment kind,
+  `session`, where the broker recorded `host` for a session the helper enrolled for itself and `box`
+  for a key a launcher such as agentbox brought; a pod stays `pod`. Migration
+  `0012_one_session_kind` rewrites every stored `host` and `box` row to `session` and allows only
+  `session` and `pod`. Every place the kind is shown says `session`: `GET /v1/enrollments/self`,
+  the grant and record reads (`agent-secrets self`, `grant list`, Dispatch's credential page and
+  Live grants), and a new record's enrollment line, while a record written before keeps its body,
+  which its id hashes, verbatim. A reader matching `host` or `box` must match `session`. The
+  clients in the field keep working through the rollout in either order: the broker records an
+  older helper's `host` or `box` as `session` and logs `an enrollment named a legacy kind`; this
+  helper asks an older broker, which refuses `session` with `400 INVALID_KIND`, once more as
+  `host` or `box`. The broker is forward-only from this migration: a broker before it inserts
+  `host` and `box`, which the new constraint refuses, so roll forward rather than back.
+- **Breaking:** a grant lasts until its session ends unless its request asked for a shorter
+  lifetime (`--ttl`, above); there is no fixed lifetime and no cap. `BROKER_MAX_GRANT_SECONDS`
+  (default and most 43200, 12 hours) is removed: a deployment that still sets it refuses to start,
+  naming the variable and explaining that a request's `--ttl` now chooses a shorter lifetime. A
+  grant with no lifetime answers `expires_at: null` on every
+  grant read (`GET /v1/enrollments/self`, `GET /v1/grants`, `GET /v1/operator/grants`), and its
+  record reads `lifetime_seconds: null` on `GET /v1/credential-requests/{id}` and
+  `lifetime_seconds: -` in its body. Migration `0013_grant_until_session_ends` drops not null from
+  `requests.lifetime_seconds` and `grants.expires_at`, and every liveness check reads a null expiry
+  as one that has not passed. `agent-secrets self` prints `until this session ends` for such a
+  grant and `grant list` prints `session-end`; an `agent-secrets` from before this release prints
+  `0001-01-01T00:00:00Z` for it, and nothing else changes for that client. Dispatch's credential
+  page shows **Until the session ends** and Live grants **When the session ends**. A broker before
+  this migration cannot read a grant with no expiry, so roll forward rather than back.
+  A running session keeps what it was given across the deploy: a request without a lifetime takes
+  the live grant of a request written before this migration (which recorded the old fixed 43200
+  seconds), keeping its expiry, and joins such a request while it is still pending. Only rows
+  written before migration 13 was applied match, so a later `--ttl 12h` request is never taken for
+  one, and nothing matches a day after the deploy.
+- **Breaking:** a session has at most one pending request for each secret. `POST /v1/requests`
+  answers a request naming a secret one of the session's pending requests names, with another set of
+  names or another lifetime, `409 REQUEST_PENDING`, naming the pending request; `agent-secrets`
+  exits 1 with that message. This holds for requests without `--ttl` too: a request for `A` and `B`
+  while one for `A` waits used to open a second record for the approver, and is now refused. The
+  identical request (the same names and the same lifetime, or none) still joins the pending one,
+  answered with that request and `coalesced: true`. Wait for the named request to be decided, or
+  `agent-secrets cancel` it and ask again.
+- The helper's `enroll-box` and `unenroll-box` ops are `enroll-session-key` and
+  `unenroll-session-key`, which name no kind, and `agent-secrets enroll --helper` needs no `--kind`.
+  Every older client keeps working: the helper still answers `enroll-box` and `unenroll-box`, from
+  an `agent-secrets` before this release, as the new pair, logging `a client asked a legacy op`;
+  this `agent-secrets` asks a helper before this release, which answers
+  `unknown op enroll-session-key`, its `enroll-box` and `unenroll-box` instead, saying so on
+  stderr; and `enroll --helper --kind box`, which dotfiles' agentbox passes, enrolls as before
+  until dotfiles pins this release and agentbox stops passing it, while any other `--kind` exits 2
+  naming the flag, as every `--kind` but `box` did before. An `enroll` without `--helper` is
+  refused for that first, whatever `--kind` it carries, as before.
 - `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
   naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
   Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not
