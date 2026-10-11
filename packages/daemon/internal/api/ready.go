@@ -157,8 +157,8 @@ func readyChecks(ctx context.Context, github githubrest.Client, githubAPI string
 	return "", nil
 }
 
-func mergeReadyPolicy(ctx context.Context, github githubrest.Client, githubAPI string, repository ghrepo.Repository, rules config.MergeRules, number int) (string, *refusal) {
-	if len(rules.ByHand) == 0 && len(rules.OneAtATime) == 0 {
+func mergeReadyPolicy(ctx context.Context, github githubrest.Client, _ string, _ ghrepo.Repository, rules config.MergeRules, number int) (string, *refusal) {
+	if len(rules.ByHand) == 0 {
 		return "", nil
 	}
 	paths, err := pullRequestPaths(ctx, github, number)
@@ -168,17 +168,7 @@ func mergeReadyPolicy(ctx context.Context, github githubrest.Client, githubAPI s
 	if rules.MatchByHand(paths) {
 		return fmt.Sprintf("MANUAL_MERGE_REQUIRED: pull request #%d matches a by_hand merge rule; do not auto-arm it", number), nil
 	}
-	if !rules.MatchOneAtATime(paths) {
-		return "", nil
-	}
-	queued, err := queuedOneAtATime(ctx, github, githubAPI, repository, number, rules)
-	if err != nil {
-		return "", githubReadFailed(err)
-	}
-	if queued == 0 {
-		return "", nil
-	}
-	return "", &refusal{http.StatusConflict, "READY_ONE_AT_A_TIME_WAITING", fmt.Sprintf("pull request #%d matches a one_at_a_time merge rule and pull request #%d is in the merge queue; wait for it to leave before requesting READY again", number, queued)}
+	return "", nil
 }
 
 func pullRequestPaths(ctx context.Context, github githubrest.Client, number int) ([]string, error) {
@@ -194,61 +184,6 @@ func pullRequestPaths(ctx context.Context, github githubrest.Client, number int)
 		paths = append(paths, file.Filename)
 	}
 	return paths, nil
-}
-
-func queuedOneAtATime(ctx context.Context, github githubrest.Client, githubAPI string, repository ghrepo.Repository, number int, rules config.MergeRules) (int, error) {
-	type pull struct {
-		Number int `json:"number"`
-	}
-	pulls, err := githubrest.GetPages[pull](ctx, github, "/pulls?state=open")
-	if err != nil {
-		return 0, err
-	}
-	for _, candidate := range pulls {
-		if candidate.Number == number {
-			continue
-		}
-		paths, err := pullRequestPaths(ctx, github, candidate.Number)
-		if err != nil {
-			return 0, err
-		}
-		if !rules.MatchOneAtATime(paths) {
-			continue
-		}
-		queued, err := pullRequestQueued(ctx, github.Token, githubAPI, repository, candidate.Number)
-		if err != nil {
-			return 0, err
-		}
-		if queued {
-			return candidate.Number, nil
-		}
-	}
-	return 0, nil
-}
-
-func pullRequestQueued(ctx context.Context, token, githubAPI string, repository ghrepo.Repository, number int) (bool, error) {
-	const query = `query PullRequestMergeQueueEntry($owner: String!, $name: String!, $number: Int!) {
-  repository(owner: $owner, name: $name) {
-    pullRequest(number: $number) {
-      mergeQueueEntry { id }
-    }
-  }
-}`
-	var response struct {
-		Repository struct {
-			PullRequest *struct {
-				MergeQueueEntry *struct {
-					ID string `json:"id"`
-				} `json:"mergeQueueEntry"`
-			} `json:"pullRequest"`
-		} `json:"repository"`
-	}
-	if err := githubrest.GraphQL(ctx, token, githubAPI, query, map[string]any{
-		"owner": repository.Owner(), "name": repository.Name(), "number": number,
-	}, &response); err != nil {
-		return false, err
-	}
-	return response.Repository.PullRequest != nil && response.Repository.PullRequest.MergeQueueEntry != nil, nil
 }
 
 // shortSHA is sha as a refusal names it, its first twelve characters.

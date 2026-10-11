@@ -189,5 +189,5 @@ func MergeRulesFragment(rules config.MergeRules) string {
 		}
 		return strings.Join(expressions, ", ")
 	}
-	return "Merge policy: by_hand " + render(rules.ByHand) + "; one_at_a_time " + render(rules.OneAtATime) + "."
+	return "Merge policy: by_hand " + render(rules.ByHand) + "."
 }

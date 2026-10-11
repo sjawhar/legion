@@ -1136,32 +1136,6 @@ func TestHandoffCompleteReadyMarksAByHandPullRequestWithoutAutoArmingIt(t *testi
 	}
 }
 
-func TestHandoffCompleteReadyWaitsForAOneAtATimeMergeQueuePath(t *testing.T) {
-	github := newHandoffGitHub(t)
-	github.set(func(g *handoffGitHub) {
-		g.merge.OneAtATime = []config.PathPattern{{Expression: "^.github/workflows/infra-deploy.yml$", Regexp: regexp.MustCompile("^.github/workflows/infra-deploy.yml$")}}
-		g.pullFiles[42] = []string{".github/workflows/infra-deploy.yml"}
-		g.pullFiles[43] = []string{".github/workflows/infra-deploy.yml"}
-		g.queued[43] = true
-	})
-	h, facts, merger := newReadyHarness(t, github)
-
-	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_ONE_AT_A_TIME_WAITING:") {
-		t.Fatalf("READY while matching pull request #43 is queued = %d %q", code, body)
-	}
-	if got := facts.recorded(); len(got) != 0 {
-		t.Fatalf("handoff facts while waiting = %#v, want none", got)
-	}
-
-	github.set(func(g *handoffGitHub) { g.queued[43] = false })
-	if code, body := ready(t, h, merger); code != http.StatusOK || body != "" {
-		t.Fatalf("READY after the matching queue entry clears = %d %q, want it accepted", code, body)
-	}
-	if got := facts.recorded(); len(got) != 1 {
-		t.Fatalf("handoff facts after the queue clears = %#v, want one READY", got)
-	}
-}
-
 // ready posts the merger's READY and returns its answer: the note when it was published, or the
 // refusal's code and sentence.
 func ready(t *testing.T, h *harness, merger liveClaim) (code int, body string) {

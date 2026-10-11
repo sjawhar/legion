@@ -49,11 +49,9 @@ type Project struct {
 	ReviewWorkflows []string
 }
 
-// MergeRules is the project's `merge` policy. A path matching ByHand is never auto-armed. A path
-// matching OneAtATime waits until no other matching pull request is in the merge queue.
+// MergeRules is the project's `merge` policy. A path matching ByHand is never auto-armed.
 type MergeRules struct {
-	ByHand     []PathPattern
-	OneAtATime []PathPattern
+	ByHand []PathPattern
 }
 
 // PathPattern is one validated regular expression from a project's merge policy.
@@ -65,11 +63,6 @@ type PathPattern struct {
 // MatchByHand reports whether any changed path matches a by-hand rule.
 func (rules MergeRules) MatchByHand(paths []string) bool {
 	return matchesPathPattern(rules.ByHand, paths)
-}
-
-// MatchOneAtATime reports whether any changed path matches a one-at-a-time rule.
-func (rules MergeRules) MatchOneAtATime(paths []string) bool {
-	return matchesPathPattern(rules.OneAtATime, paths)
 }
 
 func matchesPathPattern(patterns []PathPattern, paths []string) bool {
@@ -207,18 +200,13 @@ func readMergeRules(value *yaml.Node, key string) (MergeRules, error) {
 	if value.Kind != yaml.MappingNode {
 		return MergeRules{}, fmt.Errorf("%s must be a mapping", key)
 	}
-	fields, err := members(value, key, "by_hand", "one_at_a_time")
+	fields, err := members(value, key, "by_hand")
 	if err != nil {
 		return MergeRules{}, err
 	}
 	var rules MergeRules
 	if byHand := fields["by_hand"]; byHand != nil {
 		if rules.ByHand, err = readPathPatterns(byHand, key+".by_hand"); err != nil {
-			return MergeRules{}, err
-		}
-	}
-	if oneAtATime := fields["one_at_a_time"]; oneAtATime != nil {
-		if rules.OneAtATime, err = readPathPatterns(oneAtATime, key+".one_at_a_time"); err != nil {
 			return MergeRules{}, err
 		}
 	}
