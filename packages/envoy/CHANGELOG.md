@@ -4,16 +4,6 @@
 
 ### Added
 
-- A request for agent secrets can ask for a shorter grant: `agent-secrets request NAME... --ttl 2m`
-  and the exec form's `agent-secrets NAME... --ttl 2m -- cmd` sign the lifetime into the request
-  object (`lifetime_seconds`), the record body carries it (`lifetime_seconds: 120`), and the grant
-  ends that long after it is granted while its session lives on. `--ttl` takes a whole number of
-  seconds from 1s to 2147483647s; `0`, a fraction of a second or anything else exits 2 before any
-  broker call. `POST /v1/requests` and `GET /v1/requests/{id}` answer the `lifetime_seconds` the
-  grant got (null for none), and the CLI checks it: a broker or helper from before `--ttl`, which
-  drops the claim and grants for longer, has its grant revoked or its pending request cancelled at
-  once, and the command exits 1 naming why, running nothing. A request with `--ttl` never reuses a
-  live grant of another lifetime, and coalesces only with an identical one.
 - A person lists and ends their own machines' logins and their live grants from their own shell.
   `agent-secrets machine list` and `machine revoke ID`, and `agent-secrets grant list` and
   `grant revoke ID`, call four new broker routes, `GET /v1/operator/machines`,
@@ -42,6 +32,16 @@
   `grant list` the grant, secrets, how it was granted, approver, session, operator and expiry, and
   `--json` prints the broker's body verbatim. `machine revoke` warns on stderr when it ends this
   machine's own login, its id typed in any case.
+- A request for agent secrets can ask for a shorter grant: `agent-secrets request NAME... --ttl 2m`
+  and the exec form's `agent-secrets NAME... --ttl 2m -- cmd` sign the lifetime into the request
+  object (`lifetime_seconds`), the record body carries it (`lifetime_seconds: 120`), and the grant
+  ends that long after it is granted while its session lives on. `--ttl` takes a whole number of
+  seconds from 1s to 2147483647s; `0`, a fraction of a second or anything else exits 2 before any
+  broker call. `POST /v1/requests` and `GET /v1/requests/{id}` answer the `lifetime_seconds` the
+  grant got (null for none), and the CLI checks it: a broker or helper from before `--ttl`, which
+  drops the claim and grants for longer, has its grant revoked or its pending request cancelled at
+  once, and the command exits 1 naming why, running nothing. A request with `--ttl` never reuses a
+  live grant of another lifetime, and coalesces only with an identical one.
 - A pending secret request names whom it waits on. `POST /v1/requests` and
   `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
   names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than
