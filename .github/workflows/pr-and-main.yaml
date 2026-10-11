@@ -18,15 +18,22 @@ concurrency:
   group: tests-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Read-only: no job here writes to the repository, a registry or the API. The token clones,
-# downloads pinned tools, and, in the `lint` job, reads a pull request's commits through the
-# compare route (check-pr-text.sh), which `contents: read` covers.
+# Read-only: no job here writes to the repository, a registry or the API. The token clones and
+# downloads pinned tools, which `contents: read` covers; the `lint` job's own block adds what
+# check-pr-text.sh reads besides.
 permissions:
   contents: read
 
 jobs:
   lint:
     runs-on: ubuntu-24.04
+    # check-pr-text.sh reads a pull request's commits through the compare route (`contents: read`),
+    # its reviews and review comments (`pull-requests: read`) and its issue comments
+    # (`issues: read`).
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -56,10 +63,11 @@ jobs:
         run: .github/scripts/check-plugin-names.sh
 
       # A pull request's title, body and commit messages reach main's squash commit, the
-      # generated release notes and GitHub's pages, so this required job checks them at every
-      # push. pr-title.yaml checks them again when the pull request is edited. A push to main or a
-      # merge-queue run carries no pull request.
-      - name: Check the pull request's title, body, branch name and commits name nothing private
+      # generated release notes and GitHub's pages, and its comments and reviews are public on its
+      # page, so this required job checks them at every push. pr-title.yaml checks them again when
+      # the pull request is edited or a comment, review or review comment is posted, edited or
+      # deleted. A push to main or a merge-queue run carries no pull request.
+      - name: Check the pull request's title, body, branch name, commits, comments and reviews name nothing private
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
