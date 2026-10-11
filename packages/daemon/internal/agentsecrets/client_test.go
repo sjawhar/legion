@@ -1,16 +1,20 @@
 package agentsecrets
 
 import (
+	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -271,13 +275,22 @@ func withFastPolling(t *testing.T) {
 	t.Cleanup(func() { pollInitialInterval, pollMaxInterval = oldInitial, oldMax })
 }
 
-// withLoginRetry sets the delay doProof waits after a login that did not end issued, before it
+// withLoginRetry sets the delay doProof waits after a login the broker never opened, before it
 // starts the next one, and the most that delay doubles to, for the duration of one test.
 func withLoginRetry(t *testing.T, initial, most time.Duration) {
 	t.Helper()
 	oldInitial, oldMax := loginRetryInitial, loginRetryMax
 	loginRetryInitial, loginRetryMax = initial, most
 	t.Cleanup(func() { loginRetryInitial, loginRetryMax = oldInitial, oldMax })
+}
+
+// withUnansweredRetry sets the delay doProof waits after a code a person denied or let expire,
+// before it starts the next login, and the most that delay doubles to, for the duration of one test.
+func withUnansweredRetry(t *testing.T, initial, most time.Duration) {
+	t.Helper()
+	oldInitial, oldMax := unansweredRetryInitial, unansweredRetryMax
+	unansweredRetryInitial, unansweredRetryMax = initial, most
+	t.Cleanup(func() { unansweredRetryInitial, unansweredRetryMax = oldInitial, oldMax })
 }
 
 // enrollUntil calls Enroll until done reports true, failing the test at the deadline, and returns
@@ -307,9 +320,11 @@ func eventually(t *testing.T, fn func() bool, msg string) {
 
 // withCredential gives c an already-issued credential directly, bypassing the login/poll flow
 // entirely, for tests whose subject is Enroll/Revoke's request shape and error handling rather
-// than the login flow itself (that flow has its own dedicated tests below).
+// than the login flow itself (that flow has its own dedicated tests below). Such a client is one
+// whose boot login has begun, so a refusal starts a fresh login as a daemon's would.
 func withCredential(t *testing.T, c *Client, id string) {
 	t.Helper()
+	c.started.Store(true)
 	c.cred.Store(&credential{key: mustTestKey(t), id: id})
 }
 
@@ -880,6 +895,7 @@ func TestALoginThatExpiredOrWasDeniedIsRetriedByTheNextEnrollment(t *testing.T) 
 		t.Run(ended, func(t *testing.T) {
 			withFastPolling(t)
 			withLoginRetry(t, 0, 0)
+			withUnansweredRetry(t, 0, 0)
 			broker, server := newFakeBroker(t)
 			c := &Client{URL: server.URL, HTTP: server.Client()}
 			if _, err := c.Login(context.Background()); err != nil {
@@ -1004,6 +1020,7 @@ func TestALoginWhoseCallerEndsMidPOSTStillCollectsItsCode(t *testing.T) {
 	var release sync.Once
 	t.Cleanup(func() { release.Do(func() { close(answer) }) })
 	c := &Client{URL: server.URL, HTTP: server.Client()}
+	c.started.Store(true) // a daemon whose boot login has begun, whose enrollment retries it
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
@@ -1125,13 +1142,14 @@ func TestALoginThatFailedWaitsBeforeTheNext(t *testing.T) {
 }
 
 // TestADeniedOrExpiredCodeWaitsBeforeTheNextLogin: a code a person denied, or one that expired
-// undecided, starts the wait as a refused login does, so enrollments inside it start no login and
-// the broker never sees a fresh code on every observation.
+// undecided, waits an hour before the next login even where a login the broker never opened would
+// be retried at once, so enrollments inside it start no login and nobody signed in is shown a fresh
+// code on every observation. The wait doubles with each unanswered code, to at most a day.
 func TestADeniedOrExpiredCodeWaitsBeforeTheNextLogin(t *testing.T) {
 	for _, ended := range []string{"denied", "expired"} {
 		t.Run(ended, func(t *testing.T) {
 			withFastPolling(t)
-			withLoginRetry(t, time.Hour, 4*time.Hour)
+			withLoginRetry(t, 0, 0)
 			broker, server := newFakeBroker(t)
 			c := &Client{URL: server.URL, HTTP: server.Client()}
 			if _, err := c.Login(context.Background()); err != nil {
@@ -1145,7 +1163,18 @@ func TestADeniedOrExpiredCodeWaitsBeforeTheNextLogin(t *testing.T) {
 			if got := broker.loginAttemptCount(); got != 1 {
 				t.Fatalf("broker saw %d logins after the code was %s, want only the boot login: an Enroll inside the wait must start none", got, ended)
 			}
+			c.loginMu.Lock()
+			wait := time.Until(c.nextLogin)
+			c.loginMu.Unlock()
+			if wait <= time.Hour-time.Minute || wait > time.Hour {
+				t.Fatalf("next login in %v after the code was %s, want about an hour", wait, ended)
+			}
 		})
+	}
+	for unanswered, want := range map[int]time.Duration{1: time.Hour, 2: 2 * time.Hour, 3: 4 * time.Hour, 5: 16 * time.Hour, 6: 24 * time.Hour, 40: 24 * time.Hour} {
+		if got := unansweredWait(unanswered); got != want {
+			t.Errorf("unansweredWait(%d unanswered codes) = %v, want %v", unanswered, got, want)
+		}
 	}
 }
 
@@ -1203,4 +1232,110 @@ func mustJSON(t *testing.T, v any) string {
 		t.Fatal(err)
 	}
 	return string(raw)
+}
+
+// syncBuffer is a bytes.Buffer a renewal loop's logger writes to from its own goroutine while the
+// test reads it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// TestARestartAgainstABrokerWithoutTheRenewalRouteKeepsItsCredential: a broker from before the
+// renewal route answers it with Go's plain-text 404. The restarted daemon keeps the credential it
+// took back, says once that it cannot renew it, stops asking, keeps the credential as it was (no
+// next key), and goes on enrolling pods with it, opening no machine login.
+func TestARestartAgainstABrokerWithoutTheRenewalRouteKeepsItsCredential(t *testing.T) {
+	broker, server := newFakeBroker(t)
+	key := mustTestKey(t)
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+	keeper := &memoryKeeper{kept: &Kept{CredentialID: "cred-1", PrivateKey: der, ExpiresAt: expires}}
+	var logged syncBuffer
+	c := &Client{URL: server.URL, HTTP: server.Client(), Keeper: keeper, Log: slog.New(slog.NewTextHandler(&logged, nil))}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if code, err := c.Start(ctx); err != nil || code != "" {
+		t.Fatalf("Start = %q, %v; want the kept credential resumed", code, err)
+	}
+	eventually(t, func() bool { return strings.Contains(logged.String(), "cannot renew") }, "the renewal loop to say the broker cannot renew")
+	time.Sleep(50 * time.Millisecond)
+	if n := strings.Count(logged.String(), "cannot renew"); n != 1 {
+		t.Fatalf("the cannot-renew line was logged %d times, want once:\n%s", n, logged.String())
+	}
+	if kept, _, _ := keeper.Load(context.Background()); kept.CredentialID != "cred-1" || !bytes.Equal(kept.PrivateKey, der) || kept.NextPrivateKey != nil || !kept.ExpiresAt.Equal(expires) {
+		t.Fatalf("kept credential = %+v, want cred-1 with its own key, no next key and its expiry", kept)
+	}
+	if got := c.LoginStatus().State; got != "issued" {
+		t.Fatalf("LoginStatus = %q, want issued", got)
+	}
+	if _, err := c.Enroll(context.Background(), podEnrollment); err != nil {
+		t.Fatalf("Enroll with the kept credential: %v", err)
+	}
+	if n := broker.loginAttemptCount(); n != 0 {
+		t.Fatalf("the broker saw %d machine logins, want none", n)
+	}
+}
+
+// failingKeeper is a Keeper whose every Save fails, as a database that cannot be written does.
+type failingKeeper struct{ memoryKeeper }
+
+func (*failingKeeper) Save(context.Context, Kept) error { return errors.New("database is read-only") }
+
+// TestARenewalWhoseNextKeyCannotBeKeptAsksNothing: when the Keeper cannot save the next key, the
+// renewal never asks the broker to move to it, so a restart can never find the broker holding a key
+// the daemon lost. The credential keeps its current key and no next key.
+func TestARenewalWhoseNextKeyCannotBeKeptAsksNothing(t *testing.T) {
+	var renewals atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/renew") {
+			renewals.Add(1)
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	c := &Client{URL: server.URL, HTTP: server.Client(), Keeper: &failingKeeper{}, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	key := mustTestKey(t)
+	held := &credential{key: key, id: "cred-1"}
+	held.setExpires(time.Now().Add(time.Hour))
+	c.cred.Store(held)
+	if _, err := c.renew(context.Background(), held); err == nil || !strings.Contains(err.Error(), "keep the next key") {
+		t.Fatalf("renew with a Keeper that cannot save = %v, want the save's failure", err)
+	}
+	if n := renewals.Load(); n != 0 {
+		t.Fatalf("the broker saw %d renewals, want none", n)
+	}
+	if c.cred.Load() != held || held.key != key || held.next.Load() != nil {
+		t.Fatal("the credential changed, want its current key and no next key")
+	}
+}
+
+// TestAnEnrollmentBeforeTheBootLoginStartsOpensNoLogin: a pod the supervisor enrolls before the
+// daemon's boot login has started (and so before it took back its kept credential) is refused as
+// "no machine login yet", and the broker sees no machine login.
+func TestAnEnrollmentBeforeTheBootLoginStartsOpensNoLogin(t *testing.T) {
+	broker, server := newFakeBroker(t)
+	c := &Client{URL: server.URL, HTTP: server.Client()}
+	for range 5 {
+		wantNoCredential(t, c, "no machine login yet")
+		wantEnrollNoCredential(t, c)
+	}
+	if n := broker.loginAttemptCount(); n != 0 {
+		t.Fatalf("the broker saw %d machine logins before the boot login started, want none", n)
+	}
 }

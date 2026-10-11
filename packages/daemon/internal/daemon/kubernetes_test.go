@@ -3,6 +3,10 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,12 +21,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 
+	"github.com/sjawhar/legion/daemon/internal/agentsecrets"
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
@@ -764,10 +770,10 @@ func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
 }
 
 // No credential material — no key, no launcher credential, no bearer — ever reaches a pod or a
-// launch secret: the daemon's machine login lives only in the *agentsecrets.Client's process
-// memory (Task 1's cred atomic.Pointer[credential]), which the configuration and
-// sandbox.Options carry no field for at all. newSecretsLogin hands the runtime only the broker
-// URL, audience and token lifetime, and no launch's secrets ever name an AGENT_SECRETS_*
+// launch secret: the daemon's machine login lives in the *agentsecrets.Client's process memory and,
+// across a restart, in the daemon's own database (credentialKeeper), neither of which the
+// configuration or sandbox.Options carry a field for. newSecretsLogin hands the runtime only the
+// broker URL, audience and token lifetime, and no launch's secrets ever name an AGENT_SECRETS_*
 // variable.
 func TestNoCredentialMaterialReachesAPod(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
@@ -799,11 +805,70 @@ func TestNoCredentialMaterialReachesAPod(t *testing.T) {
 	}
 }
 
-// newSecretsLogin logs the contract's exact line, once, naming the code the broker issued and that
-// anyone signed in may approve it; a background poll goroutine keeps running against the (later closed)
-// broker after the login is issued, which is fine — it is the same unbounded, backed-off retry
-// production leaves running for as long as the daemon is up.
-func TestNewSecretsLoginLogsTheConfirmationCode(t *testing.T) {
+// lockedBuffer is a bytes.Buffer a logger writes to from a goroutine while the test reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// keptCredentials is an agentsecrets.Keeper holding at most one credential, as the store does.
+type keptCredentials struct {
+	mu   sync.Mutex
+	kept *agentsecrets.Kept
+}
+
+func (k *keptCredentials) Load(context.Context) (agentsecrets.Kept, bool, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.kept == nil {
+		return agentsecrets.Kept{}, false, nil
+	}
+	return *k.kept, true, nil
+}
+
+func (k *keptCredentials) Save(_ context.Context, kept agentsecrets.Kept) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.kept = &kept
+	return nil
+}
+
+func (k *keptCredentials) Forget(context.Context, string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.kept = nil
+	return nil
+}
+
+// waitForLine waits for logged to contain want, failing the test after two seconds.
+func waitForLine(t *testing.T, logged *lockedBuffer, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for !strings.Contains(logged.String(), want) {
+		if time.Now().After(deadline) {
+			t.Fatalf("log = %s, want it to contain %q", logged.String(), want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// startSecretsLogin logs the contract's exact line, once, naming the code the broker issued and that
+// anyone signed in may approve it; a background poll goroutine keeps running against the (later
+// closed) broker after the login is issued, which is fine — it is the same unbounded, backed-off
+// retry production leaves running for as long as the daemon is up.
+func TestStartSecretsLoginLogsTheConfirmationCode(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || r.URL.Path != "/v1/launcher-credentials" {
 			return
@@ -818,18 +883,53 @@ func TestNewSecretsLoginLogsTheConfirmationCode(t *testing.T) {
 	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
 		URL: server.URL, Audience: "agent-secrets", TokenExpirySeconds: 3600,
 	}
-	var logged bytes.Buffer
-	enroller, client := newSecretsLogin(cfg, slog.New(slog.NewJSONHandler(&logged, nil)))
+	var logged lockedBuffer
+	log := slog.New(slog.NewJSONHandler(&logged, nil))
+	enroller, client := newSecretsLogin(cfg, log)
 	if enroller == nil || client == nil {
 		t.Fatal("want an enroller and a client")
 	}
-	want := "agent-secrets machine login: enter code ABCD-1234 on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved"
-	deadline := time.Now().Add(2 * time.Second)
-	for !strings.Contains(logged.String(), want) {
-		if time.Now().After(deadline) {
-			t.Fatalf("log = %s, want it to contain %q", logged.String(), want)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startSecretsLogin(ctx, client, &keptCredentials{}, log)
+	waitForLine(t, &logged, "agent-secrets machine login: enter code ABCD-1234 on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved")
+}
+
+// With a credential the store kept from before the restart, startSecretsLogin opens no machine
+// login: it says it took the credential back, and the broker sees no login.
+func TestStartSecretsLoginResumesAKeptCredential(t *testing.T) {
+	var logins atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/v1/launcher-credentials" {
+			logins.Add(1)
 		}
-		time.Sleep(time.Millisecond)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer server.Close()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keeper := &keptCredentials{kept: &agentsecrets.Kept{CredentialID: "cred-1", PrivateKey: der, ExpiresAt: time.Now().Add(time.Hour)}}
+	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{URL: server.URL, Audience: "agent-secrets", TokenExpirySeconds: 3600}
+	var logged lockedBuffer
+	log := slog.New(slog.NewJSONHandler(&logged, nil))
+	_, client := newSecretsLogin(cfg, log)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startSecretsLogin(ctx, client, keeper, log)
+	waitForLine(t, &logged, "agent-secrets machine login resumed")
+	if got := client.LoginStatus(); got.State != "issued" || got.Code != "" {
+		t.Fatalf("LoginStatus = %+v, want issued with no code", got)
+	}
+	if strings.Contains(logged.String(), "enter code") || logins.Load() != 0 {
+		t.Fatalf("a machine login opened (%d logins): %s", logins.Load(), logged.String())
 	}
 }
 

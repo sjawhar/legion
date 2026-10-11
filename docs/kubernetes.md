@@ -2014,19 +2014,44 @@ issue's pod (every role container of it alike) and the image probe's.
   address). The block names no approver: the daemon's login is the `legion-daemon` service's, which
   anyone signed in to Dispatch approves on the Dispatch credential page, and a file that sets
   `operator` is refused at load naming the key — there is no launcher-token file and no manual CLI
-  step. The daemon runs its own login at boot, on a background context, and logs the confirmation
-  code exactly once: `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential
-  page, where anyone signed in may approve it; pod enrollment is held until approved`. The same code and the login's current status
-  ("none", "pending", "issued", "denied", "expired", or "failed" when the broker never opened the
-  login) are on `GET /legion/v1/state`'s
-  `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a
-  person signed in to Dispatch approves the code there. When a login ends without a credential
-  (the broker refused it or could not be reached, its code expired undecided, or someone denied
-  it), or the broker revokes or expires the credential, the next pod enrollment starts a fresh
-  login, with no restart. The new code is on `agentSecretsLogin` and in the supervisor's
-  `enrollment failed; retrying on the next observation` warning. After a login that ends without a
-  credential the daemon waits 30 s before the next, doubling each time to at most 5 minutes, and an
-  approved login resets the wait. It never starts a login while one is pending.
+  step. Once its boot is recorded (nothing in the boot can refuse after that), the daemon takes back
+  the launcher credential it kept from an earlier boot (the `agent_secrets_credentials` table of its
+  own database, keyed by project and broker URL), logs `agent-secrets machine login resumed`, and
+  renews it, logging `renewed the launcher credential onto a new key`, so a restart needs nobody.
+  With none it can use (a first boot, a credential past its expiry, or a new broker URL) it runs a
+  login and logs the confirmation code exactly once: `agent-secrets machine login: enter code
+  XXXX-XXXX on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is
+  held until approved`. The same code and the login's current status ("none", "pending", "issued",
+  "denied", "expired", or "failed" when the broker never opened the login; a credential taken back
+  reads "issued" with no code) are on `GET /legion/v1/state`'s `agentSecretsLogin` (daemon API
+  contract 9); pod enrollment fails closed and retries until a person signed in to Dispatch approves
+  the code there. A pod the supervisor enrolls before the login starts is refused `no machine login
+  yet` and retried. The daemon renews the credential at boot and then a quarter of the way to each
+  expiry (every 42 hours at the broker's default 7-day `BROKER_LAUNCHER_CREDENTIAL_SECONDS`), each
+  renewal moving it to a new key the daemon has saved before it asks, so a daemon stopped for up to
+  three quarters of a lifetime comes back to a live credential and a copy of an old key stops working
+  at the next renewal. The broker renews only a service `BROKER_SERVICES` registers, so the broker
+  must register `legion-daemon`; a broker that does not, or one older than the renewal route, leaves
+  the credential to lapse at its expiry, which the daemon logs. When the broker refuses the
+  credential the daemon logs at ERROR its `credential_id` and expiry: it was revoked or expired, a
+  proof could not be verified, or someone renewed it first with a copy of its key, which only
+  revoking that login on Dispatch's machine-login page ends, so revoke it there unless someone already
+  did. When a login ends without a credential (the broker refused it or could not be reached, its
+  code expired undecided, or someone denied it), or the broker refuses the credential, the next pod
+  enrollment starts a fresh login, with no restart. The new code is on `agentSecretsLogin` and in the
+  supervisor's `enrollment failed; retrying on the next observation` warning. After a login the
+  broker never opened the daemon waits 30 s before the next, doubling each time to at most 5 minutes;
+  after a code a person was shown and did not approve, it waits an hour, doubling each time to at
+  most a day, so nobody signed in sees a new code every 15 minutes. An approved login resets both
+  waits, a restart with no credential it can use runs a login once its boot is recorded (the way to
+  ask for a fresh code), and it never starts a login while one is pending. Two daemons of one project
+  must never run at once (the in-cluster daemon's Deployment replaces its pod, never doubles it): each
+  renewal moves the key, so the other one's calls would be refused. The key in that table is the one
+  raw secret the daemon's database holds: whoever can read it (the daemon's database login, and any
+  other project's daemon sharing that login, the database's administrators, its backups and any
+  `pg_dump` of it, such as the upgrade runbook's) can enroll pods as the daemon until the next
+  renewal or a revoke on Dispatch's machine-login page, so the login agents' pods use for
+  `session_store: postgres` must not be able to read the daemon's tables.
   `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
   `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the
@@ -2114,8 +2139,9 @@ issue's pod (every role container of it alike) and the image probe's.
 - **A key that fails at boot refuses the boot.** The image probe runs every provider key command the
   agents' models need, at every boot. A command that fails is "no working credentials", whether the
   cause is a revoked token or a network blip: the gate cannot tell the two apart, and passing on a
-  failed key is the fallback the gate exists to stop. Nothing restarts the Go daemon on its own: it
-  runs off the cluster, and whoever started it starts it again.
+  failed key is the fallback the gate exists to stop. Nothing in Legion restarts the Go daemon:
+  whoever runs it starts it again, an operator off the cluster or, for a daemon running in the
+  cluster, its Deployment.
 
 ### Cutting over an instance from tmux to pods
 

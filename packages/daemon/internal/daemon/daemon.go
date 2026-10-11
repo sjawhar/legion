@@ -344,6 +344,14 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 		st.Close()
 		return err
 	}
+	// The broker login starts once nothing in the boot can refuse it any more, so a daemon whose boot
+	// keeps failing never shows anyone a code. It keeps its credential in the store, so a restart
+	// takes back the credential a person approved instead of asking again; the database can be
+	// shared by several projects' daemons, so the credential is the project's own. Until it starts,
+	// a pod enrollment is refused as "no machine login yet" and retried.
+	if plan.secretsLogin != nil {
+		startSecretsLogin(ctx, plan.secretsLogin, credentialKeeper{store: st, project: cfg.Project, url: plan.secretsLogin.URL}, log)
+	}
 	// From here every way the daemon ends halts supervision before anything waits: the signal, at
 	// once, serve's end, or a start that failed. The signal also ends the boot's own steps, which run
 	// on starting. Everything after the boot record runs on a goroutine of its own, so run waits for

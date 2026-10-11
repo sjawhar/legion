@@ -98,8 +98,9 @@ func ControllerLocatorOf(runtimeName string, record controller.Record) *Controll
 // (agentsecrets.Client.LoginStatus): State is one of "none" (no login has ever been started),
 // "pending", "issued", "denied", "expired", or "failed" (the broker never opened the most recent
 // login: it refused it, or did not answer); Code is the confirmation code shown on the Dispatch
-// credential page for a pending login, "" otherwise. Never a key, a launcher credential, or why a
-// login failed — those live only in the daemon's process memory.
+// credential page for a pending login, "" otherwise. A credential the daemon took back from its
+// database at boot reads "issued" with no code. Never a key, a launcher credential, or why a login
+// failed — those stay in the daemon's process memory and, for the key and credential, its database.
 type AgentSecretsLoginView struct {
 	State string `json:"state"`
 	Code  string `json:"code"`

@@ -241,33 +241,69 @@ func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []s
 	return nil
 }
 
-// newSecretsLogin is the daemon's agent-secrets machine login as the machines' Enroller:
-// constructs the client from runtime.kubernetes.agent_secrets and starts its
-// machine login on a background context at boot, logging the confirmation code exactly once —
-// pod enrollment is held until a person signed in to Dispatch approves it on the credential page.
-// A boot login that fails, expires or is denied is retried by the client on a later enrollment
-// (agentsecrets.Client.doProof), so no restart is needed. The client
-// itself is returned too, read-only, so the state route can show the login's current status
-// (source.State, agentsecrets.Client.LoginStatus). Never part of launchSecrets, so no pod is ever
-// handed the daemon's key or its won credential. Nil, nil without the block.
+// newSecretsLogin is the daemon's agent-secrets machine login as the machines' Enroller: it
+// constructs the client from runtime.kubernetes.agent_secrets, and startSecretsLogin starts it
+// once the store has migrated. The client itself is returned too, read-only, so the state route can
+// show the login's current status (source.State, agentsecrets.Client.LoginStatus). Never part of
+// launchSecrets, so no pod is ever handed the daemon's key or its won credential. Nil, nil without
+// the block.
 func newSecretsLogin(cfg config.Config, log *slog.Logger) (supervise.Enroller, *agentsecrets.Client) {
 	k := cfg.Runtime.Kubernetes
 	if k == nil || k.AgentSecrets == nil {
 		return nil, nil
 	}
-	client := &agentsecrets.Client{URL: k.AgentSecrets.URL, HTTP: &http.Client{Timeout: 30 * time.Second}}
-	go func() {
-		code, err := client.Login(context.Background())
-		if err != nil {
-			log.Error("agent-secrets machine login failed; a pod enrollment retries it", "error", err)
-			return
-		}
-		log.Info(fmt.Sprintf(
-			"agent-secrets machine login: enter code %s on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved",
-			code,
-		))
-	}()
+	client := &agentsecrets.Client{URL: k.AgentSecrets.URL, HTTP: &http.Client{Timeout: 30 * time.Second}, Log: log}
 	return brokerEnroller{client: client}, client
+}
+
+// startSecretsLogin starts the daemon's broker login (agentsecrets.Client.Start) once the boot is
+// recorded, with keeper (the store, credentialKeeper) holding the credential a login wins: a daemon
+// that restarts takes back the credential a person approved before it rather than asking again, and
+// keeps it renewed, onto a new key each time, for as long as ctx lives. It logs that it took the
+// credential back (the client then logs its boot renewal: INFO when it succeeds, ERROR naming the
+// credential when the broker refuses it), or, when it has none it can use, the confirmation code
+// exactly once — pod enrollment is held until a person signed in to Dispatch approves it on the
+// credential page. A boot login that fails, expires or is denied is retried by the client on a later
+// enrollment (agentsecrets.Client.doProof), so no restart is needed. Nothing when client is nil (no
+// block).
+func startSecretsLogin(ctx context.Context, client *agentsecrets.Client, keeper agentsecrets.Keeper, log *slog.Logger) {
+	if client == nil {
+		return
+	}
+	client.Keeper = keeper
+	go func() {
+		code, err := client.Start(ctx)
+		switch {
+		case err != nil:
+			log.Error("agent-secrets machine login failed; a pod enrollment retries it", "error", err)
+		case code == "":
+			log.Info("agent-secrets machine login resumed: the daemon took back the launcher credential a person approved before its restart and is renewing it")
+		default:
+			log.Info(fmt.Sprintf(
+				"agent-secrets machine login: enter code %s on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved",
+				code,
+			))
+		}
+	}()
+}
+
+// credentialKeeper is the store as the broker client's Keeper: the launcher credential project's
+// daemon won for the broker at url (store.AgentSecretsCredential, migration 0037).
+type credentialKeeper struct {
+	store        *store.Store
+	project, url string
+}
+
+func (k credentialKeeper) Load(ctx context.Context) (agentsecrets.Kept, bool, error) {
+	return k.store.AgentSecretsCredential(ctx, k.project, k.url)
+}
+
+func (k credentialKeeper) Save(ctx context.Context, kept agentsecrets.Kept) error {
+	return k.store.SaveAgentSecretsCredential(ctx, k.project, k.url, kept)
+}
+
+func (k credentialKeeper) Forget(ctx context.Context, credentialID string) error {
+	return k.store.ForgetAgentSecretsCredential(ctx, k.project, k.url, credentialID)
 }
 
 // brokerEnroller is agentsecrets.Client as supervise.Enroller; an *agentsecrets.APIError is a
