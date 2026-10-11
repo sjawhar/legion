@@ -79,13 +79,10 @@ func TestTmuxBootRewritesAnOlderClonesCredentialHelper(t *testing.T) {
 	if err := reconfigureCloneCredential(context.Background(), cfg, tools, log); err != nil {
 		t.Fatalf("reconfigureCloneCredential: %v", err)
 	}
-	want := map[string]string{
-		"credential.helper":                       "\n" + workspace.GitHubCredentialHelper + "\n",
-		"credential.https://github.com.helper": "\n" + workspace.GitHubCredentialHelper + "\n\n" + workspace.GitHubCredentialHelper + "\n",
-	}
-	for key, expected := range want {
-		if got := git(t, located.Clone, "config", "--get-all", key); got != expected {
-			t.Errorf("%s reads %q after the fix-up, want %q", key, got, expected)
+	want := "\n" + workspace.GitHubCredentialHelper + "\n"
+	for _, key := range []string{"credential.helper", "credential.https://github.com.helper"} {
+		if got := git(t, located.Clone, "config", "--get-all", key); got != want {
+			t.Errorf("%s reads %q after the fix-up, want the empty reset and then %q", key, got, workspace.GitHubCredentialHelper)
 		}
 	}
 	if got := strings.TrimSpace(git(t, located.Clone, "config", "credential.interactive")); got != "false" {

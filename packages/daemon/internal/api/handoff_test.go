@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -60,13 +59,15 @@ type handoffGitHub struct {
 	// its answer: GitHub's trouble.
 	fail map[string]int
 	// pull request #42: its head, its base's repository id, its mergeable_state and whether it is
-	// merged. merge and the paths per pull request are the configured merge gate's test state.
+	// merged. merge is the project's merge policy, and pullFiles the JSON array GitHub answers for
+	// the pull request's changed files.
 	pullHead       string
 	baseRepo       int64
 	mergeableState string
 	merged         bool
 	merge          config.MergeRules
-	pullFiles      map[int][]string
+	pullFiles      string
+	// What READY reads of main and of the head: the rulesets' rules (with the status the read
 	// answers when not 200), the branch's protection, and the head's check runs, commit statuses
 	// and workflow runs.
 	rules        string
@@ -84,7 +85,7 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	t.Helper()
 	g := &handoffGitHub{
 		files: map[string]map[string]string{}, fail: map[string]int{},
-		pullFiles: map[int][]string{42: {"src/main.go"}},
+		pullFiles: `[{"filename":"src/main.go"}]`,
 		pullHead:  headSHA, baseRepo: 4242, mergeableState: "clean",
 		rules:        `[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
 		mainBranch:   `{"name":"main","protection":{"required_status_checks":{"contexts":["legacy"],"checks":[{"context":"legacy"}]}}}`,
@@ -117,8 +118,6 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 		switch {
 		case path == "branches/main":
 			_, _ = io.WriteString(w, g.mainBranch)
-		case path == "pulls":
-			_, _ = io.WriteString(w, `[{"number":42},{"number":43}]`)
 		case path == "pulls/42":
 			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"base":{"ref":"main","repo":{"id":%d}},"mergeable_state":%q,"merged":%t}`, g.pullHead, g.baseRepo, g.mergeableState, g.merged)
 		case path == "rules/branches/main":
@@ -136,18 +135,8 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 			_, _ = fmt.Fprintf(w, `{"total_count":%d,"check_runs":%s}`, strings.Count(g.checkRuns, `"name"`), g.checkRuns)
 		case strings.HasSuffix(path, "/status"):
 			_, _ = fmt.Fprintf(w, `{"statuses":%s}`, g.statuses)
-		case strings.HasPrefix(path, "pulls/") && strings.HasSuffix(path, "/files"):
-			number, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "pulls/"), "/files"))
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			files := g.pullFiles[number]
-			entries := make([]string, 0, len(files))
-			for _, file := range files {
-				entries = append(entries, fmt.Sprintf(`{"filename":%q}`, file))
-			}
-			_, _ = io.WriteString(w, "["+strings.Join(entries, ",")+"]")
+		case path == "pulls/42/files":
+			_, _ = io.WriteString(w, g.pullFiles)
 		case strings.HasPrefix(path, "contents/"):
 			file := strings.TrimPrefix(path, "contents/")
 			g.contentsRead = append(g.contentsRead, file+"@"+ref)
@@ -1100,18 +1089,53 @@ func TestHandoffCompleteReadyRefusesAHeadThatMovedBeforeTheMergerCanArmIt(t *tes
 	}
 }
 
+// A pull request whose change touches a by_hand path is READY for a person to merge, never armed:
+// the answer carries MANUAL_MERGE_REQUIRED whether or not the base branch requires a check, and a
+// rename counts both of its paths, so moving a protected file out of a by_hand path is by hand too.
 func TestHandoffCompleteReadyMarksAByHandPullRequestWithoutAutoArmingIt(t *testing.T) {
+	noChecks := func(g *handoffGitHub) { g.rules, g.mainBranch = `[]`, `{"name":"main","protected":false}` }
+	for _, tc := range []struct {
+		name, files string
+		base        func(*handoffGitHub)
+	}{
+		{"a by_hand path on a base requiring checks", `[{"filename":"migrations/versions/0001_init.py"}]`, func(*handoffGitHub) {}},
+		{"a by_hand path on a base requiring none", `[{"filename":"migrations/versions/0001_init.py"}]`, noChecks},
+		{"a rename out of a by_hand path", `[{"filename":"src/legacy.py","previous_filename":"migrations/versions/0001_init.py","status":"renamed"}]`, noChecks},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := newHandoffGitHub(t)
+			github.set(func(g *handoffGitHub) {
+				g.merge.ByHand = []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}}
+				g.pullFiles = tc.files
+				tc.base(g)
+			})
+			h, _, merger := newReadyHarness(t, github)
+			if code, body := ready(t, h, merger); code != http.StatusOK || !strings.HasPrefix(body, "MANUAL_MERGE_REQUIRED:") {
+				t.Fatalf("READY for a by-hand pull request = %d %q", code, body)
+			}
+		})
+	}
+}
+
+// GitHub lists at most 3,000 of a pull request's changed files, so a by_hand path past that limit
+// is never read. With by_hand rules configured, READY refuses a pull request at the limit, naming
+// why, rather than calling an unread path safe to arm.
+func TestHandoffCompleteReadyRefusesAFileListGitHubTruncated(t *testing.T) {
+	files := make([]string, 3000)
+	for i := range files {
+		files[i] = fmt.Sprintf(`{"filename":"src/file%04d.go"}`, i)
+	}
 	github := newHandoffGitHub(t)
 	github.set(func(g *handoffGitHub) {
 		g.merge.ByHand = []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}}
-		g.pullFiles[42] = []string{"migrations/versions/0001_init.py"}
-		g.rules = `[]`
-		g.mainBranch = `{"name":"main","protected":false}`
+		g.pullFiles = "[" + strings.Join(files, ",") + "]"
 	})
-	h, _, merger := newReadyHarness(t, github)
-
-	if code, body := ready(t, h, merger); code != http.StatusOK || !strings.HasPrefix(body, "MANUAL_MERGE_REQUIRED:") {
-		t.Fatalf("READY for a by-hand pull request = %d %q", code, body)
+	h, facts, merger := newReadyHarness(t, github)
+	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_FILES_TRUNCATED:") {
+		t.Fatalf("READY of a pull request with 3,000 changed files = %d %q", code, body)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
 	}
 }
 

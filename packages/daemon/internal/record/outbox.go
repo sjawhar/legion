@@ -29,6 +29,7 @@ const (
 	OutboxKindWorkspaceRemove   OutboxKind = "workspace_remove"
 	OutboxKindMergeQueuePublish OutboxKind = "merge_queue_publish"
 	OutboxKindIssueBranch       OutboxKind = "issue_branch"
+	OutboxKindAutoMergeDisable  OutboxKind = "auto_merge_disable"
 )
 
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
@@ -300,6 +301,16 @@ type IssueBranch struct {
 
 func (IssueBranch) OutboxKind() OutboxKind { return OutboxKindIssueBranch }
 
+// AutoMergeDisable turns off whatever would merge the pull request without a person: GitHub's
+// auto-merge where it is enabled, and the pull request's place in a merge queue. The workflow
+// queues it when a push moves an awaiting_merge pull request past its READY head, and when the
+// READY is withdrawn, so an armed merge never outlives the head READY named.
+type AutoMergeDisable struct {
+	Number int `json:"number"`
+}
+
+func (AutoMergeDisable) OutboxKind() OutboxKind { return OutboxKindAutoMergeDisable }
+
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
 	if err := validateOutboxPayload(payload); err != nil {
@@ -398,6 +409,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindAutoMergeDisable:
+		value := AutoMergeDisable{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -476,6 +493,10 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.Packet == "" {
 			return fmt.Errorf("merge queue publish requires packet")
+		}
+	case AutoMergeDisable:
+		if value.Number <= 0 {
+			return fmt.Errorf("auto-merge disable requires its pull request number")
 		}
 	default:
 		return fmt.Errorf("unknown outbox payload %T", payload)

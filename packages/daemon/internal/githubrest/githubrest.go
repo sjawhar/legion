@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,6 +50,54 @@ func (c Client) Post(ctx context.Context, path string, body, into any) error {
 	}
 	_, err = c.call(ctx, http.MethodPost, c.API+path, encoded, into)
 	return err
+}
+
+// GraphQL posts query and variables to the GraphQL route of endpoint, GitHub's API root (empty is
+// https://api.github.com), and decodes the answer's data into into. An answer that carries
+// GraphQL errors is an error even when its HTTP status is 200.
+func GraphQL(ctx context.Context, token, endpoint, query string, variables map[string]any, into any) error {
+	var response struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := (Client{Token: token, API: graphQLEndpoint(endpoint)}).Post(ctx, "", map[string]any{
+		"query": query, "variables": variables,
+	}, &response); err != nil {
+		return err
+	}
+	if len(response.Errors) != 0 {
+		messages := make([]string, 0, len(response.Errors))
+		for _, failure := range response.Errors {
+			messages = append(messages, failure.Message)
+		}
+		return fmt.Errorf("GitHub GraphQL: %s", strings.Join(messages, "; "))
+	}
+	if len(response.Data) == 0 || string(response.Data) == "null" {
+		return errors.New("GitHub GraphQL answered without data")
+	}
+	if into == nil {
+		return nil
+	}
+	if err := json.Unmarshal(response.Data, into); err != nil {
+		return fmt.Errorf("decode GitHub GraphQL data: %w", err)
+	}
+	return nil
+}
+
+// graphQLEndpoint is the GraphQL route of endpoint, GitHub's API root: /graphql beside the REST
+// routes, and /api/graphql for an Enterprise Server root that ends in /api/v3.
+func graphQLEndpoint(endpoint string) string {
+	endpoint = strings.TrimRight(endpoint, "/")
+	switch {
+	case endpoint == "":
+		return "https://api.github.com/graphql"
+	case strings.HasSuffix(endpoint, "/api/v3"):
+		return strings.TrimSuffix(endpoint, "/v3") + "/graphql"
+	default:
+		return endpoint + "/graphql"
+	}
 }
 
 // GetPages reads every page of the JSON array GitHub answers at path, a hundred items to a page,

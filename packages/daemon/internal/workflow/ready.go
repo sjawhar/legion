@@ -26,10 +26,32 @@ func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, packe
 // the head's own CI turned red, or it started conflicting with its base (reason, which names
 // either; classify.RedWithdrawsReady, classify.ConflictWithdrawsReady), so the issue left
 // awaiting_merge for implementing, GitHub will not merge the head, and a new READY follows once
-// the work comes back through testing and review. The architect hears it through its checks-red
-// notice.
+// the work comes back through testing and review. The merge armed for the READY is disarmed with
+// it (record.AutoMergeDisable). The architect hears it through its checks-red notice.
 func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, reason string) error {
+	if err := e.enqueue(ctx, tx, issue.Key, record.AutoMergeDisable{Number: pr.Number}); err != nil {
+		return err
+	}
 	return e.tellReadyAudience(ctx, tx, issue, fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason))
+}
+
+// disarmMovedReady disarms an awaiting_merge pull request a push moved past the head its READY
+// named (the merger's completion commit): GitHub checks --match-head-commit only when auto-merge
+// is enabled, so a later push by anyone with write access would otherwise merge a head nobody
+// reviewed. The READY's audience is told the READY no longer covers the head. A push that leaves
+// the head where READY named it changes nothing.
+func (e *Engine) disarmMovedReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
+	if err != nil {
+		return err
+	}
+	if merger.HandoffCommit == "" || merger.HandoffCommit == pr.HeadSHA {
+		return nil
+	}
+	if err := e.enqueue(ctx, tx, issue.Key, record.AutoMergeDisable{Number: pr.Number}); err != nil {
+		return err
+	}
+	return e.tellReadyAudience(ctx, tx, issue, fmt.Sprintf("READY for %s no longer covers pull request #%d: its head moved from %s to %s, which no review approved, so its auto-merge is disabled. Do not merge it; the architect decides how the new head is reviewed.", issue.Key, pr.Number, merger.HandoffCommit, pr.HeadSHA))
 }
 
 // tellReadyAudience tells packet to everyone a READY goes to: posted on the Dispatch issue, and

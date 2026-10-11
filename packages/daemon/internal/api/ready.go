@@ -100,13 +100,19 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 	if pull.MergeableState == "dirty" {
 		return "", &refusal{http.StatusConflict, "READY_HEAD_CONFLICTS", fmt.Sprintf("head %s of pull request #%d conflicts with its base %s, which GitHub cannot merge and starts no pull_request CI for: the implementer brings %s into the branch with a forward merge; tell the architect", head, number, pull.Base.Ref, pull.Base.Ref)}
 	}
+	// The project's merge policy is read once, before the checks: a by_hand pull request is READY
+	// for a person to merge however its base branch's checks are configured.
+	policyNote, refused := mergeReadyPolicy(ctx, github, rules, number)
+	if refused != nil {
+		return "", refused
+	}
 	required, err := requiredchecks.Required(ctx, github, pull.Base.Ref)
 	if err != nil {
 		return "", githubReadFailed(err)
 	}
 	if len(required.Checks) == 0 && len(required.Workflows) == 0 {
-		if note, refused := mergeReadyPolicy(ctx, github, rules, number); refused != nil || note != "" {
-			return note, refused
+		if policyNote != "" {
+			return policyNote, nil
 		}
 		return fmt.Sprintf("no check is required on %q of %s, so READY was published without reading the head's checks", pull.Base.Ref, repository), nil
 	}
@@ -151,39 +157,53 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 			return "", refused
 		}
 	}
-	if note, refused := mergeReadyPolicy(ctx, github, rules, number); refused != nil || note != "" {
-		return note, refused
-	}
-	return "", nil
+	return policyNote, nil
 }
 
+// pullRequestFilesLimit is the most changed files GitHub lists for a pull request: a pull request
+// that reaches it may change a path the list never shows.
+const pullRequestFilesLimit = 3000
+
+// mergeReadyPolicy is the project's merge policy for pull request number: the
+// MANUAL_MERGE_REQUIRED note when its change touches a by_hand path, which tells the merger not to
+// arm it, and nothing otherwise. A list GitHub cut at pullRequestFilesLimit leaves a by_hand path
+// unread, so READY is refused rather than armed on it.
 func mergeReadyPolicy(ctx context.Context, github githubrest.Client, rules config.MergeRules, number int) (string, *refusal) {
 	if len(rules.ByHand) == 0 {
 		return "", nil
 	}
-	paths, err := pullRequestPaths(ctx, github, number)
+	paths, files, err := pullRequestPaths(ctx, github, number)
 	if err != nil {
 		return "", githubReadFailed(err)
 	}
 	if rules.MatchByHand(paths) {
 		return fmt.Sprintf("MANUAL_MERGE_REQUIRED: pull request #%d matches a by_hand merge rule; do not auto-arm it", number), nil
 	}
+	if files >= pullRequestFilesLimit {
+		return "", &refusal{http.StatusConflict, "READY_FILES_TRUNCATED", fmt.Sprintf("pull request #%d changes at least %d files, the most GitHub lists, so whether it touches a by_hand path is unknown: a person merges it, or the change is split; tell the architect", number, pullRequestFilesLimit)}
+	}
 	return "", nil
 }
 
-func pullRequestPaths(ctx context.Context, github githubrest.Client, number int) ([]string, error) {
+// pullRequestPaths is every path pull request number's change touches, both names of a renamed
+// file among them, and how many files GitHub listed.
+func pullRequestPaths(ctx context.Context, github githubrest.Client, number int) ([]string, int, error) {
 	type file struct {
-		Filename string `json:"filename"`
+		Filename         string `json:"filename"`
+		PreviousFilename string `json:"previous_filename"`
 	}
 	files, err := githubrest.GetPages[file](ctx, github, fmt.Sprintf("/pulls/%d/files", number))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	paths := make([]string, 0, len(files))
 	for _, file := range files {
 		paths = append(paths, file.Filename)
+		if file.PreviousFilename != "" {
+			paths = append(paths, file.PreviousFilename)
+		}
 	}
-	return paths, nil
+	return paths, len(files), nil
 }
 
 // shortSHA is sha as a refusal names it, its first twelve characters.

@@ -225,10 +225,13 @@ daemon accepts READY, the merger submits the pull request with
 `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`: a repository with a
 merge queue enqueues it, one without arms auto-merge, and the repository's own required reviews and
 checks decide when it merges — rules Legion neither reads nor changes. If the head moves before the
-command, the head match refuses it; the merger builds and sends a new `READY` packet. When the
-head's own CI turns red while the issue awaits its merge, the daemon posts on the issue, and tells
-that role, that the `READY` is withdrawn, naming the red checks, and the implementer disarms the
-submission with `gh pr merge <n> -R <owner>/<repo> --disable-auto` before it pushes again.
+command, the head match refuses it; the merger builds and sends a new `READY` packet. GitHub checks
+the head match only when auto-merge is enabled, so a push after arming would merge an unreviewed
+head: the daemon disables the pull request's auto-merge, and takes it out of a merge queue, as the
+implement App whenever a push moves an awaiting pull request past its `READY` head, and tells the
+`READY`'s audience. When the head's own CI turns red while the issue awaits its merge, or the head
+starts conflicting with its base, the daemon posts on the issue, and tells that role, that the
+`READY` is withdrawn, naming the cause, and disarms the pull request the same way.
 
 ## The production check
 

@@ -492,8 +492,14 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 		return intake.Result{}, err
 	}
 	issue, err := e.store.Issue(ctx, tx, pr.Issue)
-	if err != nil || issue == nil || issue.Phase != phase.Implementing {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
+	}
+	if issue.Phase == phase.AwaitingMerge {
+		return intake.Result{}, e.disarmMovedReady(ctx, tx, *issue, pr)
+	}
+	if issue.Phase != phase.Implementing {
+		return intake.Result{}, nil
 	}
 	row, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleImplementer)
 	if err != nil || row.HandoffCommit == "" {

@@ -273,6 +273,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.mergeQueue(ctx, row, value)
 	case record.IssueBranch:
 		return r.issueBranch(ctx, row, value)
+	case record.AutoMergeDisable:
+		return r.autoMergeDisable(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -838,6 +840,59 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, r.repo)}
 	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue))
+}
+
+// autoMergeDisable turns off whatever would merge pull request payload.Number without a person,
+// as the implement App, which armed it: GitHub's auto-merge where it is enabled, and the pull
+// request's merge-queue entry where it has one. It reads both first, so a retried row, or one for
+// a pull request never armed, changes nothing. A pull request GitHub no longer has is nothing to
+// disarm.
+func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, payload record.AutoMergeDisable) error {
+	ctx, cancel := context.WithTimeout(ctx, issueBranchTimeout)
+	defer cancel()
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	if err != nil {
+		return fmt.Errorf("mint implement App token: %w", err)
+	}
+	const read = `query PullRequestAutoMerge($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) { id autoMergeRequest { enabledAt } mergeQueueEntry { id } }
+  }
+}`
+	var answer struct {
+		Repository struct {
+			PullRequest *struct {
+				ID               string    `json:"id"`
+				AutoMergeRequest *struct{} `json:"autoMergeRequest"`
+				MergeQueueEntry  *struct{} `json:"mergeQueueEntry"`
+			} `json:"pullRequest"`
+		} `json:"repository"`
+	}
+	if err := githubrest.GraphQL(ctx, lease.Token, r.githubAPI, read, map[string]any{
+		"owner": r.repo.Owner(), "name": r.repo.Name(), "number": payload.Number,
+	}, &answer); err != nil {
+		return fmt.Errorf("read whether pull request #%d of %s is armed: %w", payload.Number, r.repo, err)
+	}
+	pull := answer.Repository.PullRequest
+	if pull == nil {
+		r.log.Info("outbox auto-merge disable names a pull request GitHub does not have; finished without acting", "row", row.ID, "issue", row.Issue, "number", payload.Number)
+		return nil
+	}
+	if pull.AutoMergeRequest != nil {
+		const disable = `mutation DisableAutoMerge($id: ID!) { disablePullRequestAutoMerge(input: {pullRequestId: $id}) { clientMutationId } }`
+		if err := githubrest.GraphQL(ctx, lease.Token, r.githubAPI, disable, map[string]any{"id": pull.ID}, nil); err != nil {
+			return fmt.Errorf("disable the auto-merge of pull request #%d of %s: %w", payload.Number, r.repo, err)
+		}
+		r.log.Info("outbox disabled a pull request's auto-merge", "row", row.ID, "issue", row.Issue, "number", payload.Number)
+	}
+	if pull.MergeQueueEntry != nil {
+		const dequeue = `mutation DequeuePullRequest($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }`
+		if err := githubrest.GraphQL(ctx, lease.Token, r.githubAPI, dequeue, map[string]any{"id": pull.ID}, nil); err != nil {
+			return fmt.Errorf("take pull request #%d of %s out of the merge queue: %w", payload.Number, r.repo, err)
+		}
+		r.log.Info("outbox took a pull request out of the merge queue", "row", row.ID, "issue", row.Issue, "number", payload.Number)
+	}
+	return nil
 }
 
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {
