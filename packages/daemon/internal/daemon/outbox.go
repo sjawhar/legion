@@ -489,8 +489,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		// it: the start, and the task it gives, wait on the row's backoff, before a quiesce
 		// interrupts the role whose phase it would take over. StartedBy refuses the same in the
 		// claim's own decision.
-		if found && machine.Claim().RuleHolds() {
-			return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, machine.Claim().RuleHoldError())
+		if found {
+			if held := machine.Claim(); held.RuleHolds() {
+				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
+			}
 		}
 		// A start that takes the phase over from a role still at work in it (CI settled red before
 		// that role completed) does nothing — no claim, no working-copy adoption, no task — until

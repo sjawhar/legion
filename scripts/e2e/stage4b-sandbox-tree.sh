@@ -2920,11 +2920,14 @@ assert_handoff_committer "$tree1" implementer implementing 0
 smoke_file=$(pull_request_product_files)
 on_tree "$tree1" wait_for_worker "$tree1" tester
 record_resident "$tree1" tester || fail "tree 1's tester has no session and pod to keep: $(claim_view "$tree1" tester)"
-# held_waits: the daemon log, since the suspend, has the phase-finished row waiting for the
-# architect, which holds no role.
+# held_waits: the daemon log, since the suspend, has tree 1's notice row waiting for the architect:
+# it holds no role, or the row waits behind an earlier notice held for the same architect (the
+# child-status notices child-reentered sent it). The outbox logs a waiting row at Info only on its
+# first attempt, so either reason can be the one logged.
 held_waits() {
   tail -n "+$((held_mark + 1))" "$daemon_log" | jq -R -e --arg issue "$tree1" --arg architect "$held_architect" \
-    'fromjson? | select(.msg == "outbox row waits" and .kind == "notice" and .issue == $issue and ((.error // "") | contains($architect + " holds no role")))' >/dev/null
+    'fromjson? | select(.msg == "outbox row waits" and .kind == "notice" and .issue == $issue and ((.error // "") as $e
+      | ($e | contains($architect + " holds no role")) or ($e | contains($architect + "'"'"'s notice row") and contains("waits behind its row"))))' >/dev/null
 }
 on_tree "$tree1" until_true 600 "$tree1's phase-finished notice to wait for its operator-suspended architect" held_waits
 held_still() {
