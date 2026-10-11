@@ -540,14 +540,7 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 		t.Fatalf("linger suspended %v, want each tree claim once: %v", suspended, everyClaim)
 	}
 	assertOutboxCount(t, pool, "linger_close", 1)
-	// The root's done, and the hand-over of the child it leaves mid-run (admit's finished-root test
-	// follows that write to the child's own admission).
-	assertOutboxCount(t, pool, "dispatch_status", 2)
-	var handedOver int
-	if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'dispatch_status' and issue = 'LEGION-209'
-		and payload->>'status' = 'todo' and payload->>'observedStatus' = 'in_progress' and payload->>'handOver' = 'true'`).Scan(&handedOver); err != nil || handedOver != 1 {
-		t.Fatalf("the child's hand-over writes = %d, %v; want one", handedOver, err)
-	}
+	assertOutboxCount(t, pool, "dispatch_status", 1)
 
 	if _, err := intake.ApplyFact(ctx, pool, "timer", "linger-current", intake.LingerExpired{Issue: "LEGION-208", Generation: 7}, engine, admissionStub{}); err != nil {
 		t.Fatalf("ApplyFact current linger expiry: %v", err)
@@ -559,6 +552,15 @@ func TestSignOffLingersOnceAndExpiryStopsTreeAndRemovesEveryWorkspace(t *testing
 		t.Fatalf("linger expiry stopped %v, want each tree claim once: %v", stopped, everyClaim)
 	}
 	assertOutboxCount(t, pool, "workspace_remove", 2)
+	// The root stayed done through its linger, so its expiry hands the child it left implementing
+	// to Legion, fenced on this linger (admit's finished-root tests follow the write to the child's
+	// own admission); the stale expiry hands nothing over.
+	var handedOver int
+	if err := pool.QueryRow(ctx, `select count(*) from outbox where kind = 'dispatch_status' and issue = 'LEGION-209' and payload->>'status' = 'todo'
+		and payload->>'observedStatus' = 'in_progress' and payload->>'handOver' = 'true' and payload->>'handOverTree' = 'LEGION-208' and payload->>'handOverLinger' = '7'`).Scan(&handedOver); err != nil || handedOver != 1 {
+		t.Fatalf("the child's hand-over writes = %d, %v; want one, fenced on LEGION-208's linger 7", handedOver, err)
+	}
+	assertOutboxCount(t, pool, "dispatch_status", 2)
 	var other int
 	if err := pool.QueryRow(ctx, `select count(*) from outbox where (kind = 'workspace_remove' or (kind = 'supervise' and payload->>'op' = 'tree_close'))
 		and payload->>'linger' is distinct from '7'`).Scan(&other); err != nil || other != 0 {

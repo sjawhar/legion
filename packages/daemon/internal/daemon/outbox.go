@@ -296,6 +296,11 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	if issue.Status == payload.Status && !label {
 		return nil
 	}
+	if payload.HandOver {
+		if holds, err := r.handOverHolds(ctx, row, payload); err != nil || !holds {
+			return err
+		}
+	}
 	// A done write's reason goes on the issue first: Dispatch refuses a message on a closed issue.
 	// It is posted as this row's message, so a retry after a failed write finds it and posts none.
 	if payload.Reason != "" {
@@ -313,6 +318,28 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
 	}
 	return nil
+}
+
+// handOverHolds says whether a hand-over still acts: its issue is still a child of the tree it
+// names, and that tree's root still lingers at the generation whose linger ended with it done. A
+// root a person set todo again since has been re-admitted (its generation moved on, its linger
+// cleared), and admission's startMidPhaseChildren resumes the child in it; the hand-over finishes
+// without writing, so the two never both act on one child.
+func (r *outbox) handOverHolds(ctx context.Context, row record.OutboxRow, payload record.StatusWrite) (bool, error) {
+	issue, err := r.issue(ctx, row.Issue)
+	if err != nil {
+		return false, err
+	}
+	root, err := r.root(ctx, issue)
+	if err != nil {
+		return false, err
+	}
+	if issue.Tree == payload.HandOverTree && root != nil && root.LingersAt(payload.HandOverLinger) {
+		return true, nil
+	}
+	r.log.Info("outbox hand-over of a child whose tree came back; finished without writing", "row", row.ID, "issue", row.Issue,
+		"tree", payload.HandOverTree, "linger", payload.HandOverLinger, "current_tree", issue.Tree)
+	return false, nil
 }
 
 func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload record.MessagePost) error {

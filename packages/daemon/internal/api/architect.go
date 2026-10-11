@@ -291,6 +291,12 @@ func (s *server) releasableChild(w http.ResponseWriter, r *http.Request, tree, k
 // would, recorded under the live tree and started once its gate is open, and a live event of it
 // from before the read stops at the sequence fence. A child already recorded, which the earlier
 // attempt of a wave this call retries released, has had that observation.
+//
+// The workflow records a child only under a recorded parent, and a parent this same wave released
+// is recorded only once its own todo event arrives. A child the observation did not record is
+// answered CHILD_NOT_RECORDED, retryable: each attempt is its own fact (requestFactID), so the
+// retry applies the observation again once the parent is recorded, and the engine's and admission's
+// sequence fences make an observation the record already holds change nothing.
 func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, child dispatch.Issue) bool {
 	recorded, err := s.recordedIssue(r.Context(), child.Key)
 	if err != nil {
@@ -307,8 +313,16 @@ func (s *server) enterTodoChild(w http.ResponseWriter, r *http.Request, child di
 	observed := intake.DispatchIssue{
 		Key: child.Key, Seq: child.LastSeq, Status: child.Status, Title: child.Title, Parent: parent, Rank: child.Rank, HandedOver: child.HandedOver,
 	}
-	if _, err := intake.ApplyFact(r.Context(), s.pool, "api", fmt.Sprintf("release:%s:%d", child.Key, child.LastSeq), observed, s.handlers...); err != nil {
+	if _, err := intake.ApplyFact(r.Context(), s.pool, "api", requestFactID("waves/release"), observed, s.handlers...); err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", fmt.Sprintf("could not record %s", child.Key))
+		return false
+	}
+	if recorded, err = s.recordedIssue(r.Context(), child.Key); err != nil {
+		writeFailure(w, http.StatusInternalServerError, "RECORD_UNAVAILABLE", fmt.Sprintf("could not read the record of %s", child.Key))
+		return false
+	}
+	if recorded == nil {
+		writeFailure(w, http.StatusConflict, "CHILD_NOT_RECORDED", fmt.Sprintf("%s is todo but not recorded: the daemon records a child only under a recorded parent (%s) of a live tree; retry release_children once the parent's release has reached the daemon", child.Key, parent))
 		return false
 	}
 	return true

@@ -562,7 +562,7 @@ func TestWaveReleaseReleasesUnreleasedChildrenOfTheTreeOverTheDispatchGraph(t *t
 // no retry could ever finish the wave.
 func TestWaveReleaseRetryFinishesAWaveAPartialFailureLeftHalfReleased(t *testing.T) {
 	h, _, statuses := newArchitectHarness(t, nil, nil)
-	seedTree(t, h, "LEGION-208")
+	seedTree(t, h, "LEGION-208", "LEGION-209") // the first attempt's todo event recorded LEGION-209
 	root := "LEGION-208"
 	statuses.issues = map[string]dispatch.Issue{
 		"LEGION-208": {Key: "LEGION-208", Status: "in_progress"},

@@ -128,26 +128,50 @@ func TestOutboxStatusWriteCallsDispatchOnlyForItsObservedStatus(t *testing.T) {
 // A hand-over writes its status and the legion label together, in one Dispatch write that keeps
 // the labels the issue carries, and still writes the label where Dispatch already shows the status.
 // An issue that already carries the label takes the plain status write, and one a person moved
-// since the write was queued takes none.
+// since the write was queued takes none. The write is fenced on the linger that ended: a root a
+// person set todo again before it runs, re-admitted at its next generation, keeps its child, and so
+// does a child no longer that tree's — neither is written.
 func TestAHandOverWritesTheStatusAndTheLabelTogether(t *testing.T) {
-	row := mustOutboxRow(t, "LEGION-208", record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true}, time.Now())
+	const root, child = "LEGION-207", "LEGION-208"
+	until := time.Date(2026, 9, 24, 12, 0, 0, 0, time.UTC)
+	parent := root
+	lingering := record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 3, Status: "done", LingerUntil: &until}
+	reopened := lingering
+	reopened.Generation, reopened.LingerUntil, reopened.Phase, reopened.Status = 4, nil, phase.Admitted, "in_progress"
+	member := record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress"}
+	orphaned := member
+	orphaned.Tree = child
+	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 3}, time.Now())
 	for _, tc := range []struct {
 		name                string
+		root, child         record.Issue
 		shown               dispatch.Issue
 		statuses, handOvers []string
 	}{
-		{name: "unlabelled, mid-run", shown: dispatch.Issue{Key: row.Issue, Status: "in_progress", Labels: []string{"repo:x"}},
+		{name: "unlabelled, mid-run", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "in_progress", Labels: []string{"repo:x"}},
 			handOvers: []string{"LEGION-208 todo [repo:x]"}},
-		{name: "unlabelled, already todo", shown: dispatch.Issue{Key: row.Issue, Status: "todo"},
+		{name: "unlabelled, already todo", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "todo"},
 			handOvers: []string{"LEGION-208 todo []"}},
-		{name: "labelled, mid-run", shown: dispatch.Issue{Key: row.Issue, Status: "in_progress", Labels: []string{"Legion"}, HandedOver: true},
+		{name: "labelled, mid-run", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "in_progress", Labels: []string{"Legion"}, HandedOver: true},
 			statuses: []string{"todo"}},
-		{name: "labelled, already todo", shown: dispatch.Issue{Key: row.Issue, Status: "todo", Labels: []string{"legion"}, HandedOver: true}},
-		{name: "moved by a person", shown: dispatch.Issue{Key: row.Issue, Status: "backlog"}},
+		{name: "labelled, already todo", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "todo", Labels: []string{"legion"}, HandedOver: true}},
+		{name: "moved by a person", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "backlog"}},
+		{name: "root reopened since", root: reopened, child: member, shown: dispatch.Issue{Key: child, Status: "in_progress"}},
+		{name: "child no longer the tree's", root: lingering, child: orphaned, shown: dispatch.Issue{Key: child, Status: "in_progress"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				if err := records.PutIssue(context.Background(), tx, tc.root); err != nil {
+					return err
+				}
+				return records.PutIssue(context.Background(), tx, tc.child)
+			}); err != nil {
+				t.Fatalf("seed the tree: %v", err)
+			}
 			client := &outboxDispatch{issue: tc.shown}
-			if err := (&outbox{dispatch: client}).execute(context.Background(), row); err != nil {
+			if err := (&outbox{pool: pool, records: records, dispatch: client, log: quietLogger()}).execute(context.Background(), row); err != nil {
 				t.Fatalf("execute the hand-over: %v", err)
 			}
 			if !slices.Equal(client.statuses, tc.statuses) || !slices.Equal(client.handOvers, tc.handOvers) {

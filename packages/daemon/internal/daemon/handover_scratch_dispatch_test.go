@@ -9,7 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -47,8 +50,21 @@ func TestAHandOverReachesScratchDispatchAsOneEventCarryingTheTodoAndTheLabel(t *
 		t.Fatalf("read the mid-run child: %v", err)
 	}
 
+	// The closed tree, as the record holds it once its root's linger ended with the root done.
+	const root = "LEGION-900"
+	until := time.Now().UTC()
+	parent := root
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}); err != nil {
+			return err
+		}
+		return records.PutIssue(context.Background(), tx, record.Issue{Key: issue, Tree: root, Project: "LEGION", Title: issue, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress"})
+	}); err != nil {
+		t.Fatalf("seed the closed tree: %v", err)
+	}
+
 	now := time.Now().UTC()
-	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue, record.StatusWrite{Status: "todo", ObservedStatus: "in_progress", HandOver: true}, now))
+	enqueueOutbox(t, pool, records, mustOutboxRow(t, issue, record.StatusWrite{Status: "todo", ObservedStatus: "in_progress", HandOver: true, HandOverTree: root, HandOverLinger: 2}, now))
 	runner := &outbox{dispatchProject: "LEGION", pool: pool, records: records, dispatch: daemonDispatch, now: func() time.Time { return now }, log: quietLogger()}
 	if err := runner.RunOnce(context.Background()); err != nil {
 		t.Fatalf("run the hand-over: %v", err)

@@ -46,8 +46,12 @@ type StatusWrite struct {
 	Reason string `json:"reason,omitempty"`
 	// HandOver also puts dispatch.LegionLabel on the issue, in the same Dispatch write: the write
 	// hands the issue to Legion, and the runner writes it while the label is missing even where
-	// Dispatch already shows Status.
-	HandOver bool `json:"handOver,omitempty"`
+	// Dispatch already shows Status. HandOverTree and HandOverLinger fence it: the runner writes it
+	// only while the issue is still that tree's and the tree's root still lingers at that
+	// generation (Issue.LingersAt), so a root re-admitted since keeps the issue as its child.
+	HandOver       bool   `json:"handOver,omitempty"`
+	HandOverTree   string `json:"handOverTree,omitempty"`
+	HandOverLinger uint64 `json:"handOverLinger,omitempty"`
 }
 
 func (StatusWrite) OutboxKind() OutboxKind { return OutboxKindDispatchStatus }
