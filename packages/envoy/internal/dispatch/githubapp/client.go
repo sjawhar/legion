@@ -73,6 +73,16 @@ const (
 	blobResponseLimit = 2 << 20
 )
 
+// RequestTimeout bounds one API call -- the request and reading its body -- unless the caller's
+// own context ends sooner, which always wins. GitHub terminates a request it has spent about
+// ten seconds processing and answers its own error (documented for both the REST and the
+// GraphQL API), so a deadline at ten seconds races GitHub's own: an answer that was about to
+// arrive, success or GitHub's own timeout, is cut off and reported as a bare client timeout
+// instead. This is that bound plus room for the connection and for transferring a response at
+// responseLimit.
+// A var rather than a const so a test can shrink it; nothing outside a test writes it.
+var RequestTimeout = 20 * time.Second
+
 // ResponseTooLargeError reports a response that did not fit inside a caller's configured limit.
 type ResponseTooLargeError struct {
 	Limit int64
@@ -224,10 +234,12 @@ func New(app *auth.AppConfig, base string) (*Client, error) {
 		base = defaultBase
 	}
 	c := &Client{
-		app:          *app,
-		key:          key,
-		base:         strings.TrimSuffix(base, "/"),
-		http:         &http.Client{Timeout: 10 * time.Second},
+		app:  *app,
+		key:  key,
+		base: strings.TrimSuffix(base, "/"),
+		// No Timeout here: request applies RequestTimeout to each call's own context instead,
+		// so a caller that needs a shorter one sets it on the context it passes.
+		http:         &http.Client{},
 		now:          time.Now,
 		tokens:       map[int64]cachedToken{},
 		repositories: map[string]int64{},
@@ -623,6 +635,8 @@ func (c *Client) doLimited(ctx context.Context, method, target, authorization st
 // request performs one API call and returns its complete body when it fits within limit, status
 // and headers. body is nil for every GET call; GraphQL is this package's only POST with a body.
 func (c *Client) request(ctx context.Context, method, target, authorization string, body io.Reader, limit int64) ([]byte, int, http.Header, error) {
+	ctx, cancel := context.WithTimeout(ctx, RequestTimeout)
+	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, 0, nil, fmt.Errorf("build %s %s: %w", method, target, err)

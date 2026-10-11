@@ -182,7 +182,7 @@ await_role_claim() {
 previous_ask_ids=""
 if [[ "$mode" == E4 ]]; then
   previous_ask_ids="$(human_get_issue | jq -r '.open_asks[]? | .id')"
-  prompt="Call dispatch_ask on issue $ISSUE_KEY asking 'Ship it?' with options Yes/No, then wait."
+  prompt="Run this command in your shell, then wait: dispatch ask --issue $ISSUE_KEY --question 'Ship it?' --option Yes --option No"
 else
   curl --fail-with-body --silent --show-error \
     -X PATCH \

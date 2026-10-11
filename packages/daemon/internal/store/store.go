@@ -32,16 +32,24 @@ type Store struct {
 // Open connects to dsn and waits for the server to answer, so a daemon that
 // gets a Store has a database and one that does not is told where it failed.
 func Open(ctx context.Context, dsn string) (*Store, error) {
-	address, password := target(dsn)
 	pool, err := pgxpool.New(ctx, dsn)
 	if err != nil {
-		return nil, &connectError{address: address, password: password, err: err}
+		return nil, ConnectError(dsn, err)
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, &connectError{address: address, password: password, err: err}
+		return nil, ConnectError(dsn, err)
 	}
 	return &Store{pool: pool}, nil
+}
+
+// ConnectError is a failure to reach the Postgres dsn names as an operator reads it: the address
+// it points at and the driver's detail, never dsn's password (connectError). Every connection Legion
+// opens reports its refusal this way, the daemon's own and Oh My Pi's session database's
+// (internal/ompsessions).
+func ConnectError(dsn string, err error) error {
+	address, password := target(dsn)
+	return &connectError{address: address, password: password, err: err}
 }
 
 // Close releases the pool's connections.

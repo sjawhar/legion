@@ -1,10 +1,12 @@
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import path from "node:path";
+import { LegionReadyRequest } from "@legion/contracts/legion-api";
 import {
   createLegionDaemonClient,
   LegionDaemonApiError,
   LegionDaemonContractError,
+  type ReadyInput,
 } from "./daemon-client";
 
 /** A response the daemon's own golden test wrote (`packages/daemon/internal/api`). */
@@ -130,6 +132,21 @@ test("ready and exit post the claim wire's requests and accept only the empty 20
   await expect(talkative.ready(ready)).rejects.toBeInstanceOf(LegionDaemonContractError);
 });
 
+test("a ready carrying the capability report is the daemon's golden ReadyRequest, field for field", async () => {
+  // ready.json is what the daemon's golden test wrote of a `claim.ReadyRequest` with a report, so
+  // sending it as the client's input and recording the body it posts pins both sides to it.
+  const fixture = daemonFixture("ready.json");
+  const golden: ReadyInput = LegionReadyRequest.parse(fixture);
+  const { fetch, requests } = daemon(() => new Response(null, { status: 204 }));
+  const client = createLegionDaemonClient("http://daemon.test", fetch);
+
+  await expect(client.ready(golden)).resolves.toBeUndefined();
+  expect(requests).toEqual([
+    { method: "POST", url: "http://daemon.test/legion/v1/claims/ready", body: fixture },
+  ]);
+  expect(golden.capabilities?.rows).toHaveLength(3);
+});
+
 test("reads the daemon's state strictly, refusing the TypeScript daemon's shape", async () => {
   const state = daemonFixture("state.json");
   const { fetch, requests } = daemon(() => Response.json(state));
@@ -152,9 +169,6 @@ test("reads the daemon's state strictly, refusing the TypeScript daemon's shape"
 test("posts every Stage 3 workflow request through its matching route", async () => {
   type WorkflowClient = {
     readonly grant: (body: object) => Promise<unknown>;
-    readonly githubToken: (body: object) => Promise<unknown>;
-    readonly gitCredential: (body: object) => Promise<unknown>;
-    readonly provisioningCredential: (body: object) => Promise<unknown>;
     readonly handoffComplete: (body: object) => Promise<unknown>;
     readonly issueStatus: (body: object) => Promise<unknown>;
     readonly gateRegister: (body: object) => Promise<unknown>;
@@ -172,14 +186,8 @@ test("posts every Stage 3 workflow request through its matching route", async ()
       { sessionId: "ses_208", secret: "claim-secret", tree: "LEGION-208", issue: "LEGION-209" },
       "grant.json",
     ],
-    ["githubToken", "/legion/v1/gh-token", { grantId: "grant-208" }, "github-token.json"],
-    ["gitCredential", "/legion/v1/git-credential", { grantId: "grant-208" }, "git-credential.json"],
-    [
-      "provisioningCredential",
-      "/legion/v1/provisioning-credential",
-      { grantId: "grant-208" },
-      "provisioning-credential.json",
-    ],
+    // The completion names the pushed commit carrying the handoff, which the legion tool found
+    // in the pane; the daemon answers the note READY's checks left when they read no head.
     [
       "handoffComplete",
       "/legion/v1/handoff/complete",

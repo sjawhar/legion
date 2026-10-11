@@ -31,6 +31,7 @@ legion start --config legion.yaml --check-config
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
+| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay, and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, and the controller's daily report names each open one. In the daemon's log alone (the check prints no such row), a line without the `; to record a decision` tail — `capability <name> is open: pod <sandbox>/<container> (<role>, <issue>): <fact>`, or `pane <window>:<pane>` under tmux — is a live row (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) that a running session's own check at its start failed: the daemon logs the fact alone, with the claim, role, issue and locator as the line's attributes, as the session reports ready, then this pod-naming form at boot and at the first controller tick after the set of open rows changed, and `legion state` shows the row `open` with that detail, naming each failing session. The fact is what the session measured inside its Oh My Pi (`web_search is not a registered tool`, `not connected: <server> (<error>)`, `agents the prompts dispatch that the task tool does not resolve: <names>`, `not discovered: <paths>`, `Envoy tools missing: <names>`, `dispatch read failed: <stderr>`, `gh viewer login failed: <stderr>`, or `did not finish within 8 s`). No `capabilities.decided` line applies: fix what the fact names in the session's environment, and the row heals when that process is relaunched with the gap closed or reports anew at its next boot — a session that booted during a Dispatch, GitHub or search-provider outage reads open until then. The session's own report is under `issues.<KEY>.architect.capabilities` or `issues.<KEY>.workers.<role>.claim.capabilities` in `legion state --json`. |
 
 **At boot, after the check passes**, the daemon checks the cluster and the image:
 
@@ -54,15 +55,59 @@ legion start --config legion.yaml --check-config
   - the probe pod cannot mount the providers Secret (`… cannot mount the providers Secret
     legion-<project>-providers …`): create the Secret with every key `provider_keys` names;
   - the image names another NATS user than the daemon's seed: put the agents' seed in the providers
-    Secret's `NATS_NKEY_SEED` key.
+    Secret's `NATS_NKEY_SEED` key;
+  - `capability <name> is missing: <detail>` in the quoted log: the image lacks a tool the capability
+    check looks for (`chromium`, a language server, `go`, …), or an operator pod env such as
+    `PUPPETEER_EXECUTABLE_PATH` names one that does not run. Rebuild the image from a commit whose
+    Dockerfile carries it, or fix the variable; the worker-image workflow fails the same way on an
+    image that lacks one;
+  - `Succeeded without checking the capability list (its legion CLI predates the check)`: the image's
+    `legion` is older than this daemon's capability check. Build the image from this daemon's
+    commit.
 
   A model key that fails at boot refuses the boot even when the cause is a passing network blip,
   since the probe cannot tell the two apart. Start the daemon again once the cause is gone.
+
+## The daemon stops
+
+On SIGTERM (`legion stop`, a rollout, a node drain) the daemon logs `legion daemon stopping`, with
+`deciding` naming each claim whose decision is in flight and its event. It cuts short every
+relaunch and suspension it started itself and, once it has recorded its boot, the boot steps still
+running. A request in flight from the operator or an agent gets up to 8 seconds to finish, so a
+suspension or stop whose agent is already exiting is recorded. An operator request that would
+change a claim and that the daemon accepted before the stop began, but had not started deciding,
+is answered `503` (`<request> refused: the daemon is stopping; ask again once it is back`); one
+sent once the stop has begun gets the same 503, or finds no daemon listening once the daemon has
+closed its API listener. Repeat either once the daemon is back. It logs `legion daemon stopped`
+once it has recorded the boot's end. It waits at most 10 seconds for its own work before it records
+that, so it stops well inside a pod's termination grace. It ends no agent: the next boot re-adopts
+every pod or pane still running and relaunches each launch the stop cut short.
+
+A signal that comes before the boot is recorded ends the boot step under way only when that step
+is the plugin gate, which runs first, the GitHub App token mint, the image probe, or the NATS and
+Dispatch readiness checks; the daemon then stops without recording a boot. The cluster check,
+opening and migrating the store, building the runtime and recording the boot are not cut short:
+each runs to its end, with at most 30 seconds between one of the steps that end at the signal and
+the next, and the daemon stops at the next such step, or once its boot is recorded, which it then
+stamps.
+
+- **`legion daemon stopped draining the API`.** A request was still in flight after those 8
+  seconds. The daemon cut it short, the caller got an error, and the next boot takes its claim up;
+  repeat the request once the daemon is back.
+- **`legion daemon stopped waiting for its work`.** Some of the daemon's work had not ended when that
+  wait ran out, which takes a call into a process that does not answer; `deciding` names each claim
+  whose decision was still running, with its event. The daemon stopped anyway, and the next boot
+  takes those claims up.
 
 ## The controller
 
 - **The daemon logs `controller not registered; run legion controller start`.** Nobody is running
   the controller. Start it ([Start the controller](/legion/legion/running-legion/#start-the-controller)).
+- **The daemon logs `controller not registered; run legion controller start only under controller:
+  operator; this daemon launches its own controller and relaunches it`.** The controller the daemon
+  launches has not registered, or its session is gone. The line's `claimState` says where its claim
+  is: `launching` while a launch is in flight, `failed` or `retired` while the daemon waits to retry
+  it. For a launch that keeps failing, see "The daemon-launched controller keeps failing" below.
 - **`legion controller start` is refused: `this daemon launches the project's controller itself
   (controller: daemon), so legion controller start has none to start`.** The daemon runs its own
   controller as a pod; reach it through Dispatch instead.
@@ -185,35 +230,47 @@ legion status <KEY> backlog --config legion.yaml --operator-token-file operator-
 legion status <KEY> todo    --config legion.yaml --operator-token-file operator-token
 ```
 
-To see why the launches failed, read the pod's logs:
+To see why the launches failed, read the failed role's container log in the issue's pod:
 
 ```sh
 kubectl -n legion get pods -l legion.dev/issue=<KEY>
-kubectl -n legion logs <pod> -c worker
+kubectl -n legion logs <pod> -c <role>   # e.g. -c implementer
 kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 ```
 
 ## A pod does not come up
 
-- **`Pending`.** Usually scheduling: a tree's pods must share one node, and different trees never
-  share a node, so a pool without a free node of the right size leaves the tree's next pod
-  unscheduled. `kubectl -n legion describe pod <pod>` names the reason. Keep `admission_cap` within
-  what the pool can hold ([The cluster](/legion/legion/running-legion/#the-cluster)).
-- **The `workspace-init` container fails.** It provisions the issue's workspace on the tree volume,
-  and its refusals name what to do, sometimes a `jj` command to run against the tree's shared clone
-  (a local bookmark deleted and never pushed, or a conflicted one). Read it with
+- **`Pending`.** Usually scheduling: a pod reserves its roles' cpu and memory (3 CPU and 19 GiB for
+  an issue pod at the defaults) and lands wherever the pool has room, so a pool at its limits leaves
+  the next pod unscheduled until the daemon reads it dead past `worker_boot_timeout_seconds` and,
+  once its launch failures run out, fails the claim. `kubectl -n legion describe pod <pod>` names the
+  reason. Keep `admission_cap`, and the children a tree runs at once, within what the pool's limits
+  can place ([The cluster](/legion/legion/running-legion/#the-cluster)). A pod relaunched onto
+  another node first waits for its volume to detach from the old one (`FailedAttachVolume` or
+  `Multi-Attach` events, transient). The image probe pod, `legion-probe-<project>-<digest prefix>`,
+  Pending Unschedulable at boot is the one pod the daemon waits on instead: it logs `boot probe is
+  waiting on capacity; running it again` with the scheduler's reason and creates the pod again every
+  5 minutes, serving nothing until one is placed and passes, and then reports the `pool-capacity`
+  capability open with the count and the reason. Make room in the pool, or raise its limits; the
+  probe pod itself needs only 250m and 1Gi.
+- **The `workspace-init` container fails.** It provisions the issue's workspace on the issue's own
+  volume, and its refusals name what to do, sometimes a `jj` command to run against the issue's
+  clone (a local bookmark deleted and never pushed, or a conflicted one). Read it with
 
   ```sh
   kubectl -n legion logs <pod> -c workspace-init
   ```
 
   Nothing is registered before a refusal, so every later attempt refuses the same way until the
-  repository is fixed. Run the commands it names from a shell in one of the tree's running pods
-  (`kubectl -n legion exec -it <pod> -c worker -- sh`).
-- **The tree volume was lost.** The daemon logs
-  `supervise: the tree volume was lost with the session; relaunching a fresh session`. The agent
-  comes back as a new session in a new workspace, which holds `.legion/<issue>/workspace-recovered.json`
-  naming the issue's branch to reconcile from.
+  repository is fixed. Run the commands it names from a shell in the issue's running pod
+  (`kubectl -n legion exec -it <pod> -c architect -- sh`), or, when none runs, in a pod of your own
+  that mounts the issue's volume (`docs/kubernetes.md` in the repository, "A shell on an issue's
+  volume").
+- **The issue's volume was lost.** The daemon logs
+  `supervise: the issue's volume was lost with the session; relaunching a fresh session`. The loss
+  is one issue's: its other roles drop the sessions they kept on that volume, and no other issue of
+  the tree is touched. The agent comes back as a new session in a new workspace, which holds
+  `.legion/<issue>/workspace-recovered.json` naming the issue's branch to reconcile from.
 - **`worker-stream: rejected hello (stale worker generation)`** in the daemon's log is the fence
   working: a pod from an older generation of a claim tried to connect after a newer one replaced it.
   Nothing to do.
@@ -232,29 +289,53 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 
 These arrive as messages on the Dispatch issue, and the architect is told:
 
-- **`Issue reached review_round_cap=3.`** Three review rounds sent the change back. The architect
-  decides what happens next, often with a question to you.
+- **`Issue reached review_round_cap=3.`** The implementer's round count reached three
+  ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
+  architect decides what happens next, often with a question to you.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
-  stayed red through three fix attempts.
+  stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
+  counted head and every head pushed on top of it until a push lands on a head CI judged green) no
+  longer sends the work back by itself, so the issue waits in testing or review for the architect,
+  or for a worker's own decision such as a reviewer's request for changes. A `READY` is still
+  withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
-  round, so an approval or request for changes from anyone else leaves it undecided too. The daemon
-  reads the author's permission from GitHub before it applies the review: an account GitHub answers
-  `404` for, or a `403` that is not its rate limit, has no write access, and stands so for five
-  minutes; write access is read again for every review. Any other failed read is retried, a rate
-  limit once the wait GitHub names has passed, and while that wait stands the daemon reads nothing
-  from GitHub. The daemon logs each review that decides nothing as `workflow: a review decides nothing:
-  its author is neither the review App nor an account with write access to the repository`, with
-  the author's login, and logs a permission it read as no write access with GitHub's own answer. A
-  `403` that is not a rate limit is logged at error as `workflow: GitHub refuses the review App's
-  installation a review author's repository permission`, naming the installation's owner: the
-  review App's installation cannot read the repository's collaborators, so until it can, no review
-  but the review App's decides a round.
-- **`READY` refused.** The merger's `READY` is refused until every check the base branch requires
-  has succeeded on the pull request's head, and every workflow its rulesets require has a run on
-  the head that succeeded, and while the design gate is closed. The refusal names the head and the
-  check or workflow, or the spec version that needs approval.
+  round, so an approval or request for changes from anyone else leaves it undecided too. A review
+  from the review App decides a round only when it comes from the reviewer's own session: the
+  daemon reads the review's Legion footer
+  (`<!-- legion: {"session":"…","phase":"review"} -->`) and requires the session it names to match
+  the session recorded on the reviewer's claim. A review-App review with no footer, or whose
+  footer names another session (the controller's, an architect's), is set aside and decides
+  nothing, logged at warn as `workflow: a review decides nothing: the review App submitted it from
+  a session that is not the reviewer's`, with `footer_session`, `reviewer_session` and
+  `body_truncated`. While the reviewer's session is not yet recorded, the login alone decides,
+  logged as `workflow: the reviewer's session is not recorded; the review App's login decides`.
+  Envoy caps review bodies at 2048 runes, so the daemon restores a truncated review-App body from
+  GitHub before reading its footer; a review it cannot restore (no review id) stays set aside with
+  `body_truncated=true`. The remedy for this stall: the reviewer re-submits its review with the
+  footer naming its own session. The daemon reads the author's permission from GitHub before it
+  applies the review: an account GitHub answers `404` for, or a `403` that is not its rate limit,
+  has no write access, and stands so for five minutes; write access is read again for every review.
+  Any other failed read is retried, a rate limit once the wait GitHub names has passed, and while
+  that wait stands the daemon reads nothing from GitHub. The daemon logs each review that decides
+  nothing for permission reasons as `workflow: a review decides nothing: its author is neither the
+  review App nor an account with write access to the repository`, with the author's login, and logs
+  a permission it read as no write access with GitHub's own answer. A `403` that is not a rate limit
+  is logged at error as `workflow: GitHub refuses the review App's installation a review author's
+  repository permission`, naming the installation's owner: the review App's installation cannot
+  read the repository's collaborators, so until it can, no review but the review App's decides a
+  round.
+- **`READY` refused.** The merger's `READY` is refused while the pull request's head still carries
+  the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
+  to `retro`); until every check the base branch requires has succeeded on the head, and every
+  workflow its rulesets require has a run on the head that succeeded; and while the design gate is
+  closed. The refusal names the head and the directory, the check or workflow, or the spec version
+  that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
+  failure, and the merger completes again. None of the head checks applies to a pull request a
+  person already merged: its `READY` is published unread, and the issue goes on to its production
+  check. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
+  for a pull request that deletes it.
 
 An issue back in `in_progress` after its `READY`, while it awaited its merge, had a required check
 or workflow turn red on the head itself, or its head conflicts with its base (GitHub computes no
@@ -286,8 +367,8 @@ branch requires`); the daemon reads again every two minutes.
 ## A status change did not stick
 
 The daemon owns a running tree's status. A status an agent session writes on a running root is set
-back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, or
-`legion status` from the controller or an operator's shell, is what takes a tree out.
+back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, the
+controller's `set_status`, or `legion status` from an operator's shell, is what takes a tree out.
 
 When the daemon's own status writes to Dispatch are failing, `legion state` says so on its third
 line:
@@ -306,11 +387,38 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   the `operation` and `subject`). The daemon's NATS user is missing a grant;
   [Envoy](/legion/dispatch/envoy/) lists the subjects it needs. A daemon can boot healthy and
   consume events with one grant missing, so search the log for this line after a NATS change.
-- **`agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
-  <operator>); pod enrollment is held until approved`.** With `runtime.kubernetes.agent_secrets`
-  set, the daemon logs in to the [Secrets Broker](/legion/broker/) at boot and waits for the
-  `operator` to approve the code on Dispatch's credential page; pods are not enrolled until then.
+- **`agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page, where
+  anyone signed in may approve it; pod enrollment is held until approved`.** With
+  `runtime.kubernetes.agent_secrets` set, the daemon logs in to the [Secrets Broker](/legion/broker/)
+  at boot and waits for anyone signed in to Dispatch to approve the code on its credential page;
+  pods are not enrolled until then. Denying the code does not stop new ones: while a pod needs
+  enrolling or revoking, the daemon asks again after its wait (30 s after the first denial,
+  doubling to a cap of one code every 5 minutes). To stop the codes, stop the daemon, or remove its
+  `agent_secrets` block and restart it: the daemon reads `legion.yaml` only at start.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin
   ```
+- **`runtime.kubernetes.agent_secrets.operator was removed (LEGION-664)`.** The daemon's login is
+  the `legion-daemon` service's, which anyone signed in to Dispatch approves, so the block names no
+  approver. Delete the key.
+- **`agent-secrets machine login failed; a pod enrollment retries it`.** The broker refused the
+  daemon's boot login or could not be reached: a broker too old to accept a service's login with no
+  named approver, a `429` from the bucket every service's login shares, or a network fault.
+  `.agentSecretsLogin` reads `"state": "failed"` until the next login opens. Nothing needs
+  restarting. Fix the broker, and the next pod enrollment starts a fresh login whose code is on
+  `.agentSecretsLogin` and in the supervisor's `enrollment failed; retrying on the next
+  observation` warning. The daemon waits 30 s after a failed login before the next, doubling to at
+  most 5 minutes.
+- **`supervise: agent-secrets: the broker found the pod token expired; keeping the key for a fresh
+  token`** (`403 POD_TOKEN_EXPIRED: the projected token has expired (oidc: token expired at
+  <time>)`). The token the daemon presented for the pod expired before the broker checked it. The
+  daemon reads a fresh token from the shim when the one it holds is about to expire, so from a
+  current daemon this means the broker's clock runs more than a minute ahead of the daemon's. The
+  daemon keeps the pod's key, asks the shim for the pod's current token at its next observation,
+  and enrolls the key with it; check the two hosts' clocks.
+- **`supervise: agent-secrets: enrollment refused; waiting for the shim's next hello`** with
+  `403 POD_IDENTITY_MISMATCH: the projected token does not identify this pod`. The token is not
+  this pod's: it names another pod UID, it is not signed by the cluster the broker trusts
+  (`BROKER_K8S_OIDC_ISSUER`), or it is for another audience. An expired token is answered
+  `POD_TOKEN_EXPIRED` instead.

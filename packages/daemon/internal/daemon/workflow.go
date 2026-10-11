@@ -23,6 +23,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
@@ -83,8 +84,8 @@ type workflowRuntime struct {
 	// https://api.github.com, and a test points it at a stand-in.
 	githubAPI string
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
-	// review it submits decides a round by that login alone, so reviewerCanWrite asks GitHub
-	// nothing about it.
+	// review it submits decides a round by that login and the reviewer's recorded session
+	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
 	reviewAppLogin string
 	// permissions holds, by repository and login, until when reviewerCanWrite's read of GitHub
 	// stands as no write access; permissionTTL is how long one stands, zero, in production, being
@@ -94,6 +95,13 @@ type workflowRuntime struct {
 	permissions   map[permissionKey]time.Time
 	permissionTTL time.Duration
 	limitedUntil  time.Time
+	// refusedReviews is every review, by GitHub's review id, whose author the pass's read of a pull
+	// request's reviews found the workflow does not let decide (reviewToApply), so this process
+	// judges each such review once, as a webhook's review is judged once when it is delivered: an
+	// account given write access later never turns a review the read refused into a decision. It is
+	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
+	// then. Only the pass touches it.
+	refusedReviews map[int64]bool
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.
@@ -129,7 +137,7 @@ var appMintRetry = bootprobe.Retry{Initial: 5 * time.Second, Max: 30 * time.Seco
 // token passed asks GitHub only for the review token. It returns the review App's bot login from
 // its lease: the engine judges a push by its pusher against it, so one App configured for both
 // roles would make every implementer push the review App's and count no fix attempt, and is
-// refused.
+// refused, as is a review lease that names no login.
 func mintAtBoot(ctx context.Context, tokens appauth.Tokens, owner string, log *slog.Logger) (string, error) {
 	logins := map[appauth.AppRole]string{}
 	err := bootprobe.Run(ctx, "GitHub App tokens mint", appMintRetry, log, func(ctx context.Context) bootprobe.Outcome {
@@ -235,7 +243,7 @@ func (w *workflowRuntime) connect(ctx context.Context, cfg config.Config, nc nat
 	w.log.Info("legion workflow boot stage", "stage", "intake")
 	w.consumers, err = intake.OpenConsumers(ctx, js, intake.ConsumerSpec{
 		Project: cfg.Project, Repositories: []ghrepo.Repository{w.project.Repo}, AckWait: cfg.WorkerRPCTimeout, NakDelay: time.Second, Logger: w.log,
-		ReviewPermission: w.reviewerCanWrite,
+		ReviewPermission: w.reviewerCanWrite, ReviewBody: w.reviewBody,
 	})
 	if err != nil {
 		conn.Close()
@@ -355,10 +363,26 @@ func (w *workflowRuntime) identity(ctx context.Context, role claim.Role) (runtim
 	return lease.Identity, nil
 }
 
+// gitHubCredential is the runtime's function for a tree role's gh files (runtime.GitHubCredential)
+// over the workflow's App tokens: the role's App's lease for the repository owner — the manager
+// holds the lease and re-mints it as it nears its expiry, so a launch and every refresher tick ask
+// GitHub only when the lease turns over — rendered as gh's hosts.yml and config.yml, named for the
+// App and its expiry so the runtime's log can say whose token it wrote.
+func gitHubCredential(tokens appauth.Tokens, owner string) runtime.GitHubCredential {
+	return func(ctx context.Context, role claim.Role) (ghconfig.Rendered, error) {
+		appRole := appauth.AppRoleFor(role)
+		lease, err := tokens.Token(ctx, appRole, owner)
+		if err != nil {
+			return ghconfig.Rendered{}, fmt.Errorf("mint the %s App lease for %s: %w", appRole, role, err)
+		}
+		return ghconfig.Render(lease.Token, string(appRole), lease.ExpiresAt), nil
+	}
+}
+
 func (w *workflowRuntime) attach(supervision *supervision) {
 	w.log.Info("legion workflow boot stage", "stage", "outbox")
 	w.outbox = newOutbox(w.pool, w.records, w.dispatch, notify.New(supervision.cfg.EnvoyURL, supervision.plan.secrets["ENVOY_TOKEN"]), supervision.supervisor,
-		w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, w.githubAPI, supervision.plan.tools, w.log)
+		supervision.supervisor.store, w.tokens, w.handlers, w.projectID, w.dispatchProject, w.stateDir, w.project, w.githubAPI, supervision.plan.tools, w.log)
 	supervision.supervisor.OnTerminal(w.terminal)
 }
 

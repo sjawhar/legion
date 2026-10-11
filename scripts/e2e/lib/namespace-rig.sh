@@ -14,8 +14,8 @@
 #   label_prefix     the prefix every run label of this proof carries (e.g. s4a-): the teardown
 #                    refuses any other, so a mistyped label can never select another run's objects
 #   label_exact      instead of label_prefix: the one fixed label a proof puts on its objects
-#                    (stage4b's legsmoke, a Dispatch project's token), which it owns while it holds
-#                    that proof's run lock; the teardown refuses any other
+#                    (a Dispatch project's token, lowercased), which it owns while it holds that
+#                    identity's own run lock; the teardown refuses any other
 #   record           a file holding one Sandbox name per line, each deleted by name
 #   providers_secret (optional) the providers Secret the operator created for the run, deleted by
 #                    name; unset or empty when the run creates none
@@ -38,6 +38,16 @@ snapshot() {
     op get "$kinds" -l '!legion.dev/project' -o name
     op get "$kinds" -l "legion.dev/project=$run_label" -o name
   } | sort >"$1"
+}
+
+# issue_pvcs ISSUE prints each PersistentVolumeClaim of the run labelled legion.dev/issue=ISSUE as
+# `<name> <phase>`, one a line, in name order, and nothing when the issue has no volume. An issue's
+# volume is its own Sandbox's, labelled with the issue's key by the Sandbox's claim template at its
+# creation (LEGION-632), so it is selected by that label and never by the tree's: a tree's issues
+# share no volume.
+issue_pvcs() {
+  op get pvc -l "legion.dev/project=$run_label,legion.dev/issue=$1" -o json |
+    jq -r '.items | sort_by(.metadata.name)[] | "\(.metadata.name) \(.status.phase)"'
 }
 
 # teardown: this run's objects, and nothing else, gone. Never fails; runs once.

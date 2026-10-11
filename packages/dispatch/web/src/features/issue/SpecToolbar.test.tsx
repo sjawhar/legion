@@ -9,6 +9,7 @@ function renderToolbar(copied: boolean) {
     connection: "connected",
     copyBlockLink: async () => copied,
     isNamingVersion: false,
+    pending: undefined,
     requestNamedVersion: () => {},
     versions: [],
   };

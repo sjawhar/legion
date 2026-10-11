@@ -51,16 +51,12 @@ func waitForLockWait(t *testing.T, ctx context.Context, database *store.Store, l
 }
 
 // lockWaits counts the sessions of the test's database waiting on a lock whose statement matches
-// like. It polls from the pool, never from a transaction: a repeatable-read snapshot freezes
-// pg_stat_activity, and a loop over it spins until it times out.
+// like (storetest.CountLockWaits), failing the test when it cannot read them.
 func lockWaits(t *testing.T, ctx context.Context, database *store.Store, like string) int {
 	t.Helper()
-	var waiting int
-	if err := database.Pool.QueryRow(ctx, `
-		select count(*) from pg_stat_activity
-		where datname = current_database() and wait_event_type = 'Lock' and query like $1
-	`, like).Scan(&waiting); err != nil {
-		t.Fatalf("inspect database locks: %v", err)
+	waiting, err := storetest.CountLockWaits(ctx, database, like)
+	if err != nil {
+		t.Fatal(err)
 	}
 	return waiting
 }
@@ -236,7 +232,7 @@ func TestSnapshotIsNotBlockedByTheOwnerLock(t *testing.T) {
 }
 
 // The live-document path is the same cycle with the worst loser. A browser edit reaches
-// AppendUpdateWithClass through websocket.go, which takes the room lock on its own connection
+// AppendUpdateWithCredit through websocket.go, which takes the room lock on its own connection
 // and then the artifact row through doc_updates' foreign key; when the owner lock was
 // `for update` and an event append held it, Postgres killed one of them, and on this path the
 // loser is failRoom - it evicts the room and drops the in-flight update rather than returning
@@ -250,8 +246,8 @@ func TestLiveUpdateIsNotBlockedByTheOwnerLock(t *testing.T) {
 	doc := crdt.New()
 	doc.GetXmlFragment(fragmentName)
 	awaitUnblocked(t, "a live document update", func() error {
-		_, err := service.persistence.(*PgVersioned).AppendUpdateWithClass(
-			ctx, id, crdt.EncodeStateAsUpdateV1(doc, nil), true,
+		_, err := service.persistence.(*PgVersioned).AppendUpdateWithCredit(
+			ctx, id, crdt.EncodeStateAsUpdateV1(doc, nil), true, nil,
 		)
 		return err
 	})

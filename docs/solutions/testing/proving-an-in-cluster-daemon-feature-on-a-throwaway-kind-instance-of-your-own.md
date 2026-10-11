@@ -131,7 +131,7 @@ digest and the `Worker Image` run id, the code head it was built from, the apply
 result, the probe-pod line, the throttled log timestamps, the `controllerLocator` and role
 claim as `legion state` and the listener's `GET /v1/roles/<controller token>` show them, the
 notice rendered in the terminal with its event id, the three controls, and the teardown. Attach
-the long form as an issue artifact (`dispatch_artifact`, e.g. `kind-run-part-b.md`) and link it
+the long form as an issue artifact (`dispatch artifact`, e.g. `kind-run-part-b.md`) and link it
 from one PR comment, so the PR body stays a summary.
 
 ## Related

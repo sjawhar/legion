@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -231,6 +232,21 @@ type server struct {
 	deps            Deps
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
+	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
+	// warned holds no production job, so a read that judges a run again does not warn about it
+	// again. Nothing evicts an entry: the map holds one per (repo, run, configured job name) it has
+	// warned about, which is the runs a misconfigured production_job_name sets apart until it is
+	// fixed and the successful runs of a listing that held no production deploy, and a restart
+	// empties it.
+	warnedUnmatchedRuns sync.Map
+}
+
+// warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured
+// production job name.
+type warnedProductionRun struct {
+	repo    string
+	runID   int64
+	jobName string
 }
 
 // queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader
@@ -627,6 +643,20 @@ func (s *server) requireActor(w http.ResponseWriter, r *http.Request, supplied *
 		return model.Actor{}, false
 	}
 	return actor, true
+}
+
+// decodeOptionalJSON decodes the request body into dst when the request carries one, so a route
+// whose body is optional (a cookie caller sends none; a bearer names its session in `actor`)
+// accepts both. It writes the decode error and returns false on a malformed body.
+func (s *server) decodeOptionalJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
+	if r.ContentLength == 0 {
+		return true
+	}
+	if err := decodeJSON(r, dst); err != nil {
+		s.writeHandlerError(w, err)
+		return false
+	}
+	return true
 }
 
 func (s *server) requireHuman(w http.ResponseWriter, r *http.Request) (model.Actor, bool) {

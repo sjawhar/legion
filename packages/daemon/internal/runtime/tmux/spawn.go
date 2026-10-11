@@ -7,17 +7,17 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
+	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
@@ -41,16 +41,16 @@ func treeName(issue string) string {
 }
 
 // runtimeOwned are the variables every pane gets from the runtime itself: exactly the names
-// panePairs sets (TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime), which the shared validator
-// refuses in a spec's Env and as a secret's pointer.
+// panePairs sets for a tree pane (TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime), which the
+// shared validator refuses in a spec's Env and as a secret's pointer.
 var runtimeOwned = map[string]bool{
 	"LEGION_TREE": true, "LEGION_ISSUE": true, "LEGION_ROLE": true,
 	"LEGION_GENERATION": true, "LEGION_PROJECT": true, "LEGION_DAEMON_URL": true,
 	"LEGION_STATE_DIR": true, "LEGION_WORKSPACE": true, "ENVOY_NATS_URL": true, "ENVOY_URL": true,
-	"GIT_TERMINAL_PROMPT": true, "LEGION_GRANT_FILE": true, "XDG_CONFIG_HOME": true,
-	"XDG_CACHE_HOME": true, "XDG_DATA_HOME": true, "XDG_STATE_HOME": true,
-	"LEGION_BOOT_TOKEN_FILE": true, "LEGION_GH_PATH": true, "LEGION_GIT_PATH": true,
-	"LEGION_JJ_PATH": true, "DISPATCH_URL": true, "DISPATCH_TOKEN_FILE": true, "PI_SHELL_PREFIX": true,
+	"GIT_TERMINAL_PROMPT": true, "XDG_CONFIG_HOME": true, "XDG_CACHE_HOME": true, "XDG_DATA_HOME": true,
+	"XDG_STATE_HOME": true, "LEGION_BOOT_TOKEN_FILE": true, "DISPATCH_URL": true, "DISPATCH_TOKEN_FILE": true,
+	"GH_CONFIG_DIR": true, "GH_TOKEN": true, "GITHUB_TOKEN": true, "GH_HOST": true,
+	"PI_SHELL_PREFIX": true, "PI_CONFIG_FILES": true,
 }
 
 // validateSpawnSpec refuses a spec the runtime cannot honour exactly, before anything touches the
@@ -150,17 +150,23 @@ func secretFiles(stateDir string, spec runtime.SpawnSpec) []runtime.SecretFile {
 type PaneInputs struct {
 	StateDir, Workspace, DaemonURL, EnvoyURL, DispatchURL, DispatchTokenFile string
 	NATSURLs                                                                 []string
-	// Tools are the daemon-resolved gh, git, and jj, keyed by the variable that names each.
-	Tools map[string]string
+	// GHConfigDir is the claim's directory of gh files (runtime.GHConfigDir), the pane's
+	// GH_CONFIG_DIR; "" is none, and the pane is then told no gh variable at all: every pane of a
+	// runtime whose GitHubCredential function is nil.
+	GHConfigDir string
 }
 
 // panePairs are a pane's -e pairs, in one order: the variables every Legion pane is told (the
-// identity, daemon, state, workspace, Envoy, Dispatch and tool variables, PI_SHELL_PREFIX, which
-// keeps this daemon's gh and legion first in the agent's bash tool, and LEGION_GRANT_FILE,
-// runtime.GrantFile), the four XDG base directories
-// under `<state_dir>/home`, the spec's own variables sorted, then a `<NAME>_FILE` pointer per
-// secret file. PATH is never among them — tmux would replace it (LEGION-91) — and neither is any
-// secret's value.
+// identity, daemon, state, workspace, Envoy and Dispatch variables; for a pane with a GHConfigDir,
+// GH_CONFIG_DIR, the claim's directory of gh files, with GH_TOKEN, GITHUB_TOKEN and GH_HOST set to
+// the empty string, which gh ignores, so no token in the daemon's environment outranks the file — a
+// non-empty GH_TOKEN would; PI_SHELL_PREFIX, which keeps this daemon's legion launcher first in
+// the agent's bash tool; PI_CONFIG_FILES, which names the turn-scoping overlay
+// writeTurnScopeOverlay writes (podsafety.TurnScopeOverlay) — the one settings overlay a pane gets
+// at all), the four XDG base directories under `<state_dir>/home`, the spec's own variables
+// sorted, then a `<NAME>_FILE` pointer per secret file. PATH is never among them — tmux would
+// replace it (LEGION-91) — and neither is any secret's value. No tool path is told: a pane's gh,
+// git and jj are whatever its PATH, the daemon's, gives.
 func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) []string {
 	var pairs []string
 	add := func(name, value string) { pairs = append(pairs, "-e", name+"="+value) }
@@ -180,12 +186,15 @@ func panePairs(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile
 		add("DISPATCH_URL", in.DispatchURL)
 		add("DISPATCH_TOKEN_FILE", in.DispatchTokenFile)
 	}
-	for _, name := range slices.Sorted(maps.Keys(in.Tools)) {
-		add(name, in.Tools[name])
+	if in.GHConfigDir != "" {
+		add("GH_CONFIG_DIR", in.GHConfigDir)
+		add("GH_TOKEN", "")
+		add("GITHUB_TOKEN", "")
+		add("GH_HOST", "")
 	}
-	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.Dir(in.StateDir), workerbin.LauncherDir(in.StateDir)))
+	add("PI_SHELL_PREFIX", shellprefix.For(workerbin.LauncherDir(in.StateDir)))
+	add("PI_CONFIG_FILES", filepath.Join(in.StateDir, podsafety.TurnScopeFile))
 	add("GIT_TERMINAL_PROMPT", "0")
-	add("LEGION_GRANT_FILE", runtime.GrantFile(in.StateDir, spec.Claim))
 	for _, dir := range xdgDirectories(in.StateDir) {
 		add(dir[0], dir[1])
 	}
@@ -210,13 +219,25 @@ func makePaneHome(stateDir string) error {
 	return nil
 }
 
+// writeTurnScopeOverlay writes podsafety.TurnScopeOverlay under stateDir, read-only, so panePairs
+// can name it first in a pane's PI_CONFIG_FILES: the one settings overlay a tmux pane gets at all,
+// the same one a pod's shim writes (podsafety.Apply), and the two keys supervise.Machine.Quiesce's
+// own promise depends on regardless of runtime (LEGION-462).
+func writeTurnScopeOverlay(stateDir string) error {
+	return podsafety.WriteReadOnly(filepath.Join(stateDir, podsafety.TurnScopeFile), podsafety.TurnScopeOverlay)
+}
+
 // PaneVariables is a launch's environment without the launch, for a process this runtime does not
 // start that must be told exactly what a pane is: the rigs under packages/pi-legion/scripts, which
-// run Oh My Pi under it. It makes the pane's home as a launch does (makePaneHome) and returns the
-// variables panePairs tells a pane for spec, NAME=value in their order, files being the secret
-// files they point at.
+// run Oh My Pi under it. It makes the pane's home as a launch does (makePaneHome) and writes the
+// turn-scoping overlay as a launch does (writeTurnScopeOverlay), then returns the variables
+// panePairs tells a pane for spec, NAME=value in their order, files being the secret files they
+// point at.
 func PaneVariables(spec runtime.SpawnSpec, in PaneInputs, files []runtime.SecretFile) ([]string, error) {
 	if err := makePaneHome(in.StateDir); err != nil {
+		return nil, err
+	}
+	if err := writeTurnScopeOverlay(in.StateDir); err != nil {
 		return nil, err
 	}
 	pairs := panePairs(spec, in, files)
@@ -322,7 +343,7 @@ func (r *Runtime) awaitGone(ctx context.Context, loc runtime.Locator) error {
 }
 
 // launch is Spawn's and Resume's shared half: every check that needs no tmux, the secret files,
-// then the pane.
+// the claim's gh files, then the pane.
 func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	if err := validateSpawnSpec(spec, r.providerKeys); err != nil {
 		return runtime.Locator{}, err
@@ -356,9 +377,24 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	if err := makePaneHome(r.stateDir); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
+	if err := writeTurnScopeOverlay(r.stateDir); err != nil {
+		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+	}
 	files := secretFiles(r.stateDir, spec)
 	if err := runtime.WriteSecretFiles(r.stateDir, files); err != nil {
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+	}
+	ghConfigDir := ""
+	if r.gitHubCredential != nil {
+		ghConfigDir = runtime.GHConfigDir(r.stateDir, spec.Claim)
+		rendered, err := r.gitHubCredential(ctx, spec.Role)
+		if err != nil {
+			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
+		}
+		if _, err := ghconfig.Write(ghConfigDir, rendered); err != nil {
+			return runtime.Locator{}, fmt.Errorf("spawn %s: write the github credential: %w", spec.Claim, err)
+		}
+		r.log.Info("tmux runtime: github credential written", "claim", spec.Claim, "role", spec.Role, "app", rendered.App, "expiresAt", rendered.ExpiresAt)
 	}
 	path := r.paneEnv["PATH"]
 	if spec.Env["PATH"] != "" {
@@ -369,7 +405,7 @@ func (r *Runtime) launch(ctx context.Context, spec runtime.SpawnSpec) (runtime.L
 	command := shimShellCommand(r.socket, path, workDir, r.legion, r.streamAddress, files[0].Path, r.providerEnvDir, inner)
 	pairs := panePairs(spec, PaneInputs{
 		StateDir: r.stateDir, Workspace: workDir, DaemonURL: r.daemonURL, EnvoyURL: r.envoyURL, NATSURLs: r.natsURLs,
-		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, Tools: r.tools,
+		DispatchURL: r.dispatchURL, DispatchTokenFile: r.dispatchToken, GHConfigDir: ghConfigDir,
 	}, files)
 	return r.openPane(ctx, spec, paneCommand(pairs, command))
 }
@@ -399,11 +435,11 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []s
 		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 	}
 	if err := r.awaitPaneCommand(ctx, report); err != nil {
-		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+		return runtime.Locator{}, errors.Join(fmt.Errorf("spawn %s: %w", spec.Claim, err), r.killUnrecorded(ctx, report))
 	}
 	ticks, alive, err := r.startTicks(report.pid)
 	if err != nil {
-		return runtime.Locator{}, fmt.Errorf("spawn %s: %w", spec.Claim, err)
+		return runtime.Locator{}, errors.Join(fmt.Errorf("spawn %s: %w", spec.Claim, err), r.killUnrecorded(ctx, report))
 	}
 	if !alive {
 		// The pane closes itself with its process; there is nothing left to record or reap.
@@ -425,7 +461,8 @@ func (r *Runtime) openPane(ctx context.Context, spec runtime.SpawnSpec, pane []s
 // copy of the server, which a probe reads as not running OMP; supervision takes that for a death
 // and relaunches the claim over its still-starting process (LEGION-274). A process that exits
 // meanwhile is left to the caller's identity read, which reports it; one still the server's copy
-// when the bound runs out is killed, so no process the daemon never recorded runs on.
+// when the bound runs out is an error, and the caller kills its pane (killUnrecorded), so no
+// process the daemon never recorded runs on.
 func (r *Runtime) awaitPaneCommand(ctx context.Context, report paneReport) error {
 	deadline := time.Now().Add(r.commandTimeout)
 	for {
@@ -434,9 +471,6 @@ func (r *Runtime) awaitPaneCommand(ctx context.Context, report paneReport) error
 			return err
 		}
 		if time.Now().After(deadline) {
-			if res, err := r.run(ctx, killPaneArgv(r.socket, report.pane)); err != nil || res.exitCode != 0 && !paneGoneStderr.MatchString(res.stderr) {
-				r.log.Warn("tmux runtime: could not kill a pane that never started its command", "pane", report.pane, "err", err, "stderr", res.stderr)
-			}
 			return fmt.Errorf("pane %s pid %d did not start its command within %s", report.pane, report.pid, r.commandTimeout)
 		}
 		select {
@@ -445,6 +479,21 @@ func (r *Runtime) awaitPaneCommand(ctx context.Context, report paneReport) error
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+}
+
+// killUnrecorded kills report's pane after an error left its process unrecorded: no locator is
+// returned for it, so nothing else would end it (runtime.Runtime's Spawn and Resume). It runs even
+// once ctx has ended, since the caller's deadline may be what ended the launch. A pane already gone
+// is gone; any other failure is returned, so the launch error says the process may still run.
+func (r *Runtime) killUnrecorded(ctx context.Context, report paneReport) error {
+	res, err := r.run(context.WithoutCancel(ctx), killPaneArgv(r.socket, report.pane))
+	if err == nil && (res.exitCode == 0 || paneGoneStderr.MatchString(res.stderr)) {
+		return nil
+	}
+	if err == nil {
+		err = fmt.Errorf("tmux exited %d: %s", res.exitCode, strings.TrimSpace(res.stderr))
+	}
+	return fmt.Errorf("kill pane %s, whose process pid %d was never recorded: %w", report.pane, report.pid, err)
 }
 
 // refuseLiveIncarnation refuses a launch for a claim whose watched process still runs: one claim,

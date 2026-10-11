@@ -710,18 +710,21 @@ func TestARefusedGrowthDoesNotLeaveACarriedAskAuthorPending(t *testing.T) {
 	}
 }
 
-// A settlement that writes its version (writeVersionTx, which remembers a pending-authors
-// capture under that version's number, rememberPendingVersion) and then fails before its own
-// commit - settlement runs no Ledger.Commit/Discard of its own to release it, since its ledger's
-// tx is nil and it is its own transaction's commit that releases the capture (commitVersion,
-// called directly once that commit succeeds) - abandons through a path that must discard what it
-// remembered rather than leave it behind (LEGION-503).
+// A settlement that writes its version and deletes the pending authors it lists, and then fails
+// before its own commit, takes nothing out of them: its transaction rolls back, so alice is still
+// owed, and it marked no in-flight credit consumed. The next settlement lists her.
 func TestASettlementThatAbandonsAfterWritingItsVersionReleasesWhatItRemembered(t *testing.T) {
 	service, artifactID := newTestService(t)
 	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, "First.\n\nSecond.\n")
 	settleCurrentGeneration(t, service, artifactID)
-	editAsPeer(t, service, artifactID, replaceRun("First.", "First, edited."))
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("First.", "First, edited."))
+	waitForLandedAppends(t, service, artifactID)
+	owed := pendingAuthorRows(t, service.store, artifactID)
+	if !slices.Equal(owed, []model.Actor{alice}) {
+		t.Fatalf("pending authors before the settlement = %+v, want alice", owed)
+	}
 
 	injected := false
 	service.afterSettleVersionWrite = func(room string) error {
@@ -736,15 +739,90 @@ func TestASettlementThatAbandonsAfterWritingItsVersionReleasesWhatItRemembered(t
 		t.Fatal("settlement never reached the window after its version write")
 	}
 
+	if after := pendingAuthorRows(t, service.store, artifactID); !slices.Equal(after, owed) {
+		t.Errorf("pending authors after an abandoned settlement = %+v, want %+v unchanged", after, owed)
+	}
 	state := service.room(artifactID)
 	state.mu.Lock()
-	leaked := len(state.pendingVersions)
-	state.mu.Unlock()
-	if leaked != 0 {
-		t.Errorf("pendingVersions holds %d entr(y/ies) after an abandoned settlement, want none: its own version write must not leave a trace behind", leaked)
+	for seq, record := range state.inflight {
+		if record.consumed {
+			t.Errorf("in-flight credit %d is consumed after an abandoned settlement, want none", seq)
+		}
 	}
+	state.mu.Unlock()
 
 	service.afterSettleVersionWrite = nil
 	settleCurrentGeneration(t, service, artifactID)
 	requireLatestVersionMarkdown(t, service, artifactID, "First, edited.\n\nSecond.\n")
+	if authors := latestVersionAuthors(t, service, artifactID); !slices.Contains(authors, alice) {
+		t.Fatalf("the settlement's version lists %+v, want alice", authors)
+	}
+}
+
+// A session that writes a copy of another document's open ask block is that block's author on the
+// copy's document: settlement of the copy opens no ask, and the room keeps the session as the
+// block's author, owed, through every settlement of the copy until one opens the block's own ask,
+// once the source's block leaves its document. That ask names the session, not the copy's latest
+// editor, and the source's ask and document never credit it (LEGION-651).
+func TestACopiedAskBlocksAuthorIsKeptForTheAskItOpensOnceItsSourceIsRetracted(t *testing.T) {
+	session := model.Actor{Kind: "session", ID: "session-0123456789abcdef"}
+	bob := model.Actor{Kind: "user", ID: "bob"}
+	service, original := newTestService(t)
+	shared := ":::ask{#shared urgency=\"med\" multiple=\"false\"}\nWhich region?\n:::\n"
+	seedServiceText(t, service, original, "Context\n\n"+shared)
+	settleCurrentGeneration(t, service, original)
+	sourceAuthor := blockAskAuthor(t, service, original, "shared")
+
+	copied := createIssueDocument(t, service.store, 1, "# Copy")
+	seedServiceText(t, service, copied, "Context\n")
+	settleCurrentGeneration(t, service, copied)
+	if _, err := joinedApplyOps(service, copied, []model.EditOp{
+		{Op: "insert", After: "end", Markdown: shared},
+	}, session, nil); err != nil {
+		t.Fatalf("the session's copy: %v", err)
+	}
+	settleCurrentGeneration(t, service, copied)
+	if count := asksOn(t, service, copied); count != 0 {
+		t.Fatalf("the copy opened %d asks, want none", count)
+	}
+	// Another person's later edit makes them the copy's latest editor, whom a block with no
+	// recorded author would be credited to.
+	if _, err := joinedApplyOps(service, copied, []model.EditOp{
+		{Op: "replace", Find: "Context", With: "Context, revisited"},
+	}, bob, nil); err != nil {
+		t.Fatalf("bob's edit: %v", err)
+	}
+	settleCurrentGeneration(t, service, copied)
+	state := service.room(copied)
+	state.mu.Lock()
+	owed, recorded := state.askAuthors["shared"]
+	state.mu.Unlock()
+	if !recorded || owed != session {
+		t.Fatalf("the copy's room owes the block to %#v (recorded %v), want the session", owed, recorded)
+	}
+
+	editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children = tree.Children[:1]
+		return tree
+	})
+	settleCurrentGeneration(t, service, original)
+	requireOneOpenAskOn(t, service, "shared", copied)
+	if author := blockAskAuthor(t, service, copied, "shared"); author != session {
+		t.Errorf("the copy's own ask names %#v, want the session that wrote the block", author)
+	}
+	if opener := blockAskOpenedActor(t, service, copied, "shared"); opener != session {
+		t.Errorf("the copy's ask.opened names %#v, want the session", opener)
+	}
+	state.mu.Lock()
+	_, still := state.askAuthors["shared"]
+	state.mu.Unlock()
+	if still {
+		t.Errorf("the copy's room still owes the block's author after its ask opened")
+	}
+	if author := blockAskAuthor(t, service, original, "shared"); author != sourceAuthor {
+		t.Errorf("the source's ask names %#v, want its own author %#v", author, sourceAuthor)
+	}
+	if slices.Contains(latestVersionAuthors(t, service, original), session) {
+		t.Errorf("the source's document credits the session that wrote only the copy")
+	}
 }

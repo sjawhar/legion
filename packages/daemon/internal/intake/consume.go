@@ -42,6 +42,15 @@ type ConsumerSpec struct {
 	// nobody read. No resolver (a test, or a daemon without one) leaves every review's
 	// AuthorCanWrite false, so only the review App's own reviews decide.
 	ReviewPermission func(ctx context.Context, review PullRequestReview) (bool, error)
+	// ReviewBody restores a review-App review's full body from GitHub when Envoy's normalizer
+	// capped it (PullRequestReview.BodyTruncated), since the capped body can cut the trailing
+	// Legion footer the workflow reads to tell the reviewer's review from any other review-App
+	// session's (PullRequestReview.LegionSession). It is read here, before the fact is applied,
+	// within AckWait, and only for a review the review App submitted, with an id and a truncated
+	// body (resolveReviewBody); a failed read is returned, and the message is retried the same way
+	// a failed ReviewPermission read is. No resolver (a test, or a daemon without one) leaves every
+	// truncated review's body capped.
+	ReviewBody func(ctx context.Context, review PullRequestReview) (string, error)
 }
 
 // RetryLater is an error ConsumerSpec.ReviewPermission returns when its read must not be made again
@@ -200,17 +209,14 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 		ackMessage(spec.Logger, message)
 		return
 	}
-	fact, err := resolveReviewPermission(ctx, spec, decoded.Fact)
+	withBody, err := resolveReviewBody(ctx, spec, decoded.Fact)
 	if err != nil {
-		delay := spec.NakDelay
-		var later *RetryLater
-		if errors.As(err, &later) && later.After > delay {
-			delay = later.After
-		}
-		logMessage(spec.Logger, slog.LevelWarn, "read the reviewer's repository permission", message, "event_id", decoded.EventID, "retry_in", delay, "error", err)
-		if nakErr := message.NakWithDelay(delay); nakErr != nil {
-			logMessage(spec.Logger, slog.LevelError, "nak the reviewer's permission read", message, "event_id", decoded.EventID, "error", nakErr)
-		}
+		nakResolve(spec, message, decoded.EventID, "restore the review's truncated body", "nak the review body restore", err)
+		return
+	}
+	fact, err := resolveReviewPermission(ctx, spec, withBody)
+	if err != nil {
+		nakResolve(spec, message, decoded.EventID, "read the reviewer's repository permission", "nak the reviewer's permission read", err)
 		return
 	}
 	decoded.Fact = fact
@@ -234,23 +240,78 @@ func consumeMessage(ctx context.Context, message jetstream.Msg, spec ConsumerSpe
 	ackMessage(spec.Logger, message)
 }
 
-// resolveReviewPermission fills a review's AuthorCanWrite from ConsumerSpec.ReviewPermission,
-// before the fact enters its transaction. Only a review that decides (PullRequestReview.Decides)
-// and names its author is looked up: a comment decides nothing whoever writes it, so it costs no
-// GitHub call. Every other fact passes through untouched.
+// resolveReviewPermission fills a review's AuthorCanWrite from ConsumerSpec.ReviewPermission
+// (ResolveAuthorCanWrite), before the fact enters its transaction, within AckWait. Every other fact
+// passes through untouched.
 func resolveReviewPermission(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact, error) {
 	review, ok := fact.(PullRequestReview)
-	if !ok || spec.ReviewPermission == nil || review.Author == "" || !review.Decides() {
+	if !ok {
 		return fact, nil
 	}
 	read, cancel := context.WithTimeout(ctx, spec.AckWait)
 	defer cancel()
-	canWrite, err := spec.ReviewPermission(read, review)
+	review, err := ResolveAuthorCanWrite(read, review, spec.ReviewPermission)
 	if err != nil {
 		return nil, err
 	}
+	return review, nil
+}
+
+// ResolveAuthorCanWrite fills review's AuthorCanWrite from permission, the daemon's reader of the
+// author's repository permission, for a webhook's review (resolveReviewPermission) and the daemon's
+// own read of a pull request's reviews alike, so the workflow's DecidesRound judges both on the same
+// answer. Only a review that decides (Decides) and names its author is looked up: a comment decides
+// nothing whoever writes it, so it costs no GitHub call. No reader (a test, or a daemon without one)
+// leaves AuthorCanWrite false. A failed read is returned with the review unchanged.
+func ResolveAuthorCanWrite(ctx context.Context, review PullRequestReview, permission func(context.Context, PullRequestReview) (bool, error)) (PullRequestReview, error) {
+	if permission == nil || review.Author == "" || !review.Decides() {
+		return review, nil
+	}
+	canWrite, err := permission(ctx, review)
+	if err != nil {
+		return review, err
+	}
 	review.AuthorCanWrite = canWrite
 	return review, nil
+}
+
+// resolveReviewBody restores a truncated review-App review's body from GitHub
+// (ConsumerSpec.ReviewBody), before the fact enters its transaction and before
+// resolveReviewPermission reads its author's permission, since a restored body carries the Legion
+// footer the workflow needs. Only a review the normalizer capped (BodyTruncated), with an id to
+// look it up by and an author, is read: one with no id (a listener that predates it) keeps its
+// capped body and BodyTruncated true, so the workflow sets it aside as footer-less rather than
+// guessing at a footer it cannot restore. Every other fact, and a review the normalizer did not
+// cap, passes through untouched.
+func resolveReviewBody(ctx context.Context, spec ConsumerSpec, fact Fact) (Fact, error) {
+	review, ok := fact.(PullRequestReview)
+	if !ok || spec.ReviewBody == nil || !review.BodyTruncated || review.ID == 0 || review.Author == "" {
+		return fact, nil
+	}
+	read, cancel := context.WithTimeout(ctx, spec.AckWait)
+	defer cancel()
+	body, err := spec.ReviewBody(read, review)
+	if err != nil {
+		return nil, err
+	}
+	review.Body = body
+	review.BodyTruncated = false
+	return review, nil
+}
+
+// nakResolve widens message's nak delay to a RetryLater's wait when it names one longer than
+// spec.NakDelay, logs what failed and the delay at warn, then naks the message with that delay,
+// logging nakWhat at error if the nak itself fails.
+func nakResolve(spec ConsumerSpec, message jetstream.Msg, eventID, what, nakWhat string, err error) {
+	delay := spec.NakDelay
+	var later *RetryLater
+	if errors.As(err, &later) && later.After > delay {
+		delay = later.After
+	}
+	logMessage(spec.Logger, slog.LevelWarn, what, message, "event_id", eventID, "retry_in", delay, "error", err)
+	if nakErr := message.NakWithDelay(delay); nakErr != nil {
+		logMessage(spec.Logger, slog.LevelError, nakWhat, message, "event_id", eventID, "error", nakErr)
+	}
 }
 
 func ackMessage(logger *slog.Logger, message jetstream.Msg) {

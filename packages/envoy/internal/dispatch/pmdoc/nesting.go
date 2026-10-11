@@ -250,8 +250,9 @@ func blockNesting(node *Node) int {
 // serves it with room to spare. The tightest is the document token (Node.TokenJSON): encoding/json
 // refuses a value nested past 10,000 arrays and objects (from Go 1.27 it will not marshal one, and
 // no version decodes one), and a node at level d is nested 2d+1 deep, an object and a content
-// array per level, its marks and their attributes three deeper, and an attribute's value at most
-// maxAttrNesting more: 2,104 at this bound. The next is GET /blocks, which hashes each block's
+// array per level, its marks and their attributes three deeper, and a mark attribute's value at
+// most maxMarkAttrNesting more: 2,103 at this bound (a node's own attributes stand two levels
+// shallower and their values one deeper). The next is GET /blocks, which hashes each block's
 // subtree apart from the others, so its work grows with the square of the depth. Markdown, at most
 // maxNesting blocks deep, makes trees about a tenth as deep.
 const MaxTreeDepth = 1_000
@@ -265,18 +266,30 @@ func treeDepthError(depth int) error {
 	return fmt.Errorf("%w: a node %d levels deep; a document nests at most %d levels", ErrSchema, depth, MaxTreeDepth)
 }
 
-// maxAttrNesting is how many arrays and objects a node's or a mark's attribute value may nest
-// inside one another. The schema's own attributes are scalars or lists of them; ygo decodes an
-// element's attributes about this deep at most, but a mark's from JSON as deep as encoding/json
-// reads, so without this bound a mark alone could take the document token past what it encodes.
-const maxAttrNesting = 100
+// ygoValueNesting is how many arrays and objects ygo lets one value it stores nest inside one
+// another. From v1.51.1 its YText.Insert, Format and ApplyDelta panic on a value nested deeper
+// (crdt.maxTextValueDepth), and its decoder refuses one in an update's lib0 values
+// (encoding.maxAnyDepth), as it reads an element's attributes.
+const ygoValueNesting = 100
 
-// attrNestingError is the refusal of an attribute in attrs whose value nests past maxAttrNesting,
-// or nil. attrs belong to the node or mark (kind) of type typ.
-func attrNestingError(kind, typ string, attrs Attrs) error {
+// maxNodeAttrNesting is how many arrays and objects a node's attribute value may nest inside one
+// another: ygo stores an element attribute's value as it is. The schema's own attributes are
+// scalars or lists of them.
+const maxNodeAttrNesting = ygoValueNesting
+
+// maxMarkAttrNesting is how many arrays and objects a mark's attribute value may nest inside one
+// another: ygo stores a mark as one value, the map of its attributes, so each attribute's value
+// nests one level less than ygo allows that map. ygo decodes a mark a client sends from JSON, as
+// deep as encoding/json reads, so without this bound a mark alone could take the document token
+// past what it encodes, and writing it back through ygo would panic.
+const maxMarkAttrNesting = ygoValueNesting - 1
+
+// attrNestingError is the refusal of an attribute in attrs whose value nests past limit arrays and
+// objects, or nil. attrs belong to the node or mark (kind) of type typ.
+func attrNestingError(kind, typ string, attrs Attrs, limit int) error {
 	for name, value := range attrs {
-		if nestsPast(value, maxAttrNesting) {
-			return fmt.Errorf("%w: %s %q attribute %q nests more than %d arrays and objects", ErrSchema, kind, typ, name, maxAttrNesting)
+		if nestsPast(value, limit) {
+			return fmt.Errorf("%w: %s %q attribute %q nests more than %d arrays and objects", ErrSchema, kind, typ, name, limit)
 		}
 	}
 	return nil

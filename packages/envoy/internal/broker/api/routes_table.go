@@ -12,6 +12,7 @@ const (
 	authNone routeAuth = iota
 	authLauncher
 	authProof
+	authRenewProof
 	authUI
 )
 
@@ -55,6 +56,16 @@ func sessionAuth(h func(*server, http.ResponseWriter, *http.Request, string)) ro
 	}}
 }
 
+// renewAuth is session authentication for the one route that gives an ended enrollment a distinct
+// refusal. A skewed/malformed proof remains PROOF_INVALID; only proof.ErrNotLive is
+// ENROLLMENT_NOT_LIVE so the pod renewer can stop rather than retry an enrollment that cannot
+// recover.
+func renewAuth(h func(*server, http.ResponseWriter, *http.Request, string)) routeHandler {
+	return routeHandler{auth: authRenewProof, serve: func(s *server, w http.ResponseWriter, r *http.Request, who caller) {
+		h(s, w, r, who.enrollment)
+	}}
+}
+
 // uiAuth is a route for Dispatch's server, which sends the broker's UI token as a bearer token and
 // names the person acting (the approver) in the body or query. The broker trusts that name, so the
 // UI token is an approval credential: only Dispatch's server holds it.
@@ -74,16 +85,17 @@ type apiRoute struct {
 // https://sjawhar.github.io/legion/broker/reference/api/) prints it and refuses a row without one.
 func routes() []apiRoute {
 	return []apiRoute{
-		// Enroll a box's, host session's or pod's signing key under the caller's machine credential.
+		// Enroll a session's or pod's signing key under the caller's machine credential.
 		{http.MethodPost, "/v1/enrollments", launcherAuth((*server).createEnrollment)},
-		// Revoke an enrollment made under the caller's machine credential's operator.
+		// Revoke an enrollment made under the caller's machine credential's operator, or a pod
+		// enrollment the caller's own machine credential made.
 		{http.MethodDelete, "/v1/enrollments/{id}", launcherAuth((*server).deleteEnrollment)},
 		// Start a machine login: answers the confirmation code a person types and a pending id.
 		{http.MethodPost, "/v1/launcher-credentials", public((*server).machineLogin)},
 		// Poll a machine login by its pending id; once approved, answers its credential's id.
 		{http.MethodGet, "/v1/launcher-credentials/{pending}", public((*server).readMachineLogin)},
 		// Extend the calling session's lease.
-		{http.MethodPost, "/v1/enrollments/{id}/renew", sessionAuth((*server).renewEnrollment)},
+		{http.MethodPost, "/v1/enrollments/{id}/renew", renewAuth((*server).renewEnrollment)},
 		// Describe the calling session's enrollment and its live grants.
 		{http.MethodGet, "/v1/enrollments/self", sessionAuth((*server).readSelf)},
 		// Request secrets: the policy grants or denies them at once, or a person must approve them.
@@ -106,13 +118,13 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/credential-requests/{record}/deny", uiAuth((*server).denyRecord)},
 		// Find a pending machine login by the confirmation code its machine shows.
 		{http.MethodPost, "/v1/machine-logins/lookup", uiAuth((*server).lookupMachineLogin)},
-		// List the machine logins the named person approved, their own machines' and any
-		// service's, such as the Legion daemon's, that are not revoked and are unexpired or expired
-		// with a session still running.
+		// List the machine logins the named person may revoke, every service's, such as the Legion
+		// daemon's, whoever approved it, and the person's own machines', that are not revoked and
+		// are unexpired or expired with a session still running, each naming who approved it.
 		{http.MethodGet, "/v1/launcher-credentials", uiAuth((*server).listLauncherCredentials)},
-		// End a machine login, expired or not, as the person who approved it: its launcher proofs
-		// stop authenticating and every session it enrolled, pods included, ends with its grants and
-		// pending requests.
+		// End a machine login, expired or not: a service's as anyone signed in, a person's machine's
+		// as the person who approved it. Its launcher proofs stop authenticating and every session
+		// it enrolled, pods included, ends with its grants and pending requests.
 		{http.MethodPost, "/v1/launcher-credentials/{id}/revoke-by-approver", uiAuth((*server).revokeLauncherCredential)},
 		// List the live grants of the named person's sessions, automatic or approved, and those the
 		// person approved.
@@ -122,6 +134,19 @@ func routes() []apiRoute {
 		// the grant had already ended: its other grants that got them automatically end too, and it
 		// asks before it gets them again.
 		{http.MethodPost, "/v1/grants/{id}/revoke-by-approver", uiAuth((*server).revokeByApprover)},
+		// List the logins of the calling credential's operator's own machines, as Dispatch's
+		// machine-logins page lists them, without the service logins that page also lists.
+		{http.MethodGet, "/v1/operator/machines", launcherAuth((*server).listOperatorMachines)},
+		// End one of the operator's own machines' logins: no proof signed with it authenticates again
+		// and every session it enrolled ends. A service's login is not found here, like an unknown
+		// id. Revoking the calling machine's own login ends this machine's access.
+		{http.MethodPost, "/v1/operator/machines/{id}/revoke", launcherAuth((*server).revokeOperatorMachine)},
+		// List the live grants of the operator's sessions and those the operator approved, exactly as
+		// Dispatch's Live grants page lists them.
+		{http.MethodGet, "/v1/operator/grants", launcherAuth((*server).listOperatorGrants)},
+		// End a grant as the operator: the revocation Dispatch's page offers, which also withholds an
+		// automatic grant's secrets from its session.
+		{http.MethodPost, "/v1/operator/grants/{id}/revoke", launcherAuth((*server).revokeOperatorGrant)},
 		// The namespace prefix, AWS account and region, and the agent-secrets key the broker serves:
 		// what the CLI needs so it and the broker never disagree about which secret a name means.
 		{http.MethodGet, "/v1/settings", public((*server).readSettings)},

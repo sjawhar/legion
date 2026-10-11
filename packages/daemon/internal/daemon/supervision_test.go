@@ -9,6 +9,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -34,6 +35,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 func architect() api.SpawnRequest {
@@ -272,27 +274,8 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	launch := lastLaunch(t, rt, token)
 
 	// State is now a durable issue record joined to live claims; the claim alone does not create an
-	// issue in the projection. The workflow will write this pair in one transaction at admission.
-	stateStore, err := store.Open(context.Background(), cfg.PostgresDSN)
-	if err != nil {
-		t.Fatalf("open state store: %v", err)
-	}
-	t.Cleanup(stateStore.Close)
-	records := recordpkg.NewStore()
-	if err := stateStore.Tx(context.Background(), func(tx pgx.Tx) error {
-		issue := recordpkg.Issue{
-			Key: spawn.Issue, Tree: spawn.Issue, Project: cfg.Project, Title: "Stream lifecycle", Phase: phase.Admitted,
-			Generation: 1, Status: "in_progress",
-		}
-		if err := records.PutIssue(context.Background(), tx, issue); err != nil {
-			return err
-		}
-		return records.PutPhase(context.Background(), tx, recordpkg.PhaseRow{
-			Issue: issue.Key, Role: claim.RoleArchitect, Claim: token,
-		})
-	}); err != nil {
-		t.Fatalf("write state record: %v", err)
-	}
+	// issue in the projection.
+	admitIssue(t, cfg, spawn.Issue, claim.RoleArchitect, token)
 
 	sh := dialShim(t, record.address, launch.BootToken)
 	testwait.Eventually(t, "the hello to reach the machine", func() bool {
@@ -555,10 +538,86 @@ func TestRunReadoptsEveryClaimWithALiveLocatorOnRestart(t *testing.T) {
 	}
 }
 
-// A launch the previous daemon persisted and never finished — its locator not yet recorded when
-// it died — has no process to re-adopt; boot launches it again rather than leave a claim that
-// waits on a pane nothing knows.
+// A launch the previous daemon began and never finished has no process to re-adopt; boot launches
+// it again rather than leave a claim that waits on a process nothing knows. The previous daemon
+// left one of two rows: launching with no locator, its process (if one opened at all) never
+// recorded; or queued at the generation it had, a launch it released at boot (supervise's
+// ReleaseUncertainLaunch writes the release) and stopped before the relaunch wrote its next
+// generation (LEGION-650).
 func TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		state supervise.ClaimState
+	}{
+		{name: "stored launching with no process recorded", state: supervise.StateLaunching},
+		{name: "stored queued at its generation, released and never relaunched", state: supervise.StateQueued},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := testConfig(t)
+			project, _ := claim.ProjectToken(cfg.Project)
+			token, _ := claim.NewToken(project, "LEGION-3", claim.RolePlanner)
+			putClaim(t, cfg, supervise.Claim{
+				Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-3", Role: claim.RolePlanner,
+				Generation: 1, State: tc.state, BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)),
+			})
+			writePrompt(t, cfg, token)
+			rt := fake.NewRuntime()
+
+			d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+
+			testwait.Eventually(t, "the unfinished launch to be launched again", func() bool {
+				c := d.claim(token)
+				return c.State == string(supervise.StateLaunching) && c.Locator != nil
+			})
+			spawns := rt.CallsOf("Spawn")
+			if len(spawns) != 1 || spawns[0].Spec.Generation != 2 {
+				t.Fatalf("spawns = %+v, want one launch at generation 2", spawns)
+			}
+		})
+	}
+}
+
+// refuseRelease has the store refuse every write of token's claim as queued, as a store that does
+// not answer refuses the release of an uncertain launch, until the returned function lets it through.
+func refuseRelease(t *testing.T, cfg config.Config, token claim.Token) func() {
+	t.Helper()
+	ctx := context.Background()
+	st, err := store.Open(ctx, cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	name := "legion_test_refuse_" + strings.ToLower(randomSuffix(t))
+	for _, statement := range []string{
+		"create function " + name + "() returns trigger language plpgsql as $$ begin raise exception 'the store refused the write'; end $$",
+		"create trigger " + name + " before insert or update on claims for each row when (new.token = '" + string(token) +
+			"' and new.state = 'queued') execute function " + name + "()",
+	} {
+		if _, err := st.Pool().Exec(ctx, statement); err != nil {
+			t.Fatalf("make the store refuse the release: %v", err)
+		}
+	}
+	var once sync.Once
+	let := func() {
+		once.Do(func() {
+			for _, statement := range []string{"drop trigger if exists " + name + " on claims", "drop function if exists " + name + "()"} {
+				if _, err := st.Pool().Exec(ctx, statement); err != nil {
+					t.Errorf("let the store take the release: %v", err)
+				}
+			}
+		})
+	}
+	t.Cleanup(func() {
+		let()
+		st.Close()
+	})
+	return let
+}
+
+// A release of an uncertain launch the store does not take, outside the daemon's stop, leaves the
+// claim launch_uncertain, which nothing but a release moves on. The daemon tries the release again
+// at each orphan sweep and relaunches the claim once the store takes it, rather than leave it
+// stranded until the next restart (LEGION-650).
+func TestRunRetriesAReleaseTheStoreRefusedAtTheNextOrphanSweep(t *testing.T) {
 	cfg := testConfig(t)
 	project, _ := claim.ProjectToken(cfg.Project)
 	token, _ := claim.NewToken(project, "LEGION-3", claim.RolePlanner)
@@ -567,16 +626,29 @@ func TestRunLaunchesAgainALaunchThePreviousDaemonDidNotFinish(t *testing.T) {
 		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken("interrupted-" + randomSuffix(t)),
 	})
 	writePrompt(t, cfg, token)
+	letRelease := refuseRelease(t, cfg, token)
 	rt := fake.NewRuntime()
+	logs := &syncBuffer{}
+	o := fakeRuntime(rt, &built{})
+	o.orphanSweep = 20 * time.Millisecond
+	d := startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(logs, nil)))
 
-	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+	testwait.Eventually(t, "the store to refuse the release", func() bool {
+		return strings.Contains(logs.String(), `"msg":"supervise: release an uncertain launch`)
+	})
+	if c := storedClaim(t, cfg, token); c.State != supervise.StateLaunchUncertain || c.Locator != nil {
+		t.Fatalf("after the refused release the store holds %s with locator %+v, want launch_uncertain with none", c.State, c.Locator)
+	}
+	if spawns := rt.CallsOf("Spawn"); len(spawns) != 0 {
+		t.Fatalf("spawns while the store refuses the release = %+v, want none", spawns)
+	}
+	letRelease()
 
-	testwait.Eventually(t, "the unfinished launch to be launched again", func() bool {
+	testwait.Eventually(t, "the claim to be launched again without a restart", func() bool {
 		c := d.claim(token)
 		return c.State == string(supervise.StateLaunching) && c.Locator != nil
 	})
-	spawns := rt.CallsOf("Spawn")
-	if len(spawns) != 1 || spawns[0].Spec.Generation != 2 {
+	if spawns := rt.CallsOf("Spawn"); len(spawns) != 1 || spawns[0].Spec.Generation != 2 {
 		t.Fatalf("spawns = %+v, want one launch at generation 2", spawns)
 	}
 }
@@ -680,9 +752,9 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 // A boot reconciliation retried after boot reads the claims as they are at the retry, never as
 // the boot read them. Under the sandbox runtime the sweep deletes every Sandbox no known claim
 // owns, with no grace at boot, so a retry told the boot's snapshot would delete the Sandbox — and
-// with a root's, the tree volume — of a claim launched and suspended since. The attempt that
-// succeeds must know that claim; whether it saw the claim before or after the suspension committed
-// is scheduling, and either keeps its Sandbox.
+// with it the issue's volume — of a claim launched and suspended since. The attempt that succeeds
+// must know that claim; whether it saw the claim before or after the suspension committed is
+// scheduling, and either keeps its Sandbox.
 func TestRunRetriesTheBootReconciliationWithTheClaimsAsTheyAreNow(t *testing.T) {
 	cfg := testConfig(t)
 	project, _ := claim.ProjectToken(cfg.Project)
@@ -859,23 +931,24 @@ func TestRunReconcilesOrphansWhileItRuns(t *testing.T) {
 // The orphan sweep is told of every claim that is not retired, each with its locator or none. A
 // suspended claim, a tree's root whose agent exited, and a failed claim keep their tokens in the
 // known set with no locator; a retired claim leaves it. A runtime that deletes what no known claim owns — a sandbox's
-// Sandboxes, a root's tree volume — therefore never deletes a claim that can still resume.
+// Sandboxes, each issue's volume with them — therefore never deletes a claim that can still resume.
 func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.LaunchFailureLimit = 1
 	rt := fake.NewRuntime()
-	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("tmux refused")})
 	o := fakeRuntime(rt, &built{})
 	o.orphanSweep = 20 * time.Millisecond
 	d := startDaemon(t, cfg, o)
+	// The tree's root first: its spawn opens the operator tree its workers bind to.
+	root := d.spawn(architect())
+	rt.ScriptSpawn(fake.SpawnResult{Err: errors.New("tmux refused")})
 	planner := architect()
 	planner.Issue, planner.Role = "LEGION-4", claim.RolePlanner
-	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", planner, true); status != http.StatusInternalServerError {
+	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims", planner, true); status != http.StatusInternalServerError || !strings.Contains(string(body), "tmux refused") {
 		t.Fatalf("spawn of the claim meant to fail = %d; body %s", status, body)
 	}
 	project, _ := claim.ProjectToken(cfg.Project)
 	failed, _ := claim.NewToken(project, "LEGION-4", claim.RolePlanner)
-	root := d.spawn(architect())
 	worker := architect()
 	worker.Issue, worker.Role = "LEGION-2", claim.RoleImplementer
 	suspended := d.spawn(worker)
@@ -929,6 +1002,12 @@ func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 // returns the secret the registration issued.
 func readyClaim(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token) string {
 	t.Helper()
+	return readyClaimReporting(t, d, rt, token, nil)
+}
+
+// readyClaimReporting is readyClaim with the capability report the ready carries; nil carries none.
+func readyClaimReporting(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token, report *claim.CapabilityReport) string {
+	t.Helper()
 	launch := lastLaunch(t, rt, token)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_" + string(token), OmpSessionFile: "/sessions/" + string(token) + ".jsonl",
@@ -943,10 +1022,36 @@ func readyClaim(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token) st
 	}
 	if status, body := d.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
 		ClaimToken: token, SessionID: "ses_" + string(token), Secret: registered.Secret, Generation: 1,
+		Capabilities: report,
 	}, false); status != http.StatusNoContent {
 		t.Fatalf("ready %s = %d; body %s", token, status, body)
 	}
 	return registered.Secret
+}
+
+// admitIssue writes the durable issue record the workflow writes at admission, in one transaction:
+// issue, admitted at generation 1, with token holding role's phase. A claim alone creates no issue
+// in the state's projection.
+func admitIssue(t *testing.T, cfg config.Config, issue string, role claim.Role, token claim.Token) {
+	t.Helper()
+	st, err := store.Open(context.Background(), cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open state store: %v", err)
+	}
+	defer st.Close()
+	records := recordpkg.NewStore()
+	if err := st.Tx(context.Background(), func(tx pgx.Tx) error {
+		record := recordpkg.Issue{
+			Key: issue, Tree: issue, Project: cfg.Project, Title: issue, Phase: phase.Admitted,
+			Generation: 1, Status: "in_progress",
+		}
+		if err := records.PutIssue(context.Background(), tx, record); err != nil {
+			return err
+		}
+		return records.PutPhase(context.Background(), tx, recordpkg.PhaseRow{Issue: issue, Role: role, Claim: token})
+	}); err != nil {
+		t.Fatalf("write state record: %v", err)
+	}
 }
 
 // The budgets and the waits a machine runs on are the configuration's, not defaults of its own.
@@ -1031,6 +1136,9 @@ func streamEventTypes(t *testing.T) []string {
 	return sealed
 }
 
+// putClaim stores c as every claim the daemon stores is: a claim of an admitted tree, bound to the
+// tree's open lifecycle epoch. No workflow issue backs these trees, so their authority is the
+// operator's, as the lifecycle migration gives a tree it finds only claims of.
 func putClaim(t *testing.T, cfg config.Config, c supervise.Claim) {
 	t.Helper()
 	ctx := context.Background()
@@ -1042,7 +1150,10 @@ func putClaim(t *testing.T, cfg config.Config, c supervise.Claim) {
 	if _, err := st.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if err := st.PutClaim(ctx, c); err != nil {
+	if _, err := st.OpenTreeLifecycle(ctx, c.Project, c.Tree, treelifecycle.AuthorityOperator); err != nil {
+		t.Fatalf("admit the tree of %s: %v", c.Token, err)
+	}
+	if _, err := st.AdmitClaim(ctx, c); err != nil {
 		t.Fatalf("put %s: %v", c.Token, err)
 	}
 }
@@ -1082,22 +1193,25 @@ func secretFiles(t *testing.T, dir string) []string {
 }
 
 // The workspace-loss reaction end to end, through the daemon's own specs, store, and supervisor: a
-// resumed root whose workspace-init found the tree volume lost relaunches once as a fresh session
-// recovering legion/<issue>, and a suspended worker of the same tree drops the session that volume
-// held, so its resume is a fresh launch recovering its own issue's branch rather than a resume that
-// would fail until its budget ran out.
-func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *testing.T) {
+// resumed root whose workspace-init found its issue's volume lost relaunches once as a fresh session
+// recovering legion/<issue>, and a suspended worker of the same issue drops the session that volume
+// held, so its resume is a fresh launch recovering the issue's branch rather than a resume that
+// would fail until its budget ran out. A worker of another issue of the tree keeps its session: its
+// issue's volume is its own, and the loss was not its.
+func TestRunRelaunchesAFreshSessionWhenTheIssueVolumeIsLostAndTellsTheIssue(t *testing.T) {
 	cfg := testConfig(t)
 	rt := fake.NewRuntime()
 	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
 	root := d.spawn(architect())
 	readyClaim(t, d, rt, root)
-	worker := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."})
-	readyClaim(t, d, rt, worker)
+	sibling := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-1", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."})
+	readyClaim(t, d, rt, sibling)
+	child := d.spawn(api.SpawnRequest{Tree: "LEGION-1", Issue: "LEGION-2", Role: claim.RoleImplementer, Prompt: "Reply ready and wait."})
+	readyClaim(t, d, rt, child)
 	for _, step := range []struct {
 		token  claim.Token
 		action string
-	}{{worker, "suspend"}, {root, "suspend"}, {root, "resume"}} {
+	}{{sibling, "suspend"}, {child, "suspend"}, {root, "suspend"}, {root, "resume"}} {
 		if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(step.token)+"/"+step.action, nil, true); status != http.StatusOK {
 			t.Fatalf("%s %s = %d; body %s", step.action, step.token, status, body)
 		}
@@ -1106,11 +1220,11 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 
 	rt.Emit(runtime.Observation{Locator: *resumed, Kind: runtime.Gone,
 		WorkspaceLost: true,
-		Detail:        "the tree volume was lost: pod legion-legion-1-architect Failed: init container workspace-init terminated (Error, exit code 3)"})
+		Detail:        "the issue's volume was lost: pod legion-legion-1 Failed: init container workspace-init terminated (Error, exit code 3)"})
 
-	testwait.Eventually(t, "the root's fresh relaunch and the worker's dropped session", func() bool {
-		r, w := d.claim(root), d.claim(worker)
-		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Session == "" && w.Session == ""
+	testwait.Eventually(t, "the root's fresh relaunch and its sibling's dropped session", func() bool {
+		r, s := d.claim(root), d.claim(sibling)
+		return r.Generation == 3 && r.State == string(supervise.StateLaunching) && r.Locator != nil && r.Session == "" && s.Session == ""
 	})
 	if fresh := lastLaunch(t, rt, root); fresh.ResumeSessionFile != "" || fresh.WorkspaceRecoveredFrom != "legion/LEGION-1" {
 		t.Errorf("the root relaunched with %+v, want a fresh session recovering legion/LEGION-1", fresh)
@@ -1118,11 +1232,19 @@ func TestRunRelaunchesAFreshSessionWhenTheTreeVolumeIsLostAndTellsTheTree(t *tes
 	if c := d.claim(root); c.Budgets.LaunchFailures != 0 {
 		t.Errorf("the root's lost volume was charged: %+v", c.Budgets)
 	}
-	if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(worker)+"/resume", nil, true); status != http.StatusOK {
-		t.Fatalf("resume the worker = %d; body %s", status, body)
+	if c := d.claim(child); c.Session != "ses_"+string(child) {
+		t.Errorf("the other issue's worker is %+v, want its session kept: the lost volume was not its issue's", c)
 	}
-	if relaunched := lastLaunch(t, rt, worker); relaunched.ResumeSessionFile != "" || relaunched.WorkspaceRecoveredFrom != "legion/LEGION-2" {
-		t.Errorf("the worker relaunched with %+v, want a fresh session recovering legion/LEGION-2", relaunched)
+	for _, worker := range []claim.Token{sibling, child} {
+		if status, body := d.request(http.MethodPost, "/legion/v1/operator/claims/"+string(worker)+"/resume", nil, true); status != http.StatusOK {
+			t.Fatalf("resume %s = %d; body %s", worker, status, body)
+		}
+	}
+	if relaunched := lastLaunch(t, rt, sibling); relaunched.ResumeSessionFile != "" || relaunched.WorkspaceRecoveredFrom != "legion/LEGION-1" {
+		t.Errorf("the sibling relaunched with %+v, want a fresh session recovering legion/LEGION-1", relaunched)
+	}
+	if relaunched := lastLaunch(t, rt, child); relaunched.ResumeSessionFile != "/sessions/"+string(child)+".jsonl" || relaunched.WorkspaceRecoveredFrom != "" {
+		t.Errorf("the other issue's worker relaunched with %+v, want its recorded session resumed", relaunched)
 	}
 }
 
@@ -1142,7 +1264,7 @@ func TestRunRelaunchesAStaleAddressChargingNothing(t *testing.T) {
 
 	testwait.Eventually(t, "the relaunch", func() bool {
 		c := d.claim(token)
-		return c.Generation == 2 && c.State == string(supervise.StateLaunching)
+		return c.Generation == 2 && c.State == string(supervise.StateLaunching) && c.Locator != nil
 	})
 	if relaunched := lastLaunch(t, rt, token); relaunched.ResumeSessionFile == "" {
 		t.Errorf("relaunched with %+v, want the recorded session resumed", relaunched)

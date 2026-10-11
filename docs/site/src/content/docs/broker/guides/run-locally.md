@@ -7,8 +7,10 @@ sidebar:
 
 `packages/envoy/scripts/dev-broker.sh` creates a Postgres database of its own, builds the broker and
 its clients, writes a fake secrets file, which stands in for Secrets Manager, and starts the broker
-on a free port. It needs Go, and a Postgres server: by default it starts one in Docker (a container
-named `dispatch-pg`, reused when it is there). Without Docker, run Postgres yourself and set
+on a free port. It needs Go, and a Postgres server: by default it starts one in Docker through
+`packages/envoy/scripts/dev-postgres.sh` (a container named `dispatch-pg`, reused when it is there;
+one made from another image than that script's is refused, with the commands that move its data
+onto the right one). Without Docker, run Postgres yourself and set
 `DEV_BROKER_POSTGRES_URL` to `postgres://<user>@<host>:<port>/<database>`, for a role that may
 create databases; the script then creates and drops its database there with `psql`.
 
@@ -51,9 +53,9 @@ instead.
 
 The fake secrets file holds two secrets of `ada@example.com`'s, under the namespace
 `example/agent-secrets/` and on its example key: `DEMO_READ_TOKEN`, tagged `tier=agent`, which her
-own box or host sessions ([the kinds of session](/legion/broker/concepts/#sessions-and-enrollment))
-get without asking, and `DEMO_API_KEY`, tagged `tier=human`, which she approves. A grant lives an
-hour (`BROKER_MAX_GRANT_SECONDS=3600`). Every command below runs in that second shell.
+own sessions ([the kinds of session](/legion/broker/concepts/#sessions-and-enrollment)) get without
+asking, and `DEMO_API_KEY`, tagged `tier=human`, which she approves. A grant lasts until its session
+ends, or for the `--ttl` its request names. Every command below runs in that second shell.
 
 ## Run a helper and log it in
 
@@ -61,10 +63,10 @@ Start the helper in the background, with its log in the workdir, and log it in:
 
 ```sh
 agent-secrets-helper serve 2>"$DEV_BROKER_DIR/helper.log" &
-agent-secrets launcher login
+agent-secrets machine login
 ```
 
-`launcher login` prints a code and waits. In a third shell with the same exports, approve it as
+`machine login` prints a code and waits. In a third shell with the same exports, approve it as
 Dispatch would:
 
 ```console
@@ -72,7 +74,7 @@ $ agent-secrets-devrelay machine-approve --code YE9L-5FM5
 {"credential_id":"3bc28cd1-d04b-4481-92a8-ff10350fe795","grant_id":null,"state":"approved"}
 ```
 
-and `launcher login` exits 0. The helper's log, `$DEV_BROKER_DIR/helper.log`, says
+and `machine login` exits 0. The helper's log, `$DEV_BROKER_DIR/helper.log`, says
 `machine login issued; the helper holds a launcher credential`.
 
 ## Use secrets from a session
@@ -83,7 +85,7 @@ Start a shell as a registered session and use the secrets:
 $ agent-secrets register --wait 10 --exec -- bash
 $ agent-secrets self
 enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
-kind: host
+kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
@@ -91,8 +93,9 @@ demo-read-token-value
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- sh -c 'echo "deploying with a ${#DEMO_API_KEY}-character key"'
 ```
 
-The last command waits for approval. In the third shell, list what waits on the approver and
-approve it ([approving a request](/legion/broker/guides/approve-a-request/#without-dispatch)
+The last command waits for approval, and names who approves it (`waiting for ada@example.com to
+approve it under Credential requests in their Dispatch Inbox`). In the third shell, list what waits
+on the approver and approve it ([approving a request](/legion/broker/guides/approve-a-request/#without-dispatch)
 shows the output), and the command runs:
 
 ```console
@@ -103,11 +106,66 @@ A request has two ids: the request id `agent-secrets` prints, and the record id 
 shows and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` prints both, and
 `agent-secrets-devrelay deny --record <record id>` denies a request.
 
+Each grant so far lasts until the session ends (`agent-secrets self` lists it `until this session
+ends`). A request may ask for less with `--ttl`, and the grant then ends on its own once that has
+passed, while the session lives on:
+
+```console
+$ agent-secrets DEMO_READ_TOKEN --ttl 2m -- printenv DEMO_READ_TOKEN
+demo-read-token-value
+$ agent-secrets self
+enrollment_id: 7cf72ec3-d10f-46fd-984f-ddd856b229c2
+kind: session
+operator: ada@example.com
+lease_expires_at: 2026-10-11T01:51:13Z
+grant: f81251ab-6552-450c-9eca-12a793a29f4c (request 86237327-1f78-4c79-82a5-4f71174e71c5, expires 2026-10-11T01:38:14Z)
+```
+
+Two minutes later that grant releases nothing (`GRANT_NOT_LIVE`), `self` no longer lists it, and
+the same command asks again. `--ttl` is a whole number of seconds, `2m` or `90s`; anything else
+exits 2 before asking. When the broker or the machine's helper is from before `--ttl`, which would
+grant for longer, `agent-secrets` ends the grant it got (or cancels the request still waiting),
+says so, runs nothing and exits 1.
+
+## List and revoke from your own shell
+
+In the third shell, which is outside every session, list your machine logins and the live grants
+as Dispatch's pages would, under the helper's machine login
+([revoke a session or a grant](/legion/broker/guides/revoke-a-session/#revoke-a-grant-from-your-shell)):
+
+```console
+$ agent-secrets machine list
+CREDENTIAL_ID                         HOST                 APPROVED_BY      ISSUED                EXPIRES               STATE
+a0324632-0cc0-4113-bb26-d4123fab9da6  example-host-devbox  ada@example.com  2026-10-10T15:01:31Z  2026-10-17T15:01:31Z  ok
+$ agent-secrets grant list
+GRANT_ID                              SECRETS          GRANTED    APPROVER  SESSION                                       OPERATOR         EXPIRES
+8fe92a26-b355-4c28-8679-60e8ce98b1d9  DEMO_READ_TOKEN  automatic  -         session/example-host-devbox:2856922:35395441  ada@example.com  session-end
+```
+
+`machine list` shows your own machines' logins alone; Dispatch's machine-login page also lists
+every service's. `agent-secrets grant revoke <grant id>` ends a grant there, and
+`agent-secrets machine revoke <credential id>` one of your logins. Run in the session's shell, they
+are refused `IN_SESSION`, so the session's own commands cannot act as you:
+
+```console
+$ agent-secrets machine list
+agent-secrets machine list: IN_SESSION: pid 2857619 is inside a registered machine session, which acts on itself alone; run machine and grant commands from your own shell
+```
+
+The refusal covers the session's process tree only: a process the session sends out of it (with
+`( cmd & )`, `setsid -f` or a tmux server it started) passes, and any process running as your user
+can stop the helper. Through these commands such a process can list and revoke your own machine
+logins, never a service's machine login, and your grants, which include grants you approved on any
+session. `agent-secrets enroll --helper` is open to any process of your user, so such a process can
+also enroll a box and read your agent secrets.
+
 ## Write a secret and see it served
 
 The broker reads the fake secrets file again each time it lists the secrets, describes one or
-reads a value, so an edit to the file is what a write to Secrets Manager is in production. Add a
-secret of `ada@example.com`'s to it, here with `jq`:
+reads a value, so an edit to the file is what a write to Secrets Manager is in production, where a
+person writes with `agent-secrets secret` ([manage a secret](/legion/broker/guides/manage-a-secret/));
+that CLI calls AWS itself, so it cannot write this file. Add a secret of `ada@example.com`'s to it,
+here with `jq`:
 
 ```sh
 jq '.secrets += [{"name": "example/agent-secrets/demo-new-token",
@@ -117,7 +175,7 @@ jq '.secrets += [{"name": "example/agent-secrets/demo-new-token",
 mv "$DEV_BROKER_DIR/fake-secrets.json.new" "$DEV_BROKER_DIR/fake-secrets.json"
 ```
 
-and ask the broker to reread it, as whoever writes a secret does right after the write
+and ask the broker to reread it, as `agent-secrets secret` does right after each write
 ([Concepts](/legion/broker/concepts/#owner-and-tier-who-may-have-which-secret)). The same call
 answered `{"name":"DEMO_NEW_TOKEN","served":false,"reason":"absent"}` before the edit:
 

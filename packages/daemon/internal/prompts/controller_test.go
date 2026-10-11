@@ -11,7 +11,8 @@ import (
 // The controller's prompt is its shared role part, which holds wherever it runs, then the daemon's
 // part for how this controller was launched: in the operator's terminal by `legion controller
 // start`, or headless in a pod the daemon launched (`controller: daemon`). The shared part never
-// says which, so neither launch is told it runs the other way.
+// says which, so neither launch is told it runs the other way. The daemon's launch is told that a
+// person writes to it from Dispatch's Agents page, and never that nobody reads its session.
 func TestTheControllersPromptIsItsRolePartThenItsLaunchsPart(t *testing.T) {
 	stateDir := t.TempDir()
 	composer, err := New(stateDir)
@@ -30,8 +31,9 @@ func TestTheControllersPromptIsItsRolePartThenItsLaunchsPart(t *testing.T) {
 			[]string{"`legion controller start`", "operator's terminal", "typed directly into this session"},
 			[]string{"headless"}},
 		{"launched by the daemon", true, "controller-headless.md",
-			[]string{"headless", "`controller: daemon`", "Dispatch", "Envoy", "relaunches"},
-			[]string{"legion controller start", "typed directly"}},
+			[]string{"headless", "`controller: daemon`", "Dispatch", "Envoy", "relaunches",
+				"A plain user turn in this session other than the start message or a task an operator sent with `legion claims deliver` is a person writing from Dispatch's Agents page: answer it first, in the conversation."},
+			[]string{"legion controller start", "typed directly", "read by no one", "nobody reads"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			paths, err := composer.ControllerPromptPaths(tc.headless)
@@ -49,6 +51,8 @@ func TestTheControllersPromptIsItsRolePartThenItsLaunchsPart(t *testing.T) {
 				}
 				text += string(body)
 			}
+			// A sentence is matched whatever the file's line wrapping.
+			text = strings.Join(strings.Fields(text), " ")
 			for _, want := range tc.says {
 				if !strings.Contains(text, want) {
 					t.Errorf("the prompt does not say %q", want)
@@ -56,7 +60,7 @@ func TestTheControllersPromptIsItsRolePartThenItsLaunchsPart(t *testing.T) {
 			}
 			for _, never := range tc.never {
 				if strings.Contains(text, never) {
-					t.Errorf("the prompt says %q, which is the other launch's", never)
+					t.Errorf("the prompt says %q, which this launch is never told", never)
 				}
 			}
 		})

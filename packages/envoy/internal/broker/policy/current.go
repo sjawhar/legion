@@ -36,7 +36,9 @@ type Current struct {
 
 // NewCurrent loads the policy once, failing when that load fails, and then reloads it every
 // interval until ctx ends, each reload given that interval before it fails, so one stuck on a
-// Secrets Manager that does not answer holds the writer lock no longer.
+// Secrets Manager that does not answer holds the writer lock no longer. A reload that fails while
+// ctx is live logs LoadFailedMessage; one that fails once ctx has ended, the broker shutting down,
+// is no failed load and logs nothing, since the deployment's alarm counts that line.
 func NewCurrent(ctx context.Context, loader Loader, every time.Duration) (*Current, error) {
 	c := &Current{loader: loader, mu: make(chan struct{}, 1), recent: map[string]time.Time{}, now: time.Now}
 	if err := c.Refresh(ctx); err != nil {
@@ -53,7 +55,7 @@ func NewCurrent(ctx context.Context, loader Loader, every time.Duration) (*Curre
 				reload, cancel := context.WithTimeout(ctx, every)
 				err := c.Refresh(reload)
 				cancel()
-				if err != nil {
+				if err != nil && ctx.Err() == nil {
 					slog.Error(LoadFailedMessage, "error", err)
 				}
 			}

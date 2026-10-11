@@ -24,9 +24,9 @@ and merger. Each agent is an [Oh My Pi](https://github.com/sjawhar/oh-my-pi) ses
 pane on one host or in an [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
 pod on Kubernetes, and each phase commits a handoff under `.legion/` on the issue branch for a
 restarted agent to recover from. The daemon writes the issue's status back to Dispatch as it moves
-from Todo through In Progress, Testing, Needs Review and Retro to Done. Legion never merges: the
-merger posts `READY` on the issue, a person merges the pull request, and the implementer then checks
-the change in production.
+from Todo through In Progress, Testing, Needs Review and Retro to Done. The merger posts `READY` on
+the issue and submits the merge, the pull request merges under the repository's own rules, and the
+implementer then checks the change in production.
 
 [Legion's documentation](https://sjawhar.github.io/legion/legion/) ·
 [a walkthrough video of one issue](https://sjawhar.github.io/legion/legion/walkthrough/)
@@ -39,8 +39,8 @@ The record of work and decisions: a web app and an HTTP API over projects and is
 its status, its spec, its conversation and its files. The spec is a live document that people and
 agents edit together, comment on and suggest changes to. An ask is a question put to a named
 person, and it waits in that person's Inbox until they answer it. An approval request is an ask
-whose answer approves a document at one version or requests changes. Agents work through
-`dispatch_*` tools; people use the dashboard: the Inbox, each project's list and board, and the
+whose answer approves a document at one version or requests changes. Agents work through the
+`dispatch` command in their shell; people use the dashboard: the Inbox, each project's list and board, and the
 Agents page, where they can message the agents that are running.
 
 [Dispatch's documentation](https://sjawhar.github.io/legion/dispatch/) ·
@@ -112,13 +112,13 @@ bun run docs:dev
 | `packages/envoy/` | Go: the Envoy listener, Dispatch's server (`cmd/dispatch`), the Secrets Broker (`cmd/broker`) and its `agent-secrets` clients. |
 | `packages/dispatch/` | Dispatch's web app, in React, which Dispatch's server serves. |
 | `packages/proof-editor/` | Dispatch's document editor, copied from [proof-sdk](https://github.com/EveryInc/proof-sdk). |
-| `packages/contracts/` | The event contracts and Dispatch tool specifications the packages share, and the Go code generated from them. |
-| `packages/envoy-client/` | The HTTP client, tool contract and message renderer the three Envoy clients share. |
-| `packages/pi-envoy/` | The Oh My Pi extension every session loads: the Envoy and Dispatch tools, and the Dispatch and Envoy skills. |
+| `packages/contracts/` | The event contracts and the Dispatch specs the `dispatch` command is built from, which the packages share, and the Go code generated from them. |
+| `packages/envoy-client/` | The HTTP client, the `dispatch` command, the Envoy tool contract and the message renderer the three Envoy clients share. |
+| `packages/pi-envoy/` | The Oh My Pi extension every session loads: the Envoy tools, the `dispatch` command on the shell's `PATH`, and the Dispatch and Envoy skills. |
 | `packages/pi-legion/` | The Oh My Pi extension a Legion pane loads beside it: the Legion tool and daemon handshake, the agents Legion's workers run with, and the Legion skills. |
 | `packages/pi-shared/` | The private package both Oh My Pi extensions bundle: the in-process interface between them and the modules both use. |
-| `packages/claude-envoy/` | The Claude Code plugin: Envoy events in a Claude Code session, and the Dispatch tools. |
-| `packages/envoy-plugin/` | The OpenCode plugin: the Envoy and Dispatch tools. |
+| `packages/claude-envoy/` | The Claude Code plugin: Envoy events in a Claude Code session, and the `dispatch` command. |
+| `packages/envoy-plugin/` | The OpenCode plugin: the Envoy tools and the `dispatch` command. |
 | `skills/` | The skills Legion's agents load: the architect, the controller, the phase workers, Dispatch, Envoy and the review rubrics. |
 | `deploy/kubernetes/` | Example files for running Legion on Kubernetes: `legion.yaml`, the controller's file, and a model route. |
 | `docs/site/` | The documentation site, in Astro Starlight. |
@@ -167,7 +167,7 @@ dependency's license cannot be determined:
 | Documentation site (GitHub Pages) | [`THIRD_PARTY_NOTICES.txt`](https://sjawhar.github.io/legion/THIRD_PARTY_NOTICES.txt) |
 | `ghcr.io/sjawhar/legion/envoy`, `ghcr.io/sjawhar/legion-worker` images | `/usr/share/doc/legion/THIRD_PARTY_NOTICES` |
 | `legion-<os>-<arch>.tar.gz` (`legion-v*` releases) | `legion-<os>-<arch>/THIRD_PARTY_NOTICES` |
-| `legion-envoy-<arch>.tar.gz`, `agent-secrets-<arch>.tar.gz` (`legion-envoy-v*` releases) | `THIRD_PARTY_NOTICES`, `agent-secrets/THIRD_PARTY_NOTICES` |
+| `legion-envoy-<arch>.tar.gz`, `agent-secrets-<arch>.tar.gz`, `agent-secrets-darwin-<arch>.tar.gz` (`legion-envoy-v*` releases) | `THIRD_PARTY_NOTICES`, `agent-secrets/THIRD_PARTY_NOTICES` |
 
 `scripts/third-party-notices.ts` writes the JavaScript bundles' notices from the bundler's module
 list, `scripts/go-third-party-notices.sh` the Go programs' with go-licenses, and each image assembles

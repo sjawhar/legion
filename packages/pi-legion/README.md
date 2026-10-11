@@ -3,8 +3,8 @@
 `@sjawhar/pi-legion` is the Oh My Pi plugin a Legion pane loads beside `@sjawhar/pi-envoy`
 (`packages/pi-envoy`). It carries one extension entry, `extensions/legion.ts`: the Legion
 lifecycle, which boots a root architect or a phase worker from the daemon's pane environment
-(`LEGION_TREE`/`LEGION_ROLE`), registers the controller (`LEGION_CONTROLLER`), mints a credential
-grant before each tool call that redeems one, registers the `legion` tool, and holds the phase a
+(`LEGION_TREE`/`LEGION_ROLE`), registers the controller (`LEGION_CONTROLLER`), registers the
+`legion` tool, whose operations mint their own daemon grants in-process, and holds the phase a
 worker is in open until its `handoff_complete`. A session without that environment gets nothing from
 it. The Envoy messaging and Dispatch tools every session uses are `@sjawhar/pi-envoy`'s, and this
 plugin reaches them through the in-process interface that package publishes
@@ -17,8 +17,9 @@ pi-envoy").
 
 The Legion daemon's boot gate (`packages/daemon/internal/daemon/bootgate.go`) refuses to start
 unless the Oh My Pi a pane will run loads this plugin at the daemon's contract
-(`legion.daemonApiVersion` in `package.json`, currently 14) and loads `@sjawhar/pi-envoy` with it,
-so both go into the Oh My Pi profile the daemon's panes use:
+(`legion.daemonApiVersion` in this package's `package.json`, equal to `DaemonAPIVersion` in
+`packages/daemon/internal/api/version.go`) and loads `@sjawhar/pi-envoy` with it, so both go into
+the Oh My Pi profile the daemon's panes use:
 
 ```sh
 omp plugin install @sjawhar/pi-envoy && omp plugin install @sjawhar/pi-legion

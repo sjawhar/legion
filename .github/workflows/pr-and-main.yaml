@@ -18,15 +18,22 @@ concurrency:
   group: tests-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Read-only: no job here writes to the repository, a registry or the API. The token clones,
-# downloads pinned tools, and, in the `lint` job, reads a pull request's commits through the
-# compare route (check-pr-text.sh), which `contents: read` covers.
+# Read-only: no job here writes to the repository, a registry or the API. The token clones and
+# downloads pinned tools, which `contents: read` covers; the `lint` job's own block adds what
+# check-pr-text.sh reads besides.
 permissions:
   contents: read
 
 jobs:
   lint:
     runs-on: ubuntu-24.04
+    # check-pr-text.sh reads a pull request's commits through the compare route (`contents: read`),
+    # its reviews and review comments (`pull-requests: read`) and its issue comments
+    # (`issues: read`).
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
@@ -56,10 +63,11 @@ jobs:
         run: .github/scripts/check-plugin-names.sh
 
       # A pull request's title, body and commit messages reach main's squash commit, the
-      # generated release notes and GitHub's pages, so this required job checks them at every
-      # push. pr-title.yaml checks them again when the pull request is edited. A push to main or a
-      # merge-queue run carries no pull request.
-      - name: Check the pull request's title, body, branch name and commits name nothing private
+      # generated release notes and GitHub's pages, and its comments and reviews are public on its
+      # page, so this required job checks them at every push. pr-title.yaml checks them again when
+      # the pull request is edited or a comment, review or review comment is posted, edited or
+      # deleted. A push to main or a merge-queue run carries no pull request.
+      - name: Check the pull request's title, body, branch name, commits, comments and reviews name nothing private
         if: github.event_name == 'pull_request'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -73,11 +81,11 @@ jobs:
           go-version-file: packages/daemon/go.mod
           cache: false
 
-      # The grant rig's daemon-pane.go belongs to no module (it runs with `go run -overlay` inside
-      # packages/daemon), so it is formatted here with the daemon.
+      # The skill-scenario rig's daemon-pane.go belongs to no module (it runs with `go run -overlay`
+      # inside packages/daemon), so it is formatted here with the daemon.
       - name: Check the Go daemon's formatting
         run: |
-          unformatted=$(gofmt -l packages/daemon packages/pi-legion/scripts/grant-rig/daemon-pane.go)
+          unformatted=$(gofmt -l packages/daemon packages/pi-legion/scripts/skill-scenarios/daemon-pane.go)
           if [ -n "$unformatted" ]; then
             echo "::error::gofmt -l lists files that are not gofmt-formatted; run gofmt -w on them:"
             echo "$unformatted"
@@ -110,8 +118,11 @@ jobs:
       # the build's own GOOS, GOARCH and CGO_ENABLED (release.yaml's legion job and
       # release-envoy-listener.yaml, whose targets .github/go-release-targets.json lists for all of
       # them). Writing them here for each of those builds fails the pull request that brings in a
-      # module whose license cannot be determined, before a release does.
-      - name: Check every Go release archive's third-party notices can be written
+      # module whose license cannot be determined, before a release does. The darwin agent-secrets
+      # client is also compiled here, since writing notices loads its packages without type-checking
+      # them and no other pull-request job builds it for darwin: a darwin-only compile error fails
+      # the pull request rather than the release after the merge.
+      - name: Check every Go release archive's third-party notices can be written and the darwin client compiles
         run: |
           notices="$RUNNER_TEMP/notices"
           mkdir -p "$notices"
@@ -125,6 +136,13 @@ jobs:
             (cd packages/envoy && CGO_ENABLED=0 GOOS=linux GOARCH="$arch" \
               ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-$arch" \
               ./cmd/agent-secrets ./cmd/agent-secrets-helper)
+          done
+          for target in $(jq -r '.["agent-secrets-client"][]' .github/agent-secrets-client-targets.json); do
+            (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              go build -buildvcs=false -o /dev/null ./cmd/agent-secrets)
+            (cd packages/envoy && CGO_ENABLED=0 GOOS="${target%/*}" GOARCH="${target#*/}" \
+              ../../scripts/go-third-party-notices.sh "$notices/agent-secrets-${target%/*}-${target#*/}" \
+              ./cmd/agent-secrets)
           done
           wc -l "$notices"/*
 
@@ -153,7 +171,7 @@ jobs:
     runs-on: ubuntu-24.04
     services:
       postgres:
-        image: pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: mirror.gcr.io/pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
         env:
           POSTGRES_PASSWORD: ci
         ports: ["5432:5432"]
@@ -163,11 +181,17 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      # One service for both: the Go daemon's unit tests' Postgres and the Stage 1 script's.
-      # Setting LEGION_E2E_PG_DSN is what tells the script not to start a container of its own —
-      # that path is the devbox's.
+      # One service for all three: the Go daemon's unit tests' Postgres, the broker rig its
+      # agentsecrets contract tests drive (brokertest.NewRig skips without
+      # BROKER_TEST_DATABASE_URL), and the Stage 1 script's. Setting LEGION_E2E_PG_DSN is what tells
+      # the script not to start a container of its own — that path is the devbox's.
       LEGION_TEST_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      BROKER_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
       LEGION_E2E_PG_DSN: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
+      # The runner VM is discarded after the job, so testcontainers' Ryuk reaper has nothing to
+      # clean up, and its image (testcontainers/ryuk, on Docker Hub) would be one more registry
+      # pull a test could fail on.
+      TESTCONTAINERS_RYUK_DISABLED: "true"
 
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -206,6 +230,9 @@ jobs:
 
       - name: Test the plugin-name check
         run: .github/scripts/check-plugin-names.test.sh
+
+      - name: Test the session import pods script (a stand-in kubectl)
+        run: bash scripts/sessions-import-pods.test.sh
 
       - name: Test the live proofs' libraries (the GitHub ingress bridge, the proof human's check, the model gateway key command, the design-gate verdict)
         run: bun test scripts/e2e/lib

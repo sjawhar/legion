@@ -2,7 +2,8 @@
 // record's own read, approve and deny routes. Part of the UI routes (uiAuth) Dispatch's server
 // relays to on behalf of the browser: the UI bearer proves Dispatch's server is the caller, and
 // Dispatch names the deciding human in the body's approver field from its own session, so a
-// decision is authorized by that login being the record's approver.
+// decision is authorized by the record's rule admitting that login (record.MayDecide): its
+// approver, or anyone signed in for a shared secret's request or a service's machine login.
 package api
 
 import (
@@ -40,9 +41,10 @@ func sessionResp(s requests.Session) recordSessionResp {
 // enrollment's slot, one of several independent identities in one pod, and null for every
 // enrollment without one.
 type recordEnrollmentResp struct {
-	// "box", "host" or "pod".
+	// "session" (an agent session on a machine its person logged in) or "pod".
 	Kind string `json:"kind"`
-	// The session's runtime: a host session's host:pid:start time, a box's id, a pod's UID.
+	// The session's runtime: whatever names the session on its machine (the helper's
+	// host:pid:start time, a container's id), or a pod's UID.
 	RuntimeID string `json:"runtime_id"`
 	// The person the session runs for; empty for a pod.
 	Operator string `json:"operator"`
@@ -75,7 +77,8 @@ type recordResponse struct {
 	// "pending", or how it ended: "approved", "denied", "expired", "cancelled" or "revoked".
 	State string `json:"state"`
 	// The one login that may decide it, or "anyone": any signed-in person may decide a request
-	// for a shared human-tier secret.
+	// for a shared human-tier secret, and a service's machine login. A service's machine login a
+	// broker before that rule opened still names a person here, and anyone signed in decides it too.
 	Approver string `json:"approver"`
 	// The session asking; null for a machine login.
 	Enrollment *recordEnrollmentResp `json:"enrollment"`
@@ -89,8 +92,9 @@ type recordResponse struct {
 	Service *string `json:"service"`
 	// The reason the session gave, verbatim.
 	Reason string `json:"reason"`
-	// How long the grant or credential lasts once approved.
-	LifetimeSeconds int `json:"lifetime_seconds"`
+	// How many seconds the grant or credential lasts once approved; null for a grant that lasts
+	// until its session ends. A machine login's credential always names one.
+	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// The version of the secret policy it was decided under (the SHA-256 of every agent secret's
 	// name, owner, tier and ARN); for a machine login, the version current when it was asked.
 	RulesVersion string `json:"rules_version"`
@@ -145,7 +149,8 @@ func (s *server) readRecord(w http.ResponseWriter, r *http.Request) {
 // checks it unconditionally on both approve and deny — and ignored for an agent_secret record,
 // which requests.Machine.ApplyDecision never asks for.
 type decideBody struct {
-	// The Dispatch login of the person deciding, which must be the record's approver.
+	// The Dispatch login of the person deciding, which the record's rule must admit: its approver,
+	// or anyone signed in for a shared secret's request or a service's machine login.
 	Approver string `json:"approver"`
 	// A machine login only: its confirmation code, typed again; ignored for a secret request.
 	Code *string `json:"code"`

@@ -100,6 +100,9 @@ export function positionBar(bar: HTMLElement, view: EditorView, range: MarkRange
   }
 }
 
+/** Each live view's bar, for `commentOnSelection`. */
+const controllers = new WeakMap<EditorView, ActionBarController>();
+
 class ActionBarController {
   private view: EditorView;
   private readonly bar: HTMLDivElement;
@@ -178,6 +181,7 @@ class ActionBarController {
 
     const container = view.dom.parentElement ?? document.body;
     container.appendChild(this.bar);
+    controllers.set(view, this);
     this.buildButtons();
 
     document.addEventListener('selectionchange', this.handleSelectionChange);
@@ -194,6 +198,7 @@ class ActionBarController {
 
   destroy(): void {
     this.destroyed = true;
+    if (controllers.get(this.view) === this) controllers.delete(this.view);
     document.removeEventListener('selectionchange', this.handleSelectionChange);
     document.removeEventListener('pointerup', this.handlePointerUp);
     document.removeEventListener('touchend', this.handlePointerUp);
@@ -275,6 +280,17 @@ class ActionBarController {
     this.bar.style.display = 'none';
   }
 
+  /** The one path from a selection to a mark, for the bar's buttons and `commentOnSelection`. It
+   *  marks nothing and answers false for an empty or stale range, or while the view is read-only,
+   *  where the bar offers no action. */
+  act(kind: SelectionBarActionKind, range: MarkRange | null): boolean {
+    // Dispatch hides this bar on read-only surfaces; this also keeps a reachable button from
+    // writing a provisional mark into a closed or historical document.
+    if (!this.view.editable || !isRangeValid(this.view, range)) return false;
+    void this.runAction(kind, range);
+    return true;
+  }
+
   private async runAction(kind: SelectionBarActionKind, range: MarkRange): Promise<void> {
     const quote = this.view.state.doc.textBetween(range.from, range.to, '\n', '\n');
     let markId: string;
@@ -316,9 +332,7 @@ class ActionBarController {
         event.stopPropagation();
       });
       button.addEventListener('click', () => {
-        const range = isRangeValid(this.view, this.lastRange) ? this.lastRange : getSelectionRange(this.view);
-        if (!range) return;
-        void this.runAction(kind, range);
+        this.act(kind, isRangeValid(this.view, this.lastRange) ? this.lastRange : getSelectionRange(this.view));
       });
       return button;
     };
@@ -327,6 +341,13 @@ class ActionBarController {
     this.bar.appendChild(makeButton('Suggest', 'suggest'));
     this.bar.appendChild(makeButton('Ask', 'ask'));
   }
+}
+
+/** Starts a comment on `view`'s selection exactly as the bar's Comment button does - the same
+ *  mark, then the same `onMarkAction` - and answers whether it did: not for an empty selection,
+ *  nor while the view is read-only, where the bar offers no Comment. */
+export function commentOnSelection(view: EditorView): boolean {
+  return controllers.get(view)?.act('comment', getSelectionRange(view)) ?? false;
 }
 
 export const dispatchActionBarPlugin = (options: ActionBarOptions) =>

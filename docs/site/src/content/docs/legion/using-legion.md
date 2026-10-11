@@ -34,8 +34,10 @@ parks it, or leaves it for you.
 You do not have to hand work over yourself. When a slot is free, the controller takes the
 highest-priority `todo` issue that has no children and that nobody else is working, adds the
 `legion` label, and posts a comment saying it took the issue, who will be asked to approve the
-spec, and how to undo it. An issue that is claimed by someone, linked to a pull request, or still
-being designed (an open question, a spec awaiting approval) is left alone.
+spec, and how to undo it. An issue that is claimed by someone, or still being designed (an open
+question, a spec awaiting approval), is left alone; one linked to a pull request is skipped, with
+the pull request's state named in the controller's summary (open: work in flight; merged or
+closed: reported for a person to close or decide).
 
 Do not label child issues: a child runs under its tree once the root is admitted.
 
@@ -89,10 +91,9 @@ repository, submitted on GitHub while the issue is in `needs_review`, counts the
 **Request changes** sends the work back to the implementer with your comments, and an approval of
 the head can end the round. A review from an account without write access decides nothing, since
 any GitHub account can review a public repository's pull request, and a plain comment moves
-nothing. The pull request also carries the tree's handoff files under `.legion/<issue>/`. Its
-branch started with whatever `.legion/` earlier merges left on the default branch removed, so its
-own merge carries that removal onto the default branch too: afterwards the default branch holds
-this tree's handoff directory and those of trees merged after its branch was cut.
+nothing. The approved head also carries the tree's handoff files under `.legion/<issue>/`. Retro's
+last commit removes them, so the head you merge carries none and the merge brings no handoff onto
+the default branch; the pull request's file list shows them only until that commit.
 
 ## Merge
 
@@ -105,8 +106,8 @@ READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pul
 
 followed by the pull request's outcome and its known risks. That is your cue: read it, and merge the
 pull request on GitHub as you would any other, under the repository's branch protection and
-code-owner rules. Legion never merges, and nothing in Legion approves a pull request on your behalf
-or changes who may merge.
+code-owner rules. Nothing in Legion approves a pull request on your behalf or changes who may
+merge.
 
 After the merge, the implementer checks the change in production and records what it saw on the
 pull request and the issue. The architect then signs off with a comment summarizing the evidence,
@@ -125,8 +126,8 @@ default) in case the work resumes.
   it closes the issue with that reason. You can also close the issue yourself from the dashboard.
 
 A status written by an agent session on a running issue is set back by the daemon, and the
-architect is told who wrote it; only a person's move in the dashboard, or the controller's and
-operator's `legion status`, takes a running tree out.
+architect is told who wrote it; only a person's move in the dashboard, the controller's
+`set_status`, or an operator's `legion status`, takes a running tree out.
 
 ## What each status means
 

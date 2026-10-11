@@ -115,7 +115,7 @@ func TestGenerateJWTSignsShippedClaims(t *testing.T) {
 	verifyAppJWT(t, token, &key.PublicKey, now, "12345")
 }
 
-func TestAppRoleForEveryClaimRole(t *testing.T) {
+func TestAppRoleForEveryRole(t *testing.T) {
 	for _, tc := range []struct {
 		role claim.Role
 		want AppRole
@@ -126,6 +126,7 @@ func TestAppRoleForEveryClaimRole(t *testing.T) {
 		{claim.RoleTester, Review},
 		{claim.RoleReviewer, Review},
 		{claim.RoleMerger, Implement},
+		{claim.RoleController, Review},
 	} {
 		t.Run(string(tc.role), func(t *testing.T) {
 			if got := AppRoleFor(tc.role); got != tc.want {
@@ -192,7 +193,8 @@ func TestTokensMintsRefreshesAndCachesIdentity(t *testing.T) {
 		t.Fatalf("cached token: %v", err)
 	}
 
-	now = now.Add(55*time.Minute + time.Second)
+	// The hour-long lease has fewer than refreshWindow's twenty minutes left: the next call mints.
+	now = now.Add(40*time.Minute + time.Second)
 	refreshed, err := tokens.Token(context.Background(), Implement, "sjawhar")
 	if err != nil {
 		t.Fatalf("refreshed token: %v", err)

@@ -132,9 +132,11 @@ jobs:
           # $GITHUB_EVENT_PATH's full JSON into any provenance predicate a build below computes —
           # the mechanism behind the job-log leak the env block below already guards against.
           # provenance: false keeps this build's own attestation empty, but not that; false here
-          # too is what actually stops the event payload reaching a predicate at all.
+          # too is what actually stops the event payload reaching a predicate at all. image= is the
+          # driver's own default BuildKit image, through the mirror.
           driver-opts: |
             provenance-add-gha=false
+            image=mirror.gcr.io/moby/buildkit:buildx-stable-1
 
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:

@@ -2,8 +2,14 @@ package supervise
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"time"
+
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
 // Enrollment is one pod generation's enrollment with the secrets broker.
@@ -12,12 +18,14 @@ type Enrollment struct {
 	Incarnation string
 }
 
-// PodEnrollment is what the machine hands the broker for one pod generation: the pod UID the
+// PodEnrollment is what the machine hands the broker for one process generation: the pod UID the
 // runtime recorded as the locator's incarnation, the identity the shim's hello carried, and the
-// agent's session id. It carries no issue: each secret's owner and tier tags pick a request's
-// approver at request time, never at enrollment.
+// agent's session id. The real pod UID stays the verified runtime identity, while Slot is a
+// daemon-derived role/generation label for several private enrollments in one pod; tmux leaves
+// Slot empty. It carries no issue: each secret's owner and tier tags pick a request's approver at
+// request time, never at enrollment.
 type PodEnrollment struct {
-	PodUID, Thumbprint, PodToken, Session string
+	PodUID, Slot, Thumbprint, PodToken, Session string
 }
 
 // AgentSecretsIdentity is the pod identity a shim's hello2 carried (stream.AgentSecretsIdentity).
@@ -32,20 +40,31 @@ type Enroller interface {
 	Revoke(ctx context.Context, id string) error
 }
 
-// PermanentError is an Enroll failure a retry with the same identity cannot change (the broker's
-// 4xx); the machine drops the identity and waits for the shim's next hello.
+// PermanentError is a broker refusal a retry cannot change (a broker 4xx other than an expired
+// token): an Enroll refusal drops the identity and waits for the shim's next hello; a Revoke
+// refusal is not retried.
 type PermanentError interface{ Permanent() bool }
+
+// ExpiredTokenError is an Enroll failure the broker gave because the pod token presented had
+// expired (POD_TOKEN_EXPIRED): the key the hello carried stands, its token does not. The machine
+// drops the token, keeps the key, and enrolls that key with the token freshToken reads next.
+type ExpiredTokenError interface{ TokenExpired() bool }
 
 const (
 	// revokeAttempts and revokeRetryDelay bound the revocation of a let-go process's enrollment;
 	// past them the enrollment's lease, which nothing renews once the pod is gone, ends it.
 	revokeAttempts   = 3
 	revokeRetryDelay = 10 * time.Second
+	// podTokenSkew is how far the broker's clock, which judges a pod token's expiry, may run
+	// ahead of the daemon's before a token the daemon judged unexpired is refused anyway.
+	podTokenSkew = time.Minute
 )
 
 // heldIdentity is the latest hello2 identity for the claim's current incarnation, kept in memory
 // until the enrollment lands: a resume enrolls on the hello itself, a fresh launch once the agent
-// registers and the session id is known.
+// registers and the session id is known. Its token is the one the hello carried until freshToken
+// replaces it with one the shim read later, and empty once the broker found it expired, until
+// freshToken reads a fresh one.
 type heldIdentity struct {
 	incarnation string
 	AgentSecretsIdentity
@@ -55,27 +74,42 @@ type heldIdentity struct {
 // identity: the hello's thumbprint and token for this incarnation, and the agent's session id,
 // the broker's wake address. It never fails a transition: a refusal is logged with its code, a
 // transient one retried on the next Alive observation, a permanent one on the shim's next hello.
-// Once enrolled, the id is handed to the shim over the claim's connection, once per connection.
+// An expired token is dropped and the key kept, and the next attempt reads a fresh one
+// (freshToken). Once enrolled, the id is handed to the shim over the claim's connection, once per
+// connection.
 func (m *Machine) ensureEnrolled(ctx context.Context) error {
 	if m.deps.Secrets == nil || m.claim.Locator == nil {
 		return nil
 	}
 	incarnation := m.claim.Locator.Incarnation
+	podUID, slot := incarnation, ""
+	if loc := m.claim.Locator; loc.Runtime == runtime.RuntimeSandbox && loc.Sandbox != nil {
+		podUID = loc.Sandbox.PodUID
+		slot = fmt.Sprintf("%s-g%d", m.claim.Role, loc.Sandbox.Generation)
+	}
 	if m.claim.Enrollment == nil || m.claim.Enrollment.Incarnation != incarnation {
 		if m.identity == nil || m.identity.incarnation != incarnation || m.claim.Session == "" {
 			return nil
 		}
+		if !m.freshToken(ctx, incarnation) {
+			return nil
+		}
 		enrolling, cancel := context.WithTimeout(ctx, m.deps.Timeouts.RPC)
 		id, err := m.deps.Secrets.Enroll(enrolling, PodEnrollment{
-			PodUID: incarnation, Thumbprint: m.identity.Thumbprint, PodToken: m.identity.PodToken, Session: m.claim.Session,
+			PodUID: podUID, Slot: slot, Thumbprint: m.identity.Thumbprint, PodToken: m.identity.PodToken, Session: m.claim.Session,
 		})
 		cancel()
 		if err != nil {
+			var expired ExpiredTokenError
 			var permanent PermanentError
-			if errors.As(err, &permanent) && permanent.Permanent() {
+			switch {
+			case errors.As(err, &expired) && expired.TokenExpired():
+				m.log.Warn("supervise: agent-secrets: the broker found the pod token expired; keeping the key for a fresh token", "incarnation", incarnation, "error", err)
+				m.identity.PodToken = ""
+			case errors.As(err, &permanent) && permanent.Permanent():
 				m.log.Error("supervise: agent-secrets: enrollment refused; waiting for the shim's next hello", "incarnation", incarnation, "error", err)
 				m.identity = nil
-			} else {
+			default:
 				m.log.Warn("supervise: agent-secrets: enrollment failed; retrying on the next observation", "incarnation", incarnation, "error", err)
 			}
 			return nil
@@ -106,11 +140,71 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 	return nil
 }
 
+// freshToken reports whether the held token can be presented, first asking the shim to read it
+// again when it cannot. The shim reads its projected token at each hello, the token lives at most
+// an hour from when the kubelet wrote it, and an enrollment can wait much longer after the hello
+// (a machine login awaiting approval, a broker outage); the broker refuses an expired token as
+// POD_TOKEN_EXPIRED. So a token that could expire before the broker verifies it (within the
+// Enroll call's RPC bound plus podTokenSkew), or whose expiry cannot be read, is replaced by the
+// one the shim reads from its mount now. That includes a token the broker already refused as
+// expired, which ensureEnrolled drops, so a broker whose clock runs further ahead than
+// podTokenSkew costs one refusal, not a wait for the next hello. A shim that cannot read it again,
+// one built before the request among them, drops the identity to wait for its next hello, as a
+// refused enrollment does; a lost request is asked again on the next observation, and with no
+// connection the next hello carries a token read then.
+func (m *Machine) freshToken(ctx context.Context, incarnation string) bool {
+	if expires, ok := podTokenExpiry(m.identity.PodToken); ok && expires.After(m.deps.Clock.Now().Add(m.deps.Timeouts.RPC+podTokenSkew)) {
+		return true
+	}
+	conn, ok := m.deps.Conns.Conn(m.claim.Token)
+	if !ok {
+		return false
+	}
+	reading, cancel := context.WithTimeout(ctx, m.deps.Timeouts.RPC)
+	token, err := conn.AgentSecretsToken(reading)
+	cancel()
+	switch {
+	case errors.Is(err, runtime.ErrTokenRefused):
+		m.log.Error("supervise: agent-secrets: the shim did not read its projected token again; waiting for its next hello", "incarnation", incarnation, "error", err)
+		m.identity = nil
+		return false
+	case err != nil:
+		m.log.Warn("supervise: agent-secrets: the shim did not answer for its projected token; retrying on the next observation", "incarnation", incarnation, "error", err)
+		return false
+	}
+	m.identity.PodToken = token
+	return true
+}
+
+// podTokenExpiry is a JWT's exp claim, read without verifying anything: the broker verifies the
+// token, and the machine only judges whether presenting it could still succeed. false for a token
+// whose expiry cannot be read.
+func podTokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || claims.Exp == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0), true
+}
+
 // revoke ends the let-go process's enrollment at the broker: the first attempt on a goroutine of
 // the machine's (counted like a send, so Wait covers it), each later one in a clock callback
 // revokeRetryDelay after the last failure, revokeAttempts in all. No goroutine waits on a broker
 // outage, and a fake clock drives the retries in tests. Past the last attempt the lease ends the
-// enrollment; the give-up line says so.
+// enrollment; the give-up line says so. A permanent refusal (PermanentError) is not retried: the
+// broker ends a pod enrollment only for the machine login that made it, so a daemon restarted under
+// a new login is refused NOT_ENROLLING_CREDENTIAL for the enrollments its earlier login made, which
+// end one lease after their pods stop renewing.
 func (m *Machine) revoke(e Enrollment) {
 	if m.deps.Secrets == nil {
 		m.log.Warn("supervise: agent-secrets: enrollment recorded with no broker configured; its lease ends it", "enrollment", e.ID)
@@ -136,6 +230,11 @@ func (m *Machine) revokeAttempt(e Enrollment, attempt int) {
 	cancel()
 	if err == nil {
 		m.log.Info("supervise: agent-secrets: enrollment revoked", "enrollment", e.ID, "incarnation", e.Incarnation, "attempt", attempt)
+		return
+	}
+	var permanent PermanentError
+	if errors.As(err, &permanent) && permanent.Permanent() {
+		m.log.Warn("supervise: agent-secrets: enrollment revocation refused; its lease ends it once its pod stops renewing", "enrollment", e.ID, "error", err)
 		return
 	}
 	m.log.Warn("supervise: agent-secrets: revocation failed", "enrollment", e.ID, "attempt", attempt, "error", err)

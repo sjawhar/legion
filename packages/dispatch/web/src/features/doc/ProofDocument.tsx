@@ -10,7 +10,12 @@ import {
 } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
-import { api, isDocumentSchemaError, isDocumentUnloadable } from "../../api/client";
+import {
+  api,
+  isArtifactNotFound,
+  isDocumentSchemaError,
+  isDocumentUnloadable,
+} from "../../api/client";
 import type { Artifact, AuthenticatedUser, BlockSchema, Version } from "../../api/types";
 import { TruncatedText } from "../../components/TruncatedText";
 import { copyText } from "../../lib/clipboard";
@@ -37,11 +42,14 @@ import {
   buildReferencePath,
   parseDispatchReference,
 } from "../refs/routes";
+import { importWhenOnline } from "../shell/DeploymentResilience";
+import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
-import { bindRemoteMarks, type EditorHandle } from "./editor";
+import type { EditorHandle } from "./editor";
+import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
 import {
   blockOffsets,
@@ -51,6 +59,7 @@ import {
   selectionBarKindFor,
 } from "./marks";
 import { NameVersionDialog } from "./NameVersionDialog";
+import type { PendingState } from "./pending-sync";
 import { DocumentRuntime } from "./runtime";
 import { loadBlockSchema } from "./schema";
 import { VersionDiff } from "./VersionDiff";
@@ -95,6 +104,7 @@ const SCHEMA_REFUSAL_DELAYS_MS = [0, 1_000, 2_000, 4_000, 8_000] as const;
  * Spec tab row. Project document pages retain their artifact-header toolbar. */
 export interface DocumentToolbar {
   connection: ConnectionState;
+  pending: PendingState | undefined;
   isNamingVersion: boolean;
   requestNamedVersion(): void;
   copyBlockLink(): Promise<boolean>;
@@ -176,6 +186,7 @@ export function ProofDocument({
   const userRef = useRef(user);
   const highlightTermRef = useRef(highlightTerm);
   const [connection, setConnection] = useState<ConnectionState>("connecting");
+  const [pending, setPending] = useState<PendingState | undefined>(undefined);
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
@@ -301,6 +312,26 @@ export function ProofDocument({
     }
     return copyText(`${window.location.origin}${window.location.pathname}#b-${blockId}`);
   }, []);
+  // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
+  // offered while this editor has focus, holds a selection and takes edits, which is when the bar
+  // offers Comment; anywhere else - a comment composer, an ask card's field, a read-only or
+  // historical document - the chord does nothing. `inEditable` because the editor is where it is
+  // pressed. A document is its own scope, since the issue page and a project's document page both
+  // render one.
+  useKeymapScope("document");
+  useKeymap("document", [
+    {
+      id: "comment-on-selection",
+      inEditable: true,
+      keys: "$mod+Alt+m",
+      label: "Comment on selection",
+      run: () => editorRef.current?.commentOnSelection(),
+      when: () => {
+        const view = editorRef.current?.view;
+        return view?.editable === true && view.hasFocus() && !view.state.selection.empty;
+      },
+    },
+  ]);
   useEffect(() => {
     setOpenDecisionIndex((current) => Math.min(current, Math.max(openBlockAsks.length - 1, 0)));
   }, [openBlockAsks.length]);
@@ -310,6 +341,7 @@ export function ProofDocument({
   useEffect(() => {
     onToolbarChange?.({
       connection,
+      pending,
       copyBlockLink,
       isNamingVersion: nameVersion.isPending,
       requestNamedVersion,
@@ -317,6 +349,7 @@ export function ProofDocument({
     });
   }, [
     connection,
+    pending,
     copyBlockLink,
     nameVersion.isPending,
     onToolbarChange,
@@ -350,6 +383,7 @@ export function ProofDocument({
     let refusals = 0;
     let refusalTimer: number | undefined;
     setConnection("connecting");
+    setPending(undefined);
     setLoadError(undefined);
     setAdmission(undefined);
     schemaReadOnlyRef.current = false;
@@ -453,7 +487,22 @@ export function ProofDocument({
         .fetchQuery({ ...liveTextQueryOptions(artifact.id), staleTime: 0 })
         .then(
           () => undefined,
-          (error: unknown) => admissionBlock(error)
+          async (error: unknown) => {
+            if (isArtifactNotFound(error)) {
+              try {
+                const { deletePendingEdits } = await importWhenOnline(
+                  () => import("./pending-edits")
+                );
+                await deletePendingEdits(artifact.id);
+              } catch (deleteError) {
+                console.error(
+                  "Could not delete pending browser edits for a removed document",
+                  deleteError
+                );
+              }
+            }
+            return admissionBlock(error);
+          }
         );
       void Promise.all([textRead, loadTransport()])
         .then(([block, connect]) => {
@@ -500,6 +549,11 @@ export function ProofDocument({
             onStatus: (status) => {
               if (!failed) {
                 setConnection(status);
+              }
+            },
+            onPending: (state) => {
+              if (mounted) {
+                setPending(state);
               }
             },
             onSynced: () => {

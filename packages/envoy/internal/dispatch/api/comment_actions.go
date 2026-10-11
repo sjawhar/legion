@@ -227,11 +227,8 @@ func (s *server) commentAction(w http.ResponseWriter, r *http.Request, action st
 	var input struct {
 		Actor *model.Actor `json:"actor"`
 	}
-	if r.ContentLength != 0 {
-		if err := decodeJSON(r, &input); err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
+	if !s.decodeOptionalJSON(w, r, &input) {
+		return
 	}
 	var actor model.Actor
 	var ok bool

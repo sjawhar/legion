@@ -813,6 +813,9 @@ export function routeIsInbox(pathname: string): boolean {
   return pathname === "/";
 }
 
+/** The signed-in person's answers and ask replies (`AnswersPage`), linked from the Inbox page. */
+export const ANSWERS_PATH = "/answers";
+
 /** The live agent view's route pattern, shared by the router and `routeFillsViewport`. */
 export const AGENT_LIVE_PATH = "/agents/:sessionId/live";
 

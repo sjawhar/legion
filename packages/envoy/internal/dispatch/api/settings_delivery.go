@@ -7,6 +7,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 	"github.com/sjawhar/envoy/internal/dispatch/githubapp"
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // getDeliverySettings answers GET /api/v1/settings/delivery with the one delivery_settings row,
@@ -36,22 +37,27 @@ func (s *server) getDeliverySettings(w http.ResponseWriter, r *http.Request) {
 // eventOwnerKey refuses an event with none of those unless its payload names a specific session
 // target (the ownerless-event path exists for session-addressed messages, not settings) -- there
 // is no project-scoped equivalent for a cross-project configuration table, so this intentionally
-// does not force one.
+// does not force one. The Pipeline page's three job names are optional: absent, null or blank
+// each stores null, and a name is stored trimmed.
 func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
-	actor, ok := s.requireHuman(w, r)
-	if !ok {
-		return
-	}
 	var input struct {
-		DeployRepo           string   `json:"deploy_repo"`
-		DeployWorkflowPath   string   `json:"deploy_workflow_path"`
-		ProductionJobName    string   `json:"production_job_name"`
-		PRChecksWorkflowPath string   `json:"pr_checks_workflow_path"`
-		PopulationAuthors    []string `json:"population_authors"`
-		ExcludedRepos        []string `json:"excluded_repos"`
+		DeployRepo            string       `json:"deploy_repo"`
+		DeployWorkflowPath    string       `json:"deploy_workflow_path"`
+		ProductionJobName     string       `json:"production_job_name"`
+		PRChecksWorkflowPath  string       `json:"pr_checks_workflow_path"`
+		PopulationAuthors     []string     `json:"population_authors"`
+		ExcludedRepos         []string     `json:"excluded_repos"`
+		StagingE2EJobName     *string      `json:"staging_e2e_job_name"`
+		StagingApplyJobName   *string      `json:"staging_apply_job_name"`
+		PRChecksRollupJobName *string      `json:"pr_checks_rollup_job_name"`
+		Actor                 *model.Actor `json:"actor"`
 	}
 	if err := decodeJSON(r, &input); err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	actor, ok := s.requireActor(w, r, input.Actor)
+	if !ok {
 		return
 	}
 	repoOwner, repoName, err := parseSourceRepo(input.DeployRepo)
@@ -89,10 +95,26 @@ func (s *server) putDeliverySettings(w http.ResponseWriter, r *http.Request) {
 		DeployRepo: repoOwner + "/" + repoName, DeployWorkflowPath: input.DeployWorkflowPath,
 		ProductionJobName: input.ProductionJobName, PRChecksWorkflowPath: input.PRChecksWorkflowPath,
 		PopulationAuthors: input.PopulationAuthors, ExcludedRepos: input.ExcludedRepos,
+		StagingE2EJobName:     optionalJobName(input.StagingE2EJobName),
+		StagingApplyJobName:   optionalJobName(input.StagingApplyJobName),
+		PRChecksRollupJobName: optionalJobName(input.PRChecksRollupJobName),
 	}, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, settings)
+}
+
+// optionalJobName is an optional job-name setting as delivery_settings stores it: trimmed, or nil
+// when the caller sent none, null, or only whitespace.
+func optionalJobName(name *string) *string {
+	if name == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*name)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
 }

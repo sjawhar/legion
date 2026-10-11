@@ -26,10 +26,10 @@ type createRequestBody struct {
 }
 
 // createRequestResponse is POST /v1/requests's exact wire shape: request_id, state, secrets,
-// grant_id, record_id, coalesced — nothing else. requests.Request itself carries additional
-// fields (decided_at, decided_by, detail) this route's contract does not define, so the handler
-// below builds this dedicated response rather than marshaling the Request it gets back from
-// Machine.Create directly.
+// grant_id, record_id, approver, lifetime_seconds, coalesced — nothing else. requests.Request itself
+// carries additional fields (decided_at, decided_by, detail) this route's contract does not define,
+// so the handler below builds this dedicated response rather than marshaling the Request it gets
+// back from Machine.Create directly.
 type createRequestResponse struct {
 	// The request's id, which GET /v1/requests/{id} and its cancel route take.
 	RequestID string `json:"request_id"`
@@ -41,6 +41,16 @@ type createRequestResponse struct {
 	GrantID *string `json:"grant_id"`
 	// The credential-request record the approver decides; null when nobody needs to.
 	RecordID *string `json:"record_id"`
+	// Who decides it, as its record names them: a person's Dispatch login (their lowercase
+	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. While
+	// it is pending it waits in that person's Dispatch Inbox, or in everyone's for "anyone". Null
+	// when the policy decided it at once, so no record names one.
+	Approver *string `json:"approver"`
+	// How many seconds its grant lasts, as the signed request asked; null when it asked for no
+	// lifetime, and the grant lasts until the session ends. A reused or coalesced request answers
+	// its own, which equals the one asked for. A client that asked for a lifetime and reads null,
+	// or no such field from a broker before it, was not given that lifetime.
+	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// True when the request joined an identical one this session already had pending.
 	Coalesced bool `json:"coalesced,omitempty"`
 }
@@ -61,6 +71,9 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 	case errors.Is(err, requests.ErrMixedApprovers):
 		writeError(w, http.StatusBadRequest, "MIXED_APPROVERS", err.Error())
 		return
+	case errors.Is(err, requests.ErrRequestPending):
+		writeError(w, http.StatusConflict, "REQUEST_PENDING", err.Error())
+		return
 	case errors.Is(err, requests.ErrSessionIDInvalid):
 		writeError(w, http.StatusBadRequest, "SESSION_ID_INPUT", err.Error())
 		return
@@ -78,12 +91,14 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 		return
 	}
 	writeJSON(w, http.StatusOK, createRequestResponse{
-		RequestID: req.ID,
-		State:     req.State,
-		Secrets:   req.Secrets,
-		GrantID:   req.GrantID,
-		RecordID:  req.RecordID,
-		Coalesced: req.Coalesced,
+		RequestID:       req.ID,
+		State:           req.State,
+		Secrets:         req.Secrets,
+		GrantID:         req.GrantID,
+		RecordID:        req.RecordID,
+		Approver:        req.Approver,
+		LifetimeSeconds: req.LifetimeSeconds,
+		Coalesced:       req.Coalesced,
 	})
 }
 
@@ -91,8 +106,8 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 // and when.
 type requestDecision struct {
 	// Who decided it: the approver's login, "session:<enrollment id>" (the session cancelled it),
-	// "launcher:<credential id>" (its launcher ended the session) or "broker" (the session's lease
-	// lapsed).
+	// "launcher:<credential id>" (its launcher ended the session, or its operator ended its machine
+	// login from one of their machines) or "broker" (the session's lease lapsed).
 	By string `json:"by"`
 	// When it was decided.
 	At time.Time `json:"at"`
@@ -106,6 +121,15 @@ type requestStatusResponse struct {
 	GrantID *string `json:"grant_id"`
 	// The credential-request record the approver decides; null when nobody needs to.
 	RecordID *string `json:"record_id"`
+	// Who decides it, as its record names them: a person's Dispatch login (their lowercase
+	// email), or "anyone" for a shared secret, which anyone signed in to Dispatch may decide. The
+	// record fixes it when the request is made, so a later change to the secret's owner does not
+	// move it, and it stays once the request is decided. Null when the policy decided it at once,
+	// so no record names one.
+	Approver *string `json:"approver"`
+	// How many seconds its grant lasts, as the signed request asked; null for a grant that lasts
+	// until the session ends.
+	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// When it left "pending"; null while pending.
 	DecidedAt *time.Time `json:"decided_at"`
 	// Who decided it and when; null while pending, when the policy decided it at once, and when it
@@ -115,8 +139,9 @@ type requestStatusResponse struct {
 
 // grantValuesResponse is POST /v1/grants/{id}/values's answer.
 type grantValuesResponse struct {
-	// When the grant expires; the session can read the values again until then.
-	ExpiresAt time.Time `json:"expires_at"`
+	// When the grant expires; the session can read the values again until then. Null for a grant
+	// that lasts until the session ends.
+	ExpiresAt *time.Time `json:"expires_at"`
 	// Each granted name's value, read fresh from the secret store.
 	Values map[string]string `json:"values"`
 }
@@ -146,7 +171,7 @@ func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentI
 		writeInternal(w, "read request", err)
 		return
 	}
-	resp := requestStatusResponse{State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, DecidedAt: req.DecidedAt}
+	resp := requestStatusResponse{State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, Approver: req.Approver, LifetimeSeconds: req.LifetimeSeconds, DecidedAt: req.DecidedAt}
 	if req.DecidedBy != nil && req.DecidedAt != nil {
 		resp.Decision = &requestDecision{By: *req.DecidedBy, At: *req.DecidedAt}
 	}

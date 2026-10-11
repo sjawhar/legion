@@ -14,9 +14,15 @@ import (
 
 // leave is an issue leaving the workflow for status (done, backlog, icebox, or triage). A root
 // takes its tree with it into linger. A child ends only itself: it leaves the table, its phase
-// parked in done and every one of its claims suspended, so no transition or status write follows
-// the human's move; the tree's architect is told, and decides what the rest of its tree does, as
-// the shipped daemon routes a child's close to the architect. A later todo re-enters the child.
+// parked in done, so no transition or status write follows the human's move; the tree's
+// architect is told, and decides what the rest of its tree does, as the shipped daemon routes a
+// child's close to the architect. A later todo re-enters the child. What becomes of the child's
+// claims and its pod is the status's: a child parked in backlog, icebox or triage has every claim
+// suspended and its Sandbox kept, sessions and volume with it, until it runs again or its tree
+// closes; a child closed as done is finished, so each of its claims is closed (issue_close: retired,
+// its session dropped) and its Sandbox released with the volume it owns (record.IssueSuspend's
+// Release), while its parent keeps running on a volume of its own. A done child set back to todo
+// starts fresh.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: issue left the workflow", "issue", issue.Key, "tree", issue.Tree, "status", status)
 	if claim.IsTreeRoot(issue.Key, issue.Tree) {
@@ -28,7 +34,23 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 			return err
 		}
 	}
-	if err := e.everyClaim(ctx, tx, issue, "suspend", fmt.Sprintf("%s is %s", issue.Key, status)); err != nil {
+	op, release := record.SuperviseOp("suspend"), false
+	if status == "done" {
+		op, release = "issue_close", true
+	}
+	if err := e.everyClaim(ctx, tx, issue, op, fmt.Sprintf("%s is %s", issue.Key, status)); err != nil {
+		return err
+	}
+	root, err := e.store.Issue(ctx, tx, issue.Tree)
+	if err != nil {
+		return err
+	}
+	if root == nil {
+		return fmt.Errorf("suspend issue %s: tree root %s is not recorded", issue.Key, issue.Tree)
+	}
+	if err := e.enqueue(ctx, tx, issue.Key, record.IssueSuspend{
+		Tree: issue.Tree, Generation: issue.Generation, TreeGeneration: root.Generation, Release: release,
+	}); err != nil {
 		return err
 	}
 	kind := record.NoticeKind("child-status")
@@ -56,6 +78,11 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	}
 	for _, member := range members {
 		if err := e.everyClaim(ctx, tx, member, "suspend", fmt.Sprintf("the tree of %s lingers", root.Key)); err != nil {
+			return err
+		}
+		if err := e.enqueue(ctx, tx, member.Key, record.IssueSuspend{
+			Tree: member.Tree, Generation: member.Generation, TreeGeneration: root.Generation,
+		}); err != nil {
 			return err
 		}
 	}

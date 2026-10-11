@@ -611,9 +611,8 @@ func TestReconcileWorkflowStopsAtTheFirstRateLimitAndCapsLastError(t *testing.T)
 	client := fake.newTestClient()
 	reconcile := NewReconcile(pool, client)
 
-	since := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	until := time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
-	err := reconcile.reconcileWorkflow(ctx, "acme", "widgets", "acme/widgets", ".github/workflows/deploy.yml", DeliveryRunKindDeploy, since, until)
+	err := reconcile.reconcileWorkflow(ctx, "acme", "widgets", "acme/widgets", ".github/workflows/deploy.yml", DeliveryRunKindDeploy, until)
 	if err == nil {
 		t.Fatal("reconcileWorkflow: err = nil, want the second run's rate limit to fail the pass")
 	}

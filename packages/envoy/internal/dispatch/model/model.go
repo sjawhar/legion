@@ -583,10 +583,18 @@ type Version struct {
 	Summary   *string   `json:"summary"`
 	Authors   []Actor   `json:"authors"`
 	CreatedAt time.Time `json:"created_at"`
-	Size      *int      `json:"size,omitempty"`
-	MIME      *string   `json:"mime,omitempty"`
-	SHA256    *string   `json:"sha256,omitempty"`
+	// Size is how many bytes the version stores: a file's or an image's bytes, or a document's
+	// markdown, the rendering the version recorded.
+	Size   *int    `json:"size,omitempty"`
+	MIME   *string `json:"mime,omitempty"`
+	SHA256 *string `json:"sha256,omitempty"`
 }
+
+// VersionSize is the SQL a version's Size is selected with, over artifact_versions aliased v. A
+// file or image row records its size; a document row holds its markdown, whose length octet_length
+// takes from the stored value's header, so reading a document's size neither renders the document
+// nor reads its markdown, out of TOAST or otherwise.
+const VersionSize = `coalesce(v.size, octet_length(v.markdown))`
 
 // Ask is a question with either a human answer or a recorded closure reason.
 type Ask struct {
@@ -666,6 +674,12 @@ type AskEditPrevious struct {
 	Urgency  string      `json:"urgency"`
 }
 
+// NewAskEditPrevious is the mutable content ask asks as it stands: what an edit records as the
+// ask's previous content, and what a copied ask block is compared with.
+func NewAskEditPrevious(ask Ask) AskEditPrevious {
+	return AskEditPrevious{Question: ask.Question, Options: ask.Options, Multiple: ask.Multiple, Urgency: ask.Urgency}
+}
+
 // AskEdit is one recorded rewording of an ask, read back from its ask.edited
 // events: the question as it stood before the edit, who edited it, and when.
 type AskEdit struct {
@@ -722,6 +736,14 @@ func NewAskEventPayload(ask Ask, changes ReferenceChanges) AskEventPayload {
 		Ask:                     ask,
 		ReferenceChangesPayload: NewReferenceChangesPayload(changes),
 	}
+}
+
+// AskAnsweredEventPayload is an ask.answered payload. PreviousAnswer is set only when a human
+// replaces their earlier answer; the asker and every follower receive it through the same event
+// path as the first answer.
+type AskAnsweredEventPayload struct {
+	AskEventPayload
+	PreviousAnswer *AskAnswer `json:"previous_answer,omitempty"`
 }
 
 // IssueEventPayload is the wire payload of every `issue.*` event: the issue's own fields, flat,
@@ -800,6 +822,55 @@ type AskAnswer struct {
 	Selected []string  `json:"selected"`
 	Text     *string   `json:"text"`
 	At       time.Time `json:"at"`
+}
+
+// OpenAskOwner identifies the issue or standalone project document holding an ask.
+type OpenAskOwner struct {
+	Issue    *OpenAskIssue    `json:"issue,omitempty"`
+	Document *OpenAskDocument `json:"document,omitempty"`
+}
+
+// OpenAskIssue is the issue shape an ask-owned list row needs.
+type OpenAskIssue struct {
+	Key   string `json:"key"`
+	Title string `json:"title"`
+}
+
+// OpenAskDocument is the project document shape an ask-owned list row needs.
+type OpenAskDocument struct {
+	Project string `json:"project"`
+	Slug    string `json:"slug"`
+	Name    string `json:"name"`
+}
+
+// MyAnswerReply is the reply carried by a row in a person's answer history.
+type MyAnswerReply struct {
+	ID   string `json:"id"`
+	Body string `json:"body"`
+}
+
+// MyAnswerRow is one answer or reply written by the caller, newest first.
+type MyAnswerRow struct {
+	Kind     string         `json:"kind"`
+	At       time.Time      `json:"at"`
+	AskID    string         `json:"ask_id"`
+	Ref      string         `json:"ref"`
+	Question string         `json:"question"`
+	AskKind  string         `json:"ask_kind"`
+	AskState string         `json:"ask_state"`
+	EditedAt *string        `json:"edited_at"`
+	Owner    OpenAskOwner   `json:"owner"`
+	Answer   *AskAnswer     `json:"answer,omitempty"`
+	Current  bool           `json:"current"`
+	Reply    *MyAnswerReply `json:"reply,omitempty"`
+}
+
+// MyAnswersResponse is a page of the caller's answers and ask replies.
+type MyAnswersResponse struct {
+	Rows   []MyAnswerRow `json:"rows"`
+	Total  int           `json:"total"`
+	Limit  int           `json:"limit"`
+	Offset int           `json:"offset"`
 }
 
 // AskResolution records why a question no longer needs a human answer.
@@ -973,6 +1044,10 @@ type CommentEventPayload struct {
 	ThreadRootID string `json:"thread_root_id,omitempty"`
 	// SuppressRoute and SuppressedAuthors are resolved before the comment event commits,
 	// so the outbox can deduplicate without consulting the live session registry.
+	// SuppressedAuthors names the sessions the author routes skip because a mention delivers the
+	// comment to them: on a reply, its thread's root author when mentioned; on a new comment not
+	// in an ask's thread, every session a mention resolved to, since the outbox reads the
+	// document's authors only when it publishes.
 	SuppressRoute            bool     `json:"suppress_route"`
 	SuppressedRoute          string   `json:"suppressed_route,omitempty"`
 	SuppressedRouteSessionID *string  `json:"suppressed_route_session_id,omitempty"`

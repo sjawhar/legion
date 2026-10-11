@@ -15,6 +15,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
 const maxInt64 = uint64(^uint64(0) >> 1)
@@ -93,6 +94,12 @@ func (s *Postgres) PutIssue(ctx context.Context, tx pgx.Tx, issue Issue) error {
 		return fmt.Errorf("put issue %s: %w", issue.Key, err)
 	}
 	return nil
+}
+
+// OpenTreeLifecycle is the admission fact's transactional entry point into the shared lifecycle
+// barrier.
+func (s *Postgres) OpenTreeLifecycle(ctx context.Context, tx pgx.Tx, project, tree string, authority treelifecycle.Authority) (treelifecycle.Lifecycle, error) {
+	return treelifecycle.Open(ctx, tx, project, tree, authority)
 }
 
 func scanIssue(row scanner) (*Issue, error) {
@@ -182,7 +189,7 @@ func scanPhase(row scanner) (PhaseRow, error) {
 
 const pullRequestColumns = `issue, repo, number, branch, head_sha, head_updated_at,
 	failing, cancelled, fix_attempts, blocked_attempts, check_runs,
-	generation, snapshot, pushes, head_counted, planned_red, review_seen, review_seen_at, state,
+	generation, snapshot, pushes, head_counted, head_counted_before, planned_red, review_seen, review_seen_at, state,
 	checked_head, required, required_workflows, required_workflows_head, mergeability`
 
 func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error) {
@@ -194,34 +201,6 @@ func (s *Postgres) PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*P
 		return nil, fmt.Errorf("read pull request for %s: %w", issue, err)
 	}
 	return pr, nil
-}
-
-// PullRequestsByIssue is every pull request of issues, keyed by issue, in one query: for a
-// caller that would otherwise call PullRequest once per issue (removableWorkspaces' own candidate
-// loop, where issues is a tree's done siblings), replacing N round trips with one. An issue with
-// no pull request is simply absent from the result, the same as a nil PullRequest from PullRequest
-// itself. Empty issues returns an empty map without a query.
-func (s *Postgres) PullRequestsByIssue(ctx context.Context, tx pgx.Tx, issues []string) (map[string]PullRequest, error) {
-	byIssue := map[string]PullRequest{}
-	if len(issues) == 0 {
-		return byIssue, nil
-	}
-	rows, err := tx.Query(ctx, "select "+pullRequestColumns+" from pull_requests where issue = any($1)", issues)
-	if err != nil {
-		return nil, fmt.Errorf("list the pull requests of %d issue(s): %w", len(issues), err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		pr, err := scanPullRequest(rows)
-		if err != nil {
-			return nil, fmt.Errorf("list the pull requests of %d issue(s): %w", len(issues), err)
-		}
-		byIssue[pr.Issue] = *pr
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list the pull requests of %d issue(s): %w", len(issues), err)
-	}
-	return byIssue, nil
 }
 
 func (s *Postgres) PullRequestByBranch(ctx context.Context, tx pgx.Tx, repo, branch string) (*PullRequest, error) {
@@ -301,22 +280,22 @@ func (s *Postgres) PutPullRequest(ctx context.Context, tx pgx.Tx, pr PullRequest
 	}
 	_, err = tx.Exec(ctx, `insert into pull_requests (issue, repo, number, branch, head_sha, head_updated_at,
 		failing, cancelled, fix_attempts, blocked_attempts, check_runs, generation, snapshot, pushes,
-		head_counted, planned_red, review_seen, review_seen_at, state, checked_head, required,
+		head_counted, head_counted_before, planned_red, review_seen, review_seen_at, state, checked_head, required,
 		required_workflows, required_workflows_head, mergeability)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
 		on conflict (issue) do update set repo = excluded.repo, number = excluded.number, branch = excluded.branch,
 		head_sha = excluded.head_sha, head_updated_at = excluded.head_updated_at,
 		failing = excluded.failing, cancelled = excluded.cancelled, fix_attempts = excluded.fix_attempts,
 		blocked_attempts = excluded.blocked_attempts, check_runs = excluded.check_runs,
 		generation = excluded.generation, snapshot = excluded.snapshot,
-		pushes = excluded.pushes, head_counted = excluded.head_counted,
+		pushes = excluded.pushes, head_counted = excluded.head_counted, head_counted_before = excluded.head_counted_before,
 		planned_red = excluded.planned_red, review_seen = excluded.review_seen,
 		review_seen_at = excluded.review_seen_at, state = excluded.state, checked_head = excluded.checked_head,
 		required = excluded.required, required_workflows = excluded.required_workflows,
 		required_workflows_head = excluded.required_workflows_head, mergeability = excluded.mergeability`,
 		pr.Issue, pr.Repo, pr.Number, pr.Branch, pr.HeadSHA, pr.HeadUpdatedAt,
 		failing, cancelled, pr.FixAttempts, pr.BlockedAttempts, checkRuns,
-		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.PlannedRed,
+		pr.Generation, pr.Snapshot, pushes, pr.HeadCounted, pr.HeadCountedBefore, pr.PlannedRed,
 		pr.ReviewSeen.ID, pr.ReviewSeen.SubmittedAt, pr.State, pr.CheckedHead, required,
 		workflows, pr.WorkflowsHead, pr.Mergeability,
 	)
@@ -332,6 +311,17 @@ func (s *Postgres) SessionClaimsTree(ctx context.Context, tx pgx.Tx, tree, sessi
 		return false, fmt.Errorf("read the claims of session %s in %s: %w", session, tree, err)
 	}
 	return claims, nil
+}
+
+func (s *Postgres) ClaimSession(ctx context.Context, tx pgx.Tx, token claim.Token) (string, error) {
+	var session string
+	if err := tx.QueryRow(ctx, "select session from claims where token = $1", string(token)).Scan(&session); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read the session of claim %s: %w", token, err)
+	}
+	return session, nil
 }
 
 // ClearGeneration empties one issue's generation-scoped facts: a merged or closed pull request,
@@ -360,7 +350,7 @@ func clearGeneration(ctx context.Context, tx pgx.Tx, where, issues, key, describ
 		// review round's decision goes with the phases below. Its pushes stay, each a fact about two
 		// commits, and so does its newest review, which orders every review it will have, and the
 		// checks its base branch requires, which belong to the base, not the generation.
-		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', " +
+		"update pull_requests set fix_attempts = 0, blocked_attempts = 0, head_counted = '', head_counted_before = '', " +
 			"planned_red = false, checked_head = '', failing = '[]'::jsonb, cancelled = '[]'::jsonb, " +
 			"check_runs = '[]'::jsonb where " + where,
 		"delete from design_gates where " + where,
@@ -380,7 +370,7 @@ func scanPullRequest(row scanner) (*PullRequest, error) {
 	var failing, cancelled, checkRuns, pushes, required, workflows []byte
 	if err := row.Scan(&pr.Issue, &pr.Repo, &pr.Number, &pr.Branch, &pr.HeadSHA, &pr.HeadUpdatedAt,
 		&failing, &cancelled, &pr.FixAttempts, &pr.BlockedAttempts, &checkRuns, &pr.Generation, &pr.Snapshot,
-		&pushes, &pr.HeadCounted, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
+		&pushes, &pr.HeadCounted, &pr.HeadCountedBefore, &pr.PlannedRed, &pr.ReviewSeen.ID, &pr.ReviewSeen.SubmittedAt, &pr.State,
 		&pr.CheckedHead, &required, &workflows, &pr.WorkflowsHead, &pr.Mergeability); err != nil {
 		return nil, err
 	}

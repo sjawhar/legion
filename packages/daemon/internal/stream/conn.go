@@ -31,11 +31,12 @@ var (
 )
 
 // RefusedError is the far side answering a request with a refusal — OMP's `{success:false}`, or
-// a shim's failed adoption. The connection is fine; the agent said no.
+// a shim's failed adoption, enrollment or token read. The connection is fine; the agent said no.
 //
 // A refused prompt is runtime.ErrPromptRefused, which is what the supervisor charges a prompt
-// budget on. No other refusal is — a refused negotiation ahead of the prompt, a refused get_state
-// or adoption — so the match is on the command rather than an unconditional Unwrap.
+// budget on, and a refused token request is runtime.ErrTokenRefused. No other refusal is either —
+// a refused negotiation ahead of the prompt, a refused get_state or adoption — so the match is on
+// the command rather than an unconditional Unwrap.
 type RefusedError struct {
 	Claim   claim.Token
 	Command string
@@ -50,7 +51,13 @@ func (e *RefusedError) Error() string {
 }
 
 func (e *RefusedError) Is(target error) bool {
-	return target == runtime.ErrPromptRefused && e.Command == shimwire.TypePrompt
+	switch target {
+	case runtime.ErrPromptRefused:
+		return e.Command == shimwire.TypePrompt
+	case runtime.ErrTokenRefused:
+		return e.Command == shimwire.TypeAgentSecretsToken
+	}
+	return false
 }
 
 // The RPC protocol version the daemon speaks: v2 is the one with rpc_chunk, without which OMP
@@ -67,6 +74,7 @@ type Conn struct {
 	// seq is the order the listener registered the connection in (Sequence).
 	seq        uint64
 	claim      claim.Token
+	nc         net.Conn
 	writer     *shimwire.Writer
 	rpcTimeout time.Duration
 	log        *slog.Logger
@@ -106,6 +114,7 @@ type ackedPrompt struct {
 func newConn(nc net.Conn, token claim.Token, rpcTimeout time.Duration, log *slog.Logger, events *eventQueue) *Conn {
 	return &Conn{
 		claim:       token,
+		nc:          nc,
 		writer:      shimwire.NewWriter(connWriter{nc: nc, timeout: rpcTimeout}),
 		rpcTimeout:  rpcTimeout,
 		log:         log,
@@ -196,6 +205,18 @@ func (c *Conn) GetState(ctx context.Context) (runtime.ConnState, error) {
 	return runtime.ConnState{IsStreaming: *data.IsStreaming}, nil
 }
 
+// Abort asks OMP to end its running turn and returns on OMP's answer, which it gives once the
+// agent is idle. The turn's agent_end can still follow the answer on the wire, so the TurnEnd event
+// is what says the turn is over. A refusal is a *RefusedError; every other failure is transport.
+func (c *Conn) Abort(ctx context.Context) error {
+	if err := c.Negotiate(ctx); err != nil {
+		return err
+	}
+	id := rand.Text()
+	_, err := c.call(ctx, shimwire.Abort{ID: id}, id, "")
+	return err
+}
+
 // Shutdown asks the shim to end OMP: SIGTERM, then SIGKILL once the shim's grace runs out. The
 // shim acts on the frame itself and answers nothing (internal/shim); whether the process ended is
 // the runtime's to observe.
@@ -266,6 +287,29 @@ func (c *Conn) AgentSecretsEnrollment(ctx context.Context, enrollmentID string) 
 		}
 	}
 	return fmt.Errorf("worker-stream: %s %s answered by a %s frame", c.claim, shimwire.TypeAgentSecretsEnrollment, answer.FrameType())
+}
+
+// AgentSecretsToken asks the shim to read its projected token again and returns what it read.
+// Bounded by the RPC timeout: a file read, not a command. A shim built before the request forwards
+// it to OMP, whose unknown-command answer is a refusal like the shim's own.
+func (c *Conn) AgentSecretsToken(ctx context.Context) (string, error) {
+	id := rand.Text()
+	answer, err := c.request(ctx, shimwire.AgentSecretsToken{ID: id}, id, "", c.rpcTimeout)
+	if err != nil {
+		return "", err
+	}
+	switch answer := answer.(type) {
+	case shimwire.AgentSecretsTokenResult:
+		if answer.OK {
+			return answer.PodToken, nil
+		}
+		return "", &RefusedError{Claim: c.claim, Command: shimwire.TypeAgentSecretsToken, Reason: answer.Error}
+	case shimwire.Response:
+		if !answer.Success {
+			return "", &RefusedError{Claim: c.claim, Command: shimwire.TypeAgentSecretsToken, Reason: answer.Error}
+		}
+	}
+	return "", fmt.Errorf("worker-stream: %s %s answered by a %s frame", c.claim, shimwire.TypeAgentSecretsToken, answer.FrameType())
 }
 
 // call is a request OMP answers with a response to the same command, successful.
@@ -413,21 +457,23 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 				"extension", event.ExtensionPath, "event", event.Event, "error", event.Error)
 		}
 	case shimwire.AdoptWorkingCopyResult:
-		c.mu.Lock()
-		request, waiting := c.pending[frame.ID]
-		delete(c.pending, frame.ID)
-		c.mu.Unlock()
-		if waiting {
-			request.answer <- frame
-		}
+		c.answerShim(frame.ID, frame)
 	case shimwire.AgentSecretsEnrollmentResult:
-		c.mu.Lock()
-		request, waiting := c.pending[frame.ID]
-		delete(c.pending, frame.ID)
-		c.mu.Unlock()
-		if waiting {
-			request.answer <- frame
-		}
+		c.answerShim(frame.ID, frame)
+	case shimwire.AgentSecretsTokenResult:
+		c.answerShim(frame.ID, frame)
+	}
+}
+
+// answerShim hands a frame the shim answered itself to the request waiting on its id; one nobody
+// waits on any longer (its request timed out) is dropped.
+func (c *Conn) answerShim(id string, frame shimwire.Frame) {
+	c.mu.Lock()
+	request, waiting := c.pending[id]
+	delete(c.pending, id)
+	c.mu.Unlock()
+	if waiting {
+		request.answer <- frame
 	}
 }
 

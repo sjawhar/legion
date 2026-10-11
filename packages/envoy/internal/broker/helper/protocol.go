@@ -2,7 +2,7 @@
 
 // Package helper is the host-session side of agent secrets: a per-user daemon
 // that pins each registered process by pidfd, holds that session's P-256 key in memory, enrolls
-// it with the secrets broker as kind "host", and signs proofs only for the session's
+// it with the secrets broker as kind "session", and signs proofs only for the session's
 // descendants. The wire between the agent-secrets client and the helper is one JSON object per
 // line each way on a unix stream socket, one request per connection.
 package helper
@@ -20,20 +20,22 @@ import (
 	"time"
 )
 
-// Request is the client's one line. Op is register, sign, sign-request, unregister, sessions,
-// login, login-status, enroll-box or unenroll-box.
+// Request is the client's one line. Op is register, sign, sign-request, sign-launcher,
+// unregister, sessions, login, login-status, enroll-session-key or unenroll-session-key; an older
+// CLI's enroll-box and unenroll-box are answered as the last two (oldCLISessionKeyOps). A field
+// the helper does not read is ignored, so that CLI's "kind" costs nothing.
 type Request struct {
-	Op           string   `json:"op"`
-	Method       string   `json:"method,omitempty"`        // sign: the HTTP method of the broker call
-	URL          string   `json:"url,omitempty"`           // sign: its absolute URL
-	Secrets      []string `json:"secrets,omitempty"`       // sign-request: the requested agent_secret names
-	Reason       string   `json:"reason,omitempty"`        // sign-request: why they're needed
-	WaitSeconds  int      `json:"wait_seconds,omitempty"`  // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
-	RuntimeID    string   `json:"runtime_id,omitempty"`    // enroll-box: the box's runtime id
-	Thumbprint   string   `json:"thumbprint,omitempty"`    // enroll-box: the box key's thumbprint
-	Kind         string   `json:"kind,omitempty"`          // enroll-box: always "box"
-	SessionID    *string  `json:"session_id,omitempty"`    // enroll-box: optional registry session id
-	EnrollmentID string   `json:"enrollment_id,omitempty"` // unenroll-box: which enrollment to delete
+	Op              string   `json:"op"`
+	Method          string   `json:"method,omitempty"`           // sign, sign-launcher: the HTTP method of the broker call
+	URL             string   `json:"url,omitempty"`              // sign, sign-launcher: its absolute URL
+	Secrets         []string `json:"secrets,omitempty"`          // sign-request: the requested agent_secret names
+	Reason          string   `json:"reason,omitempty"`           // sign-request: why they're needed
+	LifetimeSeconds *int     `json:"lifetime_seconds,omitempty"` // sign-request: how many seconds the grant lasts; nil for until the session ends
+	WaitSeconds     int      `json:"wait_seconds,omitempty"`     // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
+	RuntimeID       string   `json:"runtime_id,omitempty"`       // enroll-session-key: the session's runtime id on this machine
+	Thumbprint      string   `json:"thumbprint,omitempty"`       // enroll-session-key: the session key's thumbprint
+	SessionID       *string  `json:"session_id,omitempty"`       // enroll-session-key: optional registry session id
+	EnrollmentID    string   `json:"enrollment_id,omitempty"`    // unenroll-session-key: which enrollment to end
 }
 
 // Response is the helper's one line. Code and Error are set only when OK is false, except that
@@ -53,9 +55,10 @@ type Response struct {
 	CredentialExpiresAt string        `json:"credential_expires_at,omitempty"` // login-status: RFC3339, when the held credential expires; empty while none is held or its broker did not say
 	LoginRefused        bool          `json:"login_refused,omitempty"`         // login-status: the helper dropped the credential it held (the broker refused it, or it reached the expiry the broker named), and no login has started or settled since
 	CredentialDropped   string        `json:"credential_dropped,omitempty"`    // login-status: why, set exactly when LoginRefused (dropRefused or dropExpired); a helper from before this field sends LoginRefused alone
-	LeaseExpires        string        `json:"lease_expires,omitempty"`         // enroll-box: RFC3339Nano
-	Proof               string        `json:"proof,omitempty"`
-	RequestObject       string        `json:"request_object,omitempty"` // sign-request: the signed compact JWS
+	LeaseExpires        string        `json:"lease_expires,omitempty"`         // enroll-session-key: RFC3339Nano
+	Proof               string        `json:"proof,omitempty"`                 // sign: a session proof; sign-launcher: a launcher proof of the machine credential
+	CredentialID        string        `json:"credential_id,omitempty"`         // sign-launcher: the machine credential the proof names, so a machine revoke can tell this machine's own login
+	RequestObject       string        `json:"request_object,omitempty"`        // sign-request: the signed compact JWS
 	Sessions            []SessionInfo `json:"sessions,omitempty"`
 }
 
@@ -73,7 +76,7 @@ const (
 
 // NoCredentialReason says why a helper holds no launcher credential, from login-status's fields:
 // the most recent login's state, login_refused and credential_dropped. The helper logs it on every
-// enrollment it cannot attempt, and `agent-secrets launcher login-status` prints it, so the journal
+// enrollment it cannot attempt, and `agent-secrets machine login-status` prints it, so the journal
 // and the client say the same thing. It names no confirmation code: a pending login's code is for
 // the approver's screen, never the journal. A login still pending outranks a dropped credential,
 // since its approval is what replaces it. A helper from before credential_dropped sets
@@ -117,12 +120,21 @@ const (
 	// CodeNotEnrolled answers sign or sign-request for a registered session that is still
 	// enrolling: the helper holds a launcher credential, and its enroll loop has not succeeded yet.
 	CodeNotEnrolled = "NOT_ENROLLED"
-	// CodeNoCredential answers sign or sign-request while the helper holds no launcher credential,
-	// from every restart until the operator logs the machine in: it enrolls no one, so the session
-	// has no broker identity. A register reply for such a session carries it too, beside OK.
+	// CodeNoCredential answers sign, sign-request or sign-launcher while the helper holds no
+	// launcher credential, from every restart until the operator logs the machine in: it enrolls no
+	// one, so a session has no broker identity, and the operator's shell has no machine login to
+	// act as. A register reply for such a session carries it too, beside OK.
 	CodeNoCredential = "NO_CREDENTIAL"
+	// CodeInSession answers sign-launcher from a process inside a registered session's process
+	// tree, or one whose ancestry the helper cannot follow to init (a parent it cannot read, a
+	// loop, or past 64 processes), so a session's own commands cannot act as its operator. A
+	// process that leaves its session's tree (a double fork or setsid, reparented to init or a
+	// subreaper) is not refused, and the operator's user can stop the helper anyway: it guards a
+	// session's own process tree, not a boundary against code running as that user.
+	CodeInSession = "IN_SESSION"
 	// CodeBadRequest answers a request that is not one JSON object per line, names an unknown op,
-	// or leaves out a field its op needs.
+	// leaves out a field its op needs, or asks sign-launcher for anything but one of the four
+	// operator routes under this helper's broker.
 	CodeBadRequest = "BAD_REQUEST"
 	// CodeUnidentified answers a caller the kernel could not identify, or one whose process exited
 	// or changed while the helper was identifying it.
@@ -130,17 +142,17 @@ const (
 	// CodeLoginFailed answers a login the helper could not start with the broker; the error says
 	// why.
 	CodeLoginFailed = "LOGIN_FAILED"
-	// CodeEnrollFailed answers an enroll-box the broker refused or could not be asked; the error
-	// says why.
+	// CodeEnrollFailed answers an enroll-session-key the broker refused or could not be asked;
+	// the error says why.
 	CodeEnrollFailed = "ENROLL_FAILED"
-	// CodeUnenrollFailed answers an unenroll-box the broker refused or could not be asked; the
-	// error says why.
+	// CodeUnenrollFailed answers an unenroll-session-key the broker refused or could not be
+	// asked; the error says why.
 	CodeUnenrollFailed = "UNENROLL_FAILED"
 	// CodeKeygen answers a register the helper could not make the new session's signing key for;
 	// the error says why.
 	CodeKeygen = "KEYGEN"
-	// CodeSign answers sign or sign-request when signing the proof or the request object failed;
-	// the error says why.
+	// CodeSign answers sign, sign-request or sign-launcher when signing the proof or the request
+	// object failed; the error says why.
 	CodeSign = "SIGN"
 )
 

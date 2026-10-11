@@ -1,6 +1,6 @@
 # Pi Envoy Extension
 
-`@sjawhar/pi-envoy` is the Oh My Pi extension for Envoy messaging and the native Dispatch tools,
+`@sjawhar/pi-envoy` is the Oh My Pi extension for Envoy messaging and the `dispatch` command,
 the plugin every session loads. It shares the Envoy HTTP client, tool contract, envelope parsing,
 and subject helpers with the other Legion adapters while keeping OMP's direct NATS subscriptions
 and Pi steering delivery local (inbound messages steer an in-flight turn instead of queueing behind
@@ -100,12 +100,15 @@ performs that manifest rewrite around `bun pm pack` and restores the committed f
 Packing with the committed source manifest is refused by the prepack, because such a tarball would
 point OMP at an extension file it does not contain.
 
-## Native Dispatch tools
+## The `dispatch` command
 
-The extension registers twenty-one native Dispatch tools: `dispatch_issue`, `dispatch_issue_update`, `dispatch_claim`, `dispatch_ask`, `dispatch_edit_ask`,
-`dispatch_resolve_ask`, `dispatch_resolve_comment`, `dispatch_follow`, `dispatch_comment`, `dispatch_suggest`,
-`dispatch_message`, `dispatch_doc_edit`, `dispatch_doc_read`, `dispatch_request_approval`, `dispatch_artifact`,
-`dispatch_read`, `dispatch_search`, `dispatch_issues`, `dispatch_architecture_sync`, `dispatch_open_asks`, and `dispatch_whoami`, when Dispatch configuration resolves both a base URL and bearer token.
+The extension registers no Dispatch tool. Agents reach Dispatch through the `dispatch` command in
+their shell: `dispatch --help` lists its commands, `dispatch <command> --help` each one's flags and
+an example, and the `dispatch` skill teaches when to use each. The package ships `bin/dispatch`, a
+shim that runs the bundled `dist/dispatch.js` (built from `@legion/envoy-client`'s
+`bin/dispatch.ts`) with `bun`. At load the extension puts that `bin/` first on `PATH` and sets
+`DISPATCH_HOST=omp`; each session start, switch and branch sets `DISPATCH_SESSION_ID` to the
+session's id, so a command acts as the session whose shell ran it.
 
 Configure the shared `envoy.json` with:
 
@@ -129,31 +132,35 @@ whose trimmed contents are the token — how the Legion daemon delivers it to a
 pane) wins over every other token source and never falls back when unreadable.
 Omitting `dispatch.serverUrl` while `dispatch.enabled` is true targets
 `http://localhost:8766`, the Go server's listen address. Invalid configuration,
-an invalid URL, or an empty token leaves the twenty-one tools unavailable and
-reports the source of the error.
+an invalid URL, or an empty token makes every `dispatch` command exit 2 naming the source of the
+error, and the extension reports it when the session starts.
 
-Owner-scoped calls use either an issue (a native `KEY` or external `owner/repo#n` reference) or
-an unlinked project document (`project` plus its `artifact` slug). A Legion session may omit
-`issue` when `LEGION_ISSUE` identifies its root issue and its working directory resolves to a
-repository. `dispatch_doc_read` and `dispatch_read` also accept `dispatch://` references,
-including `dispatch://PROJECT/artifact/<slug>`. `dispatch_search` needs only its query.
-`dispatch_edit_ask`, `dispatch_resolve_ask`, and `dispatch_follow` instead identify an existing
-ask with `ask`, and `dispatch_resolve_comment` a comment with `comment`. No result carries a subscription topic: opening an ask or replying to one with
-`dispatch_comment({ reply_to_ask })` makes the session a follower of that ask (its answer and
-replies reach the session directly, server-side), the result carries `details.follows.ask`, and
-the extension's `tool_result` hook tells the model so once per ask. Whole-issue or
-whole-document subscription is the model's own `envoy_subscribe` of the topic every write
-result names (`notifications.dispatch.issue.<KEY>.>` or
-`notifications.dispatch.document.<PROJECT>.<SLUG>.>`). `dispatch_doc_read` and
-`dispatch_read` return owner details only.
+A command that writes to an owner names either an issue (`--issue`, a native `KEY` or an external
+`owner/repo#n` reference) or an unlinked project document (`--project` plus `--artifact`). A Legion
+session may omit `--issue`: `LEGION_ISSUE` names its issue, and a bare issue number there is read
+against the GitHub repository of the working directory. `dispatch doc-read` and `dispatch read`
+also accept `--ref` with a `dispatch://` reference, including `dispatch://PROJECT/artifact/<slug>`.
+`dispatch search` needs only `--query`. `dispatch edit-ask`, `dispatch resolve-ask`, and
+`dispatch follow` instead identify an existing ask with `--ask`, and `dispatch resolve-comment` a
+comment with `--comment`. No result carries a subscription topic: opening an ask, or replying to
+one with `dispatch comment --reply-to-ask`, makes the session a follower of that ask (its answer
+and replies reach the session directly, server-side), and the command prints
+`Following ask <id> on <owner>: …` after its result the first time the session follows that ask.
+Whole-issue or whole-document subscription is the model's own `envoy_subscribe` of the topic every
+write result names (`notifications.dispatch.issue.<KEY>.>` or
+`notifications.dispatch.document.<PROJECT>.<SLUG>.>`).
 
-The shared contract supplies the model-facing schemas and descriptions. The
-`dispatch` skill describes when to use each operation for issues, asks, review
-feedback, documents, artifacts, and status reads.
+The shared specs in `@legion/contracts` supply each command's description and flags:
+`@legion/envoy-client`'s `dispatch-command.ts` derives one command per spec and one flag per field.
 
-`dispatch_artifact` accepts exactly one upload source: a local `path`, or inline `content`.
-For example, an architect can post a specification directly with
-`{ issue, name: "spec.md", content: "# Design" }`.
+`dispatch artifact` takes exactly one upload source: a local `--path`, or inline `--content`. For
+example, an architect can post a specification directly, its text on stdin:
+
+```sh
+dispatch artifact --issue LEGION-1 --name spec.md --content-file - <<'EOF'
+# Design
+EOF
+```
 
 Lifecycle and scope decisions between Legion roles go through `envoy_publish` to the owning
 architect's role topic; Dispatch is for durable questions to the human and the shared

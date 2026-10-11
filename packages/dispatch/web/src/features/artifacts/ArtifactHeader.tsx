@@ -203,7 +203,7 @@ export function ArtifactHeader({
                       {showDiff ? "Show version" : "Diff vs current"}
                     </button>
                   )}
-                  <ConnectionDot connection={toolbar.connection} />
+                  <ConnectionDot connection={toolbar.connection} pending={toolbar.pending} />
                 </div>
               </div>
             )}

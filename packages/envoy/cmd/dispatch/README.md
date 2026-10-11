@@ -270,41 +270,18 @@ cd packages/envoy
 ./scripts/dev-postgres.sh
 ```
 
-It prints the `DATABASE_URL` to use for development and tests. The database
-retains the migrated schema; tests only truncate rows they create.
+It prints the `DATABASE_URL` to use for development and tests. Run again, it starts or reuses the
+same `dispatch-pg` container. It refuses a `dispatch-pg` on any image but its pinned pgvector one,
+whose `vector` extension the migrations need, and prints the commands that move that container's
+data volume onto the pinned image. The database retains the migrated schema; tests only truncate
+rows they create.
 
 
 ## Running locally
 
-`DISPATCH_DEFAULT_PROJECT` must already exist in Postgres — running the
-command below against a fresh database applies migrations, then exits with
-`DISPATCH_DEFAULT_PROJECT "LOCAL" does not exist`. Create the project once:
-
-```sh
-docker exec dispatch-pg psql -U postgres -d dispatch \
-  -c "insert into projects (key, name) values ('LOCAL', 'Local project')"
-```
-
-Then run (or re-run) the server. `DISPATCH_NATS_DISABLED=1` keeps this run off
-the bus entirely; drop it and set `NATS_URLS` to a NATS of your own to exercise
-the publish path. Neither line is optional decoration: without one of them the
-server reads `natsUrls` from your `~/.config/opencode/envoy.json`, which on an
-agent machine names the shared production server, and it would reconcile that
-server's `ENVOY_NOTIFICATIONS` stream on the way in. It refuses to start against
-a NATS that is not this machine's unless `ENVOY_ALLOW_REMOTE_NATS=1` says the
-run means it.
-
-```sh
-cd packages/envoy
-DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch?sslmode=disable' \
-DISPATCH_AGENT_TOKEN=local-agent-token \
-DISPATCH_IDENTITY='header:X-Dispatch-User' \
-DISPATCH_IDENTITY_HEADER_TRUSTED=1 \
-DISPATCH_INSECURE_COOKIE=1 \
-DISPATCH_DEFAULT_PROJECT=LOCAL \
-DISPATCH_NATS_DISABLED=1 \
-go run ./cmd/dispatch
-```
+Run `bun run dispatch:local` at the repository root. It builds this server from the tree, runs it
+in cookie identity with the dev sign-in route, on a seeded database, and prints the URL that opens
+the dashboard signed in; `packages/dispatch/README.md` ("Local instance") documents it.
 
 The default listen address is `:8766`. Set `DISPATCH_LISTEN_HOST` and
 `DISPATCH_PORT` to change it; `DISPATCH_LISTEN_HOST` may be an IPv6 literal
@@ -386,13 +363,7 @@ Migration `0068_people` creates `people`, everyone who has signed in, holding th
 refresh token for a person who signed in through it, and drops `users`, the GitHub OAuth token pair
 of each GitHub login that signed in, which the GitHub proxy acted with before it read GitHub as the
 App. It locks `users` alone, `ACCESS EXCLUSIVE` for the drop; `people` is new. Its census counts the
-`users` rows the drop deletes, so wherever anyone signed in with GitHub it answers non-zero and the
-pre-deploy census of the release that carries it refuses:
-`REFUSED 0068_people.up.sql: its census counts <n> (0068_people.census.sql)`. That refusal is
-expected for this release: no code reads those rows once it ships. The deployer checks that `<n>`
-is `select count(*) from users` and that the report ends `census: REFUSED (1 reason)`, so 0068's
-count is its only refusal, and then rolls the release. Any other reason (a lock holder, a long
-transaction, a table over the limit) still stops the deploy.
+`users` rows the drop deletes.
 
 No migration retires the refresh tokens that `0068`'s release stored in plain text: every boot does
 (Identity, above), since a task of that release can write one during the roll, or after a
@@ -427,6 +398,70 @@ conversation makes by `session_id` (its artifact by name, and whether a slug is 
 census counts the rows the check would refuse, `project_key is null`, which 0009's `not null` keeps
 at `0`.
 
+Migration `0082_answers_by_person` adds two partial indexes for `GET /api/v1/me/answers`: one on
+`events` for user-authored `ask.answered` events, which the route filters to events whose actor is
+the answer's user, and one on `comments` for user replies on asks. Building them takes `SHARE` on
+`events` and `comments`; its census answers `0` because it refuses and rewrites no row.
+
+Migration `0087_search_vector_bound` creates `search_vector` and replaces the bodies of four
+search triggers' functions (documents, comments, asks and messages) so that each builds its vector
+with it ([Search](#search)). Replacing a function locks no table, and for every text whose vector
+fits, which is every row already stored, the new functions build the vector the old ones did, so
+it re-indexes nothing; its census answers `0`.
+
+Migrations `0088_issues_title_lexemes` and `0089_issues_title_lexemes_backfill` store each issue
+title's lexemes, which the duplicate-title check reads ([Search](#search)). `0088` adds
+`issues.title_lexemes` with the constant default `{}`, a catalog change that rewrites no row, so it
+holds `issues` `ACCESS EXCLUSIVE` for milliseconds (3 ms on 2,905 issues with production's titles),
+creates `title_lexemes(title)`, the one definition of a title's lexemes, and has the issues trigger
+build `search` with `search_vector` and fill the column on every insert and every retitle. `0089`
+fills it on every issue stored before, under `issues` `EXCLUSIVE` taken before it writes a row: a
+read does not wait, while every write of an issue's row, and of a row that references an issue,
+waits until it commits (0.58 s on those issues at load 85). The update alone locked each issue's
+row in the order rows lie on disk, which a reparent, locking its two issues in key order, could
+cross: on 60,000 issues the two deadlocked (`40P01`) in each of two runs, and with the table lock
+the reparent waited for the migration and committed. Neither refuses a row; both censuses answer
+`0`.
+
+Migration `0091_artifacts_project_documents` adds the partial index
+`artifacts_project_documents`, on `artifacts (project_key)` where `issue_key` and `session_id` are
+null: a project's unlinked documents. Settlement of a project document holding an ask block no ask
+of its own indexes reads its project's other documents through it, for the ask the block may be a
+copy of and for the copies of an ask it retracts, and so do the answer and resolve routes, for the
+copies of the ask they close (LEGION-651). Building it takes `SHARE` on `artifacts`; its census
+answers `0` because it refuses and rewrites no row.
+
+A decided ask that a release before LEGION-651 reworded gets back, in code, the wording its decision
+was given on: the `previous` wording of the first `ask.edited` after its latest `ask.answered` or
+`ask.resolved`, with no `ask.opened` between. No migration rewrites those rows, since the census
+refuses one that does (Pre-deploy census, below). Every boot runs the restoration over every
+decided ask in one statement (`docs.Service.RestoreDecidedWordings`, bounded at 30 s), reading
+`events` through `events_ask_payload_id` and writing only the rows whose wording differs; it logs
+`dispatch: restored a decided ask's wording` for each with the ask, its document and the question
+it asks again. In the same transaction it marks owed, in one upsert, the settlement of each
+restored block ask's own document, whose block still asks the rewording beside the decision, and
+of every other document of each restored ask's owner whose latest version holds the ask's block
+with no ask of its own under that id, a copy that may have matched the rewording and shown the
+decision on it, and arms those settlements once it commits; then it logs `dispatch: restored
+decided asks' wordings` with `restored=<n> copies=<n>`. On the 2026-10-11 production dump (3,739
+asks, 82,153 events) it restores 5 asks, each a block ask on a document of its own, and marks 0
+copies owed, in 0.17-0.77 s: the one other document holding one of those 5 blocks has an ask of
+its own under that id, so it is no copy, and the first boot of the release that carries it logs
+`restored=5 copies=0` and settles those 5 documents; each whose block still asks the rewording gets
+the decided wording written back and logs `dispatch: wrote a decided ask's wording back into its
+block`. Each document's settlement runs the same statement over its own decided asks before it
+reconciles them, and marks the restored asks' copies owed the same way, so a rewording a task of
+the earlier release writes during the roll is undone by that document's next settlement on this
+release, which also writes the decided wording back into the block and settles its copies again.
+
+Migration `0092_refs_excerpts` adds three nullable columns to `refs` with no default
+(`excerpt_block_id`, `excerpt_text`, `excerpt_version`), a catalog change that rewrites no row,
+and the partial index `refs_excerpt_drift` over the rows whose `excerpt_version` is null: the
+stored excerpt `GET /api/v1/references` answers a document mention with, which every version write
+fills and the reference-excerpt reconciliation fills for every row stored before it
+(`packages/envoy/AGENTS.md`). On the 2026-10-10 production dump the reconciliation's first pass
+filled 7,498 mentions of 2,150 documents in 248 s at `GOMAXPROCS=2`. Its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -435,7 +470,9 @@ it backfills each artifact's project and generated `ref_key`.
 ### Pre-deploy census
 
 Before a deployment rolls a new image, it runs `envoy-dispatch census` with the service's
-`DATABASE_URL`, as a one-off task under the service's own database credentials:
+`DATABASE_URL`, as a one-off task under the service's own database credentials, and the census is
+a gate: a census that refuses fails the deploy before the service moves, and nothing accepts a
+refusal and rolls past it.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch census
@@ -515,6 +552,12 @@ census like every later one. It refuses:
 - a census that fails or answers anything but one integer in one row;
 - a database that records no version yet holds tables, on its first migration: the runner would
   apply every migration from `0001` over them.
+
+So a migration that changes values readers already had, whose census counts the rows it rewrites,
+cannot pass the census wherever such a row exists, and a release that must repair existing rows
+does so in code instead: an idempotent pass at boot, and on the path that reads the rows, so a task
+of the earlier release still running during the roll cannot undo it. The restoration of decided
+asks' wordings (`docs.Service.RestoreDecidedWordings`, Database migrations above) is one.
 
 A migration declares its census in `<version>_<name>.census.sql` beside it: one `select` (or
 `with … select`) answering one integer, how many existing rows the migration would refuse (a
@@ -616,6 +659,18 @@ limited to 1,000 characters. Search covers issue titles, the latest settled docu
 comments, asks (questions and free-text answers), and messages. Live document text takes up to
 the 2 s settle delay to appear in search results.
 
+Every trigger builds its vector with `search_vector` (0087; the issues trigger's from 0088).
+Postgres holds at most 1,048,575 bytes of lexemes and positions in one vector. Prose stays far
+below that, since its words repeat, but text of words no two alike passes it well inside a
+document's 1 MiB: about 700 KB of `w000001 w000002 …`, or 475 KB of UUIDs. `search_vector` indexes a
+text whole when its vector fits, and otherwise the longest of its first half, quarter, eighth, …
+that fits, cut between two words, so keyword search finds such a document, comment, ask or message
+by the whole words in that opening part and not by the words after it; a text with no whitespace
+before the cut is found by none of its own. An issue's key is always indexed whole. Meaning search,
+where it is configured, ranks by an embedding of a text's first 32,000 characters
+(`embed.maxInputChars`), not by its vector, so it can still return such a text for a query whose
+words the vector does not hold.
+
 Each kind of content is ranked on a list of its own, by `ts_rank_cd`, then recency, then id, and
 the five lists are merged by reciprocal rank fusion: a hit at position p of its list scores
 1/(60 + p), which is its `rank`. The page therefore takes each kind's best in turn, the best issue,
@@ -630,7 +685,15 @@ with both counts.
 Search snippets are escaped text with only server-inserted `<mark>` elements around matches. Native
 issue creation rejects a title that near-duplicates an existing issue in the same project with
 `409 POSSIBLE_DUPLICATE` and up to five candidates; `force` bypasses that check, and external
-references skip it.
+references skip it. An issue title is at most 1,000 characters (`contracts.IssueTitleMax`, UTF-16
+units after trimming), on creation and on a retitle, and a longer one is `400 CAP_EXCEEDED` before
+the duplicate check runs. The check compares the new title's lexemes with those of every other
+title in the project, read from `issues.title_lexemes`, which the issues trigger fills with
+`title_lexemes(title)` (0088), the function the check calls for the new title, so a creation parses
+one title; a candidate's snippet marks the words its title shares with the new one, and the
+`POSSIBLE_DUPLICATE` message quotes a candidate's whole title. The cap bounds what one stored title
+adds to every later creation in its project, and how long that message can be: beside 2,000 stored
+titles at the cap, a check takes 56–95 ms, where parsing every title as it ran took 2.1–7.6 s.
 
 `POST /api/v1/issues`, `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks`
 also return, under `advice.suggestions` and never blocking or slowing the write past
@@ -689,6 +752,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/artifacts/{id}/_test/outside-schema` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Write the crafted malformed tree e2e uses; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/events/_test/disconnect` | POST | as above, plus `DISPATCH_TEST_HOOKS=1` | Close every open SSE connection; not mounted unless `DISPATCH_TEST_HOOKS=1`. |
 | `/api/v1/inbox?project=&assignee=` | GET | cookie or trusted header (human only) | List open asks newest-first, including their issue key, title, and assignee. `assignee=me\|unassigned\|<email>` keeps asks on issues held by the caller, by nobody (project-document asks included), or by that person; an email nobody has signed in with is `400 ASSIGNEE_NOT_ALLOWED`. |
+| `/api/v1/me/answers?limit=&offset=` | GET | cookie or trusted header (human only) | List the caller's answers and replies on asks, newest first. A row is either an answer with `current`, or a reply, and carries the ask's question, kind, state, owner and deep link. Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row. `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
 | `/api/v1/projects` | POST | cookie or trusted header | Create a project from `key` and `name`; rejects a duplicate key with `409 PROJECT_EXISTS`. |
@@ -699,15 +763,16 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/users` | GET | cookie or trusted header (human only) | Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options. |
 | `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
 | `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` from one listener `GET /v1/sessions` per request, stored nowhere: `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
-| `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. |
+| `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)). |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
-| `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (weighed as Element weights below lists) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |
+| `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. A title over 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after trimming) is `400 CAP_EXCEEDED` before the duplicate check. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (weighed as Element weights below lists) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |
+| `/api/v1/issues/{key}` | PATCH | cookie, trusted header, or bearer | Update an issue's `title`, `status`, `priority`, `labels`, `route`, `external_links`, `parent`, `rank`, `assignee` or `components`; `AGENTS.md` gives each field's rules. A title is trimmed, and one over 1,000 characters is `400 CAP_EXCEEDED`, as on creation. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. A quote mark carries the ask's id and who asked, which no rendering shows and every load of the document builds: the marks a document's comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors, and a quote anchor that would leave them past it and carrying more is `413 CAP_EXCEEDED`, naming the bound and both sizes. |
 | `/api/v1/issues/{key}/asks?state=` | GET | cookie, trusted header, or bearer | List an issue's asks, open and/or answered (`state`: `all` default, `open`, or `answered`). |
-| `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask and its reply thread. |
+| `/api/v1/asks/{id}` | GET | cookie, trusted header, or bearer | Read an ask with its reply thread, edits, followers and `answers`, every user-authored answer oldest first. |
 | `/api/v1/asks/{id}` | PATCH | cookie, trusted header, or bearer | Edit one or more of `question`, `options`, `multiple`, or `urgency` on an open ask. A bearer caller must be the asking session; a human may edit any open ask. The response records `edited_at` and emits `ask.edited` with the current ask, prior mutable fields, and `edited_by`. Anchors are selected when the ask is created and cannot be changed by this route. On a block ask the `:::ask` block is written in the same transaction and the row takes the block's parsed values, so the edit versions the document once and no settlement reverts it. Only the named fields are written: `urgency`/`multiple` alone go through the attribute path and leave the body's nodes, marks and inner block ids untouched, so an untouched question keeps its formatting, links and comment anchors; naming `question` or `options` replaces that part with the markdown pipeline's own parse, and anchors inside the replaced text move as for any document edit. A field named but unchanged is not rewritten, so an idempotent retry of the whole ask writes nothing, versions nothing, keeps every anchor and returns 200. Text the block cannot carry back unchanged — an option label containing `": "`, the separator between a label and its description, is one example — is `400 ASK_BLOCK_TEXT` naming the field, with nothing written. Text past what one write's markdown may make - weighed before it is rendered, an element for each backslash, `*`, `_`, `~`, backtick, `[`, `]` and `<` and two for each line feed, then as its markdown parses - is `413 CAP_EXCEEDED`. An edit of a block ask that would leave the document's markdown (what `.../text` answers) longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, is `413 CAP_EXCEEDED` and the ask keeps its text. |
-| `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask. An approval ask is moved to each document version before the human sees it, and an `ASK_EDITED` response means the question changed after the human reviewed it, so they reload and answer the moved request. On a block ask the answer is written into its block. Its words and the options it chooses, whose labels are the asker's text, are weighed: where they would leave the document's markdown longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, the ask still takes the whole answer and the block is written without them, saying who answered and when. The answer's state and who gave it and when are not weighed, so the asks of a document already past those limits can still be answered. The answer is kept on the ask as well: a block that leaves the document and returns gets it back at settlement, which weighs each returning answer on its own in document order and keeps one on the ask alone, the block saying who answered and when, while writing it back would take the document past those limits and make it bigger. |
+| `/api/v1/asks/{id}/answer` | POST | cookie or trusted header | Answer an open ask, or change the current answer with `expected_answer_at` set to that answer's `at`. Without it an answered ask is `409 ASK_CLOSED`. A stale value, or one sent for an open ask, is `409 ASK_ANSWER_CHANGED`; a different person is `403 NOT_ANSWERER`; an approval is `409 ASK_APPROVAL_REVIEW`. A change appends another `ask.answered` with `previous_answer`. An approval ask is moved to each document version before the human sees it, and an `ASK_EDITED` response means the question changed after the human reviewed it, so they reload and answer the moved request. On a block ask the answer is written into its block, and a changed answer without text removes the block's old `answer`. Its words and the options it chooses, whose labels are the asker's text, are weighed: where they would leave the document's markdown longer than 1 MiB and longer than it was, or making more than 65,536 elements and more than it did, the ask still takes the whole answer and the block is written without them, saying who answered and when. The answer's state and who gave it and when are not weighed, so the asks of a document already past those limits can still be answered. The answer is kept on the ask as well: a block that leaves the document and returns gets it back at settlement, which weighs each returning answer on its own in document order and keeps one on the ask alone, the block saying who answered and when, while writing it back would take the document past those limits and make it bigger. |
 | `/api/v1/asks/{id}/resolve` | POST | cookie, trusted header, or bearer | Retract or self-resolve an open ask with a recorded reason. On a block ask the block's `state` is written with it, and that is not weighed, so an ask on a document past what one upload may hold can still be resolved. A reason beginning `removed from the document in version`, which marks a retraction settlement wrote and would have the retract undone when the block returns, is `400 INVALID_RESOLUTION`. |
 | `/api/v1/issues/{key}/comments?artifact=` | GET | cookie, trusted header, or bearer | List comments, optionally limited to an artifact ID. |
 | `/api/v1/issues/{key}/comments` | POST | cookie, trusted header, or bearer | Create a comment, root-level reply, or suggestion. An anchored comment uses the same quote-or-mark-ID shape as an ask; replies inherit their root's anchor and send none. A comment's record in its document's margin - its body and replies, or a suggestion's and its replacement - holds at most 256 KiB of text, and a document's margin 1 MiB: a comment, reply or suggestion that would leave either past its bound and bigger is `413 CAP_EXCEEDED`, naming the bound and both sizes. A quote anchor that would leave the marks on the document's text carrying more than 1 MiB of ids and authors, and more than they carried, is `413 CAP_EXCEEDED` too, as for an ask's. |
@@ -720,8 +785,8 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/issues/{key}/messages` | POST | cookie, trusted header, or bearer | Post an issue message. |
 | `/api/v1/issues/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List issue artifacts or create a version from a multipart `file` or JSON `{name, content, summary?, actor?}`. The JSON form requires `Content-Type: application/json`. A `text/markdown` file is a document. Any other file's kind is read from its bytes, never from the part's declared `Content-Type`: it is `image` only when its bytes are a PNG, JPEG, GIF or WebP, stored with `mime` the type its bytes are (a JPEG declared `image/png` is `image/jpeg`), and otherwise a `file` under its declared type, an SVG among them, so no client stores other bytes as an image. A version whose kind is not its artifact's is `400 ARTIFACT_KIND_MISMATCH`. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
 | `/api/v1/projects/{key}/artifacts` | GET, POST | cookie, trusted header, or bearer | List non-primary project artifacts (or only unlinked documents with `?unlinked=true`), or create an unlinked project artifact, its kind read as an issue upload's is. An ask block whose body breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`; a new version is held to it only for the asks it writes or changes. A markdown document over 1 MiB, or any file over 25 MiB, is `413 CAP_EXCEEDED`, and so is a document whose markdown makes more than 65,536 elements (weighed as Element weights below lists), naming the line that passes the limit; a document or version whose markdown as stored (what `.../text` answers) would be longer than 1 MiB and longer than the document's was, or make more than 65,536 elements and more than the document's did, or that would leave a live state ygo could not decode as one update; or whose formatting is more items than one document update can store (1,048,576), naming the count. A file the configured bucket refuses is `502 FILE_STORE_UNAVAILABLE`, with no version written. |
-| `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact, its versions, and incoming references. `{id}` must be a UUID. |
-| `/api/v1/artifacts/{id}/rebuild` | POST | cookie or trusted header (human only) | Rebuild a document only when its durable history cannot load (`409 DOCUMENT_UNLOADABLE` on its reads): deletes its document updates, checkpoints, and snapshots, then writes one fresh update from the latest saved version or optional `{markdown}`. A supplied markdown source that changes the document writes the next immutable version, emits `artifact.version`, and moves an open approval request to that version, where it waits on its agent, as every version does; an omitted source keeps the existing latest-version behavior. The rebuild, that version, its event and the move commit in one transaction, and every refusal comes before anything is written: a live room is `409 DOCUMENT_LIVE`; a healthy, non-resident document is `409 DOCUMENT_LOADS`; supplied markdown on a closed issue's document is `409 ISSUE_CLOSED`; supplied markdown held to a new document's limits - more than 65,536 elements, or stored as markdown longer than 1 MiB or making more than 65,536 elements - is `413 CAP_EXCEEDED`. The latest saved version rebuilds whatever it weighs. A refused or failed rebuild leaves the document unchanged. It answers the report, whose `source_version` is the version the rebuilt document holds: its latest saved version, or the version supplied markdown wrote. |
+| `/api/v1/artifacts/{id}` | GET | cookie, trusted header, or bearer | Read an artifact, its versions, and incoming references. `{id}` must be a UUID. Every version on every artifact read and list (this route, the issue and project artifact lists, the issue read, the reference reads, and each version write's answer and event) carries `size`: the bytes it stores, a file's or an image's bytes or a document's markdown, read from the row's own length without rendering the document or loading its history. |
+| `/api/v1/artifacts/{id}/rebuild` | POST | cookie or trusted header (human only) | Rebuild a document only when its durable history cannot load (`409 DOCUMENT_UNLOADABLE` on its reads): deletes its document updates, checkpoints, and snapshots, then writes one fresh update from the latest saved version or optional `{markdown}`. A supplied markdown source that changes the document writes the next immutable version, emits `artifact.version`, and moves an open approval request to that version, where it waits on its agent, as every version does; an omitted source keeps the existing latest-version behavior. The rebuild, that version, its event and the move commit in one transaction, and every refusal comes before anything is written: a live room is `409 DOCUMENT_LIVE`; a healthy, non-resident document is `409 DOCUMENT_LOADS`; supplied markdown on a closed issue's document is `409 ISSUE_CLOSED`; supplied markdown held to a new document's limits - more than 65,536 elements, or stored as markdown longer than 1 MiB or making more than 65,536 elements - is `413 CAP_EXCEEDED`. The latest saved version rebuilds whatever it weighs, except a document whose tree is more items than ygo decodes in one update (1,048,576), which no document can hold and which is `413 CAP_EXCEEDED` naming the count, from either source. A refused or failed rebuild leaves the document unchanged. It answers the report, whose `source_version` is the version the rebuilt document holds: its latest saved version, or the version supplied markdown wrote. |
 | `/api/v1/artifacts/{id}/text` | GET | cookie, trusted header, or bearer | Read a live document's markdown. `{id}` must be a UUID. A stored tree outside the Proof schema is `409 DOC_SCHEMA`, and a stored history that cannot load `409 DOCUMENT_UNLOADABLE` (Document errors). |
 | `/api/v1/artifacts/{id}/versions/{n}` | GET | cookie, trusted header, or bearer | Read a document version or download a blob. `{id}` must be a UUID. A file whose bytes are in the bucket is `502 FILE_STORE_UNAVAILABLE` when the bucket does not answer, `503` on a server with no bucket configured. A file or image version, whoever owns it, is served with `Cache-Control: private, max-age=31536000, immutable` beside its `ETag` (the bytes' sha256), since a version's bytes never change and the route is authenticated; a document version, and every error, carries no cache header. |
 | `/api/v1/artifacts/{id}/versions` | POST | cookie, trusted header, or bearer | Create a named live-document version. `{id}` must be a UUID. |
@@ -845,7 +910,7 @@ node type weighs:
 | `409 ANCHOR_ORPHANED` | An operation needs a mark whose anchored text has been deleted. |
 | `400 INVALID_ANCHOR` | An anchor must provide exactly one of a nonempty `quote` or nonempty `mark_id`, with its document artifact. |
 | `400 INVALID_MARKDOWN` | Uploaded document content cannot be represented by the Proof schema, such as a table row holding text in a cell past its delimiter row's width, which a pipe inside code or a link that is not backslash-escaped makes. A Markdown document nests at most 100 blocks (quotes, lists and their items, typed blocks, and footnote definitions), and one textblock's inline markdown at most 100 marks (emphasis, strong, strikethrough, links, images, and code); deeper content is refused naming the line. An accepted suggestion whose blocks nest within that bound but land deep enough that the document would nest past it is `INVALID_OP` on `replace_with`, naming how many blocks the result nests. Malformed edit replacements report `INVALID_OP`. |
-| `409 DOC_SCHEMA` | A stored tree is outside the Proof schema, such as one holding a node more than 1,000 levels below the document or an attribute value nesting more than 100 arrays and objects; settlement writes no version of such a tree. Every route that starts from that tree answers it alike, with one message - reading its text or blocks (`/text`, `/blocks`), editing it (`POST /edits`) and naming a version (`POST /versions`) - and a schema refusal of a tree the request itself produced is a `500`. Replace it by uploading markdown under the same document name; an upload preserves every open ask block, and is refused `400 INVALID_ASK_BLOCK` for an ask block that breaks the ask content rule, as a new document is. The document websocket admits no connection to such a room: it completes the upgrade and closes with code `4409` (reason `DOC_SCHEMA`, `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`, generated into Go) before any sync, so a browser editor never receives a tree it would normalize and write back. |
+| `409 DOC_SCHEMA` | A stored tree is outside the Proof schema, such as one holding a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99; settlement writes no version of such a tree. Every route that starts from that tree answers it alike, with one message - reading its text or blocks (`/text`, `/blocks`), editing it (`POST /edits`) and naming a version (`POST /versions`) - and a schema refusal of a tree the request itself produced is a `500`. Replace it by uploading markdown under the same document name; an upload preserves every open ask block, and is refused `400 INVALID_ASK_BLOCK` for an ask block that breaks the ask content rule, as a new document is. The document websocket admits no connection to such a room: it completes the upgrade and closes with code `4409` (reason `DOC_SCHEMA`, `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`, generated into Go) before any sync, so a browser editor never receives a tree it would normalize and write back. |
 | `409 DOCUMENT_UNLOADABLE` | A document's stored history does not decode, so nothing can read or open it. Rebuild it from its latest saved version (`POST /api/v1/artifacts/{id}/rebuild`); the dashboard offers that rebuild for this code alone. A room or store that could not serve the document stays `503 DOC_SERVICE_UNAVAILABLE`, which is retried, not rebuilt. |
 | `409 DOCUMENT_LIVE` | A rebuild found the document resident in this server: open in an editor, or left by its last editor less than 90 seconds ago (a room stays resident a minute after its last peer leaves, and the sweep that evicts it runs every 30 seconds). Close its editors and retry two minutes later, or repair a schema-invalid tree by replacing it from markdown. |
 | `409 DOCUMENT_LOADS` | A rebuild found that the document's durable history loads. Nothing was deleted; replace a schema-invalid document from markdown instead. |

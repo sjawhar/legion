@@ -16,7 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
-const readyPacket = "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)\n\nno file changes above the approved head"
+const readyPacket = "READY #42 at head (approved at approved) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)\n\nA docs/solutions/legion/retro-LEGION-208.md\nD .legion/LEGION-208/review.json"
 
 // The daemon, not the merger, tells the human a pull request is ready to merge: the merger's READY
 // completion carries the packet as its summary, and merging -> awaiting_merge posts it verbatim on
@@ -367,12 +367,13 @@ func TestAMergersREADYOnALingeringTreeIsRefused(t *testing.T) {
 }
 
 // Linger holds every member of a closed tree where it stood, whichever path a fact takes: no
-// approval, green checks, red checks that exhaust max_fix_attempts, changes requested, reviewer's
-// comment on a round no review decided, backward move, retry of a held phase or failed claim moves
-// a member, counts a review round, posts or notifies, or starts a worker, whose start would
-// resume a suspended claim inside a tree that has left the workflow. A worker's own request is
-// refused, so it is told nothing moved. A merge is the one fact GitHub never sends again: it moves
-// the child on to its production check, and still starts nobody.
+// approval, green checks, red checks that send a head back or exhaust max_fix_attempts, a
+// conflicting head awaiting merge, changes requested, reviewer's comment on a round no review
+// decided, backward move, retry of a held phase or failed claim moves a member, counts a review
+// round, posts or notifies, or starts a worker, whose start would resume a suspended claim inside
+// a tree that has left the workflow. A worker's own request is refused, so it is told nothing
+// moved. A merge is the one fact GitHub never sends again: it moves the child on to its production
+// check, and still starts nobody.
 func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 	hold := record.Hold{From: phase.Testing}
 	for _, tc := range []struct {
@@ -396,6 +397,10 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "commented", CommitID: "head", HeadSHA: "head", Author: testReviewApp, Body: "a thought"}},
 		{name: "red checks at max_fix_attempts", at: phase.Testing, pr: record.PullRequest{FixAttempts: 3},
 			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}},
+		{name: "red checks that send a code head back", at: phase.Testing,
+			fact: intake.PullRequestChecks{Repo: "sjawhar/legion", Number: 42, HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "ci", ID: 2}}, Generation: 1, Snapshot: "red-1", Failing: []string{"ci"}}},
+		{name: "a conflicting head at awaiting_merge", at: phase.AwaitingMerge,
+			fact: intake.PullRequestMergeability{Repo: "sjawhar/legion", Number: 42, Base: "main", Mergeable: record.MergeabilityConflicting}},
 		{name: "changes requested at the round cap", at: phase.Reviewing,
 			fact: intake.PullRequestReview{Repo: "sjawhar/legion", Number: 42, State: "changes_requested", CommitID: "head", HeadSHA: "head", Author: testReviewApp, Body: "fix it"}},
 		{name: "the worker's backward move", at: phase.Testing, refusal: "TREE_LINGERING",

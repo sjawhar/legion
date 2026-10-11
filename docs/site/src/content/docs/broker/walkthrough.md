@@ -24,16 +24,16 @@ page.
 
 ## 1. Log the machine in, once
 
-On the agent's machine, `agent-secrets launcher login` prints a code and the address of Dispatch's
+On the agent's machine, `agent-secrets machine login` prints a code and the address of Dispatch's
 machine-login page, `/credentials/machine`. Alice opens that page, types the code, and checks the
 record it finds: a machine login for `example-host-build`, with her as its approver. She approves
-it, the page lists it under **Your machine logins**, where **Revoke** would end it and every session
+it, the page lists it under **Machine logins**, where **Revoke** would end it and every session
 it started ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)),
-and the login on the machine returns. `agent-secrets launcher login-status` checks the machine
+and the login on the machine returns. `agent-secrets machine login-status` checks the machine
 login at any time: it prints `issued` while the machine holds one, and says when that login
 expires. The broker does not renew it, so before then a person must approve a new machine login.
 
-![The machine login page with a code looked up: a machine login for example-host-build, approver alice@example.com, with Approve and Deny buttons, and below them Your machine logins, empty until she approves](/legion/media/broker/machine-login.png)
+![The machine login page with a code looked up: a machine login for example-host-build, approver alice@example.com, with Approve and Deny buttons, and below them the machine logins list, empty until she approves](/legion/media/broker/machine-login.png)
 
 ## 2. Start a session
 
@@ -51,7 +51,7 @@ agent-secrets DEMO_API_KEY --reason "Publish the docs preview for PR 42 with the
 
 `DEMO_API_KEY` is alice's own secret at the human tier (its tags are `owner=alice@example.com` and
 `tier=human`), so a request for it waits for her approval, even from her own machine: the command
-waits, and prints the Dispatch page where the request is decided.
+waits, and names who approves it, alice, and the Dispatch page where she decides it.
 
 ## 4. Approve it
 
@@ -61,9 +61,9 @@ The request is at the top of alice's Inbox, under **Credential requests**, and c
 ![The Inbox, with a secret request for DEMO_API_KEY under Credential requests, Needs you 1 beside Inbox in the sidebar, and Blocked on you: 1 item](/legion/media/broker/inbox-credential-request.png)
 
 Its page shows what was asked for, by which session, for how long, who may approve it, and the
-agent's stated reason.
+agent's stated reason. The request named no `--ttl`, so its grant lasts until the session ends.
 
-![A credential request for DEMO_API_KEY: the enrollment on example-host-build, a one-hour lifetime, approver alice@example.com, the agent's stated reason, and Approve and Deny buttons](/legion/media/broker/credential-request.png)
+![A credential request for DEMO_API_KEY: the enrollment, a session on example-host-build, a lifetime of Until the session ends, approver alice@example.com, the agent's stated reason, and Approve and Deny buttons](/legion/media/broker/credential-request.png)
 
 She approves it, and the page records the decision.
 
@@ -73,7 +73,7 @@ She approves it, and the page records the decision.
 
 The waiting command checks the broker every few seconds, so it carries on within a few seconds of
 the approval (10 at most): it receives `DEMO_API_KEY` in its environment and runs. The video
-shortens that wait, which took 6 seconds in the recording. The demo command prints the key's length
+shortens that wait, which took 5 seconds in the recording. The demo command prints the key's length
 and last four characters to show it arrived. `agent-secrets status <request>` names who decided the
 request.
 
@@ -81,9 +81,10 @@ request.
 
 **Settings** lists the live grants of alice's sessions, whether granted automatically or approved,
 and those she approved on anyone's session, each with its session, how it was granted and when it
-expires. **Revoke** ends a grant at once; a command already running keeps the value it was given.
+expires: this one when the session ends. **Revoke** ends a grant at once; a command already running
+keeps the value it was given.
 
-![Live grants in Settings: the example-host-build enrollment holding DEMO_API_KEY, approved by alice@example.com, with a Revoke button](/legion/media/broker/live-grants.png)
+![Live grants in Settings: the example-host-build session holding DEMO_API_KEY, approved by alice@example.com, expiring when the session ends, with a Revoke button](/legion/media/broker/live-grants.png)
 
 The rig that recorded the video and the screenshots, and the scripts that record them again, are in
 [`docs/site/media/broker/`](https://github.com/sjawhar/legion/tree/main/docs/site/media/broker).

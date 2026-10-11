@@ -2,16 +2,18 @@ package supervise
 
 import (
 	"context"
-	"errors"
 	"fmt"
+
+	"github.com/sjawhar/legion/daemon/internal/wait"
 )
 
 // ErrSuspendHeld answers a suspension that arrived while the claim's agent is in a turn: the
 // machine holds it and suspends the claim itself (holdSuspension). It is not a refusal. A caller
 // that keeps the request durably asks again, and the claim answers nil once it is suspended.
-var ErrSuspendHeld = errors.New("the suspension is held for the agent's turn to end")
+var ErrSuspendHeld = wait.New("the suspension is held for the agent's turn to end")
 
-// suspend stops the process and keeps the session. A suspension ends the claim's phase, so a task
+// suspend stops the process and keeps the session. A suspension ends the claim's phase (the
+// workflow suspends a worker only when its issue closes or its run is over), so a task
 // queued for a phase and still pending unconfirmed (acknowledged and then refused, or lost to the
 // transport) is retired with it (settle): the next resume is started with its new phase's task,
 // never handed the finished one's. A task of no phase — an operator's own, an architect's — is
@@ -27,9 +29,10 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 // holdSuspension is a suspension that arrives while the agent is in a turn, and this is the one
 // statement of what a held suspension (Machine.held) does.
 //
-// The workflow suspends a worker as it records the phase completion the worker reports from a tool
-// call inside its turn. Stopping the process at once would cut that call off before Oh My Pi writes
-// its result, and a session resumed from that transcript holds a report with no answer. So the
+// A worker's issue can close, or an operator suspend it, while it is in a turn: the production
+// check's sign-off, say, arriving while the implementer's report of the check is still a tool call
+// inside that turn. Stopping the process at once would cut that call off before Oh My Pi writes its
+// result, and a session resumed from that transcript holds a report with no answer. So the
 // suspension is held:
 //
 //   - It runs when the turn ends (turnEnded), or when the stop timeout runs out first
@@ -88,7 +91,7 @@ func suspendRequest(m *Machine, ev Event) (RequestSuspend, error) {
 
 // suspendNow stops the claim's process for request and keeps its session.
 func (m *Machine) suspendNow(ctx context.Context, request RequestSuspend) error {
-	if err := m.suspendProcess(ctx); err != nil {
+	if err := m.endProcess(ctx); err != nil {
 		return fmt.Errorf("suspend %s: %w", m.claim.Token, err)
 	}
 	return m.suspendedFor(ctx, request)
@@ -149,7 +152,7 @@ func (m *Machine) endHeld(ctx context.Context) error {
 	request := *m.held
 	m.dropHeld()
 	incarnation := m.claim.Locator.Incarnation
-	if err := m.suspendProcess(ctx); err != nil {
+	if err := m.endProcess(ctx); err != nil {
 		m.log.Error("supervise: could not stop the process with the runtime; suspending its claim anyway",
 			"incarnation", incarnation, "error", err)
 	}

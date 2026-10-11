@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 )
@@ -16,11 +17,6 @@ var (
 	registeredWorkspace = regexp.MustCompile(`(?i)already (?:registered|exists)`)
 	commitID            = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
-
-// IsCommitID reports whether s is the shape of a jj/git commit id: 40 hex characters, a plain
-// SHA-1. Exported for cmd/legion, which validates a daemon-recorded merged head against it before
-// that value ever reaches a revset.
-func IsCommitID(s string) bool { return commitID.MatchString(s) }
 
 // createWorkspace ports workspace.ts's createWorkspace. It resolves a bookmark before deleting a
 // stale git worktree entry or adding a workspace: a conflicted bookmark must not leave a registered
@@ -63,9 +59,9 @@ func IsCommitID(s string) bool { return commitID.MatchString(s) }
 //     origin's branch); or start from main instead, by deleting the branch on GitHub (the pull
 //     request's Delete branch button, or `gh api -X DELETE`), after which the next provisioning's
 //     fetch drops the row. A push of the deletion from the shared clone is not offered: the clone
-//     authenticates only through `legion credential`, which needs a tree's grant that no operator
-//     shell holds, and `jj git push --deleted` would push every pending deletion in the shared
-//     clone, other issues' branches with it.
+//     authenticates through `gh auth git-credential`, which reads a role's gh files under a
+//     GH_CONFIG_DIR no operator shell carries, and `jj git push --deleted` would push every
+//     pending deletion in the shared clone, other issues' branches with it.
 //   - No row at all is an issue whose branch GitHub does not have, such as a merged branch GitHub
 //     deleted. The workspace starts at main, resolved to one commit first (mainCommit), with the
 //     bookmark created on it.
@@ -171,6 +167,12 @@ func createWorkspace(ctx context.Context, run Runner, workspace Workspace, log f
 		if _, err := RunChecked(ctx, run, add, nil, ""); err != nil {
 			return err
 		}
+	}
+	// Recorded the moment the add has made the workspace, ahead of anything that can still fail:
+	// a provisioning that failed after it finds the workspace there next time and adds it no more,
+	// so only this one can record when it was created (Created).
+	if err := RecordCreated(workspace.Dir, time.Now()); err != nil {
+		return err
 	}
 	if !fromMain {
 		return nil
@@ -413,9 +415,7 @@ func ownCommitsRevset(workspaceName string) string {
 // removingSuffix marks a workspace directory Remove has renamed aside, about to delete: a sibling
 // name in the same parent directory, so the rename is one atomic same-filesystem operation
 // regardless of how large the directory is, unlike the `os.RemoveAll` that follows it, which a
-// kill can interrupt partway through a large tree. RemoveFinished recognizes the name on its next
-// run and finishes the delete rather than re-judging (or mis-judging, against a half-deleted
-// tree) a workspace already found safe to remove.
+// kill can interrupt partway through a large tree.
 const removingSuffix = ".removing"
 
 // removingPath is where Remove renames workspace.Dir to before deleting it.
@@ -424,13 +424,11 @@ func removingPath(dir string) string { return dir + removingSuffix }
 // Remove ports workspace.ts's removeIssueWorkspace, with one addition: the workspace directory is
 // renamed aside (removingSuffix) before the slower recursive delete that actually frees the
 // space, so a kill partway through that delete leaves the renamed-aside name rather than a
-// half-deleted tree at the original one; RemoveFinished recognizes that name on its next run and
-// finishes the delete rather than re-judging a workspace already found safe to remove. The
-// rename goes first so a crash leaves the registered-but-missing state that Provision repairs
-// with forget and add. jj's forget leaves the colocated worktree of a directory already gone, so
-// Remove deletes that entry itself, also when the workspace is neither registered nor present (a
-// crash after the forget). workspace is Location's, which names the clone; any other is refused
-// before anything is removed.
+// half-deleted tree at the original one. The rename goes first so a crash leaves the
+// registered-but-missing state that Provision repairs with forget and add. jj's forget leaves the
+// colocated worktree of a directory already gone, so Remove deletes that entry itself, also when
+// the workspace is neither registered nor present (a crash after the forget). workspace is
+// Location's, which names the clone; any other is refused before anything is removed.
 func Remove(ctx context.Context, run Runner, workspace Workspace) error {
 	if !located(workspace) {
 		return fmt.Errorf("workspace to remove (%#v) is not a workspace Location names", workspace)

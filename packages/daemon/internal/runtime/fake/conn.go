@@ -2,6 +2,7 @@ package fake
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -36,7 +37,10 @@ type Conn struct {
 	prompts     []Prompt
 	adoptions   []Adoption
 	enrollments []string
+	podToken    string
+	tokenReads  int
 	shutdowns   int
+	aborts      int
 	state       runtime.ConnState
 	failures    map[string]error
 }
@@ -76,6 +80,15 @@ func (c *Conn) GetState(_ context.Context) (runtime.ConnState, error) {
 	return c.state, nil
 }
 
+// Abort records the daemon asking the agent to end its turn. It ends nothing: the test ends the
+// turn itself, as the stream's agent_end would (StreamTurnEnd).
+func (c *Conn) Abort(_ context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.aborts++
+	return c.failures["Abort"]
+}
+
 func (c *Conn) Shutdown(_ context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -96,6 +109,36 @@ func (c *Conn) AgentSecretsEnrollment(_ context.Context, enrollmentID string) er
 	defer c.mu.Unlock()
 	c.enrollments = append(c.enrollments, enrollmentID)
 	return c.failures["AgentSecretsEnrollment"]
+}
+
+// AgentSecretsToken answers the daemon asking the agent's shim to read its projected token again:
+// the token SetAgentSecretsToken gave it. With none given it fails, so a test that never expected
+// the daemon to ask sees the request go unanswered rather than an empty token.
+func (c *Conn) AgentSecretsToken(_ context.Context) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.tokenReads++
+	if err := c.failures["AgentSecretsToken"]; err != nil {
+		return "", err
+	}
+	if c.podToken == "" {
+		return "", errors.New("fake: the shim was asked for its projected token, and the test set none (SetAgentSecretsToken)")
+	}
+	return c.podToken, nil
+}
+
+// SetAgentSecretsToken is the projected token the shim reads from its mount from now on.
+func (c *Conn) SetAgentSecretsToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.podToken = token
+}
+
+// TokenReads is how many times the daemon asked the shim to read its projected token again.
+func (c *Conn) TokenReads() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.tokenReads
 }
 
 // Prompts is every prompt frame sent over this connection, in order.
@@ -126,6 +169,13 @@ func (c *Conn) Shutdowns() int {
 	return c.shutdowns
 }
 
+// Aborts is how many times the agent was asked to end its turn.
+func (c *Conn) Aborts() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.aborts
+}
+
 // SetStreaming is the agent's turn starting or ending, as `GetState` would report it.
 func (c *Conn) SetStreaming(streaming bool) {
 	c.mu.Lock()
@@ -149,8 +199,14 @@ func (c *Conn) FailGetState(err error) { c.fail("GetState", err) }
 // FailShutdown makes every later Shutdown return err.
 func (c *Conn) FailShutdown(err error) { c.fail("Shutdown", err) }
 
+// FailAbort makes every later Abort return err; FailAbort(nil) clears it.
+func (c *Conn) FailAbort(err error) { c.fail("Abort", err) }
+
 // FailAdoptWorkingCopy makes every later AdoptWorkingCopy return err.
 func (c *Conn) FailAdoptWorkingCopy(err error) { c.fail("AdoptWorkingCopy", err) }
+
+// FailAgentSecretsToken makes every later AgentSecretsToken return err; nil clears it.
+func (c *Conn) FailAgentSecretsToken(err error) { c.fail("AgentSecretsToken", err) }
 
 func (c *Conn) fail(method string, err error) {
 	c.mu.Lock()

@@ -140,6 +140,17 @@ function appendAskDetailKeys(keys: (readonly unknown[])[], event: Event): void {
   }
 }
 
+/** The signed-in person's answers page lists every answer and every reply on an ask, so the
+ *  two events that write one refresh it. The query exists only while that page is open. */
+function appendAnswersPageKey(keys: (readonly unknown[])[], event: Event): void {
+  if (
+    event.type === "ask.answered" ||
+    (event.type === "comment.created" && payloadString(event, "ask_id") !== undefined)
+  ) {
+    keys.push(["me", "answers"]);
+  }
+}
+
 function appendCommentDetailKeys(keys: (readonly unknown[])[], event: Event): void {
   const id =
     event.type === "comment.delivery" ? event.payload.comment_id : payloadString(event, "id");
@@ -437,6 +448,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     if (isCommentLikeEvent(event)) {
       appendCommentDetailKeys(keys, event);
     }
+    appendAnswersPageKey(keys, event);
     if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
       keys.push(inboxQuery().queryKey);
     }
@@ -527,6 +539,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     }
     appendDocumentKey(keys, event);
     appendAskDetailKeys(keys, event);
+    appendAnswersPageKey(keys, event);
     return keys;
   }
   if (event.type === "ask.follower_added" || event.type === "ask.follower_removed") {
@@ -548,6 +561,7 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     }
     appendDocumentKey(keys, event);
     appendCommentDetailKeys(keys, event);
+    appendAnswersPageKey(keys, event);
     // The one subtraction from the conservative baseline. An Inbox row is an open ask plus its
     // thread's `last_reply` and `waiting_on`, its issue's priority, assignee and status, and
     // the ask's `referenced_by_count`. Every comment in an ask's thread carries that ask's

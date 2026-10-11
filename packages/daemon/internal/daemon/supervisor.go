@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -32,7 +34,9 @@ type supervisor struct {
 	stateDir string
 	log      *slog.Logger
 	// restored closes once every stored claim has its machine: a hello waits for it, so a shim
-	// reconnecting across a restart is admitted by a claim already supervised.
+	// reconnecting across a restart is admitted by a claim already supervised. Nothing that waits for
+	// a worker to reach the daemon may run before it closes: the boot's relaunches run after it
+	// (supervision.start), since a relaunched worker's hello would wait for the relaunch itself.
 	restored chan struct{}
 	terminal func(supervise.Claim, supervise.ClaimState)
 
@@ -40,13 +44,17 @@ type supervisor struct {
 	machines map[claim.Token]*member
 	stopped  bool
 	feeding  sync.WaitGroup
+	// all is every machine, in the order they were added. Machines are never removed: add, under
+	// mu, replaces the slice with a longer copy, and the stop's log lines read it without mu, which
+	// Create holds through a store write.
+	all atomic.Pointer[[]*supervise.Machine]
 }
 
-// member is one claim's machine, the queue its events wait in, and the tree the claim is of.
+// member is one claim's machine, the queue its events wait in, and the issue the claim is of.
 type member struct {
 	machine *supervise.Machine
 	inbox   *inbox
-	tree    string
+	issue   string
 }
 
 func newSupervisor(ctx context.Context, st *store.Store, project, stateDir string, log *slog.Logger) *supervisor {
@@ -100,9 +108,11 @@ func (s *supervisor) Create(ctx context.Context, c supervise.Claim, rolePrompt s
 			return nil, false, fmt.Errorf("keep the role prompt of %s: %w", c.Token, err)
 		}
 	}
-	if err := s.deps.Store.PutClaim(ctx, c); err != nil {
+	bound, err := s.deps.Store.AdmitClaim(ctx, c)
+	if err != nil {
 		return nil, false, err
 	}
+	c = bound
 	m, err := supervise.NewMachine(s.ctx, s.deps, c)
 	if err != nil {
 		return nil, false, err
@@ -121,13 +131,14 @@ func (s *supervisor) Claims(ctx context.Context) ([]supervise.Claim, error) {
 }
 
 // restore builds the machine of every claim the store held at boot, and reports the claims whose
-// launch the last daemon persisted and never finished: launching with no locator, the process —
-// if one opened at all — never recorded. Each is put back to queued, which is what it is: nothing
-// the daemon knows of runs for it.
+// launch the last daemon began and never finished: launching with no locator, the process — if
+// one opened at all — never recorded; or a launch it released at boot and stopped before the
+// relaunch wrote its next generation (supervise.Claim.ReleasedLaunch). Each is put back to
+// launch_uncertain, which is what it is: the daemon cannot yet say whether a process runs for it.
 func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]claim.Token, error) {
 	var unfinished []claim.Token
 	for _, c := range claims {
-		if c.State == supervise.StateLaunching && c.Locator == nil {
+		if (c.State == supervise.StateLaunching && c.Locator == nil) || c.ReleasedLaunch() {
 			c.State = supervise.StateLaunchUncertain
 			if err := s.deps.Store.PutClaim(ctx, c); err != nil {
 				return nil, err
@@ -151,7 +162,9 @@ func (s *supervisor) restore(ctx context.Context, claims []supervise.Claim) ([]c
 func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 	m.OnTerminal(s.terminal)
 	queue := newInbox()
-	s.machines[token] = &member{machine: m, inbox: queue, tree: m.Claim().Tree}
+	s.machines[token] = &member{machine: m, inbox: queue, issue: m.Claim().Issue}
+	all := append(slices.Clip(s.supervised()), m)
+	s.all.Store(&all)
 	s.feeding.Add(1)
 	go func() {
 		defer s.feeding.Done()
@@ -161,10 +174,37 @@ func (s *supervisor) add(token claim.Token, m *supervise.Machine) {
 				return
 			}
 			if err := m.Handle(s.ctx, ev); err != nil {
-				s.log.Error("supervise: an event failed", "claim", token, "event", fmt.Sprintf("%T", ev), "error", err)
+				s.decisionFailed(token, fmt.Sprintf("%T", ev), err, "supervise: an event failed")
 			}
 		}
 	}()
+}
+
+// decisionFailed logs err, a decision on token's claim failing (what names it: the event its
+// machine handled, or the release of an uncertain launch), as failed says: at Error, unless the
+// daemon's stop ended it, which is no fault, since the next boot takes the claim up. It reports
+// whether the failure is a fault.
+func (s *supervisor) decisionFailed(token claim.Token, what string, err error, failed string) bool {
+	if s.ctx.Err() != nil {
+		s.log.Info("supervise: the daemon's stop ended a decision; the next boot takes the claim up",
+			"claim", token, "event", what, "error", err)
+		return false
+	}
+	s.log.Error(failed, "claim", token, "event", what, "error", err)
+	return true
+}
+
+// inDecision is every claim whose machine is deciding an event now, whoever handed it the event,
+// as "<claim> (<event type>)", in claim order. It waits on no decision and no lock a decision holds.
+func (s *supervisor) inDecision() []string {
+	busy := []string{}
+	for _, m := range s.supervised() {
+		if ev := m.Deciding(); ev != nil {
+			busy = append(busy, fmt.Sprintf("%s (%T)", m.View().Token, ev))
+		}
+	}
+	slices.Sort(busy)
+	return busy
 }
 
 // post queues ev for the claim's machine. An event for a claim the daemon does not supervise, or
@@ -184,9 +224,10 @@ func (s *supervisor) post(token claim.Token, ev supervise.Event) {
 	m.inbox.put(ev)
 }
 
-// volumeLost tells every other claim of c's tree that the tree volume was lost (TreeVolumeLost):
-// the sessions they recorded were on it. It is the machines' VolumeLost, called by c's machine
-// under its own lock, so it reads no machine — the tree of each is kept beside it — and only queues.
+// volumeLost tells every other claim of c's issue that the issue's volume was lost
+// (IssueVolumeLost): the sessions they recorded were on it. It is the machines' VolumeLost, called by
+// c's machine under its own lock, so it reads no machine — the issue of each is kept beside it — and
+// only queues.
 func (s *supervisor) volumeLost(c supervise.Claim) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -194,27 +235,38 @@ func (s *supervisor) volumeLost(c supervise.Claim) {
 		return
 	}
 	for token, m := range s.machines {
-		if token != c.Token && m.tree == c.Tree {
-			m.inbox.put(supervise.TreeVolumeLost{Claim: token})
+		if token != c.Token && m.issue == c.Issue {
+			m.inbox.put(supervise.IssueVolumeLost{Claim: token})
 		}
 	}
 }
 
-// count is how many claims the daemon supervises.
+// count is how many claims the daemon supervises. It waits on no lock a decision holds.
 func (s *supervisor) count() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.machines)
+	return len(s.supervised())
 }
 
-// stop feeds no machine another event and waits for every event being handled to finish.
-func (s *supervisor) stop() {
+// supervised is every machine the daemon supervises, read without mu (all).
+func (s *supervisor) supervised() []*supervise.Machine {
+	if held := s.all.Load(); held != nil {
+		return *held
+	}
+	return nil
+}
+
+// halt feeds no machine another event, and waits for nothing.
+func (s *supervisor) halt() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.stopped = true
 	for _, m := range s.machines {
 		m.inbox.close()
 	}
-	s.mu.Unlock()
+}
+
+// stop feeds no machine another event and waits for every event being handled to finish.
+func (s *supervisor) stop() {
+	s.halt()
 	s.feeding.Wait()
 }
 
@@ -244,12 +296,11 @@ func (s *supervisor) wait() {
 // s.ctx alone with no deadline of its own, since the shim it answers waits for hello_ack the same
 // way and supervision.stop cancels s.ctx before the stream closes, releasing every held hello
 // rather than leaving one to time out mid-boot naming a credential problem that does not exist.
-// The token is resolved again once restoration ends, under a fresh bound: restore (s.start, ahead
-// of close(s.restored)) can relaunch a claim that was mid-launch across the restart to a new
-// generation before this hello is ever judged, and the first resolve's generation and Stale flag
-// are only ever as fresh as the moment they were read. Judging the hold by that first result would
-// accept an old generation's shim after its claim has already relaunched, taking the stream slot
-// the new generation's own hello then finds "already bound to a live stream".
+// The token is resolved again once restoration ends, under a fresh bound: the hold lasts as long
+// as the boot's readiness gate waits, and the first resolve's generation and Stale flag are only
+// ever as fresh as the moment they were read. Judging the hold by that first result would accept a
+// generation its claim has left meanwhile, taking the stream slot the new generation's own hello
+// then finds "already bound to a live stream".
 //
 // A store that fails either read answers the hello with that error, never as an unknown token: the
 // failure says nothing about the token, and the listener closes the connection unrefused for the

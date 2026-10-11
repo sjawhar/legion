@@ -70,30 +70,6 @@ test("emits each Envoy envelope as the exact Claude channel notification", async
   ])
 })
 
-test("announces a followed ask once as a plain channel notification and never subscribes", async () => {
-  const notifier = new FakeNotifier()
-  const delivery = createChannelDelivery({
-    identity: new SessionIdentity("ses_claude", "/tmp"),
-    notifier,
-  })
-  const details = { issue: "DSP-3", ask: "ask-3", follows: { ask: "ask-3" } }
-
-  await delivery.announceFollow(details)
-  await delivery.announceFollow({ ...details, comment: "c-1" })
-  await delivery.announceFollow({ issue: "DSP-3", comment: "c-2" })
-
-  expect(notifier.notifications).toEqual([
-    {
-      method: "notifications/claude/channel",
-      params: {
-        content:
-          "Following ask ask-3 on DSP-3: its answer and replies reach you directly (dispatch_follow unfollow to stop). For every event on DSP-3: envoy_subscribe notifications.dispatch.issue.DSP-3.>.",
-        meta: { producer: "dispatch" },
-      },
-    },
-  ])
-})
-
 test("strips unsafe channel meta keys before notifying Claude Code", () => {
   expect(
     sanitizeChannelMetadata({
@@ -112,7 +88,6 @@ test("enqueues a forwarded role-lane event before publishing its adapter receipt
       nats.order.push("enqueue")
       return true
     },
-    announceFollow: async () => undefined,
     inbox: () => [],
   }
 
@@ -139,7 +114,6 @@ test("never answers the reply inbox of a JetStream publish to the direct subject
       nats.order.push("enqueue")
       return true
     },
-    announceFollow: async () => undefined,
     inbox: () => [],
   }
 

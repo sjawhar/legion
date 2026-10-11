@@ -27,7 +27,7 @@ func TestARootArchitectIsToldTheDesignGatePolicyAndWhatItAsks(t *testing.T) {
 	}
 	instructions := []string{
 		"the tree's work starts only once you register your spec with `register_gate`, under either design gate policy",
-		"With `root-issues`, once the spec's decision blocks are settled (the dispatch skill's \"Approval of a spec\"), request its approval with `dispatch_request_approval` and a `summary`",
+		"With `root-issues`, once the spec's decision blocks are settled (the dispatch skill's \"Approval of a spec\"), request its approval with `dispatch request-approval` and a `--summary`",
 		"With `off`, request no approval and wait for no `design-approved`",
 	}
 	for _, policy := range []config.DesignGate{config.DesignGateRootIssues, config.DesignGateOff} {
@@ -113,8 +113,8 @@ func TestAReviewerIsToldItsProjectsReviewWorkflows(t *testing.T) {
 
 // The daemon's controller (`controller: daemon`) is launched with its role part and the headless
 // part, told the project's design gate policy as the operator's controller is, with the
-// deployment's instructions and launch secrets, and with no repository and no git identity: it
-// works Dispatch, never a checkout, and commits nothing.
+// deployment's instructions and launch secrets, and with no repository, no git identity and
+// neither App login: it works Dispatch, never a checkout or GitHub, and commits nothing.
 func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {

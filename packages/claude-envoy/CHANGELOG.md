@@ -1,5 +1,20 @@
 # Changelog
 
+## [1.0.0]
+
+### Changed
+
+- Agents reach Dispatch through the `dispatch` command (LEGION-588): `bin/dispatch` puts it on the
+  Bash tool's `PATH`, running the committed `dist/dispatch.js`, and the `open-asks` hook writes
+  `export DISPATCH_HOST=claude` to `CLAUDE_ENV_FILE` once per session. The command acts as
+  the session `CLAUDE_CODE_SESSION_ID` names and prints the follow notice itself, once per ask.
+
+### Removed
+
+- The MCP server's twenty-one `dispatch_*` tools: it lists the ten `envoy_*` tools only, and a
+  `dispatch_*` call is an unknown tool. The follow announcement on the channel and the MCP image
+  blocks went with them, since no MCP tool returns a Dispatch result.
+
 ## [0.6.7]
 
 ### Added

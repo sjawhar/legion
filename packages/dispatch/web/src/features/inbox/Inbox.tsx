@@ -9,14 +9,11 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingSkeleton } from "../../components/LoadingSkeleton";
 import { LabelPill } from "../../components/Pill";
 import { QueryError } from "../../components/QueryError";
-import { TruncatedText } from "../../components/TruncatedText";
 import {
   borderDefault,
   checkboxAccent,
   dangerText,
   focusVisibleRing,
-  linkHoverText,
-  linkText,
   secondaryButtonBorder,
   secondaryButtonDisabledText,
   secondaryButtonHoverBorder,
@@ -33,24 +30,21 @@ import { PriorityControl } from "../issue/PriorityControl";
 import { useIssueAssignee } from "../issue/useIssueAssignee";
 import { actorLabel } from "../refs/actor";
 import { COPY_REF_SELECTOR } from "../refs/CopyRefButton";
-import { referenceTriggerProps } from "../refs/RefPreview";
-import {
-  buildInboxPath,
-  buildIssuePath,
-  buildProjectPath,
-  type InboxRoute,
-  type InboxView,
-  parseInboxSearch,
-} from "../refs/routes";
+import { buildInboxPath, type InboxRoute, type InboxView, parseInboxSearch } from "../refs/routes";
 import { type KeymapScope, useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, focusedMatching, roveFocus } from "../shell/roving";
 import { useUserPreference } from "../shell/userPreference";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
 import { AskCard } from "./AskCard";
+import { InboxOwnerLink } from "./AskOwnerLink";
 import { outsideAskCard } from "./ask-card";
-import { type AskOrdinal, askIssueKey, askOrdinals, controlName } from "./ask-name";
+import { type AskOrdinal, askOrdinals, controlName } from "./ask-name";
 import { BlockedOnYou, waitingOnYou } from "./BlockedOnYou";
 import { BulkSnoozeBar } from "./BulkSnoozeBar";
+import { crossBandCounts, groupRows } from "./grouping";
+import { bandGroupItems, useGroupJump } from "./InboxGroups";
+import { ROW_ATTRIBUTE, ROW_SELECTOR } from "./inbox-row";
+import { useMotionHold } from "./motion-hold";
 import { SnoozeControl } from "./SnoozeControl";
 import {
   COLLAPSED_SECTIONS,
@@ -78,8 +72,6 @@ function InboxRowChip({ ask }: { ask: InboxRow }): ReactNode {
   return null;
 }
 
-const ROW_ATTRIBUTE = "data-inbox-row";
-const ROW_SELECTOR = `[${ROW_ATTRIBUTE}]`;
 /** The bulk bar's snooze picker: `h` hands it focus and Escape takes it back to the list. */
 const BULK_PICKER_SELECTOR = "[data-inbox-bulk-snooze]";
 
@@ -147,8 +139,10 @@ function AssignToMe({
 function InboxItem({
   ask,
   assignLive,
+  grouped,
   marked,
   ordinal,
+  ownerKey,
   onAnswered,
   onAssignLive,
   onMark,
@@ -162,10 +156,14 @@ function InboxItem({
   /** True while this row's "Assign to me" write is in flight or failed, whatever section the
    *  optimistic update put the row in. */
   assignLive: boolean;
+  /** Whether this row sits under a multi-ask owner header. */
+  grouped: boolean;
   /** Whether the reader has marked this row for a bulk action. */
   marked: boolean;
   /** This ask's place among its owner's rows, when the owner has more than one listed. */
   ordinal: AskOrdinal | undefined;
+  /** The owner identity every row exposes for cross-band group jumps. */
+  ownerKey: string;
   onAnswered: (id: string) => void;
   onAssignLive: (askId: string, live: boolean) => void;
   /** Marks or unmarks this row; `x` and the row's own checkbox are the two ways in. */
@@ -183,8 +181,6 @@ function InboxItem({
   /** The signed-in person's lowercase email; "Assign to me" writes it. */
   viewer: string;
 }): ReactNode {
-  const owner = askIssueKey(ask);
-  const title = ask.issue?.title ?? owner ?? "Document ask";
   const name = controlName(ask, ordinal);
   const releaseOnFocusOut =
     onRelease === undefined
@@ -194,7 +190,11 @@ function InboxItem({
         };
   return (
     <li
-      className={`rounded-xl outline-none focus-visible:ring-2 ${focusVisibleRing}`}
+      className={`rounded-xl outline-none focus-visible:ring-2 ${focusVisibleRing} ${
+        grouped ? `border-l-2 pl-3 ${borderDefault}` : ""
+      }`}
+      data-inbox-group={grouped ? ownerKey : undefined}
+      data-inbox-owner-key={ownerKey}
       data-inbox-row={ask.id}
       data-inbox-section={section}
       onBlur={releaseOnFocusOut}
@@ -214,41 +214,7 @@ function InboxItem({
           type="checkbox"
         />
         <div className="flex min-w-0 grow basis-48 items-baseline gap-2">
-          {ask.document === undefined ? (
-            owner === null ? (
-              <p className={`truncate text-sm ${textMutedOnCanvas}`}>{title}</p>
-            ) : (
-              <Link
-                className={`flex min-w-0 grow items-baseline gap-2 text-sm ${linkText} ${linkHoverText}`}
-                data-inbox-owner=""
-                to={buildIssuePath({ id: ask.id, key: owner, kind: "ask" })}
-                {...referenceTriggerProps({ key: owner, kind: "issue" })}
-              >
-                <span className="shrink-0 font-semibold">{owner}</span>
-                <TruncatedText>{title}</TruncatedText>
-              </Link>
-            )
-          ) : (
-            <Link
-              className={`min-w-0 grow truncate text-sm font-semibold ${linkText} ${linkHoverText}`}
-              data-inbox-owner=""
-              to={buildProjectPath({
-                item: { id: ask.id, kind: "ask" },
-                kind: "document",
-                project: ask.document.project,
-                slug: ask.document.slug,
-              })}
-              {...referenceTriggerProps({
-                kind: "document",
-                project: ask.document.project,
-                slug: ask.document.slug,
-              })}
-            >
-              <TruncatedText>
-                {ask.document.project} · {ask.document.name}
-              </TruncatedText>
-            </Link>
-          )}
+          <InboxOwnerLink ask={ask} rowOwner />
           <span className="min-w-0 max-w-[40%] shrink truncate">
             <InboxRowChip ask={ask} />
           </span>
@@ -389,6 +355,9 @@ export function Inbox({
   // views below are client-side partitions of it, so an answered row leaves every surface at once.
   const inbox = useQuery(inboxQuery());
   const whoAmI = useQuery(whoAmIQuery());
+  const listRef = useRef<HTMLElement>(null);
+  // A refetch can land while a pointer travels between rows; adopt it once that pointer settles.
+  const adoptedInbox = useMotionHold(inbox.data, listRef);
   // The credential requests the Inbox lists above its asks: the section, the banner and the empty
   // state all read this one answer.
   const credentials = useCredentialRequests();
@@ -461,7 +430,7 @@ export function Inbox({
       return next;
     });
   }, []);
-  const listedIds = inbox.data?.map((row) => row.id).join(" ");
+  const listedIds = adoptedInbox?.map((row) => row.id).join(" ");
   useEffect(() => {
     if (listedIds === undefined) return;
     const listed = new Set(listedIds === "" ? [] : listedIds.split(" "));
@@ -476,8 +445,8 @@ export function Inbox({
   const agent = filter.agent;
   const fromAgent =
     agent === undefined
-      ? (inbox.data ?? [])
-      : (inbox.data ?? []).filter(
+      ? (adoptedInbox ?? [])
+      : (adoptedInbox ?? []).filter(
           (ask) => ask.author.kind === "session" && ask.author.id === agent
         );
   const inView = (rows: readonly InboxRow[]) =>
@@ -487,6 +456,7 @@ export function Inbox({
   const shown = inView(filter.section === "needs-you" ? waitingOnYou(fromAgent) : fromAgent);
   // Later starts folded: its rows are the ones the reader has already dealt with by deferring.
   const [laterOpen, setLaterOpen] = useState(false);
+  const jumpToGroup = useGroupJump(listRef, () => setLaterOpen(true));
   // Where each row sits, judged against the clock at render: a snoozed row rejoins its turn band
   // on the first render after its moment passes. Computed here, with the selection, rather than
   // after the early returns, because the bar's count and the bindings both read it.
@@ -532,7 +502,6 @@ export function Inbox({
   // same predicate, so the two cannot drift: a pick whose optimistic move folds every marked row
   // into Later empties `selected`, not the marks behind it, and Clear still has work to do.
   const bulkBarShown = selected.length > 0 || bulkSnoozing !== 0 || bulkRefusal !== undefined;
-  const listRef = useRef<HTMLElement>(null);
   // The row the reader's hand is on (focus or pointer), read from the DOM as last committed. When
   // the server has dropped it (answered or resolved elsewhere) or handed its turn the other way
   // (their own ask-back, an agent's note or reply), it is kept - `held` - where the reader last
@@ -776,7 +745,7 @@ export function Inbox({
       {viewSwitch}
       {chip}
       {agent === undefined ? (
-        <BlockedOnYou asks={inView(inbox.data)} credentialRequests={credentials.requests} />
+        <BlockedOnYou asks={inView(adoptedInbox ?? [])} credentialRequests={credentials.requests} />
       ) : null}
       {bulkBar}
     </>
@@ -802,16 +771,15 @@ export function Inbox({
     );
   const sections = INBOX_SECTIONS.map((section) => {
     const rows = rowsIn(section);
+    const shownRows = rows.filter((ask) => !inShutBand(ask, section));
     // The same rule the selection above reads, so keyboard roving, the viewport anchor,
     // `presented` and the bar all see exactly what the reader sees.
-    return {
-      rows,
-      section,
-      shownRows: rows.filter((ask) => !inShutBand(ask, section)),
-    };
+    return { groups: groupRows(shownRows), rows, section, shownRows };
   }).filter(({ rows }) => rows.length > 0);
-  presented.current = sections.flatMap(({ section, shownRows }) =>
-    shownRows.map((ask) => ({ ask, section }))
+  // Cross-band counts include folded rows: a Later target is opened before the jump focuses it.
+  const notes = crossBandCounts(sections);
+  presented.current = sections.flatMap(({ groups, section }) =>
+    groups.flatMap((group) => group.rows.map((ask) => ({ ask, section })))
   );
   // Names are read off the rows as they render - band by band, top to bottom - so "ask 2 of 2"
   // never sits above "ask 1 of 2", and a twin folded away in `Later` leaves the row on screen
@@ -831,7 +799,7 @@ export function Inbox({
     >
       {header}
       <ul className="space-y-3">
-        {sections.flatMap(({ rows, section, shownRows }, index) => [
+        {sections.flatMap(({ groups, rows, section }, index) => [
           <li
             className={index === 0 ? undefined : "pt-2"}
             key={`heading-${section}`}
@@ -851,23 +819,31 @@ export function Inbox({
               )}
             </h2>
           </li>,
-          ...shownRows.map((ask) => (
-            <InboxItem
-              ask={ask}
-              assignLive={assigning.has(ask.id)}
-              marked={marked.has(ask.id)}
-              ordinal={ordinals.get(ask.id)}
-              key={ask.id}
-              onAnswered={recordAnswered}
-              onAssignLive={onAssignLive}
-              onMark={onMark}
-              onSnoozeLive={onSnoozeLive}
-              onRelease={ask.id === held?.ask.id ? release : undefined}
-              section={section}
-              threadUpdatedAt={inbox.dataUpdatedAt}
-              viewer={viewer}
-            />
-          )),
+          ...bandGroupItems({
+            groups,
+            notes: notes.get(section),
+            onJump: jumpToGroup,
+            renderRow: (ask, group) => (
+              <InboxItem
+                ask={ask}
+                assignLive={assigning.has(ask.id)}
+                grouped={group.rows.length > 1}
+                key={ask.id}
+                marked={marked.has(ask.id)}
+                ordinal={ordinals.get(ask.id)}
+                ownerKey={group.owner.key}
+                onAnswered={recordAnswered}
+                onAssignLive={onAssignLive}
+                onMark={onMark}
+                onSnoozeLive={onSnoozeLive}
+                onRelease={ask.id === held?.ask.id ? release : undefined}
+                section={section}
+                threadUpdatedAt={inbox.dataUpdatedAt}
+                viewer={viewer}
+              />
+            ),
+            section,
+          }),
         ])}
       </ul>
     </ViewportAnchor>

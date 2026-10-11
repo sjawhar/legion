@@ -24,24 +24,24 @@
       Dispatch sends no Content-Security-Policy; one would have to allow this script by its hash.
     -->
     <script>
-      (function () {
+      (() => {
         var leaving = false;
         function markLeaving() {
           leaving = true;
         }
         window.addEventListener("beforeunload", markLeaving);
         window.addEventListener("pagehide", markLeaving);
-        window.addEventListener("pageshow", function () {
+        window.addEventListener("pageshow", () => {
           leaving = false;
         });
         window.addEventListener(
           "error",
-          function (event) {
+          (event) => {
             var script = event.target;
             if (!(script instanceof HTMLScriptElement)) {
               return;
             }
-            if (script.src.indexOf(window.location.origin + "/assets/") !== 0) {
+            if (script.src.indexOf(`${window.location.origin}/assets/`) !== 0) {
               return;
             }
             if (leaving || !navigator.onLine) {
@@ -52,7 +52,7 @@
                 return;
               }
               window.sessionStorage.setItem("dispatch.reloaded-for-chunk", "true");
-            } catch (unavailable) {
+            } catch {
               return;
             }
             window.location.reload();

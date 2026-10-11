@@ -121,8 +121,8 @@ func TestApprovalRequestOpensAnAskWhoseAnswerPinsAReviewToTheDocumentVersion(t *
 	if again.Code != http.StatusOK || !strings.Contains(again.Body.String(), request.Ask.ID) {
 		t.Fatalf("repeat request: status=%d body=%s", again.Code, again.Body.String())
 	}
-	// Its wording cannot be edited.
-	if edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+request.Ask.ID, map[string]any{"question": "Other", "actor": sessionActor()}); edited.Code != http.StatusConflict {
+	// Its wording cannot be edited, and the refusal names the command that hands it back.
+	if edited := sessionRequest(t, handler, http.MethodPatch, "/api/v1/asks/"+request.Ask.ID, map[string]any{"question": "Other", "actor": sessionActor()}); edited.Code != http.StatusConflict || !strings.Contains(edited.Body.String(), "hand the request back with `dispatch request-approval`") {
 		t.Fatalf("edit approval ask: status=%d body=%s", edited.Code, edited.Body.String())
 	}
 	// Agents cannot answer it.

@@ -39,6 +39,16 @@ import (
 // them, on this machine, and plant on the tree volume what a tree agent can plant there for the
 // next pod of the tree: nothing planted may ever run where the provisioning Secret is readable.
 //
+// What the boundary protects is identity, not a repository-write token kept off the tree volume:
+// an implement-role container now holds the implement App's token — the same lease as the
+// provisioning token — read-only in its own gh volume (GHConfigDir), and a review-role container
+// the review App's. What the fetch container's boundary still keeps is that no review-role
+// container ever holds the implement App's token, which is what lets the reviewer's approval count
+// and the daemon's fix-attempt counting read a push's App from the App that made it. A plant that
+// a tree agent's own git triggers after provisioning runs under that agent's role: its clone's
+// helper is `gh auth git-credential` (workspace.GitHubCredentialHelper), which answers from the
+// GH_CONFIG_DIR of the process running it, and here, with none, answers nothing (exit 1).
+//
 // Provisioning also pins its git and jj — no hook, the git boot resolved, https alone, a credential
 // scoped to github.com, no working-copy snapshot in a credentialed fetch; internal/workspace's
 // tests prove each. Those pins are defence: the boundary must hold without them. So every git and
@@ -95,7 +105,7 @@ if [ "@NAME@" = jj ]; then
 		esac
 	done
 fi
-exec @REAL@ "$@"
+PATH=@PATH@ exec @REAL@ "$@"
 `
 
 // anyHostAskpass answers every host's prompts with the one-shot credential's token.
@@ -161,7 +171,10 @@ func newInitRig(t *testing.T, legion string) *initRig {
 		if err != nil {
 			t.Fatalf("provisioning's boundary tests drive a real %s: %v", name, err)
 		}
-		script := strings.NewReplacer("@NAME@", name, "@REAL@", shellprefix.Literal(real), "@ASKPASS@", shellprefix.Literal(askpass)).Replace(defeatedTool)
+		// Drop this fixture's PATH prefix before handing off: a host wrapper that searches for
+		// its real tool must not rediscover this defeated-tool wrapper and recurse into it.
+		script := strings.NewReplacer("@NAME@", name, "@REAL@", shellprefix.Literal(real),
+			"@ASKPASS@", shellprefix.Literal(askpass), "@PATH@", shellprefix.Literal(os.Getenv("PATH"))).Replace(defeatedTool)
 		if err := os.WriteFile(filepath.Join(rig.bin, name), []byte(script), 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -218,7 +231,7 @@ func (rig *initRig) launch(spec runtime.SpawnSpec) corev1.PodSpec {
 	if err != nil {
 		rig.t.Fatal(err)
 	}
-	return rig.r.podTemplate(l, false).Spec
+	return rig.r.podTemplate(l).Spec
 }
 
 // run executes the pod's init containers in order, as the kubelet does: each volume a directory —

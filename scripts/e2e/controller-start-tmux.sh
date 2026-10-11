@@ -143,8 +143,9 @@ want_contract=$(jq -r .legion.daemonApiVersion "$root/packages/pi-legion/package
 note "plugins $(jq -r '.name + "@" + .version' "$envoy_manifest") and $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile, daemonApiVersion $want_contract"
 # The boot gate resolves the model of every task agent the prompts dispatch, so the profile names
 # their roles and the default one model, served by a static-key provider that listens nowhere: the
-# controller's one model turn, the start message `legion controller start` opens it with, fails
-# against it, no check reads its answer, and no credential the machine carries decides the gate.
+# controller's one model turn, which the pi-legion extension starts from
+# LEGION_CONTROLLER_START_MESSAGE once its claim succeeds, fails against it, no check reads its
+# answer, and no credential the machine carries decides the gate.
 mkdir -p "$profile_agent"
 cat >"$profile_agent/models.yml" <<'EOF'
 providers:
@@ -189,7 +190,13 @@ EOF
 # ---- --check-config --------------------------------------------------------------------------------
 begin check-config-passes
 out=$(legion start --check-config --config "$work/legion.yaml")
-[ "$out" = "Config OK: project=$project" ] || fail "got $out"
+[ "$(head -1 <<<"$out")" = "Config OK: project=$project" ] || fail "got $out"
+# After the OK line, one line per deployment capability the file alone leaves open, in boot's words
+# (LEGION-578): under tmux the secrets and resource-limits rows, each ending with the legion.yaml
+# line that records a decision. A report, so the exit stayed 0.
+want_gaps='capability secrets is open: the tmux runtime enrolls no process with the secrets broker; to record a decision, add to legion.yaml: capabilities.decided.secrets: "<reason>"
+capability resource-limits is open: the tmux runtime sets no requests or limits on a pane; to record a decision, add to legion.yaml: capabilities.decided.resource-limits: "<reason>"'
+[ "$(tail -n +2 <<<"$out")" = "$want_gaps" ] || fail "the lines after the OK line are not the two open gaps: $out"
 note "$out"
 pass
 
@@ -282,11 +289,23 @@ registered=$(jq -R -c --arg s "$session1" 'fromjson? | select(.msg == "api: cont
 note "daemon: api: controller registered $registered"
 omp1=$(controller_omp "$ctl_state") || fail "no omp process carries LEGION_STATE_DIR=$ctl_state"
 for pair in LEGION_CONTROLLER=1 LEGION_ROLE=controller "LEGION_PROJECT=$ptoken" \
-  "LEGION_CONTROLLER_SECRET_FILE=$ctl_state/secrets/$role" "LEGION_GRANT_FILE=$ctl_state/secrets/$role-grant" \
+  "LEGION_CONTROLLER_SECRET_FILE=$ctl_state/secrets/$role" \
   "ENVOY_TOKEN_FILE=$work/envoy-token" "ENVOY_NATS_URL=$nats_url" "HOME=$omp_home" "OMP_PROFILE=$profile"; do
   [ "$(env_of "$omp1" "${pair%%=*}")" = "${pair#*=}" ] || fail "omp $omp1 has ${pair%%=*}=$(env_of "$omp1" "${pair%%=*}"), want ${pair#*=}"
 done
-env_of "$omp1" PI_SHELL_PREFIX | grep -qF "PATH='$ctl_state/worker-bin:$ctl_state/bin'\${__legion_path" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
+# No grant file: the controller's `legion` tool (read_state, set_status) mints its grants
+# in-process, and no agent runs `legion` from bash.
+for absent in LEGION_GRANT_FILE LEGION_GRANT; do
+  ! tr '\0' '\n' <"/proc/$omp1/environ" | grep -q "^$absent=" || fail "omp $omp1 carries $absent=$(env_of "$omp1" "$absent")"
+done
+env_of "$omp1" PI_SHELL_PREFIX | grep -qF "PATH='$ctl_state/bin'\${__legion_path" || fail "PI_SHELL_PREFIX = $(env_of "$omp1" PI_SHELL_PREFIX)"
+case "$(env_of "$omp1" PATH)" in
+  "$ctl_state/bin:"*) ;;
+  *) fail "PATH = $(env_of "$omp1" PATH), want the controller's legion launcher directory first" ;;
+esac
+case ":$(env_of "$omp1" PATH):" in
+  *worker-bin*) fail "PATH = $(env_of "$omp1" PATH) names a worker-bin directory; no daemon installs a gh shim any more" ;;
+esac
 [ -z "$(env_of "$omp1" LEGION_CONTROLLER_SECRET)" ] || fail "the controller secret's value is in omp's environment"
 tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qxF -- "--append-system-prompt" || fail "omp has no --append-system-prompt"
 ! tr '\0' '\n' <"/proc/$omp1/cmdline" | grep -qx -- "--mode\|rpc\|--resume.*" || fail "omp runs --mode rpc or --resume"
@@ -298,6 +317,13 @@ ls "$omp_home/.omp/profiles/$profile/logs"/omp.*.log >/dev/null 2>&1 ||
   fail "no Oh My Pi log under $omp_home/.omp/profiles/$profile"
 [ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
 note "the profile is $omp_home/.omp/profiles/$profile ($(cd "$omp_home/.omp/profiles/$profile" && printf '%s ' *)); $HOME/.omp/profiles/$profile does not exist"
+grep -qF "[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody" "$evidence/checks/ctl1.stderr" ||
+  fail "ctl1.stderr does not say the controller's gh acts as nobody: $(cat "$evidence/checks/ctl1.stderr")"
+[ -d "$ctl_state/gh" ] || fail "$ctl_state/gh does not exist"
+[ "$(stat -c %a "$ctl_state/gh")" = 700 ] || fail "$ctl_state/gh is not mode 0700: $(stat -c %a "$ctl_state/gh")"
+[ ! -e "$ctl_state/gh/hosts.yml" ] || fail "$ctl_state/gh/hosts.yml exists with no GitHub App configured"
+[ ! -e "$ctl_state/github-credential.log" ] || fail "$ctl_state/github-credential.log exists with no GitHub App configured"
+note "no GitHub App: ctl1.stderr says the controller's gh acts as nobody; $ctl_state/gh is an empty 0700 directory and no credential log"
 pass
 
 begin ctrl-c-reaches-omp-not-the-cli

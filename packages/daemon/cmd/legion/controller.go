@@ -78,14 +78,21 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // nor reads a controller secret. Then fetch the controller secret with the operator token as a
 // bearer, naming the contract the probe held the plugin to, which the daemon refuses before it
 // mints when it is not its own (the daemon mints a fresh capability and revokes the previous
-// controller's); write it
-// 0600 under the local state directory beside the gh shim, the `legion` launcher, and the
-// deployment instructions; then run Oh My Pi interactive — the launch prefix and the resolved invocation, one joined
-// `--append-system-prompt`, and daemon.ControllerStartMessage as its one message (Oh My Pi's
-// interactive mode sends it as the session's first turn), no `--resume`, no
-// `--mode rpc` — in the foreground with the same environment, and answer its exit code. A refusal
-// before the secret is written removes the directories made for the probe, so the state directory
-// is as it was.
+// controller's); write it 0600 under the local state directory beside the `legion` launcher and
+// the deployment instructions; then fetch the controller's GitHub credential
+// (fetchControllerCredential) and write it under `<state_dir>/gh` for `gh` to read, or, on a
+// daemon with no GitHub App for this project, an empty 0700 directory and nothing else; any other
+// refusal of that fetch is a failure like every other here, before Oh My Pi runs. A fetch that
+// found a credential starts a goroutine that re-fetches and rewrites that directory every
+// controllerGitHubRefreshInterval while Oh My Pi runs, logging to
+// `<state_dir>/github-credential.log` rather than this process's streams, and stopping when Oh My
+// Pi exits or the daemon says the capability is no longer current
+// (controllerCredentialSuperseded); then run Oh My Pi interactive — the launch prefix and the
+// resolved invocation with one joined `--append-system-prompt`, no `--resume`, no `--mode rpc`,
+// and daemon.ControllerStartMessage as LEGION_CONTROLLER_START_MESSAGE in its environment for the
+// extension to send as the first turn — in the foreground with the same environment, and answer
+// its exit code. A refusal before the secret is written removes the directories made for the
+// probe, so the state directory is as it was.
 func controllerStart(ctx context.Context, configPath, daemonURL string, stderr io.Writer) (int, error) {
 	absolute, err := filepath.EvalSymlinks(configPath)
 	if err == nil {
@@ -151,7 +158,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	delete(env, natsauth.DaemonSeedFileVariable)
 	delete(env, "LEGION_BOOT_TOKEN")
 	delete(env, "LEGION_BOOT_TOKEN_FILE")
-	for _, pair := range controllerEnvironment(cfg, stateDir, token, runtime.SecretFilePath(stateDir, token)) {
+	for _, pair := range controllerEnvironment(cfg, stateDir, runtime.SecretFilePath(stateDir, token)) {
 		env[pair[0]] = pair[1]
 	}
 	created, err := makeDirs(controllerDir)
@@ -172,6 +179,11 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	if _, err := runtime.WriteSecretFile(stateDir, token, controllerSecretVariable, secret); err != nil {
 		return 0, fmt.Errorf("write the controller secret: %w", err)
 	}
+	stopGitHubRefresh, err := controllerStartGitHubCredential(ctx, cfg.DaemonURL, secret, stateDir, stderr)
+	if err != nil {
+		return 0, err
+	}
+	defer stopGitHubRefresh()
 	composer, err := prompts.New(stateDir)
 	if err != nil {
 		return 0, fmt.Errorf("snapshot controller role prompts: %w", err)
@@ -195,13 +207,16 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	}
 	// The daemon's design gate policy is the controller's addressing, the line its take comment
 	// reads before it promises anyone a design approval (skill://legion-controller). The start
-	// message is Oh My Pi's first prompt, so a started or restarted controller runs its start
-	// procedure at once rather than waiting for a wake that, with every slot full, may not come.
+	// message travels as LEGION_CONTROLLER_START_MESSAGE (controllerEnvironment) rather than a CLI
+	// word: the pi-legion extension sends it as the session's first turn once its claim
+	// succeeds, before it opens the live wake subscription, so a started or restarted controller
+	// runs its start procedure at once and deterministically, never racing a wake for the one
+	// first-turn slot.
 	command := omplaunch.WithPrefix(cfg.OmpLaunchPrefix, invocation) + " " + omplaunch.SystemPromptArgument(runtime.PromptParts{
 		RolePromptPaths:            controllerPrompts,
 		Addressing:                 daemon.DesignGateFragment(designGate),
 		DeploymentInstructionsPath: instructionsFile,
-	}) + " " + shellprefix.Word(daemon.ControllerStartMessage)
+	})
 	fmt.Fprintf(stderr, "[legion] starting the controller for %s against %s; state in %s\n", cfg.Project, cfg.DaemonURL, stateDir)
 	// Interactive and in the foreground: the operator's terminal is Oh My Pi's. The child is not
 	// bound to ctx — a Ctrl-C reaches Oh My Pi through the terminal's process group and is its to
@@ -227,12 +242,16 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 
 // controllerEnvironment is what the controller's Oh My Pi is told on top of the operator's own
 // environment: the controller marker and role, the daemon, project and state directory, the Envoy,
-// GitHub and Dispatch settings every pane carries, and PI_SHELL_PREFIX, which keeps this state
-// directory's gh shim and legion launcher first in the agent's bash tool as on every pane. Secrets
-// travel as `<NAME>_FILE` pointers only. Later pairs replace any inherited value of the same name.
-func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretFile string) [][2]string {
-	workerBin, bin := workerbin.Dir(stateDir), workerbin.LauncherDir(stateDir)
-	separator := string(filepath.ListSeparator)
+// GitHub and Dispatch settings every pane carries, PI_SHELL_PREFIX, which keeps this state
+// directory's legion launcher first in the agent's bash tool as on every pane, and
+// LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension sends as the session's first turn
+// once its claim succeeds (daemon.ControllerStartMessage). GH_CONFIG_DIR names
+// `<state_dir>/gh`, the directory controllerStartGitHubCredential writes and keeps fresh, with
+// GH_TOKEN, GITHUB_TOKEN and GH_HOST blanked so gh and git read that directory's hosts.yml rather
+// than an inherited pointer of the operator's own. Secrets travel as `<NAME>_FILE`
+// pointers only. Later pairs replace any inherited value of the same name.
+func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile string) [][2]string {
+	bin := workerbin.LauncherDir(stateDir)
 	env := [][2]string{
 		{"LEGION_CONTROLLER", "1"},
 		{"LEGION_ROLE", "controller"},
@@ -241,15 +260,15 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 		{"LEGION_STATE_DIR", stateDir},
 		{"ENVOY_NATS_URL", strings.Join(cfg.NatsURLs, ",")},
 		{"ENVOY_URL", cfg.EnvoyURL},
-		// Every inherited worker-bin is dropped (the shipped pathWithoutWorkerBin), so a start
-		// from inside a Legion pane never puts that pane's shim behind this one.
-		{"PATH", workerBin + separator + bin + separator + workerbin.FreePath(os.Getenv("PATH"))},
-		{"PI_SHELL_PREFIX", shellprefix.For(workerBin, bin)},
-		{"GH_CONFIG_DIR", filepath.Join(stateDir, "gh")},
+		// The launcher directory leads exactly once, so a start from inside a Legion pane never
+		// puts that pane's legion ahead of this one.
+		{"PATH", workerbin.Path(os.Getenv("PATH"), stateDir)},
+		{"PI_SHELL_PREFIX", shellprefix.For(bin)},
+		{"GH_CONFIG_DIR", controllerGHDir(stateDir)},
 		{"GH_TOKEN", ""},
 		{"GITHUB_TOKEN", ""},
 		{"GH_HOST", ""},
-		{"LEGION_GRANT_FILE", runtime.GrantFile(stateDir, legionclaim.Token(token))},
+		{"LEGION_CONTROLLER_START_MESSAGE", daemon.ControllerStartMessage},
 	}
 	if cfg.DispatchURL != "" {
 		env = append(env, [2]string{"DISPATCH_URL", cfg.DispatchURL}, [2]string{"DISPATCH_TOKEN_FILE", cfg.DispatchTokenFile})

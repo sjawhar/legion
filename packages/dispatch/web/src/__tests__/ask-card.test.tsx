@@ -84,7 +84,7 @@ function reply(
 // never falls through to the default getAskThread, which would issue a real
 // fetch in this test environment.
 function emptyThread(input: Ask): () => Promise<AskRead> {
-  return async () => ({ ask: input, edits: [], followers: [], replies: [] });
+  return async () => ({ ask: input, answers: [], edits: [], followers: [], replies: [] });
 }
 
 function renderCard(node: ReactNode) {
@@ -480,7 +480,7 @@ test("AskCard shows every previous version of an edited question, oldest first",
   const { view } = renderCard(
     <AskCard
       ask={input}
-      getAskThread={async () => ({ ask: input, edits, followers: [], replies: [] })}
+      getAskThread={async () => ({ ask: input, answers: [], edits, followers: [], replies: [] })}
     />
   );
 
@@ -1283,7 +1283,7 @@ test("AskCard restores its inbox entry if an optimistic answer fails", async () 
     ...input,
     priority: null,
     snoozed_until: null,
-    thread: { edits: [], followers: [], replies: [] },
+    thread: { answers: [], edits: [], followers: [], replies: [] },
   };
   queryClient.setQueryData<InboxRow[]>(["inbox"], [inboxInput]);
 
@@ -1319,7 +1319,13 @@ test("AskCard reloads a changed question, requires the human to reconfirm, and a
         }
         return answered(current, submission.selected);
       }}
-      getAskThread={async () => ({ ask: current, edits: [], followers: [], replies: [] })}
+      getAskThread={async () => ({
+        ask: current,
+        answers: [],
+        edits: [],
+        followers: [],
+        replies: [],
+      })}
     />
   );
 
@@ -1483,6 +1489,7 @@ test("AskCard renders replies under the question without an open-ask thread comp
       ask={input}
       getAskThread={async () => ({
         ask: input,
+        answers: [],
         edits: [],
         followers: [],
         replies: [reply({ id: "comment-1", body: "Any update?" })],
@@ -1655,7 +1662,7 @@ test("AskCard shows the newest two replies, expands older replies, and puts a fr
     reply({ body: "Newer reply", created_at: "2026-09-09T00:04:00Z", id: "comment-4" }),
     reply({ body: "Newest reply", created_at: "2026-09-09T00:05:00Z", id: "comment-5" }),
   ];
-  const thread = async () => ({ ask: input, edits: [], followers: [], replies });
+  const thread = async () => ({ ask: input, answers: [], edits: [], followers: [], replies });
   const { view } = renderCard(
     <AskCard
       ask={input}
@@ -1722,6 +1729,7 @@ test("a compact answered ask's Write a reply reveals its composer as the next ke
       ask={input}
       getAskThread={async () => ({
         ask: input,
+        answers: [],
         edits: [],
         followers: [],
         replies: [reply({ body: "Earlier reply" })],
@@ -1760,7 +1768,7 @@ test("a reply arriving while the older replies are shown lands first and keeps t
   const { queryClient, view } = renderCard(
     <AskCard
       ask={input}
-      getAskThread={async () => ({ ask: input, edits: [], followers: [], replies })}
+      getAskThread={async () => ({ ask: input, answers: [], edits: [], followers: [], replies })}
       thread="collapsed"
     />
   );
@@ -1821,7 +1829,7 @@ test("AskCard with no replies offers Write a reply only after an answer, and ret
       getAskThread={async () => {
         attempts += 1;
         if (attempts === 1) throw new Error("boom");
-        return { ask: failedInput, edits: [], followers: [], replies: [] };
+        return { ask: failedInput, answers: [], edits: [], followers: [], replies: [] };
       }}
       thread="collapsed"
     />
@@ -1983,7 +1991,7 @@ test("a document ask links its project and document page", async () => {
       ...input,
       priority: null,
       snoozed_until: null,
-      thread: { edits: [], followers: [], replies: [] },
+      thread: { answers: [], edits: [], followers: [], replies: [] },
     },
   ]);
   const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
