@@ -18,55 +18,68 @@ import (
 // A READY names the head the merger arms with --match-head-commit, and GitHub checks that head
 // only when auto-merge is enabled: a later push by anyone with write access leaves it armed for a
 // head nobody reviewed. Arming is legitimate only for the READY head of an awaiting_merge pull
-// request, so every head move but a push landing on that head queues a disarm. In awaiting_merge
-// the move withdraws the READY as a red or a conflict does: the issue goes back to implementing
-// with its implementer started, and the architect hears a checks-red naming the move, so the new
-// head comes back through testing, review and a new READY. Elsewhere the issue stays where it is.
+// request, so every head move but one landing on that head queues a disarm, whether a push moved
+// the head or a closed pull request was reopened at a new one. In awaiting_merge the move withdraws
+// the READY as a red or a conflict does: the issue goes back to implementing with its implementer
+// started, and the architect hears a checks-red naming the move, so the new head comes back
+// through testing, review and a new READY. Elsewhere the issue stays where it is.
 func TestAPushPastTheREADYHeadWithdrawsTheREADY(t *testing.T) {
-	for _, tc := range []struct {
-		name                string
-		at                  phase.Phase
-		status              string
-		head                string
-		disarmed, withdrawn bool
+	for _, move := range []struct {
+		name  string
+		state record.PullRequestState
+		fact  func(head string) intake.Fact
 	}{
-		{"a new head in awaiting_merge", phase.AwaitingMerge, "retro", "moved", true, true},
-		{"the READY head again", phase.AwaitingMerge, "retro", "head", false, false},
-		{"a new head in reviewing", phase.Reviewing, "needs_review", "moved", true, false},
+		{"a push", record.PullRequestOpen, func(head string) intake.Fact {
+			return intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head}
+		}},
+		{"a reopen", record.PullRequestClosed, func(head string) intake.Fact {
+			return intake.PullRequestOpened{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: head, Reopened: true}
+		}},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pool := migratedPool(t)
-			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
-				Phase: tc.at, Generation: 1, Status: tc.status, Rank: "U"})
-			seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion",
-				Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
-			seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
-			applyRefusingNothing(t, pool, readyEngine(""),
-				intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: tc.head})
-			var want []record.AutoMergeDisable
-			if tc.disarmed {
-				want = []record.AutoMergeDisable{{Number: 42}}
-			}
-			if got := autoMergeDisables(t, pool); !slices.Equal(got, want) {
-				t.Fatalf("auto-merge disables %v, want %v", got, want)
-			}
-			if !tc.withdrawn {
-				if got := issuePhase(t, pool); got != tc.at {
-					t.Fatalf("the issue is in %s, want it left in %s", got, tc.at)
+		for _, tc := range []struct {
+			name                string
+			at                  phase.Phase
+			status              string
+			head                string
+			disarmed, withdrawn bool
+		}{
+			{"a new head in awaiting_merge", phase.AwaitingMerge, "retro", "moved", true, true},
+			{"the READY head again", phase.AwaitingMerge, "retro", "head", false, false},
+			{"a new head in reviewing", phase.Reviewing, "needs_review", "moved", true, false},
+		} {
+			t.Run(move.name+", "+tc.name, func(t *testing.T) {
+				pool := migratedPool(t)
+				seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root",
+					Phase: tc.at, Generation: 1, Status: tc.status, Rank: "U"})
+				seedPR(t, pool, record.PullRequest{State: move.state, Issue: "LEGION-208", Repo: "sjawhar/legion",
+					Number: 42, Branch: "legion/LEGION-208", HeadSHA: "head"})
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleImplementer, Claim: "implement-claim"})
+				seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: "head", Summary: "READY #42 at head"})
+				applyRefusingNothing(t, pool, readyEngine(""), move.fact(tc.head))
+				var want []record.AutoMergeDisable
+				if tc.disarmed {
+					want = []record.AutoMergeDisable{{Number: 42}}
 				}
-				return
-			}
-			if got := issuePhase(t, pool); got != phase.Implementing {
-				t.Fatalf("after the head moved the issue is in %s, want implementing", got)
-			}
-			if task := implementerTask(t, pool); !strings.Contains(task, "moved") {
-				t.Fatalf("implementer task %q, want it started naming the moved head", task)
-			}
-			if got := noticeKinds(t, pool, "LEGION-208"); !containsNotice(got, "checks-red") {
-				t.Fatalf("notices %v, want the architect told checks-red", got)
-			}
-		})
+				if got := autoMergeDisables(t, pool); !slices.Equal(got, want) {
+					t.Fatalf("auto-merge disables %v, want %v", got, want)
+				}
+				if !tc.withdrawn {
+					if got := issuePhase(t, pool); got != tc.at {
+						t.Fatalf("the issue is in %s, want it left in %s", got, tc.at)
+					}
+					return
+				}
+				if got := issuePhase(t, pool); got != phase.Implementing {
+					t.Fatalf("after the head moved the issue is in %s, want implementing", got)
+				}
+				if task := implementerTask(t, pool); !strings.Contains(task, "moved") {
+					t.Fatalf("implementer task %q, want it started naming the moved head", task)
+				}
+				if got := noticeKinds(t, pool, "LEGION-208"); !containsNotice(got, "checks-red") {
+					t.Fatalf("notices %v, want the architect told checks-red", got)
+				}
+			})
+		}
 	}
 }
 

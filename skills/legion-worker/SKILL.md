@@ -360,8 +360,8 @@ The daemon reads no handoff file and no branch head; it refuses, before recordin
 
 - `HANDOFF_NOT_NEW` — the commit is the one you reported for your previous phase: write and
   commit this phase's handoff before completing.
-- `READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS` and `READY_CHECKS_NOT_GREEN` — the
-  merger's READY, in `skill://legion-worker/references/merge-gate.md`.
+- `READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS`, `READY_CHECKS_NOT_GREEN` and
+  `READY_DISARM_PENDING` — the merger's READY, in `skill://legion-worker/references/merge-gate.md`.
 - `GITHUB_READ_FAILED` — GitHub's failure, not the head's, reading READY's checks: complete again.
 
 Such a refusal records nothing, so the corrected call at the same commit is applied. The answer

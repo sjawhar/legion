@@ -332,6 +332,9 @@ type Store interface {
 	// holds an unpublished controller notice of kind, so a wake is never queued behind an
 	// identical one.
 	ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind) (bool, error)
+	// DisarmPending says whether the outbox still holds an unfinished auto_merge_disable row of
+	// issue: a finished row is deleted, so any row of the kind is one still to run or retrying.
+	DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error)
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error

@@ -484,6 +484,15 @@ func (s *Postgres) ControllerNoticePending(ctx context.Context, tx pgx.Tx, proje
 	return pending, nil
 }
 
+func (s *Postgres) DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error) {
+	var pending bool
+	if err := tx.QueryRow(ctx, "select exists (select 1 from outbox where kind = $1 and issue = $2)",
+		string(OutboxKindAutoMergeDisable), issue).Scan(&pending); err != nil {
+		return false, fmt.Errorf("read whether %s has a disarm pending: %w", issue, err)
+	}
+	return pending, nil
+}
+
 const outboxColumns = `id, kind, issue, payload, attempts, next_at, last_error, created_at, lease_token, lease_until`
 
 func (s *Postgres) Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error {

@@ -1139,6 +1139,40 @@ func TestHandoffCompleteReadyRefusesAFileListGitHubTruncated(t *testing.T) {
 	}
 }
 
+// A disarm row decides by state when it runs, so one still unfinished when a new READY is accepted
+// would keep a stale arm that still stands at the new READY head, or disable the new READY's own
+// arm. READY is refused while the issue has an unfinished auto_merge_disable row, with a code the
+// merger completes again on, and is accepted once the row has finished. Another issue's unfinished
+// row refuses nothing.
+func TestHandoffCompleteReadyWaitsForTheIssuesUnfinishedDisarm(t *testing.T) {
+	github := newHandoffGitHub(t)
+	h, facts, merger := newReadyHarness(t, github)
+	for _, issue := range []string{"LEGION-208", "LEGION-209"} {
+		row, err := record.NewOutboxRow(issue, record.AutoMergeDisable{Number: 42}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error { return record.NewStore().Enqueue(context.Background(), tx, row) }); err != nil {
+			t.Fatalf("queue the disarm of %s: %v", issue, err)
+		}
+	}
+	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_DISARM_PENDING:") || !strings.Contains(body, "#42") {
+		t.Fatalf("READY with the issue's disarm unfinished = %d %q", code, body)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
+	}
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(), "delete from outbox where kind = 'auto_merge_disable' and issue = 'LEGION-208'")
+		return err
+	}); err != nil {
+		t.Fatalf("finish the issue's disarm: %v", err)
+	}
+	if code, body := ready(t, h, merger); code != http.StatusOK || body != "" {
+		t.Fatalf("READY once the issue's disarm finished, with another issue's still unfinished = %d %q", code, body)
+	}
+}
+
 // ready posts the merger's READY and returns its answer: the note when it was published, or the
 // refusal's code and sentence.
 func ready(t *testing.T, h *harness, merger liveClaim) (code int, body string) {

@@ -480,6 +480,11 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 	if err := e.store.PutPullRequest(ctx, tx, pr); err != nil {
 		return intake.Result{}, err
 	}
+	if fact.Reopened {
+		if err := e.headMoved(ctx, tx, *issue, &pr); err != nil {
+			return intake.Result{}, err
+		}
+	}
 	if issue.Phase != phase.Implementing {
 		return intake.Result{}, nil
 	}
@@ -506,12 +511,7 @@ func (e *Engine) pullRequestSynchronized(ctx context.Context, tx pgx.Tx, fact in
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	if issue.Phase == phase.AwaitingMerge {
-		return intake.Result{}, e.withdrawMovedReady(ctx, tx, *issue, pr)
-	}
-	// No head outside awaiting_merge is an accepted READY's, so whatever an earlier READY left
-	// armed - a child re-entered from awaiting_merge, say - is disarmed on every push.
-	if err := e.disarm(ctx, tx, issue.Key, pr); err != nil {
+	if err := e.headMoved(ctx, tx, *issue, pr); err != nil {
 		return intake.Result{}, err
 	}
 	if issue.Phase != phase.Implementing {

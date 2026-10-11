@@ -107,11 +107,14 @@ review posted without a completion leaves the issue in reviewing until you finis
   and every workflow its rulesets require has a passing run there — no result for a check, or no
   run of a workflow, means that head's push skipped CI when it should not have; a check still
   running means wait; a failed one is a finding. Report the refusal to the architect; never
-  push a commit to make CI run. On success the daemon posts the packet as a `dispatch message` on
-  the issue, publishes it to the project's merge queue role when one is set, and says on the issue
-  when that role has no live holder; the answer's `note` says when READY was published on a pull
-  request a person already merged, whose head can no longer change, or on a base that requires no
-  check, which the packet itself also says.
+  push a commit to make CI run. It also refuses `READY_DISARM_PENDING` while a disarm the daemon
+  queued for the pull request, when an earlier READY was withdrawn or its head moved, has not
+  finished, since that disarm decides by the record when it runs: submit nothing, complete again
+  in a minute, and tell the architect if it keeps refusing. On success the daemon posts the packet
+  as a `dispatch message` on the issue, publishes it to the project's merge queue role when one is
+  set, and says on the issue when that role has no live holder; the answer's `note` says when READY
+  was published on a pull request a person already merged, whose head can no longer change, or on a
+  base that requires no check, which the packet itself also says.
 - **The merger submits the merge the moment READY is accepted, unless the answer says a person
   merges it.** In the same turn, before anything else, it runs
   `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` with its pane's
@@ -131,11 +134,12 @@ review posted without a completion leaves the issue in reviewing until you finis
   merge after READY. The packet's second line records the step,
   `Merge: submit on normal acceptance with gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`.
 - **The daemon disarms a merge no READY covers.** Auto-merge stays enabled across pushes, and
-  `--match-head-commit` is checked only when it is enabled, so the daemon itself disables the pull
-  request's auto-merge and takes it out of a merge queue, as the implement App, on any push but one
-  landing on an awaiting READY's head, when READY is withdrawn (a push moved the head past it, its
-  CI turned red, or it conflicts with its base, each of which sends the issue back to
-  `implementing`), and when a child is set back to `todo`. No role runs a disarm.
+  `--match-head-commit` is checked only when it is enabled, so the daemon itself takes the pull
+  request out of a merge queue and disables its auto-merge, as the implement App, on any push or
+  reopen but one landing on an awaiting READY's head, when READY is withdrawn (a push or reopen
+  moved the head past it, its CI turned red, or it conflicts with its base, each of which sends the
+  issue back to `implementing`), and when a child is set back to `todo`. READY waits
+  (`READY_DISARM_PENDING`) until that disarm has finished. No role runs a disarm.
 
 ## After the merge
 

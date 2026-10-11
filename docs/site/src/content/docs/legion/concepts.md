@@ -228,11 +228,12 @@ checks decide when it merges — rules Legion neither reads nor changes. If the 
 command, the head match refuses it; the merger builds and sends a new `READY` packet. GitHub checks
 the head match only when auto-merge is enabled, so an arm outliving its `READY` would merge an
 unreviewed head. Arming is right only for the `READY` head of an issue awaiting its merge, so the
-daemon queues a disarm on every other push, and when a child is set back to `todo`. The disarm
-decides when it runs: it keeps the arm only while the issue awaits its merge at its `READY` head, and
-otherwise disables auto-merge and takes the pull request out of a merge queue, as the implement App.
-`READY` is withdrawn when a push moves the head past the one
-`READY` named, when the head's own CI turns red, or when it starts conflicting with its base: the
+daemon queues a disarm on every other push or reopen, and when a child is set back to `todo`. The
+disarm decides when it runs: it keeps the arm only while the issue awaits its merge at its `READY`
+head, and otherwise takes the pull request out of a merge queue and disables auto-merge, as the
+implement App. The daemon refuses a `READY` until any such disarm has finished. `READY` is
+withdrawn when a push or reopen moves the head past the one `READY` named, when the head's own CI
+turns red, or when it starts conflicting with its base: the
 issue goes back to `implementing`, the architect is told, and the daemon disarms the pull request
 and posts on the issue, and tells that role, that the `READY` is withdrawn, naming the cause.
 

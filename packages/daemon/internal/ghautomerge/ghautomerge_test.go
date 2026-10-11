@@ -77,10 +77,11 @@ func (g *github) serve(t *testing.T) string {
 
 // Disarm turns off what would merge the pull request without a person, by the pull request's state
 // when it runs: while the pull request's head is the READY head it was told to keep, nothing is
-// touched; otherwise auto-merge is disabled where GitHub has it enabled and the merge-queue entry
-// removed where it has one, however late GitHub made that entry. A pull request with nothing armed,
-// or one GitHub answers NOT_FOUND for at the pull request, is left alone. A second Disarm changes
-// nothing.
+// touched; otherwise the merge-queue entry is removed where it has one, however late GitHub made
+// it, and then auto-merge is disabled where GitHub has it enabled: the queue entry is the step
+// closest to merging, so a disable that keeps failing never leaves it standing. A pull request
+// with nothing armed, or one GitHub answers NOT_FOUND for at the pull request, is left alone. A
+// second Disarm changes nothing.
 func TestDisarmTurnsOffEverythingArmedUnlessTheHeadIsTheKeptREADYHead(t *testing.T) {
 	for _, tc := range []struct {
 		name          string
@@ -94,8 +95,8 @@ func TestDisarmTurnsOffEverythingArmedUnlessTheHeadIsTheKeptREADYHead(t *testing
 		{"in the merge queue, no READY to keep", "", false, true, "", []string{"dequeue PR_42"}, Disarmed{Queue: true}},
 		// In a merge-queue repository GitHub enqueues an armed pull request only once its checks
 		// pass, so an arm's queue entry can be made after the disarm was decided: it goes too.
-		{"armed and its queue entry made since", "", true, true, "", []string{"disable PR_42", "dequeue PR_42"}, Disarmed{AutoMerge: true, Queue: true}},
-		{"armed for a READY the head moved past", "", true, true, "ready", []string{"disable PR_42", "dequeue PR_42"}, Disarmed{AutoMerge: true, Queue: true}},
+		{"armed and its queue entry made since", "", true, true, "", []string{"dequeue PR_42", "disable PR_42"}, Disarmed{AutoMerge: true, Queue: true}},
+		{"armed for a READY the head moved past", "", true, true, "ready", []string{"dequeue PR_42", "disable PR_42"}, Disarmed{AutoMerge: true, Queue: true}},
 		{"armed at the READY head it was told to keep", "", true, true, "head", nil, Disarmed{Kept: true}},
 		{"nothing armed", "", false, false, "", nil, Disarmed{}},
 		{"a pull request GitHub does not have", "pullRequest", false, false, "", nil, Disarmed{Missing: true}},

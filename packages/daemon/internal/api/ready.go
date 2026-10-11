@@ -57,7 +57,7 @@ func githubReadFailed(err error) *refusal {
 // was read and passed: a private repository on the free plan can define no ruleset, so this is the
 // ordinary state of the smoke sandbox, and a merger there has no check-based gate on the head at
 // all. The note is the completion's answer (HandoffCompleteResponse.Note).
-func readyChecks(ctx context.Context, github githubrest.Client, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead string, pr *record.PullRequest) (note string, refused *refusal) {
+func readyChecks(ctx context.Context, github githubrest.Client, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead string, pr *record.PullRequest, disarmPending bool) (note string, refused *refusal) {
 	if pr == nil || pr.Number <= 0 {
 		return "", &refusal{http.StatusConflict, "NO_PULL_REQUEST", fmt.Sprintf("%s has no pull request recorded", issue)}
 	}
@@ -82,6 +82,12 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 	number := pr.Number
 	if pull.Merged {
 		return fmt.Sprintf("pull request #%d is already merged, so READY was published without reading its head's checks or handoffs", number), nil
+	}
+	// A disarm queued by an earlier withdrawal decides by state when it runs: still unfinished as
+	// this READY is accepted, it would keep a stale arm that stands at this head, or disable the arm
+	// this READY's merger is about to make. READY waits for it.
+	if disarmPending {
+		return "", &refusal{http.StatusConflict, "READY_DISARM_PENDING", fmt.Sprintf("the daemon has not yet finished disarming pull request #%d, which an earlier withdrawal or head move queued: complete again in a minute, and tell the architect if it keeps refusing", number)}
 	}
 	if pull.Head.SHA != readyHead {
 		return "", &refusal{http.StatusConflict, "READY_HEAD_MOVED", fmt.Sprintf("pull request #%d now heads at %s, not READY's %s; GitHub will not arm a different head: build a new packet and complete again", number, pull.Head.SHA, readyHead)}

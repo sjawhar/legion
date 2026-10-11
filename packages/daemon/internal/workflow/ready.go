@@ -36,8 +36,20 @@ func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issu
 	return e.tellReadyAudience(ctx, tx, issue, fmt.Sprintf("READY withdrawn for %s, pull request #%d: %s. Do not merge it: a disarm of its auto-merge and merge-queue entry is queued, the issue is back in implementing, and a new READY will follow.", issue.Key, pr.Number, reason))
 }
 
-// withdrawMovedReady withdraws the READY of an awaiting_merge pull request a push moved past the
-// head READY named (the merger's completion commit), as a red or a conflicting head withdraws it
+// headMoved answers a move of pr's head: a push, or a reopen, which can carry a head pushed while
+// the pull request was closed. Arming is legitimate only for an awaiting READY's head, so in
+// awaiting_merge the move withdraws a READY whose head it left (withdrawMovedReady), and in any
+// other phase it disarms whatever an earlier READY left armed, a child re-entered from
+// awaiting_merge, say.
+func (e *Engine) headMoved(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+	if issue.Phase == phase.AwaitingMerge {
+		return e.withdrawMovedReady(ctx, tx, issue, pr)
+	}
+	return e.disarm(ctx, tx, issue.Key, pr)
+}
+
+// withdrawMovedReady withdraws the READY of an awaiting_merge pull request a push or a reopen moved
+// past the head READY named (the merger's completion commit), as a red or a conflicting head withdraws it
 // (TriggerChecksRed, withdrawReady): GitHub checks --match-head-commit only when auto-merge is
 // enabled, so the arm would otherwise merge a head no review approved. The issue goes back to
 // implementing with its implementer started and the architect told, and the new head comes back
