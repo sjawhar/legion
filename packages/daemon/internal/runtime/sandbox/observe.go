@@ -18,7 +18,7 @@ import (
 // logTailLines is how much of a failed container's log a Gone quotes (runtime-kubernetes.ts:678-689).
 const logTailLines = 20
 
-// workspaceLostExitCode is workspace-init's exit code for a tree volume that lost its clone and
+// workspaceLostExitCode is workspace-init's exit code for an issue's volume that lost its clone and
 // the session being resumed (decision 11): a Gone that says so carries Observation.WorkspaceLost.
 const workspaceLostExitCode = 3
 
@@ -198,7 +198,7 @@ func (r *Runtime) ended(ctx context.Context, v view, roleContainer, initName str
 	var detail strings.Builder
 	workspaceLost := kind == "init" && container == initContainer && state != nil && state.ExitCode == workspaceLostExitCode
 	if workspaceLost {
-		detail.WriteString("the tree volume was lost: ")
+		detail.WriteString("the issue's volume was lost: ")
 	}
 	fmt.Fprintf(&detail, "pod %s (uid %s) %s", pod.Name, pod.UID, pod.Status.Phase)
 	if state != nil {

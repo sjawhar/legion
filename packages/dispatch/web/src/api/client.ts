@@ -38,6 +38,8 @@ import type {
   CredentialGrantsResponse,
   CredentialPendingResponse,
   CredentialRecord,
+  DeliveryMeasuresResponse,
+  DeliveryRunDetail,
   DeliverySettings,
   DeliverySettingsInput,
   DeliveryTimelineResponse,
@@ -185,6 +187,12 @@ export function apiErrorMessage(error: unknown, fallback: string): string {
   return error instanceof ApiError ? error.message : fallback;
 }
 
+// Whether the server refused with one of `codes`: a refusal the same request meets every time,
+// which its caller shows without a Retry.
+export function apiErrorCodeIn(error: unknown, codes: ReadonlySet<string>): error is ApiError {
+  return error instanceof ApiError && error.code !== undefined && codes.has(error.code);
+}
+
 export interface ListIssuesOptions {
   pinned?: boolean;
   project?: string;
@@ -212,11 +220,12 @@ export interface CreateArtifactReviewInput {
   reason?: string;
 }
 
-/** `GET /api/v1/delivery/timeline?from&to&<facets>`'s query: the window plus the same
- *  repeatable facets the delivery page's URL carries (LEGION-567's plan, "API"). */
+/** `GET /api/v1/delivery/timeline?from&to&q&<facets>`'s query: the window, the search, plus the
+ *  same repeatable facets the delivery page's URL carries (LEGION-567's plan, "API"). */
 export interface DeliveryTimelineOptions {
   from: string;
   to: string;
+  q?: string;
   repo?: readonly string[];
   parent_agent?: readonly string[];
   session?: readonly string[];
@@ -695,9 +704,20 @@ export class DispatchApiClient {
   }
 
   /** The delivery timeline's one read: merges, deploys, pipeline failures and waiting-to-deploy
-   *  PRs within `[from, to)` and the given facets, all applied server-side. */
+   *  PRs within `[from, to)`, the search and the given facets, all applied server-side. */
   getDeliveryTimeline(options: DeliveryTimelineOptions): Promise<DeliveryTimelineResponse> {
     return this.json<DeliveryTimelineResponse>(pathWithQuery("/api/v1/delivery/timeline", options));
+  }
+
+  /** The delivery measures and their targets for `[from, to)`: the same query the timeline takes,
+   *  so the search and facets narrow the pull-request measures exactly as they narrow its PRs. */
+  getDeliveryMeasures(options: DeliveryTimelineOptions): Promise<DeliveryMeasuresResponse> {
+    return this.json<DeliveryMeasuresResponse>(pathWithQuery("/api/v1/delivery/measures", options));
+  }
+
+  /** One deploy-repository run with every job it ran, for the drill-down's job lists. */
+  getDeliveryRun(id: number): Promise<DeliveryRunDetail> {
+    return this.json<DeliveryRunDetail>(`/api/v1/delivery/runs/${id}`);
   }
 
   /** The delivery timeline's configuration record, or `null` until someone sets it. */

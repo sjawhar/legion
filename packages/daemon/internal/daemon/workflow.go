@@ -94,6 +94,13 @@ type workflowRuntime struct {
 	permissions   map[permissionKey]time.Time
 	permissionTTL time.Duration
 	limitedUntil  time.Time
+	// refusedReviews is every review, by GitHub's review id, whose author the pass's read of a pull
+	// request's reviews found the workflow does not let decide (reviewToApply), so this process
+	// judges each such review once, as a webhook's review is judged once when it is delivered: an
+	// account given write access later never turns a review the read refused into a decision. It is
+	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
+	// then. Only the pass touches it.
+	refusedReviews map[int64]bool
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.

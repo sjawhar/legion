@@ -221,7 +221,7 @@ func (rig *initRig) launch(spec runtime.SpawnSpec) corev1.PodSpec {
 	if err != nil {
 		rig.t.Fatal(err)
 	}
-	return rig.r.podTemplate(l, false).Spec
+	return rig.r.podTemplate(l).Spec
 }
 
 // run executes the pod's init containers in order, as the kubelet does: each volume a directory —

@@ -90,11 +90,13 @@ reviewer answers each of the bot's threads (accepting it with a reason, or reque
 the daemon resolve the ones it accepted, and re-runs the failed run; its approval of the head ends
 the round once the head reads green. Any other red required workflow, a test or lint workflow, sends
 the issue back as a red required check does, and so does every red required workflow when the
-project declares none. Red CI on the head of an issue in `awaiting_merge` sends it back too, when
-the head's own checks or required workflow runs are red, review workflows included: the work
-returns through testing, review and `READY`, since GitHub will not merge the head it was ready for,
-and the issue, and the project's merge-queue role when one is set, are told the `READY` is
-withdrawn.
+project declares none. The other exception is red CI in testing or review within the fix attempt
+that ran out the project's `max_fix_attempts`, which waits for the architect
+([review signalling](#review-signalling)). Red CI on the head of an issue in `awaiting_merge` sends
+it back too, at any fix-attempt count, when the head's own checks or required workflow runs are red,
+review workflows included: the work returns through testing, review and `READY`, since GitHub will
+not merge the head it was ready for, and the issue, and the project's merge-queue role when one is
+set, are told the `READY` is withdrawn.
 
 ## Admission and the `legion` label
 
@@ -148,7 +150,14 @@ round; the handoffs stay on the issue branch below it, where a worker still read
 Legion uses GitHub's own review mechanisms rather than labels:
 
 - The **reviewer** submits a GitHub review: an approval of the head by its commit, or changes
-  requested. A plain comment decides nothing, and the architect is told the round is stuck.
+  requested. A plain comment decides nothing, and the architect is told the round is stuck. The
+  daemon hears of a review from GitHub's webhook, and it also reads every open pull request's
+  reviews with the implement App every two minutes, so a review whose webhook never arrived still
+  counts within one read. Either way the newest deciding review counts, and counts once: a review
+  the daemon already applied, by webhook or by read, decides nothing again. A review submitted while
+  no round is open (the work is being implemented or tested) decides no later round when the daemon
+  reads it before the next round opens. One it first hears of after that round opened can still
+  decide it, as a webhook delivered late can.
 - **CI** on the pull request's head counts: red checks while testing or reviewing, or once the
   issue awaits its merge, send the issue back to the implementer, naming the failing checks. Once
   the issue awaits its merge, only a red of the head's own counts: `READY` found the head's own
@@ -184,7 +193,16 @@ Legion uses GitHub's own review mechanisms rather than labels:
   `max_fix_attempts` pushes fail to turn CI green (three by default), the daemon posts a message on
   the issue and tells the architect; neither stops a worker. Every move back to an earlier phase
   counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
-  daemon's own move when CI turns red or the head starts conflicting with its base.
+  daemon's own move when CI turns red or the head starts conflicting with its base. Once
+  `max_fix_attempts` runs out, CI red within the attempt that ran it out - the head whose push was
+  counted, and every head pushed on top of it until a push lands on a head CI judged green - no
+  longer sends the work back from testing or review by itself: the issue stays in its phase through
+  every red in that attempt until the architect moves it, or a worker's own decision does (a
+  tester's fail, a review's request for changes). A head pushed onto green CI raises no count and
+  leaves the attempt, so its red sends the work back as usual. Every other push stays in the
+  attempt, whether it is counted or not: one onto a head CI has not judged yet, and one onto the
+  held red that counts nothing, such as the tester's red tests or its handoff. The next push onto a
+  red raises the count and is told again. A `READY` is withdrawn on red CI at any count (below).
 
 ## READY and the human merge
 

@@ -34,6 +34,7 @@ Dispatch sits beside Legion and the Secrets Broker.
 | **Projects** | A project's issues as a List or a Board, its documents, and, when the project has one, its architecture. |
 | **Issue page** | One issue: its header, the Spec, the Conversation, its child issues, and its files. |
 | **Agents** | The agents connected right now. You can message one, or broadcast to many. |
+| **Delivery** | How work reaches production: a timeline of merges and deploys, with the delivery measures and their targets above it. |
 | **Search** | `Ctrl+K` (`⌘K` on a Mac) searches everything and lists the actions for the page you are on. |
 | **Settings** | Projects, repository mappings, architecture sources, and the tokens your agents use. |
 

@@ -34,14 +34,25 @@ function databaseUrl(): string {
 }
 
 /** Runs each statement, in order on one connection, against this run's database and returns the
- *  trimmed output. psql reads no `~/.psqlrc` (`-X`), stops at the first error with its SQLSTATE
- *  and location, and prints a query's values bare (`-tA`), so a one-value query returns that
- *  value. */
-export async function sql(...statements: string[]): Promise<string> {
+ *  trimmed output. */
+export function sql(...statements: string[]): Promise<string> {
+  return sqlAt(databaseUrl(), statements);
+}
+
+/** `sql` against the database `url` names rather than this run's: `bun run dispatch:local` reads
+ *  and creates its database through the server's `postgres` database with it, passing its stop
+ *  `signal`, which kills the psql it is waiting on. psql reads no `~/.psqlrc` (`-X`), stops at
+ *  the first error with its SQLSTATE and location, and prints a query's values bare (`-tA`), so
+ *  a one-value query returns that value. */
+export async function sqlAt(
+  url: string,
+  statements: readonly string[],
+  signal?: AbortSignal
+): Promise<string> {
   const { stdout } = await execFileAsync(
     "psql",
     [
-      databaseUrl(),
+      url,
       "-X",
       "-v",
       "ON_ERROR_STOP=1",
@@ -50,7 +61,7 @@ export async function sql(...statements: string[]): Promise<string> {
       "-tA",
       ...statements.flatMap((statement) => ["-c", statement]),
     ],
-    { env: psqlEnvironment }
+    { env: psqlEnvironment, signal }
   );
   return stdout.trim();
 }

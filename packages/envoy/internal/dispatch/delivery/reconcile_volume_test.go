@@ -317,6 +317,18 @@ func TestReconcileResumesWorkflowRunsWhereAFailedPassStopped(t *testing.T) {
 	fastPageRetries(t)
 	pool, ctx := deliveryTestPool(t)
 	seedDeliverySettings(t, ctx, pool)
+	// This test is the regular runs/deploy step's: a finished backfill lists nothing, so every
+	// listing it records is the regular step's.
+	for _, path := range []string{".github/workflows/deploy.yml", ".github/workflows/pr-checks.yml"} {
+		kind := DeliveryRunKindDeploy
+		if path == ".github/workflows/pr-checks.yml" {
+			kind = DeliveryRunKindPRChecks
+		}
+		finished := time.Now().UTC()
+		if err := StartBackfillProgress(ctx, pool, backfillStep(kind), runsProgressScope("acme/widgets", path), finished, finished); err != nil {
+			t.Fatalf("finish the %s backfill: %v", kind, err)
+		}
+	}
 
 	start := time.Now().UTC().Add(-27 * 24 * time.Hour)
 	runs := make([]map[string]any, 0, 300)

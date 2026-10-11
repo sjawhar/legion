@@ -1,7 +1,6 @@
 package sandbox
 
 import (
-	"encoding/json"
 	"fmt"
 	"maps"
 	"math"
@@ -24,8 +23,8 @@ import (
 )
 
 // The pod's init containers: workspace-fetch, the one that holds the provisioning token and
-// mounts nothing a tree agent can write; and workspace-init, which works on the tree volume
-// without it. Each of the six role containers is named for its role.
+// mounts nothing an agent of the issue can write; and workspace-init, which works on the issue's
+// volume without it. Each of the six role containers is named for its role.
 const (
 	fetchContainer = "workspace-fetch"
 	initContainer  = "workspace-init"
@@ -102,7 +101,7 @@ const sessionDSNFile = "OMP_SESSION_SQL_DSN"
 // controller never enrolls (enrolledWith), so no pod carries one of its.
 func legionVolumeNames() []string {
 	names := []string{
-		treeVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
+		issueVolume, provisionVolume, feedVolume, tempVolume, configVolume, providersVolume, agentSecretsTokenVolume,
 	}
 	for _, role := range launcherRoles {
 		names = append(names, roleVolume("launcher", role), roleVolume("private", role), roleVolume(stateVolume, role))
@@ -138,59 +137,30 @@ type launch struct {
 	// (podKindOf).
 	roles []claim.Role
 	// workspace is the launchers' working directory (podKind.prepare): an issue pod's workspace,
-	// which workspace-init provisions on the tree volume (workspace.Location under TreeRoot), or the
-	// root of the controller's own volume, TreeRoot.
+	// which workspace-init provisions on the issue's volume (workspace.Location under TreeRoot), or
+	// the root of the controller's own volume, TreeRoot.
 	workspace string
 	// secrets are the claim's launch credentials, each reaching the agent as a `<NAME>_FILE`
 	// pointer into its generation's private directory: the boot token, the spec's but the providers
 	// Secret's own (Options.ProvidersSecrets, which the runtime points at the providers mount
 	// whatever the spec carries), and the Dispatch bearer when Dispatch is configured.
 	secrets map[string]string
-	// volume is the claim whose Sandbox owns the volume the pod mounts (TreeClaimName), and
-	// ownsVolume whether that Sandbox is this launch's own, which then carries the volume's claim
-	// template (podKind.prepare): an issue pod mounts its tree root's, which the root's own launch
-	// owns, and the controller's pod its own.
-	volume     claim.Token
-	ownsVolume bool
 	// prompt is the one --append-system-prompt value.
 	prompt string
-	// resumeFile is checked by the role launcher before it starts the child, on the tree volume or,
-	// under a session database, in the session table (internal/launcher); an issue pod's shared init
-	// checks tree storage, not a triggering role's transcript, and other stored sessions can also
-	// require an existing tree.
+	// resumeFile is checked by the role launcher before it starts the child, on the issue's volume
+	// or, under a session database, in the session table (internal/launcher); an issue pod's init
+	// checks the issue's volume, not a triggering role's transcript, and another role's stored
+	// session can also require the volume to hold what it left.
 	resumeFile string
+	// expectVolume is an issue pod's workspace-init input (initEnvironment), which the issue pod
+	// sets itself (issuePod.prepare, issuePod.provision): whether the issue's volume must already
+	// hold the clone or a retained session, which only sessions kept on the volume can say.
+	expectVolume bool
 	// sessionsInDatabase is whether the runtime keeps every session in a database
 	// (Options.SessionDSNKey) rather than as files on the volume: then no recorded session says
 	// anything about what the volume holds, so neither an issue pod's workspace-init nor the
 	// controller's is held to one.
 	sessionsInDatabase bool
-	// expectTreeVolume and removableWorkspacesJSON are an issue pod's workspace-init inputs
-	// (initEnvironment), which the issue pod sets itself (issuePod.prepare, issuePod.readyNewPod).
-	// expectTreeVolume is whether the tree volume must already hold the shared clone or a retained
-	// session, which only sessions kept on the volume can say. removableWorkspacesJSON is the tree's
-	// removable-workspace candidates (Options.Removable), JSON-encoded together with their expiry,
-	// one object; "" when there are none. It is set last, under the tree's launch turn
-	// (setRemovable): prepare runs long before that turn is even requested, so a list this early
-	// could already be stale by the time a pod's manifest is actually written.
-	expectTreeVolume        bool
-	removableWorkspacesJSON string
-}
-
-// setRemovable JSON-encodes candidates and notAfter into l.removableWorkspacesJSON as
-// runtime.RemovableWorkspacesPayload, called by an issue pod's readyNewPod with Options.Removable's
-// result and the launch time plus initWaitSeconds, once the tree's launch turn is held. The encoding
-// cannot fail (plain strings and a time.Time), but initEnvironment has no error to return, so a
-// refusal here is the relaunch's own to surface before it ever patches the Sandbox.
-func (l *launch) setRemovable(candidates []runtime.RemovableWorkspace, notAfter time.Time) error {
-	if len(candidates) == 0 {
-		return nil
-	}
-	encoded, err := json.Marshal(runtime.RemovableWorkspacesPayload{NotAfter: notAfter, Workspaces: candidates})
-	if err != nil {
-		return fmt.Errorf("sandbox launch %s: encode LEGION_REMOVABLE_WORKSPACES: %w", l.spec.Claim, err)
-	}
-	l.removableWorkspacesJSON = string(encoded)
-	return nil
 }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -338,46 +308,57 @@ func (l launch) agentArgv(agent []string) []string {
 // labels are the pod's resource labels, as its kind gives them (podKind.labels).
 func (r *Runtime) labels(l launch) map[string]string { return l.kind.labels(r.project, l) }
 
-// sandboxManifest is the Sandbox a relaunch creates when none exists: Suspended, so no pod starts
-// before the claim's Secret is written, with the volume's claim template when the launch owns the
-// volume its pod mounts (launch.ownsVolume). Its pod template never runs: the relaunch's Running
-// patch replaces it with the template the launch computes, affinity and all, before the controller
-// creates a pod.
-func (r *Runtime) sandboxManifest(l launch) sandbox {
-	s := sandbox{
-		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},
-		ObjectMeta: metav1.ObjectMeta{Name: l.name, Namespace: r.namespace, Labels: r.labels(l)},
-		Spec:       sandboxSpec{PodTemplate: r.podTemplate(l, false), OperatingMode: modeSuspended},
-	}
-	if l.ownsVolume {
-		storageClass := r.storageClass
-		s.Spec.VolumeClaimTemplates = []volumeClaimTemplate{{
-			Metadata: volumeClaimMetadata{Name: treeVolume, Labels: r.labels(l)},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-				StorageClassName: &storageClass,
-				Resources: corev1.VolumeResourceRequirements{
-					Requests: corev1.ResourceList{corev1.ResourceStorage: r.treeVolume},
-				},
-			},
-		}}
-	}
-	return s
+// claimLabels are the volume claim template's labels, the pod's (labels) less the tree: an issue's
+// claim carries the project and the issue, the controller's the project and its role. The volume is
+// the issue's, not the tree's: a child re-admitted as a root of its own keeps its Sandbox and volume
+// under its new tree, and the relabel (ensureSandbox) patches the Sandbox alone — the daemon's
+// restricted identity has no PVC verb — so a tree label on the claim would name the volume's first
+// tree for life. A PVC is read by its issue, never by a tree.
+func (r *Runtime) claimLabels(l launch) map[string]string {
+	labels := r.labels(l)
+	delete(labels, labelTree)
+	return labels
 }
 
-// podTemplate is the pod a launch runs (decisions 7 and 10). Every pod mounts its volume by its
-// claim's name, the Sandbox owning it included: the controller replaces the owner's `tree` volume
-// with the same claim from its template, so owner and workers read alike. The pod runs as the
-// operator's ServiceAccount (the namespace's default when the operator names none), and its
-// launcher containers mount the providers Secret's configured keys and the operator's mounts, are
-// told the operator's variables, and start Oh My Pi on the pod's baseline (`--pod-safety`,
-// internal/podsafety). Its init containers, the volumes only they mount, and its placement are its
-// kind's (podKind).
-//
-// colocate is whether the pod must share a node with another pod scheduled right now
-// (podKind.colocate), which decides its affinity. The controller applies a template only to the
-// next pod it creates, so the template is rebuilt for every relaunch.
-func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
+// sandboxManifest is the Sandbox a relaunch creates when none exists: Suspended, so no pod starts
+// before the claim's Secret is written, with the claim template of the volume its pod mounts, the
+// Sandbox's own: an issue's Sandbox owns the issue's volume, the controller's its own. The template
+// carries no tree label (claimLabels): the volume is the issue's, its tree changes on re-admission,
+// and the claim is never relabelled. Its pod template never runs: the relaunch's Running patch
+// replaces it with the template the launch computes before the controller creates a pod.
+func (r *Runtime) sandboxManifest(l launch) sandbox {
+	storageClass := r.storageClass
+	return sandbox{
+		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},
+		ObjectMeta: metav1.ObjectMeta{Name: l.name, Namespace: r.namespace, Labels: r.labels(l)},
+		Spec: sandboxSpec{
+			PodTemplate: r.podTemplate(l), OperatingMode: modeSuspended,
+			VolumeClaimTemplates: []volumeClaimTemplate{{
+				Metadata: volumeClaimMetadata{Name: issueVolume, Labels: r.claimLabels(l)},
+				Spec: corev1.PersistentVolumeClaimSpec{
+					AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+					StorageClassName: &storageClass,
+					Resources: corev1.VolumeResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceStorage: r.volumeSize},
+					},
+				},
+			}},
+		},
+	}
+}
+
+// podTemplate is the pod a launch runs (decisions 7 and 10). Every pod mounts its own Sandbox's
+// volume by its claim's name (IssueClaimName), the name the controller gives the claim it makes
+// from the Sandbox's template, so the pod reads what the template provisioned whether or not the
+// controller rewrites the volume itself. The pod runs as the operator's ServiceAccount (the
+// namespace's default when the operator names none), and its launcher containers mount the
+// providers Secret's configured keys and the operator's mounts, are told the operator's variables,
+// and start Oh My Pi on the pod's baseline (`--pod-safety`, internal/podsafety). Its init
+// containers and the volumes only they mount are its kind's (podKind). Beyond the Legion pool's
+// selector and tolerations it asks nothing of its placement: every pod owns its volume and shares
+// nothing with another pod, so the scheduler puts it wherever the pool has room. The controller
+// applies a template only to the next pod it creates, so the template is rebuilt for every relaunch.
+func (r *Runtime) podTemplate(l launch) podTemplate {
 	_, providersMounts := r.providers()
 	spec := corev1.PodSpec{
 		RestartPolicy:                 corev1.RestartPolicyAlways,
@@ -391,7 +372,6 @@ func (r *Runtime) podTemplate(l launch, colocate bool) podTemplate {
 		RuntimeClassName:  new(gvisor),
 		NodeSelector:      r.nodeSelector(),
 		Tolerations:       r.tolerations(),
-		Affinity:          l.kind.affinity(r, l, colocate),
 		PriorityClassName: r.scheduling.PriorityClass,
 		Volumes:           r.volumes(l),
 		InitContainers:    l.kind.initContainers(r, l),
@@ -431,8 +411,8 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 			Env:        slices.Clone(resolved),
 			WorkingDir: l.workspace,
 			VolumeMounts: slices.Concat([]corev1.VolumeMount{
-				{Name: treeVolume, MountPath: TreeRoot},
-				{Name: treeVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
+				{Name: issueVolume, MountPath: TreeRoot},
+				{Name: issueVolume, MountPath: ompSessionsDir, SubPath: SessionsSubPath},
 				{Name: roleVolume("launcher", role), MountPath: LauncherDir, ReadOnly: true},
 				{Name: roleVolume("private", role), MountPath: LauncherPrivateDir},
 				{Name: roleVolume(stateVolume, role), MountPath: StateDir},
@@ -480,11 +460,11 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 			corev1.Volume{Name: roleVolume(stateVolume, role), VolumeSource: memory},
 		)
 	}
-	tree := corev1.Volume{Name: treeVolume, VolumeSource: corev1.VolumeSource{
-		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: TreeClaimName(l.volume)},
+	volume := corev1.Volume{Name: issueVolume, VolumeSource: corev1.VolumeSource{
+		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: IssueClaimName(l.spec.Claim)},
 	}}
 	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
-	return slices.Concat([]corev1.Volume{tree}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
+	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
 		r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)
 }
 
@@ -620,12 +600,13 @@ func (r *Runtime) operatorEnv() []corev1.EnvVar {
 	return env
 }
 
-// The XDG base directories, at the standard offsets from the image's HOME, the same in the
-// workspace-init and main containers. The config home is the pod's shared in-memory volume: jj
-// keeps a repository's `--repo` configuration under $XDG_CONFIG_HOME/jj/repos/, so what
-// workspace-init sets there (git.abandon-unreachable-commits false, no repository identity) is
-// what the agent's jj reads. It starts empty in every pod, so nothing an agent wrote reaches
-// workspace-init's jj.
+// The XDG base directories, at the standard offsets from the image's HOME. The config, cache and
+// data homes are the same in the workspace-init and main containers; the state home is
+// xdgStateHome itself in workspace-init and a role's own directory under it in each role container
+// (roleStateHome). The config home is the pod's shared in-memory volume: jj keeps a repository's
+// `--repo` configuration under $XDG_CONFIG_HOME/jj/repos/, so what workspace-init sets there
+// (git.abandon-unreachable-commits false, no repository identity) is what the agent's jj reads. It
+// starts empty in every pod, so nothing an agent wrote reaches workspace-init's jj.
 const (
 	xdgConfigHome = podHome + "/.config"
 	xdgCacheHome  = podHome + "/.cache"
@@ -633,22 +614,39 @@ const (
 	xdgStateHome  = podHome + "/.local/state"
 )
 
-func xdgEnvironment() []corev1.EnvVar {
+// xdgEnvironment is the four XDG base directories with stateHome as the state home.
+func xdgEnvironment(stateHome string) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
 		{Name: "XDG_CACHE_HOME", Value: xdgCacheHome},
 		{Name: "XDG_DATA_HOME", Value: xdgDataHome},
-		{Name: "XDG_STATE_HOME", Value: xdgStateHome},
+		{Name: "XDG_STATE_HOME", Value: stateHome},
 	}
+}
+
+// roleStateHome is the XDG_STATE_HOME a role's agent is told, `<xdgStateHome>/<role>`: a state home
+// of its own in a pod whose role containers share the network namespace and the workspace path.
+// Oh My Pi keeps its browser broker's lock under its state root
+// (`run/daemons/<hash of the workspace's real path>/broker.pid`), taken as an abstract unix socket
+// named from the lock path, and an abstract socket name is one name across every container of the
+// pod; with one state root the first role's lock would block every other role's broker, and their
+// `browser.open` would fail while `broker.sock` sits on the first container's own filesystem. The
+// shim makes Oh My Pi's profile directory under it before Oh My Pi starts
+// (podsafety.EnsureStateHome), since Oh My Pi reads the variable only where that directory exists.
+// It is a path on the container's own filesystem rather than the role's in-memory state volume
+// (StateDir), so Chromium's `browser-profiles` and Oh My Pi's logs are not charged to the pod's
+// memory.
+func roleStateHome(role claim.Role) string {
+	return xdgStateHome + "/" + string(role)
 }
 
 // uv's settings in the worker container, which the pod's environment hands the image's uv.
 const (
 	// uvPythonRoot holds the Pythons uv installs, one directory per issue (uvPythonDir), and
-	// uvCacheDir its cache, both on the tree volume beside the workspaces. A project's .venv, in an
-	// issue's workspace on that volume, links to an interpreter in that issue's directory, so every
-	// later pod of the issue finds the interpreter and the environment works there as it is; the
-	// cache lets every pod of the tree reuse what an earlier one downloaded.
+	// uvCacheDir its cache, both on the issue's volume beside the workspaces. A project's .venv, in
+	// an issue's workspace on that volume, links to an interpreter in that issue's directory, so
+	// every later pod of the issue finds the interpreter and the environment works there as it is;
+	// the cache lets every later pod of the issue reuse what an earlier one downloaded.
 	uvPythonRoot = TreeRoot + "/uv/python"
 	uvCacheDir   = TreeRoot + "/uv/cache"
 	// uvLinkMode is how uv puts a package from uvCacheDir into a .venv: a copy. With the cache and
@@ -660,9 +658,9 @@ const (
 
 // uvPythonDir is issue's own directory under uvPythonRoot, named by the issue as a DNS label
 // (dnsName). uv serializes the installs into a directory with a file lock there, and a gVisor
-// pod's lock reaches no other pod (awaitTreeInitialized), so two pods first installing one Python
-// into a shared directory at once can each delete the other's interpreter. One directory per issue
-// keeps every other issue's pods out; only the pods of one issue share it.
+// pod's lock reaches no other pod, so two pods first installing one Python into a shared directory
+// at once could each delete the other's interpreter. One directory per issue keeps every other
+// issue's pods out; only the pods of one issue share it, and they share one volume.
 func uvPythonDir(issue string) string {
 	return uvPythonRoot + "/" + dnsName(issue, maxNameLength)
 }
@@ -680,61 +678,31 @@ func fetchEnvironment() []corev1.EnvVar {
 
 // initEnvironment is `workspace-init provision`'s contract (research runtime §2.3), the one
 // provisioning every role of the issue pod shares. Its PATH is the image's alone, naming no
-// directory on the tree volume, so the git and jj it resolves from PATH are never ones an agent put
-// there; it carries no tool-path variables, and it is never pointed at the provisioning token. It
-// gives shared provisioning its tree-wide storage expectation and never carries one role's session
-// path: a missing transcript must not prevent sibling launchers from starting. A relaunch after the
-// volume was lost names the ref the recreated workspace is recovered from; both are
-// workspace-init's alone, never the agent's. LEGION_ROLE and LEGION_GENERATION are l.spec.Role and
-// l.spec.Generation, the launch that creates the pod, read together by workspace-init provision's
-// own candidate-rotation seed (cmd/legion/workspace_init.go's rotateCandidates): a generation alone
-// does not distinguish each role's own first launch of one issue, all at generation 1 — the copies
-// of both in mainEnvironment are each role child's, carried by its launcher's start command, so
-// workspace-init needs its own. LEGION_REMOVABLE_WORKSPACES is l.removableWorkspacesJSON, set by
-// setRemovable (called by issuePod.readyNewPod, after the daemon's candidate list is read, last,
-// under the tree's launch turn), one JSON object carrying both the list and notAfter (RFC 3339: the
-// launch time plus initWaitSeconds) together, so the two can never arrive apart; absent when the
-// daemon found none. notAfter is what bounds how long a pod the Sandbox controller recreates on its
-// own may still trust this same list, read by its own fresh workspace-fetch's start time rather
-// than wall-clock time at removal (dispatch://LEGION-583, cmd/legion/workspace_init.go's
-// removableWorkspacesEnv doc comment).
+// directory on the issue's volume, so the git and jj it resolves from PATH are never ones an agent
+// put there; it carries no tool-path variables, and it is never pointed at the provisioning token.
+// It gives shared provisioning the issue's storage expectation (LEGION_EXPECT_ISSUE_VOLUME: the
+// issue's volume must already hold the clone or a retained session) and never carries one role's
+// session path: a missing transcript must not prevent sibling launchers from starting. A relaunch
+// after the volume was lost names the ref the recreated workspace is recovered from; both are
+// workspace-init's alone, never the agent's. Nothing here sizes a wait on another pod: each issue
+// pod provisions its own clone on its own volume, so no two provisions share a repository.
 func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
-	env := []corev1.EnvVar{
-		{Name: "PATH", Value: imagePath},
-		{Name: "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS", Value: strconv.FormatInt(r.initWaitSeconds(), 10)},
-		{Name: "LEGION_ROLE", Value: string(l.spec.Role)},
-		{Name: "LEGION_GENERATION", Value: strconv.FormatUint(l.spec.Generation, 10)},
-	}
-	if l.expectTreeVolume {
-		env = append(env, corev1.EnvVar{Name: "LEGION_EXPECT_TREE_VOLUME", Value: "true"})
+	env := []corev1.EnvVar{{Name: "PATH", Value: imagePath}}
+	if l.expectVolume {
+		env = append(env, corev1.EnvVar{Name: "LEGION_EXPECT_ISSUE_VOLUME", Value: "true"})
 	}
 	if l.spec.WorkspaceRecoveredFrom != "" {
 		env = append(env, corev1.EnvVar{Name: "LEGION_WORKSPACE_RECOVERED_FROM", Value: l.spec.WorkspaceRecoveredFrom})
 	}
-	if l.removableWorkspacesJSON != "" {
-		env = append(env, corev1.EnvVar{Name: "LEGION_REMOVABLE_WORKSPACES", Value: l.removableWorkspacesJSON})
-	}
-	return append(env, xdgEnvironment()...)
-}
-
-// initWaitSeconds bounds workspace-init provision's own wait to acquire another pod's lock on the
-// shared clone (`flock --timeout`, LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS): ceil(boot timeout) ×
-// (intervals + 1). Under gVisor a pod's flock never reaches another pod, so what actually keeps
-// two pods from provisioning the shared clone at once is awaitTreeInitialized (relaunch.go): a
-// new pod is never created while an existing tree pod is still initializing. lockTree itself
-// holds the launch turn only until the new pod is in the store (relaunch.go, awaitNewPod) — well
-// before that pod's own init finishes — so this wait is a safety net for whatever can still race
-// around that ordering (a pod recreated outside the normal relaunch flow), not a budget this
-// package expects to actually exhaust.
-func (r *Runtime) initWaitSeconds() int64 {
-	return int64(math.Ceil(r.bootTimeout.Seconds())) * int64(r.bootIntervals+1)
+	return append(env, xdgEnvironment(xdgStateHome)...)
 }
 
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout, the fetch's own clone bound,
-// plus this same lock-wait budget, for whatever time a provisioning pod can still spend waiting on
-// another pod's flock before it even starts its own clone.
+// which is how much longer a launch may run before its agent starts while its pod's init containers
+// run. Provisioning from the feed onto the issue's own volume is local work and waits on no other
+// pod, so it shares the registration deadline's base bound as the agent's own boot does.
 func (r *Runtime) ProvisionBound() time.Duration {
-	return workspace.FetchTimeout + time.Duration(r.initWaitSeconds())*time.Second
+	return workspace.FetchTimeout
 }
 
 // mainEnvironment is the pane contract with a pod's values (decision 10): what the pod's kind tells
@@ -749,8 +717,9 @@ func (r *Runtime) ProvisionBound() time.Duration {
 // another: the runtime refuses a spec naming one of its own (runtimeOwned), and the daemon an
 // operator's variable naming one of the runtime's or a spec's. LEGION_GRANT_FILE names
 // runtime.GrantFile on the state volume, which is empty at start: the extension makes its
-// directory. POD_UID is the pod's own incarnation, from the downward API. The secrets broker is
-// told only to a role that enrolls (enrolledWith).
+// directory. XDG_STATE_HOME is the role's own (roleStateHome), carried to the role's shim by the
+// start command (launcherCommand's Env). POD_UID is the pod's own incarnation, from the downward
+// API. The secrets broker is told only to a role that enrolls (enrolledWith).
 func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(r, l, credentialHelper)
@@ -780,7 +749,7 @@ func (r *Runtime) mainEnvironment(l launch, credentialHelper string) []corev1.En
 		add("AGENT_SECRETS_URL", broker.URL)
 		add("AGENT_SECRETS_KEY_DIR", AgentSecretsKeyDir)
 	}
-	env = append(env, xdgEnvironment()...)
+	env = append(env, xdgEnvironment(roleStateHome(spec.Role))...)
 	env = append(env, corev1.EnvVar{Name: "POD_UID", ValueFrom: &corev1.EnvVarSource{
 		FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"},
 	}})

@@ -279,10 +279,11 @@ esac
 
 // With --pod-safety (the Sandbox runtime passes it; a pane never does) the shim starts the agent on
 // the pod's baseline: the turn-scoping overlay written under LEGION_STATE_DIR and named first in
-// PI_CONFIG_FILES, ahead of the operator's, and the two session-placing variables where the pod
-// leaves them unset. Without it the agent starts on the environment it always had. With
-// --pod-safety and no state directory the shim refuses naming it, before anything is dialled or
-// spawned.
+// PI_CONFIG_FILES, ahead of the operator's, the two session-placing variables where the pod
+// leaves them unset, and Oh My Pi's profile directory made under the role's XDG_STATE_HOME.
+// Without it the agent starts on the environment it always had, and nothing is made under its
+// state home. With --pod-safety and no state directory, or a state home whose profile directory
+// cannot be made, the shim refuses naming it, before anything is dialled or spawned.
 func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) {
 	dir := t.TempDir()
 	socket := filepath.Join(dir, "s")
@@ -302,43 +303,65 @@ func TestWorkerShimStartsAPodsAgentOnTheBaselineAndAPanesAsBefore(t *testing.T) 
 	t.Setenv("OMP_SESSION_STORAGE", "")
 	os.Unsetenv("OMP_SESSION_STORAGE")
 	t.Setenv("LEGION_STATE_DIR", "")
+	t.Setenv("OMP_PROFILE", "legion")
 	marker := filepath.Join(dir, "spawned")
-	check := `touch "$0"; [ "$PI_CONFIG_FILES" = "$1" ] && [ "${OMP_SESSION_STORAGE-unset}" = "$2" ] && exit 7; echo "PI_CONFIG_FILES=$PI_CONFIG_FILES OMP_SESSION_STORAGE=${OMP_SESSION_STORAGE-unset}" >&2; exit 8`
-	shim := func(podSafety bool, overlays, sessions string) []string {
+	// $3 is the directory the pod's shim made under the state home, or "" for a pane, whose state
+	// home must then hold nothing.
+	check := `touch "$0"; [ "$PI_CONFIG_FILES" = "$1" ] && [ "${OMP_SESSION_STORAGE-unset}" = "$2" ] && case "$3" in "") [ ! -e "$XDG_STATE_HOME/omp" ];; *) [ -d "$3" ];; esac && exit 7; echo "PI_CONFIG_FILES=$PI_CONFIG_FILES OMP_SESSION_STORAGE=${OMP_SESSION_STORAGE-unset} under XDG_STATE_HOME=$XDG_STATE_HOME: $(ls -R "$XDG_STATE_HOME" 2>&1)" >&2; exit 8`
+	shim := func(podSafety bool, overlays, sessions, stateDir string) []string {
 		args := []string{"legion", "worker-shim", "--connect", "unix://" + socket, "--boot-token-file", token}
 		if podSafety {
 			args = append(args, "--pod-safety")
 		}
-		return append(args, "--", "sh", "-c", check, marker, overlays, sessions)
+		return append(args, "--", "sh", "-c", check, marker, overlays, sessions, stateDir)
+	}
+	refuses := func(args []string, naming string) {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if code := run(context.Background(), args, &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), naming) {
+			t.Fatalf("exit %d, stderr %q; want exit 1 naming %s", code, stderr.String(), naming)
+		}
+		if _, err := os.Stat(marker); err == nil {
+			t.Fatal("the agent was spawned with no baseline to start it on")
+		}
+		_ = ln.(*net.UnixListener).SetDeadline(time.Now().Add(20 * time.Millisecond))
+		if conn, err := ln.Accept(); err == nil {
+			_ = conn.Close()
+			t.Fatal("the shim dialled the daemon with no baseline to start the agent on")
+		}
+		_ = ln.(*net.UnixListener).SetDeadline(time.Time{})
 	}
 
-	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), shim(true, "", ""), &stdout, &stderr); code != 1 || !strings.Contains(stderr.String(), "LEGION_STATE_DIR") {
-		t.Fatalf("--pod-safety with no state directory: exit %d, stderr %q; want exit 1 naming LEGION_STATE_DIR", code, stderr.String())
-	}
-	if _, err := os.Stat(marker); err == nil {
-		t.Fatal("the agent was spawned with no baseline to start it on")
-	}
-	_ = ln.(*net.UnixListener).SetDeadline(time.Now().Add(20 * time.Millisecond))
-	if conn, err := ln.Accept(); err == nil {
-		_ = conn.Close()
-		t.Fatal("the shim dialled the daemon with no baseline to start the agent on")
-	}
-	_ = ln.(*net.UnixListener).SetDeadline(time.Time{})
+	t.Setenv("XDG_STATE_HOME", filepath.Join(dir, "state", "tester"))
+	refuses(shim(true, "", "", ""), "LEGION_STATE_DIR")
 
 	t.Setenv("LEGION_STATE_DIR", state)
+	blocked := filepath.Join(dir, "blocked")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("XDG_STATE_HOME", filepath.Join(blocked, "tester"))
+	refuses(shim(true, "", "", ""), filepath.Join(blocked, "tester", "omp", "profiles", "legion"))
+
 	for name, tc := range map[string]struct {
 		podSafety          bool
 		overlays, sessions string
+		// makes is the profile directory the shim makes under the state home, "" for none.
+		makes string
 	}{
-		"a pod":  {true, filepath.Join(state, podsafety.TurnScopeFile) + ":/etc/operator.yml", "file"},
-		"a pane": {false, "/etc/operator.yml", "unset"},
+		"a pod":  {true, filepath.Join(state, podsafety.TurnScopeFile) + ":/etc/operator.yml", "file", "omp/profiles/legion"},
+		"a pane": {false, "/etc/operator.yml", "unset", ""},
 	} {
+		stateHome := filepath.Join(t.TempDir(), "tester")
+		t.Setenv("XDG_STATE_HOME", stateHome)
+		made := ""
+		if tc.makes != "" {
+			made = filepath.Join(stateHome, tc.makes)
+		}
 		daemon := acknowledgeHello(ln)
-		stdout.Reset()
-		stderr.Reset()
-		if code := run(context.Background(), shim(tc.podSafety, tc.overlays, tc.sessions), &stdout, &stderr); code != 7 {
-			t.Fatalf("%s: exit %d, want 7: the agent starts with PI_CONFIG_FILES %q and OMP_SESSION_STORAGE %q; stderr: %s", name, code, tc.overlays, tc.sessions, stderr.String())
+		var stdout, stderr bytes.Buffer
+		if code := run(context.Background(), shim(tc.podSafety, tc.overlays, tc.sessions, made), &stdout, &stderr); code != 7 {
+			t.Fatalf("%s: exit %d, want 7: the agent starts with PI_CONFIG_FILES %q, OMP_SESSION_STORAGE %q and %q made; stderr: %s", name, code, tc.overlays, tc.sessions, made, stderr.String())
 		}
 		if err := <-daemon; err != nil {
 			t.Fatalf("%s: the daemon side: %v", name, err)

@@ -40,12 +40,16 @@ var retreeable = append([]ClaimState{StateQueued}, gone...)
 // Retree re-points a claim to tree, the tree its issue belongs to now: a child of a closed tree
 // re-admitted as a root of its own keeps its roles' claims, which still name the tree it left. The
 // claim drops its old tree's epoch, so its next start binds the new tree's lifecycle and launches
-// in the new tree's resources. Under a runtime that keeps sessions on the tree's volume
-// (SessionsOnVolume) the session stays on the old tree's volume, which the new tree's pods never
-// mount, so the claim drops it as a lost volume's claims do and starts fresh, recreating its
-// workspace; under tmux, whose sessions are on the host, and under the Sandbox runtime's session
-// database, the session resumes. Only a claim that runs nothing is re-pointed; one whose process
-// still runs in the old tree is a wait (wait.ErrWaiting) until its old tree's stop lands.
+// in the new tree's resources, and keeps its session: the session is the issue's, on the host under
+// tmux, and under a sandbox on the issue's own volume or in the runtime's session database
+// (runtime.kubernetes.session_store postgres), which every tree's pods read, so it resumes in the
+// new tree while the old tree lingers. Once the old tree's cleanup has taken the issue's Sandbox and
+// volume, a file session names a transcript the new volume does not hold; the supervisor knows
+// nothing of Sandboxes, and a check here would race that cleanup, so it is left to the launch, which
+// expects the volume to hold what it left and, finding it does not, logs the volume lost once and
+// starts a fresh session (runtime.WorkspaceLost). Only a claim that runs nothing is re-pointed; one
+// whose process still runs in the old tree is a wait (wait.ErrWaiting) until its old tree's stop
+// lands.
 func (m *Machine) Retree(ctx context.Context, tree string) error {
 	m.mu.Lock()
 	defer m.unlock()
@@ -57,8 +61,5 @@ func (m *Machine) Retree(ctx context.Context, tree string) error {
 	}
 	m.log.Info("supervise: the claim's issue moved to another tree", "claim", m.claim.Token, "from", m.claim.Tree, "to", tree)
 	m.claim.Tree, m.claim.TreeEpoch = tree, 0
-	if m.deps.Runtime.SessionsOnVolume() && (m.claim.Session != "" || m.claim.SessionFile != "") {
-		m.loseSession()
-	}
 	return m.persist(ctx)
 }

@@ -73,7 +73,7 @@ From a shell on the agent machine (`agent-exec bash`, where `agent-exec` is the 
 prints, and hands a command in `BROKER_RIG_AGENT_EXEC`), the flow the walkthrough shows is:
 
 ```bash
-agent-secrets launcher login                    # prints a code; approve it at /credentials/machine
+agent-secrets machine login                     # prints a code; approve it at /credentials/machine
 agent-secrets register --wait 10 --exec -- bash # a session, registered as an agent's session is
 agent-secrets DEMO_API_KEY --reason "Publish the docs preview for PR 42 with the demo API" -- ./check-demo-key.sh
 ```

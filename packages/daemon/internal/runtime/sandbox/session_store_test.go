@@ -46,9 +46,9 @@ func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 			}
 			for name, spec := range map[string]runtime.SpawnSpec{"a workflow role": workerSpec(t), "the controller": controllerSpec(t)} {
 				t.Run(name, func(t *testing.T) {
-					worker := workerOf(t, r, spec, false)
+					worker := workerOf(t, r, spec)
 					env := envOf(worker)
-					items := providersItems(podOf(t, r, spec, false))
+					items := providersItems(podOf(t, r, spec))
 					if store == "pvc" {
 						if _, set := env["OMP_SESSION_STORAGE"]; set {
 							t.Errorf("OMP_SESSION_STORAGE = %q under pvc, want it left to the pod baseline", env["OMP_SESSION_STORAGE"])
@@ -85,7 +85,7 @@ func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 				// The probe's and every worker's `legion` read the mounted directory as the shim does
 				// (shim.ReadProviderEnv, through each container's own environment): the URL file is
 				// skipped because its pointer is there.
-				for container, env := range map[string]map[string]string{"the probe": probeEnv, "a worker": envOf(workerOf(t, r, workerSpec(t), false))} {
+				for container, env := range map[string]map[string]string{"the probe": probeEnv, "a worker": envOf(workerOf(t, r, workerSpec(t)))} {
 					exported := providersExported(t, env)
 					for _, pair := range exported {
 						if strings.Contains(pair, "secret@") {
@@ -130,7 +130,7 @@ func TestAPodWithoutTheSessionStoresProjectionHoldsAMove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pod := func(r *Runtime) *corev1.Pod { return &corev1.Pod{Spec: podOf(t, r, workerSpec(t), false)} }
+	pod := func(r *Runtime) *corev1.Pod { return &corev1.Pod{Spec: podOf(t, r, workerSpec(t))} }
 	for _, tc := range []struct {
 		name  string
 		r     *Runtime
@@ -152,11 +152,11 @@ func TestAPodWithoutTheSessionStoresProjectionHoldsAMove(t *testing.T) {
 }
 
 // A resume under a session database holds the volume to nothing: its session is in the database,
-// so the issue pod's workspace-init does not expect the tree volume to hold anything (a resume on a
-// new volume provisions the workspace from the issue's pushed branch and continues the session),
-// and the controller's workspace-init looks for no session file. The resume itself still names the
-// session, which the role launcher finds in the table (internal/launcher) and Oh My Pi resumes.
-// Sessions kept as files on the volume hold both as before.
+// so the issue pod's workspace-init does not expect the issue's volume to hold anything (a resume
+// on a new volume provisions the workspace from the issue's pushed branch and continues the
+// session), and the controller's workspace-init looks for no session file. The resume itself still
+// names the session, which the role launcher finds in the table (internal/launcher) and Oh My Pi
+// resumes. Sessions kept as files on the volume hold both as before.
 func TestAResumeUnderASessionDatabaseExpectsNothingOfTheVolume(t *testing.T) {
 	for _, tc := range []struct {
 		store  string
@@ -175,13 +175,13 @@ func TestAResumeUnderASessionDatabaseExpectsNothingOfTheVolume(t *testing.T) {
 			}
 			worker := workerSpec(t)
 			worker.Generation, worker.BootToken, worker.ResumeSessionFile = 2, "boot-g2", resumeSession
-			init := envOf(containerNamed(t, podOf(t, r, worker, false), initContainer))
-			if _, set := init["LEGION_EXPECT_TREE_VOLUME"]; set != tc.expect {
-				t.Errorf("the issue pod's workspace-init expects the tree volume: %t, want %t", set, tc.expect)
+			init := envOf(containerNamed(t, podOf(t, r, worker), initContainer))
+			if _, set := init["LEGION_EXPECT_ISSUE_VOLUME"]; set != tc.expect {
+				t.Errorf("the issue pod's workspace-init expects the issue's volume: %t, want %t", set, tc.expect)
 			}
 			controller := controllerSpec(t)
 			controller.Generation, controller.BootToken, controller.ResumeSessionFile = 2, "boot-g2", controllerSession
-			controllerInit := envOf(containerNamed(t, podOf(t, r, controller, false), initContainer))
+			controllerInit := envOf(containerNamed(t, podOf(t, r, controller), initContainer))
 			if _, set := controllerInit["LEGION_RESUME_SESSION_FILE"]; set != tc.expect {
 				t.Errorf("the controller's workspace-init looks for its session file: %t, want %t", set, tc.expect)
 			}
@@ -198,10 +198,10 @@ func TestAResumeUnderASessionDatabaseExpectsNothingOfTheVolume(t *testing.T) {
 	}
 }
 
-// A new issue pod's workspace-init expects the tree volume when another claim of its tree kept a
-// session there; under a session database no claim keeps one there, and the tree's sessions are
+// A new issue pod's workspace-init expects the issue's volume when a claim of the issue kept a
+// session there; under a session database no claim keeps one there, and the issue's sessions are
 // not even read.
-func TestANewPodUnderASessionDatabaseIsNotHeldToItsTreesSessions(t *testing.T) {
+func TestANewPodUnderASessionDatabaseIsNotHeldToItsIssuesSessions(t *testing.T) {
 	for _, tc := range []struct {
 		store  string
 		key    string
@@ -211,8 +211,8 @@ func TestANewPodUnderASessionDatabaseIsNotHeldToItsTreesSessions(t *testing.T) {
 		{"pvc", "", true},
 	} {
 		t.Run(tc.store, func(t *testing.T) {
-			store := newTreeStore()
-			store.sessions[testTree] = true
+			store := newFakeStore()
+			store.sessions[rootSpec(t).Issue] = true
 			g := newRig(t, nil, withOptions(func(o *Options) { o.Store, o.SessionDSNKey = store, tc.key }))
 			g.spawn(rootSpec(t))
 			pod := g.pod(SandboxName(rootToken))
@@ -220,8 +220,8 @@ func TestANewPodUnderASessionDatabaseIsNotHeldToItsTreesSessions(t *testing.T) {
 				t.Fatal("the root's issue pod was not created")
 			}
 			init := envOf(containerNamed(t, pod.Spec, initContainer))
-			if _, set := init["LEGION_EXPECT_TREE_VOLUME"]; set != tc.expect {
-				t.Errorf("the new pod's workspace-init expects the tree volume: %t, want %t", set, tc.expect)
+			if _, set := init["LEGION_EXPECT_ISSUE_VOLUME"]; set != tc.expect {
+				t.Errorf("the new pod's workspace-init expects the issue's volume: %t, want %t", set, tc.expect)
 			}
 		})
 	}

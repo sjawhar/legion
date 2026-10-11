@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math"
 	"net"
 	"path/filepath"
@@ -62,7 +63,7 @@ const recheckInterval = 500 * time.Millisecond
 // Runtime is the Agent Sandbox runtime. Build one with New.
 type Runtime struct {
 	namespace, project, image, storageClass string
-	treeVolume                              resource.Quantity
+	volumeSize                              resource.Quantity
 	scheduling                              Scheduling
 	resources                               map[claim.Role]corev1.ResourceRequirements
 	streamURL, daemonURL, envoyURL          string
@@ -77,7 +78,6 @@ type Runtime struct {
 	agentSecrets                            *AgentSecrets
 	agent                                   []string
 	bootTimeout                             time.Duration
-	bootIntervals                           int
 	terminationGrace                        time.Duration
 	probeInterval                           time.Duration
 	adoptTimeout                            time.Duration
@@ -88,7 +88,6 @@ type Runtime struct {
 	launcherAuth                            launcherCredentials
 	now                                     func() time.Time
 	log                                     *slog.Logger
-	removable                               func(ctx context.Context, tree, exclude string) ([]runtime.RemovableWorkspace, error)
 
 	dyn       dynamic.Interface
 	kube      kubernetes.Interface
@@ -107,11 +106,9 @@ type Runtime struct {
 	// observer is the running Observe, nil when none runs.
 	observer *observer
 	// podTurns serializes the relaunches, issue suspension, release and orphan deletion of one pod,
-	// keyed by its Sandbox's name (lockPod). Tree initialization stays separately serialized because
-	// child issue pods share the root's clone and PVC.
+	// keyed by its Sandbox's name (lockPod). Nothing serializes the pods of one tree against each
+	// other: each issue's pod provisions its own clone on its own volume.
 	podTurns map[string]chan struct{}
-	// trees serializes the launches of one tree's pods (relaunch.go, awaitTreeInitialized).
-	trees map[string]chan struct{}
 }
 
 // New builds the runtime from opts, starts its Sandbox and pod informers for ctx's lifetime, and
@@ -152,11 +149,14 @@ func CensusLegacyIssueSandboxes(ctx context.Context, rc *rest.Config, namespace,
 // rejectLegacyIssueSandboxes refuses the project's Sandboxes whose pod is not one this runtime
 // builds: its containers must be exactly the launcher roles of the kind its labels name
 // (podKindOf), every workflow role for an issue Sandbox and the controller alone for the project
-// controller's. So a per-claim Sandbox of the layout before issue pods (one worker container), the
-// controller Sandbox a daemon before issue pods made (role=controller, one worker container), a pod
-// missing a launcher, one with a container more, and a Sandbox whose labels name no kind are each
-// refused. The refusal names every one of them, each with its reason, and how many there are, so
-// an operator removes them all before the next boot rather than one per refused boot.
+// controller's, and it must own a volume of its own, the one claim template every Sandbox made now
+// carries (issueVolume). So a per-claim Sandbox of the layout before issue pods (one worker
+// container), the controller Sandbox a daemon before issue pods made (role=controller, one worker
+// container), a pod missing a launcher, one with a container more, a Sandbox whose labels name no
+// kind, and a Sandbox of the tree-volume layout before per-issue volumes (treeVolumeLayout: no
+// claim template, or the tree root's `tree` template, the controller's of that layout included) are
+// each refused. The refusal names every one of them, each with its reason, and how many there are,
+// so an operator removes them all before the next boot rather than one per refused boot.
 func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceInterface, project string) error {
 	reading, cancel := call(ctx)
 	defer cancel()
@@ -171,6 +171,8 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 		}
 		if reason := legacyIssueSandbox(object); reason != "" {
 			refused = append(refused, "legacy issue Sandbox "+object.GetName()+reason)
+		} else if reason := treeVolumeLayout(object); reason != "" {
+			refused = append(refused, "Sandbox "+object.GetName()+reason)
 		}
 	}
 	if len(refused) == 0 {
@@ -178,6 +180,32 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 	}
 	return fmt.Errorf("sandbox runtime: %d of project %s's Sandboxes are not pods this runtime builds; migrate or remove each before enabling issue pods: %s",
 		len(refused), project, strings.Join(refused, "; "))
+}
+
+// treeVolumeLayout is why object is a Sandbox of the tree-volume layout before per-issue volumes,
+// following its name in the census's refusal, or "" when it owns a volume of its own: every
+// Sandbox this runtime makes carries one claim template named issueVolume, where that layout gave
+// only the tree root's Sandbox a template, named `tree`, which every child of the tree mounted, and
+// its controller's Sandbox a `tree` template of its own. Such a Sandbox is never adopted: a child's
+// would fit no launch and be made again empty, and a root's volume holds every clone and workspace
+// of its tree, which only the drained cutover docs/kubernetes.md describes may take apart.
+func treeVolumeLayout(object unstructured.Unstructured) string {
+	const upgrade = "; it is of the tree-volume layout before per-issue volumes, so drain and remove it as docs/kubernetes.md's \"Upgrading a deployment with running trees\" says"
+	templates, found, err := unstructured.NestedSlice(object.Object, "spec", "volumeClaimTemplates")
+	if err != nil || !found || len(templates) == 0 {
+		return " owns no volume" + upgrade
+	}
+	for _, raw := range templates {
+		template, ok := raw.(map[string]any)
+		if !ok {
+			return " has an unreadable volume claim template" + upgrade
+		}
+		name, _, _ := unstructured.NestedString(template, "metadata", "name")
+		if name != issueVolume {
+			return fmt.Sprintf(" owns a volume claim template named %q, not %q", name, issueVolume) + upgrade
+		}
+	}
+	return ""
 }
 
 // legacyIssueSandbox is why object is not a pod this runtime builds, following its name in the
@@ -227,13 +255,11 @@ func configure(opts Options) (*Runtime, error) {
 	case !strings.Contains(opts.Image, "@sha256:"):
 		return refuse("image %q is not pinned by digest (…@sha256:…)", opts.Image)
 	case opts.StorageClass == "":
-		return refuse("no storage class for the tree volume (the cluster has no default class to fall back on)")
-	case opts.TreeVolume.Sign() <= 0:
-		return refuse("no tree volume size: %s is not a positive quantity", opts.TreeVolume.String())
+		return refuse("no storage class for the issue volume (the cluster has no default class to fall back on)")
+	case opts.IssueVolume.Sign() <= 0:
+		return refuse("no issue volume size: %s is not a positive quantity", opts.IssueVolume.String())
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
-	case opts.BootIntervals <= 0:
-		return refuse("the registration deadline must be a positive number of boot intervals")
 	case opts.Tokens == nil:
 		return refuse("no provisioning token source")
 	case opts.Store == nil:
@@ -262,6 +288,14 @@ func configure(opts Options) (*Runtime, error) {
 			return refuse("the image's %s path %q is not absolute", tool.name, tool.path)
 		}
 	}
+	// Every container of every pod the runtime builds takes its role's entry of Resources — the
+	// init containers the launching role's, the image probe's the controller's — so a role without
+	// a reservation would run with no requests or limits at all, a silently BestEffort pod.
+	for _, role := range launcherRoles {
+		if err := checkReservation(role, opts.Resources); err != nil {
+			return refuse("%v", err)
+		}
+	}
 	if a := opts.AgentSecrets; a != nil {
 		switch {
 		case a.URL == "":
@@ -282,16 +316,16 @@ func configure(opts Options) (*Runtime, error) {
 	}
 	r := &Runtime{
 		namespace: opts.Namespace, project: opts.Project, image: opts.Image, storageClass: opts.StorageClass,
-		treeVolume: opts.TreeVolume, scheduling: opts.Scheduling, resources: opts.Resources,
+		volumeSize: opts.IssueVolume, scheduling: opts.Scheduling, resources: opts.Resources,
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
 		sessionDSNKey: opts.SessionDSNKey,
-		bootTimeout:   opts.BootTimeout, bootIntervals: opts.BootIntervals, terminationGrace: opts.TerminationGrace,
+		bootTimeout:   opts.BootTimeout, terminationGrace: opts.TerminationGrace,
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent,
-		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log, removable: opts.Removable,
+		tokens: opts.Tokens, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
 		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
-		trees: map[string]chan struct{}{}, launchers: newLaunchers(),
+		launchers: newLaunchers(),
 	}
 	if len(r.agent) == 0 {
 		r.agent = []string{defaultAgent}
@@ -303,6 +337,49 @@ func configure(opts Options) (*Runtime, error) {
 		r.log = slog.Default()
 	}
 	return r, nil
+}
+
+// checkReservation is why resources' entry for role is not a reservation, or nil when it is one:
+// cpu and memory each requested as a positive quantity equal to its limit, the kubelet's Guaranteed
+// rule for the one container; ephemeral-storage requested as a positive quantity no greater than
+// its positive limit — QoS reads cpu and memory alone, so the disk bound need not be one value as
+// both: it is the node-disk isolation between pods of unrelated trees sharing a node, a limit the
+// kubelet evicts the offending pod alone for passing, over a request the scheduler fits to the
+// node's allocatable disk; and no other resource named, since the daemon sizes nothing else
+// (daemon/kubernetes.go, roleRequirements) and an extended resource here would be one no operator
+// configured. A missing role is the first fault: its containers would carry the zero requirements.
+func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceRequirements) error {
+	requirements, ok := resources[role]
+	if !ok {
+		return fmt.Errorf("resources: no reservation for role %s", role)
+	}
+	for _, list := range []struct {
+		name string
+		list corev1.ResourceList
+	}{{"requests", requirements.Requests}, {"limits", requirements.Limits}} {
+		for _, name := range slices.Sorted(maps.Keys(list.list)) {
+			if name != corev1.ResourceCPU && name != corev1.ResourceMemory && name != corev1.ResourceEphemeralStorage {
+				return fmt.Errorf("resources: role %s names %s in its %s; a reservation is cpu, memory and ephemeral-storage alone", role, name, list.name)
+			}
+		}
+	}
+	for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+		request, limit := requirements.Requests[name], requirements.Limits[name]
+		switch {
+		case request.Sign() <= 0 || limit.Sign() <= 0:
+			return fmt.Errorf("resources: role %s reserves no %s (request %s, limit %s); a reservation is a positive quantity as both", role, name, request.String(), limit.String())
+		case request.Cmp(limit) != 0:
+			return fmt.Errorf("resources: role %s requests %s %s but is limited to %s; a reservation is one value as both", role, name, request.String(), limit.String())
+		}
+	}
+	request, limit := requirements.Requests[corev1.ResourceEphemeralStorage], requirements.Limits[corev1.ResourceEphemeralStorage]
+	switch {
+	case request.Sign() <= 0 || limit.Sign() <= 0:
+		return fmt.Errorf("resources: role %s bounds no ephemeral-storage (request %s, limit %s); the bound is a positive request under a positive limit", role, request.String(), limit.String())
+	case request.Cmp(limit) > 0:
+		return fmt.Errorf("resources: role %s requests ephemeral-storage %s past its limit %s; the request may not exceed the limit", role, request.String(), limit.String())
+	}
+	return nil
 }
 
 // start runs both informers, selected on the project label, until ctx ends, and waits for both
@@ -564,13 +641,8 @@ func (r *Runtime) checkLocator(loc runtime.Locator) error {
 }
 
 // ProvisionsWorkspaces is true: every pod's init containers provision its claim's workspace on the
-// tree volume, and the tree volume goes with the tree's root claim.
+// issue's own volume, which goes with the issue's Sandbox.
 func (r *Runtime) ProvisionsWorkspaces() bool { return true }
-
-// SessionsOnVolume is true unless the runtime keeps sessions in its session database
-// (Options.SessionDSNKey): a file session is on its tree's volume, which another tree's pods never
-// mount.
-func (r *Runtime) SessionsOnVolume() bool { return r.sessionDSNKey == "" }
 
 // Suspend ends only the recorded role process. It never changes the issue Sandbox operating mode:
 // every other resident role shares that pod and stays reachable until its own explicit stop or
@@ -625,10 +697,10 @@ func (r *Runtime) setMode(ctx context.Context, s *sandbox, mode string) error {
 
 // Release is a claim-scoped operation: it ends at most the recorded role process and forgets the
 // claim from this runtime. It never suspends or deletes an issue Sandbox, even when this runtime
-// sees no sibling role: the issue's Sandbox, its Secrets and, for a root, the tree volume are the
-// tree cleanup's alone (CleanupTree), which runs once every stored claim of the tree has retired.
-// The project controller's Sandbox belongs to the controller's claim and nothing else, so releasing
-// that claim deletes it (releaseControllerSandbox).
+// sees no sibling role: the issue's Sandbox, its Secrets and its volume are the tree cleanup's
+// alone (CleanupTree), which runs once every stored claim of the tree has retired. The project
+// controller's Sandbox belongs to the controller's claim and nothing else, so releasing that claim
+// deletes it (releaseControllerSandbox).
 func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
 	if err := k.Validate(); err != nil {
 		return fmt.Errorf("sandbox runtime: release: %w", err)
@@ -677,7 +749,7 @@ func (r *Runtime) releaseControllerSandbox(ctx context.Context, token claim.Toke
 }
 
 // AdoptWorkingCopy has the agent's shim set its working copy's author (the shared `jj metaedit
-// --update-author`, run in the pod's own workspace on the tree volume) over the claim's
+// --update-author`, run in the pod's own workspace on the issue's volume) over the claim's
 // connection. The recorded process must still be the claim's running pod: the connection is its.
 func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id runtime.GitIdentity) error {
 	if err := r.checkLocator(loc); err != nil {
@@ -710,10 +782,12 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // is that claim. known is every claim the daemon has not retired, a suspended one included
 // (knownClaims), so a retired controller's Sandbox goes and a suspended one's, which holds its
 // session, stays. Every delete runs under the pod's launch turn, so a launch that begins meanwhile
-// waits for the delete and then creates the Sandbox afresh, and is fenced to what its decision
-// read: an issue Sandbox's tree is read again under the turn, and the controller's Sandbox, whose
-// decision rests on known, read before the sweep, is deleted only as the store showed it
-// (deleteFenced). Every start writes the Sandbox its generation's address record
+// waits for the delete and then creates the Sandbox afresh, and is fenced to the Sandbox as the
+// decision read it, its uid and resourceVersion (deleteFenced): an issue Sandbox's tree is read
+// again under the turn, and a Sandbox written since the informer's snapshot — relabelled for a new
+// tree by a re-admitted issue's launch (ensureSandbox), which keeps its uid, volume and sessions,
+// or set Running — is kept as a conflict for the next sweep to judge on what it holds then.
+// Every start writes the Sandbox its generation's address record
 // (recordAddresses), so a controller relaunched into it since makes the delete a conflict, and the
 // next sweep judges it on the claims known then. The image probe's Sandbox (labelled
 // legion.dev/probe) is no claim's and never an orphan: the probe deletes it, and its shutdown time
@@ -810,7 +884,12 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 	if live {
 		return nil
 	}
-	if err := r.deleteFenced(ctx, name, metav1.Preconditions{UID: &uid}, "sandbox runtime: deleted an orphaned sandbox", "tree", tree); err != nil {
+	// Fenced to the uid and resourceVersion the decision read: a re-admission of this issue that
+	// landed between the informer's snapshot and this turn relabelled the same Sandbox for its new
+	// tree (ensureSandbox) and may already run a pod in it; the uid alone would not tell.
+	version := u.GetResourceVersion()
+	fence := metav1.Preconditions{UID: &uid, ResourceVersion: &version}
+	if err := r.deleteFenced(ctx, name, fence, "sandbox runtime: deleted an orphaned sandbox", "tree", tree); err != nil {
 		return fmt.Errorf("reconcile orphans: %w", err)
 	}
 	return nil
@@ -820,12 +899,17 @@ func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, contr
 // credentials; msg and attrs log the delete. Its caller holds the pod's launch turn. One already
 // gone is gone, and one the fence refuses, replaced or written since, is kept and logged with
 // attrs, since its owner's next decision is the orphan sweep's: neither is an error. Deletion
-// propagates in the background, a custom resource's default, so its Secrets and volume go after it
-// through their owner references.
+// propagates in the foreground, as the tree cleanup's does (deleteSandbox): the Sandbox owns its
+// PVC and its role Secrets by owner reference, and the issue's next Sandbox names the same PVC
+// (IssueClaimName), so a background delete, which drops the Sandbox at once and collects the PVC
+// after, would let a re-admission inside that window create a Sandbox asking for a Terminating
+// PVC. In the foreground the Sandbox stays, Terminating, until both are gone, so a launch that
+// waits out a Sandbox being deleted (ensureSandbox) waits for its volume too.
 func (r *Runtime) deleteFenced(ctx context.Context, name string, fence metav1.Preconditions, msg string, attrs ...any) error {
 	deleting, cancel := call(ctx)
 	defer cancel()
-	err := r.sandboxClient().Delete(deleting, name, metav1.DeleteOptions{Preconditions: &fence})
+	policy := metav1.DeletePropagationForeground
+	err := r.sandboxClient().Delete(deleting, name, metav1.DeleteOptions{PropagationPolicy: &policy, Preconditions: &fence})
 	switch {
 	case err == nil:
 		r.forgetLauncherCredentials(name)

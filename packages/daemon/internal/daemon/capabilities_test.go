@@ -8,22 +8,22 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 )
 
-// reserved is a role's CPU and memory requests and limits, all four set.
-var reserved = config.RoleResources{
-	Requests: config.Quantities{CPU: "500m", Memory: "1Gi"},
-	Limits:   config.Quantities{CPU: "2", Memory: "3Gi"},
-}
+// reserved is a role's CPU and memory reservation, both set: each is the container's request and
+// its limit.
+var reserved = config.RoleResources{CPU: "500m", Memory: "1Gi"}
 
 // Deployment reads the configuration alone: the decisions, the runtime, whether a broker is
-// configured, and the roles whose pods reserve no CPU and memory — a role lacking any of the four
-// quantities counts, in claim.Roles' order, and the controller only under controller: daemon. A
-// tmux configuration names no role: the tmux runtime sets no limits at all, which the report says
-// in its own words.
+// configured, and the roles whose pods reserve no CPU and memory — a role lacking either quantity
+// counts, in claim.Roles' order, and the controller only under controller: daemon (a Kubernetes
+// block the loader settled holds every role, so only a value built by hand names one). A tmux
+// configuration names no role: the tmux runtime sets no limits at all, which the report says in
+// its own words.
 func TestDeploymentReadsTheConfigurationAlone(t *testing.T) {
 	decided := map[capabilities.Name]string{capabilities.Secrets: "dispatch://LEGION-205 enrolls pods later"}
 	kubernetes := func(resources map[claim.Role]config.RoleResources, agentSecrets *config.AgentSecretsConfig, launch config.ControllerLaunch) config.Config {
@@ -49,7 +49,7 @@ func TestDeploymentReadsTheConfigurationAlone(t *testing.T) {
 			capabilities.Deployment{Runtime: "kubernetes", Decided: decided, AgentSecrets: true}},
 		{"a role missing one quantity, and the controller under controller: daemon", kubernetes(map[claim.Role]config.RoleResources{
 			claim.RoleArchitect: reserved, claim.RolePlanner: reserved, claim.RoleImplementer: reserved,
-			claim.RoleTester:   {Requests: config.Quantities{CPU: "2", Memory: "4Gi"}, Limits: config.Quantities{Memory: "12Gi"}},
+			claim.RoleTester:   {CPU: "2"},
 			claim.RoleReviewer: reserved, claim.RoleMerger: reserved,
 		}, nil, config.ControllerLaunchDaemon),
 			capabilities.Deployment{Runtime: "kubernetes", Decided: decided, RolesWithoutResources: []claim.Role{claim.RoleTester, claim.RoleController}}},
@@ -103,4 +103,45 @@ func TestReportCapabilitiesLogsAtBootAndOnChangeAlone(t *testing.T) {
 	if strings.Count(logged.String(), "capability model-fallback is open") != 1 {
 		t.Fatalf("model-fallback was logged after it closed:\n%s", logged.String())
 	}
+}
+
+// What the probe's run saw of the pool reaches the report: a kubernetes daemon whose probe pod
+// waited on capacity before it scheduled reports pool-capacity open, with the count and the
+// scheduler's reason, until the file decides it; one whose pod scheduled at once reports it present.
+func TestReportCapabilitiesCarriesTheProbesCapacityWaits(t *testing.T) {
+	reason := "probe pod legion-probe-legion-1d10089a0000 is Unschedulable: 0/83 nodes are available: 25 Insufficient cpu"
+	decided := map[capabilities.Name]string{capabilities.Secrets: "dispatch://LEGION-205 enrolls pods later"}
+	cfg := config.Config{
+		Runtime:      config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{Resources: config.DefaultResources()}},
+		Capabilities: config.Capabilities{Decided: decided},
+	}
+	var logged bytes.Buffer
+	s := &supervision{cfg: cfg, log: slog.New(slog.NewTextHandler(&logged, nil)), probed: true,
+		imageReport: bootprobe.ImageReport{ModelFallback: "on", CapacityWaits: 2, CapacityReason: reason}}
+
+	if got, want := s.reportCapabilities(), []string{"pool-capacity"}; !slices.Equal(got, want) {
+		t.Fatalf("reportCapabilities = %v, want %v", got, want)
+	}
+	if want := "the image probe pod was Unschedulable 2 time(s) at boot before it scheduled: " + reason; !strings.Contains(logged.String(), want) {
+		t.Fatalf("the open row was logged without the count and the reason:\n%s", logged.String())
+	}
+
+	decided[capabilities.PoolCapacity] = "the pool is sized for the trees; the probe waits"
+	if got := s.reportCapabilities(); len(got) != 0 {
+		t.Fatalf("reportCapabilities with the row decided = %v, want none open", got)
+	}
+
+	s.imageReport.CapacityWaits, s.imageReport.CapacityReason = 0, ""
+	if got := states(s.deployment().Report())[capabilities.PoolCapacity]; got.Status != capabilities.StatusPresent || got.Detail != "the image probe pod scheduled at its first attempt" {
+		t.Fatalf("pool-capacity with no wait = %s (%s), want present", got.Status, got.Detail)
+	}
+}
+
+// states is a report by capability.
+func states(report []capabilities.State) map[capabilities.Name]capabilities.State {
+	m := map[capabilities.Name]capabilities.State{}
+	for _, state := range report {
+		m[state.Name] = state
+	}
+	return m
 }

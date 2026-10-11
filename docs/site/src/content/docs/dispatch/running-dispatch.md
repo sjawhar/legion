@@ -2,7 +2,7 @@
 title: Running Dispatch
 description: What the Dispatch server needs, how to run it, its health check, and its migrations.
 sidebar:
-  order: 7
+  order: 8
 ---
 
 Dispatch is one Go program. It serves the web app, the HTTP API, live documents, and Google
@@ -37,14 +37,24 @@ and refuses every `DISPATCH_SIGNIN_*` setting. Serve Dispatch over HTTPS.
 
 ## Running it on your machine
 
-From a checkout of this repository, with Docker, Bun, and Go installed:
+To see Dispatch working, seeded with example issues, asks, agents and a broadcast and opened
+already signed in, run `bun run dispatch:local` at the repository root. It starts Dispatch beside
+stand-ins for an Envoy listener and GitHub, empties and reseeds its database every time it starts,
+and prints the address to open; `packages/dispatch/README.md` ("Local instance") covers it.
+
+To run Dispatch on a database that keeps what you put in it, from a checkout of this repository,
+with Docker, Bun, and Go installed:
 
 1. Start a Postgres:
 
    ```sh
-   docker run -d --name dispatch-pg -e POSTGRES_PASSWORD=dispatch -e POSTGRES_DB=dispatch \
-     -p 127.0.0.1:55432:5432 postgres:16
+   packages/envoy/scripts/dev-postgres.sh
    ```
+
+   It runs a container named `dispatch-pg` on `127.0.0.1:55432` from a pgvector image, which
+   Dispatch's migrations need, and starts or reuses that container when it is already there. A
+   `dispatch-pg` made from another image is refused, with the commands that move its data onto the
+   right one.
 
 2. Build the web app:
 
@@ -89,8 +99,8 @@ Sign in, then open **Settings**:
   model. Saving checks that the GitHub App can read it.
 - **Delivery timeline**: name the repository that deploys, its deploy and pull-request-check
   workflows, the job whose success is a production deploy, and whose merged pull requests count.
-  Saving checks that the GitHub App can read the repository. Until it is set, the Delivery page
-  shows the same form.
+  Saving checks that the GitHub App can read the repository. Until it is set, the
+  [Delivery](/legion/dispatch/delivery/) page shows the same form.
 - **Agent tokens**: make a token for each agent you run.
   [Dispatch for agents](/legion/dispatch/for-agents/#connecting-an-agent) covers the rest.
 

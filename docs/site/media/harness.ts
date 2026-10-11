@@ -238,12 +238,15 @@ export interface DispatchWorkspace extends SeededWorkspace {
   readonly marginThread: { readonly commentId: string; readonly markId: string };
 }
 
-/** The e2e suite's realistic workspace (`seedWorkspace`), plus the one thing the docs show that it
- *  leaves out: a comment thread anchored on a spec. Call `reset()` first. */
+/** The e2e suite's realistic workspace (`seedWorkspace`), plus the two things the docs show that it
+ *  leaves out: a comment thread anchored on a spec, and the delivery measures' fixture
+ *  (`e2e/delivery-seed.ts`). Call `reset()` first. */
 export async function seedDispatchWorkspace(): Promise<DispatchWorkspace> {
   const { seedWorkspace } = await import("../../../packages/dispatch/e2e/workspace");
+  const { seedMeasuresFixture } = await import("../../../packages/dispatch/e2e/delivery-seed");
   const { createComment } = await dispatchApi();
   const seeded = await seedWorkspace();
+  await seedMeasuresFixture();
   const comment = await createComment(
     seeded.issues.workflow,
     {

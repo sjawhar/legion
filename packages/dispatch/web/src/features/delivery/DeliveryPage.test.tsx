@@ -1,26 +1,39 @@
-import { expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
-import type { DeliverySettings, DeliveryTimelineResponse } from "../../api/types";
+import type {
+  DeliveryMeasuresResponse,
+  DeliveryPR,
+  DeliverySettings,
+  DeliveryTimelineResponse,
+} from "../../api/types";
+import { KeymapProvider } from "../shell/KeymapProvider";
 import { DeliveryPage } from "./DeliveryPage";
 
 // The list view, so the page renders without the timeline chart, whose library needs a canvas.
 const DELIVERY_URL =
   "/delivery?mode=list&from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z";
 
-const emptyTimeline: DeliveryTimelineResponse = {
-  freshness: {
-    last_error: null,
-    last_event_at: null,
-    last_reconcile_at: null,
-    unfetchable_count: 0,
-  },
-  prs: [],
-  runs: [],
-  window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
+const emptyCounts = {
+  repo: {},
+  parent_agent: {},
+  session: {},
+  issue: {},
+  priority: {},
+  component: {},
+  author: {},
+  rework: {},
+  deployed: {},
+};
+
+const emptyFreshness: DeliveryTimelineResponse["freshness"] = {
+  last_error: null,
+  last_event_at: null,
+  last_reconcile_at: null,
+  unfetchable_count: 0,
 };
 
 const notConfigured = new ApiError(404, {
@@ -28,17 +41,99 @@ const notConfigured = new ApiError(404, {
   error: "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
 });
 
-function renderPage() {
+/** The measures panel's read for the page's window: nothing in it, so every test that is not
+ *  about the panel renders it without asserting on it. */
+const emptyMeasures: DeliveryMeasuresResponse = {
+  window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
+  computed_at: "2024-06-02T00:00:00Z",
+  measures: {
+    deploy_frequency: {
+      successful_deploys: 0,
+      deploys_with_prs: 0,
+      per_day: 0,
+      with_prs_per_day: 0,
+    },
+    lead_time: {
+      merge_to_production: { median_minutes: null, p90_minutes: null, max_minutes: null },
+      first_commit_to_production: { median_minutes: null, p90_minutes: null, max_minutes: null },
+      opened_to_production: { median_minutes: null, p90_minutes: null, max_minutes: null },
+      opened_to_merge: { median_minutes: null, p90_minutes: null, max_minutes: null },
+    },
+    change_failure_rate: {
+      per_pr: { confirmed: 0, pending: 0, rejected: 0, reverts: 0, total: 0, rate: 0 },
+      per_deploy: {
+        confirmed: 0,
+        pending: 0,
+        rejected: 0,
+        reverts: 0,
+        total: 0,
+        rate: 0,
+        confirmed_or_pending: 0,
+        upper_bound_rate: 0,
+      },
+    },
+    time_to_restore: { median_minutes: null },
+    rework_share: 0,
+    deploy_run_success: { concluded: 0, reached_production: 0, cancelled: 0, rate: null },
+    daily: [],
+  },
+  flags_source: "none",
+  unowned_p0: [],
+  targets: {
+    deploys_per_day: 20,
+    change_failure_rate: 0.05,
+    merge_to_production_minutes: 45,
+    opened_to_merge_median_minutes: 60,
+    deploy_run_success_rate: 0.9,
+    unowned_p0: 0,
+  },
+  status: {
+    deploys_per_day: false,
+    change_failure_rate: null,
+    change_failure_rate_upper_bound: null,
+    merge_to_production_median: null,
+    merge_to_production: null,
+    opened_to_merge: null,
+    deploy_run_success: null,
+    unowned_p0: true,
+  },
+  freshness: emptyFreshness,
+};
+
+const emptyTimeline: DeliveryTimelineResponse = {
+  color_counts: { repo: {}, author: {}, priority: {}, component: {}, parent_agent: {} },
+  components: {},
+  facet_counts: emptyCounts,
+  freshness: emptyFreshness,
+  issue_titles: {},
+  measures: emptyMeasures,
+  prs: [],
+  runs: [],
+  waiting: [],
+  window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
+};
+
+function renderPage(url = DELIVERY_URL) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   render(
-    <MemoryRouter initialEntries={[DELIVERY_URL]}>
+    <MemoryRouter initialEntries={[url]}>
       <QueryClientProvider client={queryClient}>
-        <DeliveryPage />
+        <KeymapProvider>
+          <DeliveryPage />
+        </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
   );
   return queryClient;
 }
+
+let getDeliveryMeasures: Mock<typeof api.getDeliveryMeasures>;
+beforeEach(() => {
+  getDeliveryMeasures = spyOn(api, "getDeliveryMeasures").mockResolvedValue(emptyMeasures);
+});
+afterEach(() => {
+  getDeliveryMeasures.mockRestore();
+});
 
 test("an unconfigured timeline shows the setup form in its place, reading no settings, and a save brings the timeline", async () => {
   const saved: DeliverySettings = {
@@ -66,7 +161,7 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     expect(
       await screen.findByRole("heading", { name: "Set up the delivery timeline" })
     ).toBeDefined();
-    expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
     // The timeline's DELIVERY_NOT_CONFIGURED already says no record is stored: the form's fields
     // are there at once, empty, with no read of the record and no loading line.
@@ -90,7 +185,7 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     });
     fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
 
-    expect(await screen.findByText("No PRs match the current filters.")).toBeDefined();
+    expect(await screen.findByText("No PRs in the current filter/window.")).toBeDefined();
     expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
     expect(putDeliverySettings).toHaveBeenCalledTimes(1);
     expect(getDeliveryTimeline).toHaveBeenCalledTimes(2);
@@ -125,7 +220,7 @@ test("a refetch of the unconfigured timeline, as tab focus starts, keeps the set
     expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe(
       "acme/widgets"
     );
-    expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
     expect(screen.queryByText("Loading delivery timeline…")).toBeNull();
 
     refetch.reject(notConfigured);
@@ -134,7 +229,7 @@ test("a refetch of the unconfigured timeline, as tab focus starts, keeps the set
     expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe(
       "acme/widgets"
     );
-    expect(screen.queryByRole("button", { name: "Show timeline" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();
@@ -169,8 +264,8 @@ test("a configured timeline renders with no setup form", async () => {
   try {
     renderPage();
 
-    expect(await screen.findByText("No PRs match the current filters.")).toBeDefined();
-    expect(screen.getByRole("button", { name: "Show timeline" })).toBeDefined();
+    expect(await screen.findByText("No PRs in the current filter/window.")).toBeDefined();
+    expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
     await waitFor(() => expect(getDeliveryTimeline).toHaveBeenCalledTimes(1));
     expect(getDeliverySettings).not.toHaveBeenCalled();
@@ -195,5 +290,364 @@ test("any other timeline failure keeps the page and offers Retry, not the setup 
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();
+  }
+});
+
+const listedPR: DeliveryPR = {
+  additions: 12,
+  author: "octocat",
+  components: ["ACME/api"],
+  created_at: "2024-06-01T00:00:00Z",
+  deletions: 3,
+  deploy_run: null,
+  deployed_at: null,
+  deployed_status: "waiting",
+  first_commit_at: null,
+  id: "acme/widgets#1",
+  issue: "ACME-1",
+  issue_title: "Ship widgets",
+  merged_at: "2024-06-01T01:00:00Z",
+  number: 1,
+  parent_agent: null,
+  partial: false,
+  priority: "P0",
+  repo: "acme/widgets",
+  rework: false,
+  sessions: [],
+  title: "feat: a waiting widget",
+  unfetchable_reason: null,
+  url: "https://github.com/acme/widgets/pull/1",
+};
+
+test("the facet column offers each value with its count, sends a pick to the server and keeps the view in the URL", async () => {
+  const timeline: DeliveryTimelineResponse = {
+    ...emptyTimeline,
+    components: { "ACME/api": { parent: null, title: "Public API" } },
+    facet_counts: {
+      ...emptyCounts,
+      component: { "ACME/api": 1 },
+      issue: { "ACME-1": 1 },
+      priority: { P0: 1, __no_issue__: 3 },
+      repo: { "acme/other": 5, "acme/widgets": 1 },
+    },
+    issue_titles: { "ACME-1": "Ship widgets" },
+    prs: [listedPR],
+  };
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(timeline);
+
+  try {
+    renderPage();
+
+    expect(await screen.findByText("1 PRs in current filter/window")).toBeDefined();
+    expect(screen.getByRole("button", { name: /^Repository/ }).textContent).toBe("Any repository");
+    fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
+    const priorityOptions = within(screen.getByRole("listbox", { name: "Priority options" }));
+    const options = priorityOptions.getAllByRole("option").map((option) => option.textContent);
+    expect(options).toEqual(["No issue3", "P01"]);
+    fireEvent.click(priorityOptions.getByRole("option", { name: /^P0/ }));
+
+    await waitFor(() =>
+      expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
+        expect.objectContaining({ priority: ["P0"], repo: [] })
+      )
+    );
+    expect(screen.getByRole("button", { name: /^Priority/ }).textContent).toBe("1 selected");
+
+    fireEvent.click(screen.getByRole("button", { name: /^Dispatch issue/ }));
+    expect(screen.getByRole("option", { name: /ACME-1 — Ship widgets/ })).toBeDefined();
+
+    const colorBy = screen.getByLabelText("Color merges by") as HTMLSelectElement;
+    expect([...colorBy.options].map((option) => option.textContent)).toEqual([
+      "Repository",
+      "Author",
+      "Priority",
+      "Component",
+      "Parent agent",
+    ]);
+    fireEvent.change(colorBy, { target: { value: "component" } });
+    expect(colorBy.value).toBe("component");
+    // The list's dot follows the colour-by facet, and the row reads its issue with its priority.
+    expect(screen.getByText("ACME-1 · P0")).toBeDefined();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("the header names the window and the freshness row the prototype's six sources", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    freshness: { ...emptyTimeline.freshness, last_error: "rate limited" },
+  });
+  try {
+    renderPage();
+    expect(await screen.findByRole("heading", { name: "Delivery timeline" })).toBeDefined();
+    const generated = screen.getByText(/^Generated .* · window/);
+    expect(generated.textContent).not.toContain("1970");
+    // No brush window in the URL: nothing to clear.
+    expect(screen.queryByRole("button", { name: "clear brush window" })).toBeNull();
+    const row = screen.getByRole("region", { name: "Source freshness" });
+    const sources = [...row.querySelectorAll("[data-source]")].map((node) =>
+      node.getAttribute("data-source")
+    );
+    expect(sources).toEqual(["prs", "runs", "ci", "dispatch", "agents", "events"]);
+    expect(within(row).getByText("Deploy runs never checked: rate limited")).toBeDefined();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("while a facet pick refetches, the header and freshness keep the last answer's time, never the epoch", async () => {
+  const refetch = Promise.withResolvers<DeliveryTimelineResponse>();
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline")
+    .mockResolvedValueOnce({
+      ...emptyTimeline,
+      facet_counts: { ...emptyCounts, priority: { P0: 1 } },
+      prs: [listedPR],
+    })
+    .mockReturnValueOnce(refetch.promise);
+  try {
+    renderPage();
+    await screen.findByText(/^Generated .* · window/);
+    fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
+    fireEvent.click(
+      within(screen.getByRole("listbox", { name: "Priority options" })).getByRole("option", {
+        name: /^P0/,
+      })
+    );
+    await waitFor(() => expect(getDeliveryTimeline).toHaveBeenCalledTimes(2));
+
+    // The previous answer stays on screen while the new read is in flight.
+    expect(screen.getByText(/^Generated .* · window/).textContent).not.toContain("1970");
+    const row = screen.getByRole("region", { name: "Source freshness" });
+    expect(row.querySelector('[data-source="dispatch"]')?.textContent).toMatch(
+      /^Dispatch \d+ s ago$/
+    );
+    refetch.resolve({ ...emptyTimeline, prs: [listedPR] });
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("the list sorts by its headers and a row opens the PR's details", async () => {
+  const shipped: DeliveryPR = {
+    ...listedPR,
+    deploy_run: 500,
+    deployed_at: "2024-06-01T01:40:00Z",
+    deployed_status: "deployed",
+    id: "acme/widgets#2",
+    merged_at: "2024-06-01T00:30:00Z",
+    number: 2,
+    title: "feat: a shipped widget",
+    url: "https://github.com/acme/widgets/pull/2",
+  };
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    components: { "ACME/api": { parent: null, title: "Public API" } },
+    prs: [listedPR, shipped],
+  });
+  try {
+    renderPage();
+    const titles = async () =>
+      (await screen.findAllByRole("row"))
+        .slice(1)
+        .map((row) => (row instanceof HTMLTableRowElement ? row.cells[3]?.textContent : undefined));
+    expect(await titles()).toEqual(["feat: a waiting widget", "feat: a shipped widget"]);
+    fireEvent.click(screen.getByRole("button", { name: /^Merged/ }));
+    expect(await titles()).toEqual(["feat: a shipped widget", "feat: a waiting widget"]);
+
+    fireEvent.click(screen.getByText("feat: a shipped widget"));
+    const details = await screen.findByRole("dialog", { name: "Details" });
+    expect(within(details).getByRole("link", { name: "Open on GitHub" }).getAttribute("href")).toBe(
+      "https://github.com/acme/widgets/pull/2"
+    );
+    expect(within(details).getByText("ACME-1 — Ship widgets")).toBeDefined();
+    expect(within(details).getByText("Public API")).toBeDefined();
+    expect(within(details).getByText("70 min")).toBeDefined();
+    fireEvent.click(within(details).getByRole("button", { name: "Close details" }));
+    expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("the measures panel sits between the freshness row and the view controls and shows the timeline's own measures, fetching no second read", async () => {
+  const withP0 = (repo: readonly string[]) => ({
+    ...emptyTimeline,
+    facet_counts: { ...emptyCounts, repo: { "acme/widgets": 1 } },
+    prs: [listedPR],
+    measures: {
+      ...emptyMeasures,
+      unowned_p0: [
+        {
+          key: repo.length === 0 ? "ACME-103" : "ACME-104",
+          title: "Production deploy gate flakes",
+        },
+      ],
+    },
+  });
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockImplementation(
+    async (options) => withP0(options.repo ?? [])
+  );
+  try {
+    renderPage();
+    const p0 = await screen.findByRole("link", { name: "ACME-103" });
+    expect(p0.getAttribute("href")).toBe("/issues/ACME-103");
+    const freshness = screen.getByRole("region", { name: "Source freshness" });
+    const panel = screen.getByLabelText("KPI targets");
+    const controls = screen.getByRole("group", { name: "View" });
+    expect(
+      freshness.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
+    expect(panel.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Repository/ }));
+    fireEvent.click(
+      within(screen.getByRole("listbox", { name: "Repository options" })).getByRole("option", {
+        name: /^acme\/widgets/,
+      })
+    );
+    // The facet refetches the timeline, and the panel follows that one answer.
+    expect(await screen.findByRole("link", { name: "ACME-104" })).toBeDefined();
+    expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
+      expect.objectContaining({ repo: ["acme/widgets"] })
+    );
+    expect(getDeliveryMeasures).not.toHaveBeenCalled();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("a brush window narrows the measures to it with a read of its own, leaves the timeline's read on the whole window, and clearing it returns to the timeline's measures", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    measures: { ...emptyMeasures, unowned_p0: [{ key: "ACME-1", title: "the whole window" }] },
+  });
+  getDeliveryMeasures.mockResolvedValue({
+    ...emptyMeasures,
+    unowned_p0: [{ key: "ACME-2", title: "the brush window" }],
+  });
+  const brushStart = "2024-06-01T06:00:00.000Z";
+  const brushEnd = "2024-06-01T12:00:00.000Z";
+  try {
+    renderPage(
+      `${DELIVERY_URL}&ws=${encodeURIComponent(brushStart)}&we=${encodeURIComponent(brushEnd)}`
+    );
+    expect(await screen.findByRole("link", { name: "ACME-2" })).toBeDefined();
+    expect(getDeliveryMeasures).toHaveBeenCalledTimes(1);
+    expect(getDeliveryMeasures).toHaveBeenLastCalledWith(
+      expect.objectContaining({ from: brushStart, to: brushEnd })
+    );
+    for (const [options] of getDeliveryTimeline.mock.calls) {
+      expect(options).toEqual(
+        expect.objectContaining({ from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" })
+      );
+    }
+
+    fireEvent.click(await screen.findByRole("button", { name: "clear brush window" }));
+    expect(await screen.findByRole("link", { name: "ACME-1" })).toBeDefined();
+    expect(getDeliveryMeasures).toHaveBeenCalledTimes(1);
+    expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
+      expect.objectContaining({ from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" })
+    );
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("a brushed measures failure keeps the timeline and offers its own Retry", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
+  getDeliveryMeasures
+    .mockRejectedValueOnce(new ApiError(503, { code: "INTERNAL", error: "database unavailable" }))
+    .mockResolvedValue(emptyMeasures);
+  try {
+    renderPage(
+      `${DELIVERY_URL}&ws=${encodeURIComponent("2024-06-01T06:00:00.000Z")}&we=${encodeURIComponent("2024-06-01T12:00:00.000Z")}`
+    );
+    expect(await screen.findByText("Couldn't load the delivery measures.")).toBeDefined();
+    expect(screen.getByText("No PRs in the current filter/window.")).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    expect(await screen.findByLabelText("KPI targets")).toBeDefined();
+    expect(screen.queryByText("Couldn't load the delivery measures.")).toBeNull();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("the drill-down is a dialog: focus moves into it, Escape closes it and focus returns to the row", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    prs: [listedPR],
+  });
+  try {
+    renderPage();
+    const row = await screen.findByRole("row", { name: /feat: a waiting widget/ });
+    row.focus();
+    fireEvent.keyDown(row, { key: "Enter" });
+    const details = await screen.findByRole("dialog", { name: "Details" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(
+        within(details).getByRole("button", { name: "Close details" })
+      )
+    );
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
+    expect(document.activeElement).toBe(row);
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+/** happy-dom has no canvas, and ECharts throws without a 2D context: a context that accepts every
+ *  call lets the timeline mount, though it paints nothing. */
+function stubCanvasContext(): () => void {
+  const original = HTMLCanvasElement.prototype.getContext;
+  const state: Record<string | symbol, unknown> = {};
+  const context = new Proxy(state, {
+    get(target, key) {
+      if (key in target) return target[key];
+      if (key === "measureText") return (text: string) => ({ width: text.length * 6 });
+      if (key === "getImageData") return () => ({ data: new Uint8ClampedArray(4) });
+      return () => ({ addColorStop() {} });
+    },
+    set(target, key, value) {
+      target[key] = value;
+      return true;
+    },
+  });
+  HTMLCanvasElement.prototype.getContext = (() => context) as unknown as typeof original;
+  return () => {
+    HTMLCanvasElement.prototype.getContext = original;
+  };
+}
+
+test("a brush window narrows the merges shown but the waiting line still counts what waits before it", async () => {
+  const restoreCanvas = stubCanvasContext();
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    // Merged 28 days before the window and not shipped: the server's `waiting`.
+    waiting: [{ merged_at: "2024-05-04T00:00:00Z", deployed_at: null }],
+    // Merged inside the window at 01:00, before the brush, and still waiting.
+    prs: [listedPR],
+  });
+  try {
+    renderPage(
+      "/delivery?from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z&ws=2024-06-01T06%3A00%3A00Z&we=2024-06-01T12%3A00%3A00Z"
+    );
+    const chart = await screen.findByRole("img", { name: /^Delivery timeline/ });
+    expect(chart.getAttribute("aria-label")).toContain(
+      "0 merged pull requests, 2 waiting to deploy at the start"
+    );
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+    restoreCanvas();
   }
 });

@@ -24,30 +24,6 @@
         }
       },
       "spec": {
-        "affinity": {
-          "podAntiAffinity": {
-            "requiredDuringSchedulingIgnoredDuringExecution": [
-              {
-                "labelSelector": {
-                  "matchExpressions": [
-                    {
-                      "key": "legion.dev/tree",
-                      "operator": "Exists"
-                    },
-                    {
-                      "key": "legion.dev/tree",
-                      "operator": "NotIn",
-                      "values": [
-                        "LEGION-208"
-                      ]
-                    }
-                  ]
-                },
-                "topologyKey": "kubernetes.io/hostname"
-              }
-            ]
-          }
-        },
         "automountServiceAccountToken": false,
         "containers": [
           {
@@ -79,7 +55,18 @@
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "architect",
-            "resources": {},
+            "resources": {
+              "limits": {
+                "cpu": "250m",
+                "ephemeral-storage": "10Gi",
+                "memory": "1Gi"
+              },
+              "requests": {
+                "cpu": "250m",
+                "ephemeral-storage": "1Gi",
+                "memory": "1Gi"
+              }
+            },
             "securityContext": {
               "allowPrivilegeEscalation": false,
               "capabilities": {
@@ -94,11 +81,11 @@
             "volumeMounts": [
               {
                 "mountPath": "/legion",
-                "name": "tree"
+                "name": "issue"
               },
               {
                 "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "tree",
+                "name": "issue",
                 "subPath": "sessions"
               },
               {
@@ -150,7 +137,18 @@
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "planner",
-            "resources": {},
+            "resources": {
+              "limits": {
+                "cpu": "250m",
+                "ephemeral-storage": "10Gi",
+                "memory": "1Gi"
+              },
+              "requests": {
+                "cpu": "250m",
+                "ephemeral-storage": "1Gi",
+                "memory": "1Gi"
+              }
+            },
             "securityContext": {
               "allowPrivilegeEscalation": false,
               "capabilities": {
@@ -165,11 +163,11 @@
             "volumeMounts": [
               {
                 "mountPath": "/legion",
-                "name": "tree"
+                "name": "issue"
               },
               {
                 "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "tree",
+                "name": "issue",
                 "subPath": "sessions"
               },
               {
@@ -221,7 +219,18 @@
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "implementer",
-            "resources": {},
+            "resources": {
+              "limits": {
+                "cpu": "750m",
+                "ephemeral-storage": "20Gi",
+                "memory": "6Gi"
+              },
+              "requests": {
+                "cpu": "750m",
+                "ephemeral-storage": "1Gi",
+                "memory": "6Gi"
+              }
+            },
             "securityContext": {
               "allowPrivilegeEscalation": false,
               "capabilities": {
@@ -236,11 +245,11 @@
             "volumeMounts": [
               {
                 "mountPath": "/legion",
-                "name": "tree"
+                "name": "issue"
               },
               {
                 "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "tree",
+                "name": "issue",
                 "subPath": "sessions"
               },
               {
@@ -294,11 +303,14 @@
             "name": "tester",
             "resources": {
               "limits": {
-                "memory": "4Gi"
+                "cpu": "750m",
+                "ephemeral-storage": "20Gi",
+                "memory": "6Gi"
               },
               "requests": {
-                "cpu": "1",
-                "memory": "2Gi"
+                "cpu": "750m",
+                "ephemeral-storage": "1Gi",
+                "memory": "6Gi"
               }
             },
             "securityContext": {
@@ -315,11 +327,11 @@
             "volumeMounts": [
               {
                 "mountPath": "/legion",
-                "name": "tree"
+                "name": "issue"
               },
               {
                 "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "tree",
+                "name": "issue",
                 "subPath": "sessions"
               },
               {
@@ -371,7 +383,18 @@
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "reviewer",
-            "resources": {},
+            "resources": {
+              "limits": {
+                "cpu": "750m",
+                "ephemeral-storage": "10Gi",
+                "memory": "4Gi"
+              },
+              "requests": {
+                "cpu": "750m",
+                "ephemeral-storage": "1Gi",
+                "memory": "4Gi"
+              }
+            },
             "securityContext": {
               "allowPrivilegeEscalation": false,
               "capabilities": {
@@ -386,11 +409,11 @@
             "volumeMounts": [
               {
                 "mountPath": "/legion",
-                "name": "tree"
+                "name": "issue"
               },
               {
                 "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "tree",
+                "name": "issue",
                 "subPath": "sessions"
               },
               {
@@ -442,7 +465,18 @@
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "merger",
-            "resources": {},
+            "resources": {
+              "limits": {
+                "cpu": "250m",
+                "ephemeral-storage": "10Gi",
+                "memory": "1Gi"
+              },
+              "requests": {
+                "cpu": "250m",
+                "ephemeral-storage": "1Gi",
+                "memory": "1Gi"
+              }
+            },
             "securityContext": {
               "allowPrivilegeEscalation": false,
               "capabilities": {
@@ -457,11 +491,11 @@
             "volumeMounts": [
               {
                 "mountPath": "/legion",
-                "name": "tree"
+                "name": "issue"
               },
               {
                 "mountPath": "/home/legion/.omp/profiles/legion/agent/sessions",
-                "name": "tree",
+                "name": "issue",
                 "subPath": "sessions"
               },
               {
@@ -513,7 +547,18 @@
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "workspace-fetch",
-            "resources": {},
+            "resources": {
+              "limits": {
+                "cpu": "250m",
+                "ephemeral-storage": "10Gi",
+                "memory": "1Gi"
+              },
+              "requests": {
+                "cpu": "250m",
+                "ephemeral-storage": "1Gi",
+                "memory": "1Gi"
+              }
+            },
             "securityContext": {
               "allowPrivilegeEscalation": false,
               "capabilities": {
@@ -564,18 +609,6 @@
                 "value": "/opt/legion/bin:/opt/omp/bin:/opt/codegraph/bin:/usr/local/bin:/usr/bin:/bin"
               },
               {
-                "name": "LEGION_WORKSPACE_INIT_LOCK_WAIT_SECONDS",
-                "value": "480"
-              },
-              {
-                "name": "LEGION_ROLE",
-                "value": "architect"
-              },
-              {
-                "name": "LEGION_GENERATION",
-                "value": "1"
-              },
-              {
                 "name": "XDG_CONFIG_HOME",
                 "value": "/home/legion/.config"
               },
@@ -594,7 +627,18 @@
             ],
             "image": "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef",
             "name": "workspace-init",
-            "resources": {},
+            "resources": {
+              "limits": {
+                "cpu": "250m",
+                "ephemeral-storage": "10Gi",
+                "memory": "1Gi"
+              },
+              "requests": {
+                "cpu": "250m",
+                "ephemeral-storage": "1Gi",
+                "memory": "1Gi"
+              }
+            },
             "securityContext": {
               "allowPrivilegeEscalation": false,
               "capabilities": {
@@ -609,7 +653,7 @@
             "volumeMounts": [
               {
                 "mountPath": "/legion",
-                "name": "tree"
+                "name": "issue"
               },
               {
                 "mountPath": "/var/run/legion/feed",
@@ -647,9 +691,9 @@
         ],
         "volumes": [
           {
-            "name": "tree",
+            "name": "issue",
             "persistentVolumeClaim": {
-              "claimName": "tree-legion-legion-legion-208"
+              "claimName": "issue-legion-legion-legion-208"
             }
           },
           {
@@ -839,10 +883,9 @@
         "metadata": {
           "labels": {
             "legion.dev/issue": "LEGION-208",
-            "legion.dev/project": "legion",
-            "legion.dev/tree": "LEGION-208"
+            "legion.dev/project": "legion"
           },
-          "name": "tree"
+          "name": "issue"
         },
         "spec": {
           "accessModes": [

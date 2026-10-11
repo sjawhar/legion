@@ -31,7 +31,7 @@ func RecordCreated(dir string, at time.Time) error {
 
 // Created is the moment RecordCreated recorded for the workspace at dir. ok is false when it holds
 // none: no workspace is there, or provisioning created it before it kept the record. The record is
-// on the tree volume, which every agent of the tree can write, so it is opened without following a
+// on the issue's volume, which every agent of the issue can write, so it is opened without following a
 // link or blocking on a special file and read only up to createdRecordLimit, and anything but one
 // RFC 3339 instant is refused, naming the file.
 func Created(dir string) (at time.Time, ok bool, err error) {
