@@ -65,8 +65,9 @@ ARG GO_VERSION=1.26.8
 ARG GO_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
 # gopls, which the go stage builds static from golang.org/x/tools/gopls at this tag (gopls/v<version>).
 ARG GOPLS_VERSION=0.23.0
-# The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 archive the
-# stage downloads for it, which the build checks before unpacking anything.
+# The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 download the
+# stage fetches for it (an archive, or kubectl's single binary), which the build checks before unpacking
+# or installing anything.
 ARG UV_VERSION=0.12.21
 ARG UV_SHA256=23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0
 # Node 24 LTS.
@@ -77,9 +78,11 @@ ARG AWS_CLI_VERSION=2.37.6
 # `.sig` gpg verified as a good signature from the AWS CLI Team key
 # FB5DB77FD5C118B80511ADA8A6310ACC4672475C. A version bump repeats that check before taking its hash.
 ARG AWS_CLI_SHA256=cd40c7d1f41b3a4964e77a65377e480d71fe6ebc96bbbb64eb2239d69af6fbb2
-# kubectl, whose minor version stays within one of the API server of the cluster the workers run on
-# (Kubernetes' version skew policy: kubectl supports one minor version either side of its server). The
-# pin is the SHA-256 Kubernetes publishes beside the binary
+# kubectl, pinned to the minor version of the API server of the production cluster the Legion workers
+# run on (v1.35.7 when this pin was set): Kubernetes' version skew policy supports kubectl one minor
+# version either side of its server, so a bump follows that server's minor. A deployment whose cluster
+# runs another minor layers its own kubectl on this image (docs/kubernetes.md, "Per-deployment
+# toolchains layer on top"). The pin is the SHA-256 Kubernetes publishes beside the binary
 # (https://dl.k8s.io/release/v<version>/bin/linux/amd64/kubectl.sha256), taken only once the binary's
 # keyless Sigstore signature (kubectl.sig and kubectl.cert, beside it) verifies for the release identity
 # krel-staging@k8s-releng-prod.iam.gserviceaccount.com issued by https://accounts.google.com. A version
@@ -335,10 +338,12 @@ RUN set -eu; \
 # than a go-licenses report like `legion`'s, because go-licenses (go-third-party-notices.sh's
 # v2.0.1, under Go 1.26.8) finds no license for one of them, github.com/segmentio/asm, and would fail
 # the build. kubectl's section names the go.mod of the Kubernetes release its binary is built from,
-# the same way; that repository keeps the license text of every module it links under LICENSES/vendor
-# at the release's tag. The language servers' own LICENSE files come from their installed trees in the
-# toolchain stage; TypeScript's ThirdPartyNoticeText.txt and the typeshed LICENSE pyright bundles come
-# with them. A missing or empty file fails the build. The fetches depend only on the pins, so they come
+# the same way. The k8s.io modules that go.mod replaces with ./staging/src, kubectl itself among them,
+# are that release's own source, each with its license file under staging/src/k8s.io at the release's
+# tag; the repository keeps the license text of every other module it links under LICENSES/vendor
+# there. The language servers' own LICENSE files come from their installed trees in the toolchain
+# stage; TypeScript's ThirdPartyNoticeText.txt and the typeshed LICENSE pyright bundles come with
+# them. A missing or empty file fails the build. The fetches depend only on the pins, so they come
 # first, in a layer a source change reuses; the assembly reads the other stages' outputs after them.
 FROM tools AS notices
 ARG BUN_VERSION
@@ -391,7 +396,7 @@ RUN set -eu; \
     curl -fsSIo /dev/null "$(gh_raw_url golang/tools "gopls/v${GOPLS_VERSION}" gopls/go.mod)"; \
     printf 'gopls links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/golang/tools/blob/gopls/v%s/gopls/go.mod, the module file of the release this image builds; the\nlicense of each is published with its source and shown on pkg.go.dev.\n' "$GOPLS_VERSION" > /in/gopls-modules; \
     curl -fsSIo /dev/null "$(gh_raw_url kubernetes/kubernetes "v${KUBECTL_VERSION}" go.mod)"; \
-    printf 'kubectl links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/kubernetes/kubernetes/blob/v%s/go.mod, the module file of the release this image installs; the\nlicense of each is in https://github.com/kubernetes/kubernetes/tree/v%s/LICENSES/vendor.\n' "$KUBECTL_VERSION" "$KUBECTL_VERSION" > /in/kubectl-modules
+    printf 'kubectl links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/kubernetes/kubernetes/blob/v%s/go.mod, the module file of the release this image installs.\nThe k8s.io modules that file replaces with ./staging/src (kubectl itself, client-go, apimachinery, cli-runtime\nand component-base among them) are source of the Kubernetes release itself, each with its license file under\nhttps://github.com/kubernetes/kubernetes/tree/v%s/staging/src/k8s.io; the license of every other module is in\nhttps://github.com/kubernetes/kubernetes/tree/v%s/LICENSES/vendor.\n' "$KUBECTL_VERSION" "$KUBECTL_VERSION" "$KUBECTL_VERSION" > /in/kubectl-modules
 COPY scripts/assemble-third-party-notices.sh /usr/local/bin/
 COPY --from=go /out/go-notices /in/go-notices
 COPY --from=plugin /out/pi-envoy/dist/THIRD_PARTY_NOTICES /in/pi-envoy-notices

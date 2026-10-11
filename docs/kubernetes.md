@@ -47,11 +47,14 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); the Go toolchain
   at `go.work`'s version — `go` and `gofmt`, the tree at `/opt/go` (its `GOROOT`, which `go` finds by
   resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`); the AWS CLI v2's `aws`; and
-  `kubectl`, whose minor version stays within one of the API server of the cluster the workers run on
-  (Kubernetes' version skew policy) — all at `/usr/local/bin`, which is on the image's `PATH` and every
-  pod's. Each is a pinned release whose linux/amd64 download the build checks against a pinned SHA-256
-  before unpacking or installing it (the `ARG`s at the top of `worker.Dockerfile`; `kubectl`'s is the
-  SHA-256 Kubernetes publishes beside the binary, taken once the binary's Sigstore signature verifies).
+  `kubectl` 1.35, the minor version of the API server of the production cluster the workers run on,
+  which Kubernetes' version skew policy requires within one minor of kubectl (a deployment whose
+  cluster runs another minor layers its own `kubectl` on the image:
+  [Per-deployment toolchains layer on top](#per-deployment-toolchains-layer-on-top)) — all at
+  `/usr/local/bin`, which is on the image's `PATH` and every pod's. Each is a pinned release whose
+  linux/amd64 download the build checks against a pinned SHA-256 before unpacking or installing it
+  (the `ARG`s at the top of `worker.Dockerfile`; `kubectl`'s is the SHA-256 Kubernetes publishes beside
+  the binary, taken once the binary's Sigstore signature verifies).
   The image carries the client and no credential for it: what a worker reaches with `kubectl` is
   whatever Kubernetes identity the operator's pod gives it. A corepack shim runs the version a project's
   `packageManager` names, or else the default that corepack ships (the image sets
