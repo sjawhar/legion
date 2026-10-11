@@ -452,9 +452,10 @@ cross: on 60,000 issues the two deadlocked (`40P01`) in each of two runs, and wi
 the reparent waited for the migration and committed. Neither refuses a row; both censuses answer
 `0`.
 
-Migration `0090_search_vector_warning` replaces `search_vector`'s body so that a cut raises one
-Postgres `WARNING` naming the text's length, how much of it the vector holds and the limit, never
-the text. Replacing the function locks no table and changes no stored row; its census answers `0`.
+Migration `0090_search_vector_warning` replaces `search_vector`'s body so that a call that cuts
+raises one Postgres `WARNING` naming the text's length, how much of it the vector holds and the
+limit, never the text. Replacing the function locks no table and changes no stored row; its census
+answers `0`.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -652,13 +653,20 @@ document's 1 MiB: about 700 KB of `w000001 w000002 …`, or 475 KB of UUIDs. `se
 text whole when its vector fits, and otherwise the longest of its first half, quarter, eighth, …
 that fits, cut between two words, so keyword search finds such a document, comment, ask or message
 by the whole words in that opening part and not by the words after it; a text with no whitespace
-before the cut is found by none of its own. Each cut raises one Postgres `WARNING` (`0090`), which
-Dispatch logs at WARN as `dispatch: postgres notice` with its severity, code and message, so a cut
-text shows in Dispatch's log as `search_vector cut a text of 800000 characters to its first 400000
-…`; Dispatch logs every notice its connections receive, and a milder one at INFO. An issue's key is
-always indexed whole. Meaning search, where it is configured, ranks by an embedding of a text's
-first 32,000 characters (`embed.maxInputChars`), not by its vector, so it can still return such a
-text for a query whose words the vector does not hold.
+before the cut is found by none of its own. Each call that cuts raises one Postgres `WARNING`
+(`0090`), which Dispatch logs at WARN as `dispatch: postgres notice` with its severity, code,
+message and `where`, the context naming the trigger function, so a cut text shows in Dispatch's log
+as `search_vector cut a text of 800000 characters to its first 400000 …` beside, for a document,
+`artifact_versions_search()`. An issue title is cut twice on one write, for its vector and for its
+lexemes, so it logs two; the 1,000-character title cap keeps every title the API writes far below
+the limit. Dispatch logs every notice its connections receive, the census's included, and one
+milder than `WARNING` at Debug: Postgres's own text search raises such NOTICEs on ordinary traffic
+(`word is too long to be indexed` for a run past 2,047 bytes, from `to_tsvector` on a write and
+`ts_headline` on a search; `text-search query contains only stop words` for a search of stop
+words), and at Info they would flood the log. An issue's key is always indexed whole. Meaning
+search, where it is configured, ranks by an embedding of a text's first 32,000 characters
+(`embed.maxInputChars`), not by its vector, so it can still return such a text for a query whose
+words the vector does not hold.
 
 Each kind of content is ranked on a list of its own, by `ts_rank_cd`, then recency, then id, and
 the five lists are merged by reciprocal rank fusion: a hit at position p of its list scores

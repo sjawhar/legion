@@ -21,6 +21,12 @@ database has not applied, read-only, run before the service rolls (README
 "Pre-deploy census"); `runSubcommand` refuses an argument it does not know with
 exit 2 instead of serving, since serving migrates.
 
+No `RAISE` in a migration, or in a function or trigger a migration defines, may embed
+caller-written text (a title, a body, a query, an email): only counts, lengths, ids, codes and
+table or function names. Dispatch logs every notice its Postgres connections receive
+(`store.logNotice`: a `WARNING` at WARN with the context Postgres attaches, anything milder at
+Debug), so a notice's text reaches the log whole.
+
 Every Dispatch setting `cmd/dispatch` reads is a row of the settings table
 (`cmd/dispatch/settings.go`): `main` reads every row once (`processSettings`),
 `resolveBootConfig` and the subcommands take their values from that read

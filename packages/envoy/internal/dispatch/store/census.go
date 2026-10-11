@@ -30,6 +30,7 @@ func census(ctx context.Context, databaseURL string, fsys fs.FS, options pgmigra
 		return nil, fmt.Errorf("parse Postgres URL: %w", err)
 	}
 	config.RuntimeParams["application_name"] = censusApplicationName
+	config.OnNotice = logNotice
 	// The census's one author-written statement is pinned to the extended protocol on its own
 	// call (pgmigrate.Census); this pins the connection's default too, so a connection string
 	// asking for the simple protocol changes nothing the census runs.

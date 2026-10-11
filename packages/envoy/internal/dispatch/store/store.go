@@ -69,17 +69,25 @@ func Open(ctx context.Context, databaseURL string) (*Store, error) {
 }
 
 // logNotice logs a notice a Postgres connection receives, which pgx otherwise drops. A WARNING is
-// logged at WARN: search_vector raises one when it cuts a text to fit (0090), and that cut is
-// otherwise silent. Anything milder - a `create table if not exists` that finds its table, which
-// every boot's migration runner meets - is logged at INFO. The rooms and health pools copy this
-// configuration (Pool.separate), so their connections log the same way.
+// logged at WARN with the context Postgres attached (Where), which names the function and trigger
+// that raised it: search_vector raises one when it cuts a text to fit (0090), a cut nothing else
+// records. Anything milder is logged at Debug, because Postgres's own text search raises NOTICEs on
+// ordinary traffic - "word is too long to be indexed" from to_tsvector and ts_headline for any
+// unbroken run past 2,047 bytes, "text-search query contains only stop words" for a search of
+// stop words - and the boot's `create table if not exists` raises one too; at INFO they would
+// flood the log with lines nobody acts on. The rooms and health pools copy this configuration
+// (Pool.separate), and the census's connection sets it itself.
+//
+// A notice reaches the log whole, so no RAISE a migration or one of its functions makes may embed
+// caller-written text: counts, lengths, ids and codes only (cmd/dispatch/AGENTS.md).
 func logNotice(_ *pgconn.PgConn, notice *pgconn.Notice) {
-	level := slog.LevelInfo
+	level := slog.LevelDebug
 	if notice.SeverityUnlocalized == "WARNING" {
 		level = slog.LevelWarn
 	}
 	slog.Log(context.Background(), level, "dispatch: postgres notice",
-		"severity", notice.SeverityUnlocalized, "code", notice.Code, "message", notice.Message)
+		"severity", notice.SeverityUnlocalized, "code", notice.Code, "message", notice.Message,
+		"where", notice.Where)
 }
 
 // declaresPoolSize reports whether databaseURL carries poolSizeParam. It asks pgx.ParseConfig
