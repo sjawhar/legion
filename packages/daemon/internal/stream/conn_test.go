@@ -728,3 +728,57 @@ func TestAgentSecretsEnrollmentNeedsAnID(t *testing.T) {
 		t.Fatalf("err = %v, want the frame's own refusal", err)
 	}
 }
+
+func TestAgentSecretsTokenIsReadByTheShim(t *testing.T) {
+	h := startListener(t, harnessOptions{})
+	p := h.connect(testToken)
+	var token string
+	result := async(func() (err error) {
+		token, err = h.conn().AgentSecretsToken(context.Background())
+		return err
+	})
+	request := p.expect(shimwire.TypeAgentSecretsToken).(shimwire.AgentSecretsToken)
+	if request.ID == "" {
+		t.Fatalf("the shim received %+v", request)
+	}
+	p.send(shimwire.AgentSecretsTokenResult{ID: request.ID, OK: true, PodToken: "eyJhbGciOiJSUzI1NiJ9.e30.fresh"})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatal(err)
+	}
+	if token != "eyJhbGciOiJSUzI1NiJ9.e30.fresh" {
+		t.Fatalf("token %q, want the one the shim read", token)
+	}
+}
+
+// A shim that cannot read its token refuses the request, and a shim built before the request
+// forwards it to OMP, which refuses it as an unknown command: both are runtime.ErrTokenRefused,
+// which no retry with the same shim changes.
+func TestATokenRequestTheShimCannotAnswerIsRefused(t *testing.T) {
+	for name, answer := range map[string]func(id string) shimwire.Frame{
+		"the shim refuses it": func(id string) shimwire.Frame {
+			return shimwire.AgentSecretsTokenResult{ID: id, OK: false, Error: "agent-secrets: read the projected token /var/run/token: no such file or directory"}
+		},
+		"an older shim forwards it to OMP": func(id string) shimwire.Frame {
+			return shimwire.Response{ID: id, Command: shimwire.TypeAgentSecretsToken, Success: false, Error: "Unknown command: agent-secrets-token"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := startListener(t, harnessOptions{})
+			p := h.connect(testToken)
+			result := async(func() error {
+				_, err := h.conn().AgentSecretsToken(context.Background())
+				return err
+			})
+			request := p.expect(shimwire.TypeAgentSecretsToken).(shimwire.AgentSecretsToken)
+			p.send(answer(request.ID))
+			err := awaitResult(t, result)
+			var refused *RefusedError
+			if !errors.Is(err, runtime.ErrTokenRefused) || !errors.As(err, &refused) || refused.Command != shimwire.TypeAgentSecretsToken {
+				t.Fatalf("err = %v, want a RefusedError that is runtime.ErrTokenRefused", err)
+			}
+			if errors.Is(err, runtime.ErrPromptRefused) {
+				t.Fatal("a refused token request reads as a refused prompt")
+			}
+		})
+	}
+}

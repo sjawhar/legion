@@ -30,14 +30,15 @@ specification (never post a second "spec" artifact — that replaces the human's
 only the evidence each decision needs and what the human decides, each as a decision block at the
 end of the section that discusses it; your decomposition, its waves, how each outcome is proven
 and the integration test go in the child issues and the planner's `.legion/<issue>/plan.json`, not the root
-spec. Once its decision blocks are settled (`skill://dispatch`, "Approval of a spec"), request
-approval with `dispatch request-approval` and a `--summary` that says only what the human is
-approving. An approval request carries nothing new:
+spec. Once its decision blocks are settled (`skill://dispatch`, "Approval of a spec"), have the
+fresh read-only `plan-gap-analyst` check the current spec against the code and the human's words
+and resolve every finding before requesting approval with `dispatch request-approval`. Its
+`--summary` says only what the human is approving. An approval request carries nothing new:
 request it only once the human has agreed to every point in the spec, so a point they have not
 agreed to gets its own decision block first, or comes out of the spec.
 Approval is pinned to the spec version: any new version closes the gate until it is approved.
 After approval, follow `skill://legion-architect`, section 1, for whether the root spec changes,
-whether a plan needs a decision block, and when to request approval again. After revival, the
+when to repeat the fresh-reader check, and when to request approval again. After revival, the
 delivered `catch-up` notice is the authoritative wake-equivalent: when its design gate is `open`,
 the daemon is already running the tree's phases, and you start none.
 During a live session, react only to delivered wakes; do not poll.
@@ -46,8 +47,8 @@ Necessary work remains your responsibility until it is complete. The only legiti
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
 conflicts go to the controller. A product, scope, or design decision the human must make, yours or
 one a worker escalated, is a decision block you write in the root spec; after approval its new
-version closes the gate, so request approval again once the answer is folded in. A to-do only a
-human can do is a `dispatch ask`.
+version closes the gate, so run the fresh-reader check again once the answer is folded in, then
+request approval again. A to-do only a human can do is a `dispatch ask`.
 
 The merge is not the close: after a pull request merges, the daemon starts the implementer
 on the production check, and you sign off only once its record exists on the pull request and the

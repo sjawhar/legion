@@ -172,7 +172,7 @@ func TestAStateReleasedAsALookupFindsItTakesNoWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse the seed tree: %v", err)
 	}
-	ledger.seeded(id, tree, actor)
+	ledger.seeded(id, renderedTree{tree: tree}, actor)
 	if err := ledger.Commit(ctx); err != nil {
 		t.Fatalf("commit the seeding transaction: %v", err)
 	}

@@ -46,10 +46,17 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `node`, `npm`, `npx` and `corepack` from Node 24 LTS, with `pnpm`, `pnpx`, `yarn` and `yarnpkg` linked
   to corepack's shims (the links `corepack enable` would write, which uid 1000 cannot); the Go toolchain
   at `go.work`'s version — `go` and `gofmt`, the tree at `/opt/go` (its `GOROOT`, which `go` finds by
-  resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`); and the AWS CLI
-  v2's `aws` — all at `/usr/local/bin`, which is on the image's `PATH` and every pod's. Each is a pinned
-  release whose linux/amd64 archive the build checks against a pinned SHA-256 before unpacking it (the
-  `ARG`s at the top of `worker.Dockerfile`). A corepack shim runs the version a project's
+  resolving the `/usr/local/bin/go` symlink; the image sets no `GOROOT`); the AWS CLI v2's `aws`; and
+  `kubectl` 1.35, the minor version of the API server of the production cluster the workers run on,
+  which Kubernetes' version skew policy requires within one minor of kubectl (a deployment whose
+  cluster runs another minor layers its own `kubectl` on the image:
+  [Per-deployment toolchains layer on top](#per-deployment-toolchains-layer-on-top)) — all at
+  `/usr/local/bin`, which is on the image's `PATH` and every pod's. Each is a pinned release whose
+  linux/amd64 download the build checks against a pinned SHA-256 before unpacking or installing it
+  (the `ARG`s at the top of `worker.Dockerfile`; `kubectl`'s is the SHA-256 Kubernetes publishes beside
+  the binary, taken once the binary's Sigstore signature verifies).
+  The image carries the client and no credential for it: what a worker reaches with `kubectl` is
+  whatever Kubernetes identity the operator's pod gives it. A corepack shim runs the version a project's
   `packageManager` names, or else the default that corepack ships (the image sets
   `COREPACK_DEFAULT_TO_LATEST=0`, so never npm's newest release), fetched on first use into the user's
   corepack cache. Node, Go and the AWS CLI keep their trees at `/opt/node`, `/opt/go` and
@@ -130,15 +137,18 @@ leaves those agents' models unresolved (`--skip-agent-models`). It then checks e
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
 would find each — `omp setup python --check`, the `chromium` on `PATH` (or the browser a
 `PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
-profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun` and `uv` on `PATH` with `go version`
+profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv` and `kubectl` on `PATH` with `go version`
 running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
 (`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value).
 An image row the image carries prints `present` with its evidence (`codegraph`'s: the CLI on PATH and
 the plugin enabled in the profile's lock, which a pod's launch loads with extension discovery on). A live row prints
-`live` with the check still to prove it, a deployment row `reported`, a withheld row `withheld` with
-its ruling, and an image row the image lacks `missing` with why.
+`reported` (``each session reports it at start; `legion state` renders it: <summary>``: the probe
+proves nothing of it; [The deployment's capability report](#the-deployments-capability-report) says
+what each session measures), a deployment row `reported` too (the daemon reports it from the
+deployment's configuration), a withheld row `withheld` with its ruling, and an image row the image
+lacks `missing` with why.
 A build whose image lacks a capability fails, the probe naming every missing one. The daemon's Agent Sandbox runtime runs the same command in a probe
 Sandbox, `legion-probe-<project>-<digest12>`, with its own contract, under the operator's pod, at every
 boot, and requires `agent-models=resolved`: each agent's model resolves, with a working key, as the task
@@ -156,12 +166,12 @@ mark for the deployment's capability report ([The deployment's capability report
 A step of its own, before that final one, runs every toolchain command listed above as `legion`, from
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
-version` with `go env GOROOT` required to be `/opt/go`, `gofmt`, and trixie's `python3`, `curl`, `wget`
-and `chromium --version` included — the corepack shims fetching their shipped default pnpm and yarn
+version` with `go env GOROOT` required to be `/opt/go`, `gofmt`, `kubectl version --client`, and trixie's
+`python3`, `curl`, `wget` and `chromium --version` included — the corepack shims fetching their shipped default pnpm and yarn
 into a scratch directory the step removes. It reruns only when the toolchain or an earlier layer
 changes, so a commit that only rebuilds `legion` needs no package registry.
 To check a published image's toolchain end to end, a project Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && go version && gopls version && python3 --version && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
@@ -808,7 +818,9 @@ runs the earlier release:
      `legion controller start` refuses a `pi-legion` speaking another contract (`probeAndMint` in
      `cmd/legion/controller.go`), and the daemon refuses a `legion` or `pi-legion` of another
      contract with 409 (`internal/api/controller.go`). That `pi-legion` release must be published
-     before the rollout.
+     before the rollout. Contract 20 adds the controller's credential route
+     (`POST /legion/v1/controller/github-credential`) and the controller pod's `GH_*` environment
+     variables (LEGION-668).
 
 **Why deleting a live tree's Sandboxes loses its work.** On the earlier release the tree volume is
 the root Sandbox's `volumeClaimTemplates` entry, so Agent Sandbox creates the volume's claim with
@@ -894,8 +906,8 @@ runtime:
       volume_mounts: [...]
 bind: <the daemon host's own address, or 0.0.0.0 once advertise_host names one>
 advertise_host: <optional: a stable Service name, e.g. legion-daemon-<project>.<namespace>.svc, every pod dials instead of bind, at worker_stream_port>
-worker_stream_port: 13371
-daemon_url: http://<the address pods reach the daemon at>:13370
+worker_stream_port: <the port advertise_host or bind serves it on>
+daemon_url: http://<the address pods reach the daemon at>:<the daemon's own port>
 capabilities:                   # optional: the deployment capabilities decided by name, with the reason (The deployment's capability report, below); a gap is reported, never refused
   decided: { secrets: "<reason>", model-fallback: "<reason>", resource-limits: "<reason>", pool-capacity: "<reason>" }
 ```
@@ -1180,9 +1192,10 @@ every worker is a full agent), 20 rows, each checked at one site. The image rows
 `eval-python`, `browser`, `lsp`, `codegraph`, `skills`, `toolchain`) are `legion probe-image`'s
 ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), `present` once
 the probe passed; the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`,
-`dispatch-envoy-tools`, `github`) are to be proved by a live check against a running pod —
-dispatch://LEGION-633's integration check and dispatch://LEGION-629's checks, none of which runs
-yet, so each reads `live` with the check it awaits, never as proved; the withheld rows carry the ruling that keeps them from
+`dispatch-envoy-tools`, `github`) are proved by each session at its start, which measures them
+inside its own Oh My Pi and reports them with its ready, and the daemon renders each from what its
+live sessions reported (LEGION-663; the paragraphs after the deployment rows); the withheld rows
+carry the ruling that keeps them from
 every worker (`network`: dispatch://LEGION-5, the pod is the boundary; `operator-setup`:
 dispatch://LEGION-200, Legion owns its dependencies; `production-identities`: dispatch://LEGION-551
 and dispatch://LEGION-205); and the four deployment rows are the daemon's to measure from its own
@@ -1213,20 +1226,84 @@ A deployment row is `present` when the deployment satisfies it, `decided` when `
 `capabilities.decided.<name>: "<reason>"` records a decision on it (the report shows the reason in
 the gap's place; a decision on a satisfied row is moot and the row reads present), and `open`
 otherwise, carrying the line that records one. A name that is not one of the four is refused at
-load naming them; a blank reason too. The report appears in four places: the daemon's log, one
-warning per open row at boot and again at the first controller tick after the set of open rows
-changed (the tick asks only when it wakes the controller — one registered, no tick pending — and the
-broker login reaching `issued` is the one change a running daemon sees), as `capability <name> is open: <detail>;
-to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"`; `legion state
---json` under `capabilities` (daemon API contract 16: every row as `{name, status, detail,
-decision?, configLine?}`, `status` one of `present`, `installed`, `unchecked`, `live`, `withheld`,
-`decided` or `open`, the image rows `present` once the probe passed and `unchecked` before it or
-under tmux);
-the controller's `tick` notice, whose `openCapabilities` names the open rows so the day's report
-names each gap (`skills/legion-controller/SKILL.md`); and `legion start --check-config`, which prints
-after its OK line the rows the file alone leaves open. Nothing refuses to start over a gap: a
-daemon that would not run its pods would itself keep workers from working, so a gap is the
-operator's to close or to decide, by name and with the reason. The example `legion.yaml`
+load naming them; a blank reason too.
+
+A live row is proved by each session at its start. The Legion extension
+(`packages/pi-legion/src/capability-report.ts`) measures the six inside Oh My Pi once
+`claims/register` has answered — concurrently, while the jj attribution and the Envoy role claim
+run — and sends the report with `claims/ready` (`capabilities`: `measuredAt`, `elapsedMs` and
+`rows[{name, ok, detail}]`), each check within 8 s and the whole report within 10 s. A check that
+fails, throws or runs past its budget is a failing row carrying the reason, never a stopped
+session, and the daemon normalises what arrives (a live row the session left out reads `not
+reported by this session`, a name the table has no live row for is dropped, a detail is cut at
+1024 bytes) and never refuses a ready for what it reports. The ready after a regained Envoy role
+re-sends the same report; the controller's ready carries none. Each row's check, and the fact a
+passing one reports:
+
+- `subagents`: `pi.agents` is exposed, the `task` tool is registered, and every agent the
+  registration's `promptAgents` names (the task agents the role's prompts dispatch) is resolved by
+  `discoverAgents` in the workspace and none is in `task.disabledAgents` — `task resolves <n>
+  agents, every one the prompts dispatch`.
+- `web-search`: `web_search` is registered and one `runSearchQuery` for `jujutsu version control`
+  is answered by a provider — `web_search registered; provider <name> answered in <n> ms`.
+- `mcp`: every server the workspace's `.mcp.json` or `.omp/mcp.json` or the Oh My Pi profile
+  configures is connected, measured through a second, short-lived client per server that the check
+  disconnects (the session's own clients are the host's), so a server that admits one client reads
+  open with its error — `connected: <name> (<config file>), …`, or `no MCP server configured`.
+- `repository-extensions`: every `.omp/extensions/` module, `.omp/skills/*/SKILL.md` and
+  `.claude/skills/*/SKILL.md` the workspace carries is among what Oh My Pi discovers —
+  `discovered: <paths>`, or `the repository carries no .omp/extensions, .omp/skills or
+  .claude/skills`.
+- `dispatch-envoy-tools`: the ten `envoy_*` tools are registered and `dispatch read --issue
+  <issue>` answers, which is why the row's summary reads "reaches Dispatch through the `dispatch`
+  command and Envoy through the pi-envoy tools" — `ten Envoy tools registered; dispatch read
+  <issue> answered from <path>`.
+- `github`: `gh api graphql -f query='{ viewer { login } }'` answers the role's App login under the
+  role's token file (REST `GET /user` is not a call an App installation token may make, so the row
+  never reads it) — `gh viewer login: <login>`.
+
+The daemon renders a live row from its live sessions' reports. A live session is a claim that is
+ready, working or idle whose report came from its current process (the report's `incarnation` is
+the claim's locator's), so a claim relaunched, suspended or retired since its session reported
+keeps no row open until the new process reports. The row is `present` when no live session fails
+it and at least one proved it, its detail `proved by <N> live session(s); latest pod
+<sandbox>/<container> (<role>, <issue>) measured <RFC 3339 time>: <fact>` (the latest
+measurement; `pane <window>:<pane>` in place of the pod under tmux); `open` when any live session
+fails it, its detail naming each failing session as `pod <sandbox>/<container> (<role>, <issue>):
+<fact>`, `; `-joined, the first three then ` +N more`, and carrying no `configLine` — no
+`capabilities.decided` line exists for a live row, since a session's failing check is a fact to
+fix (the operator's, or the issue's architect's), not a deployment decision, and `legion start
+--check-config` says nothing of live rows; and `unchecked` before any live session has reported,
+its detail `no session has reported yet (<ruling>): <summary>`, where the ruling is the issue whose
+check proves the row (`repository-extensions`: dispatch://LEGION-629; `github`:
+dispatch://LEGION-631; the other four: dispatch://LEGION-663). Nothing measures again
+mid-session, so a session that booted during a Dispatch, GitHub or search-provider outage reads
+open until its next boot.
+
+The report appears in four places. The daemon's log: at each ready that carries a report, one
+`capabilities: session reported` line (`claim`, `role`, `issue`, `locator`, `incarnation`,
+`elapsedMs` and the `rows` as JSON) and one `capability <name> is open: <fact>` warning per row
+the session's check failed, the session in the same attributes; and one warning per open row at
+boot and again at the first controller tick after the set of open rows changed (the tick asks
+only when it wakes the controller — one registered, no tick pending — and the broker login
+reaching `issued` and a live session's report of a row its check failed are the changes a running
+daemon sees), as `capability <name> is open: <detail>; to record a decision, add to legion.yaml:
+capabilities.decided.<name>: "<reason>"` on a deployment row and `capability <name> is open: pod
+<sandbox>/<container> (<role>, <issue>): <fact>` — the row's rendered detail — on a live one.
+`legion state --json`: under `capabilities` every row as `{name, status, detail, decision?,
+configLine?}`, `status` one of `present`, `installed`, `unchecked`, `withheld`, `decided` or
+`open` (daemon API contract 16 added the list and contract 21 dropped `live` from it; the image
+rows are `present` once the probe passed and `unchecked` before it or under tmux), and under each
+claim's `capabilities` (`issues.<KEY>.architect` and `issues.<KEY>.workers.<role>.claim`) that
+claim's latest report — `measuredAt`, `incarnation`, `ok` (the names its checks passed) and
+`open[{name, detail}]` — whatever process sent it; compare its `incarnation` with the claim's
+`locator.incarnation` to tell the running process's report from a predecessor's. The controller's
+`tick` notice, whose `openCapabilities` names the open rows, live rows beside the deployment gaps,
+so the day's report names each (`skills/legion-controller/SKILL.md`). And `legion start
+--check-config`, which prints after its OK line the rows the file alone leaves open. Nothing
+refuses to start over a gap: a daemon that would not run its pods would itself keep workers from
+working, so a deployment gap is the operator's to close or to decide, by name and with the reason,
+and a live gap is the session's environment to fix. The example `legion.yaml`
 (`deploy/kubernetes/daemon/legion.yaml.example`) leaves its `resources` block commented out, so the
 daemon's defaults reserve CPU and memory for every role, and decides `secrets`.
 
@@ -1966,7 +2043,7 @@ runtime:
       node_selector: { legion.dev/pool: legion }
       tolerations: [{ key: legion.dev/pool, operator: Equal, value: legion, effect: NoSchedule }]
       priority_class: legion
-daemon_url: http://<address pods reach the daemon at>:13370   # required under kubernetes
+daemon_url: http://<address pods reach the daemon at>:<the daemon's own port>   # required under kubernetes
 bind: 0.0.0.0
 envoy_token_file: /var/run/legion/providers/ENVOY_TOKEN       # required under kubernetes
 ```
@@ -2092,6 +2169,21 @@ issue's pod (every role container of it alike) and the image probe's.
   `enrollment failed; retrying on the next observation` warning. After a login that ends without a
   credential the daemon waits 30 s before the next, doubling each time to at most 5 minutes, and an
   approved login resets the wait. It never starts a login while one is pending.
+  A held enrollment can come long after the shim's hello, which carries the pod's projected token
+  as the shim read it then, and that token lives `token_expiry_seconds` from when the kubelet wrote
+  it; the broker refuses an expired one as `POD_TOKEN_EXPIRED`, naming its expiry. So when the
+  token the daemon holds would expire within the enrollment's RPC bound plus a minute, the daemon
+  first asks the shim to read the file again (the `agent-secrets-token` frame), which the kubelet
+  rewrites before the token expires. A token the broker refuses as expired anyway, its clock
+  further ahead than that minute, is dropped with the pod's key kept (the supervisor logs
+  `the broker found the pod token expired; keeping the key for a fresh token`), and the next
+  observation reads a fresh one the same way. A shim from a worker image older than that frame
+  forwards it to Oh My Pi,
+  which refuses it; the daemon then logs
+  `supervise: agent-secrets: the shim did not read its projected token again; waiting for its next hello`
+  and enrolls on the shim's next hello: one its dropped connection redials with, or the claim's
+  next generation, which an operator starts with `legion claims suspend` and then
+  `legion claims resume` once the login reads `issued`.
   `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
   `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the
@@ -2208,9 +2300,9 @@ nats_urls: [nats://nats.internal.example.com:4222]
 envoy_url: http://envoy-listener.internal.example.com:9020
 envoy_token_file: /home/legion/.config/legion/sjawhar-legion/envoy-api-token
 dispatch_url: https://dispatch.internal.example.com
-daemon_url: http://<devbox VPC IP>:13370
+daemon_url: http://<devbox VPC IP>:<daemon port>
 bind: <devbox VPC IP>
-worker_stream_port: 13371
+worker_stream_port: <worker stream port>
 ```
 
 **`--resume` keeps the same-agent invariant through the init container.** The tmux runtime `stat`s the
@@ -2404,9 +2496,9 @@ and neither while it runs ([`scripts/e2e/README.md`](../scripts/e2e/README.md#st
 
 Under `controller: daemon` the daemon launches the project's controller at boot and keeps it
 running, as it does a root architect. Nobody runs `legion controller start`, and
-`POST /legion/v1/controller/secret` answers 409 (`this daemon launches the project's controller
-itself (controller: daemon), so legion controller start has none to start`): one controller runs per
-project.
+`POST /legion/v1/controller/secret` and `POST /legion/v1/controller/github-credential` both answer
+409 (`this daemon launches the project's controller itself (controller: daemon), so legion
+controller start has none to start`): one controller runs per project.
 
 **The claim.** The controller is one claim, `legion-<project>-controller`, on the role
 `controller` with no issue and no tree. It is supervised like any claim: a pod that dies is
@@ -2446,13 +2538,17 @@ session-placing variables, [Settings order](#operator-configuration), and Oh My 
 directory made under its state home, `/home/legion/.local/state/controller`), on the daemon's
 command, as an issue pod's role containers do theirs, so a relaunch in a healthy pod is a new
 generation of that child rather than a new pod. Its role Secret,
-`legion-<project>-controller-controller-boot`, holds that launcher's token alone, bound to the
-pod's uid, and is the only Secret its launch writes: there is no provisioning `-boot` Secret.
+`legion-<project>-controller-controller-boot`, holds the launcher's token and its two gh keys
+(`github-hosts` and `github-config`, the review App's `hosts.yml` and `config.yml`), refreshed every
+minute as every role's are, and is the only Secret its launch writes: there is no provisioning
+`-boot` Secret.
 Its Sandbox owns a volume of its own, as an issue's does (`issue-legion-<project>-controller`, from
 its one `issue` claim template, of `runtime.kubernetes.issue_volume` and `storage_class`), mounted
 at `/legion` with its `sessions` directory at Oh My Pi's sessions directory, so a relaunch resumes
-the session. It provisions no workspace and holds no repository credential: no `workspace-fetch`,
-no provisioning token, no gh shim. Its one init container, `legion workspace-init controller --root
+the session. It provisions no workspace: no `workspace-fetch`, no provisioning token. Its `gh`, projected
+read-only at `/var/run/legion/gh` by a `gh-controller` volume, acts as the review App, refreshed
+every minute as every role's is; a failed review-App mint fails the launch naming the role, and the
+keeper relaunches it. Its one init container, `legion workspace-init controller --root
 /legion`, makes the sessions directory; in a pod created to resume a session whose file is gone it
 exits 3, which the daemon reads as a lost volume and answers with a fresh controller. The pod
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no
@@ -2463,8 +2559,10 @@ so it lands wherever the pool has room for it, and it is annotated `karpenter.sh
 "true"`: Karpenter never consolidates or replaces for drift the node it runs on while it runs, which
 is as long as the daemon keeps it, though issue pods can still be scheduled onto that node. Its
 agent is told `LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_PROJECT`,
-`LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings and the launch secrets' `<NAME>_FILE`
-pointers, and nothing of a tree, an issue or a checkout. Its system prompt is the controller's role
+`LEGION_DAEMON_URL`, the Envoy, NATS and Dispatch settings, the launch secrets' `<NAME>_FILE`
+pointers, and the four `GH_*` variables exactly as an issue pod's role container is told them
+(`GH_CONFIG_DIR=/var/run/legion/gh`, `GH_TOKEN=""`, `GITHUB_TOKEN=""`, `GH_HOST=""`), and nothing of
+a tree, an issue or a checkout. Its system prompt is the controller's role
 prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line and the
 deployment instructions. Both its containers, the init container and the launcher, carry the
 controller's reservation — `runtime.kubernetes.resources.controller` where the file sets a field,
@@ -2610,7 +2708,24 @@ keeping nothing until the daemon has answered, the command:
 4. writes the secret 0600 under the local state directory (`state_dir`, by default
    `$XDG_STATE_HOME/legion/<project>-controller`), beside the `legion` launcher and the
    deployment instructions;
-5. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
+5. asks `POST /legion/v1/controller/github-credential` with the capability step 3 minted
+   (`{"secret": <capability>}`). The daemon compares the capability's hash in constant time under
+   its controller lock and answers the review App's two rendered gh files (`hosts`, `config`, `app`,
+   `expiresAt`), which the command writes under `<state_dir>/gh` (0700; `hosts.yml` 0600 through a
+   temp file and rename), printing `[legion] the controller's gh acts as the review App from <dir>;
+   this process refreshes the token before it expires (<expiresAt>)`. While Oh My Pi runs, a
+   goroutine re-fetches every minute and rewrites `hosts.yml` only when it changed, logging each
+   change, failure and stop to `<state_dir>/github-credential.log` (never to the terminal, never
+   the token); a 403 `INVALID_CONTROLLER_CAPABILITY` (a later start replaced the capability) or 409
+   `CONTROLLER_LAUNCHED` ends the loop, and the files last until the token's expiry — the loop's
+   lifetime is Oh My Pi's, not the command's signal context. Against a daemon with no GitHub App or
+   no project owner (500 `GITHUB_TOKEN_SOURCE_UNAVAILABLE` / `GITHUB_OWNER_UNCONFIGURED`), the
+   command creates the empty 0700 `gh` directory, prints `[legion] the daemon has no GitHub App to
+   act as; the controller's gh acts as nobody`, and runs no loop. Any other failure of this fetch
+   (unreachable, 403, 409, 502) exits 1 naming the route and the daemon's sentence, and Oh My Pi
+   never starts: the mint in step 3 has already replaced the incumbent, as every post-mint failure
+   does;
+6. runs Oh My Pi interactive in the foreground (`omp_launch_prefix` and `omp_invocation`, one joined
    `--append-system-prompt` holding the controller prompt, the daemon's `Design gate policy:` line
    and the deployment instructions, no `--resume`, no `--mode rpc`) with the controller's
    environment (`LEGION_CONTROLLER=1`, `LEGION_ROLE=controller`, `LEGION_DAEMON_URL`,
@@ -2618,7 +2733,9 @@ keeping nothing until the daemon has answered, the command:
    extension sends it as the session's first turn right after its role claim succeeds and before
    it opens the live wake subscription, so the controller's first turn runs its start procedure
    deterministically, with nothing typed, rather than racing a wake for the session's one
-   first-turn slot — LEGION-392), its grant and secret files, a `GH_CONFIG_DIR` holding no login with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied (the controller has no App), the Envoy and Dispatch
+   first-turn slot — LEGION-392), its grant and secret files, `GH_CONFIG_DIR` naming `<state_dir>/gh`
+   (the directory step 5 wrote) with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied, so nothing
+   inherited outranks the file, the Envoy and Dispatch
    endpoints, and `NATS_NKEY_SEED_FILE` naming `nats_nkey_seed_file` when the file sets it) on top
    of the operator's own environment, less `NATS_DAEMON_NKEY_SEED` and `NATS_DAEMON_NKEY_SEED_FILE`
    (the controller is pane-side, and never gets the daemon's seed) and less `LEGION_BOOT_TOKEN` and

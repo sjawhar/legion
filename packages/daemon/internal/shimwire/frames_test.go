@@ -305,3 +305,32 @@ func TestEnrollmentFramesRoundTrip(t *testing.T) {
 		}
 	}
 }
+
+// The token request and its answer are the shim's alone: a request decodes as the frame the shim
+// answers rather than as Raw it would forward to OMP, and the answer carries the token back.
+func TestTokenFramesRoundTrip(t *testing.T) {
+	request := AgentSecretsToken{ID: "req-1"}
+	if err := request.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if err := (AgentSecretsToken{}).Validate(); err == nil || !errors.Is(err, ErrMalformedFrame) {
+		t.Fatalf("a token request with no id validated: %v", err)
+	}
+	for _, frame := range []Frame{
+		request,
+		AgentSecretsTokenResult{ID: "req-1", OK: true, PodToken: "eyJhbGciOiJSUzI1NiJ9.e30.sig"},
+		AgentSecretsTokenResult{ID: "req-1", OK: false, Error: "read the projected token /var/run/token: no such file"},
+	} {
+		line, err := json.Marshal(frame)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decoded, err := Decode(line)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if decoded.FrameType() != frame.FrameType() || !reflect.DeepEqual(decoded, frame) {
+			t.Fatalf("decoded %#v from %s, want %#v", decoded, line, frame)
+		}
+	}
+}

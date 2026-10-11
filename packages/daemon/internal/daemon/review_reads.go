@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -105,9 +107,12 @@ func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubre
 // pull request's newest deciding review had every webhook arrived, judged by the workflow's own
 // rules rather than a copy of them: of the reviews that decide (intake.PullRequestReview.Decides)
 // and are newer (intake.PullRequestReview.Order) than the newest the pull request's record held as
-// the pass listed it (record.PullRequest.ReviewSeen), the newest whose author the workflow lets
-// decide (workflow.Engine.DecidesRound), with the author's write access read as a webhook's review
-// reads it (intake.ResolveAuthorCanWrite with reviewerCanWrite). GitHub lists reviews in the order
+// the pass listed it (record.PullRequest.ReviewSeen), the newest the workflow lets decide
+// (workflow.Engine.DecidesRound): the reviewer's own review-App session, told from any other
+// review-App session's by its Legion footer against the session recorded on the reviewer's claim
+// (workflow.Engine.ReviewerSession, read once per pull request that has a candidate), or an author
+// with write access read as a webhook's review reads it (intake.ResolveAuthorCanWrite with
+// reviewerCanWrite). GitHub lists reviews in the order
 // they were created, and a draft keeps its place when it is submitted later, so the list's order
 // decides nothing. Its body is the review's whole body, where the webhook's envelope carries its
 // first 2,048 characters. It says false when no review qualifies. A deciding review GitHub lists
@@ -115,9 +120,10 @@ func (w *workflowRuntime) readReviews(ctx, read context.Context, github githubre
 // failed permission read; either applies nothing.
 //
 // A review is judged once per daemon process, for the read's own judgements, as a webhook's is
-// judged once when it is delivered: a review whose author the workflow did not let decide is kept as
-// refused (refusedReviews) and not judged again by this process, so an account given write access
-// after the read judged its review cannot turn that review into a later round's decision, which its
+// judged once when it is delivered: a review the workflow did not let decide - its author without
+// write access, or the review App's from a session that is not the reviewer's - is kept as refused
+// (refusedReviews) and not judged again by this process, so an account given write access after
+// the read judged its review cannot turn that review into a later round's decision, which its
 // webhook could not either. The set is held in memory, so after a restart the first pass judges a
 // review not yet recorded again, with the permission GitHub gives then; and the read judges once
 // more a review its webhook's delivery refused, since the workflow records nothing for a review
@@ -147,15 +153,27 @@ func (w *workflowRuntime) reviewToApply(ctx context.Context, pr record.PullReque
 		}
 		return 0
 	})
+	var reviewerSession string
+	sessionRead := false
 	for _, review := range candidates {
 		if w.refusedReviews[review.ID] {
 			continue
+		}
+		if !sessionRead {
+			if err := pgx.BeginTxFunc(ctx, w.pool, pgx.TxOptions{AccessMode: pgx.ReadOnly}, func(tx pgx.Tx) error {
+				var err error
+				reviewerSession, err = w.engine.ReviewerSession(ctx, tx, pr.Issue)
+				return err
+			}); err != nil {
+				return intake.PullRequestReview{}, false, fmt.Errorf("read the session of %s's reviewer: %w", pr.Issue, err)
+			}
+			sessionRead = true
 		}
 		resolved, err := intake.ResolveAuthorCanWrite(ctx, review, w.reviewerCanWrite)
 		if err != nil {
 			return intake.PullRequestReview{}, false, fmt.Errorf("read whether %s may decide review %d: %w", review.Author, review.ID, err)
 		}
-		if w.engine.DecidesRound(resolved) {
+		if w.engine.DecidesRound(resolved, reviewerSession) {
 			return resolved, true, nil
 		}
 		if w.refusedReviews == nil {

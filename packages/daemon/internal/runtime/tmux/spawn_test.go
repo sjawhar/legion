@@ -149,17 +149,29 @@ func TestPanePairs(t *testing.T) {
 		}
 	}
 
-	// A controller pane has no App and no gh directory: none of the four gh pairs.
+	// A controller pane gets the review App's gh files like any pane.
 	controller := runtime.SpawnSpec{
 		Claim: claim.ControllerToken("omp"), Project: "omp", Role: claim.RoleController, Generation: 1, BootToken: "boot-secret",
 		Prompt: runtime.PromptParts{RolePromptPaths: []string{"/roles/controller-root.md"}},
 	}
-	in.GHConfigDir = ""
+	in.GHConfigDir = runtime.GHConfigDir("/state", controller.Claim)
+	wantPairs := map[string]string{
+		"GH_CONFIG_DIR=": in.GHConfigDir,
+		"GH_TOKEN=":      "",
+		"GITHUB_TOKEN=":  "",
+		"GH_HOST=":       "",
+	}
+	found := map[string]bool{}
 	for _, pair := range panePairs(controller, in, secretFiles("/state", controller)) {
-		for _, name := range []string{"GH_CONFIG_DIR=", "GH_TOKEN=", "GITHUB_TOKEN=", "GH_HOST="} {
-			if strings.HasPrefix(pair, name) {
-				t.Errorf("a controller pane was told %q", pair)
+		for name, value := range wantPairs {
+			if pair == name+value {
+				found[name] = true
 			}
+		}
+	}
+	for name := range wantPairs {
+		if !found[name] {
+			t.Errorf("a controller pane was not told %q", name)
 		}
 	}
 }
@@ -327,8 +339,8 @@ func TestNewRefusesAProviderDispatchTokenOnlyWhenDispatchIsConfigured(t *testing
 // runtimeOwned is exactly what a tree pane is told by the runtime itself: every name it sets with
 // Env empty and no secret but the boot token, every optional value configured. A name added to the
 // pairs and not to runtimeOwned is one a spec could override; a name left in runtimeOwned that the
-// pairs no longer set is one a spec is refused for nothing. A controller pane is told a subset (no
-// gh pairs), so the union is the tree pane's.
+// pairs no longer set is one a spec is refused for nothing. A controller pane is told the same gh
+// pairs as any other, so the sets are equal.
 func TestRuntimeOwnedIsWhatEveryPaneIsToldByTheRuntime(t *testing.T) {
 	spec := testSpec()
 	spec.Env, spec.Secrets = nil, nil

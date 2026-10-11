@@ -805,7 +805,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 				t.Fatalf("approval events for %s: edits=%d resolved=%d, want one move and no resolution", doc.askID, edited, resolved)
 			}
 
-			deliveries := askEventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
+			deliveries := eventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
 			if heard := slices.Contains(deliveries[0].Destinations, contracts.AgentSubject(asker.ID)); heard != write.askerHears {
 				t.Fatalf("the outbox published the move to %v; the asking session's topic among them = %t, want %t", deliveries[0].Destinations, heard, write.askerHears)
 			}
@@ -876,7 +876,7 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 		}
 		typeVersion("A fourth note.", 5)
 
-		deliveries := askEventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
+		deliveries := eventDeliveries(t, doc.database, doc.documentService, "ask.edited", doc.askID)
 		if len(deliveries) != 4 {
 			t.Fatalf("ask.edited events = %#v, want one move to each of versions 2 to 5", deliveries)
 		}
@@ -903,16 +903,16 @@ func TestANewVersionMovesTheOpenApprovalAsk(t *testing.T) {
 	})
 }
 
-// askEventDelivery is what the outbox did with one event: whether it woke anyone, and the topics it
+// eventDelivery is what the outbox did with one event: whether it woke anyone, and the topics it
 // published the event to.
-type askEventDelivery struct {
+type eventDelivery struct {
 	Notify       bool
 	Destinations []string
 }
 
-// askEventDeliveries runs the outbox until it has published every eventType event about askID, and
-// returns what each one reached, oldest first.
-func askEventDeliveries(t *testing.T, database *store.Store, documentService docs.API, eventType, askID string) []askEventDelivery {
+// eventDeliveries runs the outbox until it has published every eventType event whose payload's id
+// is id (an ask's, or a comment's), and returns what each one reached, oldest first.
+func eventDeliveries(t *testing.T, database *store.Store, documentService docs.API, eventType, id string) []eventDelivery {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
@@ -929,27 +929,27 @@ func askEventDeliveries(t *testing.T, database *store.Store, documentService doc
 	for {
 		var unpublished, total int
 		if err := database.Pool.QueryRow(context.Background(), `select count(*) filter (where published_at is null), count(*) `+about,
-			eventType, askID).Scan(&unpublished, &total); err != nil {
-			t.Fatalf("count %s events for %s: %v", eventType, askID, err)
+			eventType, id).Scan(&unpublished, &total); err != nil {
+			t.Fatalf("count %s events for %s: %v", eventType, id, err)
 		}
 		if total > 0 && unpublished == 0 {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the outbox left %d of %d %s events for %s unpublished", unpublished, total, eventType, askID)
+			t.Fatalf("the outbox left %d of %d %s events for %s unpublished", unpublished, total, eventType, id)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	rows, err := database.Pool.Query(context.Background(), `select notify, published_destinations `+about+` order by id`, eventType, askID)
+	rows, err := database.Pool.Query(context.Background(), `select notify, published_destinations `+about+` order by id`, eventType, id)
 	if err != nil {
-		t.Fatalf("read %s deliveries for %s: %v", eventType, askID, err)
+		t.Fatalf("read %s deliveries for %s: %v", eventType, id, err)
 	}
-	deliveries, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (askEventDelivery, error) {
-		var delivery askEventDelivery
+	deliveries, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (eventDelivery, error) {
+		var delivery eventDelivery
 		return delivery, row.Scan(&delivery.Notify, &delivery.Destinations)
 	})
 	if err != nil {
-		t.Fatalf("decode %s deliveries for %s: %v", eventType, askID, err)
+		t.Fatalf("decode %s deliveries for %s: %v", eventType, id, err)
 	}
 	return deliveries
 }

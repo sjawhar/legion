@@ -14,8 +14,8 @@
 #   label_prefix     the prefix every run label of this proof carries (e.g. s4a-): the teardown
 #                    refuses any other, so a mistyped label can never select another run's objects
 #   label_exact      instead of label_prefix: the one fixed label a proof puts on its objects
-#                    (stage4b's legsmoke, a Dispatch project's token), which it owns while it holds
-#                    that proof's run lock; the teardown refuses any other
+#                    (a Dispatch project's token, lowercased), which it owns while it holds that
+#                    identity's own run lock; the teardown refuses any other
 #   record           a file holding one Sandbox name per line, each deleted by name
 #   providers_secret (optional) the providers Secret the operator created for the run, deleted by
 #                    name; unset or empty when the run creates none

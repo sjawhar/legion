@@ -148,9 +148,9 @@ func contractDecode[T any](t *testing.T, body []byte) T {
 // TestContractLoginApprovalEnrollSignAndExpiry drives helper.Broker/Server against a real broker
 // (brokertest.NewRig) end to end: Broker.Login -> a human approves the pending machine login
 // through the real UI routes, by its typed code and the operator's login -> LoginStatus reaches
-// issued -> EnrollBox mints a live enrollment -> a session register (the existing path) enrolls
-// kind host -> sign produces a proof the real broker's own /v1/enrollments/self accepts -> the
-// launcher credential is expired by direct SQL -> the next EnrollBox names the login command
+// issued -> EnrollSessionKey mints a live enrollment -> a session register (the existing path)
+// enrolls kind session -> sign produces a proof the real broker's own /v1/enrollments/self
+// accepts -> the launcher credential is expired by direct SQL -> the next EnrollSessionKey names the login command
 // again. It also proves the machine key, the session key, and every proof this test produced
 // never touch disk (neither an arbitrary $HOME nor the registry's own persisted sessions.json
 // state file) or a log line.
@@ -180,7 +180,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 		t.Fatalf("installed credential id %v, want %s", cred, credentialID)
 	}
 
-	// --- EnrollBox: a live enrollment ---
+	// --- EnrollSessionKey: a live enrollment ---
 	boxKey, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
@@ -189,15 +189,15 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	boxEnrollmentID, _, err := b.EnrollBox(context.Background(), "box-"+t.Name(), boxThumbprint, nil)
+	boxEnrollmentID, _, err := b.EnrollSessionKey(context.Background(), "box-"+t.Name(), boxThumbprint, nil)
 	if err != nil {
-		t.Fatalf("EnrollBox: %v", err)
+		t.Fatalf("EnrollSessionKey: %v", err)
 	}
 	if boxEnrollmentID == "" {
-		t.Fatal("EnrollBox returned no enrollment id")
+		t.Fatal("EnrollSessionKey returned no enrollment id")
 	}
 
-	// --- a session register (the existing path) enrolls kind host ---
+	// --- a session register (the existing path) enrolls kind session ---
 	reg := cr.call(t, Request{Op: "register", WaitSeconds: 10})
 	if !reg.OK || reg.State != "enrolled" || reg.EnrollmentID == "" || reg.Operator != cr.broker.Operator {
 		t.Fatalf("register: %+v", reg)
@@ -217,8 +217,8 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 		t.Fatalf("GET /v1/enrollments/self (real broker) = %d: %s", status, body)
 	}
 	self := contractDecode[contractSelfResponse](t, body)
-	if self.EnrollmentID != reg.EnrollmentID || self.Kind != "host" || self.Operator != cr.broker.Operator {
-		t.Fatalf("self = %+v, want enrollment_id=%s kind=host operator=%s", self, reg.EnrollmentID, cr.broker.Operator)
+	if self.EnrollmentID != reg.EnrollmentID || self.Kind != "session" || self.Operator != cr.broker.Operator {
+		t.Fatalf("self = %+v, want enrollment_id=%s kind=session operator=%s", self, reg.EnrollmentID, cr.broker.Operator)
 	}
 
 	// --- expire the credential by direct SQL; the broker needs no restart: expiry is read from
@@ -228,7 +228,7 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 		t.Fatalf("expire launcher credential: %v", err)
 	}
 
-	// --- the next EnrollBox names the login command ---
+	// --- the next EnrollSessionKey names the login command ---
 	secondKey, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
@@ -237,9 +237,9 @@ func TestContractLoginApprovalEnrollSignAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	refused := cr.call(t, Request{Op: "enroll-box", RuntimeID: "box-2-" + t.Name(), Thumbprint: secondThumbprint})
+	refused := cr.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-2-" + t.Name(), Thumbprint: secondThumbprint})
 	if refused.OK || refused.Code != CodeEnrollFailed || !strings.Contains(refused.Error, "agent-secrets machine login") {
-		t.Fatalf("enroll-box after expiry: %+v, want %s naming the login command", refused, CodeEnrollFailed)
+		t.Fatalf("enroll-session-key after expiry: %+v, want %s naming the login command", refused, CodeEnrollFailed)
 	}
 	if b.cred.Load() != nil {
 		t.Fatal("an expired credential (401 LAUNCHER_INVALID) must clear the in-memory credential")

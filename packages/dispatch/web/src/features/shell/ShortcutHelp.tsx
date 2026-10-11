@@ -9,10 +9,16 @@ import {
   textMutedOnSurface,
   textPrimaryOnSurface,
 } from "../../theme/classes";
-import { type KeyBindingDescription, type KeymapScope, MOD_KEY_LABEL } from "./keymap";
+import {
+  ALT_KEY_LABEL,
+  type KeyBindingDescription,
+  type KeymapScope,
+  MOD_KEY_LABEL,
+} from "./keymap";
 import { useCloseOnNavigation, useDialog } from "./useDialog";
 
 const KEY_GLYPHS: Record<string, string> = {
+  Alt: ALT_KEY_LABEL,
   ArrowDown: "↓",
   ArrowLeft: "←",
   ArrowRight: "→",
@@ -39,6 +45,7 @@ const SCOPE_LABELS: Record<KeymapScope, string> = {
   architecture: "Architecture",
   board: "Board",
   dialog: "Dialog",
+  document: "Document",
   global: "Global",
   inbox: "Inbox",
   issue: "Issue",
@@ -56,6 +63,7 @@ const SCOPE_ORDER: readonly KeymapScope[] = [
   "architecture",
   "board",
   "issue",
+  "document",
   "inbox",
   "agents",
   "dialog",

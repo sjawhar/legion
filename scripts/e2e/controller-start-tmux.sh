@@ -317,6 +317,13 @@ ls "$omp_home/.omp/profiles/$profile/logs"/omp.*.log >/dev/null 2>&1 ||
   fail "no Oh My Pi log under $omp_home/.omp/profiles/$profile"
 [ ! -e "$HOME/.omp/profiles/$profile" ] || fail "the run wrote the operator's profile root: $HOME/.omp/profiles/$profile exists"
 note "the profile is $omp_home/.omp/profiles/$profile ($(cd "$omp_home/.omp/profiles/$profile" && printf '%s ' *)); $HOME/.omp/profiles/$profile does not exist"
+grep -qF "[legion] the daemon has no GitHub App to act as; the controller's gh acts as nobody" "$evidence/checks/ctl1.stderr" ||
+  fail "ctl1.stderr does not say the controller's gh acts as nobody: $(cat "$evidence/checks/ctl1.stderr")"
+[ -d "$ctl_state/gh" ] || fail "$ctl_state/gh does not exist"
+[ "$(stat -c %a "$ctl_state/gh")" = 700 ] || fail "$ctl_state/gh is not mode 0700: $(stat -c %a "$ctl_state/gh")"
+[ ! -e "$ctl_state/gh/hosts.yml" ] || fail "$ctl_state/gh/hosts.yml exists with no GitHub App configured"
+[ ! -e "$ctl_state/github-credential.log" ] || fail "$ctl_state/github-credential.log exists with no GitHub App configured"
+note "no GitHub App: ctl1.stderr says the controller's gh acts as nobody; $ctl_state/gh is an empty 0700 directory and no credential log"
 pass
 
 begin ctrl-c-reaches-omp-not-the-cli

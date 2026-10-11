@@ -188,6 +188,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"asks_open",
 		"comments_ask_id",
 		"refs_to",
+		"refs_excerpt_drift",
 		"events_unpublished",
 		"asks_open_artifact",
 		"issues_search",
