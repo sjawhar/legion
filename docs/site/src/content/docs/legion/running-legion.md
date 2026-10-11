@@ -390,24 +390,30 @@ Closing the terminal leaves the project without one, and the daemon logs
 
    **After the first upgrade to a release that records `suspendedBy`,** every claim already
    suspended reads `unknown`. The next phase start, re-admission and the controller keeper resume
-   those as before; the boot does not, so it never overrides a drain made before the upgrade. Act
-   only on the claims the state names as nothing will wake (`legion state`'s `claims nothing will
-   wake` line, or `strandedClaims` in `--json`), and skip those you drained on purpose: resume a
-   suspended architect, and deliver a suspended phase worker its phase's resume task, as
+   those as before. The boot's own sweep does not, but a start already queued before the upgrade
+   still resumes one at the first boot, as the earlier release would have. To keep a claim you
+   drained before the upgrade held against every trigger, run `legion claims suspend` on it once
+   the new daemon is up: that records the suspension as yours. Act only on the claims the state
+   names as nothing will wake (`legion state`'s `claims nothing will wake` line, or
+   `strandedClaims` in `--json`), and skip those you drained on purpose: resume a suspended
+   architect, and bring a suspended phase worker back as
    [A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)
-   shows. Never resume by hand a claim of a lingering tree or of an issue parked out of the
-   workflow: re-admission or the issue's return to `todo` starts it.
+   shows for its `suspendedBy`. Never resume by hand a claim of a lingering tree or of an issue
+   parked out of the workflow: re-admission or the issue's return to `todo` starts it.
 
    **Rolling back across this release.** The earlier daemon boots on this schema but never writes
    `suspendedBy`, so a value this release wrote survives the earlier daemon's own suspends and
    resumes, an operator's included. Before starting this release again, run against the daemon's
-   database, with no daemon of the project running:
+   database, with no daemon of the project running, where `<project>` is your `project` lowercased
+   with every character outside `a-z0-9` dropped (`project: LEGION` gives `legion`). Never run it
+   without the project filter: other projects' daemons may share the database, and their own
+   operator holds would turn `unknown`.
 
    ```sql
-   update claims set suspended_by = 'unknown' where state = 'suspended';
+   update claims set suspended_by = 'unknown' where state = 'suspended' and project = '<project>';
    ```
 
-   The boot then resumes none of the claims the earlier daemon left suspended.
+   The boot sweep then resumes none of the claims the earlier daemon left suspended.
 5. **Restart the controller** with the new binary and plugins.
 
 ## Observe

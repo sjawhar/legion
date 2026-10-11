@@ -273,22 +273,41 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
   legion claims resume --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-architect
   ```
 
-- **`deliver`** (a suspended phase worker): deliver its phase's resume task rather than resuming
-  it. Only an architect is sent a catch-up, and a worker suspended before this release
-  (`suspendedBy: unknown`), or once its turn had ended, holds no task, so a resumed worker would
-  relaunch with nothing to do, and once it runs the list stops naming it. An operator's delivery
-  resumes the claim and hands it the task. The task is the one the workflow gives a worker resuming
-  its phase, with the issue's title, key and phase as `legion state` shows them (a merger told no
-  approved head sends the round back for review):
+- **`deliver`** (a suspended phase worker): the line files every suspended worker here, but the
+  move depends on who suspended it, which `legion claims list --json` shows as `suspendedBy`.
+  Only an architect is sent a catch-up, so a worker resumed with no task relaunches with nothing to
+  do, and once it runs the list stops naming it.
 
-  ```sh
-  legion claims deliver --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-implementer \
-    --task "Continue <title>. Issue: WIDGETS-12. Phase: implementing. Resume the existing phase work."
-  ```
+  - **`suspendedBy: unknown`** (suspended before this release recorded who did): let the
+    workflow start it. Stop the project's daemon, mark the claim as the daemon's, and start the
+    daemon again; at boot it queues the workflow's own start for the worker's phase, with the
+    right run, phase and, for a merger, approved head:
 
-  A worker an operator suspended mid-task keeps that task: `legion claims list --json` shows it as
-  the claim's `pending`, and the daemon refuses a second delivery to it. Resume that one instead,
-  and its task is sent again once it is ready.
+    ```sql
+    update claims set suspended_by = 'daemon' where token = 'legion-widgets-widgets-12-implementer' and state = 'suspended';
+    ```
+
+    A task you deliver yourself belongs to no run of the workflow, so such a worker's completion
+    can be refused (`HANDOFF_NO_RUN`, or a stale generation) when it never confirmed a task of the
+    current run. The boot starts the worker only while its issue is in that phase: when
+    `legion state` shows the issue `held`, leave the claim as it is, and its architect's retry of
+    the phase starts it ([An issue is held](#an-issue-is-held)).
+  - **`suspendedBy: operator`, with a task or a waiting start:** resume it. A worker suspended
+    mid-task keeps that task (`legion claims list --json` shows it as the claim's `pending`, and
+    the daemon refuses a second delivery), and its task is sent again once it is ready. A worker
+    whose phase start reached it while it was suspended has that start waiting for your resume
+    (the daemon logged `outbox row waits` for `start <role> of <issue>`, naming the operator's
+    suspension); the start gives it the phase's task once it runs, so a delivery would hand it the
+    phase twice.
+  - **`suspendedBy: operator`, otherwise:** deliver its phase's resume task. An operator's
+    delivery resumes the claim and hands it the task. The task is the one the workflow gives a
+    worker resuming its phase, with the issue's title, key and phase as `legion state` shows them
+    (a merger told no approved head sends the round back for review):
+
+    ```sh
+    legion claims deliver --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-implementer \
+      --task "Continue <title>. Issue: WIDGETS-12. Phase: implementing. Resume the existing phase work."
+    ```
 
 - **`needsWorkflowStart`** (`state` is `failed`): a failed claim ignores `legion claims resume` and
   `legion claims deliver`, and runs again only when the workflow starts it. A failed worker's issue
