@@ -274,8 +274,11 @@ legion state --config legion.yaml --json | jq '.strandedClaims'
   escalates it to the controller. A failed architect waits for its tree's re-admission, as
   [An issue is held](#an-issue-is-held) shows.
 
-The list leaves out claims that something will still start: a worker whose phase is not its own is
-started again when its phase comes, and a parked tree's claims wait for its re-admission.
+The list names only claims of trees that hold an admission slot, and leaves out claims that
+something will still start: a worker whose phase is not its own is started again when its phase
+comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
+while every slot was taken waits for admission to start it once one frees. Do not resume that
+architect by hand: it would run outside the admission cap.
 
 ## A pod does not come up
 
