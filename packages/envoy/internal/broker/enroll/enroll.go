@@ -284,7 +284,8 @@ func (s *Service) createAttempt(ctx context.Context, cred Credential, in Enrollm
 		return Enrollment{}, false, err
 	}
 	// pod_token_renewed_at starts null on every row, a pod's included: the first renewal carrying
-	// the pod's token sets it, and from then on every renewal must carry one (Renew).
+	// the pod's token sets it, and from then on Renew refuses a token-less renewal from every live
+	// enrollment naming that pod UID (podTokenRatcheted).
 	_, err = tx.Exec(ctx, `insert into enrollments (id, kind, runtime_id, slot, operator, thumbprint, session_id, subject, launcher_credential_id, lease_expires_at)
 		values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
 		in.ID, in.Kind, in.RuntimeID, in.Slot, in.Operator, in.Thumbprint, in.SessionID, in.Subject, cred.ID, in.LeaseExpires)
@@ -484,22 +485,31 @@ func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, er
 // seconds) plus one lease. podToken is verified as Create verifies it (verifyPodToken, before the
 // row is locked) and required to name the pod UID (runtime_id) and the service-account subject the
 // enrollment recorded at Create, else ErrPodIdentity and the lease stays where it was. A token from
-// another pod or account never renews this one. A box or host renews on its proof alone; a token
-// on either renewal is ErrPodIdentity.
+// another pod or account never renews this one. A machine session renews on its proof alone; a
+// token on its renewal is ErrPodIdentity.
 //
-// The ratchet: every pod enrollment starts with pod_token_renewed_at null, whether migration 0012
-// found it or Create made it. While null, a renewal without a token still extends the lease and
-// answers WithoutPodToken, which the API logs, naming the enrollment. The first renewal carrying
-// the token sets the column, and from then on a renewal without one is ErrPodTokenRequired. A
-// worker image whose `agent-secrets renew` sends the token sets its row on its first renewal; a pod
-// whose renewer never sends one renews as it did before this check, visible through that log, so
-// for those pods a token copied out of a pod still keeps the enrollment alive past the token's
-// expiry. No deploy order matters: an older broker ignores the token a newer client sends, and
-// this broker accepts a renewal without one on a row the ratchet has not set. The contract
-// release removes the token-less path once
+// The ratchet is keyed on the pod UID. Every pod enrollment starts with pod_token_renewed_at null,
+// whether migration 0014 found it or Create made it, and the first renewal carrying an accepted
+// token sets that row's column, the record that the pod's renewer sends its token. A renewal
+// without a token is ErrPodTokenRequired once any pod enrollment naming the same runtime_id, live or
+// ended, has the column set (podTokenRatcheted), whichever launcher credential made that row or this
+// one; otherwise it still extends the lease and answers WithoutPodToken, which the API logs, naming
+// the enrollment. So the copied-token gap closes for every pod UID a current-image pod has renewed
+// under: a key enrolled under another login with a token copied out of that pod gets a row of its
+// own (rows are unique per launcher credential, pod UID and slot), and that row is refused
+// token-less as soon as any enrollment of the real pod has renewed with its token, whichever came
+// first, and stays refused across the pod's role generations and after the pod is gone. What stays
+// open: a copied token's renewals before the pod's own first token renewal, seconds after the pod
+// enrolls, and every renewal of an old-image pod, whose renewer never sends a token, until the
+// contract release. A pod UID names one pod, so a mark refuses nothing of another. No deploy order
+// matters: an older broker ignores the token a newer client sends, and this broker accepts a
+// token-less renewal of a pod UID no enrollment has marked.
+// The contract release removes the token-less path once
 // `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null`
-// answers 0 and the broker has logged no "renewed without its projected token" line for one full
-// BROKER_LEASE_SECONDS.
+// answers 0, the broker has logged no "renewed without its projected token" line for one full
+// BROKER_LEASE_SECONDS, and no issue pod runs a worker image older than the one whose renewer sends
+// the token (an old-image issue pod between role generations holds no enrollment, so the count and
+// the log miss it, yet its next phase enrolls an unmarked row).
 func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, error) {
 	withToken := podToken != ""
 	var claims PodClaims
@@ -538,6 +548,13 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 	case kind == "pod" && tokenRenewedAt != nil:
 		return Renewal{}, ErrPodTokenRequired
 	case kind == "pod":
+		ratcheted, err := podTokenRatcheted(ctx, tx, renewal.RuntimeID)
+		if err != nil {
+			return Renewal{}, err
+		}
+		if ratcheted {
+			return Renewal{}, ErrPodTokenRequired
+		}
 		renewal.WithoutPodToken = true
 	}
 	renewal.LeaseExpires = time.Now().Add(s.Lease)
@@ -550,6 +567,24 @@ func (s *Service) Renew(ctx context.Context, id, podToken string) (Renewal, erro
 		return Renewal{}, err
 	}
 	return renewal, nil
+}
+
+// podTokenRatcheted reports whether any pod enrollment naming podUID has renewed with its token
+// (pod_token_renewed_at set), live or ended. A pod UID is the API server's uid of one pod object and
+// is never given to another pod, so every row naming it is that one pod's or a copy of its token,
+// and a mark refuses nothing of any other pod. Ended rows count on purpose. A pod's enrollments end
+// at every role generation (the daemon revokes each one it lets go), so between generations the pod
+// can hold no live row at all; were only live rows read, a key enrolled under another login with a
+// token copied out of the pod would renew token-less again in every such gap, and forever once the
+// pod is gone, since a token-less renewal needs no token and the copied token's expiry stops
+// mattering after Create. A later enrollment of the same pod (a new role generation, or under the
+// daemon's next login) is the pod's own current-image renewer, which sends its token and is never
+// refused. The partial index enrollments_pod_token_renewed (migration 0014) serves the probe.
+func podTokenRatcheted(ctx context.Context, tx pgx.Tx, podUID string) (bool, error) {
+	var ratcheted bool
+	err := tx.QueryRow(ctx, `select exists(select 1 from enrollments
+		where kind = 'pod' and runtime_id = $1 and pod_token_renewed_at is not null)`, podUID).Scan(&ratcheted)
+	return ratcheted, err
 }
 
 // authorized reports whether cred may act on an enrollment of the given kind and operator — the

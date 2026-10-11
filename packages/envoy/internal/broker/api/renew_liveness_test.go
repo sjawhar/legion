@@ -15,7 +15,7 @@ import (
 // retry after the clock is corrected.
 func TestRenewDistinguishesAnEndedEnrollmentFromARecoverableProofFailure(t *testing.T) {
 	ts := newTestServer(t)
-	id, key := ts.newSessionEnrollment(t, "box", "renew-liveness", "ada@example.com")
+	id, key := ts.newSessionEnrollment(t, "renew-liveness", "ada@example.com")
 	path := "/v1/enrollments/" + id + "/renew"
 	if _, err := ts.Store.Pool.Exec(context.Background(), `update enrollments set lease_expires_at=now() - interval '1 second' where id=$1`, id); err != nil {
 		t.Fatal(err)
@@ -25,7 +25,7 @@ func TestRenewDistinguishesAnEndedEnrollmentFromARecoverableProofFailure(t *test
 		t.Fatalf("renew a lapsed enrollment = %d %s, want 401 ENROLLMENT_NOT_LIVE", status, body)
 	}
 
-	id, key = ts.newSessionEnrollment(t, "box", "renew-skew", "ada@example.com")
+	id, key = ts.newSessionEnrollment(t, "renew-skew", "ada@example.com")
 	path = "/v1/enrollments/" + id + "/renew"
 	skewed, err := proof.Sign(key, id, http.MethodPost, ts.URL+path, time.Now().Add(-2*time.Minute))
 	if err != nil {

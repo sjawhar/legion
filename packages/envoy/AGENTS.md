@@ -2032,13 +2032,15 @@ its file holds next. A machine session's renewal carries none, and any token on 
 mismatch. Every pod row starts with `pod_token_renewed_at` null, whether `Create` made it or 0014
 found it, and the first renewal that carries the token sets that row's column, the record. The
 ratchet is keyed on the pod UID: a renewal without the token is `403 POD_TOKEN_REQUIRED` once any
-live pod enrollment naming the same `runtime_id` has the column set, whichever launcher credential
-made it (`Renew`'s one lookup, on the partial index `enrollments_live_pod_token_renewed`, migration
-0014), and otherwise is accepted and logged at WARN. So the copied-token gap closes for every pod
-UID a current-image pod has renewed under, a second login's copy among the rows it refuses, and
-stays open for old-image UIDs until the contract release. A current-image pod still leaves a copied
-token the seconds before its own first token renewal. A gone pod's revoked or lapsed rows lock out
-no later enrollment of its UID. That release is safe once the unset-row count is 0, no token-less
+pod enrollment naming the same `runtime_id`, live or ended, has the column set, whichever launcher
+credential made it (`Renew`'s one lookup, `podTokenRatcheted`, on the partial index
+`enrollments_pod_token_renewed`, migration 0014), and otherwise is accepted and logged at WARN. So
+the copied-token gap closes for every pod UID a current-image pod has renewed under, a second
+login's copy among the rows it refuses, and stays open for old-image UIDs until the contract
+release. A current-image pod still leaves a copied token the seconds before its own first token
+renewal. Ended rows count: a pod UID names one pod for ever, so a mark refuses nothing of another
+pod, and it keeps refusing a copy between the pod's role generations and after the pod is gone.
+That release is safe once the unset-row count is 0, no token-less
 WARN appears for one full `BROKER_LEASE_SECONDS`, and no issue pod runs a worker image older than
 the one whose renewer sends the token (an old-image issue pod between role generations holds no
 enrollment, so it counts as 0 and logs nothing, yet its next phase enrolls an unmarked row). No

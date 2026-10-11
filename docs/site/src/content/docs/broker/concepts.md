@@ -36,9 +36,10 @@ An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session
 renews the sessions it registered, `agent-secrets renew` renews a box, and Legion's pod shim renews
 a pod. A pod's renewal carries the pod's current projected token, and the broker refuses it
 (`POD_IDENTITY_MISMATCH`) unless the token names the pod UID and service account the enrollment was
-made for. The token is not yet required. The broker ratchets each pod UID instead: once any live
-enrollment naming a pod UID has renewed with that pod's token, the broker refuses a renewal without
-one (`POD_TOKEN_REQUIRED`) from every enrollment naming that pod, whichever machine login made it.
+made for. The token is not yet required. The broker ratchets each pod UID instead: once any
+enrollment naming a pod UID, live or ended, has renewed with that pod's token, the broker refuses a
+renewal without one (`POD_TOKEN_REQUIRED`) from every enrollment naming that pod, whichever machine
+login made it.
 So the copied-token gap closes for every pod UID a current-image pod has renewed under: no
 enrollment naming that pod renews without its token, and a token copied out of the pod stops
 renewing anything once it expires. It stays open for the UID of a pod on an older worker image,

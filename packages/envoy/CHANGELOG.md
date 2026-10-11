@@ -196,36 +196,43 @@
   pod in that namespace whose spec names no account runs as it and can get a token for the broker's
   audience, so the binding proves nothing about which pods are the service's. Bind each service to
   a dedicated account its pods set as `serviceAccountName` before taking this release.
-- **Breaking:** a pod's renewal (`POST /v1/enrollments/{id}/renew`) carries the pod's current
-  projected token as `pod_token`, and the broker refuses it `403 POD_IDENTITY_MISMATCH` unless the
-  token names the pod UID and service account the enrollment was made for, and `403 POD_TOKEN_EXPIRED`
-  (naming its expiry, and retried by the renewer with the token its file holds next) once it has
-  expired. Once a pod enrollment has renewed with its token, a renewal without one is
-  `403 POD_TOKEN_REQUIRED`. A lapsed/revoked enrollment's next renewal is
-  `401 ENROLLMENT_NOT_LIVE`, distinct from retryable `PROOF_INVALID` proof failures such as iat skew;
+- **Breaking:** a renewal (`POST /v1/enrollments/{id}/renew`) of an enrollment that has ended,
+  lapsed or never existed answers `401 ENROLLMENT_NOT_LIVE` where it answered `401 PROOF_INVALID`;
   the renew route alone answers it, and every other session route still answers a not-live proof
-  `PROOF_INVALID`. The renewer stops on `POD_TOKEN_REQUIRED` and `ENROLLMENT_NOT_LIVE` and retries
-  `POD_IDENTITY_MISMATCH`, which the broker also answers for a token it could not verify while its
-  issuer was unreachable; a real mismatch ends with the lease.
-  `agent-secrets renew --pod-token-file FILE` reads the file before every renewal and sends it, and
-  Legion's worker shim passes the projected token file. The token is not yet required: every pod
-  enrollment, new or found by migration 0012, renews without one, logged as `broker: pod enrollment
-  renewed without its projected token`, until its first renewal with the token, after which it is
-  refused without one. So for a pod that has once renewed with its token, a token copied out of the
-  pod no longer keeps the enrollment alive past the token's expiry; a pod whose renewer never sends
-  one, such as one on an older worker image, renews as before, visible through that WARN, until the
-  release that requires the token. A box's or host's renewal carrying a token is
-  `403 POD_IDENTITY_MISMATCH`. **Rollout:** any order; an older broker reads no renew body, and this
-  broker accepts a token-less renewal from an enrollment that has not yet sent one. The release that
-  requires the token is safe once
+  `PROOF_INVALID`, the code that stays for retryable proof failures such as iat skew. A pod's
+  renewal carries the pod's current projected token as `pod_token`, and the broker refuses it
+  `403 POD_IDENTITY_MISMATCH` unless the token names the pod UID and service account the enrollment
+  was made for, and `403 POD_TOKEN_EXPIRED` (naming its expiry, and retried by the renewer with the
+  token its file holds next) once it has expired. A machine session's renewal carrying a token is
+  `403 POD_IDENTITY_MISMATCH`. The token is not yet required, and the broker ratchets each pod UID
+  instead: every pod enrollment, new or found by migration 0014, starts unmarked, and the first
+  renewal that carries the pod's token marks it. Once any enrollment naming a pod UID, live or ended, is
+  marked, a renewal without the token from any enrollment naming that pod, whichever machine login
+  made it, is `403 POD_TOKEN_REQUIRED`; until then it is accepted and logged as `broker: pod
+  enrollment renewed without its projected token`. So the copied-token gap closes for every pod UID
+  a current-image pod has renewed under, and stays open for old-image UIDs until the release that
+  requires the token. A current-image pod still leaves one window: a copied token used before the
+  pod's own first renewal with its token, seconds after it enrolls. A pod UID names one pod for
+  ever, so a mark refuses nothing of another pod, and it keeps refusing a copy between the pod's
+  role generations and after the pod is gone. The renewer stops on `POD_TOKEN_REQUIRED` and `ENROLLMENT_NOT_LIVE` and
+  retries `POD_IDENTITY_MISMATCH`, which the broker also answers for a token it could not verify
+  while its issuer was unreachable; a real mismatch ends with the lease. `agent-secrets renew
+  --pod-token-file FILE` reads the file before every renewal and sends it, and Legion's worker shim
+  passes the projected token file. **Rollout:** any order; an older broker reads no renew body, and
+  this broker accepts a token-less renewal from a pod no enrollment of which has sent one. The
+  release that requires the token is safe once all three hold:
   `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null`
-  answers 0 and the broker has logged no token-less WARN line for one full `BROKER_LEASE_SECONDS`.
-- Only the machine login that enrolled a pod may end its enrollment: `DELETE /v1/enrollments/{id}`
-  of a pod enrollment by any other login, another service's or a second login of the same service,
-  is `403 NOT_ENROLLING_CREDENTIAL` and ends nothing. A Legion daemon that logs in again (after a
-  restart, or when its login reaches its expiry, `BROKER_LAUNCHER_CREDENTIAL_SECONDS`, 7 days by
-  default) cannot end its earlier login's pods; each ends one lease after its pod stops renewing,
-  or at once when someone revokes that earlier login, and the daemon no longer retries that refusal.
+  answers 0; the broker has logged no token-less WARN line for one full `BROKER_LEASE_SECONDS`; and
+  no issue pod runs a worker image older than the one whose renewer sends the token (an old-image
+  issue pod between role generations holds no enrollment, so the count and the log miss it, yet its
+  next phase enrolls an unmarked row).
+- **Breaking:** only the machine login that enrolled a pod may end its enrollment:
+  `DELETE /v1/enrollments/{id}` of a pod enrollment by any other login, another service's or a
+  second login of the same service, is `403 NOT_ENROLLING_CREDENTIAL` and ends nothing. A Legion
+  daemon that logs in again (after a restart, or when its login reaches its expiry,
+  `BROKER_LAUNCHER_CREDENTIAL_SECONDS`, 7 days by default) cannot end its earlier login's pods;
+  each ends one lease after its pod stops renewing, or at once when someone revokes that earlier
+  login, and the daemon no longer retries that refusal.
 - `agent-secrets renew --pod-token-file FILE` re-reads the projected pod token before each renewal,
   refuses a blank or unreadable file without posting a bodyless renewal, and sends the token as
   `pod_token`. The worker shim passes its projected token file. This client works against a broker

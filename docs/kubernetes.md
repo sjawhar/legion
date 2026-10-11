@@ -2132,13 +2132,16 @@ issue's pod (every role container of it alike) and the image probe's.
   sends the pod's current token with every renewal, and the broker refuses a renewal whose token
   names another pod UID or service account than the enrollment's (`POD_IDENTITY_MISMATCH`, which the
   renewer retries until the lease ends, since the broker also answers it while its token issuer is
-  unreachable). The token is not yet required: an enrollment's first renewal that carries it marks
-  the enrollment, and from then on the broker refuses a renewal without one (`POD_TOKEN_REQUIRED`,
-  on which the renewer stops). A pod on an older worker image never sends one and renews as before,
-  each renewal logged at WARN, so the copied-token gap stays open for such pods until the release
-  that requires the token (the broker's operate page, "The renew token check"). No deploy order
-  matters: an older broker ignores the token, and this one accepts a renewal without it from an
-  unmarked enrollment. The broker ends a pod
+  unreachable). The token is not yet required: once any enrollment naming a pod UID has renewed
+  with that pod's token, the broker refuses a renewal without one (`POD_TOKEN_REQUIRED`, on which
+  the renewer stops) from every enrollment naming that pod, whichever machine login made it, so
+  the copied-token gap closes for every pod UID a current-image pod has renewed under. A pod on an
+  older worker image never sends one and renews as before, each renewal logged at WARN, so the gap
+  stays open for old-image UIDs until the release that requires the token (the broker's operate
+  page, "The renew token check"). A renewer that cannot read its token file sends nothing and prints
+  `ERROR: enrollment <id> cannot read its pod token`, which the shim relays into the pod's log. No deploy order
+  matters: an older broker ignores the token, and this one accepts a renewal without it from a pod
+  no enrollment of which has sent one. The broker ends a pod
   enrollment only for the machine login that made it, so a daemon that logs in again with a new key
   (after a restart, or once its login reaches its expiry, `BROKER_LAUNCHER_CREDENTIAL_SECONDS`)
   cannot revoke the enrollments its earlier login made (the broker answers

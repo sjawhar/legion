@@ -320,8 +320,9 @@ func TestOnlyTheLoginThatEnrolledAPodDeletesItsEnrollment(t *testing.T) {
 // a body naming another pod's or account's projected token is 403 POD_IDENTITY_MISMATCH, and with
 // the pod's own token past its expiry 403 POD_TOKEN_EXPIRED. A new pod enrollment renews with no
 // body, and the broker logs each such renewal, naming it, until it first renews with its own token
-// (200); from then on a renewal with no body is 403 POD_TOKEN_REQUIRED. A box sending a pod token is
-// 403 POD_IDENTITY_MISMATCH.
+// (200); from then on a renewal with no body is 403 POD_TOKEN_REQUIRED, and so is one from a second
+// login's enrollment of the same pod UID. A machine session sending a pod token is 403
+// POD_IDENTITY_MISMATCH.
 func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 	ts := newTestServer(t)
 	cred, credKey := ts.mintServiceLauncherCredential(t)
@@ -410,14 +411,34 @@ func TestAPodRenewsCarryingItsCurrentToken(t *testing.T) {
 		}
 	})
 
-	t.Run("a box sending a pod token is refused", func(t *testing.T) {
+	t.Run("a second login's enrollment of a pod UID is refused token-less once the pod renewed with its token", func(t *testing.T) {
+		id, podUID, key := enrollPod(t)
+		if status, code := renew(t, key, id, map[string]any{"pod_token": ts.podToken(t, workerAccount, podUID)}); status != http.StatusOK {
+			t.Fatalf("the pod's token renewal = %d %s, want 200", status, code)
+		}
+		other, otherKey := ts.mintServiceLauncherCredential(t)
+		copyKey := newSigningKey(t)
+		status, body := ts.launcher(t, otherKey, other, http.MethodPost, "/v1/enrollments", map[string]any{
+			"kind": "pod", "runtime_id": podUID, "slot": "implementer-g1", "thumbprint": thumbprintOf(t, copyKey),
+			"pod_token": ts.podToken(t, workerAccount, podUID),
+		})
+		if status != http.StatusCreated {
+			t.Fatalf("enroll the copy under a second login = %d %s, want 201", status, body)
+		}
+		copied := decode[wireEnrolled](t, body).EnrollmentID
+		if status, code := renew(t, copyKey, copied, nil); status != http.StatusForbidden || code != "POD_TOKEN_REQUIRED" {
+			t.Fatalf("the copy's token-less renewal = %d %s, want 403 POD_TOKEN_REQUIRED", status, code)
+		}
+	})
+
+	t.Run("a machine session sending a pod token is refused", func(t *testing.T) {
 		login, loginKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
 		key := newSigningKey(t)
 		status, body := ts.launcher(t, loginKey, login, http.MethodPost, "/v1/enrollments", map[string]any{
-			"kind": "box", "runtime_id": "box-" + uuid.NewString(), "thumbprint": thumbprintOf(t, key),
+			"kind": "session", "runtime_id": "box-" + uuid.NewString(), "thumbprint": thumbprintOf(t, key),
 		})
 		if status != http.StatusCreated {
-			t.Fatalf("enroll the box = %d %s, want 201", status, body)
+			t.Fatalf("enroll the machine session = %d %s, want 201", status, body)
 		}
 		id := decode[wireEnrolled](t, body).EnrollmentID
 		if status, code := renew(t, key, id, map[string]any{"pod_token": ts.podToken(t, workerAccount, uuid.NewString())}); status != http.StatusForbidden || code != "POD_IDENTITY_MISMATCH" {
