@@ -248,6 +248,7 @@ child1=
 child2=
 child3=
 child3_phase=
+child3_status=
 tree2=
 tree3=
 tree4=
@@ -3942,11 +3943,15 @@ tree1_roles_suspended() {
 until_true 300 "the close to suspend every role of $tree1" tree1_roles_suspended
 note "the close suspended the architect, planner, implementer, tester, reviewer and merger of $tree1"
 # The close suspends every member of the tree, child 3's planner with them: child 3 is left mid-run,
-# in the phase recorded here, which carried-child requires it keep in its own tree.
+# in the phase recorded here, which carried-child requires it keep in its own tree. Its Dispatch
+# status is recorded too: the daemon writes none before testing (workflow's table), so a child left
+# in planning or implementing still shows the todo it was released in, and carried-child's path
+# depends on it.
 until_true 300 "the close to suspend $child3's planner" issue_worker_state "$child3" planner suspended
 child3_phase=$(daemon_state | jq -er --arg issue "$child3" '.issues[$issue].phase') || fail "the daemon's state holds no phase for $child3"
 case $child3_phase in admitted | done | held) fail "$child3 is in $child3_phase when tree 1 closes, not mid-run in a phase a role works" ;; esac
-note "the close suspended $child3's planner too, its child left mid-run in $child3_phase"
+child3_status=$(dispatch_get "issues/$child3" | jq -er .status) || fail "Dispatch could not be read for $child3"
+note "the close suspended $child3's planner too, its child left mid-run in $child3_phase, Dispatch showing it $child3_status"
 # The daemon's done released the claim tree 1's architect took on its root issue (LEGION-392).
 dispatch_events "$tree1" | jq -e 'any(.[]; .type == "issue.claimed" and .actor.kind == "session")' >/dev/null ||
   fail "$tree1's events hold no issue.claimed by its architect's session"
@@ -4039,25 +4044,31 @@ pass
 begin carried-child
 # LEGION-624's hand-over, on the Sandbox runtime against production Dispatch. Tree 1 stayed done
 # through its linger, so its expiry handed child 3, left mid-run under it, to Legion (workflow's
-# settleUnfinished): one durable fence, and one status row setting the child todo with the `legion`
-# label.
-# (a) Production Dispatch predates `labels_add`, so it refuses that write by the field's name (400
-# INVALID_JSON). The daemon rides the refusal out (dispatch.PermanentRefusal): the outbox retries the
-# row and never drops it as refused for good (handover_ridden_out, held to a fabricated drop here and
-# in stage4b-verdict.test.ts), and child 3 stays tree 1's, at generation 1 and unlabelled.
-# (b) The proof human then puts the label on child 3 and leaves its status alone, as a person handing
-# it to Legion would. The row's next attempt finds it labelled, writes the plain todo the old
-# Dispatch takes, and consumes the hand-over itself (outbox consumeHandover) instead of waiting for
-# that write's event. Child 3 becomes a tree of its own at generation 2, in the phase tree 1's close
-# left it in, and takes a free slot. Its planner's claim, retired with its session by that close, is
+# settleUnfinished): one durable fence, and one status row writing the child todo with the `legion`
+# label (labels_add) at the sequence the daemon read (expected_sequence). Which path completes it
+# depends on production Dispatch's version, which the checkpoint probes first, and on the Dispatch
+# status done recorded for child 3.
+# (a) A Dispatch that knows labels_add takes the hand-over PATCH, and the outbox consumes it at once.
+# One that predates the field refuses the write by its name (400 INVALID_JSON); the daemon rides the
+# refusal out (dispatch.PermanentRefusal): the outbox retries the row and never drops it as refused
+# for good (handover_ridden_out, held to a fabricated drop here and in stage4b-verdict.test.ts), and
+# child 3 stays tree 1's, at generation 1, unlabelled, in the status done recorded.
+# (b) On that old Dispatch the proof human then puts the label on child 3 and leaves its status alone,
+# as a person handing it to Legion would. A child left in planning or implementing shows todo, so
+# that label makes a labelled todo event of its own, which admission takes as an orphan and carries
+# (admit's applyObservation: started, so carried), deleting the fence; the row's next attempt finds
+# no fence and finishes without writing. A child left later shows its phase's status, and the
+# daemon's write for it would carry expected_sequence, which the old Dispatch refuses too; it waits
+# for a Dispatch that knows both fields, so that case is BLOCKED here. The labelled, non-todo write
+# and its consumption keep their unit coverage (TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent,
+# TestAPersonMoveBetweenTheHandOverReadAndPatchStands): they share consumeHandover with the path the
+# new Dispatch takes.
+# Either way child 3 becomes a tree of its own at generation 2, in the phase tree 1's close left it
+# in, and takes a free slot. Its planner's claim, retired with its session by that close, is
 # re-pointed to the new tree (retree_msg) and, finding the volume the close deleted, relaunched once
-# as a fresh session (issue_lost_lines) that is given its phase's resume task. Its new architect runs
-# in child 3's own issue pod, under the new tree's label, and is told the tree is carried. The label
-# goes on only after close saw tree 1's Sandboxes and volumes gone, and tree 1's lifecycle row says
-# its cleanup confirmed. The path where Dispatch already shows todo with the label is not driven
-# here: a person's todo with the label reaches intake first and takes the orphan path, so the live
-# run cannot sequence it. Both paths end in the same consumeHandover, and that one is held by
-# TestAnAlreadyTodoAndLabelledChildConsumesItsHandover.
+# as a fresh session (issue_lost_lines) that is given its phase's resume task. Its new architect
+# runs in child 3's own issue pod, under the new tree's label, and is told the tree is carried.
+# Tree 1's lifecycle row says its cleanup confirmed.
 # (c) Child 3 is taken out, so its pods go and re-admission finds a free slot.
 child3_planner=$(claim_token "$child3" planner)
 handed=$(log_lines "$handed_msg" | jq -c --arg issue "$child3" 'select(.issue == $issue)')
@@ -4065,39 +4076,76 @@ handed_count=$(grep -c . <<<"$handed" || true)
 [ "$handed_count" = 1 ] || fail "the daemon logged \"$handed_msg\" for $child3 $handed_count times at tree 1's linger expiry, want once"
 [ "$(jq -r .phase <<<"$handed")" = "$child3_phase" ] ||
   fail "the daemon handed $child3 over from phase $(jq -r .phase <<<"$handed"), not the $child3_phase tree 1's close left it in"
-child3_refused_twice() { [ "$(handover_refusals "$daemon_log" "$child3")" -ge 2 ]; }
-until_true 600 "the outbox to retry $child3's hand-over write after production Dispatch refuses labels_add" child3_refused_twice
-drops=$(handover_drops "$daemon_log" "$child3")
-[ "$drops" = 0 ] ||
-  fail "the daemon dropped $child3's hand-over write as refused for good: $(log_lines "$dropped_msg" | jq -c --arg issue "$child3" 'select(.issue == $issue)' | head -1 | cut -c1-300)"
-handover_ridden_out "$daemon_log" "$child3" || fail "the verdict does not find $child3's hand-over write ridden out, though it was retried and not dropped"
-# Control: the same log with one fabricated drop of child 3's write fails the verdict.
-cp "$daemon_log" "$work/daemon-handover-dropped.log"
-jq -cn --arg msg "$dropped_msg" --arg issue "$child3" \
-  '{time: (now | todate), level: "ERROR", msg: $msg, row: 0, issue: $issue, status: 400, code: "INVALID_JSON", error: "fabricated by the driver"}' >>"$work/daemon-handover-dropped.log"
-expect_failure handover-dropped handover_ridden_out "$work/daemon-handover-dropped.log" "$child3"
-refusals=$(handover_refusals "$daemon_log" "$child3")
-refused=$(log_lines "outbox row failed" | jq -r --arg issue "$child3" 'select((.error // "") | contains("hand Dispatch issue " + $issue + " to Legion")) | .error' | tail -1)
-shown=$(dispatch_get "issues/$child3") || fail "Dispatch could not be read for $child3"
-jq -e '.status == "in_progress" and ((.labels // []) | map(ascii_downcase) | index("legion")) == null' <<<"$shown" >/dev/null ||
-  fail "Dispatch shows $child3 $(jq -c '{status, labels}' <<<"$shown") while its hand-over write is refused, want in_progress and unlabelled"
-daemon_state | jq -e --arg issue "$child3" --arg phase "$child3_phase" '.issues[$issue] | .generation == 1 and .phase == $phase' >/dev/null ||
-  fail "$child3 is $(daemon_state | jq -c --arg issue "$child3" '.issues[$issue] | {generation, phase}') while its hand-over write is refused, want tree 1's, generation 1 in $child3_phase"
-note "(a) production Dispatch refused $child3's hand-over write $refusals times and the outbox retried it, never dropping it (its last error: $(cut -c1-200 <<<"$refused")); Dispatch shows $child3 in_progress and unlabelled, and the daemon keeps it in tree 1 at generation 1 in $child3_phase"
-labels=$(jq -c '(.labels // []) + ["legion"]' <<<"$shown")
-dispatch_human PATCH "issues/$child3" "$(jq -cn --argjson labels "$labels" '{labels: $labels}')" >/dev/null ||
-  fail "the proof human could not put the legion label on $child3"
+# The probe: a PATCH with labels_add of an issue key no project numbers ($project-0). Dispatch
+# decodes the body before it looks the issue up, so one that predates the field refuses it by name,
+# and one that knows it answers 404. Nothing is written either way.
+probe_code=$(curl -sS --max-time 20 -o "$work/labels-add-probe.json" -w '%{http_code}' -X PATCH -H "@$work/dispatch-human-header" \
+  -H 'content-type: application/json' --data "$(jq -cn --arg id "$dispatch_actor" '{labels_add: [], actor: {kind: "session", id: $id}}')" \
+  "$(dispatch_url)/api/v1/issues/$project-0") || blocked "production Dispatch could not be reached to probe for labels_add"
+if [ "$probe_code" = 400 ] && grep -qF 'unknown field \"labels_add\"' "$work/labels-add-probe.json"; then
+  dispatch_knows_labels_add=no
+elif [ "$probe_code" = 404 ]; then
+  dispatch_knows_labels_add=yes
+else
+  blocked "production Dispatch answered the labels_add probe $probe_code: $(head -c 300 "$work/labels-add-probe.json")"
+fi
+note "production Dispatch answered a labels_add PATCH of $project-0 with $probe_code: it $([ "$dispatch_knows_labels_add" = yes ] && echo knows || echo predates) labels_add"
 child3_carried() {
   claims_cli list --json | jq -e --arg issue "$child3" '[.claims[] | select(.issue == $issue and .role == "planner")] | length == 1 and .[0].tree == $issue' >/dev/null &&
     daemon_state | jq -e --arg issue "$child3" --arg phase "$child3_phase" \
       '(.issues[$issue] | .generation == 2 and .phase == $phase) and (.admission.active | index($issue)) != null' >/dev/null
 }
-until_true 600 "$child3 to become a tree of its own at generation 2 in $child3_phase, admitted into a slot" child3_carried
-dispatch_events "$child3" | jq -e --arg daemon "legion-daemon:$project" 'any(.[]; .type == "issue.updated" and .payload.status == "todo" and .actor.id == $daemon)' >/dev/null ||
-  fail "$child3's events hold no todo written by legion-daemon:$project: the outbox did not write the hand-over's status"
-pending=$(db_value "select count(*) from outbox where kind = 'dispatch_status' and issue = '$child3' and payload->>'handOver' = 'true'") ||
-  fail "the daemon's database could not be read for $child3's hand-over row"
-[ "$pending" = 0 ] || fail "$child3's hand-over row is still in the outbox ($pending rows) after the hand-over was consumed"
+daemon_todo_writes() {
+  dispatch_events "$child3" | jq --arg daemon "legion-daemon:$project" '[.[] | select(.type == "issue.updated" and .payload.status == "todo" and .actor.id == $daemon)] | length'
+}
+if [ "$dispatch_knows_labels_add" = yes ]; then
+  until_true 600 "$child3 to become a tree of its own at generation 2 in $child3_phase, admitted into a slot" child3_carried
+  dispatch_events "$child3" | jq -e --arg daemon "legion-daemon:$project" \
+    'any(.[]; .type == "issue.updated" and .actor.id == $daemon and .payload.status == "todo" and ((.payload.labels // []) | map(ascii_downcase) | index("legion")) != null)' >/dev/null ||
+    fail "$child3's events hold no todo with the legion label written by legion-daemon:$project: the outbox's hand-over PATCH did not land"
+  refusals=$(handover_refusals "$daemon_log" "$child3")
+  [ "$refusals" = 0 ] || fail "a Dispatch that knows labels_add refused $child3's hand-over write $refusals times by that field"
+  carry_path="the daemon's hand-over PATCH, which the outbox consumed itself"
+  note "(a) production Dispatch took $child3's hand-over PATCH (todo with the legion label, written by legion-daemon:$project), and the outbox consumed it"
+else
+  child3_refused_twice() { [ "$(handover_refusals "$daemon_log" "$child3")" -ge 2 ]; }
+  until_true 600 "the outbox to retry $child3's hand-over write after production Dispatch refuses labels_add" child3_refused_twice
+  drops=$(handover_drops "$daemon_log" "$child3")
+  [ "$drops" = 0 ] ||
+    fail "the daemon dropped $child3's hand-over write as refused for good: $(log_lines "$dropped_msg" | jq -c --arg issue "$child3" 'select(.issue == $issue)' | head -1 | cut -c1-300)"
+  handover_ridden_out "$daemon_log" "$child3" || fail "the verdict does not find $child3's hand-over write ridden out, though it was retried and not dropped"
+  # Control: the same log with one fabricated drop of child 3's write fails the verdict.
+  cp "$daemon_log" "$work/daemon-handover-dropped.log"
+  jq -cn --arg msg "$dropped_msg" --arg issue "$child3" \
+    '{time: (now | todate), level: "ERROR", msg: $msg, row: 0, issue: $issue, status: 400, code: "INVALID_JSON", error: "fabricated by the driver"}' >>"$work/daemon-handover-dropped.log"
+  expect_failure handover-dropped handover_ridden_out "$work/daemon-handover-dropped.log" "$child3"
+  refusals=$(handover_refusals "$daemon_log" "$child3")
+  refused=$(log_lines "outbox row failed" | jq -r --arg issue "$child3" 'select((.error // "") | contains("hand Dispatch issue " + $issue + " to Legion")) | .error' | tail -1)
+  shown=$(dispatch_get "issues/$child3") || fail "Dispatch could not be read for $child3"
+  jq -e --arg status "$child3_status" '.status == $status and ((.labels // []) | map(ascii_downcase) | index("legion")) == null' <<<"$shown" >/dev/null ||
+    fail "Dispatch shows $child3 $(jq -c '{status, labels}' <<<"$shown") while its hand-over write is refused, want $child3_status and unlabelled"
+  daemon_state | jq -e --arg issue "$child3" --arg phase "$child3_phase" '.issues[$issue] | .generation == 1 and .phase == $phase' >/dev/null ||
+    fail "$child3 is $(daemon_state | jq -c --arg issue "$child3" '.issues[$issue] | {generation, phase}') while its hand-over write is refused, want tree 1's, generation 1 in $child3_phase"
+  note "(a) production Dispatch refused $child3's hand-over write $refusals times and the outbox retried it, never dropping it (its last error: $(cut -c1-200 <<<"$refused")); Dispatch shows $child3 $child3_status and unlabelled, and the daemon keeps it in tree 1 at generation 1 in $child3_phase"
+  [ "$child3_status" = todo ] ||
+    blocked "$child3 shows $child3_status, not todo: the daemon's hand-over write for a labelled child carries expected_sequence, which this production Dispatch refuses too, so its hand-over waits for a Dispatch that knows labels_add and expected_sequence"
+  labels=$(jq -c '(.labels // []) + ["legion"]' <<<"$shown")
+  dispatch_human PATCH "issues/$child3" "$(jq -cn --argjson labels "$labels" '{labels: $labels}')" >/dev/null ||
+    fail "the proof human could not put the legion label on $child3"
+  until_true 600 "$child3 to become a tree of its own at generation 2 in $child3_phase, admitted into a slot" child3_carried
+  orphaned=$(log_lines "admission orphan" | jq -c --arg issue "$child3" 'select(.issue == $issue)' | grep -c . || true)
+  [ "$orphaned" = 1 ] || fail "the daemon logged \"admission orphan\" for $child3 $orphaned times after the proof human labelled it todo, want once"
+  fences=$(db_value "select count(*) from handovers where issue = '$child3'") || fail "the daemon's database could not be read for $child3's hand-over fence"
+  [ "$fences" = 0 ] || fail "$child3's hand-over fence is still recorded ($fences rows) after admission carried it as an orphan"
+  writes=$(daemon_todo_writes) || fail "Dispatch's events could not be read for $child3"
+  [ "$writes" = 0 ] || fail "legion-daemon:$project wrote $child3 todo $writes times, though admission's orphan carry, not the outbox, handed it over"
+  carry_path="admission's orphan carry of the proof human's labelled todo, which deleted the fence"
+  note "(b) the proof human labelled $child3, which still showed todo: admission carried it as an orphan once, its fence is gone, and the daemon wrote it no todo"
+fi
+handover_row_gone() {
+  [ "$(db_value "select count(*) from outbox where kind = 'dispatch_status' and issue = '$child3' and payload->>'handOver' = 'true'")" = 0 ]
+}
+until_true 300 "$child3's hand-over row to finish in the outbox" handover_row_gone
 retree=$(log_lines "$retree_msg" | jq -c --arg c "$child3_planner" --arg from "$tree1" --arg to "$child3" 'select(.claim == $c and .from == $from and .to == $to)')
 retrees=$(grep -c . <<<"$retree" || true)
 [ "$retrees" = 1 ] || fail "the daemon logged \"$retree_msg\" from $tree1 to $child3 for $child3_planner $retrees times, want once"
@@ -4125,7 +4173,7 @@ until_true 300 "$child3's architect to be given a catch-up that says carried" ca
 confirmed=$(db_value "select cleanup_confirmed_at is not null from tree_lifecycles where project = '$run_label' and tree = '$tree1'") ||
   fail "the daemon's database could not be read for tree 1's lifecycle"
 [ "$confirmed" = t ] || fail "tree 1's lifecycle row shows its cleanup unconfirmed ('$confirmed') once $child3 runs in its own tree"
-note "(b) the proof human labelled $child3; the outbox wrote todo as legion-daemon:$project and consumed the hand-over, its row gone: $child3 is a tree of its own at generation 2 in $child3_phase, admitted"
+note "$child3 is a tree of its own at generation 2 in $child3_phase, admitted, by $carry_path; its hand-over row is gone"
 note "$child3_planner moved from $tree1 to $child3 once, found its volume gone once and relaunched fresh, and was given \"$resume\"; the architect runs beside it in pod $child3_pod (tree label $child3, PVC ${found%% *} Bound) and was told the tree is carried; tree 1's cleanup is confirmed"
 take_out "$child3"
 note "(c) $child3 taken out: Dispatch shows it in backlog and its tree's pods are gone"

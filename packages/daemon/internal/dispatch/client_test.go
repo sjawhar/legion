@@ -112,6 +112,26 @@ func TestHandOverWritesTheStatusAndTheLabelsInOnePatch(t *testing.T) {
 	}
 }
 
+// A hand-over of an issue a person already labelled writes only the status, but on the same
+// precondition: expected_sequence, so a person's park between the daemon's read and its write is
+// refused (ISSUE_CHANGED) rather than overwritten. It adds no label, since the issue carries one.
+func TestHandOverOfALabelledIssueWritesTheStatusAtItsSequence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		decodeJSON(t, r, &body)
+		_, labelsAdd := body["labels_add"]
+		if string(body["status"]) != `"todo"` || string(body["expected_sequence"]) != "9" || labelsAdd {
+			t.Fatalf("hand-over request of a labelled issue = %v, want status todo at expected_sequence 9 and no labels_add", body)
+		}
+		writeJSON(t, w, map[string]string{"status": "todo"})
+	}))
+	defer server.Close()
+
+	if err := New(server.URL, dispatchToken).HandOver(context.Background(), Issue{Key: "LEGION-4", Status: "testing", Labels: []string{"Legion"}, HandedOver: true, LastSeq: 9}, "todo"); err != nil {
+		t.Fatalf("hand over: %v", err)
+	}
+}
+
 func TestSetStatusSendsDaemonActor(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch || r.URL.Path != "/api/v1/issues/LEGION-4" {

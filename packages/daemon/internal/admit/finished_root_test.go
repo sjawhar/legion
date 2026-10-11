@@ -156,11 +156,62 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 				if err != nil || handover != nil {
 					t.Fatalf("handover fence after admission = %#v, %v, want none", handover, err)
 				}
+				if carried, err := records.CarriedRoot(context.Background(), tx, child); err != nil || carried != 2 {
+					t.Fatalf("carried root generation = %d, %v; want 2, since a gate was carried", carried, err)
+				}
 			})
 			if starts := phaseStarts(t, pool, child, tc.role, tc.phase); (starts == 1) != tc.wantRole {
 				t.Fatalf("starts of %s at %s = %d, want role start %t", tc.role, tc.phase, starts, tc.wantRole)
 			}
 		})
+	}
+}
+
+// A child carries its old root's gate when the root has one. A root reopened in its linger has its
+// gate cleared with the generation, so a second close hands its children over with none. Such a
+// child still carries its phase and pull request, but is not marked carried: its architect's
+// catch-up does not forbid register_gate, so it registers its own spec as a fresh root's does, the
+// gate its READY needs.
+func TestAHandedOverChildWithNoGateToCarryIsNotMarkedCarried(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	const root, child = "LEGION-208", "LEGION-209"
+	until := fixedNow.Add(time.Hour)
+	parent := root
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		for _, put := range []error{
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}),
+			records.PutPullRequest(context.Background(), tx, record.PullRequest{Issue: child, Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head-42", Generation: 1, State: record.PullRequestOpen}),
+			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 2}),
+		} {
+			if put != nil {
+				t.Fatalf("seed: %v", put)
+			}
+		}
+	})
+
+	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	got := issue(t, pool, child)
+	if got.Tree != child || got.Generation != 2 || got.Phase != phase.Merging {
+		t.Fatalf("handed-over child = %#v, want its own tree at generation 2, still merging", got)
+	}
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		if gate, err := records.Gate(context.Background(), tx, child); err != nil || gate != nil {
+			t.Fatalf("gate = %#v, %v; want none, since the old root had none", gate, err)
+		}
+		if pr, err := records.PullRequest(context.Background(), tx, child); err != nil || pr == nil || pr.HeadSHA != "head-42" || pr.Generation != 2 {
+			t.Fatalf("pull request = %#v, %v; want it carried at generation 2", pr, err)
+		}
+		if carried, err := records.CarriedRoot(context.Background(), tx, child); err != nil || carried != 0 {
+			t.Fatalf("carried root generation = %d, %v; want none, since no gate was carried", carried, err)
+		}
+	})
+	if starts := phaseStarts(t, pool, child, claim.RoleMerger, phase.Merging); starts != 1 {
+		t.Fatalf("merger starts at merging = %d, want one: the carried phase still resumes", starts)
 	}
 }
 

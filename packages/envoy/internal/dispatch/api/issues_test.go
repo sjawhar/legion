@@ -698,6 +698,15 @@ func TestIssueLabelsCreateNormalizePatchAndFilter(t *testing.T) {
 	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `"code":"ISSUE_CHANGED"`) {
 		t.Fatalf("stale additive label patch = %d %s, want ISSUE_CHANGED", stale.Code, stale.Body.String())
 	}
+	// Stage 4b probes whether Dispatch knows labels_add with this PATCH of a key no project numbers:
+	// this Dispatch decodes the field and answers 404, and one that predates it refuses the body by
+	// the field's name before it looks the issue up.
+	probe := sessionRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+strings.Split(first.Key, "-")[0]+"-0", map[string]any{
+		"labels_add": []string{}, "actor": sessionActor(),
+	})
+	if probe.Code != http.StatusNotFound {
+		t.Fatalf("labels_add probe of a missing issue = %d %s, want 404", probe.Code, probe.Body.String())
+	}
 
 	eventsResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+first.Key+"/events", nil, "alice")
 	if eventsResponse.Code != http.StatusOK {

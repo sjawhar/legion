@@ -55,6 +55,11 @@ waits on that approval, tell the controller. Resume the tree from there; at `pro
 once the check finishes and you have verified its record on the pull request and the issue,
 `sign_off`.
 
+A child handed over from a tree that had no design gate to carry (a root reopened in its linger
+loses its gate, and its second close hands its children over without one) gets no `carried` mark.
+Register its spec with `register_gate` as any root does: its workers already run their phase, and
+its READY waits for that gate.
+
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
 conflicts go to the controller. A product, scope, or design decision the human must make, yours or

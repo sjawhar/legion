@@ -98,16 +98,18 @@ func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) error {
 	}, nil)
 }
 
-// HandOver sets issue's status and adds LegionLabel in one PATCH, so the one event the write makes
-// carries both. labels_add is resolved inside Dispatch's row lock, so a label another actor adds
-// after this client reads issue cannot be overwritten.
+// HandOver writes issue's status for its hand-over to Legion, on the issue's sequence as the client
+// read it (expected_sequence), so a person's move since that read is refused (ISSUE_CHANGED) rather
+// than overwritten. An issue that does not yet carry LegionLabel has it added in the same PATCH
+// (labels_add, resolved inside Dispatch's row lock so a label another actor adds after this read
+// cannot be lost), and the one event the write makes carries both. An issue a person already
+// labelled gets the status alone.
 func (c *HTTPClient) HandOver(ctx context.Context, issue Issue, status string) error {
-	return c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(issue.Key), daemonWrite{
-		Status:           status,
-		LabelsAdd:        []string{LegionLabel},
-		ExpectedSequence: issue.LastSeq,
-		Actor:            daemonActor(issue.Key),
-	}, nil)
+	write := daemonWrite{Status: status, ExpectedSequence: issue.LastSeq, Actor: daemonActor(issue.Key)}
+	if !issue.HandedOver {
+		write.LabelsAdd = []string{LegionLabel}
+	}
+	return c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(issue.Key), write, nil)
 }
 
 // PostMessage writes a durable notice through POST /api/v1/issues/{key}/messages. Dispatch's

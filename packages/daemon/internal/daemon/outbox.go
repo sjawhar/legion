@@ -304,9 +304,14 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		if issue.Status == payload.Status && issue.HandedOver {
 			return r.consumeHandover(ctx, row, payload)
 		}
+		// Every hand-over write is conditional on the sequence just read (dispatch HandOver), the
+		// label added when the child lacks it, so a person's move since that read stands.
+		if err := r.dispatch.HandOver(ctx, issue, payload.Status); err != nil {
+			return fmt.Errorf("hand Dispatch issue %s to Legion as %s: %w", row.Issue, payload.Status, err)
+		}
+		return r.consumeHandover(ctx, row, payload)
 	}
-	label := payload.HandOver && !issue.HandedOver
-	if issue.Status == payload.Status && !label {
+	if issue.Status == payload.Status {
 		return nil
 	}
 	// A done write's reason goes on the issue first: Dispatch refuses a message on a closed issue.
@@ -316,28 +321,18 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 			return err
 		}
 	}
-	if label {
-		if err := r.dispatch.HandOver(ctx, issue, payload.Status); err != nil {
-			return fmt.Errorf("hand Dispatch issue %s to Legion as %s: %w", row.Issue, payload.Status, err)
-		}
-		return r.consumeHandover(ctx, row, payload)
-	}
 	if err := r.dispatch.SetStatus(ctx, row.Issue, payload.Status); err != nil {
 		return fmt.Errorf("set Dispatch issue %s to %s: %w", row.Issue, payload.Status, err)
-	}
-	if payload.HandOver {
-		return r.consumeHandover(ctx, row, payload)
 	}
 	return nil
 }
 
 // consumeHandover applies the hand-over to the record once Dispatch shows it: the row's hand-over
-// PATCH just wrote it, its plain status write did for a child already labelled, or Dispatch already
-// showed the todo and label (which a write would make no event for). It does not wait for the
-// write's event: a restart between the write and that event's publication lets the boot read record
-// the event's sequence, and the live event then stops at the sequence fence. The fact is idempotent
-// (admit's consumeHandover reads the fence it deletes), so the event, or this row's retry after a
-// failure here, changes nothing more.
+// write just set it, or Dispatch already showed the todo and label (which a write would make no
+// event for). It does not wait for the write's event: a restart between the write and that event's
+// publication lets the boot read record the event's sequence, and the live event then stops at the
+// sequence fence. The fact is idempotent (admit's consumeHandover reads the fence it deletes), so
+// the event, or this row's retry after a failure here, changes nothing more.
 func (r *outbox) consumeHandover(ctx context.Context, row record.OutboxRow, payload record.StatusWrite) error {
 	_, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("handover:%s:%d", row.Issue, row.ID),
 		intake.Handover{Issue: row.Issue, Tree: payload.HandOverTree, Generation: payload.HandOverLinger}, r.handlers...)

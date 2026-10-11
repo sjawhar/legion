@@ -623,17 +623,23 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 		}
 	}
 	if orphan {
-		if gate != nil {
-			gate.Issue = stored.Key
-			if err := a.store.PutGate(ctx, tx, *gate); err != nil {
-				return fmt.Errorf("carry gate to re-admitted orphan %s: %w", stored.Key, err)
-			}
-		}
 		if pr != nil {
 			pr.Generation = int64(stored.Generation)
 			if err := a.store.PutPullRequest(ctx, tx, *pr); err != nil {
 				return fmt.Errorf("carry pull request to re-admitted orphan %s: %w", stored.Key, err)
 			}
+		}
+		// A root is marked carried, which tells its architect never to register its own spec,
+		// only when it carried its old root's gate. A root reopened in its linger has its gate
+		// cleared with the generation, so a second close hands its children over with none: such
+		// a child keeps its phase and pull request, and its architect registers its spec as a
+		// fresh root's does, the gate its READY needs.
+		if gate == nil {
+			return nil
+		}
+		gate.Issue = stored.Key
+		if err := a.store.PutGate(ctx, tx, *gate); err != nil {
+			return fmt.Errorf("carry gate to re-admitted orphan %s: %w", stored.Key, err)
 		}
 		return a.store.PutCarriedRoot(ctx, tx, stored.Key, stored.Generation)
 	}
@@ -914,20 +920,17 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // startMidPhaseMembers starts each previous run that promotion brings back, the re-admitted root
 // included. A hand-over turns a child into that root while preserving its phase, so its phase role
 // needs the same resume start ordinary mid-phase children receive (workflow.ResumeTask, which tells
-// a carried merger its carried approved head). A carried root held from a phase starts no worker,
-// and the hold's notice went to the architect of the tree it was handed over from, so its own
-// architect is told of the hold (workflow.HeldNotice). Promotion already queued the root's branch;
-// each other member queues its own before starting.
+// a carried merger its carried approved head). A root promoted held, which only a hand-over leaves
+// (every other re-admission starts its root at admitted), starts no worker, and the hold's notice
+// went to the architect of the tree it was handed over from, so its own architect is told of the
+// hold (workflow.HeldNotice), whether or not it carried a gate. Promotion already queued the root's
+// branch; each other member queues its own before starting.
 func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	project, err := claim.ProjectToken(a.project)
 	if err != nil {
 		return err
 	}
-	carried, err := a.store.CarriedRoot(ctx, tx, root.Key)
-	if err != nil {
-		return err
-	}
-	if carried == root.Generation && root.Phase == phase.Held && root.Hold != nil {
+	if root.Phase == phase.Held && root.Hold != nil {
 		if err := a.enqueue(ctx, tx, root.Key, workflow.HeldNotice(root), now); err != nil {
 			return err
 		}

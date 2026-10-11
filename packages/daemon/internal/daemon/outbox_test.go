@@ -158,7 +158,7 @@ func TestAHandOverWritesTheStatusAndTheLabelTogether(t *testing.T) {
 		{name: "unlabelled, already todo", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "todo"},
 			handOvers: []string{"LEGION-208 todo []"}},
 		{name: "labelled, mid-run", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "in_progress", Labels: []string{"Legion"}, HandedOver: true},
-			statuses: []string{"todo"}},
+			handOvers: []string{"LEGION-208 todo [Legion]"}},
 		{name: "labelled, already todo", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "todo", Labels: []string{"legion"}, HandedOver: true}},
 		{name: "moved by a person", root: lingering, child: member, shown: dispatch.Issue{Key: child, Status: "backlog"}},
 		{name: "root reopened since", root: reopened, child: member, shown: dispatch.Issue{Key: child, Status: "in_progress"}},
@@ -305,10 +305,10 @@ func TestAnAlreadyTodoAndLabelledChildConsumesItsHandover(t *testing.T) {
 // A hand-over write Dispatch takes is consumed by the outbox at once, with the same intake.Handover
 // fact the already-todo path applies, rather than only by the event the write makes. That event can
 // be lost to a restart: a boot read records the sequence before the live event arrives, and the
-// event then stops at the sequence fence. This holds for both writes a hand-over can make: the
-// hand-over PATCH for an unlabelled child, and the plain status write for a child a person already
-// labelled (the one a Dispatch that refuses labels_add takes). The fact is idempotent, so the
-// event, when it does come, changes nothing more.
+// event then stops at the sequence fence. This holds for both writes a hand-over can make: the PATCH
+// that adds the label to an unlabelled child, and the status write alone for a child a person
+// already labelled, each on the issue's sequence. The fact is idempotent, so the event, when it does
+// come, changes nothing more.
 func TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent(t *testing.T) {
 	for _, tc := range []struct {
 		name                string
@@ -316,7 +316,7 @@ func TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent(t *testing.T) {
 		handOvers, statuses int
 	}{
 		{name: "unlabelled: the hand-over PATCH", shown: dispatch.Issue{Key: "LEGION-208", Status: "in_progress", LastSeq: 4}, handOvers: 1},
-		{name: "already labelled: the status write", shown: dispatch.Issue{Key: "LEGION-208", Status: "in_progress", Labels: []string{"legion"}, HandedOver: true, LastSeq: 4}, statuses: 1},
+		{name: "already labelled: the hand-over's status write", shown: dispatch.Issue{Key: "LEGION-208", Status: "in_progress", Labels: []string{"legion"}, HandedOver: true, LastSeq: 4}, handOvers: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const root, child = "LEGION-207", "LEGION-208"
@@ -377,64 +377,75 @@ func TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent(t *testing.T) {
 }
 
 // A person's status move after the executor read the issue is caught by Dispatch's expected
-// sequence under its row lock. The outbox keeps the row for that transient conflict, then observes
-// the person's status and drops the hand-over fence without overwriting that move.
+// sequence under its row lock, on either hand-over write: the PATCH that adds the label, and the
+// status write for a child a person already labelled. The outbox keeps the row for that transient
+// conflict, then observes the person's status and drops the hand-over fence without overwriting it.
 func TestAPersonMoveBetweenTheHandOverReadAndPatchStands(t *testing.T) {
-	const root, child = "LEGION-207", "LEGION-208"
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	now := time.Now()
-	until := now.Add(time.Hour)
-	parent := root
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		for _, put := range []error{
-			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
-			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
-			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
-		} {
-			if put != nil {
-				return put
+	for _, tc := range []struct {
+		name   string
+		labels []string
+	}{
+		{name: "unlabelled: the hand-over PATCH"},
+		{name: "already labelled: the hand-over's status write", labels: []string{"legion"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const root, child = "LEGION-207", "LEGION-208"
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			now := time.Now()
+			until := now.Add(time.Hour)
+			parent := root
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				for _, put := range []error{
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Testing, Generation: 1, Status: "testing", Rank: "B"}),
+					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+				} {
+					if put != nil {
+						return put
+					}
+				}
+				row, err := record.NewOutboxRow(child, record.StatusWrite{ObservedStatus: "testing", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, now)
+				if err != nil {
+					return err
+				}
+				return records.Enqueue(context.Background(), tx, row)
+			}); err != nil {
+				t.Fatalf("seed hand-over: %v", err)
 			}
-		}
-		row, err := record.NewOutboxRow(child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, now)
-		if err != nil {
-			return err
-		}
-		return records.Enqueue(context.Background(), tx, row)
-	}); err != nil {
-		t.Fatalf("seed hand-over: %v", err)
-	}
-	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "in_progress", LastSeq: 7}}
-	client.handOverHook = func() error {
-		client.issue.Status, client.issue.LastSeq = "backlog", 8
-		return &dispatch.Error{Status: http.StatusConflict, Code: "ISSUE_CHANGED", Message: "issue changed"}
-	}
-	runner := &outbox{pool: pool, records: records, dispatchProject: "LEGION", dispatch: client, now: func() time.Time { return now }, log: quietLogger()}
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("the sequence conflict is retried, not a tick failure: %v", err)
-	}
-	if rows := outboxRows(t, pool); rows != 1 {
-		t.Fatalf("rows after the sequence conflict = %d, want the hand-over retained", rows)
-	}
-	client.handOverHook = nil
-	runner.now = func() time.Time { return now.Add(time.Minute) }
-	if err := runner.RunOnce(context.Background()); err != nil {
-		t.Fatalf("observe the person's move: %v", err)
-	}
-	if rows := outboxRows(t, pool); rows != 0 {
-		t.Fatalf("rows after the person's move = %d, want the hand-over finished", rows)
-	}
-	if got := len(client.handOvers); got != 1 {
-		t.Fatalf("hand-over PATCH attempts = %d, want the one conditional attempt alone", got)
-	}
-	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
-		handover, err := records.Handover(context.Background(), tx, child)
-		if err != nil || handover != nil {
-			t.Fatalf("hand-over fence after the person move = %#v, %v, want none", handover, err)
-		}
-		return nil
-	}); err != nil {
-		t.Fatal(err)
+			client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "testing", Labels: tc.labels, HandedOver: tc.labels != nil, LastSeq: 7}}
+			client.handOverHook = func() error {
+				client.issue.Status, client.issue.LastSeq = "backlog", 8
+				return &dispatch.Error{Status: http.StatusConflict, Code: "ISSUE_CHANGED", Message: "issue changed"}
+			}
+			runner := &outbox{pool: pool, records: records, dispatchProject: "LEGION", dispatch: client, now: func() time.Time { return now }, log: quietLogger()}
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("the sequence conflict is retried, not a tick failure: %v", err)
+			}
+			if rows := outboxRows(t, pool); rows != 1 {
+				t.Fatalf("rows after the sequence conflict = %d, want the hand-over retained", rows)
+			}
+			client.handOverHook = nil
+			runner.now = func() time.Time { return now.Add(time.Minute) }
+			if err := runner.RunOnce(context.Background()); err != nil {
+				t.Fatalf("observe the person's move: %v", err)
+			}
+			if rows := outboxRows(t, pool); rows != 0 {
+				t.Fatalf("rows after the person's move = %d, want the hand-over finished", rows)
+			}
+			if len(client.handOvers) != 1 || len(client.statuses) != 0 {
+				t.Fatalf("hand-over writes %v and unconditional status writes %v, want the one conditional attempt alone", client.handOvers, client.statuses)
+			}
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				handover, err := records.Handover(context.Background(), tx, child)
+				if err != nil || handover != nil {
+					t.Fatalf("hand-over fence after the person move = %#v, %v, want none", handover, err)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 
