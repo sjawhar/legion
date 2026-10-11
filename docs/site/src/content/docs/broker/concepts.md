@@ -52,7 +52,8 @@ login reached its expiry and it logged in again, is refused
 login. From the moment the lease lapses, its next renewal is refused
 `ENROLLMENT_NOT_LIVE`; other session calls remain `PROOF_INVALID`. The broker's sweep, which runs
 every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run after the lapse. Ending an
-every request it still had pending, so those leave the approver's Inbox and an approval can never
+enrollment any of these ways revokes every grant it held and cancels every request it still had
+pending, so those leave the approver's Inbox and an approval can never
 land on a session that is gone
 (`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).
 
