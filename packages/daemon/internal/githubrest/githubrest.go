@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,6 +50,50 @@ func (c Client) Post(ctx context.Context, path string, body, into any) error {
 	}
 	_, err = c.call(ctx, http.MethodPost, c.API+path, encoded, into)
 	return err
+}
+
+// GraphQL posts query and variables to endpoint's GitHub GraphQL route, decoding the response's
+// data into into and refusing a GraphQL error even when the HTTP request itself succeeded.
+func GraphQL(ctx context.Context, token, endpoint, query string, variables map[string]any, into any) error {
+	var response struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := (Client{Token: token, API: graphQLEndpoint(endpoint)}).Post(ctx, "", map[string]any{
+		"query": query, "variables": variables,
+	}, &response); err != nil {
+		return err
+	}
+	if len(response.Errors) != 0 {
+		messages := make([]string, 0, len(response.Errors))
+		for _, failure := range response.Errors {
+			messages = append(messages, failure.Message)
+		}
+		return fmt.Errorf("GitHub GraphQL: %s", strings.Join(messages, "; "))
+	}
+	if len(response.Data) == 0 {
+		return errors.New("GitHub GraphQL answered without data")
+	}
+	if into == nil {
+		return nil
+	}
+	if err := json.Unmarshal(response.Data, into); err != nil {
+		return fmt.Errorf("decode GitHub GraphQL data: %w", err)
+	}
+	return nil
+}
+
+func graphQLEndpoint(endpoint string) string {
+	endpoint = strings.TrimRight(endpoint, "/")
+	if endpoint == "" {
+		return "https://api.github.com/graphql"
+	}
+	if strings.HasSuffix(endpoint, "/api/v3") {
+		return strings.TrimSuffix(endpoint, "v3") + "graphql"
+	}
+	return endpoint + "/graphql"
 }
 
 // GetPages reads every page of the JSON array GitHub answers at path, a hundred items to a page,

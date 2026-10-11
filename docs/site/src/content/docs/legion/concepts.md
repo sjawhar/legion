@@ -217,14 +217,19 @@ READY #<pull request> at <head sha> (approved at <approved sha>) for <KEY> (<pul
 ```
 
 followed by the pull request's outcome and its known risks. A project can also name a merge-queue
-role (`merge_queue_role`) that gets the same packet. The moment the daemon accepts READY, the
+role (`merge_queue_role`) that gets the same packet. Its optional `merge.by_hand` regular-expression
+paths keep matching pull requests out of auto-merge: the daemon accepts and posts their `READY`,
+then tells the merger that a person merges under the repository's rules. `merge.one_at_a_time` paths
+make the daemon refuse `READY` while another matching pull request is in the merge queue; once that
+entry leaves, the merger sends a fresh packet. Otherwise, the moment the daemon accepts READY, the
 merger submits the pull request with
 `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`: a repository with a
 merge queue enqueues it, one without arms auto-merge, and the repository's own required reviews and
-checks decide when it merges — rules Legion neither reads nor changes. When the head's own CI turns
-red while the issue awaits its merge, the daemon posts on the issue, and tells that role, that the
-`READY` is withdrawn, naming the red checks, and the implementer disarms the submission with
-`gh pr merge <n> -R <owner>/<repo> --disable-auto` before it pushes again.
+checks decide when it merges — rules Legion neither reads nor changes. If the head moves before the
+command, the head match refuses it; the merger builds and sends a new `READY` packet. When the
+head's own CI turns red while the issue awaits its merge, the daemon posts on the issue, and tells
+that role, that the `READY` is withdrawn, naming the red checks, and the implementer disarms the
+submission with `gh pr merge <n> -R <owner>/<repo> --disable-auto` before it pushes again.
 
 ## The production check
 

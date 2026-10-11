@@ -237,3 +237,24 @@ func TestNoPartSaysLegionNeverMerges(t *testing.T) {
 		}
 	}
 }
+
+func TestMergerUsesTheReadyHeadAndHonorsMergePolicies(t *testing.T) {
+	merger := rolePart(t, "merger.md")
+	for _, want := range []string{
+		"gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>",
+		"MANUAL_MERGE_REQUIRED:",
+		"READY_ONE_AT_A_TIME_WAITING",
+	} {
+		if !strings.Contains(merger, want) {
+			t.Errorf("merger prompt does not contain %q", want)
+		}
+	}
+}
+
+func TestArchitectsDoNotOpenMergeAsks(t *testing.T) {
+	for _, file := range []string{"architect.md", "architect-root.md"} {
+		if prompt := rolePart(t, file); !strings.Contains(prompt, "A merge is never a human to-do: open no `dispatch ask` for it.") {
+			t.Errorf("%s does not forbid opening a merge ask", file)
+		}
+	}
+}

@@ -50,6 +50,36 @@ func TestPostSendsJSONAndAnswersWithTheStatus(t *testing.T) {
 	}
 }
 
+func TestGraphQLPostsToTheConfiguredEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sent struct {
+			Query     string         `json:"query"`
+			Variables map[string]any `json:"variables"`
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" || r.Header.Get("Authorization") != "Bearer token" ||
+			json.NewDecoder(r.Body).Decode(&sent) != nil {
+			http.Error(w, `{"message":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		if sent.Query != "query PullRequest($number: Int!) { pullRequest(number: $number) { id } }" || sent.Variables["number"] != float64(42) {
+			http.Error(w, `{"message":"wrong query"}`, http.StatusBadRequest)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"pullRequest":{"id":"PR_42"}}}`))
+	}))
+	defer server.Close()
+
+	var response struct {
+		PullRequest struct {
+			ID string `json:"id"`
+		} `json:"pullRequest"`
+	}
+	if err := GraphQL(context.Background(), "token", server.URL, "query PullRequest($number: Int!) { pullRequest(number: $number) { id } }",
+		map[string]any{"number": 42}, &response); err != nil || response.PullRequest.ID != "PR_42" {
+		t.Fatalf("GraphQL = %#v, %v", response, err)
+	}
+}
+
 // GetPages and GetListPages follow GitHub's next pages wherever GitHub names them on the API's own
 // origin, its /repositories/<id>/ form included, and an answer on such a page names that page's
 // path. A next page on another host is refused before the token is sent there.

@@ -2,11 +2,14 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +19,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -57,11 +61,14 @@ type handoffGitHub struct {
 	// its answer: GitHub's trouble.
 	fail map[string]int
 	// pull request #42: its head, its base's repository id, its mergeable_state and whether it is
-	// merged.
+	// merged. merge and the paths per pull request are the configured merge gate's test state.
 	pullHead       string
 	baseRepo       int64
 	mergeableState string
 	merged         bool
+	merge          config.MergeRules
+	pullFiles      map[int][]string
+	queued         map[int]bool
 	// What READY reads of main and of the head: the rulesets' rules (with the status the read
 	// answers when not 200), the branch's protection, and the head's check runs, commit statuses
 	// and workflow runs.
@@ -80,7 +87,9 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	t.Helper()
 	g := &handoffGitHub{
 		files: map[string]map[string]string{}, fail: map[string]int{},
-		pullHead: headSHA, baseRepo: 4242, mergeableState: "clean",
+		pullFiles: map[int][]string{42: {"src/main.go"}, 43: {"src/other.go"}},
+		queued:    map[int]bool{},
+		pullHead:  headSHA, baseRepo: 4242, mergeableState: "clean",
 		rules:        `[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
 		mainBranch:   `{"name":"main","protection":{"required_status_checks":{"contexts":["legacy"],"checks":[{"context":"legacy"}]}}}`,
 		checkRuns:    `[{"id":1,"name":"ci","status":"completed","conclusion":"success"}]`,
@@ -96,6 +105,23 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 		defer g.mu.Unlock()
 		g.bearers = append(g.bearers, r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/graphql" {
+			var request struct {
+				Variables struct {
+					Number int `json:"number"`
+				} `json:"variables"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			entry := "null"
+			if g.queued[request.Variables.Number] {
+				entry = `{"id":"entry"}`
+			}
+			_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"mergeQueueEntry":%s}}}}`, entry)
+			return
+		}
 		path, ok := strings.CutPrefix(r.URL.Path, "/repos/acme/widgets/")
 		if !ok {
 			http.NotFound(w, r)
@@ -112,6 +138,8 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 		switch {
 		case path == "branches/main":
 			_, _ = io.WriteString(w, g.mainBranch)
+		case path == "pulls":
+			_, _ = io.WriteString(w, `[{"number":42},{"number":43}]`)
 		case path == "pulls/42":
 			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"base":{"ref":"main","repo":{"id":%d}},"mergeable_state":%q,"merged":%t}`, g.pullHead, g.baseRepo, g.mergeableState, g.merged)
 		case path == "rules/branches/main":
@@ -129,6 +157,18 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 			_, _ = fmt.Fprintf(w, `{"total_count":%d,"check_runs":%s}`, strings.Count(g.checkRuns, `"name"`), g.checkRuns)
 		case strings.HasSuffix(path, "/status"):
 			_, _ = fmt.Fprintf(w, `{"statuses":%s}`, g.statuses)
+		case strings.HasPrefix(path, "pulls/") && strings.HasSuffix(path, "/files"):
+			number, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(path, "pulls/"), "/files"))
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			files := g.pullFiles[number]
+			entries := make([]string, 0, len(files))
+			for _, file := range files {
+				entries = append(entries, fmt.Sprintf(`{"filename":%q}`, file))
+			}
+			_, _ = io.WriteString(w, "["+strings.Join(entries, ",")+"]")
 		case strings.HasPrefix(path, "contents/"):
 			file := strings.TrimPrefix(path, "contents/")
 			g.contentsRead = append(g.contentsRead, file+"@"+ref)
@@ -197,6 +237,12 @@ func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.G
 		Controller: h.store, Grants: grants, Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{},
 		Tokens: handoffTokens{}, GitHubOwner: "acme", GitHubAPI: github.url, Repository: acmeWidgets,
+		MergeRules: func(project string) config.MergeRules {
+			if project != testProject {
+				return config.MergeRules{}
+			}
+			return github.merge
+		},
 	}).Handler
 	return h, facts
 }
@@ -1049,6 +1095,69 @@ func newReadyHarness(t *testing.T, github *handoffGitHub) (*harness, *factRecord
 	seedPullRequest(t, h, "LEGION-208", headSHA)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	return h, facts, merger
+}
+
+func TestHandoffCompleteReadyRefusesAHeadThatMovedBeforeTheMergerCanArmIt(t *testing.T) {
+	const movedHead = "f00d00000000000000000000000000000000ff"
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.pullHead = movedHead })
+	h, facts, merger := newReadyHarness(t, github)
+
+	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at the old head", Ready: true, Commit: headSHA})
+	if message := refused(t, recorder, http.StatusConflict, "READY_HEAD_MOVED"); !strings.Contains(message, movedHead) {
+		t.Fatalf("READY head-moved refusal = %q, want it to name %s", message, movedHead)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts after stale READY = %#v, want none", got)
+	}
+
+	recorder = h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at the moved head", Ready: true, Commit: movedHead})
+	completion(t, recorder)
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("handoff facts after the re-posted READY = %#v, want one at %s", got, movedHead)
+	}
+	if got := lastCompletion(t, facts).Commit; got != movedHead {
+		t.Fatalf("re-posted READY commit = %s, want %s", got, movedHead)
+	}
+}
+
+func TestHandoffCompleteReadyMarksAByHandPullRequestWithoutAutoArmingIt(t *testing.T) {
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) {
+		g.merge.ByHand = []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}}
+		g.pullFiles[42] = []string{"migrations/versions/0001_init.py"}
+	})
+	h, _, merger := newReadyHarness(t, github)
+
+	if code, body := ready(t, h, merger); code != http.StatusOK || body != "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it" {
+		t.Fatalf("READY for a by-hand pull request = %d %q", code, body)
+	}
+}
+
+func TestHandoffCompleteReadyWaitsForAOneAtATimeMergeQueuePath(t *testing.T) {
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) {
+		g.merge.OneAtATime = []config.PathPattern{{Expression: "^.github/workflows/infra-deploy.yml$", Regexp: regexp.MustCompile("^.github/workflows/infra-deploy.yml$")}}
+		g.pullFiles[42] = []string{".github/workflows/infra-deploy.yml"}
+		g.pullFiles[43] = []string{".github/workflows/infra-deploy.yml"}
+		g.queued[43] = true
+	})
+	h, facts, merger := newReadyHarness(t, github)
+
+	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_ONE_AT_A_TIME_WAITING:") {
+		t.Fatalf("READY while matching pull request #43 is queued = %d %q", code, body)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts while waiting = %#v, want none", got)
+	}
+
+	github.set(func(g *handoffGitHub) { g.queued[43] = false })
+	if code, body := ready(t, h, merger); code != http.StatusOK || body != "" {
+		t.Fatalf("READY after the matching queue entry clears = %d %q, want it accepted", code, body)
+	}
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("handoff facts after the queue clears = %#v, want one READY", got)
+	}
 }
 
 // ready posts the merger's READY and returns its answer: the note when it was published, or the

@@ -42,6 +42,11 @@ projects:
     # review_workflows:                # opt-in: required workflows that review the code and fail on
     #   - .github/workflows/review.yml #   their own findings; in testing and review a red only they
     #                                  #   make goes to the reviewer, not back to the implementer
+    # merge:                           # optional path-pattern merge policy
+    #   by_hand: ['^migrations/versions/']
+    #   one_at_a_time:
+    #     - '^\.github/workflows/(infra-deploy|infra-deploy-jobs|legion-deploy|docker-build)\.yml$'
+    #     - '^\.github/actions/(iac-|buildkit|deploy-)'
 gates:
   design: root-issues                  # a person approves each root's spec (the default); or off
 github_apps:

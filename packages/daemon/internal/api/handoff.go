@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -112,7 +113,7 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// same commit is applied.
 	var note string
 	if req.Ready {
-		if note, ok = s.readyNote(w, r, grant, issue); !ok {
+		if note, ok = s.readyNote(w, r, grant, issue, req.Commit); !ok {
 			return
 		}
 	}
@@ -160,12 +161,12 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 //   - NO_REPOSITORY: the issue's project has no repository configured (a guard; configuration
 //     requires one).
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_HEAD_CARRIES_HANDOFFS,
-//     READY_CHECKS_NOT_GREEN.
+//     READY_HEAD_MOVED, READY_CHECKS_NOT_GREEN, READY_ONE_AT_A_TIME_WAITING.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
 // The reads are made as the implement App, whose token never leaves the daemon; a runtime that
 // boots without Apps publishes no READY (leaseForGrant).
-func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue) (note string, ok bool) {
+func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue, readyHead string) (note string, ok bool) {
 	var repository ghrepo.Repository
 	if s.repository != nil {
 		repository, ok = s.repository(issue.Project)
@@ -186,7 +187,11 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 		return "", false
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(s.githubAPI, repository)}
-	note, refused := readyChecks(ctx, github, repository, issue.Key, pr)
+	var rules config.MergeRules
+	if s.mergeRules != nil {
+		rules = s.mergeRules(issue.Project)
+	}
+	note, refused := readyChecks(ctx, github, s.githubAPI, repository, rules, issue.Key, readyHead, pr)
 	if refused != nil {
 		refused.write(w)
 		return "", false
