@@ -290,6 +290,33 @@ func TestNormalizeCleansEachDetailAsTheSharedFixtureSays(t *testing.T) {
 	}
 }
 
+// redactCredentials stops because its passes reach a fixed point, not because it ran out of them:
+// every detail and want of the shared fixture settles in fewer than maxRedactionPasses passes, the
+// userinfo an Authorization value opens among them, which takes a second pass to redact.
+func TestRedactCredentialsReachesAFixedPointWithinItsBound(t *testing.T) {
+	var fixture struct {
+		Patterns []redactionCase `json:"patterns"`
+	}
+	readFixture(t, "capability-redaction.json", &fixture)
+	most := 0
+	for _, testCase := range fixture.Patterns {
+		for _, text := range []string{testCase.Detail, testCase.Want} {
+			passes := 0
+			for next := redactOnce(text); next != text; next = redactOnce(text) {
+				text = next
+				passes++
+			}
+			if passes >= maxRedactionPasses {
+				t.Errorf("%s: %s: %q takes %d changing passes, the bound is %d", testCase.Pattern, testCase.Name, text, passes, maxRedactionPasses)
+			}
+			most = max(most, passes)
+		}
+	}
+	if most < 2 {
+		t.Errorf("no case took a second changing pass (most %d), so nothing shows the passes repeat", most)
+	}
+}
+
 // At the cut, cleaning keeps what came before it and is idempotent: every case of the shared
 // fixture, pushed by a run of letters so that each byte of its cleaned text in turn straddles
 // MaxReportDetail, still starts with those letters (as many as fit), is — for a case with no pad of

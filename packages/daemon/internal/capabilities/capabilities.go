@@ -233,9 +233,12 @@ func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 // the JWT rule reads as the middle of a base64url run. Space runs then collapse to one space with
 // none at either end. Redaction runs on the one line, so a credential a session split across lines
 // is still found, and before the cut, so a cut never leaves a credential's head too short to match.
-// After a cut, trailing space goes, and so does each trailing word the rules would still change — a
-// label the cut parted from its value, or a value it parted from the rest of its `***` — so
-// cleaning what this returns gives it back unchanged. The Legion plugin cleans its report the same
+// The rules run until a pass changes nothing (redactCredentials), so the line is already a fixed
+// point of them. After a cut, trailing space goes, then trailing words, and within a last word
+// trailing characters, while the rules would still change what is left — a label the cut parted
+// from its value, or a value it parted from the rest of its `***` — but never the last character,
+// since one character matches no rule; so cleaning what this returns gives it back unchanged, and
+// a cut never empties a detail that had text. The Legion plugin cleans its report the same
 // way before it sends it (`cleanDetail` in `packages/pi-legion/src/capability-report.ts`); both
 // are held to `packages/contracts/fixtures/capability-redaction.json`.
 func cleanDetail(text string) string {
@@ -256,8 +259,13 @@ func cleanDetail(text string) string {
 	line := strings.Join(strings.Fields(redacted), " ")
 	cut := strings.TrimRight(truncate(line, MaxReportDetail), " ")
 	if len(cut) < len(line) {
-		for cut != "" && redactCredentials(cut) != cut {
-			cut = cut[:max(strings.LastIndexByte(cut, ' '), 0)]
+		for redactCredentials(cut) != cut {
+			if space := strings.LastIndexByte(cut, ' '); space > 0 {
+				cut = cut[:space]
+			} else {
+				_, size := utf8.DecodeLastRuneInString(cut)
+				cut = cut[:len(cut)-size]
+			}
 		}
 	}
 	return cut
@@ -298,7 +306,7 @@ var credentialRules = []struct {
 	{regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^ /?#]+@`), "${1}***@"},
 	{regexp.MustCompile(`(?i)([?&](?:token|key|secret|password|access_token|accesstoken|refresh_token|id_token|auth_token|private_token|api_key|apikey|client_secret|sig|signature|x-amz-security-token|x-amz-signature|x-goog-signature)=)[^ &#"'<>]+`), "${1}***"},
 	{regexp.MustCompile(`(?i)\b(password[ \x{FFFF}]*=[ \x{FFFF}]*)(?:(')(?:[^'\\]|\\.)*('?)|[^ &#"'<>]+)`), "${1}${2}***${3}"},
-	{regexp.MustCompile(`(?i)(authorization\\?["']?[ \x{FFFF}]*[:=][ \x{FFFF}]*)(?:(\\["'])((?:bearer|basic|token|digest)[ \x{FFFF}]+)?[^"'\\]+|(["'])((?:bearer|basic|token|digest)[ \x{FFFF}]+)?(?:[^"'\\]|\\.)+|(\[?)((?:bearer|basic|token|digest)[ \x{FFFF}]+)?[^)\]}>]+)`), "${1}${2}${3}${4}${5}${6}${7}***"},
+	{regexp.MustCompile(`(?i)(authorization\\?["']?[ \x{FFFF}]*[:=][ \x{FFFF}]*)(?:(\\["'](?:(?:bearer|basic|token|digest)[ \x{FFFF}]+)?)[^"'\\]+|(["'](?:(?:bearer|basic|token|digest)[ \x{FFFF}]+)?)(?:[^"'\\]|\\.)+|(\[?(?:(?:bearer|basic|token|digest)[ \x{FFFF}]+)?)[^)\]}>]+)`), "${1}${2}${3}${4}***"},
 	{regexp.MustCompile(`(?i)((?:api-key|ocp-apim-subscription-key|x-subscription-token)\\?["']?[ \x{FFFF}]*[:=][ \x{FFFF}]*\\?["']?)[A-Za-z0-9._~+/=*-][A-Za-z0-9._~+/=*\x{FFFF}-]*`), "${1}***"},
 	{regexp.MustCompile(`(?i)(\\?["'](?:api_key|access_token)\\?["'][ \x{FFFF}]*:[ \x{FFFF}]*\\?["'])[^"'\\]+`), "${1}***"},
 	{regexp.MustCompile(`(?i)\b(bearer[ \x{FFFF}]+)[A-Za-z0-9._~+/=*-][A-Za-z0-9._~+/=*\x{FFFF}-]*`), "${1}***"},
@@ -309,8 +317,26 @@ var credentialRules = []struct {
 	{regexp.MustCompile(`\b(AKIA|ASIA)[A-Z0-9]{16}\b`), "${1}***"},
 }
 
-// redactCredentials is text with every credentialRules match replaced, rule by rule.
+// redactCredentials is text with every credentialRules match replaced, rule by rule, pass after
+// pass until a pass changes nothing: a replacement can remove what kept an earlier rule from
+// matching, as the Authorization rule removes the `/` that kept a userinfo's `@` out of reach.
+// maxRedactionPasses bounds the passes; every case of the shared fixture settles well within it.
 func redactCredentials(text string) string {
+	for range maxRedactionPasses {
+		next := redactOnce(text)
+		if next == text {
+			break
+		}
+		text = next
+	}
+	return text
+}
+
+// maxRedactionPasses is the most passes redactCredentials makes.
+const maxRedactionPasses = 8
+
+// redactOnce is text with every credentialRules match replaced, rule by rule, once.
+func redactOnce(text string) string {
 	for _, rule := range credentialRules {
 		text = rule.pattern.ReplaceAllString(text, rule.replacement)
 	}

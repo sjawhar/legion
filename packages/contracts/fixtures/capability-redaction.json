@@ -440,6 +440,30 @@
     },
     {
       "pattern": "cleanup",
+      "name": "an Authorization header right after an unterminated ESC [",
+      "detail": "req \u001b[ Authorization: Basic dXNlcjpwYXNz",
+      "want": "req [ Authorization: Basic ***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a quoted bearer credential right after an unterminated ESC [",
+      "detail": "\u001b[\"Bearer abcdefSecret\"]",
+      "want": "earer ***\"]"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a query credential right after an unterminated ESC [",
+      "detail": "GET /x\u001b[?token=qSecret123 401",
+      "want": "GET /x oken=*** 401"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "rules that run until nothing changes: a userinfo the Authorization rule opens",
+      "detail": "http://Authorization:a/b)@h",
+      "want": "http://***@h"
+    },
+    {
+      "pattern": "cleanup",
       "name": "a token the cut at 1024 bytes would have halved, redacted before the cut",
       "pad": 1000,
       "detail": " ghs_EXAMPLEtoken0123456789abcdefghijklmn",
@@ -479,6 +503,20 @@
       "pad": 980,
       "detail": " connect(password='x') bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "want": " connect(password='***') bbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a userinfo the Authorization rule opens, before the cut, kept with the words after it",
+      "pad": 1000,
+      "detail": " http://Authorization:a/b)@h word word word word word",
+      "want": " http://***@h word word"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "one word the cut leaves partial, trimmed by characters, never to nothing",
+      "pad": 1015,
+      "detail": "?token=abcdef",
+      "want": "?token="
     },
     {
       "pattern": "none",

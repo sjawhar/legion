@@ -463,8 +463,8 @@ const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   ],
   [/\b(password[ \uffff]*=[ \uffff]*)(?:(')(?:[^'\\]|\\.)*('?)|[^ &#"'<>]+)/gi, "$1$2***$3"],
   [
-    /(authorization\\?["']?[ \uffff]*[:=][ \uffff]*)(?:(\\["'])((?:bearer|basic|token|digest)[ \uffff]+)?[^"'\\]+|(["'])((?:bearer|basic|token|digest)[ \uffff]+)?(?:[^"'\\]|\\.)+|(\[?)((?:bearer|basic|token|digest)[ \uffff]+)?[^)\]}>]+)/gi,
-    "$1$2$3$4$5$6$7***",
+    /(authorization\\?["']?[ \uffff]*[:=][ \uffff]*)(?:(\\["'](?:(?:bearer|basic|token|digest)[ \uffff]+)?)[^"'\\]+|(["'](?:(?:bearer|basic|token|digest)[ \uffff]+)?)(?:[^"'\\]|\\.)+|(\[?(?:(?:bearer|basic|token|digest)[ \uffff]+)?)[^)\]}>]+)/gi,
+    "$1$2$3$4***",
   ],
   [
     /((?:api-key|ocp-apim-subscription-key|x-subscription-token)\\?["']?[ \uffff]*[:=][ \uffff]*\\?["']?)[A-Za-z0-9._~+/=*-][A-Za-z0-9._~+/=*\uffff-]*/gi,
@@ -482,12 +482,22 @@ const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, "$1***"],
 ];
 
-/** `text` with every `CREDENTIAL_RULES` match replaced, rule by rule. */
+/** The most passes `redactCredentials` makes: the daemon's `maxRedactionPasses`. */
+const MAX_REDACTION_PASSES = 8;
+
+/** `text` with every `CREDENTIAL_RULES` match replaced, rule by rule, pass after pass until a pass
+ * changes nothing (at most `MAX_REDACTION_PASSES`), as the daemon's `redactCredentials` does. */
 function redactCredentials(text: string): string {
-  return CREDENTIAL_RULES.reduce(
-    (line, [pattern, replacement]) => line.replace(pattern, replacement),
-    text
-  );
+  let line = text;
+  for (let pass = 0; pass < MAX_REDACTION_PASSES; pass++) {
+    const next = CREDENTIAL_RULES.reduce(
+      (redacted, [pattern, replacement]) => redacted.replace(pattern, replacement),
+      line
+    );
+    if (next === line) break;
+    line = next;
+  }
+  return line;
 }
 
 /**
@@ -495,11 +505,13 @@ function redactCredentials(text: string): string {
  * steps, which its comment explains, and held to the same shared fixture: one line, every
  * credential redacted, cut at 1024 UTF-8 bytes. Every space rune is a space and every other control
  * character is held; the rules run with each held on its own, then, when anything was held, again
- * with each whole ANSI control sequence and every other held character a space. After a cut,
- * trailing space goes, and so does each trailing word the rules would still change, so cleaning
- * what this returns gives it back unchanged. The daemon cleans the report again, which leaves it as
- * it is; this copy keeps a credential inside the pod when the daemon is a contract-21 release from
- * before that cleaning (legion-v11.5.0, v11.5.1).
+ * with each whole ANSI control sequence and every other held character a space, each time until a
+ * pass changes nothing. After a cut, trailing space goes, then trailing words, and within a last
+ * word trailing characters, while the rules would still change what is left, but never the last
+ * character; so cleaning what this returns gives it back unchanged, and a cut never empties a
+ * detail that had text. The daemon cleans the report again, which leaves it as it is; this copy
+ * keeps a credential inside the pod when the daemon is a contract-21 release from before that
+ * cleaning (legion-v11.5.0, v11.5.1).
  */
 export function cleanDetail(text: string): string {
   let marked = "";
@@ -519,8 +531,10 @@ export function cleanDetail(text: string): string {
     .join(" ");
   let cut = truncateUtf8(line, MAX_DETAIL_BYTES).replace(/ +$/, "");
   if (cut.length < line.length) {
-    while (cut !== "" && redactCredentials(cut) !== cut) {
-      cut = cut.slice(0, Math.max(cut.lastIndexOf(" "), 0));
+    while (redactCredentials(cut) !== cut) {
+      const space = cut.lastIndexOf(" ");
+      cut =
+        space > 0 ? cut.slice(0, space) : cut.slice(0, -([...cut.slice(-2)].at(-1)?.length ?? 1));
     }
   }
   return cut;
