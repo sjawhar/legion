@@ -2,6 +2,9 @@ package pmdoc
 
 import (
 	"fmt"
+	"runtime"
+	"runtime/debug"
+	"runtime/metrics"
 	"sort"
 	"strings"
 	"sync"
@@ -19,12 +22,13 @@ import (
 // -race, linear_sizes_race.go, so a -count=N run stays well inside go test's own default
 // per-package timeout even there), through growsLinearly (below).
 //
-// What each shape's closure measures is this process's own CPU time (processCPUTime), not wall
-// time. A loaded box's scheduler can inflate wall time on either side of a comparison without
-// either side doing more work - that is LEGION-569/571's whole flake history across three rounds
-// of widening the growth step and the slack without removing the root cause. CPU time is immune
-// to another process's contention for the same cores; it only grows with work this process (and
-// its GC) actually does.
+// What each shape's closure measures is the CPU time this process spends on the call alone
+// (cpuTimeOf), not wall time. A loaded box's scheduler can inflate wall time on either side of a
+// comparison without either side doing more work - that is LEGION-569/571's whole flake history
+// across three rounds of widening the growth step and the slack without removing the root cause.
+// CPU time is immune to another process's contention for the same cores. The collector is settled
+// before each call and stopped during it, because a collection's CPU time depends on when it lands
+// rather than on the call (cpuTimeOf has the mechanism).
 //
 // growsLinearly also samples every size the same number of times and keeps the fastest
 // (growthVerdict's sampleCount), so neither a first run's warm-up nor whichever side a stray spike
@@ -52,12 +56,12 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 		small := full / growthStep
 		t.Run(shape, func(t *testing.T) {
 			growsLinearly(t, fmt.Sprintf("parsing %q", shape), []int{small * len(shape), full * len(shape)}, linearSlack, func(size int) time.Duration {
-				repeats := size / len(shape)
-				before := processCPUTime()
-				if _, err := ParseRendering(strings.Repeat(shape, repeats)); err != nil {
-					t.Fatalf("parse %d bytes of %q: %v", size, shape, err)
-				}
-				return processCPUTime() - before
+				text := strings.Repeat(shape, size/len(shape))
+				return cpuTimeOf(t, func() {
+					if _, err := ParseRendering(text); err != nil {
+						t.Fatalf("parse %d bytes of %q: %v", size, shape, err)
+					}
+				})
 			})
 		})
 	}
@@ -69,12 +73,12 @@ func TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText(t *testing.T) {
 		}
 		t.Run(shape, func(t *testing.T) {
 			growsLinearly(t, fmt.Sprintf("rendering %q", shape), []int{small * len(shape), full * len(shape)}, linearSlack, func(size int) time.Duration {
-				repeats := size / len(shape)
-				before := processCPUTime()
-				if _, err := Render(doc(repeats)); err != nil {
-					t.Fatalf("render %d bytes of %q: %v", size, shape, err)
-				}
-				return processCPUTime() - before
+				tree := doc(size / len(shape))
+				return cpuTimeOf(t, func() {
+					if _, err := Render(tree); err != nil {
+						t.Fatalf("render %d bytes of %q: %v", size, shape, err)
+					}
+				})
 			})
 		})
 	}
@@ -191,11 +195,11 @@ func TestParseIsLinearInATableOfEscapedPipes(t *testing.T) {
 	const header, row = "| a |\n| --- |\n", "`\\|`\n"
 	growsLinearly(t, "parsing a table of `\\|` cells", []int{16 << 10, 256 << 10, 1 << 20}, growthAllowance, func(size int) time.Duration {
 		markdown := header + strings.Repeat(row, (size-len(header))/len(row))
-		before := processCPUTime()
-		if _, err := ParseRendering(markdown); err != nil {
-			t.Fatalf("parse %d bytes of `\\|` rows: %v", size, err)
-		}
-		return processCPUTime() - before
+		return cpuTimeOf(t, func() {
+			if _, err := ParseRendering(markdown); err != nil {
+				t.Fatalf("parse %d bytes of `\\|` rows: %v", size, err)
+			}
+		})
 	})
 }
 
@@ -243,9 +247,7 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 					writeUpdate(t, doc, fragment, repeatedBlocks(t, test.from, blocks))
 				}
 				want := repeatedBlocks(t, test.to, blocks)
-				before := processCPUTime()
-				writeUpdate(t, doc, fragment, want)
-				took := processCPUTime() - before
+				took := cpuTimeOf(t, func() { writeUpdate(t, doc, fragment, want) })
 				if got, err := Read(fragment); err != nil || !got.Equal(want) {
 					t.Fatalf("%s: %d blocks read back otherwise (%v)", test.name, blocks, err)
 				}
@@ -271,9 +273,7 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 			want := repeatedBlocks(t, "a\n\n", blocks)
 			update := fastest("replacing every other block", func() time.Duration {
 				doc, fragment := from()
-				before := processCPUTime()
-				writeUpdate(t, doc, fragment, want)
-				took := processCPUTime() - before
+				took := cpuTimeOf(t, func() { writeUpdate(t, doc, fragment, want) })
 				if got, err := Read(fragment); err != nil || !got.Equal(want) {
 					t.Fatalf("replacing every other block: %d blocks read back otherwise (%v)", blocks, err)
 				}
@@ -281,14 +281,14 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 			})
 			walks := fastest("ygo's walks to every other block", func() time.Duration {
 				doc, fragment := from()
-				before := processCPUTime()
-				doc.Transact(func(txn *crdt.Transaction) {
-					for index := 0; index < blocks; index += 2 {
-						fragment.Delete(txn, index, 1)
-						fragment.InsertElement(txn, index, crdt.NewYXmlElement("paragraph"))
-					}
+				return cpuTimeOf(t, func() {
+					doc.Transact(func(txn *crdt.Transaction) {
+						for index := 0; index < blocks; index += 2 {
+							fragment.Delete(txn, index, 1)
+							fragment.InsertElement(txn, index, crdt.NewYXmlElement("paragraph"))
+						}
+					})
 				})
-				return processCPUTime() - before
 			})
 			if update > alternatingAllowance*walks {
 				t.Fatalf("replacing every other block of %d took %s, %.1f times the %s ygo's own Delete and Insert at those indexes take (at most %d)", blocks, update.Round(time.Millisecond), float64(update)/float64(walks), walks.Round(time.Millisecond), alternatingAllowance)
@@ -341,11 +341,55 @@ const sampleCount = 3
 // (cputest.Process), not wall time - immune to another process's contention for the same cores,
 // which is LEGION-569/571's whole flake history (the file-level comment above has the fuller
 // account). No test in this package calls t.Parallel (there is no t.Parallel() anywhere under
-// internal/dispatch/pmdoc), so ordinarily at most one measured call runs at a time, and this
-// process's CPU delta across one call is that call's own cost plus whatever GC work its
-// allocations trigger meanwhile. leakedCallGuard (below) is what keeps that true even once a call
-// has missed its own deadline and gone on running in the background.
+// internal/dispatch/pmdoc), so ordinarily at most one measured call runs at a time.
+// leakedCallGuard (below) is what keeps that true even once a call has missed its own deadline
+// and gone on running in the background. Every measured call reads it through cpuTimeOf.
 func processCPUTime() time.Duration { return cputest.Process() }
+
+// cpuTimeOf is the CPU time this process spends running op, with the garbage collector settled
+// before op starts and stopped while it runs, so the time is op's own work alone.
+//
+// A collection inside the window adds CPU time that depends on when it lands rather than on op.
+// Whether one lands depends on the heap goal the untimed setup and the tests before it leave
+// behind, so a small size's write can run with no collection at all while a full-size write runs
+// one or two. A collection's own CPU time varies several times over between cycles, since its
+// idle mark workers run on every processor the single-threaded write leaves idle and
+// processCPUTime counts them. Either way the full size's time grows against the small size's
+// without the work growing, which is how a linear write went over linearSlack's bound.
+//
+// Stopping the collector hides nothing a regression would show: work that grows quadratically
+// does so on op's own goroutine, and allocation that grows quadratically still pays inside the
+// window for the fresh memory it touches. The heap may grow to windowMemoryLimit while the
+// collector is stopped, so a regression that allocates without bound is collected rather than
+// killing the process; a window that reaches the limit fails t, since that collection would put
+// its noise back into the time.
+func cpuTimeOf(t *testing.T, op func()) time.Duration {
+	t.Helper()
+	runtime.GC()
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	limit := min(debug.SetMemoryLimit(-1), windowMemoryLimit)
+	defer debug.SetMemoryLimit(debug.SetMemoryLimit(limit))
+	cycles := gcCycles()
+	before := processCPUTime()
+	op()
+	took := processCPUTime() - before
+	if collected := gcCycles() - cycles; collected != 0 {
+		t.Errorf("%d collections ran inside a timed window, which grew the heap to the %d MiB memory limit; their CPU time is in its %s", collected, limit>>20, took.Round(time.Millisecond))
+	}
+	return took
+}
+
+// windowMemoryLimit is the most memory cpuTimeOf lets a window grow the heap to with the collector
+// stopped, unless the process already runs under a lower limit. The largest window here, seeding a
+// mebibyte of paragraphs, allocates about 1 GiB, and a parse of a mebibyte table about 800 MiB.
+const windowMemoryLimit = 3 << 30
+
+// gcCycles is how many collections this process has completed.
+func gcCycles() uint64 {
+	sample := []metrics.Sample{{Name: "/gc/cycles/total:gc-cycles"}}
+	metrics.Read(sample)
+	return sample[0].Value.Uint64()
+}
 
 // leaking counts how many of each what (growsLinearly's shape-and-size label) are currently
 // running past their own deadline - a count, not a single flag, so two concurrently leaking calls
