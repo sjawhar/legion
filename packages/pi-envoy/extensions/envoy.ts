@@ -601,8 +601,9 @@ export default function envoyExtension(pi: PiApi): void {
     // The pictures the transcript the session is now on already shows (a fork's, a handoff's, a
     // resume's, a restart's) are in the history every request sends, so they count as shown. The
     // id the session left is no longer served: what it was shown is forgotten, and so are the
-    // turns sent into it (every match asks under the live id) and its typed turns already handed
-    // their pictures (`TypedPictures.dropOtherSessions` says which survive).
+    // turns this instance sent into it (every match asks under the live id; another instance in
+    // the process may still serve the id) and its typed turns already handed their pictures
+    // (`TypedPictures.dropOtherSessions` says which survive).
     markPicturesShown(shownPictures(sessionID), transcriptPictures(branch));
     if (previousSessionID !== sessionID) {
       forgetShownPictures(previousSessionID);
