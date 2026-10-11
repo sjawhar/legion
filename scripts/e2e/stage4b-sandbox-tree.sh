@@ -4058,7 +4058,7 @@ done
 # Every other tree's claims move too, though their own workflow may end a phase meanwhile: once each
 # has left the generation it ran, none has left its issue pod, and every claim of the run is on the
 # addresses the daemon hands now. No capacity subject: a claim relaunching onto a starved pod has no
-# locator at all (letGo clears it, machine.go:947; the Sandbox runtime sets one only once the
+# locator at all (supervise/machine.go's letGo clears it; the Sandbox runtime sets one only once the
 # launcher in a placed pod connects, relaunch.go:135,183), so claims_left counts it left at once —
 # this wait can time out only on a product failure, which any subject here could only misread as
 # BLOCKED.
