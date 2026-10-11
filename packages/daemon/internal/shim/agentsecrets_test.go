@@ -13,7 +13,8 @@ import (
 )
 
 // fakeAgentSecrets is `agent-secrets` as the shim runs it: keygen writes key.pem and prints a
-// fixed thumbprint; renew records that it started and sleeps until killed; anything else fails.
+// fixed thumbprint; renew records that it started, with its arguments, and sleeps until killed;
+// anything else fails.
 const fakeThumbprint = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
 
 func writeFakeAgentSecrets(t *testing.T, dir string) string {
@@ -25,7 +26,7 @@ case "$1" in
     [ "$2" = "--out" ] || exit 64
     umask 077; printf 'fake key\n' >"$3/key.pem"; printf '%s\n' "` + fakeThumbprint + `"; exit 0 ;;
   renew)
-    printf 'renew %s\n' "$$" >>"$AGENT_SECRETS_KEY_DIR/renew.log"; exec sleep 300 ;;
+    shift; printf 'renew %s %s\n' "$$" "$*" >>"$AGENT_SECRETS_KEY_DIR/renew.log"; exec sleep 300 ;;
   *) echo "unexpected: $*" >&2; exit 65 ;;
 esac
 `
@@ -35,7 +36,7 @@ esac
 	return path
 }
 
-func agentSecretsConfig(t *testing.T, socket string, o *omp) (shim.Config, string) {
+func agentSecretsConfig(t *testing.T, socket string, o *omp) (shim.Config, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	keyDir := filepath.Join(dir, "keys")
@@ -49,14 +50,14 @@ func agentSecretsConfig(t *testing.T, socket string, o *omp) (shim.Config, strin
 	cfg := config(t, socket, o)
 	cfg.AgentSecrets = &shim.AgentSecrets{KeyDir: keyDir, TokenFile: tokenFile, Binary: writeFakeAgentSecrets(t, dir)}
 	cfg.Env = append(cfg.Env, "AGENT_SECRETS_KEY_DIR="+keyDir, "AGENT_SECRETS_URL=http://broker.test")
-	return cfg, keyDir
+	return cfg, keyDir, tokenFile
 }
 
 func TestTheHelloCarriesTheKeyThumbprintAndTheProjectedToken(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, keyDir := agentSecretsConfig(t, path, o)
+	cfg, keyDir, _ := agentSecretsConfig(t, path, o)
 	r := run(t, cfg, newClock())
 	peer := stub.accept(t)
 
@@ -94,11 +95,14 @@ func TestAHelloWithoutAgentSecretsIsAPlainHello2(t *testing.T) {
 	r.stop(t)
 }
 
+// TestTheEnrollmentFrameIsWrittenBesideTheKeyAndStartsTheRenewer: the renewer is started with the
+// projected token file the runtime mounts, `agent-secrets renew --pod-token-file <file>`, so each
+// renewal carries the pod's current token for the broker to check against the enrollment.
 func TestTheEnrollmentFrameIsWrittenBesideTheKeyAndStartsTheRenewer(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, keyDir := agentSecretsConfig(t, path, o)
+	cfg, keyDir, tokenFile := agentSecretsConfig(t, path, o)
 	r := run(t, cfg, newClock())
 	peer := stub.accept(t)
 	peer.open(t) // hello2 read, acked, the child's first frame read back
@@ -113,14 +117,19 @@ func TestTheEnrollmentFrameIsWrittenBesideTheKeyAndStartsTheRenewer(t *testing.T
 		t.Fatalf("enrollment file mode %v, want 0600", info.Mode().Perm())
 	}
 	deadline := time.Now().Add(waitLimit) // the fake renewer records its start in renew.log
+	var started string
 	for {
 		if raw, err := os.ReadFile(filepath.Join(keyDir, "renew.log")); err == nil && strings.HasPrefix(string(raw), "renew ") {
+			started = string(raw)
 			break
 		}
 		if time.Now().After(deadline) {
 			t.Fatal("the renewer was not started within the wait limit")
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if fields := strings.Fields(started); len(fields) != 4 || fields[2] != "--pod-token-file" || fields[3] != tokenFile {
+		t.Fatalf("renewer started as %q, want `renew --pod-token-file %s`", started, tokenFile)
 	}
 	// The same id again is answered again and rewrites nothing that matters.
 	peer.send(t, shimwire.AgentSecretsEnrollment{ID: "req-2", EnrollmentID: "enr-1"})
@@ -154,7 +163,7 @@ func TestKeygenFailureEndsTheShimBeforeAnyDial(t *testing.T) {
 	path := socketPath(t)
 	stub := listen(t, path)
 	o := newOMP(t)
-	cfg, _ := agentSecretsConfig(t, path, o)
+	cfg, _, _ := agentSecretsConfig(t, path, o)
 	if err := os.WriteFile(cfg.AgentSecrets.Binary, []byte("#!/bin/sh\necho 'keygen: disk full' >&2; exit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}

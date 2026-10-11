@@ -661,6 +661,7 @@ type fakeEnroller struct {
 	enrollErr   error
 	revokeErr   error
 	revokeFails int // Revoke fails this many times, then succeeds
+	calls       int // every Revoke call, failed or not
 	next        int
 }
 
@@ -678,6 +679,7 @@ func (f *fakeEnroller) Enroll(_ context.Context, e PodEnrollment) (string, error
 func (f *fakeEnroller) Revoke(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.calls++
 	if f.revokeFails > 0 {
 		f.revokeFails--
 		return errors.New("broker unreachable")
@@ -699,6 +701,12 @@ func (f *fakeEnroller) revocations() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.revoked)
+}
+
+func (f *fakeEnroller) revokeCalls() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
 }
 
 type permanentErr struct{ msg string }
