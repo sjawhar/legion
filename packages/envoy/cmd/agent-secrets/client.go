@@ -28,6 +28,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -35,6 +36,12 @@ type client struct {
 	baseURL string
 	http    *http.Client
 }
+
+const (
+	terminalRenewalCodePodIdentity = "POD_IDENTITY_MISMATCH"
+	terminalRenewalCodePodToken    = "POD_TOKEN_REQUIRED"
+	terminalRenewalCodeNotLive     = "ENROLLMENT_NOT_LIVE"
+)
 
 func newClient(baseURL string) *client {
 	return &client{baseURL: baseURL, http: &http.Client{Timeout: 30 * time.Second}}
@@ -55,10 +62,21 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("%s (%s)", e.Message, e.Code)
 }
 
-// Permanent reports whether retrying this broker refusal cannot change its answer.
+// Permanent reports the closed set of renewal refusals that cannot recover until the enrollment
+// changes. PROOF_INVALID deliberately stays retryable: its proof can be valid after a clock
+// correction, while ENROLLMENT_NOT_LIVE is the renew route's unambiguous ended-enrollment code.
+// A broker that predates ENROLLMENT_NOT_LIVE answers an ended enrollment PROOF_INVALID with a
+// message saying `not live` (its renew handler's "enrollment is not live" and its proof check's
+// "proof invalid: not live"), which no recoverable proof failure says, so that is terminal too.
 func (e *apiError) Permanent() bool {
-	return e.Status >= http.StatusBadRequest && e.Status < http.StatusInternalServerError &&
-		e.Status != http.StatusTooManyRequests
+	switch e.Code {
+	case terminalRenewalCodePodIdentity, terminalRenewalCodePodToken, terminalRenewalCodeNotLive:
+		return true
+	case "PROOF_INVALID":
+		return strings.Contains(e.Message, "not live")
+	default:
+		return false
+	}
 }
 
 // do sends the request and, on a 2xx response, returns its raw body; any other status decodes

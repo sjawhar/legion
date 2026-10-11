@@ -93,9 +93,9 @@ func TestRenewSendsThePodsCurrentToken(t *testing.T) {
 	}
 }
 
-// TestRenewWithoutAPodTokenFileSendsNoBody: a box renewal posts no body, which every broker
-// release accepts for a box. Its permanent 401 still answers the distinct renewal-refusal exit
-// code, so a shim would not restart an enrollment the broker has already ended.
+// TestRenewWithoutAPodTokenFileSendsNoBody: a box renewal posts no body. PROOF_INVALID is not a
+// terminal enrollment verdict: an iat-skew correction can make the next proof valid, so the loop
+// waits to retry instead of returning exit 76.
 func TestRenewWithoutAPodTokenFileSendsNoBody(t *testing.T) {
 	var bodies [][]byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -106,15 +106,57 @@ func TestRenewWithoutAPodTokenFileSendsNoBody(t *testing.T) {
 		bodies = append(bodies, raw)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
-		_ = json.NewEncoder(w).Encode(map[string]string{"code": "PROOF_INVALID", "error": "enrollment is not live"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"code": "PROOF_INVALID", "error": "iat outside 60s"})
 	}))
 	defer srv.Close()
 	client, signer, enrollmentID, _ := renewalSession(t, srv.URL)
-	if code := renewLoop(context.Background(), client, signer, enrollmentID, func() (string, error) { return "", nil }, io.Discard, time.After); code != exitRenewRefused {
-		t.Fatalf("renew loop exit = %d, want %d", code, exitRenewRefused)
+	waits := make(chan chan time.Time, 1)
+	after := func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time)
+		waits <- ch
+		return ch
 	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan int, 1)
+	go func() {
+		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return "", nil }, io.Discard, after)
+	}()
+	<-waits // PROOF_INVALID reached the transient retry wait
 	if len(bodies) != 1 || len(bodies[0]) != 0 {
 		t.Fatalf("renew bodies %q, want one request with no body", bodies)
+	}
+	cancel()
+	if code := <-result; code != 0 {
+		t.Fatalf("renew loop exit after retry cancellation = %d, want 0", code)
+	}
+}
+
+// TestRenewStopsOnlyForTerminalBrokerCodes: the three terminal codes exit 76, and so does an older
+// broker's PROOF_INVALID that says the enrollment is not live (its renew handler's and its proof
+// check's wording), since that broker has no ENROLLMENT_NOT_LIVE to send.
+func TestRenewStopsOnlyForTerminalBrokerCodes(t *testing.T) {
+	for _, tc := range []struct {
+		code, message string
+		status        int
+	}{
+		{terminalRenewalCodePodIdentity, "terminal", http.StatusForbidden},
+		{terminalRenewalCodePodToken, "terminal", http.StatusForbidden},
+		{terminalRenewalCodeNotLive, "enrollment is not live", http.StatusUnauthorized},
+		{"PROOF_INVALID", "enrollment is not live", http.StatusUnauthorized},
+		{"PROOF_INVALID", "proof invalid: not live", http.StatusUnauthorized},
+	} {
+		t.Run(tc.code+" "+tc.message, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(map[string]string{"code": tc.code, "error": tc.message})
+			}))
+			defer srv.Close()
+			client, signer, enrollmentID, _ := renewalSession(t, srv.URL)
+			if got := renewLoop(context.Background(), client, signer, enrollmentID, func() (string, error) { return "", nil }, io.Discard, time.After); got != exitRenewRefused {
+				t.Fatalf("renew loop exit = %d, want %d", got, exitRenewRefused)
+			}
+		})
 	}
 }
 
