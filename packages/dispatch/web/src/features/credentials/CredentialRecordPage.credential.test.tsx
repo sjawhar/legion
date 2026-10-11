@@ -54,6 +54,31 @@ test("a decided secret record with no credential shows no Credential line", asyn
   }
 });
 
+// A request that asked for no lifetime gets a grant that lasts until its session ends, which the
+// broker answers as a null lifetime; the page says so rather than "0 seconds".
+test("a record with no lifetime says its grant lasts until the session ends", async () => {
+  const { getRecord } = renderRecordPage({ ...decidedSecretRecord(), lifetime_seconds: null });
+  try {
+    const lifetime = await screen.findByText("Until the session ends");
+    expect(lifetime.previousElementSibling?.textContent).toBe("Lifetime");
+    expect(screen.queryByText(/second/)).toBeNull();
+  } finally {
+    cleanup();
+    getRecord.mockRestore();
+  }
+});
+
+test("a record with a lifetime names it in whole units", async () => {
+  const { getRecord } = renderRecordPage({ ...decidedSecretRecord(), lifetime_seconds: 120 });
+  try {
+    expect(await screen.findByText("2 minutes")).toBeDefined();
+    expect(screen.queryByText("Until the session ends")).toBeNull();
+  } finally {
+    cleanup();
+    getRecord.mockRestore();
+  }
+});
+
 // LEGION-587: a record's own session, resolved the same way the Inbox row's is.
 test("a record with no session set reads as no session named", async () => {
   const { getRecord } = renderRecordPage(decidedSecretRecord());

@@ -92,8 +92,9 @@ type recordResponse struct {
 	Service *string `json:"service"`
 	// The reason the session gave, verbatim.
 	Reason string `json:"reason"`
-	// How long the grant or credential lasts once approved.
-	LifetimeSeconds int `json:"lifetime_seconds"`
+	// How many seconds the grant or credential lasts once approved; null for a grant that lasts
+	// until its session ends. A machine login's credential always names one.
+	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// The version of the secret policy it was decided under (the SHA-256 of every agent secret's
 	// name, owner, tier and ARN); for a machine login, the version current when it was asked.
 	RulesVersion string `json:"rules_version"`
@@ -110,7 +111,7 @@ type recordResponse struct {
 func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 	resp := recordResponse{
 		RecordID: detail.RecordID, Kind: detail.Kind, State: detail.State, Approver: detail.Approver,
-		Identifiers: detail.Identifiers, Reason: detail.Reason, LifetimeSeconds: detail.LifetimeSeconds,
+		Identifiers: detail.Identifiers, Reason: detail.Reason, LifetimeSeconds: intPtr(detail.LifetimeSeconds),
 		RulesVersion: detail.RulesVersion, ExpiresAt: detail.ExpiresAt, RequestedAt: detail.RequestedAt,
 		Session: sessionResp(detail.Session),
 	}

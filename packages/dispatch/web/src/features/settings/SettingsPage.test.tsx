@@ -188,3 +188,41 @@ test("two grants on one pod read apart by their slots", async () => {
     }
   }
 });
+
+// A grant that lasts until its session ends has no expiry, which the broker answers as null; its
+// row says so rather than a time read from null (1970), and a grant with an expiry still shows it.
+test("a grant with no expiry says it ends when its session ends", async () => {
+  const unrelated = stubUnrelatedQueries();
+  const getCredentialPending = spyOn(api, "getCredentialPending").mockResolvedValue({
+    pending: [],
+  });
+  const grant = (grantId: string, expiresAt: string | null) => ({
+    approver: null,
+    created_at: "2026-09-30T00:00:00Z",
+    enrollment: { kind: "session", operator: "sami@example.com", runtime_id: "box-1", slot: null },
+    expires_at: expiresAt,
+    grant_id: grantId,
+    granted: "automatic" as const,
+    names: [grantId === "grant-1" ? "DEEL_API_KEY" : "GWS_READ_TOKEN"],
+    record_id: null,
+  });
+  const getCredentialGrants = spyOn(api, "getCredentialGrants").mockResolvedValue({
+    grants: [grant("grant-1", null), grant("grant-2", "2026-09-30T01:00:00Z")],
+  });
+
+  try {
+    renderPage();
+
+    expect(await screen.findByRole("cell", { name: "When the session ends" })).toBeDefined();
+    expect(document.querySelectorAll("time[datetime='2026-09-30T01:00:00Z']")).toHaveLength(1);
+    // Two Created times and the one grant's Expires time: the grant with no expiry shows none.
+    expect(document.querySelectorAll("time")).toHaveLength(3);
+  } finally {
+    cleanup();
+    getCredentialPending.mockRestore();
+    getCredentialGrants.mockRestore();
+    for (const spy of Object.values(unrelated)) {
+      spy.mockRestore();
+    }
+  }
+});

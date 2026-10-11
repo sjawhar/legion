@@ -30,7 +30,11 @@ const columns: readonly RevocableColumn<CredentialGrant>[] = [
   { cell: (grant) => grant.names.join(", "), header: "Names" },
   { cell: grantedBy, header: "Granted" },
   { cell: (grant) => <Timestamp at={grant.created_at} />, header: "Created" },
-  { cell: (grant) => <Timestamp at={grant.expires_at} />, header: "Expires" },
+  {
+    cell: (grant) =>
+      grant.expires_at === null ? "When the session ends" : <Timestamp at={grant.expires_at} />,
+    header: "Expires",
+  },
 ];
 
 /**

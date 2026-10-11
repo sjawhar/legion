@@ -19,8 +19,12 @@ const LIFETIME_UNITS: ReadonlyArray<{ seconds: number; unit: string }> = [
   { seconds: 60, unit: "minute" },
 ];
 
-/** Formats a lifetime in whole units ("15 minutes", "2 hours") rather than a raw second count. */
-function formatLifetime(seconds: number): string {
+/** Formats a lifetime in whole units ("15 minutes", "2 hours") rather than a raw second count, and
+ *  no lifetime as the grant's actual end: its session's. */
+function formatLifetime(seconds: number | null): string {
+  if (seconds === null) {
+    return "Until the session ends";
+  }
   for (const { seconds: unitSeconds, unit } of LIFETIME_UNITS) {
     if (seconds >= unitSeconds) {
       const count = Math.round(seconds / unitSeconds);

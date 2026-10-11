@@ -263,7 +263,7 @@ type wireRecord struct {
 	Identifiers     []string            `json:"identifiers"`
 	Service         *string             `json:"service"`
 	Reason          string              `json:"reason"`
-	LifetimeSeconds int                 `json:"lifetime_seconds"`
+	LifetimeSeconds *int                `json:"lifetime_seconds"`
 	RulesVersion    string              `json:"rules_version"`
 	ExpiresAt       time.Time           `json:"expires_at"`
 	RequestedAt     time.Time           `json:"requested_at"`
@@ -306,7 +306,7 @@ type wireApproverGrant struct {
 	Enrollment wireEnrollmentInfo `json:"enrollment"`
 	Names      []string           `json:"names"`
 	Approver   *string            `json:"approver"`
-	ExpiresAt  time.Time          `json:"expires_at"`
+	ExpiresAt  *time.Time         `json:"expires_at"`
 	CreatedAt  time.Time          `json:"created_at"`
 }
 
@@ -511,6 +511,9 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 	if plainRead.Enrollment != nil {
 		t.Fatalf("machine record enrollment = %+v, want nil (no requesting enrollment)", plainRead.Enrollment)
 	}
+	if plainRead.LifetimeSeconds == nil || *plainRead.LifetimeSeconds != int((7*24*time.Hour).Seconds()) {
+		t.Fatalf("machine record lifetime_seconds = %v, want the credential's week", plainRead.LifetimeSeconds)
+	}
 
 	// The code selects the login, but only its approver (the login_hint) decides it.
 	status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
@@ -682,6 +685,9 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if readBack.Enrollment == nil || readBack.Enrollment.Kind != "session" || readBack.Enrollment.Operator != testApprover || readBack.Enrollment.Slot != nil {
 		t.Fatalf("record enrollment = %+v, want kind=session operator=%s and no slot", readBack.Enrollment, testApprover)
 	}
+	if readBack.LifetimeSeconds != nil {
+		t.Fatalf("record lifetime_seconds = %d, want null for a request naming no lifetime (until the session ends)", *readBack.LifetimeSeconds)
+	}
 	if readBack.Session.Request == nil || *readBack.Session.Request != sessionID || readBack.Session.Enrollment != nil {
 		t.Fatalf("record session = %+v, want request=%s and no enrollment session_id", readBack.Session, sessionID)
 	}
@@ -755,6 +761,9 @@ func TestAgentSecretRequestLifecycle(t *testing.T) {
 	if len(listed.Names) != 1 || listed.Names[0] != "DEEL_API_KEY" || listed.Granted != "approval" || listed.Approver == nil || *listed.Approver != testApprover ||
 		listed.RecordID == nil || *listed.RecordID != recordID || listed.Enrollment.Slot != nil {
 		t.Fatalf("listed grant = %+v, want names [DEEL_API_KEY] granted on approval by %s, resting on record %s, on an enrollment with no slot", listed, testApprover, recordID)
+	}
+	if listed.ExpiresAt != nil {
+		t.Fatalf("listed grant expires_at = %s, want null for a grant that lasts until its session ends", listed.ExpiresAt)
 	}
 
 	// Revoking by approver takes the grant's approver or its enrollment's operator (both
