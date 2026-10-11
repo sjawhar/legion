@@ -66,25 +66,28 @@ func (s *Postgres) CancelTreeHandovers(ctx context.Context, tx pgx.Tx, tree stri
 	return nil
 }
 
-func (s *Postgres) CarriedRoot(ctx context.Context, tx pgx.Tx, issue string) (uint64, error) {
+func (s *Postgres) HandedOverRoot(ctx context.Context, tx pgx.Tx, issue string) (*HandedOverRoot, error) {
+	root := HandedOverRoot{Issue: issue}
 	var generation int64
-	err := tx.QueryRow(ctx, `select generation from carried_roots where issue = $1`, issue).Scan(&generation)
+	err := tx.QueryRow(ctx, `select generation, gate_carried from handed_over_roots where issue = $1`, issue).Scan(&generation, &root.GateCarried)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
+		return nil, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("read carried root %s: %w", issue, err)
+		return nil, fmt.Errorf("read handed-over root %s: %w", issue, err)
 	}
-	return uint64(generation), nil
+	root.Generation = uint64(generation)
+	return &root, nil
 }
 
-func (s *Postgres) PutCarriedRoot(ctx context.Context, tx pgx.Tx, issue string, generation uint64) error {
-	if generation == 0 || generation > maxInt64 {
-		return fmt.Errorf("put carried root %s: generation %d is out of range", issue, generation)
+func (s *Postgres) PutHandedOverRoot(ctx context.Context, tx pgx.Tx, root HandedOverRoot) error {
+	if root.Generation == 0 || root.Generation > maxInt64 {
+		return fmt.Errorf("put handed-over root %s: generation %d is out of range", root.Issue, root.Generation)
 	}
-	if _, err := tx.Exec(ctx, `insert into carried_roots (issue, generation) values ($1, $2)
-		on conflict (issue) do update set generation = excluded.generation`, issue, int64(generation)); err != nil {
-		return fmt.Errorf("put carried root %s: %w", issue, err)
+	if _, err := tx.Exec(ctx, `insert into handed_over_roots (issue, generation, gate_carried) values ($1, $2, $3)
+		on conflict (issue) do update set generation = excluded.generation, gate_carried = excluded.gate_carried`,
+		root.Issue, int64(root.Generation), root.GateCarried); err != nil {
+		return fmt.Errorf("put handed-over root %s: %w", root.Issue, err)
 	}
 	return nil
 }

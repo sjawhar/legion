@@ -10,11 +10,14 @@ create table handovers (
     cancelled boolean not null default false
 );
 
--- A root a hand-over created carries its child's phase and approved gate into that generation;
--- its architect's catch-up says so, so it resumes rather than registering its spec again.
-create table carried_roots (
+-- A root a hand-over created carries its child's phase, phase rows and pull request into that
+-- generation, and its old root's gate when the old root had one. Its architect's catch-up says
+-- so: it resumes the tree rather than decomposing it anew, and registers its own spec only when no
+-- gate came with it.
+create table handed_over_roots (
     issue text primary key references issues(key) on delete cascade,
-    generation bigint not null check (generation > 0)
+    generation bigint not null check (generation > 0),
+    gate_carried boolean not null
 );
 
 -- A carried root holds a copy of its old root's gate, on the old root's document, whose events

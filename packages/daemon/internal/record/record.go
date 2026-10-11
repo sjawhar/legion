@@ -305,6 +305,15 @@ type ReleaseRetry struct {
 	Exhausted bool
 }
 
+// HandedOverRoot is a root a hand-over created: the generation at which the child became a root of
+// its own, carrying its phase, phase rows and pull request, and whether its old root's gate came
+// with them.
+type HandedOverRoot struct {
+	Issue       string
+	Generation  uint64
+	GateCarried bool
+}
+
 // Store contains only transactional operations. The caller owns each transaction so intake can
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
@@ -369,10 +378,10 @@ type Store interface {
 	ReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) (*ReleaseRetry, error)
 	PutReleaseRetry(ctx context.Context, tx pgx.Tx, retry ReleaseRetry) error
 	DeleteReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) error
-	// CarriedRoot is the generation at which issue became a root carrying a handed-over child's
-	// state, zero for none; PutCarriedRoot records it.
-	CarriedRoot(ctx context.Context, tx pgx.Tx, issue string) (uint64, error)
-	PutCarriedRoot(ctx context.Context, tx pgx.Tx, issue string, generation uint64) error
+	// HandedOverRoot is issue's record as a root a hand-over created, nil for none;
+	// PutHandedOverRoot records it.
+	HandedOverRoot(ctx context.Context, tx pgx.Tx, issue string) (*HandedOverRoot, error)
+	PutHandedOverRoot(ctx context.Context, tx pgx.Tx, root HandedOverRoot) error
 	// WaitingNotices is every notice row of project's issues not yet due at now, oldest first.
 	WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error)
 	// ExpediteOutbox makes row id due at now if it was due later.

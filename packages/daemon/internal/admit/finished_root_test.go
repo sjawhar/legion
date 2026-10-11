@@ -1,7 +1,9 @@
 package admit
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"reflect"
@@ -156,8 +158,8 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 				if err != nil || handover != nil {
 					t.Fatalf("handover fence after admission = %#v, %v, want none", handover, err)
 				}
-				if carried, err := records.CarriedRoot(context.Background(), tx, child); err != nil || carried != 2 {
-					t.Fatalf("carried root generation = %d, %v; want 2, since a gate was carried", carried, err)
+				if handedRoot, err := records.HandedOverRoot(context.Background(), tx, child); err != nil || handedRoot == nil || handedRoot.Generation != 2 || !handedRoot.GateCarried {
+					t.Fatalf("handed-over root = %#v, %v; want generation 2 with its gate carried", handedRoot, err)
 				}
 			})
 			if starts := phaseStarts(t, pool, child, tc.role, tc.phase); (starts == 1) != tc.wantRole {
@@ -206,12 +208,98 @@ func TestAHandedOverChildWithNoGateToCarryIsNotMarkedCarried(t *testing.T) {
 		if pr, err := records.PullRequest(context.Background(), tx, child); err != nil || pr == nil || pr.HeadSHA != "head-42" || pr.Generation != 2 {
 			t.Fatalf("pull request = %#v, %v; want it carried at generation 2", pr, err)
 		}
-		if carried, err := records.CarriedRoot(context.Background(), tx, child); err != nil || carried != 0 {
-			t.Fatalf("carried root generation = %d, %v; want none, since no gate was carried", carried, err)
+		if handedRoot, err := records.HandedOverRoot(context.Background(), tx, child); err != nil || handedRoot == nil || handedRoot.Generation != 2 || handedRoot.GateCarried {
+			t.Fatalf("handed-over root = %#v, %v; want generation 2 with no gate carried", handedRoot, err)
 		}
 	})
 	if starts := phaseStarts(t, pool, child, claim.RoleMerger, phase.Merging); starts != 1 {
 		t.Fatalf("merger starts at merging = %d, want one: the carried phase still resumes", starts)
+	}
+}
+
+// A root a hand-over created is told so in its architect's catch-up, whether or not it carried a
+// gate: `handed_over`, since its workers already run their phases and the architect must not
+// decompose the tree anew (section 2 of its skill). `carried` says the gate came with it, so it
+// registers no spec; a root without it registers its own, and still starts nothing on that gate's
+// approval.
+func TestAHandedOverRootsCatchUpSaysHandedOverAndWhetherItCarriedAGate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		gate    bool
+		carried string
+	}{
+		{name: "with its old root's gate", gate: true, carried: "true"},
+		{name: "with no gate to carry", gate: false, carried: "false"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			const root, child = "LEGION-208", "LEGION-209"
+			until := fixedNow.Add(time.Hour)
+			parent := root
+			inTx(t, pool, func(tx pgx.Tx) {
+				records := record.NewStore()
+				puts := []error{
+					records.PutIssue(ctx, tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(ctx, tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
+					records.PutHandover(ctx, tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+				}
+				if tc.gate {
+					puts = append(puts, records.PutGate(ctx, tx, record.DesignGate{Issue: root, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 1, ApprovedVersion: new(1)}))
+				}
+				for _, put := range puts {
+					if put != nil {
+						t.Fatalf("seed: %v", put)
+					}
+				}
+			})
+
+			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+			if _, err := intake.ApplyFact(ctx, pool, "supervise", "supervise:architect-of-"+child+":1:ready",
+				intake.ClaimReady{Issue: child, Role: claim.RoleArchitect, Launch: 1}, engine, admission); err != nil {
+				t.Fatalf("apply the architect's ready: %v", err)
+			}
+			var handedOver, carried string
+			if err := pool.QueryRow(ctx, `select coalesce(payload->'catch_up'->>'handed_over', 'false'), coalesce(payload->'catch_up'->>'carried', 'false')
+				from outbox where kind = 'notice' and issue = $1 and payload->>'kind' = 'catch-up' order by id desc limit 1`, child).Scan(&handedOver, &carried); err != nil {
+				t.Fatalf("read the architect's catch-up: %v", err)
+			}
+			if handedOver != "true" || carried != tc.carried {
+				t.Fatalf("catch-up says handed_over %s, carried %s; want handed_over true, carried %s", handedOver, carried, tc.carried)
+			}
+		})
+	}
+}
+
+// The outbox's own consumption of a hand-over (a write Dispatch already took, or a child Dispatch
+// already shows todo with the label) is logged as admission's hand-over, marked as the outbox's,
+// once the consumption commits, so the live proof can tell it from admission's orphan carry of the
+// same child.
+func TestTheOutboxsConsumptionOfAHandOverIsLogged(t *testing.T) {
+	pool := migratedPool(t)
+	var logged bytes.Buffer
+	admission := newAdmission(t, 1, slog.New(slog.NewJSONHandler(&logged, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	seedLingeringHandovers(t, pool, "LEGION-208", "LEGION-209")
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "outbox", "handover", intake.Handover{Issue: "LEGION-209", Tree: "LEGION-208", Generation: 1}, engine, admission); err != nil {
+		t.Fatalf("consume the hand-over: %v", err)
+	}
+	lines := 0
+	for _, line := range strings.Split(strings.TrimSpace(logged.String()), "\n") {
+		var entry map[string]any
+		if json.Unmarshal([]byte(line), &entry) == nil && entry["msg"] == "admission hand-over" && entry["issue"] == "LEGION-209" &&
+			entry["tree"] == "LEGION-208" && entry["via"] == "outbox" {
+			lines++
+		}
+	}
+	if lines != 1 {
+		t.Fatalf("admission hand-over lines via the outbox = %d, want one; admission logged:\n%s", lines, logged.String())
+	}
+	if got := issue(t, pool, "LEGION-209"); got.Tree != "LEGION-209" || got.Generation != 2 {
+		t.Fatalf("consumed child = %#v, want its own tree at generation 2", got)
 	}
 }
 
@@ -467,9 +555,9 @@ func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T
 		if err != nil || pr == nil || pr.State != record.PullRequestMerged || pr.HeadSHA != "merged-head" {
 			t.Fatalf("pull request = %#v, %v; want merged at merged-head", pr, err)
 		}
-		carried, err := records.CarriedRoot(ctx, tx, child.Key)
-		if err != nil || carried != 2 {
-			t.Fatalf("carried root generation = %d, %v; want 2", carried, err)
+		handedRoot, err := records.HandedOverRoot(ctx, tx, child.Key)
+		if err != nil || handedRoot == nil || handedRoot.Generation != 2 {
+			t.Fatalf("handed-over root = %#v, %v; want generation 2", handedRoot, err)
 		}
 	})
 	if starts := architectStarts(t, pool, child.Key); starts != 1 {
@@ -487,9 +575,9 @@ func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T
 	}
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
-		carried, err := records.CarriedRoot(ctx, tx, unstarted.Key)
-		if err != nil || carried != 0 {
-			t.Fatalf("unstarted orphan carried generation = %d, %v; want none", carried, err)
+		handedRoot, err := records.HandedOverRoot(ctx, tx, unstarted.Key)
+		if err != nil || handedRoot != nil {
+			t.Fatalf("unstarted orphan's handed-over record = %#v, %v; want none: it was admitted fresh", handedRoot, err)
 		}
 		gate, err := records.Gate(ctx, tx, unstarted.Key)
 		if err != nil || gate != nil {
@@ -642,9 +730,9 @@ func TestAHandedOverChildThatFinishedIsAdmittedFresh(t *testing.T) {
 			}
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
-				carried, err := records.CarriedRoot(ctx, tx, "LEGION-209")
-				if err != nil || carried != 0 {
-					t.Fatalf("carried generation = %d, %v; want none", carried, err)
+				handedRoot, err := records.HandedOverRoot(ctx, tx, "LEGION-209")
+				if err != nil || handedRoot != nil {
+					t.Fatalf("handed-over record = %#v, %v; want none: it was admitted fresh", handedRoot, err)
 				}
 				gate, err := records.Gate(ctx, tx, "LEGION-209")
 				if err != nil || gate != nil {

@@ -481,7 +481,9 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 
 // consumeHandover completes an outbox hand-over when Dispatch already showed its todo and label.
 // It is the direct equivalent of the daemon-authored event path, but cannot be mistaken for an
-// ordinary daemon todo echo because it carries the persisted fence identity.
+// ordinary daemon todo echo because it carries the persisted fence identity. It logs the hand-over
+// as the event path does, marked as the outbox's, once it commits: the live proof tells the two
+// consumers of a person's labelled todo (this, or admission's orphan carry) apart by it.
 func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.Handover) error {
 	stored, err := a.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || stored == nil {
@@ -495,6 +497,9 @@ func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.
 	if err != nil || root == nil || !root.LingersAt(fact.Generation) {
 		return err
 	}
+	intake.OnCommit(ctx, func() {
+		a.log.Info("admission hand-over", "issue", fact.Issue, "tree", fact.Tree, "linger", fact.Generation, "via", "outbox")
+	})
 	return a.readmit(ctx, tx, *stored, stored.Title, deref(stored.Parent), stored.Rank, stored.LastDispatchSeq, startedRun(*stored))
 }
 
@@ -629,19 +634,19 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 				return fmt.Errorf("carry pull request to re-admitted orphan %s: %w", stored.Key, err)
 			}
 		}
-		// A root is marked carried, which tells its architect never to register its own spec,
-		// only when it carried its old root's gate. A root reopened in its linger has its gate
-		// cleared with the generation, so a second close hands its children over with none: such
-		// a child keeps its phase and pull request, and its architect registers its spec as a
-		// fresh root's does, the gate its READY needs.
-		if gate == nil {
-			return nil
+		// Every root a hand-over created is recorded as one, so its architect's catch-up says it was
+		// handed over and decomposes nothing anew; it is marked as carrying a gate, which tells the
+		// architect never to register its own spec, only when its old root had one. A root reopened
+		// in its linger has its gate cleared with the generation, so a second close hands its
+		// children over with none: such a child keeps its phase and pull request, and its architect
+		// registers its spec as a fresh root's does, the gate its READY needs.
+		if gate != nil {
+			gate.Issue = stored.Key
+			if err := a.store.PutGate(ctx, tx, *gate); err != nil {
+				return fmt.Errorf("carry gate to re-admitted orphan %s: %w", stored.Key, err)
+			}
 		}
-		gate.Issue = stored.Key
-		if err := a.store.PutGate(ctx, tx, *gate); err != nil {
-			return fmt.Errorf("carry gate to re-admitted orphan %s: %w", stored.Key, err)
-		}
-		return a.store.PutCarriedRoot(ctx, tx, stored.Key, stored.Generation)
+		return a.store.PutHandedOverRoot(ctx, tx, record.HandedOverRoot{Issue: stored.Key, Generation: stored.Generation, GateCarried: gate != nil})
 	}
 	// Only the old tree's own root coming back cancels its pending hand-overs; an orphan of that
 	// tree admitted by a person leaves its siblings' fences standing.

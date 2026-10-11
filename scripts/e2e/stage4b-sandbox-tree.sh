@@ -4661,12 +4661,18 @@ begin carried-child
 # child 3 stays tree 1's, at generation 1, unlabelled, in the status done recorded.
 # (b) On that old Dispatch the proof human then puts the label on child 3 and leaves its status alone,
 # as a person handing it to Legion would. A child left in planning or implementing shows todo, so
-# that label makes a labelled todo event of its own, which admission takes as an orphan and carries
-# (admit's applyObservation: started, so carried), deleting the fence; the row's next attempt finds
-# no fence and finishes without writing. A child left later shows its phase's status, and the
-# daemon's write for it would carry expected_sequence, which the old Dispatch refuses too; it waits
-# for a Dispatch that knows both fields, so that case is BLOCKED here. The labelled, non-todo write
-# and its consumption keep their unit coverage (TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent,
+# that label makes a labelled todo event of its own. Either consumer may take it, and both are
+# correct: admission takes the event as an orphan and carries it (admit's applyObservation:
+# started, so carried), deleting the fence, and the row's next attempt finds no fence and finishes
+# without writing; or, when the row's backed-off retry reads the labelled todo before intake has
+# applied that event, the outbox consumes the hand-over itself (outbox consumeHandover, then
+# admit's consumeHandover). Both end with the child carried, its fence gone, no todo written by the
+# daemon, and the row finished, which (b) asserts; it names the consumer by its one log line,
+# `admission orphan` or `admission hand-over` with `via: outbox`, and fails on both or neither. A
+# child left later shows its phase's status, and the daemon's write for it would carry
+# expected_sequence, which the old Dispatch refuses too; it waits for a Dispatch that knows both
+# fields, so that case is BLOCKED here. The labelled, non-todo write and its consumption keep their
+# unit coverage (TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent,
 # TestAPersonMoveBetweenTheHandOverReadAndPatchStands): they share consumeHandover with the path the
 # new Dispatch takes.
 # Either way child 3 becomes a tree of its own at generation 2, in the phase tree 1's close left it
@@ -4739,14 +4745,18 @@ else
   dispatch_human PATCH "issues/$child3" "$(jq -cn --argjson labels "$labels" '{labels: $labels}')" >/dev/null ||
     fail "the proof human could not put the legion label on $child3"
   until_true 600 "$child3 to become a tree of its own at generation 2 in $child3_phase, admitted into a slot" child3_carried
-  orphaned=$(log_lines "admission orphan" | jq -c --arg issue "$child3" 'select(.issue == $issue)' | grep -c . || true)
-  [ "$orphaned" = 1 ] || fail "the daemon logged \"admission orphan\" for $child3 $orphaned times after the proof human labelled it todo, want once"
   fences=$(db_value "select count(*) from handovers where issue = '$child3'") || fail "the daemon's database could not be read for $child3's hand-over fence"
-  [ "$fences" = 0 ] || fail "$child3's hand-over fence is still recorded ($fences rows) after admission carried it as an orphan"
+  [ "$fences" = 0 ] || fail "$child3's hand-over fence is still recorded ($fences rows) after it was carried"
   writes=$(daemon_todo_writes) || fail "Dispatch's events could not be read for $child3"
-  [ "$writes" = 0 ] || fail "legion-daemon:$project wrote $child3 todo $writes times, though admission's orphan carry, not the outbox, handed it over"
-  carry_path="admission's orphan carry of the proof human's labelled todo, which deleted the fence"
-  note "(b) the proof human labelled $child3, which still showed todo: admission carried it as an orphan once, its fence is gone, and the daemon wrote it no todo"
+  [ "$writes" = 0 ] || fail "legion-daemon:$project wrote $child3 todo $writes times, though the proof human's label set it todo"
+  orphaned=$(log_lines "admission orphan" | jq -c --arg issue "$child3" 'select(.issue == $issue)' | grep -c . || true)
+  consumed=$(log_lines "admission hand-over" | jq -c --arg issue "$child3" 'select(.issue == $issue and .via == "outbox")' | grep -c . || true)
+  case "$orphaned $consumed" in
+    "1 0") carry_path="admission's orphan carry of the proof human's labelled todo, which deleted the fence" ;;
+    "0 1") carry_path="the outbox's own consumption, its backed-off retry having read the labelled todo before intake applied it" ;;
+    *) fail "the daemon logged \"admission orphan\" $orphaned times and \"admission hand-over\" via the outbox $consumed times for $child3 after the proof human labelled it, want exactly one consumer once" ;;
+  esac
+  note "(b) the proof human labelled $child3, which still showed todo: it was carried by $carry_path; its fence is gone, and the daemon wrote it no todo"
 fi
 handover_row_gone() {
   [ "$(db_value "select count(*) from outbox where kind = 'dispatch_status' and issue = '$child3' and payload->>'handOver' = 'true'")" = 0 ]
