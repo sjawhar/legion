@@ -2182,16 +2182,17 @@ deploy order keeps every pod renewing (an older broker ignores the token, and 00
 nullable), but that is liveness, not exposure: a grant lasts until its session ends, so a copy
 renewing an old-image UID keeps one approval's grant while it renews. The rollout therefore
 replaces every old-image issue pod before or right after the broker deploys, then revokes the
-login that made each enrollment a remaining token-less WARN names (the operate page). A pod
-enrollment is ended only by the launcher credential that made it (`DELETE` by any other is
-`403 NOT_ENROLLING_CREDENTIAL`), so a Legion daemon that logs in again (a restart, or its login's
-expiry) leaves its earlier login's pods to their leases or to a revoke of that login. The renew
-route alone maps proof.ErrNotLive to `401 ENROLLMENT_NOT_LIVE` (its own `authRenewProof` case in
-`authenticate`, `sessionCaller`): a pod renewer stops only on it or `POD_TOKEN_REQUIRED`, and
-retries `POD_IDENTITY_MISMATCH`, which `verifyPodToken` also answers for a token it could not verify
-while the issuer or its key set was unreachable; a real mismatch ends with the lease, after which
-the renewal is `ENROLLMENT_NOT_LIVE`. Its iat/key/URL failures remain `PROOF_INVALID` and retry.
-Other session routes map a not-live proof to `PROOF_INVALID` as before.
+login that made each enrollment a remaining token-less WARN names, by its credential id once its
+code and approver show it is not the daemon's, never by its self-reported machine name (the
+operate page). A pod enrollment is ended only by the launcher credential that made it (`DELETE` by
+any other is `403 NOT_ENROLLING_CREDENTIAL`), so a Legion daemon that logs in again (a restart, or
+its login's expiry) leaves its earlier login's pods to their leases or to a revoke of that login.
+The renew route alone maps proof.ErrNotLive to `401 ENROLLMENT_NOT_LIVE` (its own `authRenewProof`
+case in `authenticate`, `sessionCaller`): a pod renewer stops only on it or `POD_TOKEN_REQUIRED`,
+and retries `POD_IDENTITY_MISMATCH`, which `verifyPodToken` also answers for a token it could not
+verify while the issuer or its key set was unreachable; a real mismatch ends with the lease, after
+which the renewal is `ENROLLMENT_NOT_LIVE`. Its iat/key/URL failures remain `PROOF_INVALID` and
+retry. Other session routes map a not-live proof to `PROOF_INVALID` as before.
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or

@@ -226,8 +226,10 @@
   enrollment of which has sent one), but it does not bound exposure: a grant lasts until its
   session ends, so a copy renewing an old-image pod's UID keeps one approval's grant for as long as
   it renews. Before or right after the broker deploys, replace every old-image issue pod, then
-  revoke the machine login that made each enrollment a remaining token-less WARN line names. The
-  release that requires the token is safe once all three hold:
+  revoke the machine login that made each enrollment a remaining token-less WARN line names, by
+  its credential id once it is shown not to be the daemon's, never by its machine name, which a
+  copy's login can share (the operate page gives the query and the call). The release that
+  requires the token is safe once all three hold:
   `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null and created_at < now() - interval '1 minute'`
   answers 0; the broker has logged no token-less WARN line for one full `BROKER_LEASE_SECONDS`; and
   no issue pod runs a worker image older than the one whose renewer sends the token (an old-image

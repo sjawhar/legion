@@ -2218,7 +2218,9 @@ issue's pod (every role container of it alike) and the image probe's.
   `NOT_ENROLLING_CREDENTIAL`, and the daemon logs
   `supervise: agent-secrets: enrollment revocation refused; its lease ends it once its pod stops renewing`):
   each ends one lease after its pod's renewer stops, or at once when someone revokes that earlier
-  login on Dispatch's machine-login page. The daemon's login is the service `legion-daemon`'s, and
+  login by its credential id (the broker's operate page, "The renew token check", gives the query
+  and the call), never by its name on Dispatch's machine-login page, which every login of the
+  daemon shares. The daemon's login is the service `legion-daemon`'s, and
   its pods run as the ServiceAccount `runtime.kubernetes.pod.service_account` names (`default` when
   unset, above). A broker configured with that account for `legion-daemon`, such as
   `BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:legion-worker` for pods running as
