@@ -131,11 +131,11 @@ func unreported(sent ...Row) []Row {
 }
 
 // Normalize turns what a session sent into the rows the daemon keeps: a name Table has no live
-// row for is dropped and returned, a detail is one line (newlines, tabs and control characters
-// out, whitespace runs collapsed) cut on a rune boundary when longer than MaxReportDetail, a
-// failing row with no detail left reads "no detail reported" while a passing row's empty detail
-// stays empty, a live row the wire lacks is filled in as not reported, the rows come out in Table
-// order whatever order the wire sent them, and a name sent twice keeps the first.
+// row for is dropped and returned, a detail is one line (newlines, tabs, control characters and
+// ANSI control sequences out, whitespace runs collapsed) cut on a rune boundary when longer than
+// MaxReportDetail, a failing row with no detail left reads "no detail reported" while a passing
+// row's empty detail stays empty, a live row the wire lacks is filled in as not reported, the rows
+// come out in Table order whatever order the wire sent them, and a name sent twice keeps the first.
 func TestNormalizeKeepsTheLiveRowsInTableOrder(t *testing.T) {
 	long := strings.Repeat("€", 400)
 	for _, testCase := range []struct {
@@ -184,9 +184,9 @@ func TestNormalizeKeepsTheLiveRowsInTableOrder(t *testing.T) {
 			wantKept: unreported(Row{Name: GitHub, OK: true, Detail: ""}),
 		},
 		{
-			name:     "puts a detail on one line with its control characters out",
-			rows:     []claim.CapabilityRow{{Name: "mcp", OK: false, Detail: "not connected: evil\nserver\x1b[31m (boom)"}},
-			wantKept: unreported(Row{Name: MCP, Detail: "not connected: evil server [31m (boom)"}),
+			name:     "puts a detail on one line with its control characters and sequences out",
+			rows:     []claim.CapabilityRow{{Name: "mcp", OK: false, Detail: "not connected: evil\nserver\x1b[31m (boom)\x1b"}},
+			wantKept: unreported(Row{Name: MCP, Detail: "not connected: evil server (boom)"}),
 		},
 		{
 			name: "orders the rows as Table does",
@@ -280,6 +280,25 @@ func TestNormalizeCleansEachDetailAsTheSharedFixtureSays(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Cleaning is idempotent at the cut too: every case of the shared fixture, pushed by a run of
+// letters so that each byte of it in turn straddles MaxReportDetail, comes back from a second
+// cleaning as the first left it, so a label the cut leaves without its value is dropped rather than
+// redacted only by the daemon's pass.
+func TestCleanDetailIsIdempotentAtTheCut(t *testing.T) {
+	var fixture struct {
+		Patterns []redactionCase `json:"patterns"`
+	}
+	readFixture(t, "capability-redaction.json", &fixture)
+	for _, testCase := range fixture.Patterns {
+		for pad := MaxReportDetail - 64; pad <= MaxReportDetail+8; pad++ {
+			once := cleanDetail(strings.Repeat("a", pad) + " " + testCase.Detail)
+			if twice := cleanDetail(once); twice != once {
+				t.Errorf("%s: %s, pushed by %d letters: cleaned again\n %q\nwant\n %q", testCase.Pattern, testCase.Name, pad, twice, once)
+			}
+		}
 	}
 }
 

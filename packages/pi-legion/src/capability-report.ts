@@ -409,9 +409,13 @@ const CHECKS: Readonly<Record<LiveCapability, Check>> = {
 /** The longest detail a row carries, in UTF-8 bytes: the daemon's `capabilities.MaxReportDetail`. */
 const MAX_DETAIL_BYTES = 1024;
 
-/** What `cleanDetail` holds a control character as while it redacts: a noncharacter, which no text
- * carries, so it stands for nothing else. */
+/** What `cleanDetail` holds a control character or sequence as while it redacts: a noncharacter,
+ * which no text carries, so it stands for nothing else. */
 const HELD = "\uffff";
+
+/** An ANSI control sequence, in its 7-bit form (ESC `[`) or its C1 form: the daemon's `csi`. */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: an escape character is what it matches.
+const CSI = /\u001b\[[0-?]*[ -/]*[@-~]|\u009b[0-?]*[ -/]*[@-~]/g;
 
 /** Go's `unicode.IsSpace`, the space runes the daemon's cleanup splits on. */
 function isSpace(code: number): boolean {
@@ -448,58 +452,77 @@ function truncateUtf8(text: string, max: number): string {
  * `packages/daemon/internal/capabilities` and in its order, which its comment explains; the shared
  * fixture names each with an example. A value class takes `HELD`, and a separator a space or
  * `HELD`. The userinfo rule starts only where a run of scheme characters starts, and the JWT rule
- * only where a run of base64url characters starts, as the daemon's prefix groups do, so a long run
- * that never completes a match is read once rather than once per start: JavaScriptCore backtracks,
- * where the daemon's RE2 does not.
+ * only where a run of base64url characters starts or right after a percent or `\u` escape, as the
+ * daemon's prefix groups do, so a long run that never completes a match is read once rather than
+ * once per start: JavaScriptCore backtracks, where the daemon's RE2 does not.
  */
 const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   [/(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^ /?#]+@/gi, "$1***@"],
   [
-    /([?&](?:token|key|secret|password|access_token|refresh_token|id_token|api_key|apikey|client_secret|sig|x-amz-security-token|x-amz-signature)=)[^ &#"'<>]+/gi,
+    /([?&](?:token|key|secret|password|access_token|accesstoken|refresh_token|id_token|auth_token|private_token|api_key|apikey|client_secret|sig|signature|x-amz-security-token|x-amz-signature|x-goog-signature)=)[^ &#"'<>]+/gi,
     "$1***",
   ],
+  [/\b(password[ \uffff]*=[ \uffff]*)(?:'(?:[^'\\]|\\.)*'?|[^ &#"'<>]+)/gi, "$1***"],
   [
-    /(authorization["']?[ \uffff]*[:=][ \uffff]*)(?:(["'])((?:bearer|basic|token|digest)[ \uffff]+)?[^"']+|(\[?)((?:bearer|basic|token|digest)[ \uffff]+)?[^)\]}>]+)/gi,
-    "$1$2$3$4$5***",
+    /(authorization\\?["']?[ \uffff]*[:=][ \uffff]*)(?:(\\["'])((?:bearer|basic|token|digest)[ \uffff]+)?[^"'\\]+|(["'])((?:bearer|basic|token|digest)[ \uffff]+)?(?:[^"'\\]|\\.)+|(\[?)((?:bearer|basic|token|digest)[ \uffff]+)?[^)\]}>]+)/gi,
+    "$1$2$3$4$5$6$7***",
   ],
-  [/(x-api-key["']?[ \uffff]*[:=][ \uffff]*["']?)[A-Za-z0-9._~+/=*\uffff-]+/gi, "$1***"],
+  [
+    /((?:(?:x-(?:goog-)?)?api-key|ocp-apim-subscription-key|x-subscription-token)\\?["']?[ \uffff]*[:=][ \uffff]*\\?["']?)[A-Za-z0-9._~+/=*\uffff-]+/gi,
+    "$1***",
+  ],
+  [/(\\?["'](?:api_key|access_token)\\?["'][ \uffff]*:[ \uffff]*\\?["'])[^"'\\]+/gi, "$1***"],
   [/\b(bearer[ \uffff]+)[A-Za-z0-9._~+/=*\uffff-]+/gi, "$1***"],
   [/\b(gh[pousr]_|github_pat_)[A-Za-z0-9._\uffff-]{20,}/g, "$1***"],
   [
-    /(?<![A-Za-z0-9_\uffff-])eyJ[A-Za-z0-9_\uffff-]{8,}\.[A-Za-z0-9_\uffff-]{8,}\.[A-Za-z0-9_\uffff-]*/g,
+    /(?:(?<![A-Za-z0-9_\uffff-])|(?<=%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}))eyJ[A-Za-z0-9_\uffff-]{8,}\.[A-Za-z0-9_\uffff-]{8,}\.[A-Za-z0-9_\uffff-]*/g,
     "***",
   ],
-  [/\b(sk-|dsp_)[A-Za-z0-9_\uffff-]{20,}/g, "$1***"],
+  [/\b(sk-|dsp_|ya29\.|xox[a-z]-|glpat-|npm_)[A-Za-z0-9_\uffff-]{20,}/g, "$1***"],
+  [/\b(AIza)[A-Za-z0-9_\uffff-]{35,}/g, "$1***"],
   [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, "$1***"],
 ];
+
+/** `text` with every `CREDENTIAL_RULES` match replaced, rule by rule. */
+function redactCredentials(text: string): string {
+  return CREDENTIAL_RULES.reduce(
+    (line, [pattern, replacement]) => line.replace(pattern, replacement),
+    text
+  );
+}
 
 /**
  * A detail as the daemon's `cleanDetail` (`packages/daemon/internal/capabilities`) keeps it, and
  * held to the same shared fixture: one line, every credential redacted, cut at 1024 UTF-8 bytes.
- * Every space rune is a space; every other control character is held as `HELD` while the rules
- * run, so a credential value runs on across it, then is a space too; space runs then collapse, and
- * redaction runs before the cut. The daemon cleans the report again, which leaves it as it is; this
- * copy keeps a credential inside the pod when the daemon is a contract-21 release from before that
- * cleaning (legion-v11.5.0, v11.5.1).
+ * Every space rune is a space; every ANSI control sequence and every other control character is
+ * held as `HELD` while the rules run, so a credential value runs on across it, then is a space too,
+ * and the rules run once more when anything was held; space runs then collapse, and redaction runs
+ * before the cut. After a cut, trailing space goes, and so does each trailing word the rules would
+ * still change, so cleaning what this returns gives it back unchanged. The daemon cleans the report
+ * again, which leaves it as it is; this copy keeps a credential inside the pod when the daemon is a
+ * contract-21 release from before that cleaning (legion-v11.5.0, v11.5.1).
  */
 export function cleanDetail(text: string): string {
   let marked = "";
-  for (const char of text) {
+  for (const char of text.replace(CSI, HELD)) {
     const code = char.codePointAt(0) ?? 0;
     // Go's unicode.IsControl: C0, DEL and C1.
     const control = code < 0x20 || (code >= 0x7f && code < 0xa0);
     marked += isSpace(code) ? " " : control ? HELD : char;
   }
-  const redacted = CREDENTIAL_RULES.reduce(
-    (line, [pattern, replacement]) => line.replace(pattern, replacement),
-    marked
-  );
+  let redacted = redactCredentials(marked);
+  if (marked.includes(HELD)) redacted = redactCredentials(redacted.replaceAll(HELD, " "));
   const line = redacted
-    .replaceAll(HELD, " ")
     .split(" ")
     .filter((field) => field !== "")
     .join(" ");
-  return truncateUtf8(line, MAX_DETAIL_BYTES);
+  let cut = truncateUtf8(line, MAX_DETAIL_BYTES).replace(/ +$/, "");
+  if (cut.length < line.length) {
+    while (cut !== "" && redactCredentials(cut) !== cut) {
+      cut = cut.slice(0, Math.max(cut.lastIndexOf(" "), 0));
+    }
+  }
+  return cut;
 }
 
 /** `8 s` for a whole number of seconds, else the milliseconds. */

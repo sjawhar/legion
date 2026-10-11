@@ -225,6 +225,183 @@
       "want": ""
     },
     {
+      "pattern": "ansi-colour",
+      "name": "a GitHub token in an ANSI colour sequence",
+      "detail": "token \u001b[1mghp_EXAMPLEtoken0123456789abcdefghijklmn\u001b[0m expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "ansi-colour",
+      "name": "a JWT in an ANSI colour sequence",
+      "detail": "token \u001b[31meyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl\u001b[0m expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "ansi-colour",
+      "name": "an AWS key id in an ANSI colour sequence",
+      "detail": "AccessDenied: \u001b[33mAKIAIOSFODNN7EXAMPLE\u001b[0m is not authorized",
+      "want": "AccessDenied: AKIA*** is not authorized"
+    },
+    {
+      "pattern": "ansi-colour",
+      "name": "a GitHub token in the C1 form of a colour sequence",
+      "detail": "token \u009b1mghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "escaped-jwt",
+      "name": "a JWT after a percent-encoded quote",
+      "detail": "redirect=%22eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl%22 refused",
+      "want": "redirect=%22***%22 refused"
+    },
+    {
+      "pattern": "escaped-jwt",
+      "name": "a JWT in a percent-encoded query",
+      "detail": "next=https%3A%2F%2Fapp.example%2Fcb%3Ftoken%3DeyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl failed",
+      "want": "next=https%3A%2F%2Fapp.example%2Fcb%3Ftoken%3D*** failed"
+    },
+    {
+      "pattern": "escaped-jwt",
+      "name": "a JWT in a percent-encoded Authorization header",
+      "detail": "header=Authorization%3A%20Bearer%20eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl",
+      "want": "header=Authorization%3A%20Bearer%20***"
+    },
+    {
+      "pattern": "escaped-jwt",
+      "name": "a JWT after a JSON-escaped quote",
+      "detail": "{\\u0022token\\u0022:\\u0022eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl\\u0022}",
+      "want": "{\\u0022token\\u0022:\\u0022***\\u0022}"
+    },
+    {
+      "pattern": "jwt",
+      "name": "a JWT right after a control character, which the second pass finds",
+      "detail": "token\u001beyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a header label the cut at 1024 bytes leaves without its value, dropped back to the label",
+      "pad": 1000,
+      "detail": " Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789",
+      "want": " Authorization:"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a redacted query value the cut leaves partial, dropped",
+      "pad": 1014,
+      "detail": " ?token=abcdef",
+      "want": ""
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a cut right after a space, without the space",
+      "pad": 1023,
+      "detail": " bbbb",
+      "want": ""
+    },
+    {
+      "pattern": "authorization-header",
+      "name": "an escaped JSON header",
+      "detail": "body {\\\"Authorization\\\":\\\"Basic dXNlcjpwYXNz\\\"}",
+      "want": "body {\\\"Authorization\\\":\\\"Basic ***\\\"}"
+    },
+    {
+      "pattern": "authorization-header",
+      "name": "an escaped quote inside a quoted value",
+      "detail": "{\"Authorization\":\"Digest username=\\\"bob\\\", response=\\\"6629fae49393a05397450978507c4ef1\\\"\"}",
+      "want": "{\"Authorization\":\"Digest ***\"}"
+    },
+    {
+      "pattern": "provider-key",
+      "name": "a Google OAuth access token (ya29.)",
+      "detail": "google: 401 for ya29.a0AfH6SMBexampleToken0123456789abc",
+      "want": "google: 401 for ya29.***"
+    },
+    {
+      "pattern": "provider-key",
+      "name": "a Slack token (xoxb-)",
+      "detail": "slack: invalid_auth (xoxb-EXAMPLE-not-a-real-token-0000)",
+      "want": "slack: invalid_auth (xoxb-***)"
+    },
+    {
+      "pattern": "provider-key",
+      "name": "a GitLab personal access token (glpat-)",
+      "detail": "gitlab: 401 for glpat-EXAMPLEtoken0123456789ab",
+      "want": "gitlab: 401 for glpat-***"
+    },
+    {
+      "pattern": "provider-key",
+      "name": "an npm token (npm_)",
+      "detail": "npm ERR! 401 token npm_EXAMPLEtoken0123456789abcdefghijklmnop",
+      "want": "npm ERR! 401 token npm_***"
+    },
+    {
+      "pattern": "provider-key",
+      "name": "a Google API key (AIza)",
+      "detail": "maps: key AIzaSyEXAMPLEkey0123456789abcdefghijklm is invalid",
+      "want": "maps: key AIza*** is invalid"
+    },
+    {
+      "pattern": "query-credential",
+      "name": "more credential parameters, camelCase among them",
+      "detail": "GET https://git.example/api/v4/projects?private_token=pt&auth_token=at2&accessToken=ct&Signature=sg&X-Goog-Signature=gs&page=2: 401",
+      "want": "GET https://git.example/api/v4/projects?private_token=***&auth_token=***&accessToken=***&Signature=***&X-Goog-Signature=***&page=2: 401"
+    },
+    {
+      "pattern": "api-key-header",
+      "name": "an x-goog-api-key header",
+      "detail": "x-goog-api-key: gkSecret123 rejected",
+      "want": "x-goog-api-key: *** rejected"
+    },
+    {
+      "pattern": "api-key-header",
+      "name": "an Ocp-Apim-Subscription-Key header",
+      "detail": "Ocp-Apim-Subscription-Key: 0123abcdSecret rejected",
+      "want": "Ocp-Apim-Subscription-Key: *** rejected"
+    },
+    {
+      "pattern": "api-key-header",
+      "name": "an X-Subscription-Token header",
+      "detail": "X-Subscription-Token: braveSecret123 rejected",
+      "want": "X-Subscription-Token: *** rejected"
+    },
+    {
+      "pattern": "api-key-header",
+      "name": "an api-key header",
+      "detail": "api-key: azureSecret123 rejected",
+      "want": "api-key: *** rejected"
+    },
+    {
+      "pattern": "api-key-header",
+      "name": "an escaped JSON x-api-key header",
+      "detail": "{\\\"x-api-key\\\":\\\"jsonSecret123\\\"}",
+      "want": "{\\\"x-api-key\\\":\\\"***\\\"}"
+    },
+    {
+      "pattern": "json-member",
+      "name": "an api_key member",
+      "detail": "{\"api_key\":\"jsonSecret123\",\"model\":\"x\"}",
+      "want": "{\"api_key\":\"***\",\"model\":\"x\"}"
+    },
+    {
+      "pattern": "json-member",
+      "name": "an access_token member",
+      "detail": "{\"access_token\":\"atSecret123\",\"token_type\":\"bearer\"}",
+      "want": "{\"access_token\":\"***\",\"token_type\":\"bearer\"}"
+    },
+    {
+      "pattern": "libpq-password",
+      "name": "a connection string's password",
+      "detail": "connect host=db.example user=legion password=pgSecret123 dbname=legion: refused",
+      "want": "connect host=db.example user=legion password=*** dbname=legion: refused"
+    },
+    {
+      "pattern": "libpq-password",
+      "name": "a quoted connection string password",
+      "detail": "connect host=db.example password='pg secret' dbname=legion: refused",
+      "want": "connect host=db.example password=*** dbname=legion: refused"
+    },
+    {
       "pattern": "none",
       "name": "a detail quoting no credential",
       "detail": "gh viewer login: legion-implementer[bot]; connected: alpha (.omp/mcp.json)",

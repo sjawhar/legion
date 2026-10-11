@@ -781,6 +781,17 @@ describe("cleanDetail", () => {
       expect(cleanDetail(padding + want)).toBe(padding + want);
     });
   }
+
+  test("is idempotent at the cut: every case, pushed so each byte in turn straddles 1024 bytes", () => {
+    const unstable: string[] = [];
+    for (const { pattern, name, detail } of redaction.patterns) {
+      for (let pad = 1024 - 64; pad <= 1024 + 8; pad++) {
+        const once = cleanDetail(`${"a".repeat(pad)} ${detail}`);
+        if (cleanDetail(once) !== once) unstable.push(`${pattern}: ${name}, pushed by ${pad}`);
+      }
+    }
+    expect(unstable).toEqual([]);
+  });
 });
 
 describe("credential redaction", () => {
