@@ -60,6 +60,13 @@ export class TypedPictures {
     this.#admissions.delete(messageId);
   }
 
+  /** The host submitted turn `messageId` after running every `input` handler. A turn still
+   *  holding its pictures then had its text rewritten ahead of pi-envoy's handler and will never
+   *  be handed them, so it goes; a handed one waits for its message to start. */
+  inputPassed(messageId: string): void {
+    if (this.#admissions.get(messageId)?.images !== undefined) this.#admissions.delete(messageId);
+  }
+
   /** The host's `message` started. When it carries a turn's tag, that turn is done; the addresses
    *  it showed are returned when it had been handed its pictures. The message starts in the
    *  session live now, whose set they join. */

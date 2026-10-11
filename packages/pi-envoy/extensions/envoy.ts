@@ -719,7 +719,10 @@ export default function envoyExtension(pi: PiApi): void {
       .then(
         (result) => {
           const submitted = result.handled === "prompt" || result.handled === "skill";
-          if (!submitted) {
+          if (submitted) {
+            // Every input handler has run: pictures never handed over never will be.
+            typedPictures.inputPassed(turn.messageId);
+          } else {
             dropInjectedUserTurn(noted, turn.messageId);
             typedPictures.withdraw(turn.messageId);
           }

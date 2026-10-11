@@ -6266,6 +6266,11 @@ describe("envoy OMP extension", () => {
       agent.push(directDispatchEnvelope("steer", `${slug}-1`, { body }));
       await delivered(1);
       await asked.promise;
+      // The host answered `prompt` after every input handler ran, so this turn will never be
+      // handed its pictures: its admission is released, and a later input with the original text
+      // is handed nothing.
+      for (let index = 0; index < 10; index += 1) await Promise.resolve();
+      expect(await handlers.input?.({ source: "extension", text: body }, context)).toBeUndefined();
       await fixture.handlers.get("message_start")?.(
         {
           message: {

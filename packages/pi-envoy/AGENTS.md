@@ -43,7 +43,8 @@ without its pictures arrives as a card, which carries them: a prompt the host dr
 it was admitted) leaves them unshown. Their limit: an extension whose `input` handler runs ahead of
 pi-envoy's and rewrites the text leaves that turn without its pictures, since the text is the
 only part of the event naming the turn; they are never marked shown, so a later delivery carries
-them.
+them, and the turn's admission goes once `sendUserInput` answers that the input was submitted,
+every handler having run.
 
 A person's direct Send or Aside from Dispatch's Agents page (Send is the dashboard's name for a
 steer) becomes the user's own turn (`src/dispatch-user-turn.ts`). A frame is only a candidate
@@ -103,9 +104,9 @@ command, whose streamed user message is the expanded text while Dispatch stores 
 typed, and the page takes the stored copy away only when the two texts are equal
 (`AgentRuntimeThread.tsx`, a guard against a forged tag on an open bus). A `/skill:` shows once:
 the stream carries no custom message, so the page shows Dispatch's stored copy alone. A typed turn
-still queued across a branch or a move-off starts under the new id, untagged by the record, and
-shows once there: Dispatch stored the Send under the id it was sent to, which that page does not
-read.
+the host starts under a new id (queued across a branch or a move-off, or a session change during
+its `sendUserInput`) is untagged by the record there, and shows once: Dispatch stored the Send
+under the id it was sent to, which that page does not read.
 
 The stream also lists the slash commands a viewer can send (`kind: "commands"`, the last frame of
 every replay and published whenever the list changes), in the session's terminal picker's order:

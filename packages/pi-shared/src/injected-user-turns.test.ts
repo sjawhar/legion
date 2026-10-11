@@ -112,13 +112,12 @@ describe("the user turns sent into a session", () => {
   // A message's identity is its host timestamp and its tag, the identity the stream keys it by:
   // the memo answers by it, so a message at another timestamp is matched against the record rather
   // than taken from an earlier message's answer.
-  test("take a noted turn for each message carrying the same tag at another timestamp", () => {
+  test("answer a message by its timestamp and tag, never by an earlier message's tag alone", () => {
     noteTypedUserTurn("s1", "m-1");
-    expect(matchInjectedUserTurn("s1", { ...user(10, "ship it"), tag: "m-1" })).toBe("m-1");
-    noteTypedUserTurn("s1", "m-1");
-    expect(matchInjectedUserTurn("s1", { ...user(20, "ship it"), tag: "m-1" })).toBe("m-1");
-
-    expect(envoyPluginInterface().injectedUserTurns.get("s1")?.sent).toEqual([]);
+    const first = { ...user(10, "ship it"), tag: "m-1" };
+    expect(matchInjectedUserTurn("s1", first)).toBe("m-1");
+    expect(matchInjectedUserTurn("s1", first)).toBe("m-1");
+    expect(matchInjectedUserTurn("s1", { ...user(20, "ship it"), tag: "m-1" })).toBeUndefined();
   });
 
   // A typed command that submits nothing (`/compact`, `/session`) leaves its turn noted until the

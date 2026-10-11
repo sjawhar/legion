@@ -305,9 +305,12 @@ sends in, process-wide, on the shared interface (`injectedUserTurns`,
 (`matchInjectedUserTurn`). A turn sent as typed input (`pi.sendUserInput`) is found by the Dispatch
 id the host keeps as the message's `tag`, and only by it, so a command that submitted nothing
 (`/compact`, `/session`) leaves nothing the daemon's next assignment could match; it stays in the
-record past the run's `agent_end` until its message arrives or the host answers that the input
-submitted none, so a Send the host runs as a turn of its own after that run still counts as the
-person's. On a host without `sendUserInput` a turn is found by its text and forgotten at the run's
+record past the run's `agent_end` until its message arrives, the host answers that the input
+submitted none, or the session changes, so a Send the host runs as a turn of its own after that
+run still counts as the person's. legion.ts asks under the live session id, so a typed turn the
+host starts under a new id (queued across a branch or a session file's move-off, or a session
+change during its `sendUserInput`) carries no note there and counts as an assignment. On a host
+without `sendUserInput` a turn is found by its text and forgotten at the run's
 `agent_end`, so a Send or an Aside sent in after the run's last queue or aside poll and before that
 `agent_end`, which the host then runs as a turn of its own, matches nothing: it counts as an
 assignment, which opens even a closed phase, and the dashboard shows it twice. One sent in after

@@ -85,6 +85,32 @@ describe("a typed turn's pictures", () => {
     expect(pictures.started(tagged("m-1"))).toBeUndefined();
   });
 
+  // The host has run every input handler once `sendUserInput` answers that it submitted the turn:
+  // a turn still holding its pictures then had its text rewritten before pi-envoy's handler, and
+  // will never be handed them. A turn handed them waits for its message to start.
+  test("never handed over are released once the input has passed every handler", () => {
+    const pictures = new TypedPictures();
+    pictures.admit("m-rewritten", {
+      addresses: ["a1"],
+      body: "Look",
+      images: [png("one")],
+      sessionID: "s1",
+    });
+    pictures.admit("m-handed", {
+      addresses: ["a2"],
+      body: "Other",
+      images: [png("two")],
+      sessionID: "s1",
+    });
+    pictures.handOver("Other");
+    pictures.inputPassed("m-rewritten");
+    pictures.inputPassed("m-handed");
+
+    expect(pictures.handOver("Look")).toBeUndefined();
+    expect(pictures.started(tagged("m-rewritten"))).toBeUndefined();
+    expect(pictures.started(tagged("m-handed"))).toEqual(["a2"]);
+  });
+
   // A switch, `/new` or resume discards the queue of the session left, so a turn sent into it and
   // already handed its pictures never starts. One still holding them is in a `sendUserInput` that
   // has not reached pi-envoy's input handler yet, which will still ask for them.
