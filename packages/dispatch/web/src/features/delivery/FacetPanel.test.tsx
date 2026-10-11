@@ -51,6 +51,9 @@ const data: Omit<DeliveryTimelineResponse, "measures"> = {
   issue_titles: {},
   prs: [],
   runs: [],
+  session_groups: [],
+  session_pr_counts: {},
+  session_titles: {},
   waiting: [],
   window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
 };
@@ -89,6 +92,38 @@ test("a facet's trigger names the facet and what is picked", () => {
   try {
     expect(screen.getByRole("button", { name: "Component: 1 selected" })).toBeDefined();
     expect(screen.getByRole("button", { name: "Parent agent: Any parent agent" })).toBeDefined();
+  } finally {
+    cleanup();
+  }
+});
+
+test("a group's Parent agent value reads as its name, and Edit groups opens the editor", () => {
+  const grouped = {
+    ...data,
+    facet_counts: {
+      ...data.facet_counts,
+      parent_agent: { "group:g1": 3, Reviewer: 1 },
+    },
+    session_groups: [
+      {
+        created_at: "2026-10-11T00:00:00Z",
+        created_by: { id: "alice@example.com", kind: "user" as const },
+        id: "g1",
+        name: "Release crew",
+        sessions: ["s1", "s2"],
+        updated_at: "2026-10-11T00:00:00Z",
+        updated_by: { id: "alice@example.com", kind: "user" as const },
+      },
+    ],
+    session_titles: { s1: "Planner one", s2: "Planner two", s3: "Reviewer" },
+    session_pr_counts: { s1: 2, s2: 1, s3: 1 },
+  };
+  render(<FacetPanel data={grouped} filters={noFilters} onChange={() => {}} />);
+  try {
+    fireEvent.click(screen.getByRole("button", { name: /^Parent agent/ }));
+    expect(optionNames("Parent agent options")).toEqual(["Release crew, 3 PRs", "Reviewer, 1 PR"]);
+    fireEvent.click(screen.getByRole("button", { name: "Edit groups" }));
+    expect(screen.getByRole("dialog", { name: "Session groups" })).toBeDefined();
   } finally {
     cleanup();
   }

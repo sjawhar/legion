@@ -109,6 +109,9 @@ const emptyTimeline: DeliveryTimelineResponse = {
   measures: emptyMeasures,
   prs: [],
   runs: [],
+  session_groups: [],
+  session_pr_counts: {},
+  session_titles: {},
   waiting: [],
   window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
 };

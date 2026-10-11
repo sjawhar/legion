@@ -6,11 +6,10 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// ResolveSessionTitles answers the Delivery page's "parent agent" and "session" facet display
-// labels (LEGION-567). There is no grouping: a subagent's own commit trailer carries no
-// parent-session reference, so "the agent is the session the Omp-Session trailer names, shown by
-// its Dispatch-recorded title" (Main's ruling) -- each session id resolves to its own most recent
-// known title, nothing more.
+// ResolveSessionTitles answers each session's most recent known title, which the Delivery page
+// shows a session by (LEGION-567): a subagent's own commit trailer carries no parent-session
+// reference, so a pull request's Parent agent is the first session its Omp-Session trailers name,
+// shown by that title, unless a session group holds it (ParentAgents, parent_agent.go; LEGION-682).
 //
 // A session's title is never stored in a dedicated table; every write stamps a model.Actor
 // (including its ActorOrigin.SessionTitle) as JSONB onto the row it wrote and onto the matching
@@ -50,13 +49,4 @@ func ResolveSessionTitles(ctx context.Context, pool *store.Pool, sessionIDs []st
 		}
 	}
 	return titles, rows.Err()
-}
-
-// DisplayAgent is the "parent agent" or "session" facet value the API returns for one session id:
-// its resolved title when ResolveSessionTitles found one, else the bare id.
-func DisplayAgent(sessionID string, titles map[string]string) string {
-	if title, ok := titles[sessionID]; ok {
-		return title
-	}
-	return sessionID
 }

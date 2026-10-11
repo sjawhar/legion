@@ -2501,11 +2501,11 @@ export interface DeliveryPR {
   readonly components: readonly string[];
   readonly sessions: readonly string[];
   /**
-   * `parent_agent` and `session` (this field's `sessions` above) resolve to the same set of
-   * sessions today (LEGION-567: no grouping link exists); `parent_agent` is the
-   * resolved Dispatch session title (or the bare id if none was ever recorded), `session` is the
-   * raw id — kept as two fields for the SPA's existing facet vocabulary and so a real grouping
-   * link, if one is added later, needs no API shape change.
+   * The Parent agent: the session group holding the first of `sessions` (as `group:<id>`; the
+   * response's `session_groups` names it), else that session's latest Dispatch title, or its bare
+   * id if none was ever recorded. A session outside every group whose title is a group's name
+   * carries its id beside the title (`Planner (<id>)`). Null when no session wrote the pull
+   * request. `session` (the `sessions` field) keeps each raw id.
    */
   readonly parent_agent: string | null;
   readonly deploy_run: number | null;
@@ -2614,6 +2614,14 @@ export interface DeliveryTimelineResponse {
     readonly unfetchable_count: number;
   };
   readonly measures: DeliveryMeasuresResponse;
+  /** Every session group, by name. */
+  readonly session_groups: readonly DeliverySessionGroup[];
+  /** For each session that is the first session of a window pull request, its title, or its id
+   *  when it has none. A group member no window pull request names first is absent. */
+  readonly session_titles: Readonly<Record<string, string>>;
+  /** For each such session, how many window pull requests it is the first session of, before the
+   *  search and the facets. */
+  readonly session_pr_counts: Readonly<Record<string, number>>;
 }
 
 /** One job of `GET /api/v1/delivery/runs/{id}`, with its result and timings. */
