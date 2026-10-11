@@ -125,6 +125,11 @@ type Client struct {
 	// two differ.
 	connEvents   uint64
 	hookedEvents uint64
+	// drainedReconnects is how many times c.Conn had reconnected in place when Drain stopped the
+	// client, set under mu in the step that stops it, so a reconnect callback can tell a reconnect
+	// before the drain from one during it (closeStopped). Once the client is stopped c.Conn never
+	// changes (ensureConnWithContext), so the count needs no connection beside it.
+	drainedReconnects uint64
 
 	// recovery state
 	recovering int32
@@ -519,17 +524,21 @@ func (c *Client) Close() {
 }
 
 // Drain stops the client and drains it, letting the deliveries already in their handlers finish,
-// and the connection is closed when Drain returns, at the latest once timeout passes, so a blocked
-// drain cannot keep a process alive. It stops the client first, so neither the drain's close nor a
-// recovery already under way reconnects or re-subscribes a process that is shutting down. It then
-// drains the delivery subscriptions while the connection still accepts new ones: a handler
-// finishing its delivery may subscribe (RequestCoreTo's receipt inbox), which a draining
-// connection refuses. Only then does it drain the connection, whose Drain only starts the drain,
-// and wait for it to close itself. A connection that is reconnecting is closed at once: nothing it
-// sends reaches the server, so no subscription would drain and a reconnect would re-send them.
+// and returns once the connection has closed, at the latest once timeout passes, so a blocked
+// drain cannot keep a process alive. A connection closed while nats.go drains it can read
+// DRAINING_PUBS again for about 5 s after Drain returns (see the wait below). It stops the client
+// first, so neither the drain's close nor a recovery already under way reconnects or re-subscribes
+// a process that is shutting down. It then drains the delivery subscriptions while the connection
+// still accepts new ones: a handler finishing its delivery may subscribe (RequestCoreTo's receipt
+// inbox), which a draining connection refuses. Only then does it drain the connection, whose Drain
+// only starts the drain, and wait for it to close itself. A connection that is reconnecting is
+// closed at once: nothing it sends reaches the server, so no subscription would drain and a
+// reconnect would re-send them.
 // A bind in flight at the stop is not waited for: one that ends while the subscriptions drain
 // installs its own, which the next pass drains, and one that ends after the last pass drains its
-// own, which the connection's drain takes (endBind). The close ends one still in flight.
+// own, which the connection's drain takes (endBind). The close ends one still in flight. A
+// reconnect nats.go reports once the client has stopped closes the connection only when it came
+// after the stop (closeStopped).
 func (c *Client) Drain(timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	c.subscriptionsMu.Lock()
@@ -537,9 +546,12 @@ func (c *Client) Drain(timeout time.Duration) error {
 		c.stopMode = clientDraining
 	}
 	c.subscriptionsMu.Unlock()
-	c.stop()
+	// The stop and the reconnect count are one step under mu, so a reconnect callback that finds
+	// the client stopped also finds the count (closeStopped).
 	c.mu.Lock()
+	c.stop()
 	conn := c.Conn
+	c.drainedReconnects = conn.Stats().Reconnects
 	c.mu.Unlock()
 	defer conn.Close()
 	if conn.IsReconnecting() {
@@ -570,10 +582,29 @@ func (c *Client) Drain(timeout time.Duration) error {
 			}
 		}
 	}
+	// nats.go's Drain only starts the drain, and the wait for it to close the connection takes the
+	// connection's CLOSED event rather than polling for the state. A close that lands while nats.go
+	// drains the connection (a lost server, a reconnect callback closing it) is undone at the
+	// pinned nats.go (v1.50.0) and in every release through v1.54.0: drainConnection marks the
+	// closed connection DRAINING_PUBS again and waits 5 s for a PONG on the socket close() shut, so
+	// a poll can miss the moment the connection was closed and wait out the deadline. For the same
+	// reason the connection can read DRAINING_PUBS for about 5 s after Drain returns; the deferred
+	// Close finds it already closed and does not end that wait. nats-io/nats.go#2163 fixes it and
+	// is unreleased; re-check on a nats.go bump. Once a release that carries it is pinned, only this
+	// explanation goes: the CLOSED-event wait stays correct.
+	closed := conn.StatusChanged(nats.CLOSED)
+	defer conn.RemoveStatusListener(closed)
 	if err := conn.Drain(); err != nil {
 		return err
 	}
-	return waitUntil(conn.IsClosed)
+	expired := time.NewTimer(time.Until(deadline))
+	defer expired.Stop()
+	select {
+	case <-closed:
+		return nil
+	case <-expired.C:
+		return fmt.Errorf("drain NATS: %w", context.DeadlineExceeded)
+	}
 }
 
 // deliveringSubscriptions returns the installed subscriptions that are still valid, those a pass

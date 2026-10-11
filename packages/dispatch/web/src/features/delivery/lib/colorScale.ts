@@ -40,6 +40,10 @@ export const COLOR_PALETTE = [
 /** Placeholder values ("No issue", "No session", ...) recede in neutral grey. */
 export const PLACEHOLDER_COLOR = "#64748b";
 
+/** The values left out when some are chosen to have their own colour share this one. It sits
+ *  outside the palette and apart from the placeholders' grey. */
+export const OTHER_COLOR = "#a8a29e";
+
 /** The value of `colorBy` a PR is coloured (and, with swimlanes on, laned) by: the first of its
  *  values, as the server's `color_counts` counts it. */
 export function colorKeyFor(pr: DeliveryPR, colorBy: ColorFacet): string {
@@ -61,17 +65,25 @@ export function colorKeyFor(pr: DeliveryPR, colorBy: ColorFacet): string {
 
 /** colorKeyFor() value -> colour, from the window's `color_counts` for the facet (nothing
  *  applied), largest group first, so a value keeps its colour when facets or a brush window change
- *  which PRs are shown. Placeholder values are grey and don't use up a palette slot. */
-export function buildColorScale(counts: Readonly<Record<string, number>>): Map<string, string> {
+ *  which PRs are shown. Placeholder values are grey and don't use up a palette slot. With values
+ *  `chosen`, those take the palette in the order chosen and every other value shares
+ *  OTHER_COLOR, so the chosen ones stand out however many values there are. */
+export function buildColorScale(
+  counts: Readonly<Record<string, number>>,
+  chosen: readonly string[] = []
+): Map<string, string> {
   const scale = new Map<string, string>();
+  const ranked = Object.keys(counts).sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0));
+  const order = chosen.length === 0 ? ranked : [...new Set(chosen)];
   let next = 0;
-  for (const [key] of Object.entries(counts).sort((a, b) => b[1] - a[1])) {
-    if (key in PLACEHOLDER_LABELS) {
-      scale.set(key, PLACEHOLDER_COLOR);
-      continue;
-    }
+  for (const key of order) {
+    if (key in PLACEHOLDER_LABELS) continue;
     scale.set(key, COLOR_PALETTE[next % COLOR_PALETTE.length] ?? "#38bdf8");
     next += 1;
+  }
+  for (const key of ranked) {
+    if (key in PLACEHOLDER_LABELS) scale.set(key, PLACEHOLDER_COLOR);
+    else if (!scale.has(key)) scale.set(key, OTHER_COLOR);
   }
   return scale;
 }

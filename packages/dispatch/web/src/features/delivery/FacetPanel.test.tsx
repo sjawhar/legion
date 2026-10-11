@@ -1,9 +1,22 @@
 import { expect, test } from "bun:test";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import type { ComponentProps } from "react";
 
 import type { DeliveryTimelineResponse } from "../../api/types";
 import { FacetPanel } from "./FacetPanel";
 import type { Filters } from "./lib/facets";
+
+/** The panel as the page renders it, under a query client: Edit groups opens an editor that
+ *  saves through it. */
+function renderPanel(props: ComponentProps<typeof FacetPanel>) {
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  return render(
+    <QueryClientProvider client={queryClient}>
+      <FacetPanel {...props} />
+    </QueryClientProvider>
+  );
+}
 
 const noFilters: Filters = {
   repo: [],
@@ -51,6 +64,9 @@ const data: Omit<DeliveryTimelineResponse, "measures"> = {
   issue_titles: {},
   prs: [],
   runs: [],
+  session_groups: [],
+  session_pr_counts: {},
+  session_titles: {},
   waiting: [],
   window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
 };
@@ -62,7 +78,7 @@ function optionNames(listbox: string): (string | null)[] {
 }
 
 test("a facet's options sort by count, read placeholders in words, and say a parent includes its sub-components", () => {
-  render(<FacetPanel data={data} filters={noFilters} onChange={() => {}} />);
+  renderPanel({ data, filters: noFilters, onChange: () => {} });
   try {
     fireEvent.click(screen.getByRole("button", { name: /^Component/ }));
     expect(optionNames("Component options")).toEqual([
@@ -79,16 +95,42 @@ test("a facet's options sort by count, read placeholders in words, and say a par
 });
 
 test("a facet's trigger names the facet and what is picked", () => {
-  render(
-    <FacetPanel
-      data={data}
-      filters={{ ...noFilters, component: ["ACME/api"] }}
-      onChange={() => {}}
-    />
-  );
+  renderPanel({ data, filters: { ...noFilters, component: ["ACME/api"] }, onChange: () => {} });
   try {
     expect(screen.getByRole("button", { name: "Component: 1 selected" })).toBeDefined();
     expect(screen.getByRole("button", { name: "Parent agent: Any parent agent" })).toBeDefined();
+  } finally {
+    cleanup();
+  }
+});
+
+test("a group's Parent agent value reads as its name, and Edit groups opens the editor", () => {
+  const grouped = {
+    ...data,
+    facet_counts: {
+      ...data.facet_counts,
+      parent_agent: { "group:g1": 3, Reviewer: 1 },
+    },
+    session_groups: [
+      {
+        created_at: "2026-10-11T00:00:00Z",
+        created_by: { id: "alice@example.com", kind: "user" as const },
+        id: "g1",
+        name: "Release crew",
+        sessions: ["s1", "s2"],
+        updated_at: "2026-10-11T00:00:00Z",
+        updated_by: { id: "alice@example.com", kind: "user" as const },
+      },
+    ],
+    session_titles: { s1: "Planner one", s2: "Planner two", s3: "Reviewer" },
+    session_pr_counts: { s1: 2, s2: 1, s3: 1 },
+  };
+  renderPanel({ data: grouped, filters: noFilters, onChange: () => {} });
+  try {
+    fireEvent.click(screen.getByRole("button", { name: /^Parent agent/ }));
+    expect(optionNames("Parent agent options")).toEqual(["Release crew, 3 PRs", "Reviewer, 1 PR"]);
+    fireEvent.click(screen.getByRole("button", { name: "Edit groups" }));
+    expect(screen.getByRole("dialog", { name: "Session groups" })).toBeDefined();
   } finally {
     cleanup();
   }

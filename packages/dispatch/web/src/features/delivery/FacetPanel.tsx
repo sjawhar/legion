@@ -5,6 +5,7 @@ import { MultiSelect } from "../../components/MultiSelect";
 import {
   borderStrong,
   inputClasses,
+  linkText,
   surfaceBg,
   textMutedOnCanvas,
   textPrimaryOnSurface,
@@ -19,6 +20,8 @@ import {
   REWORK_LABELS,
   type ReworkFacet,
 } from "./lib/facets";
+import { parentAgentLabel } from "./lib/parentAgent";
+import { SessionGroupsEditor } from "./SessionGroupsEditor";
 
 type ListFacet = Exclude<FacetKey, "rework" | "deployed">;
 
@@ -95,17 +98,27 @@ function Facet({
 /** The delivery timeline's facet column: the search, Rework and Deployed side by side, then one
  *  facet per list (repository, parent agent, session, Dispatch issue, priority, component,
  *  author), each counted by the server with every other facet applied and its own ignored. All
- *  combinable; the caller keeps them in the URL. */
+ *  combinable; the caller keeps them in the URL. Under Parent agent, **Edit groups** opens the
+ *  session-groups editor. */
 export function FacetPanel({
   data,
   filters,
   onChange,
 }: {
-  data: Pick<DeliveryTimelineResponse, "facet_counts" | "components" | "issue_titles">;
+  data: Pick<
+    DeliveryTimelineResponse,
+    | "facet_counts"
+    | "components"
+    | "issue_titles"
+    | "session_groups"
+    | "session_titles"
+    | "session_pr_counts"
+  >;
   filters: Filters;
   onChange: (next: Filters) => void;
 }): ReactNode {
   const [openFacet, setOpenFacet] = useState<FacetKey | undefined>(undefined);
+  const [editingGroups, setEditingGroups] = useState(false);
   const countsOf = (key: FacetKey) => data.facet_counts[FACET_PARAMS[key]];
   const byCount = (key: FacetKey) => {
     const counts = countsOf(key);
@@ -137,6 +150,7 @@ export function FacetPanel({
       if (children === 0) return title;
       return `${title} (includes ${children} sub-component${children === 1 ? "" : "s"})`;
     }
+    if (key === "parentAgent") return parentAgentLabel(value, data.session_groups);
     return value;
   };
   const facetProps = (key: FacetKey) => ({
@@ -180,15 +194,38 @@ export function FacetPanel({
           />
         </div>
       </div>
-      {LIST_FACETS.map(({ key, label }) => (
-        <Facet
-          {...facetProps(key)}
-          key={key}
-          label={label}
-          valueLabel={(value) => valueLabel(key, value)}
-          values={byCount(key)}
+      {LIST_FACETS.map(({ key, label }) => {
+        const facet = (
+          <Facet
+            {...facetProps(key)}
+            key={key}
+            label={label}
+            valueLabel={(value) => valueLabel(key, value)}
+            values={byCount(key)}
+          />
+        );
+        if (key !== "parentAgent") return facet;
+        return (
+          <div key={key}>
+            {facet}
+            <button
+              className={`mt-1 text-xs underline ${linkText}`}
+              onClick={() => setEditingGroups(true)}
+              type="button"
+            >
+              Edit groups
+            </button>
+          </div>
+        );
+      })}
+      {editingGroups ? (
+        <SessionGroupsEditor
+          counts={data.session_pr_counts}
+          groups={data.session_groups}
+          onClose={() => setEditingGroups(false)}
+          titles={data.session_titles}
         />
-      ))}
+      ) : null}
     </div>
   );
 }

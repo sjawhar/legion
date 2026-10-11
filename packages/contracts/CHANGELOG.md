@@ -4,6 +4,11 @@
 
 ### Added
 
+- `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
+  `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,
+  `session_titles` and `session_pr_counts`; `DeliveryPR.parent_agent` is a session group's
+  `group:<id>` for a pull request whose first session is a member (LEGION-682).
+
 - Added `LegionReadyRequest`, the body of the Legion daemon's `POST /legion/v1/claims/ready`, and
   `LegionCapabilityReport`, its optional `capabilities`: what a session measured of the six live
   capability rows at boot (`measuredAt`, `elapsedMs`, `rows[{name, ok, detail}]`; a `detail` may
