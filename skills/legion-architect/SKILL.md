@@ -97,20 +97,36 @@ not request approval and do not wait for `design-approved`; the gate opens at re
 sub-architect on a child issue has no policy line and never runs the gate: the root approval
 covers the tree. When the gate is armed, run this exact sequence **before the tree's work starts**:
 
-```text
-dispatch doc-edit --issue <root issue> --ops-json-file - <<'EOF'   # extend the primary document in place
-...
-EOF
-# then settle its decision blocks (below)
-dispatch request-approval --issue <root issue> --summary '<what the human is approving>'
-    # the primary document by default; prints "Approval requested for spec.md (document id <UUID>) at version <N> …"
-legion({
-  op: "register_gate",
-  issue: "<root issue>",
-  artifactId: "<UUID>",   // the document id from that text, such as 4e0aca36-77b3-43bd-96cf-d58890ae64e4
-  version: <N>,           // the version number the human is asked to approve
-})
-```
+1. Extend the primary document in place:
+
+   ```bash
+   dispatch doc-edit --issue <root issue> --ops-json-file - <<'EOF'
+   ...
+   EOF
+   ```
+
+2. Settle its decision blocks as [Approval of a spec](skill://dispatch/SKILL.md#approval-of-a-spec)
+   says.
+3. Run `task(agent="plan-gap-analyst")` with the current root spec, the code and command output
+   it relies on, and the human's words; resolve every finding in the root spec.
+4. Request approval:
+
+   ```bash
+   dispatch request-approval --issue <root issue> --summary '<what the human is approving>'
+   ```
+
+   The primary document is the default; the command prints `Approval requested for spec.md
+   (document id <UUID>) at version <N> …`.
+5. Register that document version with the daemon:
+
+   ```ts
+   legion({
+     op: "register_gate",
+     issue: "<root issue>",
+     artifactId: "<UUID>", // the document id the request printed
+     version: <N>, // the version the human is asked to approve
+   })
+   ```
 
 The decision blocks come first: settle every one as
 [Approval of a spec](skill://dispatch/SKILL.md#approval-of-a-spec) says before you request approval;
@@ -142,9 +158,10 @@ read covers a human who answers the question between your `dispatch request-appr
 yourself.
 
 Then park. Do not release a wave until a later delivered wake shows `design-approved` on the root;
-the daemon starts no phase in the tree before then. On `design-changes-requested`, revise the spec
-(a new version of the primary document) as the human's reason asks, request approval again as
-above (the answer closed the last request, so this opens a new one), and stay parked.
+the daemon starts no phase in the tree before then. On `design-changes-requested`, (1) revise the
+spec as the human's reason asks, (2) run `task(agent="plan-gap-analyst")` with that new version,
+the code and command output it relies on, and the human's words, then resolve every finding, and
+(3) request approval again and stay parked.
 
 **After approval, the root spec changes only when what the tree delivers, or a decision a human
 settled, changes.** Approval is pinned to the spec version: any new version of the root spec closes
@@ -152,7 +169,7 @@ the gate again with no wake (you made the edit, or the `artifact.version` event 
 you). So edit an approved root spec only when its Summary, its Acceptance, the tree's scope, or a
 decision a human settled in one of its decision blocks changes. Such a change is a point the human
 has not agreed to: put the problem behind it to them as its own decision block, with its evidence,
-at the end of the section it changes, and request approval again as above once they have answered
+at the end of the section it changes, then repeat steps 2 through 5 once they have answered
 it. Release no new wave until the next `design-approved` arrives — work already in flight
 continues. Every merger's `READY` in the tree is refused until a human approves
 the latest version. A settled decision is the human's. A plan that would overturn one goes back to

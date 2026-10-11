@@ -217,11 +217,12 @@
 - `agent-secrets renew --pod-token-file FILE` re-reads the projected pod token before each renewal,
   refuses a blank or unreadable file without posting a bodyless renewal, and sends the token as
   `pod_token`. The worker shim passes its projected token file. This client works against a broker
-  that predates the renewal body because that handler ignores it. The terminal renewal codes
-  `POD_IDENTITY_MISMATCH`, `POD_TOKEN_REQUIRED`, and `ENROLLMENT_NOT_LIVE`, and an older broker's
-  `PROOF_INVALID` saying `not live`, exit 76 (`EX_PROTOCOL`) naming the enrollment, HTTP status
-  and broker code; the shim quotes that terminal line beside its own enrollment and stops. Any
-  other `PROOF_INVALID` and other transient failures retry.
+  that predates the renewal body because that handler ignores it. The terminal renewal refusals
+  `POD_TOKEN_REQUIRED` and `ENROLLMENT_NOT_LIVE`, and an older broker's `PROOF_INVALID` saying
+  `not live`, exit 76 (`EX_PROTOCOL`) naming the enrollment, HTTP status and broker code; the shim
+  quotes that terminal line beside its own enrollment and stops. Every other refusal retries,
+  `POD_IDENTITY_MISMATCH` among them, which the broker also answers for a token it could not verify
+  while its issuer was unreachable.
 - `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
   naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
   Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not

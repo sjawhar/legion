@@ -32,8 +32,8 @@ const keygenTimeout = 30 * time.Second
 const renewRestartDelay = 5 * time.Second
 
 // permanentRenewExitCode is agent-secrets' documented exitRenewRefused. It crosses the process
-// boundary because a permanent broker refusal must stop the shim rather than crash-looping a pod
-// whose projected token is wrong or absent.
+// boundary because a terminal broker refusal (a pod renewal without its token, or an enrollment
+// that has ended) must stop the shim rather than crash-looping a renewer that cannot succeed.
 const permanentRenewExitCode = 76
 
 // lastLineWriter forwards a child stream while retaining its final nonblank line for the shim's
@@ -190,7 +190,7 @@ func writeEnrollment(dir, id string) error {
 // heartbeat that proves the pod live to the broker — as a child of the shim, restarted after
 // renewRestartDelay only when it exits transiently, until the shim ends. Each renewal carries the
 // pod's current projected token, which the broker checks names the pod UID and service account the
-// enrollment was made for; a permanent broker refusal exits 76 and stops the renewer. The shim and
+// enrollment was made for; a terminal broker refusal exits 76 and stops the renewer. The shim and
 // agent-secrets ship in one worker image, so the renewer always knows the flag. It reads
 // AGENT_SECRETS_URL and AGENT_SECRETS_KEY_DIR from the shim's own environment, where the runtime
 // set them. One renewer per shim: a second enrollment frame starts no second one.

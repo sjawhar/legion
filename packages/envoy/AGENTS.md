@@ -2237,13 +2237,17 @@ with the same not-logged-in notice naming `agent-secrets machine login`.
 projected token before every broker request, refuses a blank or unreadable file without making a
 bodyless request, and sends it as `pod_token`. The worker shim passes its projected token file.
 The client works against a broker that predates the renewal body because that handler reads no
-body. The terminal renewal codes are `POD_IDENTITY_MISMATCH`, `POD_TOKEN_REQUIRED`, and
-`ENROLLMENT_NOT_LIVE`, plus an older broker's `PROOF_INVALID` whose message says `not live` (its
-word for an ended enrollment): only those exit 76 (`EX_PROTOCOL`) with the enrollment id, HTTP
-status and broker code; the shim quotes that terminal line beside its own enrollment id and stops
-rather than restarting a pod whose token or enrollment is permanently rejected. Any other
-`PROOF_INVALID` is retryable: a clock or URL correction can make the next proof valid. Transient
-errors keep the retry backoff.
+body. The terminal renewal refusals are one set in `cmd/agent-secrets` (`terminalRenewal`):
+`POD_TOKEN_REQUIRED`, `ENROLLMENT_NOT_LIVE`, and an older broker's `PROOF_INVALID` whose message
+says `not live` (its word for an ended enrollment). Only those exit 76 (`EX_PROTOCOL`) with the
+enrollment id, HTTP status and broker code; the shim quotes that terminal line beside its own
+enrollment id and stops rather than restarting a renewer that cannot succeed. Every other refusal
+keeps the retry backoff: `POD_IDENTITY_MISMATCH`, because the broker also answers it for a token
+it could not verify while its issuer or key set was unreachable (a real mismatch ends with the
+lease, and the next renewal is `ENROLLMENT_NOT_LIVE`); `POD_TOKEN_EXPIRED`, retried with the token
+the file holds next; and any other `PROOF_INVALID`, since a clock or URL correction can make the
+next proof valid.
+
 The login that installs a credential wakes every registered session's enrollment retry, so those
 sessions reach the broker within about a second of it rather than when a backoff of up to a minute
 comes round. A session whose renew the broker refuses `ENROLLMENT_NOT_LIVE` (its lease lapsed, or

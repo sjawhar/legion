@@ -77,7 +77,7 @@ import (
 const (
 	exitUsageError   = 2   // usage error: a flag, argument, token file, or required environment value is invalid
 	exitPending      = 75  // request still waiting for a person to approve it
-	exitRenewRefused = 76  // renew reached a permanent broker refusal; the worker shim must not restart it
+	exitRenewRefused = 76  // renew reached a refusal in terminalRenewal; the worker shim must not restart it
 	exitDenied       = 77  // request denied
 	exitCannotRun    = 126 // register --exec command exists but could not run
 	exitNotFound     = 127 // register --exec command was not found
@@ -121,7 +121,7 @@ var commands = []command{
 	{"--version", "agent-secrets --version",
 		"Print the release this binary was built as."},
 	{"renew", "agent-secrets renew [--pod-token-file FILE]",
-		"Keep an agent box's or pod's enrollment lease alive, renewing it until interrupted. A pod\nnames its projected service-account token's file: each renewal sends the token the file holds\nthen, which the broker checks names the pod and service account the enrollment was made for. A\npermanent broker refusal exits 76, naming the enrollment, HTTP status and broker code."},
+		"Keep an agent box's or pod's enrollment lease alive, renewing it until interrupted. A pod\nnames its projected service-account token's file: each renewal sends the token the file holds\nthen, which the broker checks names the pod and service account the enrollment was made for.\nPOD_TOKEN_REQUIRED, ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID saying\n\"not live\" exits 76, naming the enrollment, HTTP status and broker code; every other\nrefusal retries."},
 	{"request", "agent-secrets request NAME... [--reason TEXT] [--json]",
 		"Request secrets and print the request's id and state, and who approves it and where while\nit waits; exit 75 while it waits for approval and 77 when it is denied."},
 	{"status", "agent-secrets status <request_id> [--json]",
@@ -692,8 +692,10 @@ func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
 // file again and sends its contents as pod_token, since the kubelet rotates the token in place;
 // the broker verifies it against the enrollment's pod UID and service account. Without the flag a
 // renewal has no body, a box's renewal. A broker that predates the token reads no renew body, so a
-// renewal carrying one still renews there. A permanent 4xx refusal exits exitRenewRefused (76), so
-// the worker shim stops rather than restarting an identity or token error forever.
+// renewal carrying one still renews there. A refusal in terminalRenewal (POD_TOKEN_REQUIRED,
+// ENROLLMENT_NOT_LIVE, or an older broker's PROOF_INVALID saying "not live") exits
+// exitRenewRefused (76), so the worker shim stops rather than restarting a renewer that cannot
+// succeed; every other refusal, POD_IDENTITY_MISMATCH and POD_TOKEN_EXPIRED among them, retries.
 func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, map[string]bool{"pod-token-file": true})
 	flags := newFlagSet("renew", stderr)

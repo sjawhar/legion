@@ -28,6 +28,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 )
@@ -37,11 +38,24 @@ type client struct {
 	http    *http.Client
 }
 
-const (
-	terminalRenewalCodePodIdentity = "POD_IDENTITY_MISMATCH"
-	terminalRenewalCodePodToken    = "POD_TOKEN_REQUIRED"
-	terminalRenewalCodeNotLive     = "ENROLLMENT_NOT_LIVE"
-)
+// terminalRenewal is the closed set of renewal refusals `agent-secrets renew` stops on, exiting
+// exitRenewRefused (76) so the worker shim does not restart it; every other refusal keeps the retry
+// backoff. Each member is an answer no retry can change: POD_TOKEN_REQUIRED is a pod enrollment's
+// renewal that carried no token, and ENROLLMENT_NOT_LIVE an enrollment that has ended, lapsed or
+// never existed. A broker that predates ENROLLMENT_NOT_LIVE answers an ended enrollment
+// PROOF_INVALID with a message saying "not live" (its renew handler's "enrollment is not live" and
+// its proof check's "proof invalid: not live"), which no recoverable proof failure says.
+// POD_IDENTITY_MISMATCH is not a member: the broker also answers it for a token it could not
+// verify while its issuer or key set was unreachable, and a real mismatch ends with the lease,
+// after which the next renewal is ENROLLMENT_NOT_LIVE.
+var terminalRenewal = struct {
+	Codes                     []string
+	LegacyCode, LegacyMessage string
+}{
+	Codes:         []string{"POD_TOKEN_REQUIRED", "ENROLLMENT_NOT_LIVE"},
+	LegacyCode:    "PROOF_INVALID",
+	LegacyMessage: "not live",
+}
 
 func newClient(baseURL string) *client {
 	return &client{baseURL: baseURL, http: &http.Client{Timeout: 30 * time.Second}}
@@ -62,21 +76,13 @@ func (e *apiError) Error() string {
 	return fmt.Sprintf("%s (%s)", e.Message, e.Code)
 }
 
-// Permanent reports the closed set of renewal refusals that cannot recover until the enrollment
-// changes. PROOF_INVALID deliberately stays retryable: its proof can be valid after a clock
-// correction, while ENROLLMENT_NOT_LIVE is the renew route's unambiguous ended-enrollment code.
-// A broker that predates ENROLLMENT_NOT_LIVE answers an ended enrollment PROOF_INVALID with a
-// message saying `not live` (its renew handler's "enrollment is not live" and its proof check's
-// "proof invalid: not live"), which no recoverable proof failure says, so that is terminal too.
+// Permanent reports whether this refusal is one of terminalRenewal's: a code it lists, or its
+// legacy code with a message naming the ended enrollment.
 func (e *apiError) Permanent() bool {
-	switch e.Code {
-	case terminalRenewalCodePodIdentity, terminalRenewalCodePodToken, terminalRenewalCodeNotLive:
+	if slices.Contains(terminalRenewal.Codes, e.Code) {
 		return true
-	case "PROOF_INVALID":
-		return strings.Contains(e.Message, "not live")
-	default:
-		return false
 	}
+	return e.Code == terminalRenewal.LegacyCode && strings.Contains(e.Message, terminalRenewal.LegacyMessage)
 }
 
 // do sends the request and, on a 2xx response, returns its raw body; any other status decodes
