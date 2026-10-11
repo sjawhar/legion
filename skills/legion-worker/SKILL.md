@@ -308,8 +308,7 @@ line), the full definition of a proof, what the tester verifies, and the simplif
   `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`, and the
   repository's required reviews and checks decide when it lands
   (`skill://legion-worker/references/merge-gate.md`). The reviewer's submissions, retro's commit,
-  the merger's READY and its submission, the implementer's disarming of a withdrawn READY, and the
-  production check follow the same reference.
+  the merger's READY and its submission, and the production check follow the same reference.
 - **No surface reaches the changed path** is a report to the architect, never a reason to
   complete the phase: `skill://legion-worker/references/pr-body.md`.
 

@@ -45,6 +45,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The implementer no longer disarms a withdrawn READY (LEGION-683): the Go daemon disables the pull
+  request's auto-merge and takes it out of a merge queue itself, so the
+  `gh pr merge <n> -R <owner>/<repo> --disable-auto` step is gone from the implementer's prompt and
+  from `legion-worker`'s merge-gate reference, which now says no role runs a disarm.
 - `legion.daemonApiVersion` is 21 (LEGION-663). Contract 21 adds an optional `capabilities`
   report to `POST /legion/v1/claims/ready` — what a session measured of the six live capability
   rows at boot — and `promptAgents`, the sorted task agents the role's prompts dispatch, to the

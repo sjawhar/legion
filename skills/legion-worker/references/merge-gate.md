@@ -1,8 +1,8 @@
 # The merge gate: review, retro, READY, and the production check
 
 Part of `skill://legion-worker`. Read it when you are the reviewer submitting a review or an
-approval, the implementer disarming a withdrawn READY or recording the production check, or the
-merger building READY and submitting the merge. Every path it cites is in sjawhar/legion.
+approval, the implementer recording the production check, or the merger building READY and
+submitting the merge. Every path it cites is in sjawhar/legion.
 
 The order, in full: the tester's evidence green → the reviewer's approval of the head →
 retro → the merger's READY → the merge → the implementer's production check. The approved
@@ -126,16 +126,12 @@ review posted without a completion leaves the issue in reviewing until you finis
   and that turn runs only `gh`. A `gh pr merge` GitHub refuses is reported to the architect with
   its message; a person can still merge after READY. The packet's second line records the step,
   `Merge: submitted on acceptance with gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`.
-- **A withdrawn READY is disarmed by the implementer.** When READY is withdrawn (the head's CI
-  turned red, or it conflicts with its base, after READY, which sends the issue back to
-  `implementing`), a merge queue drops the pull request on the red check, but auto-merge stays
-  enabled across pushes, and `--match-head-commit` was checked only when it was enabled. So the
-  implementer, at the start of that implementing round, runs
-  `gh pr merge <n> -R <owner>/<repo> --disable-auto` before any push. A pull request still in a
-  merge queue is removed with `gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}' -F id=<pull request node id>`
-  (`--disable-auto` dequeues nothing). When nothing is armed — the merger's submission was refused,
-  or a queue already dropped it — the command exits 1 with "Can't disable auto-merge for this pull
-  request.": run it anyway and take that answer as nothing to disarm.
+- **The daemon disarms a merge no READY covers.** Auto-merge stays enabled across pushes, and
+  `--match-head-commit` is checked only when it is enabled, so the daemon itself disables the pull
+  request's auto-merge and takes it out of a merge queue, as the implement App, on any push but one
+  landing on an awaiting READY's head, when READY is withdrawn (a push moved the head past it, its
+  CI turned red, or it conflicts with its base, each of which sends the issue back to
+  `implementing`), and when a child is set back to `todo`. No role runs a disarm.
 
 ## After the merge
 
