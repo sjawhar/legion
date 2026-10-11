@@ -475,7 +475,11 @@
   is a copy of it while the source is open, or when the source's answer or resolution was given
   while it asked that wording, ordered by the events' commit order; one answered or resolved after
   the rewording opens its own ask, so no copy shows a decision on a question it does not ask.
-  Answering or resolving the source reaches its copies a settlement later.
+  Answering or resolving the source reaches its copies a settlement later. Each block settlement
+  takes for a copy, and each change of the state a copy shows, is logged once (`dispatch: settled
+  an ask block as a copy of another document's ask`, naming the copy, its block, the source ask,
+  its document and its state, never the question), since such a block opens no ask and reaches no
+  one's Inbox.
   `dispatch request-approval`'s refusal and the dashboard's decision card name the source, its
   document and its state from those attributes. A copy whose text is changed, or an id no ask of
   the owner indexes, still opens one, and so do a source's copies once its block
@@ -490,10 +494,11 @@
   gets back the wording that decision was given on, in code and not by a migration: every boot
   restores them all in one statement and logs each ask, its document and its question, and each
   document's settlement restores its own before it writes the decided wording back into the block,
-  which also undoes a rewording an earlier release's task writes during a rolling deploy. Either
-  restoration settles the restored asks' copies again: a copy that settled while its source's row
-  held the rewording showed the decision on the reworded question, and now opens its own ask
-  (LEGION-651).
+  which also undoes a rewording an earlier release's task writes during a rolling deploy. The boot
+  settles each restored ask's own document, whose block still asks the rewording until that
+  settlement writes the decided wording back. Either restoration settles the restored asks' copies
+  again: a copy that settled while its source's row held the rewording showed the decision on the
+  reworded question, and now opens its own ask (LEGION-651).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

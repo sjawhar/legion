@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -69,18 +70,20 @@ const decidedWordingRollbackTimeout = 5 * time.Second
 
 // RestoreDecidedWordings gives every decided ask a task of an earlier release reworded its
 // decided wording back (decidedWordingRestore) and marks owed, in the same transaction, the
-// settlement of every document showing a copy of one of them (owedCopiesOf), which it arms once
-// that commits, as an answer or a resolution of a copy's source does: a copy settled while its
-// source's row held the rewording matched that wording and shows the decision on it, and its next
-// settlement opens the block's own ask. It logs each ask it restored once the transaction commits
-// and returns how many asks it restored and how many copies it marked owed. cmd/dispatch runs it
-// once at boot; a task of the earlier release still running during a rolling deploy can reword one
-// again, which the next settlement of its document on this release restores
-// (restoreDocumentDecidedWordings). Each block is written back to the decided wording by its
-// document's next settlement. Its update holds the restored asks' rows while it takes the copy
-// locks, which waits on no holder of one: a settlement takes its own document's ask rows before its
-// copy lock, an answer or a resolution its ask's row before SettleCopiesOf, and neither waits on
-// another ask's row once it holds the copy lock.
+// settlement of each restored block ask's own document and of every document showing a copy of
+// one of them (owedSettlementsOfRestored), which it arms once that commits. The own document's
+// block still asks the rewording beside the decision, and its settlement writes the decided
+// wording back into it (reconcileAskBlocks); a copy settled while its source's row held the
+// rewording matched that wording and shows the decision on it, and its next settlement opens the
+// block's own ask, as an answer or a resolution of a copy's source settles it. It logs each ask it
+// restored once the transaction commits and returns how many asks it restored and how many copies
+// it marked owed. cmd/dispatch runs it once at boot; a task of the earlier release still running
+// during a rolling deploy can reword one again, which the next settlement of its document on this
+// release restores (restoreDocumentDecidedWordings), writing the decided wording back in that same
+// settlement. Its update holds the restored asks' rows while it takes the copy locks, which waits
+// on no holder of one: a settlement takes its own document's ask rows before its copy lock and
+// before its own pending row, an answer or a resolution its ask's row before SettleCopiesOf, and
+// neither waits on another ask's row once it holds the copy lock.
 func (s *Service) RestoreDecidedWordings(ctx context.Context) (restored, copies int, err error) {
 	ctx = store.WithTransactionTracking(ctx)
 	tx, err := s.store.Pool.Begin(ctx)
@@ -96,7 +99,7 @@ func (s *Service) RestoreDecidedWordings(ctx context.Context) (restored, copies 
 	if err != nil {
 		return 0, 0, err
 	}
-	owed, err := owedCopiesOfRestored(ctx, tx, wordings)
+	owed, copies, err := owedSettlementsOfRestored(ctx, tx, wordings)
 	if err != nil {
 		return 0, 0, err
 	}
@@ -104,16 +107,17 @@ func (s *Service) RestoreDecidedWordings(ctx context.Context) (restored, copies 
 		return 0, 0, fmt.Errorf("commit restoring decided asks' wordings: %w", err)
 	}
 	logRestoredWordings(wordings)
-	for _, copy := range owed {
-		s.scheduleSettle(copy)
+	for _, document := range owed {
+		s.scheduleSettle(document)
 	}
-	return len(wordings), len(owed), nil
+	return len(wordings), copies, nil
 }
 
-// owedCopiesOfRestored marks owed the settlement of every document showing a copy of an ask of
-// restored (owedCopiesOf), reading each restored ask's document's owner, and returns them. An ask
-// no block holds has no copies.
-func owedCopiesOfRestored(ctx context.Context, tx pgx.Tx, restored []restoredWording) ([]string, error) {
+// owedSettlementsOfRestored marks owed, in one upsert (markSettlementPending), the settlement of
+// each document holding the block of an ask of restored and of every document showing a copy of
+// one (lockedCopiesOf, which takes the copy locks first), reading each such document's owner, and
+// returns them with how many are copies. An ask no block holds has neither.
+func owedSettlementsOfRestored(ctx context.Context, tx pgx.Tx, restored []restoredWording) ([]string, int, error) {
 	var documents []documentAsks
 	index := map[string]int{}
 	for _, wording := range restored {
@@ -124,7 +128,7 @@ func owedCopiesOfRestored(ctx context.Context, tx pgx.Tx, restored []restoredWor
 		if !found {
 			owner, err := documentOwner(ctx, tx, *wording.document)
 			if err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 			at = len(documents)
 			index[*wording.document] = at
@@ -132,7 +136,23 @@ func owedCopiesOfRestored(ctx context.Context, tx pgx.Tx, restored []restoredWor
 		}
 		documents[at].asks = append(documents[at].asks, model.Ask{ID: wording.ask, BlockID: wording.block, BlockArtifactID: wording.document})
 	}
-	return owedCopiesOf(ctx, tx, documents...)
+	copies, err := lockedCopiesOf(ctx, tx, documents...)
+	if err != nil {
+		return nil, 0, err
+	}
+	owed := slices.Clone(copies)
+	for _, document := range documents {
+		owed = append(owed, document.artifactID)
+	}
+	if len(owed) == 0 {
+		return nil, 0, nil
+	}
+	slices.Sort(owed)
+	owed = slices.Compact(owed)
+	if err := markSettlementPending(ctx, tx, owed, nil, false, true); err != nil {
+		return nil, 0, err
+	}
+	return owed, len(copies), nil
 }
 
 // restoreDocumentDecidedWordings is RestoreDecidedWordings for the decided asks of rows, the asks

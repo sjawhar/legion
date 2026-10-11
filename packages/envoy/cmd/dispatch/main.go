@@ -742,15 +742,16 @@ func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
 }
 
 // decidedWordingRestoreTimeout bounds the boot's restoration of decided asks' wordings. On the
-// 2026-10-11 production dump (3,739 asks, 82,153 events) the restoration and its copies' marking
-// took 0.17-0.77 s.
+// 2026-10-11 production dump (3,739 asks, 82,153 events) the restoration and its marking of the
+// documents it leaves owed took 0.17-0.77 s.
 const decidedWordingRestoreTimeout = 30 * time.Second
 
 // restoreDecidedWordings is the boot's restoration of the wording each decided ask was decided on,
-// where a task of an earlier release reworded it, and its marking of each such ask's copies owed
-// (docs.Service.RestoreDecidedWordings), bounded by timeout. Each ask it restored has its own
-// line; this logs their count and the copies' count. A restoration that fails or runs out of time
-// is logged and the start goes on, since each document's next settlement restores its own asks.
+// where a task of an earlier release reworded it, and its marking owed of each such block ask's own
+// document and copies (docs.Service.RestoreDecidedWordings), bounded by timeout. Each ask it
+// restored has its own line; this logs their count and the copies' count. A restoration that fails
+// or runs out of time is logged and the start goes on, since each document's next settlement
+// restores its own asks.
 func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeout time.Duration) {
 	bootTask(ctx, timeout, "dispatch: restore decided asks' wordings", "dispatch: restored decided asks' wordings",
 		func(ctx context.Context) ([]any, error) {

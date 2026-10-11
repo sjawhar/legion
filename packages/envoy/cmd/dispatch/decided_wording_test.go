@@ -16,9 +16,11 @@ import (
 // the one answered and then reworded: one answered again after the rewording holds a decision on
 // the new wording, one reworded while open and one reopened before its rewording were decided on
 // nothing they no longer ask, and one reworded and back again already asks its decided wording.
-// A record copy of the spec taken while the reworded ask's row held the rewording showed the
-// decision on the reworded question, so the boot marks it owed a settlement, which opens its own
-// ask; a document holding the block of an ask the boot left as it was owes none.
+// The boot marks the restored ask's own spec owed a settlement, whose block still asks the
+// rewording beside the decision until that settlement writes the decided wording back, and a
+// record copy of the spec taken while the reworded ask's row held the rewording, which showed the
+// decision on the reworded question and opens its own ask at that settlement; a document holding
+// the block of an ask the boot left as it was owes none.
 func TestDispatchBootRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
 	database := storetest.Open(t)
 	ctx := context.Background()
@@ -113,7 +115,7 @@ Ship on Tuesday?
 	answered(unchanged)
 	edited(unchanged)
 
-	// The settlement the boot arms waits five minutes, so the copy's debt is still there to read.
+	// The settlements the boot arms wait five minutes, so the debts are still there to read.
 	process := startDispatchProcessWithSettleDelay(t, database.Pool.Config().ConnString(), 5*time.Minute)
 	process.waitHealthy(t)
 	process.WaitForOutput(t, `msg="dispatch: restored decided asks' wordings" restored=1`)
@@ -170,8 +172,8 @@ Ship on Tuesday?
 		owed = append(owed, document)
 	}
 	rows.Close()
-	if len(owed) != 1 || owed[0] != record {
-		t.Errorf("the documents owing a settlement after the boot are %v, want only the record copy %s", owed, record)
+	if len(owed) != 2 || owed[0] != spec || owed[1] != record {
+		t.Errorf("the documents owing a settlement after the boot are %v, want the spec %s and the record copy %s", owed, spec, record)
 	}
 	if t.Failed() {
 		t.Logf("Dispatch's output:\n%s", output)

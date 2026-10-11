@@ -1568,6 +1568,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	for _, event := range published {
 		s.events.Publish(event)
 	}
+	reconciliation.logCopiedBlocks(room)
 	// A copy of an ask this settlement retracted opens its own ask at its next settlement, which
 	// its pending row (reconcileAskBlocks, owedCopiesOf) also leaves to the resumption should this
 	// process stop first.

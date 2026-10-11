@@ -693,6 +693,137 @@ func TestARestorationOfACopysSourceSettlesTheCopyAgain(t *testing.T) {
 	}
 }
 
+// The boot's restoration of a decided ask's wording marks the ask's own document owed, as it marks
+// the ask's copies: the document's block still asks the rewording an earlier release took into
+// the row, beside the decision, and nothing else settles the document until someone edits it. The
+// one settlement the boot arms writes the decided wording back into the block, and a second
+// restoration finds nothing to restore and marks nothing.
+func TestTheBootsRestorationSettlesTheRestoredAsksOwnDocument(t *testing.T) {
+	ctx := context.Background()
+	for _, closing := range []string{"answered", "resolved"} {
+		t.Run(closing, func(t *testing.T) {
+			service, original := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, original, "Context\n\n"+shipBlock)
+			settleCurrentGeneration(t, service, original)
+			answer, opener := decidedShip(closing)
+			if err := closeSource(ctx, service, original, "ship", blockAskOn(t, service, original, "ship"), answer, nil); err != nil {
+				t.Fatal(err)
+			}
+			source := blockAskOn(t, service, original, "ship")
+			editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
+				return replaceRun("Yes: Monday.", "Tuesday: Ship it.")(replaceRun("Ship on Monday?", "Ship on Tuesday?")(tree))
+			})
+			rewordAsAnEarlierRelease(t, service, original, source)
+			// The earlier release's settlement that took the rewording into the row committed, so
+			// the document owed nothing when this release booted: once the browser edit's own
+			// appends, which mark the row, have landed, the row goes.
+			waitForLandedAppends(t, service, original)
+			if _, err := service.store.Pool.Exec(ctx, `delete from doc_settlements_pending where artifact_id = $1`, original); err != nil {
+				t.Fatalf("settle the document as the earlier release did: %v", err)
+			}
+
+			if restored, copies, err := service.RestoreDecidedWordings(ctx); err != nil || restored != 1 || copies != 0 {
+				t.Fatalf("the boot's restoration restored %d asks and marked %d copies owed (%v), want the source and no copy", restored, copies, err)
+			}
+			if owed := copyOwed(t, service, original); owed != 1 {
+				t.Fatalf("the restored ask's own document owes %d settlements after the boot, want one", owed)
+			}
+			settleCurrentGeneration(t, service, original)
+			requireCopiedStates(t, service, original, opener)
+			text, err := service.Text(ctx, original)
+			if err != nil {
+				t.Fatalf("read the document: %v", err)
+			}
+			if strings.Contains(text, "Tuesday") {
+				t.Fatalf("the document's block still asks the rewording after the settlement the boot armed:\n%s", text)
+			}
+			if owed := copyOwed(t, service, original); owed != 0 {
+				t.Fatalf("the document owes %d settlements after it settled, want none", owed)
+			}
+			if restored, copies, err := service.RestoreDecidedWordings(ctx); err != nil || restored != 0 || copies != 0 {
+				t.Fatalf("a second restoration restored %d asks and marked %d copies owed (%v), want none", restored, copies, err)
+			}
+			if owed := copyOwed(t, service, original); owed != 0 {
+				t.Fatalf("the document owes %d settlements after a second restoration, want none", owed)
+			}
+		})
+	}
+}
+
+// A block taken for a copy opens no ask and reaches nobody's Inbox, so settlement logs each block
+// it writes a copy's attributes into, naming the copy, its source ask, the source's document and
+// the state it shows, and never the question. A later settlement that leaves the copy's blocks as
+// they are logs nothing more, and one that shows a change of a source's state logs that block
+// again.
+func TestASettlementLogsEachBlockItTakesForACopyOnce(t *testing.T) {
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	service, original := newTestService(t)
+	service.settle = time.Hour
+	asks := copiedAskSource(t, service, original)
+	copied := createIssueDocument(t, service.store, 1, "# Copy")
+	seedServiceText(t, service, copied, copiedAsksDocument)
+	settleCurrentGeneration(t, service, copied)
+	classified := func() []string {
+		var lines []string
+		for line := range strings.Lines(logs.Lines("settled an ask block as a copy")) {
+			if strings.Contains(line, "artifact="+copied) {
+				lines = append(lines, line)
+			}
+		}
+		return lines
+	}
+	lines := classified()
+	if len(lines) != 3 {
+		t.Fatalf("the copy's first settlement logged %d copy lines, want one per copied block:\n%s", len(lines), strings.Join(lines, ""))
+	}
+	source := documentAddress(t, service, original)
+	for block, state := range map[string]string{"copy-answered": "answered", "copy-resolved": "resolved", "copy-open": "open"} {
+		found := false
+		for _, line := range lines {
+			if strings.Contains(line, "block="+block+" ") {
+				found = strings.Contains(line, "source_ask="+asks[block]) && strings.Contains(line, source) &&
+					strings.Contains(line, "source_state="+state)
+			}
+		}
+		if !found {
+			t.Fatalf("no copy line names %s, its source %s on %s and the state %s:\n%s", block, asks[block], source, state, strings.Join(lines, ""))
+		}
+	}
+	for _, question := range []string{"Ship on Monday", "Write the changelog", "Which region"} {
+		if strings.Contains(strings.Join(lines, ""), question) {
+			t.Fatalf("a copy line logged the question %q:\n%s", question, strings.Join(lines, ""))
+		}
+	}
+
+	editLiveTree(t, service, copied, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children[0].Text = "Context, revisited"
+		return tree
+	})
+	settleCurrentGeneration(t, service, copied)
+	if again := classified(); len(again) != 3 {
+		t.Fatalf("a settlement that left the copy's blocks as they were logged %d copy lines more, want none:\n%s", len(again)-3, strings.Join(again, ""))
+	}
+
+	region := "us-east-1"
+	answer, _ := json.Marshal(model.AskAnswer{User: "bob", Selected: []string{}, Text: &region, At: time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)})
+	if _, err := service.store.Pool.Exec(context.Background(), `update asks set state = 'answered', answer = $2 where id = $1`, asks["copy-open"], answer); err != nil {
+		t.Fatalf("answer the open source ask: %v", err)
+	}
+	editLiveTree(t, service, copied, func(tree *pmdoc.Node) *pmdoc.Node {
+		tree.Children[0].Children[0].Text = "Context, again"
+		return tree
+	})
+	settleCurrentGeneration(t, service, copied)
+	after := classified()
+	if len(after) != 4 || !strings.Contains(after[3], "block=copy-open ") || !strings.Contains(after[3], "source_state=answered") {
+		t.Fatalf("the settlement after the open source was answered logged %d copy lines more, want one naming copy-open answered:\n%s", len(after)-3, strings.Join(after, ""))
+	}
+}
+
 // A copy of a decided ask's source is a copy only of what was decided. Once its source's own
 // document rewords the answered ask, a copy of the reworded text holds a question no decision
 // answered and opens its own ask, and a copy of the wording that was answered shows the answer.

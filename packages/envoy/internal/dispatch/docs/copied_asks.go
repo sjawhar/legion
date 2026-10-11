@@ -230,20 +230,35 @@ type documentAsks struct {
 
 // owedCopiesOf marks a settlement owed, in tx, for every other document of each document's owner
 // whose latest version holds the block of one of that document's asks with no ask of its own under
-// that block's id, and returns them for the caller to arm once tx commits. Such a block is a copy
-// of the ask, or one its document has not settled yet, and shows the ask as of its own last
-// settlement. Settlement calls this for the asks it retracts, whose copies then open the block's
-// own ask, and for the decided asks whose wording it restores; an answer or a resolution for the
-// ask it closes (SettleCopiesOf) and the boot for every ask it restores (RestoreDecidedWordings),
-// whose copies then show them or open their own. A document's latest version is read for the
-// block's opener (`:::ask{#<id> …}`), so one that quotes the opener elsewhere, in code, is settled
-// for nothing. The pending rows (markSettlementPending, one statement however many copies there
-// are) keep the debt across a restart, for the resumption to arm. They are taken under the copy
-// lock of every project among the owners (lockProjectCopies), taken first and in the projects'
-// order, so two holders of several never wait on each other in a cycle; and the caller has taken
-// no other pending row and not the events' commit-order lock: a copy's settlement deletes its own
-// row before it appends an event, so the two can wait on each other in only one direction.
+// that block's id (lockedCopiesOf), and returns them for the caller to arm once tx commits. Such a
+// block is a copy of the ask, or one its document has not settled yet, and shows the ask as of its
+// own last settlement. Settlement calls this for the asks it retracts, whose copies then open the
+// block's own ask, and for the decided asks whose wording it restores; an answer or a resolution
+// for the ask it closes (SettleCopiesOf), whose copies then show it. The boot's restoration finds
+// the copies of every ask it restores the same way and marks them with the asks' own documents
+// (owedSettlementsOfRestored). The pending rows (markSettlementPending, one statement however many
+// copies there are) keep the debt across a restart, for the resumption to arm.
 func owedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]string, error) {
+	copies, err := lockedCopiesOf(ctx, tx, documents...)
+	if err != nil || len(copies) == 0 {
+		return nil, err
+	}
+	if err := markSettlementPending(ctx, tx, copies, nil, false, true); err != nil {
+		return nil, err
+	}
+	return copies, nil
+}
+
+// lockedCopiesOf takes the copy lock of every project among documents' owners (lockProjectCopies),
+// first and in the projects' order, so two holders of several never wait on each other in a
+// cycle, and returns, sorted and once each, every other document of each document's owner whose
+// latest version holds the block of one of that document's asks with no ask of its own under that
+// block's id (copiesOf). A document's latest version is read for the block's opener
+// (`:::ask{#<id> …}`), so one that quotes the opener elsewhere, in code, is settled for nothing.
+// The caller has taken no pending row and not the events' commit-order lock: a copy's settlement
+// deletes its own row before it appends an event, so the two can wait on each other in only one
+// direction.
+func lockedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]string, error) {
 	var projects []string
 	for _, document := range documents {
 		if document.owner.IssueKey == nil && slices.ContainsFunc(document.asks, func(ask model.Ask) bool { return ask.BlockID != nil }) {
@@ -264,15 +279,8 @@ func owedCopiesOf(ctx context.Context, tx pgx.Tx, documents ...documentAsks) ([]
 		}
 		copies = append(copies, found...)
 	}
-	if len(copies) == 0 {
-		return nil, nil
-	}
 	slices.Sort(copies)
-	copies = slices.Compact(copies)
-	if err := markSettlementPending(ctx, tx, copies, nil, false, true); err != nil {
-		return nil, err
-	}
-	return copies, nil
+	return slices.Compact(copies), nil
 }
 
 // copiesOf reads the other documents of document's owner holding the block of one of its asks with

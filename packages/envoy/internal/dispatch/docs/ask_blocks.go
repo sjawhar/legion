@@ -41,6 +41,9 @@ type settlementReconciliation struct {
 	// a decided ask whose wording it restores (restoreDocumentDecidedWordings), whose settlement
 	// reconcileAskBlocks marked owed (owedCopiesOf); the settlement arms each once it commits.
 	owedCopies []string
+	// copied are the blocks this settlement wrote a copy's attributes into, as a copy of another
+	// document's ask (copiedAskSources), which it logs once it commits (logCopiedBlocks).
+	copied []copiedBlock
 	// indexedAskBlocks are the blocks with a recorded author that this settlement indexed or
 	// found indexed, whose author the room forgets once it commits (consumeAskAuthors). A copy
 	// is neither: its author is kept for the ask it opens once its source is retracted.
@@ -57,6 +60,26 @@ type askRepair struct {
 	set     func(*pmdoc.Node) bool
 }
 
+// copiedBlock is one block settlement wrote a copy's attributes into: its id and its source.
+type copiedBlock struct {
+	blockID string
+	source  copiedSource
+}
+
+// logCopiedBlocks logs, once its settlement of artifactID has committed, each block that settlement
+// wrote a copy's attributes into - a block becoming a copy, or a copy whose source's state changed
+// - naming the copy, its source and the state it shows, never the question. A block taken for a
+// copy opens no ask and reaches nobody's Inbox, so this line is how one taken for a copy that was
+// meant as a new question is found. A copy whose attributes already agree is written nothing and
+// logged nothing, so an unchanged copy's later settlements add no line.
+func (r *settlementReconciliation) logCopiedBlocks(artifactID string) {
+	for _, block := range r.copied {
+		slog.Info("dispatch: settled an ask block as a copy of another document's ask",
+			"artifact", artifactID, "block", block.blockID, "source_ask", block.source.ask.ID,
+			"source_document", block.source.document, "source_state", block.source.ask.State)
+	}
+}
+
 // repair runs set on node, the ask block carrying blockID in the tree settlement read, and records
 // it for repairLive when it changed the block.
 func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set func(*pmdoc.Node) bool) bool {
@@ -68,14 +91,15 @@ func (r *settlementReconciliation) repair(node *pmdoc.Node, blockID string, set 
 }
 
 // repairAsk repairs the server attributes of node, the ask block carrying blockID in the tree
-// settlement read, to agree with ask (setAskServerAttributes), and records the repair for
-// repairLive and, when event is not nil, the block.repaired it emits - each where withholdAnswers
-// finds it again. copied is the document ask is on when node is a copy of it, "" otherwise.
-func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, ask model.Ask, copied string, event *model.Event) {
+// settlement read, to agree with ask (setAskServerAttributes), records the repair for repairLive
+// and, when event is not nil, the block.repaired it emits - each where withholdAnswers finds it
+// again - and reports whether it changed the block. copied is the document ask is on when node is
+// a copy of it, "" otherwise.
+func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, ask model.Ask, copied string, event *model.Event) bool {
 	found := readAskServerState(node)
 	changed, wroteAnswer := setAskServerAttributes(node, ask, copied, false)
 	if !changed {
-		return
+		return false
 	}
 	rewrite := serverRewrite{node: node, ask: ask, copied: copied, found: found, answer: wroteAnswer, repair: len(r.repairs), event: -1}
 	r.repairs = append(r.repairs, askRepair{blockID: blockID, set: askServerAttributes(ask, copied, false)})
@@ -84,6 +108,7 @@ func (r *settlementReconciliation) repairAsk(node *pmdoc.Node, blockID string, a
 		r.events = append(r.events, *event)
 	}
 	r.rewrites = append(r.rewrites, rewrite)
+	return true
 }
 
 // repairLive makes the reconciliation's repairs on live, the document as it stands when settlement
@@ -250,7 +275,9 @@ func (s *Service) reconcileAskBlocks(
 			// A copy is read-only here: its source's state is written into the block, and
 			// nothing this settlement does writes the source's row.
 			if source, copied := sources[block.id]; copied {
-				reconciled.repairAsk(block.node, block.id, source.ask, source.document, nil)
+				if reconciled.repairAsk(block.node, block.id, source.ask, source.document, nil) {
+					reconciled.copied = append(reconciled.copied, copiedBlock{blockID: block.id, source: source})
+				}
 				continue
 			}
 		}

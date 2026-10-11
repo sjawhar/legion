@@ -1575,14 +1575,21 @@ resolve routes (`SettleCopiesOf`), a retracting or restoring settlement (`reconc
 the boot's restoration (`RestoreDecidedWordings`) mark owed, in one `doc_settlements_pending`
 upsert (`markSettlementPending`), and arm once they commit, the settlement of every other document
 of the owner whose latest version holds the block with no ask of its own under that id
-(`owedCopiesOf`, which takes the copy lock of each project among the documents it is given, in the
-projects' order). After a retraction the first of those to settle opens the block's own ask,
-credited to the author who wrote the block into it, whom the room keeps owed while the block is a
-copy; every other copy then matches that ask and names it, so copies of one owner share one ask
-once their source is retracted and the question waits in one place, and a block pasted elsewhere
-and then cut, in either order, is open in one place. That needs the owner's copies to settle one at
-a time: an issue's documents do, under their issue's row (`lockArtifactOwner`), but a project
-document's owner row is the document itself, so a
+(`lockedCopiesOf`, which takes the copy lock of each project among the documents it is given, in
+the projects' order, through `owedCopiesOf` for all but the boot). Each time settlement writes a
+copy's attributes into a block - the block becoming a copy, or the state it shows changing - it
+logs, once its transaction commits, `dispatch: settled an ask block as a copy of another
+document's ask` with the copy's `artifact` and `block`, the `source_ask`, its `source_document`
+and the `source_state` it shows, never the question; a copy left as it was logs nothing. That
+line is how a block taken for a copy that was meant as a new question is found, since it opens no
+ask and reaches nobody's Inbox: a recurring templated ask under an id its author chose, asking
+what an earlier document of the owner already asked, is one. After a retraction the first copy to
+settle opens the block's own ask, credited to the author who wrote the block into it, whom the
+room keeps owed while the block is a copy; every other copy then matches that ask and names it, so
+copies of one owner share one ask once their source is retracted and the question waits in one
+place, and a block pasted elsewhere and then cut, in either order, is open in one place. That needs
+the owner's copies to settle one at a time: an issue's documents do, under their issue's row
+(`lockArtifactOwner`), but a project document's owner row is the document itself, so a
 project's copy bookkeeping - a settlement's copy-source read, and every marking of copies owed -
 takes a transaction advisory lock keyed on the project (`lockProjectCopies`), so nothing that locks
 the project's row waits on it. It is the two-key form, `pg_advisory_xact_lock(copiedAsksLockNamespace,
@@ -1633,9 +1640,13 @@ it may restore, null at boot for every decided ask; both re-index the restored q
 references, log each ask they restore, its document and the question it asks again (`dispatch:
 restored a decided ask's wording`), never the wording it replaced, and mark the restored asks'
 copies owed: a copy that settled while its source's row held the rewording matched that wording and
-shows the decision on it, and its next settlement opens the block's own ask. The boot then logs the
-asks' and the copies' counts (`dispatch: restored decided asks' wordings`, `restored=<n>
-copies=<n>`). A route that changes an ask's text or lifecycle writes both:
+shows the decision on it, and its next settlement opens the block's own ask. The boot also marks
+each restored block ask's own document owed in the same upsert, since its block still asks the
+rewording beside the decision and nothing else settles that document until someone edits it; the
+settlement it arms writes the decided wording back into the block (a settlement's own restoration
+does that in the same pass). The boot then logs the asks' and the copies' counts (`dispatch:
+restored decided asks' wordings`, `restored=<n> copies=<n>`). A route that changes an ask's text or
+lifecycle writes both:
 `PATCH /api/v1/asks/{id}` on a block ask (an open one; a decided one is `409 ASK_NOT_OPEN`) writes
 the block through the document ledger and then takes the row's values from what the block parses
 back to, and `POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the
