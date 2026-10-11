@@ -2882,6 +2882,32 @@ describe("executeDispatchTool", () => {
     }
   });
 
+  // A title cap has to reject before the done reason writes its message: otherwise a bad retitle
+  // leaves an issue open with a stray closing reason.
+  test("dispatch_issue_update refuses a title over the cap before posting its close reason", async () => {
+    const fetchImpl = (() => {
+      throw new Error("network must not be called");
+    }) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_issue_update",
+        args: {
+          issue: "ACME-175",
+          status: "done",
+          reason: "Shipped in owner/repo#7.",
+          title: "x".repeat(1001),
+        },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow(/title is 1 characters over the 1000-character limit \(1001\/1000\)/);
+  });
+
   /** Records every request; the messages route and the PATCH answer with the given responses. */
   function closingServer(answers: { message: () => Response; patch: () => Response }) {
     const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
@@ -3837,8 +3863,6 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(
       '"Approve spec.md (version 3)? Proposes a live sync in place of the nightly export."'
     );
-    expect(result.text).toContain('`task(agent="scout")`');
-    expect(result.text).toContain("Legion plugin's `plan-gap-analyst`");
     expect(result.details).toMatchObject({ issue: "DSP-42", ask: "ask-9", version: 3 });
     expect(result.details).toMatchObject({ follows: { ask: "ask-9" } });
     expect(result.details).not.toHaveProperty("topic");

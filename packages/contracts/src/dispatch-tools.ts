@@ -1,4 +1,4 @@
-import { DEFAULT_ISSUE_PAGE_LIMIT, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
+import { DEFAULT_ISSUE_PAGE_LIMIT, ISSUE_TITLE_MAX, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
 import type { SchemaApi, SchemaNode, ToolArgumentsShape } from "./tool-schema";
 
 export interface DispatchToolSpec {
@@ -261,11 +261,14 @@ export const dispatchToolSpecs = [
     example: { project: "DSP", title: "Native workspace" },
     description:
       "Create a native Dispatch issue for newly tracked work. Search first with dispatch search; if potentially duplicate issues exist, this returns 409 POSSIBLE_DUPLICATE unless --force is set after reading them. " +
+      "When passing a spec, before calling, have a fresh read-only reader check it against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. " +
       "A spec holding an ask block whose body breaks its content rule (one or more question paragraphs, then at most one bullet list of options, last) is refused with 400 INVALID_ASK_BLOCK. " +
       `Do not use it when an existing issue already covers the work; read or update that issue instead. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       project: z.string().describe("Project key for the new issue."),
-      title: z.string().describe("Concise issue title."),
+      title: z
+        .string({ max: ISSUE_TITLE_MAX })
+        .describe("Concise issue title, at most 1,000 characters."),
       parent: z.string().describe("Optional parent issue.").optional(),
       external: z.string().describe("Optional external issue reference.").optional(),
       force: z
@@ -327,7 +330,10 @@ export const dispatchToolSpecs = [
           "Required with status done, and only with it: why the issue is closing, at most 2,000 characters. Posted on the issue as a message before it closes."
         )
         .optional(),
-      title: z.string({ min: 1 }).describe("Replacement title.").optional(),
+      title: z
+        .string({ min: 1, max: ISSUE_TITLE_MAX })
+        .describe("Replacement title, at most 1,000 characters.")
+        .optional(),
       labels: z
         .array(z.string({ min: 1, max: 40 }), { max: 20 })
         .describe(
@@ -928,7 +934,7 @@ export const dispatchToolSpecs = [
     name: "dispatch_request_approval",
     example: { issue: "DSP-1", summary: "A live sync replaces the nightly export." },
     description:
-      "Ask a human to approve a document at its current version. Opens an approval ask (Approve / " +
+      "Ask a human to approve a document at its current version. Before calling, have a fresh read-only reader check the spec against the code and the human's words, then resolve every finding; a Legion architect uses `plan-gap-analyst`. Opens an approval ask (Approve / " +
       "Request changes) in the human's Inbox whose question names the document and version, " +
       "followed by the summary; the answer pins a review to that version and arrives as " +
       "artifact.approved or artifact.changes_requested. An open request follows the document: a " +

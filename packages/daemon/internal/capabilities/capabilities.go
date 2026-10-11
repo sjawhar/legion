@@ -82,7 +82,7 @@ var Table = []Capability{
 	{MCP, SiteLive, "reaches the MCP servers the deployment configures", "", ""},
 	{RepositoryExtensions, SiteLive, "loads the Oh My Pi extensions the repository it works carries", "dispatch://LEGION-629", ""},
 	{DispatchEnvoyTools, SiteLive, "reaches Dispatch and Envoy through the pi-envoy tools", "", ""},
-	{GitHub, SiteLive, "reads and writes GitHub through `legion gh` on its role's App", "dispatch://LEGION-631", ""},
+	{GitHub, SiteLive, "reads and writes GitHub through its plain `gh` and `git` on its role's App token file", "dispatch://LEGION-631", ""},
 	{Secrets, SiteDeployment, "reads the secrets the deployment grants its pod generation through the agent-secrets broker", "", ""},
 	{ModelFallback, SiteDeployment, "falls back to another model when its own is unavailable (retry.modelFallback)", "", ""},
 	{Toolchain, SiteImage, "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun and uv", "", ""},

@@ -368,7 +368,7 @@ func TestLoadRefusesEveryStage3Key(t *testing.T) {
 		},
 		{
 			// The repository's names are joined into paths and GitHub API routes; a name holding
-			// whitespace is no GitHub owner's or repository's, as `legion threads --repo` refused.
+			// whitespace is no GitHub owner's or repository's (ghrepo.Parse).
 			name: "a repo that holds whitespace",
 			body: strings.Replace(minimalFile, "{ repo: acme/widgets }", "{ repo: acme/wid gets }", 1),
 			want: `projects.DEMO.repo "acme/wid gets" holds whitespace, which no GitHub owner or repository name does`,

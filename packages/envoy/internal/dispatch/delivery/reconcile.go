@@ -716,14 +716,7 @@ func (r *Reconcile) reconcileRun(ctx context.Context, owner, repo, repoFull stri
 		}
 		return fmt.Errorf("list jobs: %w", err)
 	}
-	jobs := make([]DeliveryRunJob, len(fetchedJobs))
-	for i, job := range fetchedJobs {
-		jobs[i] = DeliveryRunJob{
-			Repo: repoFull, RunID: run.RunID, Name: job.Name, StartedAt: job.StartedAt,
-			CompletedAt: job.CompletedAt, Conclusion: mapJobConclusion(job.Conclusion),
-		}
-	}
-	return UpsertRunJobs(ctx, r.pool, repoFull, run.RunID, jobs)
+	return UpsertRunJobs(ctx, r.pool, repoFull, run.RunID, RunJobs(repoFull, run.RunID, fetchedJobs))
 }
 
 // mapRunConclusionPtr adapts mapRunConclusion (which intake.go calls with the envelope's raw

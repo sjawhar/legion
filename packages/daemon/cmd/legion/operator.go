@@ -187,6 +187,19 @@ func daemonAddress(configPath string, port int) (string, error) {
 	return "http://" + address, nil
 }
 
+// daemonURL is the API root LEGION_DAEMON_URL names, without a trailing slash, or loopback on
+// LEGION_DAEMON_PORT (13370 when unset) while it names none.
+func daemonURL() string {
+	if endpoint := strings.TrimRight(os.Getenv("LEGION_DAEMON_URL"), "/"); endpoint != "" {
+		return endpoint
+	}
+	port := os.Getenv("LEGION_DAEMON_PORT")
+	if port == "" {
+		port = "13370"
+	}
+	return "http://127.0.0.1:" + port
+}
+
 // refusal is an answer outside 2xx as the operator reads it: the status, and the sentence the
 // daemon's `{"error"}` body carries — or the body itself when it carries none, so nothing the
 // daemon said is lost.

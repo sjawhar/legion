@@ -13,6 +13,7 @@ import {
   type Call,
   type Entry,
   jsonl,
+  toolCall,
   toolResult,
   turnEnd,
 } from "./omp-session-fixtures";
@@ -46,7 +47,9 @@ const tick: Entry = {
   content: "envoy:\n  from: agent\n  summary: tick on LEGSMOKE\n  message:\n    kind: tick",
   display: true,
 };
-const bash = bashTool("legion state --json");
+// The controller reads the daemon's state with its legion tool (read_state), never `legion` from
+// bash: a call of the turn that is not the report.
+const readState: Call = toolCall("legion", { op: "read_state" });
 // The four surfaces of one bash call running `dispatch message` on ISSUE.
 const command = (issue: string) =>
   `dispatch message --issue ${issue} --body-file - <<'EOF'\n${body}\nEOF`;
@@ -66,13 +69,13 @@ const posted = toolResult(`Posted message 2adbdb49 (dispatch://${report}/message
 // controller idle and starts the turn that posts the report with CALL.
 const onTickTurn = (call: Call, startTurn: Entry[] = []): Entry[] => [
   start,
-  assistant(bash),
+  assistant(readState),
   toolResult("{}"),
   tick,
   ...startTurn,
   turnEnd("stop"),
   tick,
-  assistant(bash),
+  assistant(readState),
   toolResult("{}"),
   assistant(call),
   posted,
@@ -81,7 +84,7 @@ const onTickTurn = (call: Call, startTurn: Entry[] = []): Entry[] => [
 // inStartTurn: the report is posted with CALL in the start turn, after a tick was steered into it.
 const inStartTurn = (call: Call): Entry[] => [
   start,
-  assistant(bash),
+  assistant(readState),
   toolResult("{}"),
   tick,
   assistant(call),
@@ -144,7 +147,7 @@ describe("report_after_tick", () => {
 
   test("a skill file that quotes the command in the start turn is not the report's call", () => {
     const skill = toolResult(`Post the report with ${command(report)}.`);
-    const { code, stdout } = run(onTickTurn(viaDevice(report), [assistant(bash), skill]));
+    const { code, stdout } = run(onTickTurn(viaDevice(report), [assistant(readState), skill]));
     expect(stdout).toBe("");
     expect(code).toBe(0);
   });

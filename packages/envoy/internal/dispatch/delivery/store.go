@@ -21,7 +21,7 @@ import (
 
 // SettingsColumns is the delivery_settings select list ScanSettings reads, in scan order; every
 // query that returns the settings row selects exactly this.
-const SettingsColumns = `deploy_repo, deploy_workflow_path, production_job_name, pr_checks_workflow_path, population_authors, excluded_repos, last_event_at, last_reconcile_at, last_error, updated_by, updated_at`
+const SettingsColumns = `deploy_repo, deploy_workflow_path, production_job_name, pr_checks_workflow_path, population_authors, excluded_repos, staging_e2e_job_name, staging_apply_job_name, pr_checks_rollup_job_name, last_event_at, last_reconcile_at, last_error, updated_by, updated_at`
 
 // ScanSettings decodes one SettingsColumns row into a DeliverySettings.
 func ScanSettings(row pgx.Row) (DeliverySettings, error) {
@@ -30,6 +30,7 @@ func ScanSettings(row pgx.Row) (DeliverySettings, error) {
 	if err := row.Scan(
 		&settings.DeployRepo, &settings.DeployWorkflowPath, &settings.ProductionJobName,
 		&settings.PRChecksWorkflowPath, &settings.PopulationAuthors, &settings.ExcludedRepos,
+		&settings.StagingE2EJobName, &settings.StagingApplyJobName, &settings.PRChecksRollupJobName,
 		&settings.LastEventAt, &settings.LastReconcileAt, &settings.LastError, &updatedBy, &settings.UpdatedAt,
 	); err != nil {
 		return DeliverySettings{}, err
@@ -87,9 +88,10 @@ func PutSettings(ctx context.Context, pool *store.Pool, settings DeliverySetting
 		with cleared as (delete from delivery_reconcile_progress)
 		insert into delivery_settings (
 			singleton, deploy_repo, deploy_workflow_path, production_job_name,
-			pr_checks_workflow_path, population_authors, excluded_repos, updated_by
+			pr_checks_workflow_path, population_authors, excluded_repos,
+			staging_e2e_job_name, staging_apply_job_name, pr_checks_rollup_job_name, updated_by
 		)
-		values (true, $1, $2, $3, $4, $5, $6, $7)
+		values (true, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		on conflict (singleton) do update set
 			deploy_repo = excluded.deploy_repo,
 			deploy_workflow_path = excluded.deploy_workflow_path,
@@ -97,6 +99,9 @@ func PutSettings(ctx context.Context, pool *store.Pool, settings DeliverySetting
 			pr_checks_workflow_path = excluded.pr_checks_workflow_path,
 			population_authors = excluded.population_authors,
 			excluded_repos = excluded.excluded_repos,
+			staging_e2e_job_name = excluded.staging_e2e_job_name,
+			staging_apply_job_name = excluded.staging_apply_job_name,
+			pr_checks_rollup_job_name = excluded.pr_checks_rollup_job_name,
 			last_event_at = null,
 			last_reconcile_at = null,
 			last_error = null,
@@ -104,7 +109,8 @@ func PutSettings(ctx context.Context, pool *store.Pool, settings DeliverySetting
 			updated_at = now()
 		returning `+SettingsColumns,
 		settings.DeployRepo, settings.DeployWorkflowPath, settings.ProductionJobName,
-		settings.PRChecksWorkflowPath, populationAuthors, excludedRepos, actorJSON,
+		settings.PRChecksWorkflowPath, populationAuthors, excludedRepos,
+		settings.StagingE2EJobName, settings.StagingApplyJobName, settings.PRChecksRollupJobName, actorJSON,
 	))
 }
 
@@ -810,6 +816,30 @@ func ListRunsStartedIn(ctx context.Context, pool *store.Pool, repo string, kind 
 		runs = append(runs, run)
 	}
 	return runs, rows.Err()
+}
+
+// RunsWithJobs is a list of runs and every job of each, keyed by run id.
+type RunsWithJobs struct {
+	Runs []DeliveryRun
+	Jobs map[int64][]DeliveryRunJob
+}
+
+// ListRunsWithJobsStartedIn is ListRunsStartedIn's runs with ListRunJobsForRuns' jobs of them: the
+// Pipeline page's two reads, the PR-checks runs and the deploy runs of its shown days.
+func ListRunsWithJobsStartedIn(ctx context.Context, pool *store.Pool, repo string, kind DeliveryRunKind, branch, event string, from, to time.Time) (RunsWithJobs, error) {
+	runs, err := ListRunsStartedIn(ctx, pool, repo, kind, branch, event, from, to)
+	if err != nil {
+		return RunsWithJobs{}, err
+	}
+	runIDs := make([]int64, len(runs))
+	for i, run := range runs {
+		runIDs[i] = run.RunID
+	}
+	jobs, err := ListRunJobsForRuns(ctx, pool, repo, runIDs)
+	if err != nil {
+		return RunsWithJobs{}, err
+	}
+	return RunsWithJobs{Runs: runs, Jobs: jobs}, nil
 }
 
 // maxPullRequestsPerWindow bounds ListPullRequestsInWindow: a window a caller (the API, a future

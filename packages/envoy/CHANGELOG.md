@@ -4,6 +4,24 @@
 
 ### Added
 
+- `Ctrl+Alt+M` (`⌘+⌥+M` on a Mac), Google Docs' shortcut, comments on the text selected in a
+  document, as the selection bar's **Comment** does: it opens the margin's composer on the
+  selection and puts the cursor in it. It works in an issue's documents and a project's documents
+  while the cursor is in the document and text is selected, and does nothing in a comment being
+  written or on a document the reader cannot edit. The `?` help lists it under **Document** and
+  shows `⌥` for Alt on a Mac. On a Mac, shortcuts that hold Alt also match the key's position,
+  since Option changes the character (Option+M types `µ`); every other system keeps
+  character-only matching, so AltGr continues typing its layout's character (LEGION-680).
+- Every document version now carries `size`, the bytes of the markdown it stores, as file and
+  image versions already carried theirs: on the issue and project artifact lists, the issue read,
+  an artifact's read, each version's read, the reference closure and outgoing reference reads, the
+  version an upload, a named version or an edit answers with, and the version on every
+  `artifact.created` and `artifact.version` event, settlement's and a rebuild's included. Dispatch
+  reads it from the version row's own stored length (`octet_length`), so listing a document near
+  the 1 MiB cap neither renders it nor loads its stored history, and a person or a monitor can find
+  such a document from the list alone (LEGION-481). The dashboard's issue Artifacts tab and project
+  Documents tab show each document's latest size beside its kind, and a document's version list
+  shows every version's.
 - A person lists and ends their own machines' logins and their live grants from their own shell.
   `agent-secrets machine list` and `machine revoke ID`, and `agent-secrets grant list` and
   `grant revoke ID`, call four new broker routes, `GET /v1/operator/machines`,
@@ -207,6 +225,14 @@
   stderr; and `enroll --helper --kind box`, which dotfiles' agentbox passes, enrolls as before,
   while any other `--kind` exits 2 naming the flag, as every `--kind` but `box` did before. An
   `enroll` without `--helper` is refused for that first, whatever `--kind` it carries, as before.
+- `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
+  naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
+  Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not
+  identify this pod", which reads as another pod's token. `POD_IDENTITY_MISMATCH` now means only a
+  token that does not prove the pod. A launcher that branches on the code presents the pod's
+  current token with the same key; the Legion daemon reads the new code as not permanent, keeps
+  the key, and enrolls it with the pod's current token, which it asks the shim for at its next
+  observation.
 - **Breaking:** `agent-secrets launcher login` and `launcher login-status` are removed, with no
   alias: `agent-secrets machine login` and `machine login-status` replace them, beside
   `machine list` and `machine revoke`. A script that still calls `launcher` gets the usage and
@@ -451,6 +477,40 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A person's new comment on a document reaches the agents that wrote it, each once, on its own
+  `notifications.agent.<session_id>` topic, whatever the issue's route: a comment on a passage of
+  an issue's document or a project document, a comment on a whole project document, a suggestion,
+  and an edit of any of these. The writers are the session that created the document and every
+  session one of its versions credits, which includes an agent whose anchored comment credited it
+  on a new version. Before, a new comment found no author to route to, so the agent heard of it
+  only by subscribing to the issue's or document's own topic (LEGION-681). A document only people
+  wrote sends nothing new, since a person has no topic. A reply still reaches its thread's root
+  author and its parent's author alone, an ask reply its followers, and a comment on an issue's
+  conversation, which names no document, no author. An agent's comment still notifies nobody, so a
+  session commenting on a document it wrote is not told of its own comment. A writer the comment
+  @-mentions hears it once, from the mention: a new comment's `suppressed_authors` now names every
+  session a mention resolved to.
+- `scripts/dev-postgres.sh` reuses its `dispatch-pg` container rather than failing on the name: it
+  starts a stopped one and serves a running one, when the container runs the pinned pgvector
+  image. It refuses one on any other image, such as a `postgres:16` an older version of the script
+  created, whose missing `vector` extension failed Dispatch's migrations at `0072`. The refusal
+  names both images and prints the commands that move the container's data volume onto the pinned
+  image, read from `docker inspect` and quoted so a bind mount's path with a space pastes whole;
+  the script itself stops, removes and recreates nothing. `scripts/dev-broker.sh` boots Postgres
+  through it, so it refuses that container too, before it creates a database.
+- A document whose search vector would pass Postgres's limit on one vector (1,048,575 bytes of lexemes and positions) can be versioned. Text of words no two alike passes it well inside a document's 1 MiB, at about 700 KB of `w000001 w000002 …` or 475 KB of UUIDs, and every write of such text failed with `string is too long for tsvector`: the document's version, so every settlement of it, its upload, an issue titled with it and that title's duplicate check, and an ask block holding it. Migrations `0087`–`0088` build every search vector with `search_vector`, which indexes the whole text where its vector fits, exactly as before, and otherwise the longest of its first half, quarter, eighth, … that fits, cut between two words, so keyword search finds such a text by the whole words that open it and by no part of a word the cut would split. A body with no whitespace before its cut contributes none of its own words; an issue's key is always indexed whole (LEGION-505).
+- An issue title is at most 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after the trim), on creation and on a retitle; a longer one is `400 CAP_EXCEEDED`, named as the comment, message and ask caps name theirs, before the duplicate check reads the project's titles. Titles had no cap, so one stored title could be as long as a request allowed: every later creation in its project read it in the duplicate check, and the `409 POSSIBLE_DUPLICATE` message quoted it whole. Beside 2,000 production titles, one stored 800 KB title raised the check from about 0.1 s to 0.56 s. A new title of 20,000 distinct words (10,000 did not) beside an issue whose title shared one of them overflowed Postgres's default 2 MB stack in the duplicate check's snippet (`stack depth limit exceeded`, `500`); a title at the cap holds at most 501 lexemes. Production's longest title is 326 characters. The dashboard's create dialog and issue-header title field stop at the cap, and a retitle Dispatch refuses shows Dispatch's reason in the header instead of the generic failure line (LEGION-505).
+- The duplicate-title check no longer parses every title in the project on each creation. It read each stored title's lexemes by building them from the title as it ran, several times over for a title that shared a word with the new one, so its cost grew with every title in the project: beside 2,000 titles at the 1,000-character cap, an ordinary creation's check took 2.1–2.5 s and one at the cap 7.6 s. Migrations `0088`–`0089` store each title's own lexemes in `issues.title_lexemes`, which the issues trigger fills on every insert and retitle and `0089` fills for every issue stored before, under a table lock that no reparent deadlocks against; the check reads them, so a creation parses one title. Beside those 2,000 titles the check takes 56–95 ms, and beside 2,000 production titles 15–19 ms where it took 120–154 ms (Postgres 16, load 60–80). It answers the same candidates, in the same order. A candidate's snippet marks the words its title shares with the new title: with a parent, a word that is both the parent's and a part of a hyphenated word of the new title is no longer marked, where the snippet marked it beside parent `Legion` in `launch window legion` for the new title `legion-resolve launch window` (LEGION-505).
+- The delivery timeline and measures no longer log `a successfully concluded run has no job
+  matching the configured production_job_name` for a deploy run that skipped its production job.
+  GitHub lists a skipped call of a reusable workflow under the calling job's name alone, so a
+  dev-only run lists `production-apply` where a deploy lists `production-apply / production-apply`.
+  The skip is taken as the reason only while another run the same read judges holds a job by the
+  configured name, so a typo whose first part names a skipped job (`staging-apply /
+  production-apply`) still warns; a window with no production deploy in it warns for each of its
+  successful runs. Such a run still counts as no deploy. Every warning is now logged once per run
+  and configured job name for the life of the process rather than on every read: one dev-only run
+  had been logging the line twice every three minutes (LEGION-567).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

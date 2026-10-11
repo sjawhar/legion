@@ -257,7 +257,7 @@ func (s *server) loadArtifactsByRefKey(ctx context.Context, q queryer, refKeys [
 	rows, err := q.Query(ctx, `
 		select a.id::text, a.issue_key, coalesce(a.project_key, ''), a.session_id, a.ref_key, a.slug, a.name, a.kind, a.is_primary,
 		       a.created_by, a.created_at,
-		       v.number, v.named, v.summary, v.authors, v.created_at, v.size, v.mime, v.sha256
+		       `+versionColumns+`
 		from artifacts a
 		join artifact_versions v on v.artifact_id = a.id
 		where a.ref_key = any($1)

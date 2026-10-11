@@ -7,8 +7,10 @@ sidebar:
 
 `packages/envoy/scripts/dev-broker.sh` creates a Postgres database of its own, builds the broker and
 its clients, writes a fake secrets file, which stands in for Secrets Manager, and starts the broker
-on a free port. It needs Go, and a Postgres server: by default it starts one in Docker (a container
-named `dispatch-pg`, reused when it is there). Without Docker, run Postgres yourself and set
+on a free port. It needs Go, and a Postgres server: by default it starts one in Docker through
+`packages/envoy/scripts/dev-postgres.sh` (a container named `dispatch-pg`, reused when it is there;
+one made from another image than that script's is refused, with the commands that move its data
+onto the right one). Without Docker, run Postgres yourself and set
 `DEV_BROKER_POSTGRES_URL` to `postgres://<user>@<host>:<port>/<database>`, for a role that may
 create databases; the script then creates and drops its database there with `psql`.
 

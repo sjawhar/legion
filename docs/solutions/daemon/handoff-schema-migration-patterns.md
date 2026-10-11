@@ -8,7 +8,7 @@ tags:
   - backward-compatibility
   - discriminated-union
 date: 2026-04-05
-status: active
+status: superseded by LEGION-631 — `legion handoff write|read` and their write-time validation are gone, and nothing holds a handoff to a shape any more; a worker writes `.legion/<KEY>/<phase>.json` itself (`schemaVersion`, `phase`, `issue` and `completed` included, the fields its role prompt spells), commits and pushes it, and the `legion` tool's `handoff_complete` finds the pushed commit carrying it and reports that to the daemon, which reads no handoff file
 module: daemon
 related_issues:
   - "#239"

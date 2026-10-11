@@ -13,7 +13,6 @@ import { Link } from "react-router-dom";
 import type { DeliveryMeasuresResponse } from "../../api/types";
 import { DisclosureToggle } from "../../components/DisclosureToggle";
 import {
-  approvalPill,
   borderDefault,
   dangerText,
   linkText,
@@ -29,6 +28,7 @@ import {
 import { buildIssuePath } from "../refs/routes";
 import { formatMinutes, pct } from "./lib/format";
 import { Sparkbars } from "./Sparkbars";
+import { TargetBadge } from "./TargetBadge";
 
 const UNOWNED_P0_SHOWN = 6;
 
@@ -51,22 +51,6 @@ function tone(met: boolean | null): string {
   return met ? successText : dangerText;
 }
 
-function Badge({ met }: { met: boolean | null }): ReactNode {
-  const [label, state] =
-    met === null
-      ? ["no data", "draft" as const]
-      : met
-        ? ["\u2713 met", "approved" as const]
-        : ["\u2717 missed", "changes_requested" as const];
-  return (
-    <span
-      className={`shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium whitespace-nowrap ${approvalPill[state]}`}
-    >
-      {label}
-    </span>
-  );
-}
-
 function KpiCard(props: {
   title: string;
   target: string;
@@ -83,7 +67,9 @@ function KpiCard(props: {
         {/* Two lines at most: a narrow card (Dispatch's sidebar leaves the grid narrower than the
             prototype's page) shows its whole title rather than cutting it to a word. */}
         <span className={`line-clamp-2 min-w-0 text-xs ${textMutedOnSurface}`}>{props.title}</span>
-        {props.met === undefined ? null : <Badge met={props.met} />}
+        {props.met === undefined ? null : (
+          <TargetBadge met={props.met} metLabel={"\u2713 met"} missedLabel={"\u2717 missed"} />
+        )}
       </div>
       {props.children}
       <div className={`text-[11px] ${textMutedOnSurface}`}>target {props.target}</div>

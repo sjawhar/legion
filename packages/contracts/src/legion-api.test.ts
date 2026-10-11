@@ -4,6 +4,7 @@ import path from "node:path";
 import { z } from "zod";
 import {
   LegionChildRequest,
+  LegionControllerCredentialResponse,
   LegionControllerGrantRequest,
   LegionControllerRegisterResponse,
   LegionControllerSecretResponse,
@@ -11,12 +12,10 @@ import {
   LegionErrorResponse,
   LegionEscalateRequest,
   LegionGateRegisterRequest,
-  LegionGitCredentialResponse,
-  LegionGitHubTokenResponse,
-  LegionGrantCredentialRequest,
   LegionGrantRequest,
   LegionGrantResponse,
   LegionHandoffCompleteRequest,
+  LegionHandoffCompleteResponse,
   LegionIssueStatusRequest,
   LegionOperatorClaimResponse,
   LegionOperatorClaimsResponse,
@@ -26,8 +25,6 @@ import {
   LegionRootCloseRequest,
   LegionSignOffRequest,
   LegionStateResponse,
-  LegionThreadsResolveRequest,
-  LegionThreadsResolveResponse,
   LegionWaveReleaseRequest,
   LegionWaveReleaseResponse,
 } from "./legion-api";
@@ -46,16 +43,12 @@ const schemas: Record<string, z.ZodType> = {
   "register.json": LegionRegisterResponse,
   "register-controller.json": LegionControllerRegisterResponse,
   "controller-secret.json": LegionControllerSecretResponse,
+  "controller-github-credential.json": LegionControllerCredentialResponse,
   "error.json": LegionErrorResponse,
   "operator-claim.json": LegionOperatorClaimResponse,
   "operator-claims.json": LegionOperatorClaimsResponse,
   "grant.json": LegionGrantResponse,
-  "github-token.json": LegionGitHubTokenResponse,
-  "git-credential.json": LegionGitCredentialResponse,
-  "provisioning-credential.json": LegionGitHubTokenResponse,
-  "threads-resolve.json": LegionThreadsResolveResponse,
-  "threads-resolve-refused.json": LegionThreadsResolveResponse,
-  "handoff-complete.json": LegionEmptyResponse,
+  "handoff-complete.json": LegionHandoffCompleteResponse,
   "issue-status.json": LegionEmptyResponse,
   "gate-register.json": LegionEmptyResponse,
   "wave-release.json": LegionWaveReleaseResponse,
@@ -87,28 +80,6 @@ test("every Go-written fixture parses through the strict schema", () => {
   }
 });
 
-test("a thread's outcome is resolved or left open, never both or neither", () => {
-  const url = "https://github.com/acme/widgets/pull/42#discussion_r1";
-  for (const outcome of [
-    { url },
-    { url, newestBy: "legion-reviewer" },
-    {
-      url,
-      resolved: "the Legion reviewer's acceptance of a bot's thread",
-      leftOpen: "not an acceptance",
-    },
-  ]) {
-    expect(
-      LegionThreadsResolveResponse.safeParse({ threads: [outcome], withheld: 0 }).success
-    ).toBe(false);
-  }
-});
-
-test("a resolve answer always carries its withheld count", () => {
-  expect(LegionThreadsResolveResponse.safeParse({ threads: [], withheld: 0 }).success).toBe(true);
-  expect(LegionThreadsResolveResponse.safeParse({ threads: [] }).success).toBe(false);
-});
-
 test("state accepts optional fields emitted by later workflow slices", () => {
   const current = fixture("state.json");
   expect(LegionStateResponse.safeParse(current).success).toBeTrue();
@@ -117,9 +88,13 @@ test("state accepts optional fields emitted by later workflow slices", () => {
     admission: Record<string, unknown>;
     issues: Record<string, { phase: string; slot?: Record<string, unknown> }>;
   };
+  const laterIssue = later.issues["LEGION-208"];
+  if (laterIssue === undefined || laterIssue.slot === undefined) {
+    throw new Error("state fixture lacks LEGION-208 or its slot");
+  }
   later.admission.free = 1;
-  later.issues["LEGION-208"]!.phase = "integrating";
-  later.issues["LEGION-208"]!.slot!.lentTo = "LEGION-209";
+  laterIssue.phase = "integrating";
+  laterIssue.slot.lentTo = "LEGION-209";
 
   expect(LegionStateResponse.safeParse(later).success).toBeTrue();
 });
@@ -132,7 +107,11 @@ test("state rejects malformed optional workflow fields", () => {
   const malformedLender = fixture("state.json") as {
     issues: Record<string, { slot?: Record<string, unknown> }>;
   };
-  malformedLender.issues["LEGION-208"]!.slot!.lentTo = "not an issue key";
+  const malformedLenderIssue = malformedLender.issues["LEGION-208"];
+  if (malformedLenderIssue === undefined || malformedLenderIssue.slot === undefined) {
+    throw new Error("state fixture lacks LEGION-208 or its slot");
+  }
+  malformedLenderIssue.slot.lentTo = "not an issue key";
   expect(LegionStateResponse.safeParse(malformedLender).success).toBeFalse();
 });
 
@@ -140,7 +119,11 @@ test("state accepts the existing done phase", () => {
   const completed = fixture("state.json") as {
     issues: Record<string, { phase: string }>;
   };
-  completed.issues["LEGION-208"]!.phase = "done";
+  const completedIssue = completed.issues["LEGION-208"];
+  if (completedIssue === undefined) {
+    throw new Error("state fixture lacks LEGION-208");
+  }
+  completedIssue.phase = "done";
 
   expect(LegionStateResponse.safeParse(completed).success).toBeTrue();
 });
@@ -166,12 +149,6 @@ test("every workflow request has a strict schema", () => {
       "controller grant",
       LegionControllerGrantRequest,
       { sessionId: "ses_controller", secret: "s" },
-    ],
-    ["grant credential", LegionGrantCredentialRequest, { grantId: "grant-208" }],
-    [
-      "threads resolve",
-      LegionThreadsResolveRequest,
-      { grantId: "grant-208", repo: "acme/widgets", number: 42 },
     ],
     [
       "handoff complete",

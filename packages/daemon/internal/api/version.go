@@ -88,4 +88,43 @@ package api
 // first, and pi-legion 8.4.1 and 8.5.0 declare those with the init container's old environment,
 // so a daemon at either would pass the gate against an image whose `workspace-init` speaks the
 // other contract. Renumbered twice, as the same learning says.)
-const DaemonAPIVersion = 18
+//
+// 19: LEGION-631 -- each role's GitHub App token is a file its plain `gh` and `git` read, never a
+// grant the plugin redeems: the three credential routes, `POST /legion/v1/gh-token`,
+// `POST /legion/v1/git-credential` and `POST /legion/v1/provisioning-credential`, and
+// `GrantRequest.push` on `POST /legion/v1/grants` are deleted. The pane and pod environment gains
+// `GH_CONFIG_DIR`, the role's directory of gh files (`hosts.yml` and `config.yml` rendered from
+// its App token and rewritten as the lease turns over), with `GH_TOKEN`, `GITHUB_TOKEN` and
+// `GH_HOST` set to the empty string so nothing in the environment outranks the file — all four
+// runtime-set — and loses `LEGION_GH_PATH`, `LEGION_GIT_PATH`, `LEGION_JJ_PATH`,
+// `LEGION_CREDENTIAL_HELPER` and `LEGION_GRANT_FILE`: a pane's gh, git and jj are its PATH's,
+// every shared clone's helper is `gh auth git-credential`, and nothing in a pane runs `legion`
+// from bash any more, since the `legion` tool mints its grants in-process for its own daemon calls
+// (`handoff_complete`, `read_record`, the controller's `read_state` and `set_status`). No
+// `worker-bin` directory leads PATH: nothing shims gh, and `PI_SHELL_PREFIX` puts the `legion`
+// launcher directory first alone. `HandoffCompleteResponse` gains `note` (READY's three refusals
+// run in the daemon on the pull request's head: `.legion/<issue>/` still carried, a conflict with
+// the base, a required check not green or a required workflow without a passing run); the
+// request's `commit` is the pushed commit carrying the phase's handoff, which the `legion` tool's
+// `handoff_complete` finds in the pane as `legion handoff complete` did.
+// `POST /legion/v1/threads/resolve` is deleted: the reviewer names the bot threads
+// it accepted to the implementer, who resolves them with plain `gh` as the pull request's author. A
+// plugin or image built before 19 would shim gh over a token file it never reads and mint a grant
+// before every command, against a daemon on 19 that serves none of that, so the boot gate and
+// `legion probe-image` refuse the mixed pair. (This branch first took 16, then 17, then 18;
+// LEGION-578 landed at 16, LEGION-588 at 17 and LEGION-632 at 18 first, pi-legion 8.4.1, 8.6.0
+// and 8.9.0 declaring them without the token file, so a daemon at any of them would pass the gate
+// against them. Renumbered three times, as the collision note says.)
+//
+// 20: LEGION-668 -- the controller holds the review App's GitHub token like every role: `POST
+// /legion/v1/controller/github-credential` is the route `legion controller start` fetches the
+// controller's gh files from and refreshes them over, with the controller capability. The
+// controller pod's agent environment gains `GH_CONFIG_DIR`, `GH_TOKEN`, `GITHUB_TOKEN` and
+// `GH_HOST` exactly as an issue pod's role container has them, backed by a `gh-controller` volume
+// of its role Secret. A `legion` built before 20 never fetches the credential, so its controller's
+// gh acts as nobody against a daemon that expects it to, and a daemon before 20 serves no such
+// route, so `legion controller start` from 20 is refused after the mint and cuts the incumbent
+// controller off for nothing: the boot gate and `legion probe-image` refuse the mixed pair. (This
+// branch first took 19; LEGION-631 landed at 19 first, pi-legion 8.10.1 declaring it without this
+// route, so a daemon at 19 would pass the gate against it. Renumbered, as the collision note says.)
+const DaemonAPIVersion = 20

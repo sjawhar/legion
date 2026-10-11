@@ -31,6 +31,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/natsauth"
 	"github.com/sjawhar/legion/daemon/internal/omplaunch"
@@ -45,6 +46,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
 const (
@@ -233,8 +235,13 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			st.Close()
 			return err
 		}
+		if err := reconfigureCloneCredential(boot, cfg, plan.tools, log); err != nil {
+			workflow.stop()
+			st.Close()
+			return err
+		}
 		if workflow != nil {
-			log.Info("legion workflow boot stage", "stage", "worker-bin")
+			log.Info("legion workflow boot stage", "stage", "launcher")
 		}
 	}
 	if workflow != nil {
@@ -459,8 +466,8 @@ type plan struct {
 	// nil without a workflow, where every delivery holds and every tree closes.
 	phaseHolds   func(ctx context.Context, issue string, p phase.Phase) (bool, error)
 	treeClosable func(ctx context.Context, c supervise.Claim) (bool, error)
-	// tools are the gh, git, and jj boot resolved on the host, by name; nil without a repository,
-	// and under a runtime whose agents run the worker image's own.
+	// tools are the git and jj boot resolved on the host, by name, for workspace provisioning;
+	// nil without a repository, and under a runtime whose agents run the worker image's own.
 	tools         map[string]string
 	project       string
 	operatorToken string
@@ -631,19 +638,24 @@ func prepareTmux(cfg config.Config, log *slog.Logger, o overrides, dispatchToken
 			}
 			return state
 		}
-		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, p.tools, log)
+		p.newRuntime = tmuxRuntime(cfg, p.project, invocation, providerEnvDir, dispatchTokenFile, log)
 	}
 	return nil
 }
 
 // tmuxRuntime builds the tmux runtime over the worker stream: the listener is its connection
 // directory, and the listener's address is the `--connect` every pane's shim is started with;
-// providerEnvDir, when set, is the `--provider-env-dir` beside it. The private server's
-// environment is scrubbed before anything is launched on it.
-func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) runtimeFactory {
-	return func(ctx context.Context, listener *stream.Listener, streamAddress string, _ appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
-		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, tools, log)
+// providerEnvDir, when set, is the `--provider-env-dir` beside it. The workflow's App tokens, when
+// the daemon has them, are every tree pane's gh files (gitHubCredential); a daemon with no GitHub
+// Apps hands the runtime none, and its panes hold no gh files. The private server's environment is
+// scrubbed before anything is launched on it.
+func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) runtimeFactory {
+	return func(ctx context.Context, listener *stream.Listener, streamAddress string, tokens appauth.Tokens, _ *store.Store) (runtime.Runtime, error) {
+		opts := tmuxOptions(cfg, project, invocation, providerEnvDir, dispatchTokenFile, log)
 		opts.StreamAddress, opts.Conns = streamAddress, listener
+		if tokens != nil {
+			opts.GitHubCredential = gitHubCredential(tokens, githubOwner(cfg))
+		}
 		rt, err := tmux.New(opts)
 		if err != nil {
 			return nil, err
@@ -660,8 +672,8 @@ func tmuxRuntime(cfg config.Config, project, invocation, providerEnvDir, dispatc
 }
 
 // tmuxOptions translates the configuration into the tmux runtime's Options, all but the worker
-// stream, which boot hands the factory.
-func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, tools map[string]string, log *slog.Logger) tmux.Options {
+// stream and the GitHub credential function, which boot hands the factory.
+func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatchTokenFile string, log *slog.Logger) tmux.Options {
 	return tmux.Options{
 		Project:           project,
 		StateDir:          cfg.StateDir,
@@ -670,7 +682,6 @@ func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatc
 		NatsURLs:          cfg.NatsURLs,
 		DispatchURL:       cfg.DispatchURL,
 		DispatchTokenFile: dispatchTokenFile,
-		Tools:             paneTools(tools),
 		OmpInvocation:     invocation,
 		OmpLaunchPrefix:   cfg.OmpLaunchPrefix,
 		StopGrace:         cfg.WorkerStopTimeout,
@@ -679,6 +690,40 @@ func tmuxOptions(cfg config.Config, project, invocation, providerEnvDir, dispatc
 		ProviderEnvDir:    providerEnvDir,
 		Log:               log,
 	}
+}
+
+// reconfigureCloneCredential brings the shared clone an earlier daemon provisioned under the state
+// directory to the helper every clone gets now (workspace.ConfigureRepositoryCredential): a clone
+// provisioned before each pane read GitHub from its own gh files names that daemon's `legion
+// credential` by the pane launcher's path, which answers no pane now, so its first push would
+// fail. It runs the git boot resolved (tools), as the outbox's provisioning does, and logs the one
+// clone it rewrote. A configuration with no repository, or a state directory with no clone yet, is
+// nothing to do: provisioning writes the helper into a clone it makes.
+func reconfigureCloneCredential(ctx context.Context, cfg config.Config, tools map[string]string, log *slog.Logger) error {
+	repo := cfg.Projects[cfg.Project].Repo
+	if repo.IsZero() || tools == nil {
+		return nil
+	}
+	// Location derives the clone from the repository alone; the issue names only the workspace
+	// beside it, which nothing here reads.
+	located, err := workspace.Location(cfg.StateDir, repo, cfg.Project)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(filepath.Join(located.Clone, ".git")); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read the shared clone %s: %w", located.Clone, err)
+	}
+	changed, err := workspace.ConfigureRepositoryCredential(ctx, workspace.NewRunner(workspace.CommandTimeout, tools), located.Clone)
+	if err != nil {
+		return fmt.Errorf("set the shared clone's git credential helper: %w", err)
+	}
+	if changed {
+		log.Info("legion daemon set the shared clone's git credential helper", "clone", located.Clone, "helper", workspace.GitHubCredentialHelper)
+	}
+	return nil
 }
 
 // supervision is everything that runs a claim: the worker stream, the runtime, and the machines,
@@ -874,18 +919,20 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 }
 
 // start supervises every claim the store holds. A claim with a live locator is re-adopted — its
-// process told to the runtime and observed from now on, never launched again. An unrecorded launch
-// is relaunched only after boot orphan reconciliation proves any pre-crash pane absent or reaped;
-// a failed listing leaves it launch_uncertain until the bounded retry succeeds. Only then are
-// hellos resolved: a shim reconnecting across the restart is admitted by a claim already supervised.
-// A daemon that leaves the controller to its operator first stops the controller's claim an
-// earlier boot under `controller: daemon` left (stopLaunchedController), which leaves it absent or
-// retired. The only controller claim among the unrecorded launches is a launch a crash cut short,
-// and by then the stop has retired it, so launchUnfinished would not relaunch it: its
-// ReleaseUncertainLaunch acts only on a launch-uncertain claim. Dropping that token is a second
-// guard beside that check, so boot does not report the retired claim as an unrecorded launch. The
-// steps before the relaunches run on boot, and the relaunches on the machines' context; the
-// daemon's stop ends both (run).
+// process told to the runtime and observed from now on, never launched again. Once every claim has
+// its machine and the boot orphan reconciliation has run, hellos are resolved: a shim reconnecting
+// across the restart is admitted by a claim already supervised. An unrecorded launch is relaunched
+// only after that reconciliation proves any pre-crash pane absent or reaped; a failed listing
+// leaves it launch_uncertain until the bounded retry succeeds. The relaunches run after hellos are
+// resolved, on a goroutine of their own, so start returns, and the API serves, without waiting for
+// any (relaunchUnfinished). A daemon that leaves the controller to its operator first stops the
+// controller's claim an earlier boot under `controller: daemon` left (stopLaunchedController),
+// which leaves it absent or retired. The only controller claim among the unrecorded launches is a
+// launch a crash cut short, and by then the stop has retired it, so launchUnfinished would not
+// relaunch it: its ReleaseUncertainLaunch acts only on a launch-uncertain claim. Dropping that token
+// is a second guard beside that check, so boot does not report the retired claim as an unrecorded
+// launch. The steps before the relaunches run on boot, and the relaunches on the machines' context;
+// the daemon's stop ends both (run).
 func (s *supervision) start(boot context.Context) error {
 	unfinished, err := s.supervisor.restore(boot, s.claims)
 	if err != nil {
@@ -899,15 +946,11 @@ func (s *supervision) start(boot context.Context) error {
 		unfinished = slices.DeleteFunc(unfinished, func(token claim.Token) bool { return token == controller })
 	}
 	pruneAllBut(runtime.SecretsDir(s.cfg.StateDir), s.claims, s.log)
-	if s.reconcileBootOrphans(boot) {
-		if failed := s.launchUnfinished(unfinished); len(failed) > 0 {
-			s.retryUnfinished(failed, true)
-		}
-	} else if len(unfinished) > 0 {
+	reconciled := s.reconcileBootOrphans(boot)
+	if !reconciled {
 		for _, token := range unfinished {
 			s.log.Warn("supervise: unrecorded launch remains uncertain; not relaunching", "claim", token)
 		}
-		s.retryUnfinished(unfinished, false)
 	}
 	close(s.supervisor.restored)
 
@@ -937,6 +980,9 @@ func (s *supervision) start(boot context.Context) error {
 		defer s.wg.Done()
 		s.reconcileOrphans(s.supervisor.ctx)
 	}()
+	if len(unfinished) > 0 {
+		s.relaunchUnfinished(unfinished, reconciled)
+	}
 	return nil
 }
 
@@ -972,49 +1018,85 @@ func (s *supervision) reconcileBootOrphans(ctx context.Context) bool {
 	return false
 }
 
-// launchUnfinished starts only claims that remain queued with no locator. A still-live old pane can
-// reconnect while reconciliation was uncertain; its hello changes the state before a later retry,
-// and it must never be joined by a second pane. It returns the claims whose release the store did
-// not take, outside the daemon's stop: each is still launch_uncertain, in memory as in the store,
-// and nothing else in this boot releases it, so the caller retries it (retryUnfinished).
+// launchUnfinished starts only claims that remain queued with no locator, each on a goroutine of
+// its own, and returns once every one has: one relaunch never waits out another's launch, which
+// under a Sandbox can take minutes. A still-live old pane can reconnect while reconciliation was
+// uncertain; its hello changes the state before a later retry, and it must never be joined by a
+// second pane. It returns the claims whose release the store did not take, outside the daemon's
+// stop: each is still launch_uncertain, in memory as in the store, and nothing else in this boot
+// releases it, so the caller retries it (relaunchUnfinished).
 func (s *supervision) launchUnfinished(tokens []claim.Token) []claim.Token {
-	var failed []claim.Token
-	for _, token := range tokens {
+	refused := make([]bool, len(tokens))
+	var launching sync.WaitGroup
+	for i, token := range tokens {
 		m, ok := s.supervisor.Machine(token)
 		if !ok {
 			continue
 		}
-		released, err := m.ReleaseUncertainLaunch(s.supervisor.ctx)
-		if err != nil {
-			if s.supervisor.decisionFailed(token, "release of an uncertain launch", err,
-				"supervise: release an uncertain launch; retrying at the next orphan sweep") {
-				failed = append(failed, token)
-			}
-			continue
-		}
-		c := m.Claim()
-		if !released || c.State != supervise.StateQueued || c.Locator != nil {
-			s.log.Info("supervise: unrecorded launch settled without relaunch", "claim", token, "state", c.State)
-			continue
-		}
-		s.log.Warn("supervise: launching again a launch the previous daemon did not finish", "claim", token)
-		spawn := supervise.RequestSpawn{Claim: token}
-		if err := m.Handle(s.supervisor.ctx, spawn); err != nil {
-			s.supervisor.decisionFailed(token, fmt.Sprintf("%T", spawn), err, "supervise: launch an unfinished launch again")
+		launching.Add(1)
+		go func() {
+			defer launching.Done()
+			refused[i] = s.launchUnfinishedClaim(token, m)
+		}()
+	}
+	launching.Wait()
+	var failed []claim.Token
+	for i, token := range tokens {
+		if refused[i] {
+			failed = append(failed, token)
 		}
 	}
 	return failed
 }
 
-// retryUnfinished launches tokens' unfinished launches on the normal orphan-sweep cadence, until
-// none is left or the daemon stops. Until the boot reconciliation has succeeded (reconciled), each
-// sweep retries it first — each reconciliation has the bounded retry above, and only a success
-// releases these claims to launch; once it has, a sweep retries only the releases the store did not
-// take (launchUnfinished), since the reconciliation's proof that no predecessor runs still holds.
-func (s *supervision) retryUnfinished(tokens []claim.Token, reconciled bool) {
+// launchUnfinishedClaim releases one unfinished launch and launches it again, and reports whether
+// the store refused the release (launchUnfinished).
+func (s *supervision) launchUnfinishedClaim(token claim.Token, m *supervise.Machine) bool {
+	released, err := m.ReleaseUncertainLaunch(s.supervisor.ctx)
+	if err != nil {
+		return s.supervisor.decisionFailed(token, "release of an uncertain launch", err,
+			"supervise: release an uncertain launch; retrying at the next orphan sweep")
+	}
+	c := m.Claim()
+	if !released || c.State != supervise.StateQueued || c.Locator != nil {
+		s.log.Info("supervise: unrecorded launch settled without relaunch", "claim", token, "state", c.State)
+		return false
+	}
+	s.log.Warn("supervise: launching again a launch the previous daemon did not finish", "claim", token)
+	spawn := supervise.RequestSpawn{Claim: token}
+	if err := m.Handle(s.supervisor.ctx, spawn); err != nil {
+		s.supervisor.decisionFailed(token, fmt.Sprintf("%T", spawn), err, "supervise: launch an unfinished launch again")
+	}
+	return false
+}
+
+// relaunchUnfinished launches tokens' unfinished launches on a goroutine of its own, never on the
+// boot: at once when the boot reconciliation succeeded (reconciled), then on the normal orphan-sweep
+// cadence, until none is left or the daemon stops. A relaunched worker reaches the daemon only once
+// the daemon is up — a Sandbox pod's launchers dial it through its Service, which routes only to a
+// pod whose probes pass, so only once the API answers /healthz, and a shim's hello is resolved only
+// once restoration has closed — so a relaunch the boot waited on could not register: it spent its
+// whole launch budget, launch_failure_limit × worker_boot_timeout_seconds, with the API unanswered.
+//
+// The pre-restart process of such a launch, when one still runs, may now say hello before its
+// relaunch writes the next generation, and be admitted: its claim, launch_uncertain or queued until
+// then, ignores the hello and refuses its registration, and at the next generation the fence drops
+// it. Its connection holds the claim's stream slot only while that process lives, and the relaunch
+// ends it before it starts the next generation: a tmux boot's reconciliation kills every pane no
+// claim records, and a Sandbox relaunch stops its launcher's earlier generation first. Once the next
+// generation is written, the old process's boot token resolves stale.
+//
+// Until the boot reconciliation has succeeded, each sweep retries it first — each reconciliation
+// has the bounded retry above, and only a success releases these claims to launch; once it has, a
+// sweep retries only the releases the store did not take (launchUnfinished), since the
+// reconciliation's proof that no predecessor runs still holds.
+func (s *supervision) relaunchUnfinished(tokens []claim.Token, reconciled bool) {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
+		if reconciled {
+			tokens = s.launchUnfinished(tokens)
+		}
 		ticker := time.NewTicker(s.plan.orphanSweep)
 		defer ticker.Stop()
 		for len(tokens) > 0 {
@@ -1135,9 +1217,11 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	var tokens appauth.Tokens
 	var grants *credential.Grants
 	var claimReady func(supervise.Claim)
+	var githubAPI string
 	if workflow != nil {
 		records, handlers, client, tokens, grants = workflow.records, workflow.handlers, workflow.dispatch, workflow.tokens, workflow.grants
 		claimReady = workflow.claimReady
+		githubAPI = workflow.githubAPI
 	}
 	// Under `controller: daemon` the keeper launches and keeps the project's controller, and takes
 	// its ready. The liveness sweep runs beside it under either mode, never behind it.
@@ -1176,6 +1260,8 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Dispatch:           client,
 		Tokens:             tokens,
 		GitHubOwner:        githubOwner(cfg),
+		GitHubAPI:          githubAPI,
+		Repository:         projectRepository(cfg),
 		Grants:             grants,
 		Releaser:           s.supervisor.deps.Runtime,
 		Trees:              st,
@@ -1306,4 +1392,14 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 // are installed on. A Stage 2 configuration has no repository and so no owner.
 func githubOwner(cfg config.Config) string {
 	return cfg.Projects[cfg.Project].Repo.Owner()
+}
+
+// projectRepository answers the repository a project works in (`projects.<KEY>.repo`), as the
+// handoff route reads an issue branch there: what outbox.createBranch creates the branch in. A
+// project the configuration does not name, or names with no repository (Stage 2), has none.
+func projectRepository(cfg config.Config) func(project string) (ghrepo.Repository, bool) {
+	return func(project string) (ghrepo.Repository, bool) {
+		configured, ok := cfg.Projects[project]
+		return configured.Repo, ok && !configured.Repo.IsZero()
+	}
 }

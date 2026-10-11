@@ -144,8 +144,11 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     last_event_at: null,
     last_reconcile_at: null,
     population_authors: ["octocat"],
+    pr_checks_rollup_job_name: null,
     pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
     production_job_name: "widgets-release",
+    staging_apply_job_name: null,
+    staging_e2e_job_name: null,
     updated_at: "2026-10-07T12:00:00Z",
     updated_by: { id: "alice@example.com", kind: "user" },
   };

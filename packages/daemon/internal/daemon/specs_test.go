@@ -113,8 +113,8 @@ func TestAReviewerIsToldItsProjectsReviewWorkflows(t *testing.T) {
 
 // The daemon's controller (`controller: daemon`) is launched with its role part and the headless
 // part, told the project's design gate policy as the operator's controller is, with the
-// deployment's instructions and launch secrets, and with no repository and no git identity: it
-// works Dispatch, never a checkout, and commits nothing.
+// deployment's instructions and launch secrets, and with no repository, no git identity and
+// neither App login: it works Dispatch, never a checkout or GitHub, and commits nothing.
 func TestTheControllersLaunchIsItsHeadlessPromptAndNoCheckout(t *testing.T) {
 	composer, err := prompts.New(t.TempDir())
 	if err != nil {

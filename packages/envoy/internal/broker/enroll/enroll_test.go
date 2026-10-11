@@ -452,6 +452,30 @@ func TestPodEnrollmentRejectsBadOrMismatchedToken(t *testing.T) {
 	}
 }
 
+// A pod token that verifies in every other way but has expired is refused as expired, naming when
+// it expired, not as a token for another pod: the launcher can present the pod's current token
+// with the same key, where a mismatch is a different pod altogether.
+func TestPodEnrollmentWithAnExpiredTokenNamesItsExpiry(t *testing.T) {
+	svc := newService(t)
+	ctx := context.Background()
+	issuer, key := withPodVerifier(t, svc)
+	cred := mintCredential(t, svc, nil, str("legion-daemon"), "cluster")
+
+	expiry := time.Now().Add(-2 * time.Minute).Truncate(time.Second)
+	claims := issuer.Claims("system:serviceaccount:legion:worker", testAudience)
+	claims["iat"], claims["exp"] = expiry.Add(-10*time.Minute).Unix(), expiry.Unix()
+	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": "pod-expired-uid"}}
+	expired := issuer.Mint(t, key, claims)
+
+	_, err := svc.Create(ctx, cred, Enrollment{Kind: "pod", RuntimeID: "pod-expired-uid", Thumbprint: "tp-expired", PodToken: expired})
+	if !errors.Is(err, ErrPodTokenExpired) || errors.Is(err, ErrPodIdentity) {
+		t.Fatalf("Create(expired pod token) = %v, want ErrPodTokenExpired and not ErrPodIdentity", err)
+	}
+	if want := expiry.UTC().Format(time.RFC3339); !strings.Contains(err.Error(), want) {
+		t.Fatalf("Create(expired pod token) = %q, want the error to name its expiry %s", err, want)
+	}
+}
+
 // TestCreateRetriesWhenConflictingRowIsRevokedBeforeRecovery is the regression for review
 // finding 3: the conflicting live row can be revoked between createAttempt's failed insert and
 // its recovery lookup (a concurrent Revoke racing this Create), which otherwise makes that lookup
