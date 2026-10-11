@@ -11,7 +11,7 @@
   gains `promptAgents`, the sorted task agents the role's prompts dispatch, and the claim view on
   `GET /legion/v1/state` gains an optional `capabilities` (`measuredAt`, `incarnation`, `ok`,
   `open[{name, detail}]`), the claim's latest report as the daemon shows it — daemon API contract
-  19 (LEGION-663).
+  20 (LEGION-663).
 - Added `AnswerAskInput.expected_answer_at`, `AskRead.answers`, `InboxThread.answers`,
   `MyAnswerRow`, `MyAnswersResponse`, and `AskAnsweredEventPayload`, whose
   `previous_answer` names the answer a human changed (LEGION-622).

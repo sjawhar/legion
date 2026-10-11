@@ -54,7 +54,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   Go `legion` built from the same commit: a daemon at 19 or earlier refuses the report as an
   unknown field with 400, which exits the session, and this release's strict state reader is the
   first to accept a claim view carrying one. The daemon's boot gate and `legion probe-image` refuse
-  any earlier contract (the 8.10.1 release declares 19, the LEGION-631 entry below).
+  any earlier contract (the 8.11.0 release declares 19, the LEGION-631 entry below).
 - `legion.daemonApiVersion` is 19 (LEGION-631). Each Legion role's GitHub App token is now a file
   the pane's plain `gh` and `git` read: the daemon sets `GH_CONFIG_DIR` (gh's `hosts.yml` and
   `config.yml`, rendered and refreshed by the daemon) and empties `GH_TOKEN`, `GITHUB_TOKEN` and
