@@ -940,7 +940,8 @@ since pgx and libpq read both; a service entry's `hostaddr`, the one key they pa
 to Postgres as a setting, which refuses the connection, so the harness server never boots on one.
 `e2e/psql.ts` imports nothing from `e2e/`, so a module can import it statically before the harness
 is up, without evaluating `e2e/api.ts`; its `sqlAt` runs the same psql against a URL it is given,
-which `e2e/local-instance.ts` uses to create its database through the server's `postgres` one.
+and kills it when an `AbortSignal` it is passed fires, which `e2e/local-instance.ts` uses to
+create its database through the server's `postgres` one.
 
 That reset is also the one rig failure that presents as a code failure. A transaction that holds
 one of the truncated tables for 5 s, such as a session left idle in a transaction, a long query, or
@@ -972,8 +973,9 @@ run with one message listing every taken port beside its own variable, before a 
 One table, `e2e/harness-listeners.ts`, names each listener, its command, its port's variable and
 whether a deployed run starts it; the config's probe and `webServer` read the rows it starts: all
 five ports for a local run, and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The
-probe is `e2e/port-probe.ts`'s `isPortUsed`, Playwright's own predicate. The refusal names only
-the variables the run probes. Its remedies are
+probe is `e2e/port-probe.ts`: `isPortUsed` is Playwright's own predicate, and `takenPorts` lists
+the taken ports of a set of rows, which the config and `e2e/local-instance.ts` both refuse on. The
+refusal names only the variables the run probes. Its remedies are
 to stop whatever listens there, or to move a local run to free ports **and its own
 `DATABASE_URL`** — moving only the ports starts this run's servers elsewhere and still truncates
 the database the leftover server holds, and `e2e/seed.ts`'s quiesce reaches only the server at the
@@ -997,12 +999,16 @@ startup smoke checks, over HTTP with a dev sign-in cookie, that `/auth/whoami` n
 Inbox holds the seed's rows, the seeded broadcast is listed and every seeded session is an agent.
 It deliberately does not check a broadcast's recipient order: `e2e/broadcast.e2e.ts` owns that
 assertion, so the command has to start on a server without that fix for the spec to go red
-against it. Its own `DATABASE_URL` check reads the URL with `new URL`, which a `?host=` parameter
-or a key=value string defeats; the order closes that gap, since the reset runs only after the
-server's `/healthz` answered, and the server refuses to boot on a non-loopback database under
-`DISPATCH_DEV_SIGNIN`. Keep the health wait ahead of the reset. Ctrl-C, a SIGTERM or a failure at
-any step signals every process group it started, then SIGKILLs whatever still runs after 10 s,
-and the command returns once their leaders have exited.
+against it. What it runs on lives in `e2e/local-instance-support.ts`, which runs nothing on
+import: `Supervisor`, which starts each process and stops them all (Ctrl-C, a SIGTERM, a failure
+at any step), signalling every process group, SIGKILLing whatever still runs after 10 s, aborting
+the signal its psql calls carry, and returning once every leader has exited; `databaseUrlRefusal`,
+its own `DATABASE_URL` check; and `shellQuote`, for the commands it prints.
+`e2e/__tests__/local-instance-support.test.ts` (`bun run test`) drives them with real processes
+and no server. That check reads the URL with `new URL`, as libpq would only in part; the order
+closes the gap, since the reset runs only after the server's `/healthz` answered, and the server
+refuses to boot on a non-loopback database under `DISPATCH_DEV_SIGNIN`. Keep the health wait ahead
+of the reset.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Where a caret lands beside

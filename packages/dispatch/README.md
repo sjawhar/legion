@@ -113,14 +113,16 @@ it (`421 HOST_MISMATCH`). Ctrl-C stops every process it started, and so does a f
 step; the database's container stays.
 
 Its inputs are the harness's own. `DATABASE_URL`, when set, is used as given: it must be a single
-`postgres://` URL naming `127.0.0.1`, `localhost` or `[::1]`, and it is truncated and reseeded on
+`postgres://` URL whose host (its `host` query parameter when it has one, as for libpq) is
+`127.0.0.1`, `localhost`, `[::1]` or a Unix socket directory, and it is truncated and reseeded on
 every start. Unset, the command runs `packages/envoy/scripts/dev-postgres.sh`, which creates,
 starts or reuses the `dispatch-pg` container, and creates database `dispatch_local` in it once.
 That script refuses a `dispatch-pg` on any image but its pinned pgvector one, since Dispatch's
 migrations need the `vector` extension, and prints the commands that move the container's data
-volume onto that image. The harness ports (`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`,
-`PLAIN_HTTP_PORT`, `FAKE_GITHUB_PORT`, `FAKE_BROKER_PORT`) move the instance, and the command
-refuses before anything starts when one is taken. psql runs without `PGHOSTADDR` (`e2e/psql.ts`).
+volume onto that image, quoted so they paste as they read. The harness ports
+(`DISPATCH_E2E_PORT`, `FAKE_ENVOY_PORT`, `PLAIN_HTTP_PORT`, `FAKE_GITHUB_PORT`,
+`FAKE_BROKER_PORT`) move the instance, and the command refuses before anything starts when one is
+taken. psql runs without `PGHOSTADDR` (`e2e/psql.ts`), and a Ctrl-C ends a psql in flight too.
 
 A spec runs against the instance with the printed command, which sets
 `DISPATCH_E2E_REUSE_SERVERS=1` and the same `DATABASE_URL`; each spec empties the database and the

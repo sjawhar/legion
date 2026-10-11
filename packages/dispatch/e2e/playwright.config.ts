@@ -3,7 +3,7 @@ import { defineConfig, devices } from "@playwright/test";
 import { baseUrl } from "./api";
 import { harnessListeners } from "./harness-listeners";
 import { plainHttpHost, plainHttpOrigin } from "./plain-http-origin";
-import { isPortUsed } from "./port-probe";
+import { takenPorts } from "./port-probe";
 
 // The plain-HTTP project's origin is a proxy on PLAIN_HTTP_PORT, reached by a host name Chromium
 // maps to loopback. The page is a non-loopback plain-HTTP origin, while the proxy forwards to the
@@ -72,10 +72,8 @@ function isListMode(argv: readonly string[]): boolean {
 // so `process.send` is a function there and undefined in the CLI that starts the servers;
 // `TEST_WORKER_INDEX` cannot discriminate them, because the loader never sets it.
 if (!reuseServers && typeof process.send !== "function" && !isListMode(process.argv)) {
-  const used = await Promise.all(startedListeners.map((listener) => isPortUsed(listener.port)));
-  const taken = startedListeners.filter((_, index) => used[index]);
-  if (taken.length > 0) {
-    const ports = taken.map((listener) => `${listener.port} (${listener.variable})`).join(", ");
+  const ports = await takenPorts(startedListeners);
+  if (ports !== undefined) {
     const variables = startedListeners.map((listener) => listener.variable).join("/");
     const remedy = startsOwnServers
       ? `move this run to free ports with ${variables} and to its own DATABASE_URL, since the ` +

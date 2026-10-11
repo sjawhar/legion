@@ -2701,9 +2701,11 @@ testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-liste
 shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_UI_TOKEN`, `AGENT_SECRETS_APPROVER`, the helper's
 `AGENT_SECRETS_HELPER_SOCK` and `AGENT_SECRETS_OPERATOR_FILE`, both in its workdir, where it writes
 the operator file, and `DEV_BROKER_DIR`, the workdir itself). Each `dev-broker.sh` run creates
-and drops its own isolated database, on the shared `dispatch-pg` container or, with
-`DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no Docker), so
-concurrent instances never see each other's enrollments, requests or grants, and listens on the
+and drops its own isolated database, on the shared `dispatch-pg` container, which it boots through
+`dev-postgres.sh` (so a `dispatch-pg` off that script's pinned image is refused before anything is
+created), or, with `DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no
+Docker), so concurrent instances never see each other's enrollments, requests or grants, and
+listens on the
 port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`), so
 concurrent instances can never collide on a shared port either.
 `dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and

@@ -24,6 +24,20 @@ refuse() {
   exit 1
 }
 
+# Each argument as one shell word, joined by spaces: a word a shell would split or expand (a bind
+# mount's host path with a space in it) is single-quoted, so a printed command pastes as it reads.
+quote() {
+  local words=() word
+  for word in "$@"; do
+    if [[ "$word" =~ ^[A-Za-z0-9_@%+=:,./-]+$ ]]; then
+      words+=("$word")
+    else
+      words+=("'${word//\'/\'\\\'\'}'")
+    fi
+  done
+  printf '%s' "${words[*]}"
+}
+
 if ! docker container inspect "$container" >/dev/null 2>&1; then
   docker run "${run_flags[@]}" "$image" >/dev/null
   printf '%s\n' "DATABASE_URL=$database_url"
@@ -68,9 +82,9 @@ fi
 backup="$container-$(printf '%s' "${container_image_id#sha256:}" | cut -c1-12)"
 refuse "$stale" \
   "To move it onto the pinned image and keep every database in it, run these in order; the old container stays, stopped, until the new one serves:" \
-  "  docker stop $container" \
-  "  docker rename $container $backup" \
-  "  docker run ${run_flags[*]} -v $mount_spec $image" \
-  "  docker exec $container psql -U postgres -Atc \"select 1 from pg_available_extensions where name = 'vector'\"" \
-  "  docker rm $backup" \
-  "The psql line prints 1 once the new container serves; until then \`docker rename $backup $container\` and \`docker start $container\` put the old one back. The two images are built on different operating systems, so PostgreSQL may warn that a database's collation version does not match; \`REINDEX DATABASE <name>\` and then \`ALTER DATABASE <name> REFRESH COLLATION VERSION\` in that database clears it."
+  "  $(quote docker stop "$container")" \
+  "  $(quote docker rename "$container" "$backup")" \
+  "  $(quote docker run "${run_flags[@]}" -v "$mount_spec" "$image")" \
+  "  $(quote docker exec "$container" psql -U postgres -Atc "select 1 from pg_available_extensions where name = 'vector'")" \
+  "  $(quote docker rm "$backup")" \
+  "The psql line prints 1 once the new container serves; until then \`$(quote docker rename "$backup" "$container")\` and \`$(quote docker start "$container")\` put the old one back. The two images are built on different operating systems, so PostgreSQL may warn that a database's collation version does not match; \`REINDEX DATABASE <name>\` and then \`ALTER DATABASE <name> REFRESH COLLATION VERSION\` in that database clears it."

@@ -137,6 +137,20 @@ else
   printf 'PASS: a stale dispatch-pg on a bind mount: the move mounts its host path\n'
 fi
 
+# A bind mount whose host path holds a space: the printed move pastes as one command, its -v
+# argument one word. The `docker run` line is replayed through bash with `docker` as a function
+# that prints its arguments one per line.
+run_case FAKE_IMAGE_ID="$stale_id" FAKE_CONFIG_IMAGE=postgres:16 FAKE_MOUNT="bind||/srv/My Data"
+printed_run="$(sed -n 's/^dev-postgres:   \(docker run .*\)$/\1/p' "$err")"
+replayed="$(bash -c "docker() { printf '%s\n' \"\$@\"; }; $printed_run")"
+if [ "$status" -ne 1 ] || ! read_only || [ -z "$printed_run" ] \
+  || ! grep -qxF -- "/srv/My Data:/var/lib/postgresql/data" <<<"$replayed"; then
+  fail "a stale dispatch-pg on a bind mount with a space: the printed move pastes whole"
+  printf '  printed: %s\n  replayed: %s\n' "$printed_run" "$(tr '\n' '|' <<<"$replayed")"
+else
+  printf 'PASS: a stale dispatch-pg on a bind mount with a space: the printed move pastes as one command\n'
+fi
+
 run_case FAKE_IMAGE_ID="$stale_id" FAKE_CONFIG_IMAGE=postgres:16 FAKE_MOUNT=""
 if [ "$status" -ne 1 ] || ! read_only || ! grep -qF "is on no volume" "$err" || grep -qF "docker rename" "$err"; then
   fail "a stale dispatch-pg with no data volume: refused with no move"

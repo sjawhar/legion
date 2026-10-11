@@ -17,3 +17,15 @@ export async function isPortUsed(port: number): Promise<boolean> {
   };
   return (await Promise.all([dial("127.0.0.1"), dial("::1")])).includes(true);
 }
+
+/** The `listeners` whose port is taken, as `<port> (<variable>)` items joined for a refusal, or
+ *  undefined when every port is free. e2e/playwright.config.ts and e2e/local-instance.ts both
+ *  refuse to start on it, each naming its own remedy. */
+export async function takenPorts(
+  listeners: readonly { readonly port: number; readonly variable: string }[]
+): Promise<string | undefined> {
+  const used = await Promise.all(listeners.map((listener) => isPortUsed(listener.port)));
+  const taken = listeners.filter((_, index) => used[index]);
+  if (taken.length === 0) return undefined;
+  return taken.map((listener) => `${listener.port} (${listener.variable})`).join(", ");
+}
