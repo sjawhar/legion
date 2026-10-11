@@ -2208,7 +2208,7 @@ own poll reads). A helper from before that field reports only the most recent lo
 denied re-login still reads `denied` and exits 1 until the helper restarts on a release that
 carries it. While a credential is held, login-status's last stderr line says when it expires and
 how long that is from now (`credential_expires_at`, from the `expires_at` the broker's issued poll
-carries); the broker has no renewal, so a new machine login a human approves must replace it before
+carries); a person's machine login does not renew, so a new machine login a human approves must replace it before
 then, and a helper or broker from before that field gets a line saying the expiry is unknown.
 With no credential held, login-status exits 1 and prints the most recent login's state
 (`pending`, `denied`, `expired`, or `none` before any login), except once the helper drops the
@@ -2305,8 +2305,9 @@ through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read onl
 set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600),
 `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_MAX_GRANT_SECONDS` (default 43200, max
 43200 — how long every grant lives, unless its session ends first), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
-(default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
-re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
+(default 604800, max 2592000 — a launcher credential's lifetime from its approval or, for a
+service's login, its latest renewal; past it a person's machine re-runs login, new key, new code,
+new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
 (optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate
 limiters' per-address buckets trust for the caller's real address (`clientAddress`) — its last
@@ -2370,7 +2371,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 27 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 29 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -2597,8 +2598,28 @@ under another record (a machine that signed two logins with one key) is `409
 KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. `Read` (the machine's own
 poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state and, once issued,
 the minted credential's id and `expires_at` — no token is ever returned; the credential is usable
-only with proofs signed by the key the request object embedded. The broker has no renewal route:
-past `expires_at` the machine logs in again, with a new key, a new code and a new human approval.
+only with proofs signed by the key the request object embedded. A person's machine login does not
+renew: past `expires_at` the machine logs in again, with a new key, a new code and a new human
+approval. A service's login renews its own credential (`Renew`,
+`POST /v1/launcher-credentials/{id}/renew`, launcher-authenticated): the body carries a machine
+request object its next key signed, naming the credential's own service, the way ACME's key
+rollover nests a request the new key signed inside one the old key signed. In one transaction,
+holding the credential's row `for update` as a revoke does, the broker moves the row to that key
+(`key_thumbprint`, `public_jwk`) and to `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from now, and writes a
+`launcher_credential.renewed` audit row naming the credential as actor and the new thumbprint. The
+credential keeps its id, its approval record and every enrollment it made; from the commit on only
+the new key's proofs authenticate it (`AuthenticateLauncher` reads the row's thumbprint), so a copy
+of the old key stops working. It refuses another credential's id `403 NOT_YOURS`, a person's
+machine login `403 PERSON_CREDENTIAL`, a service `BROKER_SERVICES` does not register `403
+SERVICE_NOT_REGISTERED` (a service's name is the machine's own claim, which anyone signed in may
+approve, so only a registered service's login outlives one lifetime; `machine.Service.Services`),
+a request object that does not verify, names another
+service, repeats a jti or carries the current key `400 REQUEST_INVALID`, a new key another live
+credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a credential revoked or past its expiry
+`401 LAUNCHER_INVALID`, so a renewal never revives one. `GET /v1/launcher-credentials/self`
+(launcher-authenticated) answers the calling credential's id, service and `expires_at` and changes
+nothing: a launcher unsure which of two keys the broker holds (a renewal whose answer it never read)
+asks with each, and the one the broker holds is answered 200, the other 401.
 
 `GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person may revoke that
 can still reach a secret (id, host, service, `approved_by`, issued, expires, `expired`): every

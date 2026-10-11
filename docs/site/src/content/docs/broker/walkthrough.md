@@ -31,7 +31,7 @@ it, the page lists it under **Machine logins**, where **Revoke** would end it an
 it started ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)),
 and the login on the machine returns. `agent-secrets machine login-status` checks the machine
 login at any time: it prints `issued` while the machine holds one, and says when that login
-expires. The broker does not renew it, so before then a person must approve a new machine login.
+expires. A person's machine login does not renew, so before then a person must approve a new machine login.
 
 ![The machine login page with a code looked up: a machine login for example-host-build, approver alice@example.com, with Approve and Deny buttons, and below them the machine logins list, empty until she approves](/legion/media/broker/machine-login.png)
 

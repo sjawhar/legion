@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/go-jose/go-jose/v4"
@@ -46,6 +47,15 @@ var (
 	// already holds a live launcher credential under another record: a machine signed two logins
 	// with one key and the first was approved. The record stays pending.
 	ErrKeyHoldsLiveCredential = errors.New("this machine login's key already holds a live launcher credential")
+	// ErrCredentialNotLive is Renew's refusal for a launcher credential that is revoked or past its
+	// expiry: a renewal extends a live credential and never brings one back.
+	ErrCredentialNotLive = errors.New("this launcher credential is revoked or expired")
+	// ErrPersonCredential is Renew's refusal for a person's own machine login: its expiry asks the
+	// person to approve a new machine login, which a renewal would skip.
+	ErrPersonCredential = errors.New("a person's machine login does not renew")
+	// ErrServiceNotRegistered is Renew's refusal for a service's login whose service the broker does
+	// not register (BROKER_SERVICES): its name is the machine's own claim, so it lasts one lifetime.
+	ErrServiceNotRegistered = errors.New("only a service the broker registers (BROKER_SERVICES) renews its login")
 )
 
 type Service struct {
@@ -58,6 +68,10 @@ type Service struct {
 	Skew               time.Duration
 	PendingTTL         time.Duration
 	CredentialLifetime time.Duration
+	// Services are the registered services' names (BROKER_SERVICES): the only service logins Renew
+	// extends. A service's name is the machine's own claim, which anyone signed in may approve, so a
+	// login naming any other service lasts its one lifetime and never renews.
+	Services []string
 
 	// Replay records a request object's jti (the proof_jtis table), answering false when it was
 	// already seen. Wired to enroll.Service.Replay in production, exactly like
@@ -344,6 +358,105 @@ func (s *Service) Read(ctx context.Context, pendingID string) (state, credential
 		return "", "", time.Time{}, err
 	}
 	return state, credentialID, expiresAt, nil
+}
+
+// CredentialExpiry answers when a launcher credential expires, for a launcher whose proof the caller
+// has already verified as that credential's (GET /v1/launcher-credentials/self).
+func (s *Service) CredentialExpiry(ctx context.Context, credentialID string) (time.Time, error) {
+	var expiresAt time.Time
+	if err := s.Store.Pool.QueryRow(ctx, `select expires_at from launcher_credentials where id=$1`, credentialID).Scan(&expiresAt); err != nil {
+		return time.Time{}, err
+	}
+	return expiresAt, nil
+}
+
+// Renew moves a service's launcher credential to a new key and to CredentialLifetime from now, on
+// the word of a launcher proof the caller verified as that same credential's, and records it in a
+// launcher_credential.renewed audit row naming the credential as the actor, in one transaction.
+// compactRequest is a machine request object the new key signed, as a machine login's is, naming
+// the credential's own service: it proves the caller holds the new key, the way ACME's key
+// rollover carries a request the new key signed inside one the old key signed. From the commit on,
+// only the new key's proofs authenticate the credential (AuthenticateLauncher reads the row's
+// thumbprint), so a copy of the old key stops working, while the credential keeps its id, its
+// approval record and every enrollment it made. It is how a service such as the Legion daemon
+// keeps the login a person approved once, rather than asking for a new one every lifetime.
+//
+// A person's own machine login is ErrPersonCredential: its expiry is when its person approves
+// again. A service the broker does not register (Services, BROKER_SERVICES) is
+// ErrServiceNotRegistered: anyone signed in may approve a login naming any service, and only a
+// registered one's lasts past its lifetime. A credential revoked or past its expiry is
+// ErrCredentialNotLive, so a renewal never revives one. A request object that does not verify,
+// names no single launcher_credential detail or another service, repeats a jti, or carries the
+// credential's current key is record.ErrRequestInvalid; a new key that already holds another live
+// credential is ErrKeyHoldsLiveCredential. It holds the credential's row for update, as
+// RevokeCredential does, so a renewal racing a revoke either commits first and is then revoked, or
+// finds the credential revoked.
+func (s *Service) Renew(ctx context.Context, credentialID, compactRequest string) (time.Time, error) {
+	obj, err := record.VerifyRequestObject(compactRequest, s.Audience, s.Skew, time.Now())
+	if err != nil {
+		return time.Time{}, err
+	}
+	if len(obj.Details) != 1 || obj.Details[0].Type != record.KindLauncherCredential {
+		return time.Time{}, fmt.Errorf("%w: exactly one launcher_credential detail is required", record.ErrRequestInvalid)
+	}
+	jwk, err := embeddedJWK(compactRequest)
+	if err != nil {
+		return time.Time{}, err
+	}
+	fresh, err := s.Replay(ctx, obj.JTI, obj.Expires.Add(s.Skew+jtiRetentionMargin))
+	if err != nil {
+		return time.Time{}, err
+	}
+	if !fresh {
+		return time.Time{}, fmt.Errorf("%w: replayed jti", record.ErrRequestInvalid)
+	}
+
+	tx, err := s.Store.Pool.Begin(ctx)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer tx.Rollback(ctx)
+	var service *string
+	var thumbprint string
+	var live bool
+	err = tx.QueryRow(ctx, `select service, key_thumbprint, revoked_at is null and expires_at > now() from launcher_credentials where id=$1 for update`, credentialID).
+		Scan(&service, &thumbprint, &live)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrCredentialNotLive
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	switch {
+	case !live:
+		return time.Time{}, ErrCredentialNotLive
+	case service == nil:
+		return time.Time{}, ErrPersonCredential
+	case !slices.Contains(s.Services, *service):
+		return time.Time{}, ErrServiceNotRegistered
+	case obj.Service() != *service:
+		return time.Time{}, fmt.Errorf("%w: the new key's request names service %q, not this credential's %q", record.ErrRequestInvalid, obj.Service(), *service)
+	case obj.Thumbprint == thumbprint:
+		return time.Time{}, fmt.Errorf("%w: a renewal moves the credential to a new key, and this is its current one", record.ErrRequestInvalid)
+	}
+	expires := time.Now().Add(s.CredentialLifetime).UTC().Truncate(time.Microsecond)
+	_, err = tx.Exec(ctx, `update launcher_credentials set key_thumbprint=$2, public_jwk=$3, expires_at=$4 where id=$1`,
+		credentialID, obj.Thumbprint, []byte(jwk), expires)
+	if store.IsUniqueViolation(err) {
+		return time.Time{}, ErrKeyHoldsLiveCredential
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	if _, err := tx.Exec(ctx, `insert into audit (kind, actor, detail) values ('launcher_credential.renewed',$1,
+		jsonb_build_object('credential_id',$2::text,'service',$3::text,'expires_at',$4::timestamptz,'key_thumbprint',$5::text))`,
+		record.LauncherActor(credentialID), credentialID, *service, expires, obj.Thumbprint); err != nil {
+		return time.Time{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return time.Time{}, err
+	}
+	return expires, nil
 }
 
 // recordState answers a record's current state ("pending" absent any terminal event, else the

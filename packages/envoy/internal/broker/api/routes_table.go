@@ -82,6 +82,12 @@ func routes() []apiRoute {
 		{http.MethodPost, "/v1/launcher-credentials", public((*server).machineLogin)},
 		// Poll a machine login by its pending id; once approved, answers its credential's id.
 		{http.MethodGet, "/v1/launcher-credentials/{pending}", public((*server).readMachineLogin)},
+		// Describe the calling machine login's own credential: its id, service and expiry.
+		{http.MethodGet, "/v1/launcher-credentials/self", launcherAuth((*server).readLauncherSelf)},
+		// Move a service's machine login's own credential to a new key and a full lifetime from now, so
+		// the login a person approved once lasts until someone revokes it; a person's machine login
+		// does not renew.
+		{http.MethodPost, "/v1/launcher-credentials/{id}/renew", launcherAuth((*server).renewLauncherCredential)},
 		// Extend the calling session's lease.
 		{http.MethodPost, "/v1/enrollments/{id}/renew", sessionAuth((*server).renewEnrollment)},
 		// Describe the calling session's enrollment and its live grants.

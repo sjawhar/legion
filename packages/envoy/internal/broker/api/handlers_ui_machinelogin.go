@@ -66,7 +66,8 @@ type launcherCredentialResp struct {
 	ApprovedBy string `json:"approved_by"`
 	// When the login was approved.
 	IssuedAt time.Time `json:"issued_at"`
-	// When the credential expires; the broker has no renewal.
+	// When the credential expires; a service's login moves it later with each renewal, and a
+	// person's machine login does not renew.
 	ExpiresAt time.Time `json:"expires_at"`
 	// True once expires_at has passed: the login enrolls nothing more, but sessions it enrolled
 	// still run (each renews with its own key), and revoking it ends them.

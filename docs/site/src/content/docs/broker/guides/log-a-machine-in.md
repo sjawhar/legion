@@ -80,12 +80,12 @@ anyone's revoke ends every pod it enrolled.
 Back on the machine, `agent-secrets machine login` exits 0 and the helper logs
 `machine login issued; the helper holds a launcher credential`: the machine credential the approval
 minted, which the helper now enrolls sessions with. Check it at any time; it also says when the
-credential expires, since the broker has no renewal:
+credential expires, since a person's machine login does not renew:
 
 ```console
 $ agent-secrets machine login-status
 issued
-agent-secrets machine login-status: the launcher credential expires at 2026-10-10T03:21:40Z (in 6d23h59m); the broker has no renewal, so a new machine login a human approves must replace it before then
+agent-secrets machine login-status: the launcher credential expires at 2026-10-10T03:21:40Z (in 6d23h59m); a person's machine login does not renew, so a new machine login a human approves must replace it before then
 ```
 
 ## 4. Start agents as sessions

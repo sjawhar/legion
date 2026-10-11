@@ -132,7 +132,8 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
 
 ## End a machine's login
 
-A machine login lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval, but its sessions
+A machine login lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval, or, for a service's login
+such as the Legion daemon's, from its latest renewal, but its sessions
 outlive it: a session renews its lease with its own key, never with the machine's credential, so a
 box keeps working after the machine's credential expires, and so does a host session while the
 helper that renews it runs. A login can be ended, with every session it enrolled, at any time: for

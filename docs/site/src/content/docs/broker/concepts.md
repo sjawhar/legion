@@ -74,7 +74,17 @@ enrolls the service's pods and acts as no person: the Legion daemon's login wait
 its code, not for one named person. The broker reads the service from the machine's signed request,
 so a login the daemon starts while still naming a person in it is anyone's to decide too.
 
-A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. It may be revoked from Dispatch's
+A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval. The login of a
+service `BROKER_SERVICES` registers renews its own: `POST /v1/launcher-credentials/{id}/renew`,
+signed with its current key and carrying a request its next key signed, moves the credential to that
+key and to a full lifetime from the renewal, so the login a person approved once lasts until someone
+revokes it, and a copy of an old key stops working at the next renewal, unless whoever copied it
+renews first; the daemon then logs at ERROR the credential to revoke. A login naming any other
+service lasts its one lifetime, since a service's name is the machine's own claim. The Legion daemon
+keeps its credential in its own database and renews it a quarter of the way to each expiry. A
+person's machine login does not renew: past its expiry the machine logs in again, with a new key, a
+new code and a new approval. A credential may be
+revoked from Dispatch's
 machine-login page, or, for a person's own machine, from any of their machines under its machine
 login (`agent-secrets machine revoke`), before or after
 it expires, which also ends every session it enrolled

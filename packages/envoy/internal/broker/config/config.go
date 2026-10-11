@@ -99,8 +99,10 @@ type Config struct {
 	ProofSkewSeconds int
 	// BROKER_MAX_GRANT_SECONDS: how long a grant lives, unless its session ends first.
 	MaxGrantSeconds int
-	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login's credential lasts once
-	// approved; past it the machine logs in again, with a new key, a new code and a new approval.
+	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login's credential lasts once approved,
+	// and once renewed: a service's login (the Legion daemon's) renews its own before it expires, onto
+	// a new key each time; past it a person's machine logs in again, with a new key, a new code and a
+	// new approval.
 	LauncherCredentialSeconds int
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
 	// the pending requests and machine logins nobody decided in time.

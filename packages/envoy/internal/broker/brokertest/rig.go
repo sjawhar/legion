@@ -70,13 +70,21 @@ type Rig struct {
 type Option func(*rigConfig)
 
 type rigConfig struct {
-	lease time.Duration
+	lease              time.Duration
+	credentialLifetime time.Duration
 }
 
 // WithLease sets the enrollment lease the broker grants, an hour by default, for a test whose
 // launcher must renew a session within it.
 func WithLease(lease time.Duration) Option {
 	return func(c *rigConfig) { c.lease = lease }
+}
+
+// WithCredentialLifetime sets how long an approved or renewed launcher credential lasts, 7 days by
+// default (BROKER_LAUNCHER_CREDENTIAL_SECONDS' default), for a test whose launcher must renew its
+// credential within it.
+func WithCredentialLifetime(lifetime time.Duration) Option {
+	return func(c *rigConfig) { c.credentialLifetime = lifetime }
 }
 
 // NewRig holds two secrets the person ada@example.com owns: TEST_SECRET, human-tier, which a
@@ -87,7 +95,7 @@ func WithLease(lease time.Duration) Option {
 // it. It skips t when BROKER_TEST_DATABASE_URL is unset (storetest.Open's own contract).
 func NewRig(t *testing.T, options ...Option) *Rig {
 	t.Helper()
-	config := rigConfig{lease: time.Hour}
+	config := rigConfig{lease: time.Hour, credentialLifetime: 7 * 24 * time.Hour}
 	for _, option := range options {
 		option(&config)
 	}
@@ -121,8 +129,8 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: cur,
-		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
-		Replay: enr.Replay,
+		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: config.credentialLifetime,
+		Services: []string{"legion-daemon"}, Replay: enr.Replay,
 	}
 
 	api.Register(mux, api.Deps{

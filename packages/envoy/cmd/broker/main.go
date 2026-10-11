@@ -153,7 +153,8 @@ func main() {
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
 		PendingTTL: machineLoginPendingTTL, CredentialLifetime: time.Duration(cfg.LauncherCredentialSeconds) * time.Second,
-		Replay: enr.Replay,
+		Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts)),
+		Replay:   enr.Replay,
 	}
 
 	var waker func(context.Context, string, string, string)

@@ -50,7 +50,9 @@ function Fact({ children, label }: { children: ReactNode; label: string }): Reac
  * (no markdown pipeline - a `<blockquote>` with `whitespace-pre-wrap` renders it verbatim), then,
  * for a pending machine (`launcher_credential`) record, the sentence explaining what approving it
  * grants: a person's machine starts agent sessions as them, while a service's login (the Legion
- * daemon's) starts worker pods as the service, never as the person approving it. A pod
+ * daemon's) starts worker pods as the service, never as the person approving it. A service the
+ * broker registers renews its own credential until someone revokes it, so its Lifetime says so; the
+ * name is the machine's own claim, which the page cannot check. A pod
  * enrollment's slot (`implementer-g3`) is its own fact, since several slots of one pod share the
  * same enrollment line. Shared by `CredentialRecordPage` and `MachineLoginPage`, which both show
  * this same layout before their own (page-specific) decision/action controls.
@@ -83,7 +85,11 @@ export function CredentialRecordFacts({ record }: { record: CredentialRecord }):
             />
           </div>
         </Fact>
-        <Fact label="Lifetime">{formatLifetime(record.lifetime_seconds)}</Fact>
+        <Fact label="Lifetime">
+          {record.kind === "launcher_credential" && record.service
+            ? `${formatLifetime(record.lifetime_seconds)}, renewed until someone revokes it if the broker registers ${record.service}`
+            : formatLifetime(record.lifetime_seconds)}
+        </Fact>
         <Fact label="Requested">
           <Timestamp at={record.requested_at} />
         </Fact>

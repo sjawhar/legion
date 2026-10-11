@@ -155,7 +155,7 @@ func credentialExpiry(expiresAt string, now time.Time) string {
 	if left <= 0 {
 		return fmt.Sprintf("the launcher credential expired at %s; run: agent-secrets machine login", expiresAt)
 	}
-	return fmt.Sprintf("the launcher credential expires at %s (in %s); the broker has no renewal, so a new machine login a human approves must replace it before then", expiresAt, roughDuration(left))
+	return fmt.Sprintf("the launcher credential expires at %s (in %s); a person's machine login does not renew, so a new machine login a human approves must replace it before then", expiresAt, roughDuration(left))
 }
 
 // roughDuration is d to the minute, with days: 6d23h59m, 3h5m, 0m.

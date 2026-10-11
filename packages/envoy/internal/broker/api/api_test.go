@@ -107,7 +107,7 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
-		Replay: enr.Replay,
+		Services: []string{"legion-daemon"}, Replay: enr.Replay,
 	}
 
 	deps := api.Deps{

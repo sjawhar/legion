@@ -36,8 +36,9 @@ var errNoCredential = errors.New(noCredentialMsg)
 // machineCredential is the helper's launcher identity, existing only in memory: the private key
 // never touches disk, and id is the launcher credential the broker minted once a human approved
 // the machine login that installed this. expiresAt is when the broker said it expires (zero when
-// the broker did not say); the broker has no renewal, so past it only a new machine login a human
-// approves gives the helper a credential again. gone closes when the helper stops holding it.
+// the broker did not say); a person's machine login does not renew (the broker renews only a
+// service's), so past it only a new machine login a human approves gives the helper a credential
+// again. gone closes when the helper stops holding it.
 type machineCredential struct {
 	key       *ecdsa.PrivateKey
 	id        string
@@ -350,7 +351,7 @@ func (b *Broker) watchExpiry(cred *machineCredential) {
 	}
 	select {
 	case <-time.After(time.Until(cred.expiresAt.Add(-lead))):
-		b.logger().Warn("the launcher credential expires soon; the broker has no renewal, so before then run: agent-secrets machine login, and have a human approve it",
+		b.logger().Warn("the launcher credential expires soon; a person's machine login does not renew, so before then run: agent-secrets machine login, and have a human approve it",
 			"credential_id", cred.id, "expires_at", cred.expiresAt.Format(time.RFC3339), "in", time.Until(cred.expiresAt).Round(time.Second))
 	case <-cred.gone:
 		return

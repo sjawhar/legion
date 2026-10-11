@@ -68,6 +68,39 @@ test("code -> lookup -> Approve posts the looked-up code", async () => {
   }
 });
 
+test("a service's login says its lifetime renews if the broker registers it; a person's does not", async () => {
+  const lookupMachineCredential = spyOn(api, "lookupMachineCredential")
+    .mockResolvedValueOnce(
+      machineRecord({ approver: "anyone", lifetime_seconds: 604800, service: "legion-daemon" })
+    )
+    .mockResolvedValueOnce(machineRecord({ lifetime_seconds: 604800 }));
+
+  try {
+    renderPage();
+    fireEvent.change(screen.getByLabelText("Code shown on the machine"), {
+      target: { value: "abcd1234" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Look up" }));
+    expect(
+      await screen.findByText(
+        "7 days, renewed until someone revokes it if the broker registers legion-daemon"
+      )
+    ).toBeDefined();
+    cleanup();
+
+    renderPage();
+    fireEvent.change(screen.getByLabelText("Code shown on the machine"), {
+      target: { value: "abcd1234" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Look up" }));
+    expect(await screen.findByText("7 days")).toBeDefined();
+    expect(screen.queryByText(/renewed by/)).toBeNull();
+  } finally {
+    cleanup();
+    lookupMachineCredential.mockRestore();
+  }
+});
+
 test("a NO_SUCH_CODE lookup failure renders inline under the input", async () => {
   const lookupMachineCredential = spyOn(api, "lookupMachineCredential").mockRejectedValue(
     new ApiError(404, { code: "NO_SUCH_CODE", error: "No pending request matches that code." })
