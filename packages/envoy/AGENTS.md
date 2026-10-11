@@ -2204,23 +2204,29 @@ projected token before every broker request, refuses a blank or unreadable file 
 bodyless request, and sends it as `pod_token`. The worker shim passes its projected token file.
 The client works against a broker that predates the renewal body because that handler reads no
 body. The terminal renewal codes are `POD_IDENTITY_MISMATCH`, `POD_TOKEN_REQUIRED`, and
-`ENROLLMENT_NOT_LIVE`: only those exit 76 (`EX_PROTOCOL`) with the enrollment id, HTTP status and
-broker code; the shim quotes that terminal line beside its own enrollment id and stops rather than
-restarting a pod whose token or enrollment is permanently rejected. `PROOF_INVALID` is retryable:
-a clock or URL correction can make the next proof valid. Transient errors keep the retry backoff.
+`ENROLLMENT_NOT_LIVE`, plus an older broker's `PROOF_INVALID` whose message says `not live` (its
+word for an ended enrollment): only those exit 76 (`EX_PROTOCOL`) with the enrollment id, HTTP
+status and broker code; the shim quotes that terminal line beside its own enrollment id and stops
+rather than restarting a pod whose token or enrollment is permanently rejected. Any other
+`PROOF_INVALID` is retryable: a clock or URL correction can make the next proof valid. Transient
+errors keep the retry backoff.
 The login that installs a credential wakes every registered session's enrollment retry, so those
-sessions reach the broker within about a second rather than when a backoff of up to a minute comes
-round. A session whose renew returns `ENROLLMENT_NOT_LIVE` (or an older broker's
-`PROOF_INVALID` message that explicitly says `not live`) stops counting as enrolled at once, and
-its enrollment becomes the session's lapsed id; so does a re-pinned session's recorded enrollment
-after a helper restart. A retryable `PROOF_INVALID` keeps its current enrollment. While a session
-is lapsed and the helper holds a credential, sign answers NOT_ENROLLED naming the refused renew,
-and `register --wait N` waits for its re-enrollment. The helper revokes a lapsed id before the
-session enrolls again, and while the session lives its record keeps that id until the revoke lands,
-so a restart meanwhile, even a second one before any login, still revokes it. A session that ends
+sessions reach the broker within about a second of it rather than when a backoff of up to a minute
+comes round. A session whose renew the broker refuses (its lease lapsed) stops counting as enrolled
+at once, and its enrollment becomes the session's lapsed id; so does a re-pinned session's recorded
+enrollment after a helper restart. While it is lapsed and the helper holds a credential, sign
+answers NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its
+re-enrollment. The helper revokes a lapsed id before the session enrolls again, and while the
+session lives its record keeps that id until the revoke lands, so a restart meanwhile, even a
+second one before any login, still revokes it. A session that ends
 first takes its record with it and hands the id to a bounded revoke (three tries); before a login
-those fail, and a re-login that is denied, expires unapproved or is still pending leaves the
-credential an earlier login installed in place, and the helper keeps enrolling sessions with it, so login-status still
+those fail, and the broker's sweeper ends the id once its lease lapses. A revoke refused 403
+`OPERATOR_MISMATCH` (an enrollment made under another operator's launcher credential) counts as
+done, and the session enrolls afresh.
+`agent-secrets machine login-status`, which the helper answers, exits 0 while the helper holds a
+launcher credential and prints `issued`. A
+re-login that is denied, expires unapproved or is still pending leaves the credential an earlier
+login installed in place, and the helper keeps enrolling sessions with it, so login-status still
 exits 0 and prints `issued`, and stderr names the most recent login and its code
 (`credential_held` beside `login_state`, the most recent login's state, which `machine login`'s
 own poll reads). A helper from before that field reports only the most recent login, so there a

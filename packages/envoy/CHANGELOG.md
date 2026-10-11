@@ -175,9 +175,10 @@
   refuses a blank or unreadable file without posting a bodyless renewal, and sends the token as
   `pod_token`. The worker shim passes its projected token file. This client works against a broker
   that predates the renewal body because that handler ignores it. The terminal renewal codes
-  `POD_IDENTITY_MISMATCH`, `POD_TOKEN_REQUIRED`, and `ENROLLMENT_NOT_LIVE` exit 76
-  (`EX_PROTOCOL`) naming the enrollment, HTTP status and broker code; the shim quotes that terminal
-  line beside its own enrollment and stops. `PROOF_INVALID` and other transient failures retry.
+  `POD_IDENTITY_MISMATCH`, `POD_TOKEN_REQUIRED`, and `ENROLLMENT_NOT_LIVE`, and an older broker's
+  `PROOF_INVALID` saying `not live`, exit 76 (`EX_PROTOCOL`) naming the enrollment, HTTP status
+  and broker code; the shim quotes that terminal line beside its own enrollment and stops. Any
+  other `PROOF_INVALID` and other transient failures retry.
 - **Breaking:** `agent-secrets launcher login` and `launcher login-status` are removed, with no
   alias: `agent-secrets machine login` and `machine login-status` replace them, beside
   `machine list` and `machine revoke`. A script that still calls `launcher` gets the usage and

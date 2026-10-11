@@ -131,17 +131,25 @@ func TestRenewWithoutAPodTokenFileSendsNoBody(t *testing.T) {
 	}
 }
 
+// TestRenewStopsOnlyForTerminalBrokerCodes: the three terminal codes exit 76, and so does an older
+// broker's PROOF_INVALID that says the enrollment is not live (its renew handler's and its proof
+// check's wording), since that broker has no ENROLLMENT_NOT_LIVE to send.
 func TestRenewStopsOnlyForTerminalBrokerCodes(t *testing.T) {
-	for code, status := range map[string]int{
-		terminalRenewalCodePodIdentity: http.StatusForbidden,
-		terminalRenewalCodePodToken:    http.StatusForbidden,
-		terminalRenewalCodeNotLive:     http.StatusUnauthorized,
+	for _, tc := range []struct {
+		code, message string
+		status        int
+	}{
+		{terminalRenewalCodePodIdentity, "terminal", http.StatusForbidden},
+		{terminalRenewalCodePodToken, "terminal", http.StatusForbidden},
+		{terminalRenewalCodeNotLive, "enrollment is not live", http.StatusUnauthorized},
+		{"PROOF_INVALID", "enrollment is not live", http.StatusUnauthorized},
+		{"PROOF_INVALID", "proof invalid: not live", http.StatusUnauthorized},
 	} {
-		t.Run(code, func(t *testing.T) {
+		t.Run(tc.code+" "+tc.message, func(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(status)
-				_ = json.NewEncoder(w).Encode(map[string]string{"code": code, "error": "terminal"})
+				w.WriteHeader(tc.status)
+				_ = json.NewEncoder(w).Encode(map[string]string{"code": tc.code, "error": tc.message})
 			}))
 			defer srv.Close()
 			client, signer, enrollmentID, _ := renewalSession(t, srv.URL)
