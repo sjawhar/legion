@@ -46,21 +46,35 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	return intake.Result{}, nil
 }
 
-// dispatchArtifact applies an artifact event to every gate registered on that document: the root
-// that owns it, by whose key Dispatch sends its events, and each copy a hand-over carried to a
-// child of its tree, now a root of its own (admit's readmit). register_gate refuses a document of
-// another issue, so no other gate names it. Each gate takes the event as its own (applyArtifact).
+// dispatchArtifact applies an artifact event to the gates registered on that document: the root
+// that owns it, by whose key Dispatch sends its events, takes every event (applyArtifact), and each
+// copy a hand-over carried to a child of its tree, now a root of its own (admit's readmit), takes
+// only an approval that opens it or keeps it open (copyTakes). register_gate refuses a document of
+// another issue, so no other gate names it.
 func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.DispatchArtifact) (intake.Result, error) {
 	gates, err := e.store.GatesForArtifact(ctx, tx, fact.ArtifactID)
 	if err != nil {
 		return intake.Result{}, err
 	}
 	for _, gate := range gates {
+		if gate.Issue != fact.Key && !copyTakes(gate, fact) {
+			continue
+		}
 		if err := e.applyArtifact(ctx, tx, gate, fact); err != nil {
 			return intake.Result{}, err
 		}
 	}
 	return intake.Result{}, nil
+}
+
+// copyTakes says whether a carried copy of another root's gate takes an event of that root's
+// document. The carried work was approved under the design the copy carries, and the document
+// belongs to the old tree now, so nothing on it closes the copy: not a new version, a changes
+// request, or an approval of a version older than the copy's (which ApplyDesignGateEvent would
+// record as the approved version, closing it). Only an approval of the copy's version or a later
+// one applies, opening a copy carried closed and releasing the READYs it refused.
+func copyTakes(gate record.DesignGate, fact intake.DispatchArtifact) bool {
+	return fact.Kind == intake.DispatchArtifactApproved && fact.Version >= gate.LatestVersion
 }
 
 // applyArtifact applies an artifact event to one gate, for the issue that holds it: an approval
