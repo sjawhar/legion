@@ -2035,8 +2035,9 @@ issue's pod (every role container of it alike) and the image probe's.
   the token expires. A shim from a worker image older than that frame forwards it to Oh My Pi,
   which refuses it; the daemon then logs
   `supervise: agent-secrets: the shim did not read its projected token again; waiting for its next hello`
-  and enrolls on the shim's next hello, which comes when its connection drops (a daemon restart
-  makes every shim reconnect).
+  and enrolls on the shim's next hello: one its dropped connection redials with, or the claim's
+  next generation, which an operator starts with `legion claims suspend` and then
+  `legion claims resume` once the login reads `issued`.
   `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
   `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the
