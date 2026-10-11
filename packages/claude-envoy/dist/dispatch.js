@@ -17348,22 +17348,31 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version2.markdown.split(`
 `);
+  const stillOpen = (named, state) => {
+    const next = state === "answered" ? "fold the answer into the text" : "write the decision into the text";
+    return `${named}, ${state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`;
+  };
   const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
+    const openers = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`));
+    const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
     const named = ask === undefined ? `block ${block.id}` : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
-    const states = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)).map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
     if (states.length === 0)
       return [`${named}, which version ${latest} does not hold yet`];
     if (!states.includes("open") && states.some((state) => state !== undefined))
       return [];
-    if (ask === undefined)
+    if (ask !== undefined)
+      return ask.state === "open" ? [named] : [stillOpen(named, ask.state)];
+    const attribute = (name) => openers.map((line) => new RegExp(`\\b${name}="([^"]+)"`).exec(line)?.[1]).find((value) => value !== undefined);
+    const sourceId = attribute("copied_from");
+    const document = attribute("copied_from_document");
+    if (sourceId === undefined || document === undefined) {
       return [`${named}, whose ask Dispatch has not opened yet`];
-    if (ask.state === "open")
-      return [named];
-    const next = ask.state === "answered" ? "fold the answer into the text" : "write the decision into the text";
-    return [
-      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`
-    ];
+    }
+    const source = parseDispatchRef(document);
+    const where = source === null ? document : source.owner.kind === "project" ? documentLabel(source.owner.project, source.id) : `${source.owner.issue} ${source.id}`;
+    const ref = source?.owner.kind === "issue" ? dispatchChildRef(dispatchIssueRef(source.owner.issue), "ask", sourceId) : dispatchChildRef(document, "ask", sourceId);
+    return [`${named}, a copy of ask ${ref}, which is open on ${where}: answer it there`];
   });
   if (open.length === 0)
     return;

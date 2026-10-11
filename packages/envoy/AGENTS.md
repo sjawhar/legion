@@ -1224,7 +1224,39 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
-exists, and refuses to run without `dispatch.server_url`.
+exists, and refuses to run without `dispatch.server_url`. A document mention's backlink excerpt -
+the block holding the target's first mention, its id the `#b-<id>` jump and its markdown cut to
+480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
+`excerpt_version`, migration 0092) when the mention is indexed, cut from a render of the version's
+tree that the write already makes: every renderer of a version's tree takes the block offsets from
+its own render (`pmdoc.RenderWithBlockOffsets`; `renderTreeWithOffsets`,
+`documentMarkdownWithOffsets`), and a `docs.renderedTree` carries the tree, the markdown and the
+offsets together to `refs.MentionExcerpts` and `refs.RecordExcerpts` (`writeVersionTx`, and an
+upload's and a seeded spec's `docs.Service.IndexDocumentReferences`, which take the transaction's
+recorded rendering from the ledger), so the route reads no document and no write renders its tree
+for the excerpts (LEGION-531). An edit, a named version, a seed, a rebuild and a settlement render
+the tree once; an upload that changes the document renders it twice, as it did before excerpts -
+`ReplaceText`'s render of the replacement, which is the stored markdown, and `applyLive`'s render
+of the fork - and its excerpts are cut from `applyLive`'s render only when the two agree. A null
+`excerpt_version` marks a mention owed an excerpt: every row 0092 found, each one `rebuild-refs`
+inserts, and every mention of an upload whose replacement left the document as it was, the one
+version write that records no rendering (`refs.ClearExcerpts`, which keeps the payload the row
+holds for the reconciliation but sets its version null). `cmd/dispatch` runs
+`docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows through the partial index
+`refs_excerpt_drift` (an empty index once it has caught up), stores one batch of 20 documents per
+tick, every 2 s while a batch is full and every five minutes after, and for the hour after its
+start first marks owed the excerpts a version written by the binary a deploy replaces left
+behind (`refs.MarkStaleExcerpts`). A document the reconciliation cannot read for any reason but
+an unloadable history or a tree outside the schema (which it records as having no block), or whose
+excerpts it cannot store, is logged at ERROR and skipped for that tick, its mentions left owed, so
+one document never holds back the rest of its batch. `refs.StoredExcerpts` serves only a row whose
+`excerpt_version` is non-null; a row owed an excerpt is answered with the document's name, not the
+payload it still holds. One window is left: during the one rolling deploy that ships 0092, a
+version the binary it replaces writes leaves the previous version's excerpt with its
+`excerpt_version` still set, and the route serves that excerpt until `refs.MarkStaleExcerpts`
+marks it owed at the reconciliation's next tick, which starts within five minutes
+(`docs.ReferenceExcerptReconcileInterval`) of the last one ending. The deploy's overlap lies inside
+the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
@@ -1546,14 +1578,111 @@ against its schema content rule. Schema changes are additive: add a type, add a 
 attribute, add an enum choice, or widen a content rule. Tightening content, removing or renaming a
 type or attribute, or requiring a new attribute requires a document migration and version bump.
 
+An ask block whose id no ask of its document indexes is a copy when another document of the same
+owner (the same issue, or for a project document the same project's other documents) holds an ask
+under that id that asks, or once asked (its `ask.opened` and `ask.edited` events), exactly what the
+block asks - its question, options, `multiple` and urgency, which a copy carries unchanged
+(`copiedAskSources`, `docs/copied_asks.go`): a record copy of a spec uploaded beside it carries its
+blocks under their ids. Block ids are unique per document only (`asks_block_id_unique` is on
+`block_artifact_id` and `block_id`), so the text has to match as well, since an author-chosen id
+such as `decision` can name unrelated questions on two documents. A match on an earlier wording
+counts only while the ask is open, or when its answer or resolution was given while that wording was
+current: its `ask.answered` or `ask.resolved` event comes after the event that made the wording
+current and before the `ask.edited` that retired it, ordered by `events.id`, which the broker
+allocates in commit order (`askHistory.shownBy`). An answer or resolution given after the rewording
+decides a question the block does not ask, so the block is no copy of that ask and opens its own, as
+a block whose options differ does. Where several asks match, the earliest asked is the source,
+whether it matched on its current wording or an earlier one, so two unrelated asks of one owner
+under one id asking the same thing are one question to a copy. A copy opens no ask: settlement
+writes its source's state and answer into the block, names the source in
+the server-owned `copied_from` and its document's `dispatch://` address (`refs.ArtifactRef`) in
+`copied_from_document`, neither of which an upload can set (`asUploaded`). The block is read-only
+there, since the copy has no ask row an answer or resolve route could reach and settlement only
+reads the source's; `dispatch request-approval`'s refusal and the dashboard's decision card name
+the source, its document and its state from those attributes, reading no ask. A copy shows its
+source as of its own last settlement, and settles again when its own content changes, when a
+restart resumes a settlement it owed, when its source is answered or resolved, when settlement
+retracts its source, and when its source's decided wording is restored (below): the answer and
+resolve routes (`SettleCopiesOf`), a retracting or restoring settlement (`reconcileAskBlocks`) and
+the boot's restoration (`RestoreDecidedWordings`) mark owed, in one `doc_settlements_pending`
+upsert (`markSettlementPending`), and arm once they commit, the settlement of every other document
+of the owner whose latest version holds the block with no ask of its own under that id
+(`lockedCopiesOf`, which takes the copy lock of each project among the documents it is given, in
+the projects' order, through `owedCopiesOf` for all but the boot). Each time settlement writes a
+copy's attributes into a block - the block becoming a copy, or the state it shows changing - it
+logs, once its transaction commits, `dispatch: settled an ask block as a copy of another
+document's ask` with the copy's `artifact` and `block`, the `source_ask`, its `source_document`
+and the `source_state` it shows, never the question; a copy left as it was logs nothing. That
+line is how a block taken for a copy that was meant as a new question is found, since it opens no
+ask and reaches nobody's Inbox: a recurring templated ask under an id its author chose, asking
+what an earlier document of the owner already asked, is one. After a retraction the first copy to
+settle opens the block's own ask, credited to the author who wrote the block into it, whom the
+room keeps owed while the block is a copy; every other copy then matches that ask and names it, so
+copies of one owner share one ask once their source is retracted and the question waits in one
+place, and a block pasted elsewhere and then cut, in either order, is open in one place. That needs
+the owner's copies to settle one at a time: an issue's documents do, under their issue's row
+(`lockArtifactOwner`), but a project document's owner row is the document itself, so a
+project's copy bookkeeping - a settlement's copy-source read, and every marking of copies owed -
+takes a transaction advisory lock keyed on the project (`lockProjectCopies`), so nothing that locks
+the project's row waits on it. It is the two-key form, `pg_advisory_xact_lock(copiedAsksLockNamespace,
+hashtext(project))`, whose key space Postgres keeps apart from the single-key locks every other
+advisory lock here takes (a document's room, a project's rank allocation, the events' commit
+order), so it never waits on one of those; two projects whose hashes collide only take turns on
+their copy bookkeeping. Every holder takes it before any `doc_settlements_pending` row and before
+the events' commit-order lock (`TestCopyLockComesBeforeEveryPendingRowAndEvent`, a static check
+of every Dispatch function's calls in statement order), and a settlement deletes its own pending
+row before it appends its first event, since a route marking that document owed holds the row
+while it waits for the commit-order lock. Every other writer of a document's own pending row takes
+it before it appends an event too: an upload's or a seed's document write marks it
+(`appendUpdateTxClass`) before the route appends its event, so `Ledger.Commit`'s later record of
+the edit source touches a row the transaction already holds
+(`TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents`). A
+copy whose text is changed and an id no ask of the owner indexes open an ask as any new block does
+(LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0091), an
+issue document's `artifacts_issue_key`, and the owed copies' latest versions `artifact_versions`'
+unique `(artifact_id, number)`; `copied_asks_plan_test.go` holds each. Finding the owed copies
+reads, with `LIKE`, the latest markdown of every other document of the owner, so a retraction, an
+answer or a resolution of a block ask costs in proportion to the owner's markdown bytes.
+
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.
-The block is therefore the source of truth for an ask's **text** (question, options, `multiple`,
-`urgency`) and the row for its **lifecycle** (`state`, `answer`, `resolution`), so a route that
-changes either writes both: `PATCH /api/v1/asks/{id}` on a block ask writes the block through
-the document ledger and then takes the row's values from what the block parses back to, and
-`POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the fields it
-names: the row holds the question as plain text, so rebuilding the whole body from it would
+The block is therefore the source of truth for an open ask's **text** (question, options,
+`multiple`, `urgency`) and the row for its **lifecycle** (`state`, `answer`, `resolution`). A
+decided ask's wording is fixed: its answer or resolution decides the question it was given on, so
+where an answered or resolved ask's block asks something else - a document edit or an upload
+reworded it - settlement leaves the row as it was decided and writes the decided wording back into
+the block (`writeDecidedWording`, through the same repair as the server-owned attributes, with one
+`block.repaired` event), logging `dispatch: wrote a decided ask's wording back into its block` with
+the ask and the document. That repair keeps the parts the block already asks, and rewrites the
+rest through the markdown pipeline, as the edit route does; a block it cannot give the decided
+wording is left as it is, logged at ERROR, and the row still keeps its decided wording. A person who
+wants another question writes a new ask block; reopening the ask would put a new question in a
+person's Inbox for an edit they may not have meant as one. An ask settlement restores after a
+retraction follows the state the restoration gives it: one restored open takes its block's text,
+one restored with its answer keeps the wording that answer was given on. A decided ask that a
+release before this rule reworded - its row holding a document's edit beside the decision made on
+the wording before it - gets back the wording its decision was given on, the previous wording of
+the first `ask.edited` after its latest `ask.answered` or `ask.resolved` with no `ask.opened`
+between, in code rather than by a migration, since the pre-deploy census refuses a migration that
+rewrites rows (`cmd/dispatch/README.md`, "Pre-deploy census"): once at boot over every decided ask
+(`docs.Service.RestoreDecidedWordings`), and at every settlement over its document's decided asks
+(`restoreDocumentDecidedWordings`), which also undoes a rewording a task of that release writes
+during a rolling deploy. Both run `decidedWordingRestore`, one statement whose `$1` names the asks
+it may restore, null at boot for every decided ask; both re-index the restored question's
+references, log each ask they restore, its document and the question it asks again (`dispatch:
+restored a decided ask's wording`), never the wording it replaced, and mark the restored asks'
+copies owed: a copy that settled while its source's row held the rewording matched that wording and
+shows the decision on it, and its next settlement opens the block's own ask. The boot also marks
+each restored block ask's own document owed in the same upsert, since its block still asks the
+rewording beside the decision and nothing else settles that document until someone edits it; the
+settlement it arms writes the decided wording back into the block (a settlement's own restoration
+does that in the same pass). The boot then logs the asks' and the copies' counts (`dispatch:
+restored decided asks' wordings`, `restored=<n> copies=<n>`). A route that changes an ask's text or
+lifecycle writes both:
+`PATCH /api/v1/asks/{id}` on a block ask (an open one; a decided one is `409 ASK_NOT_OPEN`) writes
+the block through the document ledger and then takes the row's values from what the block parses
+back to, and `POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the
+fields it names: the row holds the question as plain text, so rebuilding the whole body from it would
 flatten an untouched question's formatting and links and mint fresh ids for the paragraphs a
 comment anchors into. Naming `urgency` or `multiple` alone therefore goes through the attribute
 path and leaves every child node, mark and inner block id exactly as it was; naming `question`
@@ -1599,7 +1728,8 @@ rowspan, or rows the budget ran out partway through. Where a table outside the a
 it first, the check can write span cells the document did not, and the ask is refused unless
 padding its stored rows gives those cells.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
-canonical markdown.
+canonical markdown, and a copy also `copied_from` and `copied_from_document`, the ask it was copied
+from and that ask's document.
 
 ## Critical conventions
 

@@ -288,7 +288,7 @@ func loadArtifactNodes(ctx context.Context, q Queryer, byRefKey bool, ids []stri
 			lookup = refKey
 		}
 		nodes[[2]string{"artifact", lookup}] = resolvedNode{
-			GraphNode: model.GraphNode{Kind: "artifact", ID: id, IssueKey: issueKey, Project: project, Ref: artifactRef(issueKey, project, session, slug, kind, primary)},
+			GraphNode: model.GraphNode{Kind: "artifact", ID: id, IssueKey: issueKey, Project: project, Ref: ArtifactRef(issueKey, project, session, slug, kind, primary)},
 			text:      name,
 			refKey:    refKey,
 		}
@@ -374,10 +374,10 @@ func loadComponentNodes(ctx context.Context, q Queryer, ids []string, nodes map[
 	return rows.Err()
 }
 
-// artifactRef is the address the dashboard copies for a document: an issue's primary document
+// ArtifactRef is the address the dashboard copies for a document: an issue's primary document
 // is its spec, another issue artifact sits under artifact/<slug>, a project document under
 // its project, and an agent's conversation's file under agent/<session id>.
-func artifactRef(issueKey *string, project string, session *string, slug, kind string, primary bool) string {
+func ArtifactRef(issueKey *string, project string, session *string, slug, kind string, primary bool) string {
 	if session != nil {
 		return "dispatch://agent/" + *session + "/artifact/" + slug
 	}

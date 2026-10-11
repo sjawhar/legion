@@ -202,6 +202,19 @@
   status and broker code; the shim quotes that terminal line beside its own enrollment and stops.
   Every other refusal retries, `POD_IDENTITY_MISMATCH` among them, which the broker also answers
   for a token it could not verify while its issuer was unreachable.
+- `GET /api/v1/references` no longer renders every document that mentions its target to cut each
+  backlink's one-block excerpt (LEGION-531; 24.6% of a week's production CPU). Each document
+  mention's excerpt - the block holding the target's first mention, its `#b-<id>` jump and its
+  markdown cut to 480 characters - is stored on its `refs` row when the mention is indexed, cut
+  from the render the version write already makes, so the route reads one indexed query and loads
+  no document. Migration `0092_refs_excerpts` adds the three nullable columns (`excerpt_block_id`,
+  `excerpt_text`, `excerpt_version`) and the partial index `refs_excerpt_drift`; its census answers
+  `0`. `envoy-dispatch` runs a reconciliation that fills every row indexed before it, one batch of
+  20 documents per tick. Until it reaches a row, the route answers that mention with the
+  document's name, the fallback a mention in no block already got. The excerpts the dashboard
+  shows are unchanged: on the 2026-10-10 production dump, all 7,537 document mentions match the
+  rendered path. In the rolling deploy that ships 0092, a version the outgoing task writes keeps
+  the previous version's excerpt until the reconciliation's next tick, within five minutes.
 - **Breaking:** an agent session on a machine its person logged in is one enrollment kind,
   `session`, where the broker recorded `host` for a session the helper enrolled for itself and `box`
   for a key a launcher such as agentbox brought; a pod stays `pod`. Migration
@@ -538,6 +551,40 @@
   successful runs. Such a run still counts as no deploy. Every warning is now logged once per run
   and configured job name for the life of the process rather than on every read: one dev-only run
   had been logging the line twice every three minutes (LEGION-567).
+- A document uploaded or seeded with another document's ask blocks, under their block ids and with
+  the same question, options, `multiple` and urgency, on the same issue (or the same project for a
+  project document) opens no ask for them: each copied block shows the state and answer of the ask
+  it was copied from, read-only, and names it and its document in the server-owned `copied_from`
+  and `copied_from_document`, where settlement had opened a new ask in a person's Inbox for every
+  copied block, answered and resolved ones included. Of several matching asks the earliest asked
+  is the source, whichever wording it matched on. A block matching only a source's earlier wording
+  is a copy of it while the source is open, or when the source's answer or resolution was given
+  while it asked that wording, ordered by the events' commit order; one answered or resolved after
+  the rewording opens its own ask, so no copy shows a decision on a question it does not ask.
+  Answering or resolving the source reaches its copies a settlement later. Each block settlement
+  takes for a copy, and each change of the state a copy shows, is logged once (`dispatch: settled
+  an ask block as a copy of another document's ask`, naming the copy, its block, the source ask,
+  its document and its state, never the question), since such a block opens no ask and reaches no
+  one's Inbox.
+  `dispatch request-approval`'s refusal and the dashboard's decision card name the source, its
+  document and its state from those attributes. A copy whose text is changed, or an id no ask of
+  the owner indexes, still opens one, and so do a source's copies once its block
+  leaves its document: settlement of the source retracts its ask and settles every copy, the first
+  opens one ask, credited to whoever wrote the block into it, and the others name that ask, on a
+  project's documents as on an issue's. Migration `0091_artifacts_project_documents` adds the
+  partial index a project document's lookups read. An answered or resolved ask's wording is fixed:
+  a document edit or an upload that changes its block's question, options, `multiple` or urgency
+  no longer rewords the ask and leaves its answer beside a question nobody answered; settlement
+  writes the decided wording back into the block and logs it, as `PATCH /api/v1/asks/{id}` already
+  refused such an edit (`ASK_NOT_OPEN`). Each ask an earlier release reworded after its decision
+  gets back the wording that decision was given on, in code and not by a migration: every boot
+  restores them all in one statement and logs each ask, its document and its question, and each
+  document's settlement restores its own before it writes the decided wording back into the block,
+  which also undoes a rewording an earlier release's task writes during a rolling deploy. The boot
+  settles each restored ask's own document, whose block still asks the rewording until that
+  settlement writes the decided wording back. Either restoration settles the restored asks' copies
+  again: a copy that settled while its source's row held the rewording showed the decision on the
+  reworded question, and now opens its own ask (LEGION-651).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

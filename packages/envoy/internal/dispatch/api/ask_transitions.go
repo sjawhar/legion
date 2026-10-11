@@ -195,6 +195,12 @@ func (s *server) answerAsk(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return err
 			}
+			// A copy of this ask on another document of its owner shows its state, so the
+			// answer settles each copy again; the copies' pending rows are taken before this
+			// document's (docs.SettleCopiesOf).
+			if err := s.deps.Docs.SettleCopiesOf(ctx, ask); err != nil {
+				return err
+			}
 			var answerText any
 			if answer.Text != nil {
 				answerText = *answer.Text
@@ -281,6 +287,9 @@ func (s *server) resolveAsk(w http.ResponseWriter, r *http.Request) {
 			if ask.BlockID != nil {
 				blockArtifact, err := blockArtifactOf(ask)
 				if err != nil {
+					return model.Ask{}, err
+				}
+				if err := s.deps.Docs.SettleCopiesOf(ctx, ask); err != nil {
 					return model.Ask{}, err
 				}
 				if err := s.deps.Docs.SetBlockAttributes(ctx, blockArtifact, *ask.BlockID, map[string]any{
