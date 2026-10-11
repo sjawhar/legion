@@ -9,7 +9,10 @@
   needs, with its `project.created` event naming that session, rather than asking a person to
   make it in Settings. A key that already exists is still `409 PROJECT_EXISTS` whoever asks, and a
   key that is not a project key or an empty name `400 INVALID_PROJECT`. `GET /api/v1` lists the
-  route as `any`.
+  route as `any`. Every route that refuses a project key that is not one (creating a project or an
+  issue, mapping a repository, search) now says the rule the same way: `project "x" is not a project
+  key: an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE`. Creating an
+  issue without a title answers `title is required`.
 - `Ctrl+Alt+M` (`⌘+⌥+M` on a Mac), Google Docs' shortcut, comments on the text selected in a
   document, as the selection bar's **Comment** does: it opens the margin's composer on the
   selection and puts the cursor in it. It works in an issue's documents and a project's documents

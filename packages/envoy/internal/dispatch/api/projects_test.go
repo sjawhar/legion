@@ -110,6 +110,28 @@ func TestCreatingATakenProjectKeyIsRefusedForABearerAndACookie(t *testing.T) {
 	}
 }
 
+// Every route that takes a project key refuses a bad one with the same description of the rule,
+// so an agent learns the rule once, whichever route it called.
+func TestEveryRouteRefusesABadProjectKeyInOneWording(t *testing.T) {
+	handler := newTestHandler(t)
+	const rule = "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE"
+	for _, probe := range []struct {
+		name, method, target, code string
+		body                       any
+	}{
+		{"create project", http.MethodPost, "/api/v1/projects", "INVALID_PROJECT", map[string]string{"key": "bad", "name": "Bad"}},
+		{"create issue", http.MethodPost, "/api/v1/issues", "INVALID_ISSUE", map[string]string{"project": "bad", "title": "Title"}},
+		{"map a repository", http.MethodPut, "/api/v1/settings/repo-projects/owner/repo", "INVALID_REPO_PROJECT", map[string]string{"project": "bad"}},
+		{"search", http.MethodGet, "/api/v1/search?q=ok&project=bad", "INVALID_PROJECT", nil},
+	} {
+		response := dispatchRequest(t, handler, probe.method, probe.target, probe.body, "alice")
+		body := response.Body.String()
+		if response.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"`+probe.code+`"`) || !strings.Contains(body, rule) {
+			t.Errorf("%s with key \"bad\": status=%d body=%s, want 400 %s describing the rule %q", probe.name, response.Code, body, probe.code, rule)
+		}
+	}
+}
+
 // A bad key or an empty name is 400 INVALID_PROJECT for a session as for a person, and the
 // refusal names which of the two is wrong: an agent reads it as the whole answer.
 func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {

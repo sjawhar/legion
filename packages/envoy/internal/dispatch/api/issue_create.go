@@ -136,8 +136,12 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			input.Title = input.External
 		}
 	}
-	if !projectKeyPattern.MatchString(input.Project) || input.Title == "" {
-		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "project and title are required")
+	if !projectKeyPattern.MatchString(input.Project) {
+		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, fmt.Sprintf("project %q is not a project key: %s", input.Project, projectKeyRule))
+		return
+	}
+	if input.Title == "" {
+		writeError(w, "INVALID_ISSUE", http.StatusBadRequest, "title is required")
 		return
 	}
 	// Before the duplicate check, which reads the new title against every title in the project.
