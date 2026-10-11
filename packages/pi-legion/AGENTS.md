@@ -103,7 +103,8 @@ credential-helper variable and `LEGION_GRANT_FILE`; `POST /legion/v1/handoff/com
 independent issue pods, each on a volume of its own (LEGION-632: the init container's environment
 is the four surfaces above and nothing of a shared disk — no removable-workspaces list, no lock
 wait, no role or generation — and its volume expectation is `LEGION_EXPECT_ISSUE_VOLUME`), contract 17's `dispatch`
-command instructions in every daemon role prompt (LEGION-588), contract 16's `capabilities` list on`GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
+command instructions in every daemon role prompt (LEGION-588), contract 16's `capabilities` list on
+`GET /legion/v1/state` (LEGION-578), contract 15's Sandbox locator in an issue's shared pod
 (LEGION-462), contract 14's daemon-launched controller pod (LEGION-592) and contract 13's `push`
 grant and `LEGION_REMOVABLE_WORKSPACES` payload (LEGION-583, the list contract 18 removed); the
 Envoy plugin's manifest carries no `legion` key, and the gate reads only this package's.

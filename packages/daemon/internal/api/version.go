@@ -142,8 +142,8 @@ package api
 // plugin, so the boot gate and `legion probe-image` refuse the mixed pair. (This branch first took
 // 19, based on LEGION-631's branch while that branch declared 18; LEGION-631 landed at 19 first,
 // pi-legion 8.11.0 declaring it without the report. Renumbered to 20 at the retarget to main; then
-// LEGION-668 landed at 20 first, with no pi-legion release declaring it yet, so a daemon at 20
-// would pass the gate against a plugin without the report. Renumbered twice, as
+// LEGION-668 landed at 20 first, pi-legion 8.14.0 declaring it without the report, so a daemon at
+// 20 would pass the gate against it. Renumbered twice, as
 // docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
 // says.)
 const DaemonAPIVersion = 21
