@@ -22,7 +22,7 @@ with the `read` tool: a read by filesystem path stops at 300 lines.
 | When | Read |
 | --- | --- |
 | You write or edit the PR body, record a proof (an `E2E` line or a handoff `proof` array), verify another phase's proof, or run the simplify pass | `skill://legion-worker/references/pr-body.md` |
-| You reply to, accept, or resolve a review thread, or run `legion threads resolve` | `skill://legion-worker/references/review-threads.md` |
+| You reply on or resolve a review thread, list a pull request's threads, or adjudicate a bot's finding | `skill://legion-worker/references/review-threads.md` |
 | GitHub reports a conflict, the pull request is retargeted, you compare heads after a conflict merge, or you would rewrite a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
 | You review or approve, build the READY packet, or check the merge in production | `skill://legion-worker/references/merge-gate.md` |
 | The issue renames a repository, package, or URL across the codebase | `skill://legion-worker/references/systematic-rename.md` |
@@ -60,10 +60,8 @@ only on this phase's artifact.
 You never start another Legion role: the daemon starts every phase worker itself, from its fixed
 workflow table. You may still use ordinary `task` subagents for your own phase work; none of them
 is a Legion role. A subagent runs in your pane as you, with every host tool but the `legion` tool
-(it is never offered one), so a `legion` command from its bash, a completion included, is yours at
-the daemon: give a subagent no completion step. Today such a command runs on the per-call grant
-your own last credentialed call wrote, within its 60 seconds (*Four facts about `gh`*, below);
-LEGION-631 (dispatch://LEGION-631) replaces that grant with the role's mounted token file.
+(it is never offered one), so completing your phase is yours alone: give a subagent no completion
+step.
 Escalate a product, scope, design, cross-phase, or lifecycle decision to the owning architect with
 `envoy_publish` to its role topic (`notifications.role.` followed by its encoded token, see
 above), carrying the verified facts and the decision needed. A `write` to `agent://` only reaches
@@ -90,7 +88,7 @@ implementer's own proof on a production-like surface at the head that merges, an
 head included (`skill://legion-worker/references/pr-body.md#what-a-proof-is`,
 `skill://legion-worker/references/pr-body.md#the-rules-every-phases-evidence-follows`); and the
 implementer's production check after the merge
-(`skill://legion-worker/references/merge-gate.md#after-the-human-merge`).
+(`skill://legion-worker/references/merge-gate.md#after-the-merge`).
 
 ## Asking another role
 
@@ -118,25 +116,24 @@ Concurrent issues have disjoint workspaces; only the currently active phase muta
 one. After you complete and go idle, treat `$LEGION_WORKSPACE` as read-only in every later
 turn, including one an Envoy question starts: you are kept alive to answer questions, not to keep
 editing. Do not create new commits, run `jj -R "$LEGION_WORKSPACE" new`, or touch tracked files
-once your own handoff is committed (and, for the implementer, pushed) — a code change belongs to
+once your own handoff is committed and pushed — a code change belongs to
 whichever phase is active now. The same holds once the Go daemon has taken your phase back without
 your completion: CI settling red while you tested, or reviewed a round you had not completed,
 moves the issue to `implementing` and interrupts your turn, and the implementer starts only once
 that turn has ended. Do not resume the interrupted work afterward.
 
 On every start, and especially after revival or re-creation, read the issue and then the
-committed predecessor handoffs in lifecycle order, with the `legion` tool's `handoff_read`:
+committed predecessor handoffs in lifecycle order, with the `read` tool from
+`$LEGION_WORKSPACE/.legion/<issue>/`:
 
-1. `architect.json`
-2. `plan.json`
-3. `implement.json`
-4. `test.json`
-5. `review.json`
+1. `plan.json`
+2. `implement.json`
+3. `test.json`
+4. `review.json`
 
-Read only files that precede the assigned phase. Each was held to its phase's rules when it was
-written (`handoff_write`, in the completion gate below): fields the phase does not declare passed
-untouched and reach the next worker. The `legion` tool's `handoff_read` returns them; its
-description says where it reads each one from.
+Read only files that precede the assigned phase. Each was checked against its phase's rules when
+its phase completed (the completion gate below): fields the phase does not declare passed
+untouched and reach the next worker.
 Write the phase-specific fields the next phase and the architect need, consistent with what
 predecessor phases already wrote. The durable copy lives in
 `$LEGION_WORKSPACE/.legion/<issue>/<phase>.json`. If a committed handoff conflicts with memory or a prior
@@ -145,32 +142,6 @@ transcript, the committed file wins: it is the copy that survived.
 If your task, prompt, or a message since your last turn begins `Your workspace was recreated…`, read
 your phase's committed handoff and any `.legion/<issue>/workspace-recovered.json`, and reconcile
 before new work: anything unpushed is gone. That message stays in history; reconciled, it is done.
-
-## jj Safety Rules
-
-- **Always `jj -R "$LEGION_WORKSPACE" new` to create isolated commits.** Never
-  `jj -R "$LEGION_WORKSPACE" edit @-` to go back to a parent — this changes what `@` points
-  to and makes `jj abandon` dangerous.
-- **Never `jj -R "$LEGION_WORKSPACE" abandon`.** If a mistake would require abandoning
-  work, stop and send the owning architect the `jj -R "$LEGION_WORKSPACE" log` evidence.
-- **Before pushing, check ancestry:** `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'`
-  — verify only your issue's commits are in the chain, not unrelated work.
-
-**Shared operation safety:** Under tmux every issue workspace is a `jj workspace` of one shared
-clone and operation log; under Kubernetes each issue pod has its own, shared by that issue's roles
-alone. Either way `jj undo`, `jj abandon`, and `jj op restore|revert|abandon|undo` rewrite a log
-other agents work in. The extension refuses them in every phase-worker pane before they run — a
-`bash` command in any position of a pipeline or `&&` chain, with or without `-R`, judged on the
-whole argument list (a supervised service's start included); `eval` code; and stdin written to a
-service (a `write` to `proc://<id>`) — from your own tool calls and from any `task` subagent you
-spawn (it runs in your pane, against the same log), and a `bash` command whose quoted text merely
-mentions `jj` with one of those words (a heredoc, an echo, a commit message) is refused too: write
-such text with the `write` tool or say "operation-log rollback" instead. `jj restore <paths>`,
-`jj op log`, and `jj op show` stay allowed. Recover forward only: a new commit
-(`jj -R "$LEGION_WORKSPACE" new`) or `jj -R "$LEGION_WORKSPACE" restore <paths>` of files.
-Anything else, stop and send the owning architect the `jj -R "$LEGION_WORKSPACE" log`
-evidence; the architect decides, and an operator performs any operation-log restore with every
-other tree paused.
 
 ## Phase work
 
@@ -183,6 +154,9 @@ discipline, scheduling, or human communication with labels or a local status mod
 An issue that renames a repository, package, or URL across the codebase also follows
 `skill://legion-worker/references/systematic-rename.md`; one that deletes code, a command, or
 documentation follows `skill://legion-worker/references/cleanup-deletion.md`.
+
+Create isolated commits with `jj -R "$LEGION_WORKSPACE" new` and reviewable ones with
+`jj -R "$LEGION_WORKSPACE" split -m "<message>" <paths…>`, each holding only your phase's paths.
 
 Commit attribution is automatic: the extension exports a `JJ_CONFIG` overlay when your
 session starts, so every jj commit you make carries an `Omp-Session: <this-session-id>`
@@ -214,38 +188,28 @@ architect that log; do not accept it as a side effect. A wrong identity on your 
 other App or none, is a pane-environment problem to report to the architect, not something to
 pin (`docs/solutions/legion/shared-main-repo-hazards-for-concurrent-issue-workspaces.md`,
 Hazard 1).
-Your session receives the credential capability it needs; invoke GitHub through the
-credential helper:
+Your pane's `gh` and `git` already carry your role's GitHub identity; invoke GitHub with plain
+`gh`:
 
 ```bash
-legion gh -- <gh args…>
+gh <gh args…>
 ```
 
-Four facts about `gh` in a worker pane. The `gh` on your `PATH` is a shim
-(`<state_dir>/worker-bin/gh`, installed by the daemon at startup — `packages/daemon/internal/runtime/workerbin/workerbin.go`)
-that execs `legion gh -- "$@"`, so `gh …` and `legion gh -- …` are the same call, and each call
-redeems a fresh token from your session's grant — identity is supplied per call, never stored.
-Never run `gh auth login` or `gh auth setup-git`; there is no login state to create. The shim
-refuses `pr merge` (and a raw `gh api …/merge` or a GraphQL mutation) for every role: Legion never
-merges. It also refuses every GitHub-issue write — the `issue`
-subcommand's `comment`, `create`, `edit`, `close`, `reopen`, `delete`, `pin`, `unpin`, `transfer`,
-`lock`, `unlock`, and `develop`, and any raw `gh api` call to an `/issues` path whose method is not
-GET (an explicit `-X`, or the POST that `-f`/`-F`/`--input` imply; pull-request conversation
-comments live on that path too, so edit them with `gh pr comment`) — printing
-``Legion issues live on Dispatch; use `dispatch message` or `dispatch comment` on <your LEGION_ISSUE>``:
-Legion never reads or writes a GitHub issue. `pr comment`, `pr review`,
-`api …/pulls/…`, `api graphql`, and issue reads are unaffected. The credential reaches `legion`
-through the file `$LEGION_GRANT_FILE` names, written by the extension before each of your bash
-commands, each `github` tool call, and each `read`/`grep` of a `pr://` or `issue://` URL (and by
-the `legion` tool before its `handoff_complete`); never `cat`, `echo`, copy, or
-`export` it — `legion credential`, `legion gh`, `jj git push`, and `handoff_complete` read it
-themselves. The file is the pane's, not the command's, and a grant lives 60 seconds: a `task`
-subagent, an `eval` subprocess, or a background job in your pane reads the grant your last such
-call wrote, and a `github` tool `run_watch` keeps polling `gh` on the one written when the call
-began, so each succeeds only within 60 seconds of that call and 403s afterwards — a timing
-artifact, not a broken credential. Run credentialed commands from your own bash calls, and watch a
-run that may outlast a minute with `gh run watch` in bash, which redeems once and then runs on the
-token it got.
+How `gh` works in a worker pane. `GH_CONFIG_DIR` names a read-only directory holding gh's own
+`hosts.yml` (your role's GitHub App installation token, user `x-access-token`) and `config.yml`,
+which the daemon rewrites in place from its cached lease so it never expires under you; the `gh`
+on your `PATH` is the ordinary binary and reads it on every call, `git` reads the same file
+through the clone's `credential.helper` (`!gh auth git-credential`), and `GH_TOKEN`,
+`GITHUB_TOKEN` and `GH_HOST` are set empty so nothing outranks it. Never run `gh auth login`,
+`gh auth setup-git`, `gh config set` or `gh alias set`: there is no login state to create, and the
+directory is read-only. One rule nothing enforces: **Legion's issues live on Dispatch, never on
+GitHub issues** — no `gh issue` write and no non-GET `gh api` call to an `/issues` path
+(pull-request conversation comments live on that path too; edit them with `gh pr comment`); use
+`dispatch message` or `dispatch comment` on your `LEGION_ISSUE`. The `legion` tool's own daemon
+calls carry a credential of their own, minted in-process; `gh` and `git` never see it, and you
+never `cat`, `echo`, copy, or `export` a token. A `task` subagent, an `eval` subprocess, or a
+background job in your pane inherits the same `GH_CONFIG_DIR` and so the same credential, for as
+long as it runs.
 
 **Other credentials your pod may already carry.** Before reporting that a read is unreachable,
 check for them rather than assuming none exist: `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`
@@ -273,7 +237,7 @@ for the retro's Dispatch message (`skill://legion-retro`):
 For example:
 
 ```bash
-legion gh -- pr comment <pr-number> \
+gh pr comment <pr-number> \
   --body $'Verification complete.\n\n<!-- legion: {"session":"<session-id>","phase":"<phase>"} -->' \
   --repo <owner>/<repo>
 ```
@@ -300,13 +264,12 @@ The implementer opens the pull request. After its implementation commit and veri
 pushes the issue branch under this exact name with the one push procedure every role uses
 (*Every role pushes its own commits*, below).
 
-The provisioned issue workspace configures `credential.helper` with the daemon's absolute
-credential command, so `legion push` authenticates transparently through the same session
-capability. Never handle a token.
+The shared clone's `credential.helper` is `!gh auth git-credential`, so `jj git push`
+authenticates as your role's App from the same file your `gh` reads. Never handle a token.
 
-Then open the pull request with `legion gh -- pr create`. The PR body **must** contain the
+Then open the pull request with `gh pr create`. The PR body **must** contain the
 line `Dispatch: <KEY>` — the daemon's fallback link from a PR to its Dispatch issue when the
-branch name alone is ambiguous. The credential helper and `legion gh` provide the GitHub
+branch name alone is ambiguous. Your pane's `gh` and `git` provide the GitHub
 identity; never export, fetch, or replace a token. Other phases advance the existing branch
 rather than creating a replacement bookmark or PR.
 
@@ -321,23 +284,32 @@ never one. **Before you write or edit any line of the PR body or any `proof` arr
 `skill://legion-worker/references/pr-body.md`**: the template (the sole definition of the CI
 line), the full definition of a proof, what the tester verifies, and the simplify pass.
 
-- **Review threads** are disposed of one by one, never in bulk, and only an `Accepted:` from the
-  thread's opener (or, on a bot's thread, from the Legion reviewer) closes one. The implementer
-  runs `legion threads resolve` after every push that answers a review, before its completion,
-  and the merger before READY: `skill://legion-worker/references/review-threads.md`.
+- **The tester runs the application, not CI again.** It drives the changed surface for real and
+  tries to break it, judges whether the implementer's tests would catch what it broke, records what
+  it ran and saw, and must read CI for everything static — lint, types and the unit suites are
+  CI's work, rerun by no tester: `skill://legion-worker/references/pr-body.md`.
+- **Review threads** are answered and resolved one by one, never in bulk, and never one you have
+  not read: one disposition reply per thread, then that thread's own resolution by the
+  implementer, the pull request's author — its `gh api graphql` mutation after every push that
+  answers a review, before its completion, for the threads it answered and for the bot threads the
+  reviewer names to it as accepted (the review App cannot resolve one):
+  `skill://legion-worker/references/review-threads.md`.
 - **No deferrals.** A finding that changes
   behaviour, hides an error, or breaks a gate is fixed in this pull request; naming, duplication,
   or wording cleanup is batched into the one `Fast-follow:` line instead of iterating per push.
 - **A red CI job** that failed on its own is re-run with
-  `legion gh -- run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base.
+  `gh run rerun <run-id> --failed`, never by pushing a new commit or bringing in the base.
 - **A conflict or a retarget** is the only reason to bring the base into the branch, always as a
   forward merge and never `jj rebase`; the unchanged-diff fingerprint each role compares
   afterwards is in the same reference: `skill://legion-worker/references/conflicts-and-rewrites.md`.
 - **The merge gate**, in order: the tester's evidence green → the reviewer's approval of the head
-  → retro → the merger's READY → the human merge → the implementer's production check. Legion
-  never merges. The reviewer's submissions,
-  retro's commit, the merger's READY, and the production check follow
-  `skill://legion-worker/references/merge-gate.md`.
+  → retro → the merger's READY → the merge → the implementer's production check. On READY's
+  acceptance the merger submits the pull request with
+  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`, and the
+  repository's required reviews and checks decide when it lands
+  (`skill://legion-worker/references/merge-gate.md`). The reviewer's submissions, retro's commit,
+  the merger's READY and its submission, the implementer's disarming of a withdrawn READY, and the
+  production check follow the same reference.
 - **No surface reaches the changed path** is a report to the architect, never a reason to
   complete the phase: `skill://legion-worker/references/pr-body.md`.
 
@@ -350,29 +322,17 @@ A planner picking up after the issue moves back from implementing starts fresh o
 tip — `jj -R "$LEGION_WORKSPACE" new legion/<KEY>@origin` — since the implementer's unpushed
 commits are no longer in the chain (*Every role pushes its own commits*, below).
 
-Write the phase-specific handoff: call the `legion` tool with `op: "handoff_write"`, `phase: "<p>"`,
-and `data`: a JSON object of the phase-specific fields only. It runs `legion handoff write` in
-`$LEGION_WORKSPACE` and returns its output.
-
-A handoff built from the one already on disk (a test handoff that accumulates review rounds can
-pass 128 KiB) can instead be piped from bash, so you never re-emit the whole payload:
-`cd -- "$LEGION_WORKSPACE" && bun -e 'const h = await Bun.file(".legion/<issue>/<phase>.json").json(); delete h.schemaVersion; delete h.phase; delete h.completed; <your edit to h>; console.log(JSON.stringify(h))' | legion handoff write --phase <phase>`.
-The program is single-quoted, so strings in your edit take double quotes. It is `bun` because the
-worker image a pod runs ships `bun` and not `jq`, and a devbox pane has the `bun` Legion builds
-with. With `--data` omitted, `legion handoff write` reads the JSON object from stdin. The CLI adds
-`schemaVersion`, `phase` and `completed` itself and refuses them in the data, hence the `delete`s.
-
-`handoff_write` validates the payload against the phase's schema before writing: an
-implement handoff without a well-formed `proof`, or a test handoff that reports no failure and
-carries no `proof` of its own, exits 1 naming the field and writes nothing. Each `proof` entry, in
-either phase, is an object of six non-empty strings: `criterion` (the acceptance line it proves),
-`surface`, `command`, `observed`, `headSha` (the commit it ran at) and `negativeControl`.
-
-Then verify the durable artifact exists:
-
-```bash
-test -f "$LEGION_WORKSPACE/.legion/<issue>/<phase>.json"
-```
+Write the handoff, `$LEGION_WORKSPACE/.legion/<issue>/<phase>.json` (`plan`, `implement`, `test`
+or `review`), with the ordinary `write` tool: a JSON object with `schemaVersion: 1`,
+`phase: "<phase>"`, `issue: "<KEY>"`, `completed: "<RFC 3339 UTC time of writing>"`, and the
+phase's own fields exactly as your role prompt spells them — the planner's `requiredSkills`,
+`gapAnalysis`, `planReview` and `specDepartures` records; the implementer's `proof` array; the
+tester's `implementerProof`, `failures` and, whenever it reports no failure, its own `proof`; the
+reviewer's `verdict`, counts and `keyFindings`. Nothing stamps the first four for you. Each `proof`
+entry, in either phase, is an object of six non-empty strings: `criterion` (the acceptance line it
+proves), `surface`, `command`, `observed`, `headSha` (the commit it ran at) and `negativeControl`.
+A handoff built from the one already on disk (a test handoff that accumulates review rounds) is
+read with `read`, edited, and written whole with `write`, its `completed` set to now.
 
 Then commit that exact handoff file onto the issue branch:
 
@@ -381,63 +341,100 @@ cd -- "$LEGION_WORKSPACE" && \
   jj -R "$LEGION_WORKSPACE" split -m "<phase>: record handoff" .legion/<issue>/<phase>.json
 ```
 
+Then push (below) and report completion: call the `legion` tool with `op: "handoff_complete"` and
+`summary` (two sentences for the architect; the tester adds `verdict: "pass"` or `"fail"`, the
+merger `ready: true`). **Push before you complete is a hard rule.** `handoff_complete` finds, with
+your pane's jj, the newest commit on the issue branch that carries `.legion/<KEY>/<phase>.json`
+and reports it to the daemon, and refuses — posting nothing — while:
+
+- the file has a change still in the working copy: commit it, then complete again;
+- the file is missing from the workspace: write it, then commit and push it;
+- the file is not committed on this branch (only the base carries it): write and commit it;
+- the carrying commit was authored by another App (every role of an issue shares the workspace):
+  run `jj -R "$LEGION_WORKSPACE" new`, then write and commit this phase's handoff again;
+- the carrying commit is not yet on `legion/<KEY>@origin`: push the issue branch, then complete
+  again.
+
+Nothing checks the file's shape: the fields your role prompt spells are what the next role reads.
+The daemon reads no handoff file and no branch head; it refuses, before recording anything:
+
+- `HANDOFF_NOT_NEW` — the commit is the one you reported for your previous phase: write and
+  commit this phase's handoff before completing.
+- `READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS` and `READY_CHECKS_NOT_GREEN` — the
+  merger's READY, in `skill://legion-worker/references/merge-gate.md`.
+- `GITHUB_READ_FAILED` — GitHub's failure, not the head's, reading READY's checks: complete again.
+
+Such a refusal records nothing, so the corrected call at the same commit is applied. The answer
+may carry a `note` (READY published on an already-merged pull request, or a base requiring no
+check).
+
+Retro's last commit removes `.legion/<issue>/` from the head that merges (`skill://legion-retro`);
+a round after it, such as one a withdrawn READY sends back, writes and commits its own handoff
+again, since `handoff_complete` reports the commit carrying the file. Retro, the merger and the
+post-merge production check write no `.legion/<issue>/<phase>.json`, commit no handoff, and report
+with `handoff_complete` alone, which reports the commit the workspace stands on.
+
 **Every role pushes its own commits.** After the handoff commit — and, for the tester, the red
-tests it wrote — push the issue branch with `legion push`, run from bash in your workspace:
+tests it wrote — push the issue branch with the plain `jj` of your pane, from bash in your
+workspace; `<KEY>` is your `LEGION_ISSUE`:
 
 ```bash
-cd -- "$LEGION_WORKSPACE" && legion push
+cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY> -r @- && jj -R "$LEGION_WORKSPACE" git push --bookmark legion/<KEY>
 ```
 
-It pushes `@-` through the provisioned credential helper, which authenticates as your role's App
-(`appauth.AppRoleFor` in `packages/daemon/internal/appauth/identity.go`). Your system prompt says
-which pushes skip CI and which commit-message keywords it refuses. While the head commit carries
+A push whose commits touch only `.legion/` (a handoff-only push) ends its head's commit message
+with `skip-checks: true` as the last line, preceded by two empty lines, so GitHub starts no
+workflow run for it and the daemon carries the code head's verdict to it. GitHub honours the
+trailer only in that shape — the last line, after two empty lines; one empty line is not enough,
+and GitHub then starts every workflow as if the line were not there (a planner's handoff push
+did exactly that in the first live run of this rule). jj keeps the two lines as written, where
+`git commit`'s default cleanup would collapse them. Write the line with trailers off for the one
+describe, since the pane's jj overlay would otherwise append `Omp-Session:` after it:
+
+```bash
+jj -R "$LEGION_WORKSPACE" describe -r @- --config 'templates.commit_trailers=""' -m "$(jj -R "$LEGION_WORKSPACE" log -r @- --no-graph -T description)"$'\n\n\nskip-checks: true'
+```
+
+Every other push — code, red tests, `docs/solutions/`, retro's removal of `.legion/<KEY>/`, a
+forward merge, a rewrite — carries no such line and none of GitHub's bracket keywords
+(`[skip ci]`, `[ci skip]`, `[no ci]`, `[skip actions]`, `[actions skip]`), which start no workflow
+wherever they stand. The daemon classifies a push by the paths its commits touch, never by the
+trailer: a wrong trailer stalls the issue (a trailered code push gets no verdict carried; a head
+with no CI is refused at READY) and never passes it. While the head commit carries
 `skip-checks: true`, a pull-request body edit alone starts no GitHub workflow run, so a check that
 re-judges the body re-runs on that head only after a later push; on a code head the same edit
 re-runs it at once. While the pull request conflicts with its base (GitHub shows it
 `CONFLICTING`), no workflow triggered `on: pull_request` runs for any of its activity types, so
 a body edit re-judges nothing there either; a push cures both, but only once the pull request is
 mergeable, so the implementer forward-merges a conflicting one first (*Reintegrating the base* in
-`skill://legion-worker/references/conflicts-and-rewrites.md`). Its ancestry check refuses
-unless `@-` descends from `legion/<KEY>@origin` (or the branch is not on GitHub yet): your issue's
-roles share one clone (under tmux every issue does), so another role's push moves the remote branch
-here at once, and a push not descending from it would move it sideways onto your commit and
-drop theirs. A handoff commit never sits on an implementer's unpushed chain: when the issue moves
-back to planning, the implementer's unpushed commits stay off the bookmark until the implementer
-returns, and the planner writes its handoff on the remote tip.
+`skill://legion-worker/references/conflicts-and-rewrites.md`).
 
-Before any rewrite of a commit you already pushed — a `jj squash --into` one, or any other
-rewrite — read *Rewriting pushed commits* in
-`skill://legion-worker/references/conflicts-and-rewrites.md`: it checks that no other tree's work
-is built on that commit and records the pushed tip `legion push` reads, the only case in which a
-push lets the remote branch move off its current tip.
-
-Before the push, check ancestry and identity as above: the chain carries every earlier phase's
-pushed commits, and pushing them with yours is expected. A refusal, and a push the remote rejects, is a
-report to the architect with the output, never a force-push. The merger makes no commit and
-pushes nothing.
-
-Do not report phase completion until the write, existence check, handoff commit, and push
-succeed. This is the committed copy the next phase reads after revival. Retro's last commit
-removes `.legion/<issue>/` from the head a human merges (`skill://legion-retro`); a round after
-it, such as one a withdrawn READY sends back, writes and commits its own handoff again, since
-`handoff_complete` refuses a handoff that commit removed. Retro and the post-merge production
-check write no `.legion/<issue>/<phase>.json`, commit no handoff, and report with
-`handoff_complete` alone (below).
+Before the push, inspect `jj -R "$LEGION_WORKSPACE" log -r 'ancestors(@, 5)'` and run the
+identity check above: the chain carries every earlier phase's pushed commits, and pushing them
+with yours is expected. Your issue's roles share one clone (under tmux every issue does), so
+another role's push moves `legion/<KEY>@origin` here at once, and `jj git push` refuses a remote
+branch that moved: report the refusal to the architect with its output, never force. A handoff commit never
+sits on an implementer's unpushed chain: when the issue moves back to planning, the implementer's
+unpushed commits stay off the bookmark until the implementer returns, and the planner writes its
+handoff on the remote tip. The one sanctioned non-fast-forward move is the rewrite of a commit you
+already pushed — a `jj squash --into` one, or any other rewrite — and before it, read *Rewriting
+pushed commits* in `skill://legion-worker/references/conflicts-and-rewrites.md`: its guard checks
+that no other tree's work is built on that commit, and only after it clears is the bookmark moved
+with `--allow-backwards`. The merger makes no commit and pushes nothing.
 
 ## Completion: report to the architect, then stay
 
-Report completion to the architect with the `legion` tool's `handoff_complete` and a two-sentence
-`summary`. This publishes your phase's completion to the architect's role and clears the daemon's
-record of this issue's active phase. A shell `legion handoff complete`, should one run, completes
-the phase at the daemon just as well and is not refused, but only the tool call tells the
-extension's phase stall: after a shell completion the reminder arrives when the turn settles and
-again after each later Envoy delivery's turn, until a tool `handoff_complete` next succeeds (in
-practice the next phase's). A completion made on that reminder is refused and closes nothing —
-`HANDOFF_NOT_CURRENT_PHASE` once the phase has moved, `HANDOFF_ALREADY_RECORDED` where a
-completion moves nothing (the implementer before its pull request exists; the production check) —
-so answer the reminder with a WAITING line saying the phase was completed from the shell. Do not
-add pipeline labels, run a controller loop, or invent a different completion protocol — this is the
-whole contract.
+Report completion to the architect: call the `legion` tool with `op: "handoff_complete"` and
+`summary`: two sentences for the architect. The tool is your only way to the daemon
+(`handoff_complete`; `read_record`, your issue's record, which is what "re-read your issue
+record" means; and `request_backward_move`), and nothing of yours runs `legion` from bash. The
+tool call is what the extension's phase stall records, and a turn that ends with the phase still
+open gets one reminder; do not complete again on that reminder when your first completion was
+accepted — it stands, and a second is refused because the issue has already left your phase.
+
+This publishes your phase's completion to the architect's role and clears the daemon's
+record of this issue's active phase. Do not add pipeline labels, run a controller loop, or
+invent a different completion protocol — this is the whole contract.
 
 A reviewer's phase ends with its completion, not with its review; the order of a review round
 (the handoff push; for an approval, CI settled green at that head; the review of that head; then

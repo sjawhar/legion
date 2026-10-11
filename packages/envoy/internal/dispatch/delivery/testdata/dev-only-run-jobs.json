@@ -1,0 +1,221 @@
+{
+  "total_count": 36,
+  "jobs": [
+    {
+      "name": "validate-stack",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:33:31Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "dev-apply / legion-dev-apply",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "org-apply",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:47:20Z"
+    },
+    {
+      "name": "dev-apply / dispatch-apply",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "dev-apply / build-images-production",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "dev-apply / org-apply",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "dev-apply / wait-for-images",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:34:12Z",
+      "completed_at": "2026-10-10T09:34:41Z"
+    },
+    {
+      "name": "notify-org-apply-failure",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "dev-apply / dispatch-rerun-refusal",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:37Z"
+    },
+    {
+      "name": "chain-verdict",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "dev-apply / legion-rerun-refusal",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:37Z"
+    },
+    {
+      "name": "dev-apply / dev-apply",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:47:41Z",
+      "completed_at": "2026-10-10T09:55:28Z"
+    },
+    {
+      "name": "dev-apply / build-images-staging",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "dev-apply / wait-for-wheels",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "dev-apply / org-apply-rerun-refusal",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:37Z"
+    },
+    {
+      "name": "notify-workload-failure",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "dev-apply / build-images-dev",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:35:36Z",
+      "completed_at": "2026-10-10T09:38:52Z"
+    },
+    {
+      "name": "dev-apply / staging-apply",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:34:57Z"
+    },
+    {
+      "name": "dev-apply / production-apply",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:20Z",
+      "completed_at": "2026-10-10T09:34:57Z"
+    },
+    {
+      "name": "notify-validate-stack-failure",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:25Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "production-apply",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:26Z",
+      "completed_at": "2026-10-10T09:47:20Z"
+    },
+    {
+      "name": "staging-apply",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:27Z",
+      "completed_at": "2026-10-10T09:47:20Z"
+    },
+    {
+      "name": "dev-apply / e2e-collect-preflight",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:33:46Z",
+      "completed_at": "2026-10-10T09:34:57Z"
+    },
+    {
+      "name": "dev-apply / platform-ui-e2e",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:34:16Z",
+      "completed_at": "2026-10-10T09:44:40Z"
+    },
+    {
+      "name": "dev-apply / slot-preflight",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:34:16Z",
+      "completed_at": "2026-10-10T09:35:15Z"
+    },
+    {
+      "name": "legion-dev-apply",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:29Z",
+      "completed_at": "2026-10-10T09:47:20Z"
+    },
+    {
+      "name": "dev-apply / wait-for-apply-images",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:34:11Z",
+      "completed_at": "2026-10-10T09:34:31Z"
+    },
+    {
+      "name": "dev-apply / legion-apply",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:47:29Z",
+      "completed_at": "2026-10-10T09:33:36Z"
+    },
+    {
+      "name": "dev-apply / dev-apply-post-gate",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:55:50Z",
+      "completed_at": "2026-10-10T10:01:59Z"
+    },
+    {
+      "name": "dev-apply / staging-e2e / staging-e2e hiring drivers",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:55:50Z",
+      "completed_at": "2026-10-10T09:57:01Z"
+    },
+    {
+      "name": "dev-apply / staging-e2e / staging-e2e",
+      "conclusion": "success",
+      "started_at": "2026-10-10T09:55:52Z",
+      "completed_at": "2026-10-10T10:00:10Z"
+    },
+    {
+      "name": "dev-apply / staging-e2e / credential-inventory",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T09:55:29Z",
+      "completed_at": "2026-10-10T09:55:29Z"
+    },
+    {
+      "name": "dev-apply / staging-e2e / Reap cancelled staging e2e eval sets",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T10:00:10Z",
+      "completed_at": "2026-10-10T10:00:10Z"
+    },
+    {
+      "name": "dev-apply / workload-rerun-refusal",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T10:00:11Z",
+      "completed_at": "2026-10-10T10:00:10Z"
+    },
+    {
+      "name": "dev-lane-results",
+      "conclusion": "success",
+      "started_at": "2026-10-10T10:02:19Z",
+      "completed_at": "2026-10-10T10:02:24Z"
+    },
+    {
+      "name": "dev-apply / dev-chain-tripwire",
+      "conclusion": "skipped",
+      "started_at": "2026-10-10T10:02:00Z",
+      "completed_at": "2026-10-10T10:01:59Z"
+    }
+  ]
+}

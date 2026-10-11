@@ -9,7 +9,7 @@ tags:
   - grant-lifetime
   - worker-pod
 date: 2026-10-08
-status: active
+status: superseded by LEGION-631 — `legion push`, `legion gh` and the per-command grant are gone; every role pushes with plain `jj bookmark set legion/<KEY> -r @-` and `jj git push --bookmark legion/<KEY>`, runs plain `gh` as its App from `GH_CONFIG_DIR` with no grant to outlive, and the plugin no longer refuses `jj undo` or `jj abandon`, while the frozen-commit rule itself (a new commit above `@-`, never a squash into it) still holds
 module: legion
 related_issues:
   - "LEGION-578"

@@ -142,7 +142,7 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 		Failing: []string{"unit"}, Cancelled: []string{"e2e"}, CheckedHead: "b1c2d3",
 		FixAttempts: 2, BlockedAttempts: 1,
 		CheckRuns: []AttemptRun{{Name: "unit", ID: 91}, {Name: "lint", ID: 92}}, Generation: 4,
-		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", PlannedRed: true, State: PullRequestMerged,
+		Snapshot: "snapshot-4", Pushes: pushes, HeadCounted: "b1c2d3", HeadCountedBefore: "a0b1c2", PlannedRed: true, State: PullRequestMerged,
 		// A base that requires no check reads back as such, never as a set that was not read.
 		Required:  []string{},
 		Workflows: []RequiredWorkflow{{Path: ".github/workflows/review.yml", Result: "failure"}}, WorkflowsHead: "b1c2d3",
@@ -283,14 +283,14 @@ func samePullRequest(got, want PullRequest) bool {
 		got.FixAttempts == want.FixAttempts &&
 		got.BlockedAttempts == want.BlockedAttempts && reflect.DeepEqual(got.CheckRuns, want.CheckRuns) &&
 		got.Generation == want.Generation && got.Snapshot == want.Snapshot &&
-		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted &&
+		reflect.DeepEqual(got.Pushes, want.Pushes) && got.HeadCounted == want.HeadCounted && got.HeadCountedBefore == want.HeadCountedBefore &&
 		got.PlannedRed == want.PlannedRed && reflect.DeepEqual(got.Required, want.Required) &&
 		reflect.DeepEqual(got.Workflows, want.Workflows) && got.WorkflowsHead == want.WorkflowsHead
 }
 
 // A new generation keeps an open pull request but none of the old generation's fix-attempt
-// accounting: its counts, its counted head, and its planned mark, which would otherwise exempt the
-// new generation's first red from counting.
+// accounting: its counts, its counted head and the mark that count replaced, and its planned mark,
+// which would otherwise exempt the new generation's first red from counting.
 func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
@@ -300,7 +300,7 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		Issue: issue.Key, Repo: "sjawhar/legion", Number: 1359, Branch: "legion/LEGION-285",
 		HeadSHA: "red-tests", HeadUpdatedAt: time.Date(2026, 9, 25, 21, 0, 0, 0, time.UTC),
 		CheckedHead: "red-tests", Failing: []string{"test"}, CheckRuns: []AttemptRun{},
-		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", PlannedRed: true, State: PullRequestOpen,
+		FixAttempts: 2, BlockedAttempts: 2, HeadCounted: "red-tests", HeadCountedBefore: "fix", PlannedRed: true, State: PullRequestOpen,
 	}
 	inTx(t, st, func(tx pgx.Tx) {
 		must(t, records.PutIssue(ctx, tx, issue))
@@ -313,9 +313,9 @@ func TestClearGenerationResetsAnOpenPullRequestsFixAttemptAccounting(t *testing.
 		if got == nil {
 			t.Fatal("the open pull request is gone, want it kept")
 		}
-		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.PlannedRed {
-			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q plannedRed=%v, want 0, 0, \"\" and false",
-				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.PlannedRed)
+		if got.FixAttempts != 0 || got.BlockedAttempts != 0 || got.HeadCounted != "" || got.HeadCountedBefore != "" || got.PlannedRed {
+			t.Fatalf("after ClearGeneration: fixAttempts=%d blockedAttempts=%d headCounted=%q headCountedBefore=%q plannedRed=%v, want 0, 0, \"\", \"\" and false",
+				got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.HeadCountedBefore, got.PlannedRed)
 		}
 	})
 }
@@ -618,7 +618,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	want := map[string][]string{
 		"issues":           {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status"},
 		"phases":           {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at"},
-		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability"},
+		"pull_requests":    {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability"},
 		"design_gates":     {"issue", "artifact_id", "latest_version", "approved_version"},
 		"slots":            {"issue", "index", "admitted_at"},
 		"processed_events": {"source", "event_id", "processed_at"},

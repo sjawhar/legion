@@ -10,7 +10,7 @@ tags:
   - git-ref
   - ci-watcher
 date: 2026-10-07
-status: active
+status: superseded by LEGION-631 — `legion push` is gone; the bookmark is moved by plain `jj bookmark set legion/<KEY> -r @-` and `jj git push --bookmark legion/<KEY>`, and the two-reads diagnosis stands
 module: .github/workflows, packages/daemon
 applies_when:
   - `gh run list --branch legion/<KEY>` shows no run for a commit you pushed and `mergeStateStatus` is not DIRTY

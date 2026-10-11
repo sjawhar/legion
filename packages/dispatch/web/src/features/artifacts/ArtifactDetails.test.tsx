@@ -89,6 +89,33 @@ test("ArtifactDetails compares selected blob versions side by side", async () =>
   }
 });
 
+// A document version's line names its stored markdown's size, as a file version's names its bytes;
+// a document carries no SHA-256, so its line names none.
+test("ArtifactDetails names each document version's stored size", async () => {
+  const doc: Artifact = {
+    ...artifact,
+    id: "artifact-doc",
+    kind: "doc",
+    name: "spec.md",
+    slug: "spec-md",
+    versions: artifact.versions.map(({ mime: _mime, sha256: _sha256, ...version }) => ({
+      ...version,
+      size: version.number === 1 ? 512 : 1_048_475,
+    })),
+  };
+
+  const view = renderDetails(doc);
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Show all versions" }));
+    const versions = screen.getByRole("region", { name: "Versions for spec.md" });
+    expect(versions.textContent).toContain("512 B");
+    expect(versions.textContent).toContain("1023.9 KB");
+    expect(versions.textContent).not.toContain("SHA-256");
+  } finally {
+    view.unmount();
+  }
+});
+
 test("ArtifactDetails links each inbound source to the record that cites it", async () => {
   const getReferences = spyOn(api, "getReferences").mockResolvedValue({
     edges: [

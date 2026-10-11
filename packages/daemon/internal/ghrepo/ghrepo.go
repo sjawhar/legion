@@ -1,6 +1,6 @@
 // Package ghrepo is the one reading of a GitHub `<owner>/<name>` every Legion input takes, parsed
-// once where it enters: a project's configured repo (internal/config), `legion threads resolve
-// --repo`, and `legion workspace-init`'s --repo, before anything touches the volume or the feed.
+// once where it enters: a project's configured repo (internal/config), the pull request a record
+// carries, and `legion workspace-init`'s --repo, before anything touches the volume or the feed.
 // Everything past those boundaries carries the Repository, so nothing splits the string again.
 // Every path Legion derives from a repository joins its two names under a state directory, so
 // each input is held to the same rule.

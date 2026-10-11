@@ -1,8 +1,8 @@
-// The delivery pages' e2e fixture, written directly in Postgres: the timeline and the measures
-// read only stored facts, so these are the rows intake and reconcile would have written, without
-// a live GitHub App. One module so the timeline rows, the measures rows and the docs screenshots
-// read the same data. acme/widgets-shaped placeholders throughout (AGENTS.md: "This repository is
-// public").
+// The delivery pages' e2e fixture, written directly in Postgres: the timeline, the measures and
+// the Pipeline page read only stored facts, so these are the rows intake and reconcile would have
+// written, without a live GitHub App. One module so the timeline rows, the measures rows, the
+// Pipeline rows and the docs screenshots read the same data. acme/widgets-shaped placeholders
+// throughout (AGENTS.md: "This repository is public").
 import { sql } from "./psql";
 
 const SEED_ACTOR = `'{"kind":"system","id":"e2e-seed"}'`;
@@ -126,4 +126,164 @@ export async function seedMeasuresFixture(): Promise<void> {
        ('acme/widgets', 506, 'integration-test', '2026-09-11T09:00:00Z', 'failure'),
        ('acme/widgets', 507, 'widgets-release / widgets-release', '2026-09-14T09:00:00Z', 'failure')`
   );
+}
+
+/** The Pipeline page's pinned "today" (`?at=`): the e2e rows and the docs screenshot show the
+ *  seven days ending on its day, 2026-09-26 to 2026-10-02. */
+export const PIPELINE_AT = "2026-10-02T12:00:00Z";
+
+/** A time on 2026-09-<day> (a day past 30 rolls into October), as the prototype's
+ *  collector/tests/test_pipeline.py `_ts` writes it. */
+function fixtureTime(day: number, hour: number, minute = 0): string {
+  return new Date(Date.UTC(2026, 8, day, hour, 0, 0) + minute * 60_000).toISOString();
+}
+
+interface PipelineJob {
+  name: string;
+  minutes: number;
+  conclusion: string | null;
+}
+
+/** One stored run and its jobs as VALUES rows: each job starts at `jobStart` and lasts its
+ *  minutes; a null conclusion is a job still running. */
+function pipelineRun(run: {
+  id: number;
+  kind: "pr_checks" | "deploy";
+  started: string;
+  completed: string;
+  conclusion: string;
+  branch: string | null;
+  event: string;
+  jobStart: string;
+  jobs: PipelineJob[];
+}): { run: string; jobs: string[] } {
+  const quote = (value: string | null) => (value === null ? "null" : `'${value}'`);
+  const prNumber = run.kind === "pr_checks" ? "7" : "null";
+  const started = Date.parse(run.jobStart);
+  return {
+    run: `('acme/widgets', ${run.id}, '${run.kind}', ${prNumber}, 's${run.id}', '${run.started}', '${run.started}', '${run.completed}', '${run.conclusion}', 'https://github.com/acme/widgets/actions/runs/${run.id}', ${quote(run.branch)}, '${run.event}')`,
+    jobs: run.jobs.map(
+      (job) =>
+        `('acme/widgets', ${run.id}, '${job.name}', '${run.jobStart}', '${new Date(started + job.minutes * 60_000).toISOString()}', ${quote(job.conclusion)})`
+    ),
+  };
+}
+
+/** The Pipeline page's rows: the ones the prototype's collector/tests/test_pipeline.py builds in
+ *  code, with placeholder job names (the API test `api/delivery_pipeline_test.go` seeds the same
+ *  rows), dated so `?at=PIPELINE_AT` shows them, and the three job names set on the stored
+ *  settings row. PR checks: the failing-jobs runs (today, two failures and a cancelled run;
+ *  yesterday, a success and a failure before the 24 hours) and 50 build / unit results to rank
+ *  among the slowest jobs, every one a `pull_request` run, plus a `merge_group` run no card
+ *  counts. Deploys (run ids 601-606, clear of the measures fixture's 501-508, so the docs harness
+ *  seeds both): four push runs on main naming the three settings' jobs, plus a workflow_dispatch
+ *  run and a push on feature/x no card counts. The settings name `staging-e2e / run`,
+ *  `staging-release / apply` and the roll-up `checks-complete`. Two pull requests merged today:
+ *  one shipped by run 601 (head commit 08:00, after its 07:10 merge), one still waiting. */
+export async function seedPipelineRows(): Promise<void> {
+  const job = (name: string, minutes: number, conclusion: string | null = "success") => ({
+    conclusion,
+    minutes,
+    name,
+  });
+  const check = (
+    id: number,
+    day: number,
+    hour: number,
+    minutes: number,
+    conclusion: string,
+    jobs: PipelineJob[],
+    event = "pull_request"
+  ) =>
+    pipelineRun({
+      branch: null,
+      completed: fixtureTime(day, hour, minutes),
+      conclusion,
+      event,
+      id,
+      jobStart: fixtureTime(day, hour),
+      jobs,
+      kind: "pr_checks",
+      started: fixtureTime(day, hour),
+    });
+  const deploy = (id: number, branch: string, event: string, jobs: PipelineJob[]) =>
+    pipelineRun({
+      branch,
+      completed: fixtureTime(32, 12),
+      conclusion: "success",
+      event,
+      id,
+      jobStart: fixtureTime(32, 9),
+      jobs: [job("staging-e2e / inventory", 0, "skipped"), ...jobs],
+      kind: "deploy",
+      started: fixtureTime(32, 8),
+    });
+  const runs = [
+    check(1, 32, 8, 30, "failure", [
+      job("build / unit", 29, "failure"),
+      job("checks-complete", 0.5, "failure"),
+      job("lint", 5),
+    ]),
+    check(2, 32, 10, 30, "failure", [
+      job("build / unit", 29, "failure"),
+      job("lint", 5, "failure"),
+    ]),
+    check(3, 31, 13, 30, "success", [
+      job("build / unit", 29),
+      job("lint", 5),
+      job("docs", 0, "skipped"),
+    ]),
+    check(4, 31, 6, 30, "failure", [job("typecheck", 4, "failure")]),
+    check(5, 32, 11, 10, "cancelled", [job("build / unit", 9, "failure")]),
+    ...Array.from({ length: 50 }, (_, i) =>
+      check(100 + i, 27 + (i % 5), 8, 95, "success", [job("build / unit", 90 + i)])
+    ),
+    check(900, 32, 9, 20, "success", [job("build / unit", 19)], "merge_group"),
+    deploy(601, "main", "push", [
+      job("staging-release / apply", 7),
+      job("staging-e2e / run", 40),
+      job("widgets-release / widgets-release", 9),
+    ]),
+    deploy(602, "main", "push", [
+      job("staging-release / apply", 8),
+      job("staging-e2e / run", 70, "failure"),
+      job("widgets-release / widgets-release", 0, "skipped"),
+    ]),
+    deploy(603, "main", "push", [
+      job("staging-release / apply", 9),
+      job("staging-e2e / run", 3, "cancelled"),
+    ]),
+    deploy(604, "main", "push", [job("staging-release / apply", 0, null)]),
+    deploy(605, "main", "workflow_dispatch", [
+      job("staging-release / apply", 99, "failure"),
+      job("staging-e2e / run", 99, "failure"),
+    ]),
+    deploy(606, "feature/x", "push", [
+      job("staging-e2e / run", 30),
+      job("widgets-release / widgets-release", 9),
+    ]),
+  ];
+  await sql(
+    `UPDATE delivery_settings SET staging_e2e_job_name = 'staging-e2e / run',
+       staging_apply_job_name = 'staging-release / apply', pr_checks_rollup_job_name = 'checks-complete'
+     WHERE singleton`,
+    `INSERT INTO delivery_pull_requests (
+       repo, number, title, url, author, created_at, merged_at, additions, deletions, rework, issue_key, sessions, partial
+     ) VALUES
+       ('acme/widgets', 11, 'feat: a piped widget', 'https://github.com/acme/widgets/pull/11', 'octocat',
+        '${fixtureTime(32, 7)}', '${fixtureTime(32, 7, 10)}', 3, 1, false, null, ARRAY[]::text[], false),
+       ('acme/widgets', 12, 'feat: a waiting widget', 'https://github.com/acme/widgets/pull/12', 'octocat',
+        '${fixtureTime(32, 9)}', '${fixtureTime(32, 10)}', 2, 0, false, null, ARRAY[]::text[], false)`,
+    `INSERT INTO delivery_runs (
+       repo, run_id, kind, pr_number, head_sha, head_commit_at, started_at, completed_at, conclusion, url, head_branch, event
+     ) VALUES ${runs.map((r) => r.run).join(",\n")}`,
+    `INSERT INTO delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion) VALUES
+       ${runs.flatMap((r) => r.jobs).join(",\n")}`
+  );
+}
+
+/** The Pipeline page's fixture on a reset database: the delivery settings, then its rows. */
+export async function seedPipelineFixture(): Promise<void> {
+  await sql(SETTINGS);
+  await seedPipelineRows();
 }
