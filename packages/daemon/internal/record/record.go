@@ -101,7 +101,7 @@ type PhaseRow struct {
 	LastHandoff string
 	// Decision is the review round's decision, on the reviewer's row: the newest review the review
 	// App or an account with write access to the repository submitted for the round that carried one
-	// (workflow's decidesRound), kept until the round ends, since the reviewer's completion can come
+	// (workflow's DecidesRound), kept until the round ends, since the reviewer's completion can come
 	// after the review it posted. Nil until a review decides.
 	Decision *ReviewDecision
 	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until

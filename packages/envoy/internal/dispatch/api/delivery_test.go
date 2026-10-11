@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"os"
 	"reflect"
 	"slices"
 	"strconv"
@@ -506,41 +507,55 @@ func TestGetDeliveryRunListsEveryJob(t *testing.T) {
 	}
 }
 
-// TestDeliveryReadsLogNoProductionJobWarningForARunOffMain: a dev-only deploy run, on a branch
-// other than main with its production job skipped (GitHub names a skipped reusable-workflow job
-// after the calling job alone), is no deploy, and both reads that judge deploy runs, the timeline
-// and the measures, read the runs on main alone, so neither logs ProductionApplies' WARN about a
-// missing production job for it. The same run on main is logged, which shows the capture sees
-// the WARN when one is written.
-func TestDeliveryReadsLogNoProductionJobWarningForARunOffMain(t *testing.T) {
+// TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob: both reads that judge deploy runs, the
+// timeline and the measures, warn about a successfully concluded run on main that holds no job by
+// the configured production job name, and only once for it however often they read it. A dev-only
+// run is no deploy and draws no warning, whether it ran off main (neither read judges it) or on
+// main beside a deploy: dev-only-run-jobs.json is GitHub's job list for a main run whose dispatch
+// applied dev alone, where the configured production job (`production-apply / production-apply`, a
+// reusable workflow's job) is skipped and so listed under its calling job's name alone
+// (`production-apply`), and the deploy's job of the configured name shows that name is real. The
+// run on main with neither spelling of the job is the warning's case, a renamed or misconfigured
+// job, and shows the capture sees the WARN when one is written.
+func TestDeliveryReadsWarnOnceForAMainRunWithNoProductionJob(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)
 	ctx := t.Context()
 	if _, err := delivery.PutSettings(ctx, database.Pool, delivery.DeliverySettings{
 		DeployRepo: "acme/widgets", DeployWorkflowPath: ".github/workflows/deploy.yml",
-		ProductionJobName: "widgets-release / widgets-release", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
+		ProductionJobName: "production-apply / production-apply", PRChecksWorkflowPath: ".github/workflows/pr-checks.yml",
 		PopulationAuthors: []string{"octocat"},
 	}, model.Actor{Kind: "system", ID: "test"}); err != nil {
 		t.Fatalf("seed settings: %v", err)
 	}
-	start := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)
+	data, err := os.ReadFile("../delivery/testdata/dev-only-run-jobs.json")
+	if err != nil {
+		t.Fatalf("read the recorded job list: %v", err)
+	}
+	recorded, _, err := delivery.DecodeJobsPage(data)
+	if err != nil {
+		t.Fatalf("decode the recorded job list: %v", err)
+	}
+
+	start := time.Date(2026, 10, 10, 9, 47, 17, 0, time.UTC)
 	success := delivery.DeliveryRunConclusionSuccess
-	const offMain, onMain = int64(501), int64(502)
+	const offMain, devOnlyOnMain, renamedOnMain, deployOnMain = int64(38041790207), int64(38041790208), int64(38041790209), int64(38041790210)
+	renamed := []delivery.FetchedJob{{Name: "prod-apply / prod-apply", Conclusion: new("success")}}
+	deploy := []delivery.FetchedJob{{Name: "production-apply / production-apply", Conclusion: new("success"), CompletedAt: new(start.Add(10 * time.Minute))}}
 	for _, run := range []struct {
 		id     int64
 		branch string
-	}{{offMain, "test/dev-only"}, {onMain, "main"}} {
+		jobs   []delivery.FetchedJob
+	}{{offMain, "test/dev-only", renamed}, {devOnlyOnMain, "main", recorded}, {renamedOnMain, "main", renamed}, {deployOnMain, "main", deploy}} {
 		id := strconv.FormatInt(run.id, 10)
 		if err := delivery.UpsertRun(ctx, database.Pool, delivery.DeliveryRun{
 			Repo: "acme/widgets", RunID: run.id, Kind: delivery.DeliveryRunKindDeploy, HeadSHA: "sha" + id,
-			HeadCommitAt: start, StartedAt: start, CompletedAt: new(start.Add(time.Hour)), Conclusion: &success,
+			HeadCommitAt: start.Add(-49 * time.Minute), StartedAt: start, CompletedAt: new(start.Add(15 * time.Minute)), Conclusion: &success,
 			URL: "https://github.com/acme/widgets/actions/runs/" + id, HeadBranch: new(run.branch), Event: new("workflow_dispatch"),
 		}); err != nil {
 			t.Fatalf("seed run %d: %v", run.id, err)
 		}
-		if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", run.id, []delivery.DeliveryRunJob{
-			{Repo: "acme/widgets", RunID: run.id, Name: "widgets-release", Conclusion: new(delivery.DeliveryJobConclusionSkipped)},
-		}); err != nil {
-			t.Fatalf("seed run %d's job: %v", run.id, err)
+		if err := delivery.UpsertRunJobs(ctx, database.Pool, "acme/widgets", run.id, delivery.RunJobs("acme/widgets", run.id, run.jobs)); err != nil {
+			t.Fatalf("seed run %d's jobs: %v", run.id, err)
 		}
 	}
 
@@ -549,9 +564,11 @@ func TestDeliveryReadsLogNoProductionJobWarningForARunOffMain(t *testing.T) {
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previous) })
 
-	const window = "from=2024-01-01T00:00:00Z&to=2024-01-02T00:00:00Z"
-	getDeliveryTimeline(t, handler, window)
-	getDeliveryMeasures(t, handler, window)
+	const window = "from=2026-10-10T00:00:00Z&to=2026-10-11T00:00:00Z"
+	for range 2 {
+		getDeliveryTimeline(t, handler, window)
+		getDeliveryMeasures(t, handler, window)
+	}
 
 	warned := map[string]int{}
 	for _, line := range strings.Split(logs.String(), "\n") {
@@ -564,9 +581,10 @@ func TestDeliveryReadsLogNoProductionJobWarningForARunOffMain(t *testing.T) {
 			}
 		}
 	}
-	if warned[strconv.FormatInt(offMain, 10)] != 0 || warned[strconv.FormatInt(onMain, 10)] == 0 {
-		t.Fatalf("missing-production-job WARNs by run = %v, want none for the run off main (%d) and some for the run on main (%d)",
-			warned, offMain, onMain)
+	want := map[string]int{strconv.FormatInt(renamedOnMain, 10): 1}
+	if !reflect.DeepEqual(warned, want) {
+		t.Fatalf("missing-production-job WARNs by run = %v, want %v: none for the run off main (%d) or the dev-only run on main (%d), one for the run on main with no production job (%d)",
+			warned, want, offMain, devOnlyOnMain, renamedOnMain)
 	}
 }
 

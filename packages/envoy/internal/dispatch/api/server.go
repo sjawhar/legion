@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -231,6 +232,21 @@ type server struct {
 	deps            Deps
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
+	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
+	// warned holds no production job, so a read that judges a run again does not warn about it
+	// again. Nothing evicts an entry: the map holds one per (repo, run, configured job name) it has
+	// warned about, which is the runs a misconfigured production_job_name sets apart until it is
+	// fixed and the successful runs of a listing that held no production deploy, and a restart
+	// empties it.
+	warnedUnmatchedRuns sync.Map
+}
+
+// warnedProductionRun keys server.warnedUnmatchedRuns: one deploy run under one configured
+// production job name.
+type warnedProductionRun struct {
+	repo    string
+	runID   int64
+	jobName string
 }
 
 // queryer is the pgx surface shared by *pgxpool.Pool and pgx.Tx, so one loader
