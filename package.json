@@ -11,6 +11,7 @@
   "description": "Autonomous development swarm using Oh My Pi agents",
   "private": true,
   "scripts": {
+    "dispatch:local": "cd packages/dispatch && bun run dispatch:local",
     "docs:dev": "cd docs/site && bun run dev",
     "docs:build": "cd docs/site && bun run build",
     "docs:media": "bun docs/site/media/shots.ts"

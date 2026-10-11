@@ -146,6 +146,14 @@ export const deliveryRunQuery = (id: number) =>
     queryFn: () => api.getDeliveryRun(id),
   });
 
+/** The Pipeline page's read, keyed under `["delivery"]` so a settings save refreshes it with the
+ *  timeline, and by `at` so a pinned day is its own cache entry. */
+export const deliveryPipelineQuery = (options: { at?: string }) =>
+  queryOptions({
+    queryKey: ["delivery", "pipeline", options],
+    queryFn: () => api.getDeliveryPipeline(options),
+  });
+
 /** The delivery timeline's configuration record, or `null` until someone sets it: the Settings
  *  section's form reads it, while the Delivery page's setup form starts from the `null` the
  *  timeline's `DELIVERY_NOT_CONFIGURED` already implies and reads nothing. */

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -94,18 +93,16 @@ func openPeople(boot bootConfig, dataDir string, pool *store.Pool, signIn *oidc.
 }
 
 // retirePlainRefreshTokens is the boot's retirement of the refresh tokens people holds in plain
-// text (store.PgPeopleStore.RetirePlainRefreshTokens), bounded by timeout: a pool that does not
-// answer fails each token not yet revoked, and the start goes on. It logs the counts, never a
-// token; each token the pool did not revoke has its own ERROR line, and stays for the next boot.
+// text (store.PgPeopleStore.RetirePlainRefreshTokens), bounded by timeout (bootTask): a pool that
+// does not answer fails each token not yet revoked, and the start goes on. It logs the counts,
+// never a token; each token the pool did not revoke has its own ERROR line, and stays for the next
+// boot.
 func retirePlainRefreshTokens(ctx context.Context, people *store.PgPeopleStore, timeout time.Duration) {
-	retireCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	retired, failed, err := people.RetirePlainRefreshTokens(retireCtx)
-	if err != nil {
-		slog.Error("dispatch: retire the refresh tokens stored in plain text", "retired", retired, "failed", failed, "error", err)
-		return
-	}
-	slog.Info("dispatch: retired the refresh tokens stored in plain text", "retired", retired, "failed", failed)
+	bootTask(ctx, timeout, "dispatch: retire the refresh tokens stored in plain text", "dispatch: retired the refresh tokens stored in plain text",
+		func(ctx context.Context) ([]any, error) {
+			retired, failed, err := people.RetirePlainRefreshTokens(ctx)
+			return []any{"retired", retired, "failed", failed}, err
+		})
 }
 
 // requestIdentityFor is how a browser request names its person under boot: a header-identity

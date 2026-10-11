@@ -103,7 +103,7 @@ and the checks that branch requires (its rulesets and its branch protection), th
 
 Every agent runs from `ghcr.io/sjawhar/legion-worker`, which carries Oh My Pi, Legion's two plugins
 (`@sjawhar/pi-envoy` and `@sjawhar/pi-legion`), the `legion` CLI and a general toolchain (git, jj, gh,
-Node, uv, the AWS CLI).
+Node, uv, the AWS CLI, kubectl).
 `legion.yaml` accepts the image only by digest (`ghcr.io/sjawhar/legion-worker@sha256:…`). A digest
 is published in each Worker Image workflow run's summary and in the body of each `legion-v<version>`
 GitHub release; for a `sha-` or release-version worker-image tag,
@@ -338,7 +338,9 @@ the complete shape (rendered in the [configuration reference](/legion/legion/ref
    ```
 
 The command checks the file and the plugins, fetches a fresh controller credential from the daemon
-with your operator token, and starts Oh My Pi in the foreground; its first turn runs the
+with your operator token, then fetches the review App's token for the controller's `gh` and keeps
+it refreshed while the session runs (against a daemon with no GitHub App, it says so and the
+controller's `gh` acts as nobody), and starts Oh My Pi in the foreground; its first turn runs the
 controller's start procedure with nothing typed. Running it again replaces the previous controller.
 Closing the terminal leaves the project without one, and the daemon logs
 `controller not registered; run legion controller start` until someone starts it.
@@ -413,7 +415,7 @@ Closing the terminal leaves the project without one, and the daemon logs
 ## Take a tree out
 
 From an operator's shell, `legion status` sets a root's Dispatch status through the daemon, as the
-controller does:
+controller does through its `legion` tool's `set_status`:
 
 ```sh
 legion status WIDGETS-12 backlog --config legion.yaml --operator-token-file operator-token

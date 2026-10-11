@@ -86,14 +86,14 @@ func TestARestartWithNoLoginSaysWhyTheSessionCannotEnroll(t *testing.T) {
 	}
 }
 
-// TestABoxTheHelperCannotEnrollIsAnError: an enroll-box the helper cannot attempt for want of a
-// launcher credential fails, as before, and logs the same ERROR and reason as a host session's
-// enrollment does.
-func TestABoxTheHelperCannotEnrollIsAnError(t *testing.T) {
+// TestASessionKeyTheHelperCannotEnrollIsAnError: an enroll-session-key the helper cannot attempt
+// for want of a launcher credential fails, as before, and logs the same ERROR and reason as the
+// helper's own session's enrollment does.
+func TestASessionKeyTheHelperCannotEnrollIsAnError(t *testing.T) {
 	var out syncBuffer
 	r := newLoggedRig(t, "", slog.New(slog.NewJSONHandler(&out, nil)))
-	if box := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-1", Thumbprint: "tp-1"}); box.OK || box.Code != CodeEnrollFailed || box.Error != noCredentialMsg {
-		t.Fatalf("enroll-box with no credential: %+v; want %s naming %q", box, CodeEnrollFailed, noCredentialMsg)
+	if key := r.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-1", Thumbprint: "tp-1"}); key.OK || key.Code != CodeEnrollFailed || key.Error != noCredentialMsg {
+		t.Fatalf("enroll-session-key with no credential: %+v; want %s naming %q", key, CodeEnrollFailed, noCredentialMsg)
 	}
 	line := waitForRecord(t, &out, "session cannot enroll: the helper holds no launcher credential; run: agent-secrets machine login, and have a human approve it")
 	for k, v := range map[string]any{
@@ -101,7 +101,7 @@ func TestABoxTheHelperCannotEnrollIsAnError(t *testing.T) {
 		"why": "no machine login since the helper started; a restart discards the launcher credential",
 	} {
 		if line[k] != v {
-			t.Fatalf("the line for the box: %s = %v; want %v (line %v)", k, line[k], v, line)
+			t.Fatalf("the line for the session key: %s = %v; want %v (line %v)", k, line[k], v, line)
 		}
 	}
 }
@@ -279,13 +279,14 @@ func TestSignAnswersNoCredentialWhileTheHelperHoldsNone(t *testing.T) {
 	r.login(t)
 	expect("logged in, still enrolling", CodeNotEnrolled)
 
-	// The broker refuses the credential (401 LAUNCHER_INVALID) on the next enroll, the box's or the
-	// session's own loop's, whichever comes first; either way the helper holds none afterwards.
+	// The broker refuses the credential (401 LAUNCHER_INVALID) on the next enroll, the session
+	// key's or the session's own loop's, whichever comes first; either way the helper holds none
+	// afterwards.
 	r.fake.mu.Lock()
 	r.fake.enrollUnauthorizedNext = 1
 	r.fake.mu.Unlock()
-	if box := r.call(t, Request{Op: "enroll-box", RuntimeID: "box-1", Thumbprint: "tp-1"}); box.OK {
-		t.Fatalf("enroll-box with a refused credential: %+v", box)
+	if key := r.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-1", Thumbprint: "tp-1"}); key.OK {
+		t.Fatalf("enroll-session-key with a refused credential: %+v", key)
 	}
 	if r.srv.Broker.HasCredential() {
 		t.Fatal("a refused credential must be cleared")

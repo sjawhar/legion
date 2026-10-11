@@ -217,21 +217,36 @@ func rewriteLive(doc *crdt.Doc, origin any, edit func(live *pmdoc.Node) bool) (*
 }
 
 func renderTree(tree *pmdoc.Node) (string, error) {
-	markdown, err := pmdoc.Render(tree)
+	markdown, _, err := renderTreeWithOffsets(tree)
+	return markdown, err
+}
+
+// renderTreeWithOffsets is renderTree with each identified block's byte range in the markdown,
+// which the same render records, so a write that stores the rendering cuts its mentions' excerpts
+// (recordTreeExcerpts) from it rather than rendering the tree again for them.
+func renderTreeWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset, error) {
+	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
 	if err != nil {
 		if errors.Is(err, pmdoc.ErrSchema) {
-			return "", fmt.Errorf("%w: %v", ErrDocSchema, err)
+			return "", nil, fmt.Errorf("%w: %v", ErrDocSchema, err)
 		}
-		return "", err
+		return "", nil, err
 	}
-	return markdown, nil
+	return markdown, offsets, nil
 }
 
 // documentMarkdown renders a tree treeOf read from a document, so a tree only the renderer refuses
 // is that document's OutsideSchemaError, as treeOf makes one the reader refuses.
 func documentMarkdown(tree *pmdoc.Node) (string, error) {
-	markdown, err := pmdoc.Render(tree)
-	return markdown, documentSchemaError(err)
+	markdown, _, err := documentMarkdownWithOffsets(tree)
+	return markdown, err
+}
+
+// documentMarkdownWithOffsets is documentMarkdown with each identified block's byte range, from the
+// same render.
+func documentMarkdownWithOffsets(tree *pmdoc.Node) (string, []pmdoc.BlockOffset, error) {
+	markdown, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
+	return markdown, offsets, documentSchemaError(err)
 }
 
 // renderDocument is what doc renders now, or the error that stopped it being read or rendered.

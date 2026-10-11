@@ -320,7 +320,7 @@ type fakeOMPShim struct {
 	process     *exec.Cmd
 }
 
-func startFakeOMPShim(t *testing.T, legion, addr string) *fakeOMPShim {
+func startFakeOMPShim(t *testing.T, legion, addr string, flags ...string) *fakeOMPShim {
 	t.Helper()
 	work := t.TempDir()
 	tokenPath := filepath.Join(work, "boot-token")
@@ -337,7 +337,8 @@ func startFakeOMPShim(t *testing.T, legion, addr string) *fakeOMPShim {
 		stdinRecord: filepath.Join(work, "omp-stdin.ndjson"),
 		exited:      make(chan struct{}),
 	}
-	shim.process = exec.Command(legion, "worker-shim", "--connect", addr, "--boot-token-file", tokenPath, "--", self)
+	args := append([]string{"worker-shim", "--connect", addr, "--boot-token-file", tokenPath}, flags...)
+	shim.process = exec.Command(legion, append(args, "--", self)...)
 	shim.process.Env = append(os.Environ(), fakeOMPEnv+"=1", "FAKE_OMP_STDIN="+shim.stdinRecord, "FAKE_OMP_PID="+shim.pidPath)
 	shim.process.Stdout = shim.output
 	shim.process.Stderr = shim.output
@@ -404,6 +405,54 @@ func TestTheRealShimBridgesAFakeOMPToTheRealListener(t *testing.T) {
 			}
 			bridge(t, legion, addr)
 		})
+	}
+}
+
+// The real shim, started with an enrolled pod's flags, answers the real listener's token request
+// itself with the token its mount holds at the request — after the kubelet rewrote it since the
+// hello — and nothing of the request reaches Oh My Pi.
+func TestTheRealShimReadsItsProjectedTokenAgainForTheRealListener(t *testing.T) {
+	legion := buildLegion(t)
+	work := t.TempDir()
+	keyDir := filepath.Join(work, "keys")
+	if err := os.Mkdir(keyDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const thumbprint = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs"
+	agentSecrets := filepath.Join(work, "agent-secrets")
+	keygen := "#!/bin/sh\n[ \"$1\" = keygen ] || exit 2\nprintf 'key\\n' >\"$3/key.pem\"\necho " + thumbprint + "\n"
+	if err := os.WriteFile(agentSecrets, []byte(keygen), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(work, "token")
+	const atHello, rotated = "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjF9.hello", "eyJhbGciOiJSUzI1NiJ9.eyJleHAiOjJ9.rotated"
+	if err := os.WriteFile(tokenFile, []byte(atHello+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d := listen(t, "tcp://127.0.0.1:0", (&gate{open: true}).resolve)
+	shim := startFakeOMPShim(t, legion, d.listener.Addr(),
+		"--agent-secrets-key-dir", keyDir, "--pod-token-file", tokenFile, "--agent-secrets-bin", agentSecrets)
+	hello, ok := d.next(t).(stream.Hello)
+	if !ok || hello.AgentSecrets == nil || *hello.AgentSecrets != (stream.AgentSecretsIdentity{Thumbprint: thumbprint, PodToken: atHello}) {
+		t.Fatalf("hello %#v, want the identity with the token the mount held at the hello", hello)
+	}
+	testwait.Eventually(t, "the shim to spawn OMP after the ack", shim.childStarted)
+	ctx, cancel := context.WithTimeout(context.Background(), integrationWait)
+	defer cancel()
+	conn, err := d.listener.Await(ctx, integrationClaim)
+	if err != nil {
+		t.Fatalf("Await: %v", err)
+	}
+
+	if err := os.WriteFile(tokenFile, []byte(rotated+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	token, err := conn.AgentSecretsToken(ctx)
+	if err != nil || token != rotated {
+		t.Fatalf("AgentSecretsToken = %q, %v, want the rewritten token", token, err)
+	}
+	if frames := childFrames(t, shim.stdinRecord); len(frames) != 0 {
+		t.Fatalf("the fake OMP read %q; the token request is the shim's alone", frames)
 	}
 }
 

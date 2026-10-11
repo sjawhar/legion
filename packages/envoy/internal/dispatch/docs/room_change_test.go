@@ -64,7 +64,8 @@ func TestAForkThatLosesRoomContentIsRenderedAgain(t *testing.T) {
 	}
 	editLiveTree(t, service, artifactID, dropBlock(t, "doomed paragraph"))
 
-	_, markdown, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	captured, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	markdown := captured.markdown
 	if err != nil {
 		t.Fatalf("capture live text: %v", err)
 	}
@@ -157,7 +158,8 @@ func TestOneAbsorbedRoomChangeCostsOneRender(t *testing.T) {
 		t.Fatal("the second edit recorded no rendering")
 	}
 
-	tree, markdown, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	captured, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	tree, markdown := captured.tree, captured.markdown
 	if err != nil {
 		t.Fatalf("capture live text: %v", err)
 	}
@@ -259,7 +261,8 @@ func TestACaptureNeverReusesARenderingTheForkHasMovedPast(t *testing.T) {
 		}
 		write := ledger.liveWriteFor(artifactID)
 		if write != nil && write.tree != nil {
-			tree, markdown, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+			captured, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+			tree, markdown := captured.tree, captured.markdown
 			if err != nil {
 				t.Fatalf("round %d: capture: %v", round, err)
 			}

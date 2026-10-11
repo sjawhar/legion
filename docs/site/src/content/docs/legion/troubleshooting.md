@@ -31,7 +31,7 @@ legion start --config legion.yaml --check-config
 | `unknown key <key>` | A typo, or a setting Legion no longer has; the message says which when it knows. |
 | `omp_invocation is not used when runtime is kubernetes: …` | Remove it: every pod runs the worker image's Oh My Pi. |
 | `<PROJECT> is already running (pid <n>)` (from `legion start` itself) | A daemon for this project is already registered on the machine: `legion status <PROJECT>`, `legion legions`. |
-| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay, and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, and the controller's daily report names each open one. |
+| `capability <name> is open: <detail>; to record a decision, add to legion.yaml: capabilities.decided.<name>: "<reason>"` (after the `Config OK` line, exit 0) | A report, not a refusal: the deployment leaves a worker capability open. The check names the rows the file alone decides — `resource-limits` while a role lacks CPU and memory in both requests and limits, `secrets` while no broker is configured — and the daemon logs the same line at boot for every open row, `model-fallback` included when the probe read `retry.modelFallback` false under your overlay, and `pool-capacity` when the image probe pod was Unschedulable before it scheduled (the detail counts the attempts that waited and quotes the scheduler's reason). Close the gap, or add the `capabilities.decided.<name>: "<reason>"` line it prints to record your decision. `legion state --json` lists every row under `capabilities`, and the controller's daily report names each open one. In the daemon's log alone (the check prints no such row), a line without the `; to record a decision` tail — `capability <name> is open: pod <sandbox>/<container> (<role>, <issue>): <fact>`, or `pane <window>:<pane>` under tmux — is a live row (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) that a running session's own check at its start failed: the daemon logs the fact alone, with the claim, role, issue and locator as the line's attributes, as the session reports ready, then this pod-naming form at boot and at the first controller tick after the set of open rows changed, and `legion state` shows the row `open` with that detail, naming each failing session. The fact is what the session measured inside its Oh My Pi (`web_search is not a registered tool`, `not connected: <server> (<error>)`, `agents the prompts dispatch that the task tool does not resolve: <names>`, `not discovered: <paths>`, `Envoy tools missing: <names>`, `dispatch read failed: <stderr>`, `gh viewer login failed: <stderr>`, or `did not finish within 8 s`). No `capabilities.decided` line applies: fix what the fact names in the session's environment, and the row heals when that process is relaunched with the gap closed or reports anew at its next boot — a session that booted during a Dispatch, GitHub or search-provider outage reads open until then. The session's own report is under `issues.<KEY>.architect.capabilities` or `issues.<KEY>.workers.<role>.claim.capabilities` in `legion state --json`. |
 
 **At boot, after the check passes**, the daemon checks the cluster and the image:
 
@@ -293,22 +293,39 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
   architect decides what happens next, often with a question to you.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
-  stayed red through three fix attempts.
+  stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
+  counted head and every head pushed on top of it until a push lands on a head CI judged green) no
+  longer sends the work back by itself, so the issue waits in testing or review for the architect,
+  or for a worker's own decision such as a reviewer's request for changes. A `READY` is still
+  withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
-  round, so an approval or request for changes from anyone else leaves it undecided too. The daemon
-  reads the author's permission from GitHub before it applies the review: an account GitHub answers
-  `404` for, or a `403` that is not its rate limit, has no write access, and stands so for five
-  minutes; write access is read again for every review. Any other failed read is retried, a rate
-  limit once the wait GitHub names has passed, and while that wait stands the daemon reads nothing
-  from GitHub. The daemon logs each review that decides nothing as `workflow: a review decides nothing:
-  its author is neither the review App nor an account with write access to the repository`, with
-  the author's login, and logs a permission it read as no write access with GitHub's own answer. A
-  `403` that is not a rate limit is logged at error as `workflow: GitHub refuses the review App's
-  installation a review author's repository permission`, naming the installation's owner: the
-  review App's installation cannot read the repository's collaborators, so until it can, no review
-  but the review App's decides a round.
+  round, so an approval or request for changes from anyone else leaves it undecided too. A review
+  from the review App decides a round only when it comes from the reviewer's own session: the
+  daemon reads the review's Legion footer
+  (`<!-- legion: {"session":"…","phase":"review"} -->`) and requires the session it names to match
+  the session recorded on the reviewer's claim. A review-App review with no footer, or whose
+  footer names another session (the controller's, an architect's), is set aside and decides
+  nothing, logged at warn as `workflow: a review decides nothing: the review App submitted it from
+  a session that is not the reviewer's`, with `footer_session`, `reviewer_session` and
+  `body_truncated`. While the reviewer's session is not yet recorded, the login alone decides,
+  logged as `workflow: the reviewer's session is not recorded; the review App's login decides`.
+  Envoy caps review bodies at 2048 runes, so the daemon restores a truncated review-App body from
+  GitHub before reading its footer; a review it cannot restore (no review id) stays set aside with
+  `body_truncated=true`. The remedy for this stall: the reviewer re-submits its review with the
+  footer naming its own session. The daemon reads the author's permission from GitHub before it
+  applies the review: an account GitHub answers `404` for, or a `403` that is not its rate limit,
+  has no write access, and stands so for five minutes; write access is read again for every review.
+  Any other failed read is retried, a rate limit once the wait GitHub names has passed, and while
+  that wait stands the daemon reads nothing from GitHub. The daemon logs each review that decides
+  nothing for permission reasons as `workflow: a review decides nothing: its author is neither the
+  review App nor an account with write access to the repository`, with the author's login, and logs
+  a permission it read as no write access with GitHub's own answer. A `403` that is not a rate limit
+  is logged at error as `workflow: GitHub refuses the review App's installation a review author's
+  repository permission`, naming the installation's owner: the review App's installation cannot
+  read the repository's collaborators, so until it can, no review but the review App's decides a
+  round.
 - **`READY` refused.** The merger's `READY` is refused while the pull request's head still carries
   the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
   to `retro`); until every check the base branch requires has succeeded on the head, and every
@@ -350,8 +367,8 @@ branch requires`); the daemon reads again every two minutes.
 ## A status change did not stick
 
 The daemon owns a running tree's status. A status an agent session writes on a running root is set
-back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, or
-`legion status` from the controller or an operator's shell, is what takes a tree out.
+back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, the
+controller's `set_status`, or `legion status` from an operator's shell, is what takes a tree out.
 
 When the daemon's own status writes to Dispatch are failing, `legion state` says so on its third
 line:
@@ -393,3 +410,15 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   `.agentSecretsLogin` and in the supervisor's `enrollment failed; retrying on the next
   observation` warning. The daemon waits 30 s after a failed login before the next, doubling to at
   most 5 minutes.
+- **`supervise: agent-secrets: the broker found the pod token expired; keeping the key for a fresh
+  token`** (`403 POD_TOKEN_EXPIRED: the projected token has expired (oidc: token expired at
+  <time>)`). The token the daemon presented for the pod expired before the broker checked it. The
+  daemon reads a fresh token from the shim when the one it holds is about to expire, so from a
+  current daemon this means the broker's clock runs more than a minute ahead of the daemon's. The
+  daemon keeps the pod's key, asks the shim for the pod's current token at its next observation,
+  and enrolls the key with it; check the two hosts' clocks.
+- **`supervise: agent-secrets: enrollment refused; waiting for the shim's next hello`** with
+  `403 POD_IDENTITY_MISMATCH: the projected token does not identify this pod`. The token is not
+  this pod's: it names another pod UID, it is not signed by the cluster the broker trusts
+  (`BROKER_K8S_OIDC_ISSUER`), or it is for another audience. An expired token is answered
+  `POD_TOKEN_EXPIRED` instead.

@@ -278,7 +278,7 @@ func projectedHold(t *testing.T, pool *pgxpool.Pool, key string) (phase.Phase, s
 	var state api.State
 	if err := pgx.BeginFunc(t.Context(), pool, func(tx pgx.Tx) error {
 		var err error
-		state, err = projection.Project(t.Context(), tx, record.NewStore(), "LEGION", nil)
+		state, err = projection.Project(t.Context(), tx, record.NewStore(), "LEGION", nil, nil)
 		return err
 	}); err != nil {
 		t.Fatalf("project the state: %v", err)

@@ -38,7 +38,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 
 	// A second enrollment's own overdue pending request, to pin that Wake fires once PER request
 	// leaving pending, not once per tick.
-	enr2, key2 := newEnrollment(t, m.Store, "box", "box-b-"+t.Name(), new(fixtureOperator), nil)
+	enr2, key2 := newEnrollment(t, m.Store, "session", "box-b-"+t.Name(), new(fixtureOperator), nil)
 	overdue2, err := m.Create(ctx, enr2, signRequest(t, m, key2, "need it too", "DEEL_API_KEY"), "")
 	if err != nil || overdue2.State != "pending" {
 		t.Fatalf("Create(overdue2) = %+v, %v, want state pending", overdue2, err)
@@ -46,7 +46,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 
 	// A request still inside its deadline: must be left alone and never woken. A third,
 	// distinct enrollment avoids coalescing onto overdue's own pending row for the same secret.
-	enr3, key3 := newEnrollment(t, m.Store, "box", "box-c-"+t.Name(), new(fixtureOperator), nil)
+	enr3, key3 := newEnrollment(t, m.Store, "session", "box-c-"+t.Name(), new(fixtureOperator), nil)
 	m.PendingTTL = time.Hour
 	fresh, err := m.Create(ctx, enr3, signRequest(t, m, key3, "not yet", "DEEL_API_KEY"), "")
 	if err != nil || fresh.State != "pending" {
@@ -130,7 +130,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 func TestSweeperEndsLapsedEnrollments(t *testing.T) {
 	m, gone, goneKey, approver := newFixture(t)
 	ctx := context.Background()
-	live, liveKey := newEnrollment(t, m.Store, "box", "box-live-"+t.Name(), new(fixtureOperator), nil)
+	live, liveKey := newEnrollment(t, m.Store, "session", "box-live-"+t.Name(), new(fixtureOperator), nil)
 
 	type session struct{ grantID, pendingID, recordID string }
 	open := func(enr string, key *ecdsa.PrivateKey) session {
@@ -290,8 +290,8 @@ func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := lockIdenticalPending(ctx, holdAdvisory, enr, []string{"DEEL_API_KEY"}); err != nil {
-		t.Fatalf("hold the advisory lock: %v", err)
+	if err := lockPendingNames(ctx, holdAdvisory, enr, []string{"DEEL_API_KEY"}); err != nil {
+		t.Fatalf("hold the advisory locks: %v", err)
 	}
 	var lease time.Time
 	if err := m.Store.Pool.QueryRow(ctx, `update enrollments set lease_expires_at = now() + interval '1500 milliseconds' where id=$1

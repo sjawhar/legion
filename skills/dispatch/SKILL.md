@@ -372,6 +372,10 @@ says; the human has agreed to every point in the spec; and the current version h
 approved. A Legion root spec under an armed design gate always goes to approval once all three
 hold (`skill://legion-architect`).
 
+Before calling `dispatch request-approval`, have a fresh read-only reader check the current spec
+against the code and the human's words, then resolve every finding. A Legion architect uses its
+`plan-gap-analyst`; another session uses the read-only reader its host supplies.
+
 When all three hold, request it in the pass that finishes the spec: a design waiting with nothing in
 the human's Inbox waits on nobody. When a human asks for approval while a block is open, do not
 request it and do not hold it silently: name each open block and ask them to answer it or waive
@@ -474,8 +478,9 @@ A BTW, Aside or Steer frame, or a message from the Agents page, is answered as
 ## Following
 
 You follow every ask you open or reply to: its answer, edits, resolution and replies reach you
-directly. Nothing else on an issue reaches you unless you subscribe to its topic. Leaving or
-rejoining a thread, and the topic to subscribe to, are in
+directly. A person's reply to a comment you started, and a person's new comment on a document you
+wrote, reach you directly too. Nothing else on an issue reaches you unless you subscribe to its
+topic. Leaving or rejoining a thread, and the topic to subscribe to, are in
 [Asks after they open](skill://dispatch/references/asks.md).
 
 ## References

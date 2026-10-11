@@ -49,7 +49,8 @@ func TestSnapshotReusesTheTransactionsRenderedDocument(t *testing.T) {
 		t.Fatalf("the edit recorded no rendering: tree=%v markdown=%q", write.tree, write.markdown)
 	}
 
-	tree, markdown, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	captured, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	tree, markdown := captured.tree, captured.markdown
 	if err != nil {
 		t.Fatalf("capture live text: %v", err)
 	}
@@ -86,7 +87,8 @@ func TestAForkThatGainsRoomContentIsRenderedAgain(t *testing.T) {
 	}
 	editLiveTree(t, service, artifactID, appendBlocks(t, "gained in the room"))
 
-	_, markdown, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	captured, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	markdown := captured.markdown
 	if err != nil {
 		t.Fatalf("capture live text: %v", err)
 	}
@@ -361,7 +363,8 @@ func TestAForkThatGainsRoomFormattingIsRenderedAgain(t *testing.T) {
 	}
 	editLiveTree(t, service, artifactID, boldBlock(t, "plain paragraph"))
 
-	_, markdown, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	captured, _, err := service.captureLiveTextAndAuthors(joinedCtx, artifactID, nil)
+	markdown := captured.markdown
 	if err != nil {
 		t.Fatalf("capture live text: %v", err)
 	}

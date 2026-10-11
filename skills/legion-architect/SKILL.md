@@ -16,8 +16,8 @@ separate coordinator to finish necessary work.
   (pattern `^[A-Z][A-Z0-9]*-[0-9]+$`, e.g. `LEGION-41`).
 - The daemon starts every Legion role itself and sequences each issue's phases from its fixed
   workflow table: planner, implementer, tester, reviewer, retro (the implementer again), merger,
-  and, after a human merges, the implementer's production check. One role works an issue at a
-  time, and the handoff or event that ends its phase is what starts the next; you start,
+  and, after the pull request merges, the implementer's production check. One role works an
+  issue at a time, and the handoff or event that ends its phase is what starts the next; you start,
   re-assign and order no worker. Message a known phase worker with `envoy_publish` to
   `notifications.role.` followed by its encoded role token. Phase workers escalate lifecycle,
   product, scope, design, and cross-phase decisions the same way: `envoy_publish` to your own
@@ -46,7 +46,11 @@ the merge credential. They override this skill's defaults where they conflict.
 
 ## 1. Decompose or adopt
 
-Inspect the root issue, acceptance criteria, existing children, and current handoffs.
+Inspect the root issue, acceptance criteria, existing children, and current handoffs. Your issue
+record is the `legion` tool's `read_record`; a child's committed handoff is a plain file on its
+issue branch, read with `read` from that issue's workspace, `.legion/<child>/<phase>.json`, or
+from GitHub:
+`gh api repos/<owner>/<repo>/contents/.legion/<child>/<phase>.json?ref=legion/<child> --jq .content | base64 -d`.
 Decomposition is complete only when every child issue names the real surface its acceptance
 criteria are proven on and the repository skill that drives it; if the repository cannot
 exercise a criterion end to end, building that path is a child issue of this tree.
@@ -93,20 +97,36 @@ not request approval and do not wait for `design-approved`; the gate opens at re
 sub-architect on a child issue has no policy line and never runs the gate: the root approval
 covers the tree. When the gate is armed, run this exact sequence **before the tree's work starts**:
 
-```text
-dispatch doc-edit --issue <root issue> --ops-json-file - <<'EOF'   # extend the primary document in place
-...
-EOF
-# then settle its decision blocks (below)
-dispatch request-approval --issue <root issue> --summary '<what the human is approving>'
-    # the primary document by default; prints "Approval requested for spec.md (document id <UUID>) at version <N> …"
-legion({
-  op: "register_gate",
-  issue: "<root issue>",
-  artifactId: "<UUID>",   // the document id from that text, such as 4e0aca36-77b3-43bd-96cf-d58890ae64e4
-  version: <N>,           // the version number the human is asked to approve
-})
-```
+1. Extend the primary document in place:
+
+   ```bash
+   dispatch doc-edit --issue <root issue> --ops-json-file - <<'EOF'
+   ...
+   EOF
+   ```
+
+2. Settle its decision blocks as [Approval of a spec](skill://dispatch/SKILL.md#approval-of-a-spec)
+   says.
+3. Run `task(agent="plan-gap-analyst")` with the current root spec, the code and command output
+   it relies on, and the human's words; resolve every finding in the root spec.
+4. Request approval:
+
+   ```bash
+   dispatch request-approval --issue <root issue> --summary '<what the human is approving>'
+   ```
+
+   The primary document is the default; the command prints `Approval requested for spec.md
+   (document id <UUID>) at version <N> …`.
+5. Register that document version with the daemon:
+
+   ```ts
+   legion({
+     op: "register_gate",
+     issue: "<root issue>",
+     artifactId: "<UUID>", // the document id the request printed
+     version: <N>, // the version the human is asked to approve
+   })
+   ```
 
 The decision blocks come first: settle every one as
 [Approval of a spec](skill://dispatch/SKILL.md#approval-of-a-spec) says before you request approval;
@@ -138,9 +158,10 @@ read covers a human who answers the question between your `dispatch request-appr
 yourself.
 
 Then park. Do not release a wave until a later delivered wake shows `design-approved` on the root;
-the daemon starts no phase in the tree before then. On `design-changes-requested`, revise the spec
-(a new version of the primary document) as the human's reason asks, request approval again as
-above (the answer closed the last request, so this opens a new one), and stay parked.
+the daemon starts no phase in the tree before then. On `design-changes-requested`, (1) revise the
+spec as the human's reason asks, (2) run `task(agent="plan-gap-analyst")` with that new version,
+the code and command output it relies on, and the human's words, then resolve every finding, and
+(3) request approval again and stay parked.
 
 **After approval, the root spec changes only when what the tree delivers, or a decision a human
 settled, changes.** Approval is pinned to the spec version: any new version of the root spec closes
@@ -148,7 +169,7 @@ the gate again with no wake (you made the edit, or the `artifact.version` event 
 you). So edit an approved root spec only when its Summary, its Acceptance, the tree's scope, or a
 decision a human settled in one of its decision blocks changes. Such a change is a point the human
 has not agreed to: put the problem behind it to them as its own decision block, with its evidence,
-at the end of the section it changes, and request approval again as above once they have answered
+at the end of the section it changes, then repeat steps 2 through 5 once they have answered
 it. Release no new wave until the next `design-approved` arrives — work already in flight
 continues. Every merger's `READY` in the tree is refused until a human approves
 the latest version. A settled decision is the human's. A plan that would overturn one goes back to
@@ -271,12 +292,18 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    <tip-sha> --summary`, quoted in READY) and sends the READY packet with its completion, which
    refuses a head that still carries `.legion/<issue>/`; the daemon posts
    `READY #<n> at <current sha> (approved at <approved sha>) for <KEY> (<pr url>)` on the Dispatch
-   issue and publishes it to the project's merge queue role when one is set. Legion never merges; a human merges under the repository's
-   GitHub branch-protection and CODEOWNERS rules. If the merger reports a failed verification,
+   issue and publishes it to the project's merge queue role when one is set. The moment the daemon
+   accepts READY, the merger submits the pull request with
+   `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` and tells you what
+   the command answered; the repository's required reviews and checks decide when it lands, and
+   Legion neither reads nor writes those rules. A READY the design gate refused is submitted later:
+   the merger submits nothing on a refusal, so once that spec version is approved and the daemon
+   posts the packet, tell the merger to submit it. If the merger reports a failed verification,
    treat it like `pr-blocked`: the merger holds the phase, so tell it to move the issue back with
    `request_backward_move`, naming what failed; never bypass. A READY refused because the head
    still carries `.legion/<issue>/` goes back to `retro`, so the implementer's retro removes it.
-5. a human merges; the daemon then starts the **implementer** once more, on the production check.
+5. the merge lands under the repository's rules; the daemon then starts the **implementer** once
+   more, on the production check.
    It drives the changed path in production through the user's own access path and records
    what it saw on the pull request and on this issue. Sign off only after the implementer's production
    report exists. A defect it finds is a corrective child issue of this tree, not a note on a
@@ -294,12 +321,12 @@ with `request_backward_move`, and the daemon runs the phases from there: the imp
 the bookmark forward with the
 destination (the forward-merge procedure in `skill://legion-worker/references/conflicts-and-rewrites.md` — `jj new legion/<KEY> <destination>`,
 never a rebase, since a rebase rewrites every descendant of the chain's fork point, including
-another tree's branch stacked on it), pushes it with the ordinary push procedure (a genuine
-fast-forward), and posts the before/after fingerprints; the tester re-runs the bare gates only;
+another tree's branch stacked on it), pushes it as every role pushes (`jj git push`; a genuine
+fast-forward, and a code push, so no `skip-checks: true` line), and posts the before/after fingerprints; the tester re-runs the bare gates only;
 the reviewer confirms and approves the new head by SHA (or continues its round if it had not
 approved); the daemon carries the issue on through retro to the merger, whose new READY packet the daemon posts.
 This merge happens only when GitHub reports `CONFLICTING`
-(`legion gh -- pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
+(`gh pr view <n> --json mergeable,mergeStateStatus`); read that on every end-game
 wake — `phase-finished`, `catch-up`, `checks-red`, `review-stuck` — because a `CONFLICTING`
 PR gets no CI and no wake announces it. The moment you see it, tell the worker holding the issue's
 phase (`envoy_publish` to its role topic) to move the issue back to `implementing` with
@@ -307,19 +334,14 @@ phase (`envoy_publish` to its role topic) to move the issue back to `implementin
 naming the conflict for the human who merges. Do not let the merger send a READY packet for an
 obsolete approval.
 
-If a worker reports that `legion threads resolve` exited 1 naming a review thread GitHub refused
-to resolve, open a `dispatch ask` that names the thread's URL and GitHub's message for a human to
-resolve it by hand, with options for resolved / could not; the merger does not complete while it
-is open. That is the one review-thread step a human takes: the review App cannot resolve a thread
-on a pull request the implementer opened, and the implementer's and merger's runs of the command
-close every accepted one.
-
-If a reviewer reports that `legion threads resolve` exited 1 counting threads that hold the
-implement App's pending draft (the daemon counts them and never names them), tell the worker
-holding the issue's phase (`envoy_publish` to its role topic) to move the issue back to
-`implementing` with `request_backward_move`, naming the count, so the implementer submits or
-discards its pending review; its own run of the command names those threads `left open … an
-unsubmitted draft in a pending review`. Open no ask for it: the implementer clears it.
+If the implementer reports that GitHub refused to resolve a review thread — its own
+`resolveReviewThread`, on a thread it answered or one the reviewer named as accepted — open a
+`dispatch ask` that names the thread's id or URL and GitHub's message for a human to resolve it by
+hand, with options for resolved / could not; the merger does not complete while it is open. That
+is the one review-thread step a human takes: GitHub lets only the pull request author's App
+resolve a thread, so the implementer resolves every thread with plain `gh`, the ones it answers
+and the bot threads the reviewer accepted and named to it (an Envoy message to the implementer's
+role topic, or its review body); the reviewer resolves none.
 
 ## 7. Close
 
@@ -354,7 +376,7 @@ active phase worker.
 | `design-approved` | Its `version` is the approved one. A human approved the root spec document at its current version; the gate is open. Proceed to section 2. |
 | `design-changes-requested` | Its `version` and `reason`. A human asked for changes to the root spec at `version`, for `reason`. Revise the spec as the reason asks and request approval again as section 1 says; stay parked; the gate is closed. |
 | `phase-finished` | The daemon has already moved the issue to its next phase by its fixed table and started that phase's role; you start nothing. Read the committed handoff for the finishing phase; if it shows unresolved gaps, tell the role now working the issue (`envoy_publish` to its role topic). A `planner` notice that names a departure from the spec's design defers to section 1's full condition: when the approved Summary, Acceptance, scope and settled decisions still hold, the plan is the record; otherwise change the root spec and request approval again as section 1 says. A `reviewer` notice whose GitHub review is `CHANGES_REQUESTED` needs nothing from you: the daemon has returned the issue to `implementing` (Dispatch `in_progress`) and started the **implementer**, whose correction goes through the tester and the reviewer again, never straight to retro. A `reviewer` notice with an `APPROVED` review means the daemon has started retro (step 5). An `implementer` notice for `production_check` is its production report: read the record on the pull request and the issue, then run step 7. A `tester` notice with `verdict: "fail"` — its handoff carries `implementerProof.verdict: "rejected"`, or a failure naming the production-like proof — has gone back to the **implementer** by the daemon's table; never supply the proof from another role. A worker that reports no surface reaches the changed path sends that report instead of completing its phase, so the daemon starts nothing more on that issue and the worker stays idle in its session, not suspended: file a child issue in this tree to build the surface (infrastructure, tooling, or a skill), and when that child's `child-closed` arrives, tell the waiting worker to continue with `envoy_publish` to its role topic. That report is never a reason to advance the phase. |
-| `pr-blocked` | Its `reason` names the pull request and the `max_fix_attempts` it reached, or reads `Issue reached review_round_cap=<N>.` (the end of this row). The count is of heads pushed onto a red verdict that changed something outside `.legion/` — handoff-only pushes (`.legion/` paths only) never count, a push by the review App (a planner's, tester's, reviewer's or architect's) never counts, and the head after a red the tester's red tests earned (a review-App push that changed a path outside `.legion/`, however many handoff-only pushes follow it) does not count either — so after the tester's handoff-only push onto the implementer's red, the implementer's next push does count; a push the daemon cannot classify (a listener without `changed_paths`, a list the listener stopped at 100 paths or 32,768 runes of text, a push listing no commits) does. Published once per exhausted count, not on every later red verdict for that count. Read the failed CI evidence and recovery attempts. The notice moves nothing: the issue stays in its phase. In `implementing`, give the implementer the failing checks (`envoy_publish` to its role topic). In any later phase a worker holds, tell that worker (`envoy_publish` to its role topic) to move the issue back to `implementing` with `request_backward_move`, naming the failing checks, and the daemon starts the implementer; or file a corrective child. In `awaiting_merge`, where no worker holds a phase and a backward move is refused, open a `dispatch ask` naming the failing checks for the human who merges, as section 6 does for a conflict there. Do not treat the blocked PR as final. A `review_round_cap` reason is the implementer's round count instead: every move back to an earlier phase counts one, and the notice comes again with each round past the cap. It moves nothing either, since the round that reached the cap has already started its worker. Tell the rounds apart by what announced each: a tester's fail by its `phase-finished` with `verdict: "fail"`; a request for changes by the reviewer's `phase-finished` over a `CHANGES_REQUESTED` review; the daemon's own move by a `checks-red` notice, whose reason names either a conflict (`the head conflicts with <base>`) or the required checks that failed (`CI is red at <head>`); a worker's `request_backward_move` by a `phase-finished` from the role that asked, whose reason reaches only the task of the worker the move started, so ask that worker. Judge the cap by the rounds that are not conflicts. Conflict returns need nothing from you beyond the next round. Tester fails, requests for changes and CI-red returns (a `checks-red` notice is raised for CI only when a required check fails on code the branch pushed) are the work going in circles: narrow it, re-plan it with the responsible worker, or ask a human with `dispatch ask`. Judge a worker's backward move by the reason that worker gives. A move you ordered for a conflict found before `awaiting_merge` (section 6) is a conflict return. The merger's move back to `reviewing` because its task names no approved head is not the work going in circles either. A move that sends back code found wrong counts with the tester fails. |
+| `pr-blocked` | Its `reason` names the pull request and the `max_fix_attempts` it reached, or reads `Issue reached review_round_cap=<N>.` (the end of this row). The count is of heads pushed onto a red verdict that changed something outside `.legion/` — handoff-only pushes (`.legion/` paths only) never count, a push by the review App (a planner's, tester's, reviewer's or architect's) never counts, and the head after a red the tester's red tests earned (a review-App push that changed a path outside `.legion/`, however many handoff-only pushes follow it) does not count either — so after the tester's handoff-only push onto the implementer's red, the implementer's next push does count; a push the daemon cannot classify (a listener without `changed_paths`, a list the listener stopped at 100 paths or 32,768 runes of text, a push listing no commits) does. Published once per exhausted count, not on every later red verdict for that count. Read the failed CI evidence and recovery attempts. The notice moves nothing, and no later CI red within the attempt that ran the count out (the counted head, and every head pushed on top of it until a push lands on a head CI judged green, the tester's red tests and handoff onto the held red included) sends the work back from `testing` or `reviewing` either: the issue stays in its phase until you move it, or a worker's own decision does (a tester's `fail`, a reviewer's request for changes). A head pushed onto green CI leaves that attempt, so its red still comes as a `checks-red`. In `implementing`, give the implementer the failing checks (`envoy_publish` to its role topic). In any later phase a worker holds, tell that worker (`envoy_publish` to its role topic) to move the issue back to `implementing` with `request_backward_move`, naming the failing checks, and the daemon starts the implementer; or file a corrective child. In `awaiting_merge`, where no worker holds a phase and a backward move is refused, open a `dispatch ask` naming the failing checks for the human who merges, as section 6 does for a conflict there. Do not treat the blocked PR as final. A `review_round_cap` reason is the implementer's round count instead: every move back to an earlier phase counts one, and the notice comes again with each round past the cap. It moves nothing either, since the round that reached the cap has already started its worker. Tell the rounds apart by what announced each: a tester's fail by its `phase-finished` with `verdict: "fail"`; a request for changes by the reviewer's `phase-finished` over a `CHANGES_REQUESTED` review; the daemon's own move by a `checks-red` notice, whose reason names either a conflict (`the head conflicts with <base>`) or the required checks that failed (`CI is red at <head>`); a worker's `request_backward_move` by a `phase-finished` from the role that asked, whose reason reaches only the task of the worker the move started, so ask that worker. Judge the cap by the rounds that are not conflicts. Conflict returns need nothing from you beyond the next round. Tester fails, requests for changes and CI-red returns (a `checks-red` notice is raised for CI only when a required check fails on code the branch pushed) are the work going in circles: narrow it, re-plan it with the responsible worker, or ask a human with `dispatch ask`. Judge a worker's backward move by the reason that worker gives. A move you ordered for a conflict found before `awaiting_merge` (section 6) is a conflict return. The merger's move back to `reviewing` because its task names no approved head is not the work going in circles either. A move that sends back code found wrong counts with the tester fails. |
 | `pr-merged` | Its `reason` names the pull request. The PR merged, under the repository's rules, before the issue reached `awaiting_merge`. The workflow runs on and asks no one to merge it: the daemon starts the **implementer** on the production check once the issue gets there, and you start nothing. Its `phase-finished` for `production_check` is what brings you to step 7: verify the record on the pull request and this issue first, then sign off naming it with `sign_off`. A merge is not the close. |
 | `pr-closed-unmerged` | Decide from current scope whether the work is reopened, started over (`park_child` then `rerun_child`, for a child), or ended with a reason. Delegate the repository action to the responsible phase worker and keep ownership. |
 | A reply on an ask you follow | Interpret the reply in the issue's design context. Answer in its thread (`dispatch comment --reply-to <comment id>`; under an open ask whose next move is yours, such as the approval request you must revise or hand back, `--reply-to-ask <ask id> --turn agent`, since a default-turn reply hands that request back to the human and a corrected `--summary` is then refused), then adjust the plan or relay it via `envoy_publish` to the responsible worker's role token; scope and product decisions remain with you. |
