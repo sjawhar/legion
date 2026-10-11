@@ -846,8 +846,11 @@ either lane has placed a pod, and refuses, BLOCKED, only if that one read alread
 close together can each read room enough for itself alone — the read is not a reservation — so a
 true shortfall surfaces only once both are actually scheduling. That is never silent: every
 pod-placement wait is wrapped (`on_tree`/`on_issue`), so a wait stalled on the pool's own limits
-ends its checkpoint `BLOCKED: capacity: …`, naming the pod the scheduler could not place, rather
-than failing or hanging — the same outcome a single lane gets today when the pool is simply full.
+while its subject pod is still Pending, or after its claim has given up, ends its checkpoint
+`BLOCKED: capacity: …`, naming the pod the scheduler could not place — the same outcome a single
+lane gets today when the pool is simply full. A pod that starves and is placed before its own
+claim's launch budget runs out, with the wait still timing out for some other reason, reads FAIL:
+neither path has evidence of a starvation that never reached either threshold.
 Running two lanes at once therefore needs either enough spare legion-pool capacity for both (8
 pods' worth of reservations between them) or tolerance for the slower lane landing `BLOCKED` on
 capacity; widening the pool is infrastructure, not this change.
@@ -870,12 +873,12 @@ the run that owns it. A signal to the whole process group does not stop the remo
 - a teardown command that fails prints `cleanup warning: line N exited S`, never a check's `FAIL`
   line, and leaves the exit status the checks set.
 - **Production NATS, stream `ENVOY_NOTIFICATIONS`**: the daemon's two durable consumers. They are
-  named by the Dispatch key: `legion-go-LEGSMOKE-dispatch` (`notifications.dispatch.issue.>`) and
-  `legion-go-LEGSMOKE-github` (`notifications.github.sjawhar.legion-smoke.>`).
+  named by the Dispatch key: `legion-go-<project>-dispatch` (`notifications.dispatch.issue.>`) and
+  `legion-go-<project>-github` (`notifications.github.sjawhar.legion-smoke.>`) — `LEGSMOKE` by default.
   - The teardown deletes both by exact name and prints `deleted` or `absent` for each.
   - `hygiene` fails if either remains, and the preflight refuses to start while either exists.
   - A SIGKILLed driver runs no trap, and the next run of the same identity's preflight names what it left; a different identity's run never sees it.
-- **Production Dispatch, project LEGSMOKE**: three root issues per run. The preflight moves stale
+- **Production Dispatch, project `LEGSMOKE` by default**: three root issues per run. The preflight moves stale
   todo roots to backlog. The proof human's writes use the agents' bearer and name the session
   `legion-e2e4b-proof-human-<pid>` as their actor, which production Dispatch requires; it holds no
   claim, so the daemon sets back its status write on a live root as it does any outside session's.
@@ -883,14 +886,14 @@ the run that owns it. A signal to the whole process group does not stop the remo
 - **`sjawhar/legion-smoke`**: the fixture branch `legion/<tree 2>`, tree 1's pull request, which
   the proof reads first and the proof human merges by hand only when the merger armed nothing (the
   merger's own submission on its READY is the expected path under this branch's prompt), and
-  `done`'s cleanup pull request on `proof/clean-main-legsmoke`, which the proof human merges. The
+  `done`'s cleanup pull request on `proof/clean-main-<run_label>` (`legsmoke` by default), which the proof human merges. The
   teardown closes any pull request the run left open, such as one from a
   run that stopped before the merge, and deletes each tree's branch `legion/<tree>`. It also closes
   the cleanup pull request if it is still open, with a comment naming the run, and deletes its
   branch, when the run stopped after `done` made that branch and before the merge deleted it (a
   merge GitHub answered with a 504, the wait that timed out, an interrupt;
   [`close_smoke_cleanup`](#libworkflowsh)), and prints the URL of a pull request it could not close.
-  Every Stage 4b run's cleanup branch has that one name, so the teardown acts only on the branch the
+  Every run's cleanup branch is named for its own identity, so the teardown acts only on the branch the
   run recorded making: a run that never reached the cleanup touches none, an earlier run's
   included, and `done` fails, naming the branch, when one is there before it makes its own, which it
   then leaves. To go on, delete that branch on `sjawhar/legion-smoke`, which also closes a pull

@@ -387,7 +387,10 @@ pool_two_pods_per_instance() {
 # scheduler's newest FailedScheduling message for the pod. A misclassification is therefore
 # visible, and it can only ever read BLOCKED, never PASS. No recency window bounds the event: it
 # would rest on Karpenter's re-emit interval, which no one has measured on the deployed version.
-# Prints nothing when there is none, or when the cluster cannot be read.
+# Prints nothing when there is none, when the cluster cannot be read, or when its jq itself fails
+# (guarded, never the ERR trap: set -E inherits it into a command substitution, so an unguarded
+# failure here would print a FAIL line from inside a check this hook is trying to end BLOCKED;
+# lib/rig.sh:137-139 guards pgrep the same way).
 limit_pending() {
   kubectl --context "$operator" -n "$namespace" --request-timeout=20s get pods -l "legion.dev/project=$run_label,$1" -o json >"$work/limit-pods.json" || return 0
   kubectl --context "$operator" -n "$namespace" --request-timeout=20s get events --field-selector involvedObject.kind=Pod -o json >"$work/limit-events.json" || return 0
@@ -410,7 +413,8 @@ limit_pending() {
     | select($current != null and $current.reason == "FailedScheduling"
         and ($current.message | contains("exceed limits for nodepool (NodePool=legion)")) and $current.t >= $pod.since)
     | ([$seen[] | select(.uid == $pod.uid and .component == "default-scheduler" and .reason == "FailedScheduling")] | max_by(.t)) as $scheduler
-    | "pod \($pod.name) (uid \($pod.uid)): Karpenter at \($current.at): \($current.message | tojson); PodScheduled \($pod.condition.reason) since \($pod.condition.lastTransitionTime): \(($pod.condition.message // "") | tojson); default scheduler: \(if $scheduler == null then "none" else ($scheduler.message | tojson) end)"' "$work/limit-pods.json" | sort -u
+    | "pod \($pod.name) (uid \($pod.uid)): Karpenter at \($current.at): \($current.message | tojson); PodScheduled \($pod.condition.reason) since \($pod.condition.lastTransitionTime): \(($pod.condition.message // "") | tojson); default scheduler: \(if $scheduler == null then "none" else ($scheduler.message | tojson) end)"' "$work/limit-pods.json" | sort -u ||
+    echo "limit_pending's jq could not read $work/limit-pods.json or $work/limit-events.json" >&2
 }
 
 # limit_pending_exhausted SELECTOR: like limit_pending, but for one of SELECTOR's pods the daemon
@@ -425,10 +429,26 @@ limit_pending() {
 # check instead: reads the daemon log for a claim that failed with launch failures ran out at or
 # after check_started, whose token (claim_token, lib/workflow.sh:133) names an issue inside
 # SELECTOR; from the pod watch, keeps that issue's pod if it was Unschedulable at or before the
-# failure with no PodScheduled=True before it (placement after the failure still counts); then
-# requires Karpenter's own nodepool-limit event on that pod's uid, dated at or before the failure
-# — events outlive the pod by the cluster's event TTL, so this still finds it once the pod itself
-# is gone. Prints nothing when there is none, or when a read fails.
+# failure with no PodScheduled=True before it (placement after the failure still counts) and was
+# never deleted at or before the failure (a pod of an earlier, already-abandoned incarnation of
+# the same issue is not evidence about this one); then requires Karpenter's own nodepool-limit
+# event on that pod's uid. Karpenter re-emits the same event on its own DedupeTimeout (5 minutes)
+# while a pod stays Pending, and the API server folds the repeats into one Event whose last
+# observation keeps moving forward, so the event's first observation, not its last, is what must
+# precede the failure; its rank among other candidate events is capped at the failure, so a still
+# -repeating event never outranks a genuinely later one that also precedes the failure. seconds
+# parses a full RFC 3339 offset, not only Z, since slog writes the daemon's local zone
+# (lib/controller-liveness-verdict.jq's secs, the same logic by another name here). Events
+# outlive the pod by the cluster's event TTL, so this still finds it once the pod itself is gone.
+# Prints nothing when there is none, when a read fails, or when its jq itself fails (guarded,
+# never the ERR trap: set -E inherits it into a command substitution, so an unguarded failure here
+# would print a FAIL line from inside a check this hook is trying to end BLOCKED; lib/rig.sh:137-139
+# guards pgrep the same way). Reads the live pod watch the way it already reads the daemon log,
+# one JSON value a line with a failed parse skipped, not slurped as one JSON document: watch_raw
+# appends each event with one printf, a pod object larger than the stdio buffer can go out in more
+# than one write, and a read that falls between those writes would otherwise see a torn last
+# object and fail the whole read — a real capacity case reading FAIL for a reason that has nothing
+# to do with capacity.
 limit_pending_exhausted() {
   local key value has_value=true
   case $1 in
@@ -436,10 +456,16 @@ limit_pending_exhausted() {
     *) key=$1 value='' has_value=false ;;
   esac
   kubectl --context "$operator" -n "$namespace" --request-timeout=20s get events --field-selector involvedObject.kind=Pod -o json >"$work/limit-events-exhausted.json" || return 0
-  jq -n -r --rawfile log "$daemon_log" --slurpfile watch "$evidence/pod-watch.json" --slurpfile events "$work/limit-events-exhausted.json" \
+  jq -n -r --rawfile log "$daemon_log" --rawfile watch "$evidence/pod-watch.json" --slurpfile events "$work/limit-events-exhausted.json" \
     --arg key "$key" --arg value "$value" --argjson has_value "$has_value" --arg run_label "$run_label" --arg since "$check_started" '
-    def seconds: sub("\\.[0-9]+"; "") | fromdateiso8601;
+    def seconds:
+      (capture("^(?<s>[0-9-]+T[0-9:]+)(\\.(?<f>[0-9]+))?(?<z>Z|[+-][0-9]{2}:[0-9]{2})$")
+        // error("not an RFC 3339 time: \(.)")) as $t
+      | (($t.s + "Z") | fromdateiso8601) + (($t.f // "0") | "0." + . | tonumber)
+        - (if $t.z == "Z" then 0
+           else (($t.z[1:3] | tonumber) * 3600 + ($t.z[4:6] | tonumber) * 60) * (if $t.z[0:1] == "-" then -1 else 1 end) end);
     def at: .series.lastObservedTime // .lastTimestamp // .eventTime // .metadata.creationTimestamp;
+    def first_at: .firstTimestamp // .eventTime // .metadata.creationTimestamp;
     ($since | seconds) as $since_t
     | ($log | split("\n") | map(fromjson? // empty)) as $lines
     | [$lines[]
@@ -449,7 +475,8 @@ limit_pending_exhausted() {
         | select($m != null)
         | {issue: ($m.issue | ascii_upcase), failed_at: (.time | seconds)}
       ] as $failures
-    | [$watch[] | select(.object.kind == "Pod") | .object] as $pods
+    | ($watch | split("\n") | map(fromjson? // empty)) as $watch_lines
+    | [$watch_lines[] | select(.object.kind == "Pod") | .object] as $pods
     | [
         $failures[] as $f
         | [$pods[] | select(.metadata.labels["legion.dev/issue"] == $f.issue)] as $issue_pods
@@ -457,22 +484,26 @@ limit_pending_exhausted() {
         | select(any($issue_pods[]; if $has_value then (.metadata.labels[$key] // "") == $value else (.metadata.labels | has($key)) end))
         | ($issue_pods | map(.metadata.uid) | unique) as $uids
         | $uids[] as $uid
-        | ([$issue_pods[] | select(.metadata.uid == $uid) | .status.conditions[]? | select(.type == "PodScheduled")]
+        | [$issue_pods[] | select(.metadata.uid == $uid)] as $uid_pods
+        | select([$uid_pods[] | .metadata.deletionTimestamp // empty] | all(.[]; (. | seconds) > $f.failed_at))
+        | ([$uid_pods[] | .status.conditions[]? | select(.type == "PodScheduled")]
             | map({status, reason, t: (.lastTransitionTime | seconds)})) as $transitions
         | select(any($transitions[]; .status == "False" and .reason == "Unschedulable" and .t <= $f.failed_at))
         | select((any($transitions[]; .status == "True" and .t < $f.failed_at)) | not)
         | {uid: $uid, failed_at: $f.failed_at, issue: $f.issue}
       ] as $candidates
     | [$events[0].items[]
-        | select(.involvedObject.kind == "Pod" and at != null)
-        | {uid: .involvedObject.uid, component: (.source.component // .reportingComponent), reason, message: (.message // ""), at: at, t: (at | seconds)}
+        | select(.involvedObject.kind == "Pod" and at != null and first_at != null)
+        | {uid: .involvedObject.uid, component: (.source.component // .reportingComponent), reason, message: (.message // ""), at: at, first_t: (first_at | seconds), last_t: (at | seconds)}
       ] as $seen
     | $candidates[] as $c
-    | ([$seen[] | select(.uid == $c.uid and .component == "karpenter" and .t <= $c.failed_at)] | max_by(.t)) as $current
+    | ([$seen[] | select(.uid == $c.uid and .component == "karpenter" and .first_t <= $c.failed_at)
+        | . + {t: ([.last_t, $c.failed_at] | min)}] | max_by(.t)) as $current
     | select($current != null and $current.reason == "FailedScheduling"
         and ($current.message | contains("exceed limits for nodepool (NodePool=legion)")))
     | "pod uid \($c.uid), issue \($c.issue), unschedulable before its claims launch failures ran out: Karpenter at \($current.at): \($current.message | tojson)"
-  ' | sort -u
+  ' | sort -u ||
+    echo "limit_pending_exhausted's jq could not read the daemon log, the pod watch, or the events it fetched" >&2
 }
 
 # capacity_subject is the label selector (within the run) of the pods the current wait needs placed,
@@ -503,14 +534,15 @@ on_issue() {
 }
 
 # limit_pending_blocked is the run's timeout_hook (lib/rig.sh until_true). A wait that timed out
-# while one of its own subject's pods could not be placed for the pool's limits was starved by
-# capacity, which is no verdict on the change, so the check ends BLOCKED naming the pod —
-# currently Pending (limit_pending), or starved before its claim's launch failures ran out, inside
-# the current check (limit_pending_exhausted): without the second check a slower lane's capacity
-# shortfall that resolves after the daemon gives up, the ordinary case under concurrency, would
-# read as a bare timeout FAIL, a verdict on the change that has nothing to do with it. A wait
-# with no subject, a starved pod outside the subject, any other timeout, and every check that
-# fails outright (a leak, an audit, a pod verdict) still fail.
+# while one of its own subject's pods was still Pending on the pool's limits (limit_pending), or
+# was starved before its claim's launch failures ran out (limit_pending_exhausted, placement after
+# that failure still counts), was starved by capacity, which is no verdict on the change, so the
+# check ends BLOCKED naming the pod rather than a bare timeout FAIL. BLOCKED applies only to those
+# two windows, not to every capacity question: a pod that starves and is placed before its own
+# claim's launch budget runs out, with the wait still timing out for some other reason, reads FAIL
+# — neither function has evidence of a starvation that never reached either threshold. A wait with
+# no subject, a starved pod outside the subject, any other timeout, and every check that fails
+# outright (a leak, an audit, a pod verdict) still fail.
 limit_pending_blocked() {
   local pending
   [ -n "$capacity_subject" ] || return 0
@@ -1881,7 +1913,7 @@ delete_consumers() {
 # each tree's branch legion/<tree> there (tree 2's is the fixture's): the run's own, which a run that
 # stops before the proof human's merge would otherwise leave behind. Then it closes the cleanup pull
 # request done opened, and deletes its branch, when the run stopped between making the branch and the
-# merge (close_smoke_cleanup, lib/workflow.sh): every run's is proof/clean-main-legsmoke, so it acts
+# merge (close_smoke_cleanup, lib/workflow.sh): a run's own is proof/clean-main-$run_label, so it acts
 # only on the one this run made, and a note names by URL any it could not close. It makes no gh call
 # unless require_proof_human passed: a refused run's gh acts as someone else.
 remove_run_branches() {
@@ -1939,9 +1971,9 @@ cleanup() {
   stop_pid "$leaks_pid"
   stop_tree "$sampler_pid"
   stop_tree "$interests_pid"
-  # The namespace label, the durable consumers and the project are shared by every Stage 4b run,
-  # so a run that never passed prerequisites' ownership checks (the lock, the ports, no leftover
-  # objects or consumers) owns none of them and removes nothing.
+  # The namespace label, the durable consumers and the project are shared by every Stage 4b run
+  # holding this identity, so a run that never passed prerequisites' ownership checks (the lock,
+  # the ports, no leftover objects or consumers) owns none of them and removes nothing.
   if [ -n "$locked" ]; then
     # The teardown waits for the run's labelled pods to go but deletes no pod itself, so the run's
     # own control pods (the memory hog, the reachability pod) go first.
@@ -1960,8 +1992,8 @@ cleanup() {
   rm -rf "$work"
   # The notes are for a checkpoint that failed itself: none once ok is set, after a blocked
   # checkpoint, or after a signal (129, 130, 143, as trapped below). Otherwise a failed teardown
-  # check (a namespace left dirty, a write outside LEGSMOKE) names itself, and only a clean teardown
-  # lets a blocked checkpoint end BLOCKED. A failure while done cleans the smoke main
+  # check (a namespace left dirty, a write outside the run's own project) names itself, and only a
+  # clean teardown lets a blocked checkpoint end BLOCKED. A failure while done cleans the smoke main
   # (smoke_main_cleaning) is the fixture's teardown, not the workflow under test, and the verdict
   # says so, unless a teardown check failed or a production guard recorded a violation: then the
   # ordinary failure stands.
@@ -2019,7 +2051,7 @@ production_audit() {
   # its sessions' interests every 5 s and at every checkpoint while its daemon runs. A registered
   # session with no sample the listener answered leaves the audit unable to vouch for it, and so do
   # three unanswered samples of one session in a row (interests_unanswered): either fails the audit.
-  local sampled unvouched unanswered outside
+  local sampled unvouched unanswered outside prs
   sampled=$(jq -s -c '[.[].session_id] | unique' "$evidence/interests.jsonl" 2>/dev/null) || sampled='[]'
   unvouched=$(jq -c --argjson sampled "$sampled" '[.[] | select(. as $s | $sampled | index($s) | not)]' <<<"$sessions")
   unanswered=$(interests_unanswered "$evidence/interests-outcomes.txt") || unanswered='["the interest sample outcomes could not be read"]'
@@ -2028,7 +2060,9 @@ production_audit() {
     printf '%s\n' "$unanswered" >"$evidence/production-interests-outside.json"
   elif [ "$unvouched" != "[]" ]; then
     jq -c '[{"registered sessions with no interest sample": .}]' <<<"$unvouched" >"$evidence/production-interests-outside.json"
-  elif outside=$(interests_outside "$evidence/interests.jsonl"); then
+  elif ! prs=$(run_pull_request_numbers); then
+    printf '"the run'\''s pull request numbers could not be read"\n' >"$evidence/production-interests-outside.json"
+  elif outside=$(interests_outside "$evidence/interests.jsonl" "$prs"); then
     printf '%s\n' "$outside" >"$evidence/production-interests-outside.json"
   else
     printf '"the interest samples could not be read"\n' >"$evidence/production-interests-outside.json"
@@ -2166,21 +2200,36 @@ start_interests_sampler() {
   ) >/dev/null 2>&1 9>&- 7>&- &
   interests_pid=$!
 }
-# interests_outside FILE prints, as one JSON array, every sampled topic in FILE outside the run: a
-# topic of the run names LEGSMOKE, the project's own subject space (notifications.legion.legsmoke.),
-# its repository's GitHub subjects (notifications.github.sjawhar.legion-smoke., where an agent
-# follows its own pull request), operator-close's tree ($optree), a legion-legsmoke- role, or the
-# session itself. $project and $optree match as whole tokens, bounded by non-alphanumeric
-# characters, not by regex's `\b` (word-boundary) alone: `\b` treats `_` as a word character, so
-# `\bLEGSMOKE\b` would miss a topic spelled `LEGSMOKE_something`, which a bare contains() would
-# at least have caught by accident. A bare contains() has the opposite failure: it would read
-# another lane's LEGSMOKE2 as ours when we are LEGSMOKE, or its S4BOP-1234 as ours when we are
-# S4BOP-123 — the exact leak this audit exists to catch. Neither gap is here: both inputs are
-# validated to [A-Z][A-Z0-9]* and digits before this runs, so neither carries a character this
-# regex would need to escape.
+# run_pull_request_numbers prints, as a JSON array, the number of every pull request (open or
+# closed) on the smoke repository whose branch is one of this run's issue branches
+# (legion/$project-*, run_pull_requests' own prefix, lib/workflow.sh:599-601, but --state all so a
+# pull request this run closed during the run still counts as its own): the only pull requests
+# interests_outside accepts a GitHub subject for, since two lanes share one smoke repository and
+# GitHub subjects end in the pull request number (notifications.github.<owner>.<repo>.pr.<n>,
+# packages/daemon/internal/intake/intake_test.go), not the project that opened it.
+run_pull_request_numbers() {
+  gh -R "$repo" pr list --state all --limit 1000 --json number,headRefName \
+    --jq "[.[] | select(.headRefName | startswith(\"legion/$project-\")) | .number]"
+}
+# interests_outside FILE PRS prints, as one JSON array, every sampled topic in FILE outside the
+# run: a topic of the run names LEGSMOKE, the project's own subject space
+# (notifications.legion.legsmoke.), one of PRS's pull requests on its repository's GitHub subjects
+# (notifications.github.sjawhar.legion-smoke., where an agent follows its own pull request —
+# never the bare repository prefix: two lanes share sjawhar/legion-smoke, and a lane-A session
+# that followed lane B's pull request would otherwise pass as this run's own), operator-close's
+# tree ($optree) or its child ($opchild), a legion-legsmoke- role, or the session itself. $project,
+# $optree and $opchild match as whole tokens, bounded by non-alphanumeric characters, not by
+# regex's `\b` (word-boundary) alone: `\b` treats `_` as a word character, so `\bLEGSMOKE\b` would
+# miss a topic spelled `LEGSMOKE_something`, which a bare contains() would at least have caught by
+# accident. A bare contains() has the opposite failure: it would read another lane's LEGSMOKE2 as
+# ours when we are LEGSMOKE, or its S4BOP-1234 as ours when we are S4BOP-123 — the exact leak this
+# audit exists to catch. Neither gap is here: both inputs are validated to [A-Z][A-Z0-9]* and
+# digits before this runs, so neither carries a character this regex would need to escape.
 interests_outside() {
-  jq -s -c --arg p "$project" --arg t "legion-$run_label-" --arg space "notifications.legion.$run_label." --arg repo "notifications.github.${repo/\//.}." --arg op "$optree" '[.[] | .session_id as $s | .topics[]?
-    | select((test("(^|[^A-Za-z0-9])" + $p + "([^A-Za-z0-9]|$)") or contains($t) or startswith($space) or startswith($repo) or test("(^|[^A-Za-z0-9])" + $op + "([^A-Za-z0-9]|$)") or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
+  jq -s -c --arg p "$project" --arg t "legion-$run_label-" --arg space "notifications.legion.$run_label." --arg repo "notifications.github.${repo/\//.}." --arg op "$optree" --arg opc "$opchild" --argjson prs "$2" '
+    def repo_pr: startswith($repo) and (((.[($repo | length):] | capture("^pr\\.(?<n>[0-9]+)")?) // null) as $m | $m != null and ($prs | index($m.n | tonumber) != null));
+    [.[] | .session_id as $s | .topics[]?
+    | select((test("(^|[^A-Za-z0-9])" + $p + "([^A-Za-z0-9]|$)") or contains($t) or startswith($space) or repo_pr or test("(^|[^A-Za-z0-9])" + $op + "([^A-Za-z0-9]|$)") or test("(^|[^A-Za-z0-9])" + $opc + "([^A-Za-z0-9]|$)") or contains($s)) | not) | {session: $s, topic: .}] | unique' "$1"
 }
 audit_verdict() { [ "$(jq -c . "$1")" = "[]" ] && [ "$(jq -c . "$2")" = "[]" ]; }
 # audit_failure is what a failed production audit says, in the checkpoint and in the teardown.
@@ -3748,7 +3797,7 @@ done
 # Every other tree's claims move too, though their own workflow may end a phase meanwhile: once each
 # has left the generation it ran, none has left its issue pod, and every claim of the run is on the
 # addresses the daemon hands now.
-on_tree "$tree1" until_true 900 "every claim of the run to leave the generation it ran before the respelling" claims_left "$live_before"
+on_subject "legion.dev/tree" until_true 900 "every claim of the run to leave the generation it ran before the respelling" claims_left "$live_before"
 live_after=$(live_claims) || fail "legion claims could not be read"
 replaced=$(jq -cn --argjson b "$live_before" --argjson a "$live_after" \
   '[$b[] as $c | $a[] | select(.token == $c.token and .podUid != $c.podUid) | {token, podUid, was: $c.podUid}]')
@@ -3801,7 +3850,7 @@ split=$(live_claims | jq -c --arg t "$tree1" '[.[] | select(.tree == $t)] | grou
 [ "$split" = "[]" ] || fail "an issue of tree $tree1 runs its roles in more than one pod: $split"
 # Every other tree's claims move too, though their own workflow may end a phase meanwhile: once each
 # has left the incarnation it ran, every claim of the run is on the new addresses.
-on_tree "$tree1" until_true 900 "every claim of the run to leave the pod it ran before the move" claims_left "$live_before"
+on_subject "legion.dev/tree" until_true 900 "every claim of the run to leave the pod it ran before the move" claims_left "$live_before"
 claims_on_handed_addresses
 # The pod shape follows the move (shape_problems): record_stream noted the new stream as the daemon
 # started, the shape watcher, forked on the old port, checks each pod the move launched against it
@@ -3815,7 +3864,28 @@ shape_checked() {
   uids=$(live_claims | jq -r '.[].podUid' | sort -u) || return 1
   for uid in $uids; do grep -qF " $uid " "$evidence/pods-checked.txt" || return 1; done
 }
-on_subject "legion.dev/tree" until_true 300 "the shape watcher to check every pod the run's claims run in since the move" shape_checked
+# shape_checked_blocked is shape_checked's own timeout_hook, in place of on_subject's run-wide
+# "legion.dev/tree": that subject would let any Pending pod of the run, including one starved for
+# a genuine product reason unrelated to this wait, read this timeout BLOCKED. Ends BLOCKED only
+# when one of the specific pods shape_checked is still waiting for — missing from
+# pods-checked.txt — is itself starved, checked issue by issue since capacity_subject takes one
+# selector at a time.
+shape_checked_blocked() {
+  local claims issue uid pending
+  claims=$(live_claims) || return 0
+  while IFS=$'\t' read -r issue uid; do
+    [ -n "$uid" ] || continue
+    grep -qF " $uid " "$evidence/pods-checked.txt" 2>/dev/null && continue
+    pending=$(limit_pending "legion.dev/issue=$issue") || pending=
+    if [ -z "$pending" ]; then
+      pending=$(limit_pending_exhausted "legion.dev/issue=$issue") || pending=
+    fi
+    [ -z "$pending" ] || blocked "capacity: the legion pool is at its limits, so the scheduler cannot place $(awk 'NR > 1 { printf " // " } { printf "%s", $0 }' <<<"$pending")"
+  done < <(jq -r '.[] | [.issue, .podUid] | @tsv' <<<"$claims")
+}
+timeout_hook=shape_checked_blocked
+until_true 300 "the shape watcher to check every pod the run's claims run in since the move" shape_checked
+timeout_hook=limit_pending_blocked
 bad=$(pod_shape_verdict "$evidence/pod-watch.json")
 [ -z "$bad" ] || fail "Sandbox pods depart from the pod shape: $(tr '\n' ' ' <<<"$bad")"
 note "the shape watcher checked every pod the run's claims run in since the move, and each of the $(jq -r -L "$root/scripts/e2e/lib" 'include "stage4b-pods"; ready_pods | .metadata.uid' "$evidence/pod-watch.json" | sort -u | wc -l) pods seen ready so far dials the stream served when it was created"
@@ -4660,7 +4730,7 @@ expect_failure production-audit-outside audit_verdict "$evidence/controls/audit-
 # of the run, must find that topic.
 control_session=$(jq -r '.[0] // "legion-e2e4b-control"' "$evidence/run-sessions.json")
 { cat "$evidence/interests.jsonl"; jq -cn --arg s "$control_session" '{at: "control", session_id: $s, topics: ["notifications.dispatch.issue.ACME-1"]}'; } >"$evidence/controls/interests-outside.jsonl"
-caught=$(interests_outside "$evidence/controls/interests-outside.jsonl")
+caught=$(interests_outside "$evidence/controls/interests-outside.jsonl" '[]')
 jq -e 'any(.[]; .topic == "notifications.dispatch.issue.ACME-1")' <<<"$caught" >/dev/null ||
   fail "the interest filter let an outside topic through: $caught"
 note "the interest filter's control: an added topic outside the run (notifications.dispatch.issue.ACME-1) is caught"
