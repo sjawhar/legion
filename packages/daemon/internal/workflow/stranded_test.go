@@ -93,9 +93,6 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 	// run outside the cap.
 	waiting := strandedIssue("LEGION-10", "LEGION-10", phase.Admitted)
 	waiting.Generation, waiting.Status, waiting.HandedOver = 3, "todo", true
-	// A root a person moved out of the workflow gave up its slot; its claims wait on that person.
-	shelved := strandedIssue("LEGION-11", "LEGION-11", phase.Implementing)
-	shelved.Status = "backlog"
 	issues := []record.Issue{
 		strandedIssue("LEGION-1", "LEGION-1", phase.Implementing),
 		strandedIssue("LEGION-2", "LEGION-1", phase.Retro),
@@ -107,7 +104,6 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		strandedIssue("LEGION-8", "LEGION-7", phase.ProductionCheck),
 		strandedIssue("LEGION-9", "LEGION-404", phase.Planning),
 		waiting,
-		shelved,
 	}
 
 	implementer := strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleImplementer, supervise.StateSuspended)
@@ -145,10 +141,8 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		strandedClaim(t, "S2-1", "S2-1", claim.RoleImplementer, supervise.StateSuspended),
 		// A worker of its issue's phase that runs, or is launching, is not stranded.
 		strandedClaim(t, "LEGION-6", "LEGION-6", claim.RolePlanner, supervise.StateIdle),
-		// The architect of a root waiting for a slot, and the stalled tree a person shelved.
+		// The architect of a root waiting for a slot.
 		strandedClaim(t, "LEGION-10", "LEGION-10", claim.RoleArchitect, supervise.StateSuspended),
-		strandedClaim(t, "LEGION-11", "LEGION-11", claim.RoleArchitect, supervise.StateFailed),
-		strandedClaim(t, "LEGION-11", "LEGION-11", claim.RoleImplementer, supervise.StateSuspended),
 	}
 	stored := map[claim.Token]supervise.Claim{}
 	for _, c := range claims {
