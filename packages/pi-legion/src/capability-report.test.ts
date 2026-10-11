@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -10,6 +10,7 @@ import {
   CAPABILITY_REPORT_TIMEOUT_MS,
   type CapabilityHost,
   type CapabilityInput,
+  cleanDetail,
   ENVOY_TOOL_NAMES,
   LIVE_CAPABILITIES,
   type LiveCapability,
@@ -740,50 +741,50 @@ describe("github", () => {
   });
 });
 
-/** The redaction cases both funnels are held to: this report's rows and the daemon's
- * `capabilities.Normalize`. `patterns` is one detail per credential shape and what it reads
- * redacted; `branches` is each branch of a check that quotes upstream text, with the upstream text,
- * the credential in it, the detail a plugin without this redaction sends, and what the daemon's
- * state shows. */
+/** The cases both funnels are held to: `cleanDetail` here and the daemon's `capabilities.NewRow`.
+ * `patterns` is a detail per credential shape or cleanup rule and what it reads cleaned, each
+ * prefixed with `pad` letters `a` where it has one; `branches` is each branch of a check that quotes
+ * upstream text, with that text, the credential in it, and the text redacted. */
 interface RedactionFixture {
   readonly patterns: readonly {
     readonly pattern: string;
     readonly name: string;
+    readonly pad?: number;
     readonly detail: string;
     readonly want: string;
   }[];
   readonly branches: readonly {
-    readonly branch: string;
+    readonly name: string;
     readonly row: LiveCapability;
     readonly upstream: string;
     readonly credential: string;
-    readonly sent: string;
-    readonly shown: string;
+    readonly redacted: string;
   }[];
 }
 
+const fixtures = path.resolve(import.meta.dir, "../../contracts/fixtures");
 const redaction = JSON.parse(
-  readFileSync(
-    path.resolve(import.meta.dir, "../../contracts/fixtures/capability-redaction.json"),
-    "utf8"
-  )
+  readFileSync(path.join(fixtures, "capability-redaction.json"), "utf8")
 ) as RedactionFixture;
 
-describe("credential redaction", () => {
-  for (const { pattern, name, detail, want } of redaction.patterns) {
-    test(`${pattern}: ${name}`, async () => {
-      const rows = await measure(
-        fakeHost({
-          discoverAgents: async () => {
-            throw new Error(detail);
-          },
-        })
-      );
-      expect(rows.subagents).toEqual({ ok: false, detail: want });
+/** The report rows this plugin sends for the fixture's branches, which the daemon's
+ * `TestNormalizeKeepsThePluginsReportAsItIs` runs through `Normalize`. `UPDATE_FIXTURES=1` rewrites
+ * it from what the plugin sends now. */
+const PLUGIN_REPORT = path.join(fixtures, "capability-redaction-plugin-report.json");
+
+describe("cleanDetail", () => {
+  for (const { pattern, name, pad = 0, detail, want } of redaction.patterns) {
+    test(`${pattern}: ${name}`, () => {
+      const padding = "a".repeat(pad);
+      expect(cleanDetail(padding + detail)).toBe(padding + want);
+      // The daemon cleans what this plugin sends again, so cleaning is idempotent.
+      expect(cleanDetail(padding + want)).toBe(padding + want);
     });
   }
+});
 
-  test("each branch that quotes upstream text carries the credential in it redacted", async () => {
+describe("credential redaction", () => {
+  test("every row passes cleanDetail: each branch that quotes upstream text carries it redacted", async () => {
     const upstream = (row: LiveCapability): string => {
       const branch = redaction.branches.find((candidate) => candidate.row === row);
       if (branch === undefined) throw new Error(`the fixture has no branch on the ${row} row`);
@@ -816,15 +817,19 @@ describe("credential redaction", () => {
     );
 
     const details = Object.fromEntries(report.rows.map((row) => [row.name, row.detail]));
-    for (const branch of redaction.branches) {
-      expect(branch.sent).toContain(branch.upstream);
-      expect(branch.upstream).toContain(branch.credential);
-      expect({ branch: branch.branch, detail: details[branch.row] }).toEqual({
-        branch: branch.branch,
-        detail: branch.shown,
+    for (const { name, row, redacted } of redaction.branches) {
+      expect({ name, detail: details[row] }).toEqual({
+        name,
+        detail: expect.stringContaining(redacted),
       });
     }
     const wire = JSON.stringify(report);
-    for (const branch of redaction.branches) expect(wire).not.toContain(branch.credential);
+    for (const { credential } of redaction.branches) expect(wire).not.toContain(credential);
+
+    const sent = { rows: report.rows };
+    if (process.env.UPDATE_FIXTURES === "1") {
+      writeFileSync(PLUGIN_REPORT, `${JSON.stringify(sent, null, 2)}\n`);
+    }
+    expect(JSON.parse(readFileSync(PLUGIN_REPORT, "utf8"))).toEqual(sent);
   });
 });

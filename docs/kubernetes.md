@@ -1235,10 +1235,12 @@ run — and sends the report with `claims/ready` (`capabilities`: `measuredAt`, 
 `rows[{name, ok, detail}]`), each check within 8 s and the whole report within 10 s. A check that
 fails, throws or runs past its budget is a failing row carrying the reason, never a stopped
 session, and the daemon normalises what arrives (a live row the session left out reads `not
-reported by this session`, a name the table has no live row for is dropped, a detail is cut at
-1024 bytes) and never refuses a ready for what it reports. The ready after a regained Envoy role
-re-sends the same report; the controller's ready carries none. Each row's check, and the fact a
-passing one reports:
+reported by this session`, a name the table has no live row for is dropped, a detail is one line
+with every credential it quotes redacted, cut at 1024 bytes) and never refuses a ready for what it
+reports. The state route answers without authentication, so the extension cleans each detail the
+same way before it sends it, and the daemon cleans a report it reads back from the store at boot
+too. The ready after a regained Envoy role re-sends the same report; the controller's ready
+carries none. Each row's check, and the fact a passing one reports:
 
 - `subagents`: `pi.agents` is exposed, the `task` tool is registered, and every agent the
   registration's `promptAgents` names (the task agents the role's prompts dispatch) is resolved by
