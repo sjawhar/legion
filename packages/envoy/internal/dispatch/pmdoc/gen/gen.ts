@@ -2,7 +2,7 @@
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { setBlockIdGenerator } from "@legion/proof-editor";
-import { createHeadlessProof, type HeadlessProofEditor } from "@legion/proof-editor/headless";
+import { createHeadlessProof } from "@legion/proof-editor/headless";
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { Transform } from "prosemirror-transform";
 import { prosemirrorToYXmlFragment } from "y-prosemirror";
@@ -417,9 +417,9 @@ const replaceRangeCases: ReplaceRangeCase[] = [
               return doc.resolve(quotePosition(doc, replace.at)).before();
           }
         })();
-  const fromPos =
-    pointPosition === undefined ? quotePosition(doc, replace.from) : pointPosition;
-  const toPos = pointPosition === undefined ? quotePosition(doc, replace.to) + replace.to.length : fromPos;
+  const fromPos = pointPosition === undefined ? quotePosition(doc, replace.from) : pointPosition;
+  const toPos =
+    pointPosition === undefined ? quotePosition(doc, replace.to) + replace.to.length : fromPos;
   const slice = inline
     ? inserted.slice(1, inserted.content.size - 1)
     : inserted.slice(0, inserted.content.size);
@@ -441,7 +441,7 @@ const replaceRangeOracle = {
   schema: "pmdoc/replace-range-oracle/v1",
   cases: replaceRangeCases,
 };
-const nextSplices = JSON.stringify(replaceRangeOracle, null, 2) + "\n";
+const nextSplices = `${JSON.stringify(replaceRangeOracle, null, 2)}\n`;
 
 function quotePosition(doc: ProseMirrorNode, quote: string): number {
   let result = -1;
@@ -498,7 +498,7 @@ const nextFences = `[\n${fenceCases
   .map((line) => `  ${line}`)
   .join(",\n")}\n]\n`;
 
-const next = JSON.stringify(fixtures, null, 2) + "\n";
+const next = `${JSON.stringify(fixtures, null, 2)}\n`;
 if (check) {
   const current = readFileSync(out, "utf8");
   const currentSplices = readFileSync(spliceOut, "utf8");
