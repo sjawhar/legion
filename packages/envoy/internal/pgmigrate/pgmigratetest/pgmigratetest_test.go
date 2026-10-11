@@ -10,9 +10,9 @@ import (
 )
 
 // Each entry the binary leaves out gets the advice that fixes it: all: brings in a _ or . name, and
-// nothing embeds a symlink, a version-control name, an empty directory or an irregular file, so
-// those are named for what they are rather than sent back to all:. Each row is the entry that
-// tells one branch of the advice from its absence.
+// nothing embeds a symlink, a version-control name, a directory //go:embed took nothing from (an
+// empty one, for instance) or an irregular file, so those are named for what they are rather than
+// sent back to all:. Each row is the entry that tells one branch of the advice from its absence.
 func TestCheckEmbedsEveryFileNamesWhyAnEntryIsMissing(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
