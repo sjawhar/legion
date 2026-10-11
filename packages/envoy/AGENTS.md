@@ -2227,10 +2227,12 @@ rather than restarting a pod whose token or enrollment is permanently rejected. 
 errors keep the retry backoff.
 The login that installs a credential wakes every registered session's enrollment retry, so those
 sessions reach the broker within about a second of it rather than when a backoff of up to a minute
-comes round. A session whose renew the broker refuses (its lease lapsed) stops counting as enrolled
-at once, and its enrollment becomes the session's lapsed id; so does a re-pinned session's recorded
-enrollment after a helper restart. While it is lapsed and the helper holds a credential, sign
-answers NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its
+comes round. A session whose renew the broker refuses `ENROLLMENT_NOT_LIVE` (its lease lapsed, or
+an older broker's `PROOF_INVALID` saying `not live`) stops counting as enrolled at once, and its
+enrollment becomes the session's lapsed id; so does a re-pinned session's recorded enrollment after
+a helper restart. Any other refused renew keeps the lease and retries. While it is lapsed and the
+helper holds a credential, sign answers NOT_ENROLLED naming the refused renew, and
+`register --wait N` waits for its
 re-enrollment. The helper revokes a lapsed id before the session enrolls again, and while the
 session lives its record keeps that id until the revoke lands, so a restart meanwhile, even a
 second one before any login, still revokes it. A session that ends
