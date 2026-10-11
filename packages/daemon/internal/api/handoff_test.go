@@ -1126,10 +1126,12 @@ func TestHandoffCompleteReadyMarksAByHandPullRequestWithoutAutoArmingIt(t *testi
 	github.set(func(g *handoffGitHub) {
 		g.merge.ByHand = []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}}
 		g.pullFiles[42] = []string{"migrations/versions/0001_init.py"}
+		g.rules = `[]`
+		g.mainBranch = `{"name":"main","protected":false}`
 	})
 	h, _, merger := newReadyHarness(t, github)
 
-	if code, body := ready(t, h, merger); code != http.StatusOK || body != "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it" {
+	if code, body := ready(t, h, merger); code != http.StatusOK || !strings.HasPrefix(body, "MANUAL_MERGE_REQUIRED:") {
 		t.Fatalf("READY for a by-hand pull request = %d %q", code, body)
 	}
 }

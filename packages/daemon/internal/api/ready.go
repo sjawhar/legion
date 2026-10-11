@@ -105,6 +105,9 @@ func readyChecks(ctx context.Context, github githubrest.Client, githubAPI string
 		return "", githubReadFailed(err)
 	}
 	if len(required.Checks) == 0 && len(required.Workflows) == 0 {
+		if note, refused := mergeReadyPolicy(ctx, github, githubAPI, repository, rules, number); refused != nil || note != "" {
+			return note, refused
+		}
 		return fmt.Sprintf("no check is required on %q of %s, so READY was published without reading the head's checks", pull.Base.Ref, repository), nil
 	}
 	var results map[string]string
