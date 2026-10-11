@@ -320,6 +320,9 @@ type Store interface {
 	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
 	ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error
 	Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error)
+	// GatesForArtifact is every gate registered on artifactID, in issue order: the document owner's
+	// gate and each copy a hand-over carried to a child of its tree.
+	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error

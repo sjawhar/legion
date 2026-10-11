@@ -902,12 +902,24 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 
 // startMidPhaseMembers starts each previous run that promotion brings back, the re-admitted root
 // included. A hand-over turns a child into that root while preserving its phase, so its phase role
-// needs the same resume start ordinary mid-phase children receive. Promotion already queued the
-// root's branch; each other member queues its own before starting.
+// needs the same resume start ordinary mid-phase children receive (workflow.ResumeTask, which tells
+// a carried merger its carried approved head). A carried root held from a phase starts no worker,
+// and the hold's notice went to the architect of the tree it was handed over from, so its own
+// architect is told of the hold (workflow.HeldNotice). Promotion already queued the root's branch;
+// each other member queues its own before starting.
 func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	project, err := claim.ProjectToken(a.project)
 	if err != nil {
 		return err
+	}
+	carried, err := a.store.CarriedRoot(ctx, tx, root.Key)
+	if err != nil {
+		return err
+	}
+	if carried == root.Generation && root.Phase == phase.Held && root.Hold != nil {
+		if err := a.enqueue(ctx, tx, root.Key, workflow.HeldNotice(root), now); err != nil {
+			return err
+		}
 	}
 	for _, member := range issues {
 		if member.Tree != root.Tree {
@@ -933,8 +945,12 @@ func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root re
 				return err
 			}
 		}
+		task, err := workflow.ResumeTask(ctx, a.store, tx, member, role)
+		if err != nil {
+			return err
+		}
 		payload := record.SuperviseRequest{Op: "start", Tree: member.Tree, Role: role, Generation: member.Generation, Phase: member.Phase,
-			Task: workflow.ResumePhaseTask(member), ResumeTask: true}
+			Task: task, ResumeTask: true}
 		if err := a.enqueue(ctx, tx, member.Key, payload, now); err != nil {
 			return err
 		}

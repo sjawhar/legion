@@ -4,7 +4,9 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -157,6 +159,69 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 			})
 			if starts := phaseStarts(t, pool, child, tc.role, tc.phase); (starts == 1) != tc.wantRole {
 				t.Fatalf("starts of %s at %s = %d, want role start %t", tc.role, tc.phase, starts, tc.wantRole)
+			}
+		})
+	}
+}
+
+// A carried root's workers resume from what the carry kept. A carried merger is told the head the
+// carried review round approved, the one head its READY may name, so it does not send the round
+// back to review. A carried root held from a phase starts no worker, and the only held notice went
+// to the old tree's architect, so its own architect is told of the hold at promotion, to retry or
+// escalate it.
+func TestACarriedRootResumesFromTheApprovedHeadAndTheHold(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		at   phase.Phase
+		hold *record.Hold
+	}{
+		{name: "merging", at: phase.Merging},
+		{name: "held from testing", at: phase.Held, hold: &record.Hold{From: phase.Testing, Reason: record.HoldEscalated}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			const root, child = "LEGION-208", "LEGION-209"
+			until := fixedNow.Add(time.Hour)
+			parent := root
+			inTx(t, pool, func(tx pgx.Tx) {
+				records := record.NewStore()
+				for _, put := range []error{
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: tc.at, Hold: tc.hold, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}),
+					records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: child, Role: claim.RoleReviewer, Claim: "reviewer-claim", Decision: &record.ReviewDecision{State: "approved", Head: "approved-head"}}),
+					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+				} {
+					if put != nil {
+						t.Fatalf("seed: %v", put)
+					}
+				}
+			})
+
+			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+			var mergerTasks []string
+			var held []record.Notice
+			for _, effect := range effects(t, pool) {
+				if effect.issue != child {
+					continue
+				}
+				if request, ok := effect.payload.(record.SuperviseRequest); ok && request.Op == "start" && request.Role == claim.RoleMerger {
+					mergerTasks = append(mergerTasks, request.Task)
+				}
+				if notice, ok := effect.payload.(record.Notice); ok && notice.Kind == "held" {
+					held = append(held, notice)
+				}
+			}
+			if tc.hold == nil {
+				if len(mergerTasks) != 1 || !strings.HasSuffix(mergerTasks[0], " Approved head: approved-head.") {
+					t.Fatalf("carried merger tasks = %q, want one naming the carried approved head", mergerTasks)
+				}
+				return
+			}
+			want := record.Notice{Kind: "held", Role: claim.RoleTester, Phase: phase.Testing, Reason: string(record.HoldEscalated)}
+			if len(held) != 1 || !reflect.DeepEqual(held[0], want) {
+				t.Fatalf("held notices to the carried root = %+v, want %+v once", held, want)
 			}
 		})
 	}

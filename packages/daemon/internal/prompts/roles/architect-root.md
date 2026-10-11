@@ -43,10 +43,14 @@ the daemon is already running the tree's phases, and you start none.
 During a live session, react only to delivered wakes; do not poll.
 
 When a `catch-up` says `carried`, this root is a child handed over from a finished tree, carrying
-its phase, its approved design gate, its phase records and its pull request. Never `register_gate`
-or request approval again, and do not begin planning anew: the daemon has already started the role
-of its current phase. Resume the tree from there; at `production_check`, once the check finishes and
-you have verified its record on the pull request and the issue, `sign_off`.
+its phase, its design gate, its phase records and its pull request. Never `register_gate`, and do
+not begin planning anew: the daemon has already started the role of its current phase, or, when
+the root is held, tells you of the hold with a `held` notice to retry or escalate. The carried gate
+is a copy on the old root's spec document. If a READY is refused because it is closed (a newer
+version of that spec is unapproved), ask a human to approve that version of the old root's
+document; its approval opens your gate and releases the READY. Resume the tree from there; at
+`production_check`, once the check finishes and you have verified its record on the pull request
+and the issue, `sign_off`.
 
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree

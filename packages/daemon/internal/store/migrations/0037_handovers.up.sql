@@ -16,3 +16,7 @@ create table carried_roots (
     issue text primary key references issues(key) on delete cascade,
     generation bigint not null check (generation > 0)
 );
+
+-- A carried root holds a copy of its old root's gate, on the old root's document, whose events
+-- arrive keyed by the old root; each event is applied to every gate on that document.
+create index design_gates_artifact_id on design_gates (artifact_id);
