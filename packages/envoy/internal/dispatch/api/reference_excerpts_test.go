@@ -190,3 +190,40 @@ func TestTheReconciliationStoresTheExcerptOfAMentionIndexedWithout(t *testing.T)
 		t.Fatalf("idle tick = %d documents, err %v; want none", documents, err)
 	}
 }
+
+// A changed document's old excerpt can remain on its refs row while the row is owed a fresh one.
+// The references route must not serve that payload: it falls back to the document's name until the
+// reconciliation records the edited document's block.
+func TestAnOwedEditedExcerptFallsBackToTheDocumentNameUntilReconciled(t *testing.T) {
+	handler, database, service, _ := referenceExcerptHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	reference := "dispatch://" + createReferenceAPIIssue(t, handler, "CORE").Key
+	design := createProjectDocument(t, handler, "OPS", "Design notes",
+		"# Design\n\nThe old plan is "+reference+".\n")
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+design.ID+"/edits", map[string]any{
+		"ops":     []map[string]string{{"op": "replace", "find": "old", "with": "new"}},
+		"summary": "Refresh the plan",
+		"actor":   sessionActor(),
+	})
+	if edited.Code != http.StatusOK {
+		t.Fatalf("edit the document: status=%d body=%s", edited.Code, edited.Body.String())
+	}
+	want := renderedMentionExcerpt(t, service, design.ID, reference)
+	if !strings.Contains(want.Text, "new plan") {
+		t.Fatalf("rendered edited excerpt = %#v; want the new plan", want)
+	}
+	if err := refs.ClearExcerpts(context.Background(), database.Pool, design.ID); err != nil {
+		t.Fatalf("mark the edited excerpt owed: %v", err)
+	}
+	if got := documentMention(t, handler, reference, design.ID).Excerpt; got == nil || got.BlockID != "" || got.Text != "Design notes" {
+		t.Fatalf("excerpt while owed = %#v; want the document's name", got)
+	}
+	documents, full, err := service.ReconcileReferenceExcerpts(context.Background())
+	if err != nil || documents < 1 || full {
+		t.Fatalf("reconcile = %d documents, full %v, err %v; want the edited document reconciled", documents, full, err)
+	}
+	if got := documentMention(t, handler, reference, design.ID).Excerpt; got == nil || *got != want {
+		t.Fatalf("excerpt after reconciliation = %#v; want %#v", got, want)
+	}
+}

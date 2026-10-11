@@ -60,8 +60,8 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL st
 // markdown came from (recordTreeExcerpts), so IndexDocumentReferences' check that the recorded
 // rendering is the version's markdown never clears. That unchanged upload's markdown is the
 // document the reconciliation read, so the excerpt stored under the older number is the one the
-// version would have stored, and nothing reads the number but MarkStaleExcerpts, whose re-marking
-// only recomputes the same excerpt.
+// version would have stored. StoredExcerpts hides an owed row, and the reconciliation's non-null
+// version makes that same excerpt current again.
 func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, excerpts map[Target]model.GraphExcerpt) error {
 	kinds := make([]string, 0, len(excerpts))
 	ids := make([]string, 0, len(excerpts))
@@ -88,12 +88,14 @@ func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, e
 	return nil
 }
 
-// StoredExcerpts is, by citing document, the excerpt stored on each mention of (toKind, toID) a
-// document writes; a mention with none stored is absent. It reads refs through refs_to alone.
+// StoredExcerpts is, by citing document, the stored and current excerpt on each mention of
+// (toKind, toID) a document writes; a mention with none stored or one the reconciliation owes is
+// absent. It reads refs through refs_to alone.
 func StoredExcerpts(ctx context.Context, q Queryer, toKind, toID string) (map[string]model.GraphExcerpt, error) {
 	rows, err := q.Query(ctx, `
 		select from_id, coalesce(excerpt_block_id, ''), excerpt_text from refs
-		where to_kind = $1 and to_id = $2 and from_kind = 'artifact' and excerpt_text is not null
+		where to_kind = $1 and to_id = $2 and from_kind = 'artifact'
+		  and excerpt_text is not null and excerpt_version is not null
 	`, toKind, toID)
 	if err != nil {
 		return nil, fmt.Errorf("read reference excerpts: %w", err)
@@ -160,8 +162,9 @@ func DriftedExcerpts(ctx context.Context, q Queryer, limit int) ([]ExcerptDrift,
 }
 
 // ClearExcerpts marks every mention the document fromID writes as owed an excerpt, keeping the
-// excerpt each holds for the route to serve until the reconciliation stores the latest: what a
-// version write that cannot cut its excerpts leaves.
+// payload each holds for the reconciliation to overwrite. StoredExcerpts does not serve it while
+// excerpt_version is null, so the route uses the document's name until the reconciliation stores
+// the latest excerpt: what a version write that cannot cut its excerpts leaves.
 func ClearExcerpts(ctx context.Context, q Execer, fromID string) error {
 	if _, err := q.Exec(ctx, `
 		update refs set excerpt_version = null where from_kind = 'artifact' and from_id = $1

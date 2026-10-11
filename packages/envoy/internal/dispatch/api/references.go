@@ -121,9 +121,9 @@ func parseReferencesQuery(r *http.Request, serverURL string) (refs.Query, text.R
 // documentMentionExcerpts replaces the excerpt of every mention written by a document with the
 // excerpt stored when the mention was indexed (refs.RecordExcerpts): the block holding the mention,
 // its id a #b-<id> jump target, and its markdown. The route reads no document: a mention whose
-// excerpt the reconciliation has not stored yet, or that lies in no block, keeps the document's
-// name, and one stored from an older version than the document's latest shows that version's
-// block until the reconciliation stores the latest.
+// excerpt the reconciliation has not stored yet, is owed a fresh one, or lies in no block keeps
+// the document's name. The reconciliation serves the next stored block only after it records a
+// non-null excerpt_version.
 func (s *server) documentMentionExcerpts(ctx context.Context, query refs.Query, edges []model.GraphEdge) error {
 	stored, err := refs.StoredExcerpts(ctx, s.deps.Store.Pool, query.Kind, query.ID)
 	if err != nil {

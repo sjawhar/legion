@@ -1240,16 +1240,18 @@ the tree once; an upload that changes the document renders it twice, as it did b
 of the fork - and its excerpts are cut from `applyLive`'s render only when the two agree. A null
 `excerpt_version` marks a mention owed an excerpt: every row 0091 found, each one `rebuild-refs`
 inserts, and every mention of an upload whose replacement left the document as it was, the one
-version write that records no rendering (`refs.ClearExcerpts`, which keeps the excerpt the row
-holds). `cmd/dispatch` runs `docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows
-through the partial index `refs_excerpt_drift` (an empty index once it has caught up), stores one
-batch of 20 documents per tick, every 2 s while a batch is full and every five minutes after, and
-for the hour after its start first marks owed the excerpts a version written by the binary a deploy
-replaces left behind (`refs.MarkStaleExcerpts`). A document the reconciliation cannot read for any
-reason but an unloadable history or a tree outside the schema (which it records as having no
-block), or whose excerpts it cannot store, is logged at ERROR and skipped for that tick, its
-mentions left owed, so one document never holds back the rest of its batch. Until a row is filled,
-the route answers that mention with the excerpt it holds, or the document's name when it holds none.
+version write that records no rendering (`refs.ClearExcerpts`, which keeps the payload the row
+holds for the reconciliation but sets its version null). `cmd/dispatch` runs
+`docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows through the partial index
+`refs_excerpt_drift` (an empty index once it has caught up), stores one batch of 20 documents per
+tick, every 2 s while a batch is full and every five minutes after, and for the hour after its
+start first marks owed the excerpts a version written by the binary a deploy replaces left
+behind (`refs.MarkStaleExcerpts`). A document the reconciliation cannot read for any reason but
+an unloadable history or a tree outside the schema (which it records as having no block), or whose
+excerpts it cannot store, is logged at ERROR and skipped for that tick, its mentions left owed, so
+one document never holds back the rest of its batch. `refs.StoredExcerpts` serves only a row whose
+`excerpt_version` is non-null; until then, the route answers that mention with the document's name,
+never the stale payload the row still holds.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the

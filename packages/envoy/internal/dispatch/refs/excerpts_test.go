@@ -90,8 +90,8 @@ func TestOwedExcerptsAreFoundThroughTheDriftIndexAndRecordedOnce(t *testing.T) {
 	if drifted, err := DriftedExcerpts(ctx, database.Pool, 20); err != nil || len(drifted) != 1 || drifted[0].Version != 2 {
 		t.Fatalf("drift after an older binary's version = %#v, %v; want the document at version 2", drifted, err)
 	}
-	if stored, _ := StoredExcerpts(ctx, database.Pool, "issue", "CORE-1"); stored[document] != excerpt {
-		t.Fatalf("a mention owed an excerpt serves %#v; want the excerpt it held until recorded", stored)
+	if stored, _ := StoredExcerpts(ctx, database.Pool, "issue", "CORE-1"); len(stored) != 0 {
+		t.Fatalf("a mention owed an excerpt serves %#v; want no stored excerpt", stored)
 	}
 	if marked, err := MarkStaleExcerpts(ctx, database.Pool); err != nil || marked != 0 {
 		t.Fatalf("marking again = %d, %v; want none, owed rows are not stale", marked, err)
