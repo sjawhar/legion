@@ -191,16 +191,22 @@ func TestTheReconciliationStoresTheExcerptOfAMentionIndexedWithout(t *testing.T)
 	}
 }
 
-// A changed document's old excerpt can remain on its refs row while the row is owed a fresh one.
-// The references route must not serve that payload: it falls back to the document's name until the
-// reconciliation records the edited document's block.
+// A version written by the binary a deploy replaces stores no excerpt, so its mentions keep the
+// previous version's block until MarkStaleExcerpts marks them owed. The references route must not
+// serve that stale payload: it falls back to the document's name until the reconciliation records
+// the edited document's block.
 func TestAnOwedEditedExcerptFallsBackToTheDocumentNameUntilReconciled(t *testing.T) {
 	handler, database, service, _ := referenceExcerptHandler(t)
+	ctx := context.Background()
 	createReferenceAPIProject(t, handler, "CORE")
 	createReferenceAPIProject(t, handler, "OPS")
 	reference := "dispatch://" + createReferenceAPIIssue(t, handler, "CORE").Key
 	design := createProjectDocument(t, handler, "OPS", "Design notes",
 		"# Design\n\nThe old plan is "+reference+".\n")
+	previous := documentMention(t, handler, reference, design.ID).Excerpt
+	if previous == nil || !strings.Contains(previous.Text, "old plan") {
+		t.Fatalf("excerpt before the edit = %#v; want the old plan", previous)
+	}
 	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+design.ID+"/edits", map[string]any{
 		"ops":     []map[string]string{{"op": "replace", "find": "old", "with": "new"}},
 		"summary": "Refresh the plan",
@@ -213,13 +219,21 @@ func TestAnOwedEditedExcerptFallsBackToTheDocumentNameUntilReconciled(t *testing
 	if !strings.Contains(want.Text, "new plan") {
 		t.Fatalf("rendered edited excerpt = %#v; want the new plan", want)
 	}
-	if err := refs.ClearExcerpts(context.Background(), database.Pool, design.ID); err != nil {
-		t.Fatalf("mark the edited excerpt owed: %v", err)
+	// The older binary wrote the edit's version without touching the excerpt columns, so the row
+	// still holds the version before it.
+	if _, err := database.Pool.Exec(ctx, `
+		update refs set excerpt_block_id = $2, excerpt_text = $3, excerpt_version = excerpt_version - 1
+		where from_kind = 'artifact' and from_id = $1
+	`, design.ID, previous.BlockID, previous.Text); err != nil {
+		t.Fatalf("leave the previous version's excerpt behind: %v", err)
+	}
+	if marked, err := refs.MarkStaleExcerpts(ctx, database.Pool); err != nil || marked != 1 {
+		t.Fatalf("mark stale excerpts = %d, %v; want the edited document's mention", marked, err)
 	}
 	if got := documentMention(t, handler, reference, design.ID).Excerpt; got == nil || got.BlockID != "" || got.Text != "Design notes" {
 		t.Fatalf("excerpt while owed = %#v; want the document's name", got)
 	}
-	documents, full, err := service.ReconcileReferenceExcerpts(context.Background())
+	documents, full, err := service.ReconcileReferenceExcerpts(ctx)
 	if err != nil || documents < 1 || full {
 		t.Fatalf("reconcile = %d documents, full %v, err %v; want the edited document reconciled", documents, full, err)
 	}
