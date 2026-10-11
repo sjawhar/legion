@@ -161,7 +161,7 @@ func signRequest(t *testing.T, m *Machine, key *ecdsa.PrivateKey, reason string,
 	for i, n := range names {
 		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: n, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(key, m.Audience, details, reason, "", time.Now())
+	compact, err := record.Sign(key, m.Audience, details, reason, "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -171,7 +171,7 @@ func signRequest(t *testing.T, m *Machine, key *ecdsa.PrivateKey, reason string,
 func TestCreatePendingWritesTheRecordAndApproveMintsTheGrant(t *testing.T) {
 	m, enr, key, approver := newFixture(t)
 	ctx := context.Background()
-	compact, err := record.Sign(key, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}}}, "why", "", time.Now())
+	compact, err := record.Sign(key, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}}}, "why", "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -322,7 +322,7 @@ func TestCreateRefusesLoginHintAndForeignThumbprint(t *testing.T) {
 	m, enr, key, _ := newFixture(t)
 	ctx := context.Background()
 
-	withHint, err := record.Sign(key, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}}}, "why", fixtureOperator, time.Now())
+	withHint, err := record.Sign(key, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "DEEL_API_KEY", Actions: []string{"inject"}}}, "why", fixtureOperator, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign(login_hint): %v", err)
 	}
@@ -776,7 +776,7 @@ func TestMachineSessionID(t *testing.T) {
 	ctx := context.Background()
 	enrB, keyB := newEnrollment(t, m.Store, "session", "box-b-"+t.Name(), new(fixtureOperator), nil)
 
-	compact, err := record.Sign(keyA, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "AUTO_TOKEN", Actions: []string{"inject"}}}, "need it", "", time.Now())
+	compact, err := record.Sign(keyA, m.Audience, []record.AuthorizationDetail{{Type: "agent_secret", Identifier: "AUTO_TOKEN", Actions: []string{"inject"}}}, "need it", "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}

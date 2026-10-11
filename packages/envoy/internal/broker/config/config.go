@@ -123,6 +123,10 @@ const noDatabasePassword = "the broker substitutes no password into BROKER_DATAB
 // and its tier.
 const noRulesFile = "the broker reads each secret's owner and tier from the secret's own tags under BROKER_SECRETS_PREFIX, so there is no rules file"
 
+// noGrantCap is why BROKER_MAX_GRANT_SECONDS is gone: a request chooses a shorter lifetime, or
+// its grant lasts until the requesting session ends.
+const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts until the requesting session ends"
+
 // removedVars are environment variables the broker no longer reads. A stale deployment still
 // setting one must fail loudly rather than silently running on configuration that means nothing
 // any more.
@@ -137,6 +141,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_RULES_FILE", noRulesFile},
 	{"BROKER_RULES_S3_URI", noRulesFile},
 	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
+	{"BROKER_MAX_GRANT_SECONDS", noGrantCap},
 }
 
 // serviceAccountPattern is a Kubernetes service account's subject, the one a pod's projected token

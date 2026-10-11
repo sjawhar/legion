@@ -142,7 +142,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 	machineKey := newKey(t)
 	loginRequest, err := record.Sign(machineKey, brokerURL, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: "devrelay-test-host"},
-	}, "", testApprover, time.Now())
+	}, "", testApprover, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign(machine login): %v", err)
 	}
@@ -188,7 +188,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 	// --- request: the box asks for the approval-required secret ---
 	compact, err := record.Sign(sessionKey, brokerURL, []record.AuthorizationDetail{
 		{Type: "agent_secret", Identifier: "AGENT_SECRETS_PROOF_APPROVAL", Actions: []string{"inject"}},
-	}, "devrelay main_test", "", time.Now())
+	}, "devrelay main_test", "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}

@@ -282,7 +282,7 @@ func signAgentSecretRequest(t *testing.T, key *ecdsa.PrivateKey, audience, reaso
 	for i, n := range names {
 		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: n, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(key, audience, details, reason, "", time.Now())
+	compact, err := record.Sign(key, audience, details, reason, "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -293,7 +293,7 @@ func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, logi
 	t.Helper()
 	compact, err := record.Sign(key, audience, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: host},
-	}, "", loginHint, time.Now())
+	}, "", loginHint, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}

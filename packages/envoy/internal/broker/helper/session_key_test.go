@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/proof"
+	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
 // TestEnrollSessionKeyEnrollsAndRevokesAnExternalKey drives the kind-free pair against a real
@@ -137,6 +138,26 @@ func rawCall(t *testing.T, sock, line string) Response {
 		t.Fatalf("helper reply %q: %v", reply, err)
 	}
 	return resp
+}
+
+// TestSignRequestSignsTheLifetimeItIsAsked: sign-request with lifetime_seconds signs that lifetime
+// into the request object, the claim the broker grants for, and without it signs none, so the
+// grant lasts until the session ends.
+func TestSignRequestSignsTheLifetimeItIsAsked(t *testing.T) {
+	r := startRig(t, "")
+	if reg := r.call(t, Request{Op: "register", WaitSeconds: 5}); !reg.OK || reg.State != "enrolled" {
+		t.Fatalf("register: %+v", reg)
+	}
+	for _, lifetime := range []*int{new(120), nil} {
+		resp := r.call(t, Request{Op: "sign-request", Secrets: []string{"DEEL_API_KEY"}, Reason: "x", LifetimeSeconds: lifetime})
+		if !resp.OK {
+			t.Fatalf("sign-request lifetime %v: %+v", lifetime, resp)
+		}
+		ro, err := record.VerifyRequestObject(resp.RequestObject, r.srv.Broker.URL, time.Minute, time.Now())
+		if err != nil || (ro.LifetimeSeconds == nil) != (lifetime == nil) || lifetime != nil && *ro.LifetimeSeconds != *lifetime {
+			t.Fatalf("sign-request lifetime %v signed lifetime %v (%v)", lifetime, ro.LifetimeSeconds, err)
+		}
+	}
 }
 
 // TestABrokerBeforeTheSessionKindStillEnrollsEverySession: a broker that refuses kind session

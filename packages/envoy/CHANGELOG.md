@@ -186,8 +186,9 @@
   `host` and `box`, which the new constraint refuses, so roll forward rather than back.
 - **Breaking:** a grant lasts until its session ends unless its request asked for a shorter
   lifetime (`--ttl`, above); there is no fixed lifetime and no cap. `BROKER_MAX_GRANT_SECONDS`
-  (default and most 43200, 12 hours) is no longer read; a deployment that still sets it starts
-  normally and the value means nothing. A grant with no lifetime answers `expires_at: null` on every
+  (default and most 43200, 12 hours) is removed: a deployment that still sets it refuses to start,
+  naming the variable and explaining that a request's `--ttl` now chooses a shorter lifetime. A
+  grant with no lifetime answers `expires_at: null` on every
   grant read (`GET /v1/enrollments/self`, `GET /v1/grants`, `GET /v1/operator/grants`), and its
   record reads `lifetime_seconds: null` on `GET /v1/credential-requests/{id}` and
   `lifetime_seconds: -` in its body. Migration `0013_grant_until_session_ends` drops not null from

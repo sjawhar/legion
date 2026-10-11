@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,16 +20,16 @@ func signRequestFor(t *testing.T, m *Machine, key *ecdsa.PrivateKey, lifetime in
 	for i, n := range names {
 		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: n, Actions: []string{"inject"}}
 	}
-	compact, err := record.SignWithLifetime(key, m.Audience, details, "need it", lifetime, time.Now())
+	compact, err := record.Sign(key, m.Audience, details, "need it", "", &lifetime, time.Now())
 	if err != nil {
-		t.Fatalf("record.SignWithLifetime: %v", err)
+		t.Fatalf("record.Sign: %v", err)
 	}
 	return compact
 }
 
-// age moves grant grantID's creation and expiry, and its enrollment's lease, back by elapsed: the
-// package's fake clock (shift the row's timestamps, as TestCreateDoesNotReuseAnExpiredOrRevokedGrant
-// does), so the broker's own now() reads the grant as elapsed old while the session stays live.
+// age moves grant grantID's creation and expiry back by elapsed: the package's fake clock shifts
+// the grant's timestamps, as TestCreateDoesNotReuseAnExpiredOrRevokedGrant does, so the broker's
+// own now() reads the grant as elapsed old while the session stays live.
 func age(t *testing.T, m *Machine, grantID string, elapsed time.Duration) {
 	t.Helper()
 	interval := elapsed.String()
@@ -56,7 +57,7 @@ func TestATTLGrantEndsAfterItsLifetime(t *testing.T) {
 		t.Fatalf("Create(DEEL_API_KEY, 120 s) = %+v, %v, want pending", pending, err)
 	}
 	detail, err := m.ReadRecord(ctx, *pending.RecordID)
-	if err != nil || detail.LifetimeSeconds != 120 {
+	if err != nil || detail.LifetimeSeconds == nil || *detail.LifetimeSeconds != 120 {
 		t.Fatalf("the record of a 120 s request = %+v, %v; want lifetime 120", detail, err)
 	}
 	approved, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
@@ -101,6 +102,57 @@ func TestATTLGrantEndsAfterItsLifetime(t *testing.T) {
 	}
 }
 
+// TestANoTTLRequestReusesAnUnexpiredPreMigrationGrant pins the one rollout bridge: before
+// migration 0013, a no-TTL request recorded the former 12-hour default and its grant has an
+// expiry. A running session asking again without --ttl keeps that grant and its original expiry,
+// rather than opening a second approval request or extending what the person approved.
+func TestANoTTLRequestReusesAnUnexpiredPreMigrationGrant(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+
+	old, err := m.Create(ctx, enr, signRequestFor(t, m, key, 43200, "AUTO_TOKEN"), "")
+	if err != nil || old.GrantID == nil {
+		t.Fatalf("Create(pre-migration AUTO_TOKEN) = %+v, %v; want a grant", old, err)
+	}
+	var before time.Time
+	if err := m.Store.Pool.QueryRow(ctx, `select expires_at from grants where id=$1`, *old.GrantID).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+
+	reused, err := m.Create(ctx, enr, signRequest(t, m, key, "no TTL after migration", "AUTO_TOKEN"), "")
+	if err != nil || reused.ID != old.ID || reused.GrantID == nil || *reused.GrantID != *old.GrantID {
+		t.Fatalf("Create(no TTL after migration) = %+v, %v; want pre-migration request %s and grant %s reused", reused, err, old.ID, *old.GrantID)
+	}
+	var after time.Time
+	if err := m.Store.Pool.QueryRow(ctx, `select expires_at from grants where id=$1`, *old.GrantID).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if !after.Equal(before) {
+		t.Fatalf("pre-migration grant expiry changed from %s to %s; want it left as approved", before, after)
+	}
+}
+
+// TestAPendingRequestWithAnotherLifetimeIsRefused keeps one pending approval per session and
+// secret name: changing --ttl must name the request already in the approver's Inbox rather than
+// opening another card.
+func TestAPendingRequestWithAnotherLifetimeIsRefused(t *testing.T) {
+	m, enr, key, _ := newFixture(t)
+	ctx := context.Background()
+
+	first, err := m.Create(ctx, enr, signRequestFor(t, m, key, 120, "DEEL_API_KEY"), "")
+	if err != nil || first.RecordID == nil {
+		t.Fatalf("Create(first 120s request) = %+v, %v; want pending", first, err)
+	}
+	second, err := m.Create(ctx, enr, signRequestFor(t, m, key, 300, "DEEL_API_KEY"), "")
+	if err == nil || !strings.Contains(err.Error(), first.ID) {
+		t.Fatalf("Create(second 300s request) = %+v, %v; want a refusal naming pending request %s", second, err, first.ID)
+	}
+	var count int
+	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from requests where enrollment_id=$1 and state='pending'`, enr).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("pending requests = %d, %v; want one", count, err)
+	}
+}
+
 // TestAGrantWithNoTTLLastsUntilItsSessionEnds is a request with no `--ttl`: its grant records no
 // lifetime and no expiry, still releases its values a week on while its session is live, is listed
 // for the session and the operator with no expiry, and ends when the session does.
@@ -117,8 +169,8 @@ func TestAGrantWithNoTTLLastsUntilItsSessionEnds(t *testing.T) {
 		t.Fatalf("Create(DEEL_API_KEY) = %+v, %v, want pending", pending, err)
 	}
 	detail, err := m.ReadRecord(ctx, *pending.RecordID)
-	if err != nil || detail.LifetimeSeconds != 0 {
-		t.Fatalf("the record of a request naming no lifetime = %+v, %v; want lifetime 0", detail, err)
+	if err != nil || detail.LifetimeSeconds != nil {
+		t.Fatalf("the record of a request naming no lifetime = %+v, %v; want no lifetime", detail, err)
 	}
 	approved, err := m.ApplyDecision(ctx, *pending.RecordID, true, approver)
 	if err != nil || approved.GrantID == "" {

@@ -111,7 +111,7 @@ type recordResponse struct {
 func buildRecordResponse(detail requests.RecordDetail) recordResponse {
 	resp := recordResponse{
 		RecordID: detail.RecordID, Kind: detail.Kind, State: detail.State, Approver: detail.Approver,
-		Identifiers: detail.Identifiers, Reason: detail.Reason, LifetimeSeconds: intPtr(detail.LifetimeSeconds),
+		Identifiers: detail.Identifiers, Reason: detail.Reason, LifetimeSeconds: detail.LifetimeSeconds,
 		RulesVersion: detail.RulesVersion, ExpiresAt: detail.ExpiresAt, RequestedAt: detail.RequestedAt,
 		Session: sessionResp(detail.Session),
 	}

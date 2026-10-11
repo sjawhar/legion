@@ -282,11 +282,3 @@ func strPtr(s string) *string {
 	}
 	return &s
 }
-
-// intPtr is nil for 0 and &n otherwise, for an optional wire number that is null rather than 0.
-func intPtr(n int) *int {
-	if n == 0 {
-		return nil
-	}
-	return &n
-}

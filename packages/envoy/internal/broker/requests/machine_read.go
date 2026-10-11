@@ -8,10 +8,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
-	"time"
-
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"slices"
+	"sort"
+	"strconv"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -33,7 +35,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	var expires *time.Time
 	var live bool
 	enr := enrollmentRow{ID: enrollmentID}
-	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+GrantUnexpired("g")+` and e.revoked_at is null and e.lease_expires_at > now(),
+	err := m.Store.Pool.QueryRow(ctx, `select g.enrollment_id, g.expires_at, g.revoked_at is null and `+grantUnexpired("g")+` and e.revoked_at is null and e.lease_expires_at > now(),
 		g.request_id, r.rules_version, coalesce(r.decided_by, ''), e.kind, e.operator, e.subject, c.service
 		from grants g join enrollments e on e.id=g.enrollment_id join requests r on r.id=g.request_id
 		left join launcher_credentials c on c.id = e.launcher_credential_id where g.id=$1`, grantID).
@@ -216,7 +218,7 @@ type Grant struct {
 // expire first and those that last until the session ends last.
 func (m *Machine) LiveGrants(ctx context.Context, enrollmentID string) ([]Grant, error) {
 	rows, err := m.Store.Pool.Query(ctx, `select id, request_id, approver, expires_at from grants g
-		where enrollment_id=$1 and revoked_at is null and `+GrantUnexpired("g")+` order by expires_at nulls last, created_at`, enrollmentID)
+		where enrollment_id=$1 and revoked_at is null and `+grantUnexpired("g")+` order by expires_at nulls last, created_at`, enrollmentID)
 	if err != nil {
 		return nil, err
 	}
@@ -230,6 +232,153 @@ func (m *Machine) LiveGrants(ctx context.Context, enrollmentID string) ([]Grant,
 		grants = append(grants, g)
 	}
 	return grants, rows.Err()
+}
+
+// grantUnexpired is the SQL predicate that grant alias's expiry has not passed: true for a grant
+// with no expiry, which lasts until its session ends. Every read and state transition that asks
+// whether a grant is live uses it beside revoked_at is null.
+func grantUnexpired(alias string) string {
+	return "(" + alias + ".expires_at is null or " + alias + ".expires_at > now())"
+}
+
+// insertGrant writes a grant that lasts lifetimeSeconds from now, or, when nil, until its session
+// ends: a null expires_at, which endEnrollment's revoke alone ends.
+func insertGrant(ctx context.Context, tx pgx.Tx, requestID, enrollmentID, approver string, lifetimeSeconds *int) (string, error) {
+	id := uuid.NewString()
+	_, err := tx.Exec(ctx, `insert into grants (id, request_id, enrollment_id, approver, expires_at)
+		values ($1,$2,$3,$4, now() + make_interval(secs => $5))`,
+		id, requestID, enrollmentID, nullable(approver), lifetimeSeconds)
+	return id, err
+}
+
+type pendingRequestRow struct {
+	ID       string
+	Lifetime *int
+	Names    []string
+}
+
+// pendingRequest returns the oldest pending request for any name sorted names shares. Create holds
+// every matching name's advisory lock before it asks, so a concurrent request cannot pass the
+// lookup and open another record for that name.
+func pendingRequest(ctx context.Context, q querier, enrollmentID string, sorted []string) (pendingRequestRow, error) {
+	rows, err := q.Query(ctx, `select r.id, r.lifetime_seconds, array_agg(s.name order by s.name)
+		from requests r join request_secrets s on s.request_id=r.id
+		where r.enrollment_id=$1 and r.state='pending' and exists (
+			select 1 from request_secrets matching where matching.request_id=r.id and matching.name = any($2)
+		) group by r.id, r.lifetime_seconds order by min(r.created_at)`, enrollmentID, sorted)
+	if err != nil {
+		return pendingRequestRow{}, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return pendingRequestRow{}, rows.Err()
+	}
+	var pending pendingRequestRow
+	if err := rows.Scan(&pending.ID, &pending.Lifetime, &pending.Names); err != nil {
+		return pendingRequestRow{}, err
+	}
+	return pending, rows.Err()
+}
+
+func sameLifetime(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// querier is what a read takes to run inside a transaction or straight on the pool.
+type querier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+// matchingRequest runs query (whose rows are a request id and that request's secret names, with
+// $1 bound to enrollmentID and $2 to lifetime, the lifetime the request must have asked for) and
+// answers the first request whose names are exactly sorted, or "" when none is. Names are compared
+// as sets of whole strings, never as one joined string, so a name containing a separator cannot
+// pass for two names.
+func matchingRequest(ctx context.Context, q querier, query, enrollmentID string, lifetime *int, sorted []string) (string, error) {
+	rows, err := q.Query(ctx, query, enrollmentID, lifetime)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var names []string
+		if err := rows.Scan(&id, &names); err != nil {
+			return "", err
+		}
+		sort.Strings(names)
+		if slices.Equal(names, sorted) {
+			return id, nil
+		}
+	}
+	return "", rows.Err()
+}
+
+// legacyDefaultGrantLifetimeSeconds was every grant's fixed lifetime before migration 0013.
+// A request naming no lifetime keeps one unexpired grant from that release as it was approved,
+// including its expiry, rather than prompting again. This bridge goes 12 hours after deployment:
+// no such grant remains unexpired then.
+const legacyDefaultGrantLifetimeSeconds = 43200
+
+// reuseLiveGrant answers Create's own "request (or reuse the live grant)" contract: an exact
+// name-set match (never a subset or superset — the same matching rule coalescing uses for pending
+// requests), asking for the same lifetime, against a still-live grant (not revoked, not expired)
+// under this enrollment is returned as-is, with no new request row and no new record, as long as
+// the policy it was decided under is still current and no granted name is a service's
+// (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts), or the current
+// policy still allows it to the session (stillAllowed, the check Values makes), and its whole
+// approval chain still verifies (VerifyChain, the same check Values makes). A caller that already
+// holds a live grant for these exact names never re-asks a human who already approved it, a policy
+// tightened since then is never bypassed by reuse, and neither is a chain that no longer verifies.
+// No live grant holds a withheld name nobody approved: the withhold ended each one (withhold).
+func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names []string, lifetime *int, set *policy.Set) (Request, bool, error) {
+	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
+		join request_secrets s on s.request_id=r.id
+		join grants g on g.request_id=r.id
+		where r.enrollment_id=$1 and (
+			r.lifetime_seconds is not distinct from $2
+			or ($2 is null and r.lifetime_seconds=`+strconv.Itoa(legacyDefaultGrantLifetimeSeconds)+` and g.expires_at is not null)
+		) and r.state='granted' and g.revoked_at is null and `+grantUnexpired("g")+`
+		group by r.id`, enr.ID, lifetime, sortedCopy(names))
+	if err != nil || id == "" {
+		return Request{}, false, err
+	}
+	var rulesVersion, decidedBy string
+	if err := m.Store.Pool.QueryRow(ctx, `select rules_version, coalesce(decided_by, '') from requests where id=$1`, id).Scan(&rulesVersion, &decidedBy); err != nil {
+		return Request{}, false, err
+	}
+	granted, err := requestedSecrets(ctx, m.Store.Pool, id)
+	if err != nil {
+		return Request{}, false, err
+	}
+	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
+		if err != nil {
+			return Request{}, false, err
+		}
+		for _, g := range granted {
+			if err := stillAllowed(set, g.name, g.decision, decidedBy, requester); errors.Is(err, ErrGrantNotLive) {
+				return Request{}, false, nil
+			} else if err != nil {
+				return Request{}, false, err
+			}
+		}
+	}
+	r, err := m.Get(ctx, id)
+	if err != nil {
+		return Request{}, false, err
+	}
+	if r.GrantID != nil {
+		if err := m.VerifyChain(ctx, *r.GrantID); errors.Is(err, ErrGrantChainInvalid) {
+			return Request{}, false, nil
+		} else if err != nil {
+			return Request{}, false, err
+		}
+	}
+	return r, true, nil
 }
 
 // RecordKind reads a credential-request record's own kind ("agent_secret" or
@@ -373,7 +522,7 @@ type RecordDetail struct {
 	Identifiers     []string
 	Service         string
 	Reason          string
-	LifetimeSeconds int
+	LifetimeSeconds *int
 	RulesVersion    string
 	ExpiresAt       time.Time
 	RequestedAt     time.Time
@@ -485,7 +634,7 @@ func (m *Machine) GrantsForApprover(ctx context.Context, approver string) ([]App
 		from grants g
 		join requests r on r.id=g.request_id
 		join enrollments e on e.id=g.enrollment_id
-		where g.revoked_at is null and `+GrantUnexpired("g")+`
+		where g.revoked_at is null and `+grantUnexpired("g")+`
 		and (g.approver=$1 or e.operator=$1)
 		order by g.created_at desc`, login)
 	if err != nil {

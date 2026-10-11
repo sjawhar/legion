@@ -231,7 +231,7 @@ func TestReadRecordNamesNoSessionForAMachineLogin(t *testing.T) {
 		Approver:        "alice",
 		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-"},
 		ExpiresAt:       time.Now().Add(time.Hour),
-		LifetimeSeconds: 3600,
+		LifetimeSeconds: new(3600),
 		Request:         signRequest(t, m, key, "login", "example-host"),
 		RulesVersion:    "rules-v1",
 	}

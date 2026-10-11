@@ -453,21 +453,14 @@ func TestTheWithholdLeavesTheSessionsApprovedGrantOfTheSecretLive(t *testing.T) 
 // TestAnApprovalAfterTheWithholdOutlivesTheOperatorsLaterRevokes pins that a revoke withholding
 // nothing new ends no grant but its own: the operator withholds AUTO_TOKEN and SHARED_TOKEN by
 // revoking the session's automatic {AUTO_TOKEN, SHARED_TOKEN} grant, which also ends its automatic
-// AUTO_TOKEN grant, and then approves two requests that were waiting with AUTO_TOKEN in them.
-// Revoking the ended AUTO_TOKEN grant (from a Live grants list loaded before), and then the first
-// approval's grant, leaves the second approval's grant releasing AUTO_TOKEN.
+// AUTO_TOKEN grant, and then approves two successive requests that include AUTO_TOKEN. One pending
+// request owns each secret name at a time; revoking the ended AUTO_TOKEN grant (from a Live grants
+// list loaded before), and then the first approval's grant, leaves the second approval's grant
+// releasing AUTO_TOKEN.
 func TestAnApprovalAfterTheWithholdOutlivesTheOperatorsLaterRevokes(t *testing.T) {
 	m, enr, key, operator := newFixture(t)
 	withSharedToken(t, m)
 	ctx := context.Background()
-	var waiting []Request
-	for _, names := range [][]string{{"AUTO_TOKEN", "DEEL_API_KEY"}, {"AUTO_TOKEN", "DEEL_API_KEY", sharedToken}} {
-		req, err := m.Create(ctx, enr, signRequest(t, m, key, "deploy", names...), "")
-		if err != nil || req.State != "pending" {
-			t.Fatalf("Create(%v) = %+v, %v; want pending", names, req, err)
-		}
-		waiting = append(waiting, req)
-	}
 	single, err := m.Create(ctx, enr, signRequest(t, m, key, "one", "AUTO_TOKEN"), "")
 	if err != nil || single.GrantID == nil {
 		t.Fatalf("Create(AUTO_TOKEN) = %+v, %v; want granted", single, err)
@@ -480,7 +473,11 @@ func TestAnApprovalAfterTheWithholdOutlivesTheOperatorsLaterRevokes(t *testing.T
 		t.Fatalf("RevokeByApprover(pair): %v", err)
 	}
 	var approved []string
-	for _, req := range waiting {
+	for _, names := range [][]string{{"AUTO_TOKEN", "DEEL_API_KEY"}, {"AUTO_TOKEN"}} {
+		req, err := m.Create(ctx, enr, signRequest(t, m, key, "deploy", names...), "")
+		if err != nil || req.State != "pending" || req.RecordID == nil {
+			t.Fatalf("Create(%v) = %+v, %v; want pending", names, req, err)
+		}
 		dec, err := m.ApplyDecision(ctx, *req.RecordID, true, operator)
 		if err != nil || dec.GrantID == "" {
 			t.Fatalf("ApplyDecision(%s) = %+v, %v; want granted", operator, dec, err)

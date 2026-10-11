@@ -136,13 +136,12 @@ type createRequestBody struct {
 	SessionID *string `json:"session_id"`
 }
 
-// CreateRequest asks signer to build and sign a credential-request object naming one
 // agent_secret authorization_detail per requested name and lifetimeSeconds, the grant's lifetime
-// (0 for until the session ends) (Signer.SignRequestObject, audience == the broker's own base URL),
-// then calls POST /v1/requests with that object nested in the body and the outer call still
+// (nil for until the session ends) (Signer.SignRequestObject, audience == the broker's own base
+// URL), then calls POST /v1/requests with that object nested in the body and the outer call still
 // authenticated with a session Proof header. It returns both the decoded result and the exact raw
 // response bytes, for --json's "print the response body verbatim" requirement.
-func (c *client) CreateRequest(ctx context.Context, signer Signer, names []string, reason string, lifetimeSeconds int, sessionID string) (RequestResult, []byte, error) {
+func (c *client) CreateRequest(ctx context.Context, signer Signer, names []string, reason string, lifetimeSeconds *int, sessionID string) (RequestResult, []byte, error) {
 	requestObject, err := signer.SignRequestObject(c.baseURL, names, reason, lifetimeSeconds)
 	if err != nil {
 		return RequestResult{}, nil, fmt.Errorf("sign request object: %w", err)

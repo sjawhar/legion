@@ -290,8 +290,8 @@ func TestCreateWaitsOutTheSweepItRaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("begin: %v", err)
 	}
-	if err := lockIdenticalPending(ctx, holdAdvisory, enr, []string{"DEEL_API_KEY"}, nil); err != nil {
-		t.Fatalf("hold the advisory lock: %v", err)
+	if err := lockPendingNames(ctx, holdAdvisory, enr, []string{"DEEL_API_KEY"}); err != nil {
+		t.Fatalf("hold the advisory locks: %v", err)
 	}
 	var lease time.Time
 	if err := m.Store.Pool.QueryRow(ctx, `update enrollments set lease_expires_at = now() + interval '1500 milliseconds' where id=$1

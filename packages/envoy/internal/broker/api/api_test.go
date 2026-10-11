@@ -318,7 +318,20 @@ func signAgentSecretRequest(t *testing.T, key *ecdsa.PrivateKey, audience, reaso
 	for i, n := range names {
 		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: n, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(key, audience, details, reason, "", time.Now())
+	compact, err := record.Sign(key, audience, details, reason, "", nil, time.Now())
+	if err != nil {
+		t.Fatalf("record.Sign: %v", err)
+	}
+	return compact
+}
+
+func signAgentSecretRequestFor(t *testing.T, key *ecdsa.PrivateKey, audience, reason string, lifetime int, names ...string) string {
+	t.Helper()
+	details := make([]record.AuthorizationDetail, len(names))
+	for i, n := range names {
+		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: n, Actions: []string{"inject"}}
+	}
+	compact, err := record.Sign(key, audience, details, reason, "", &lifetime, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -331,7 +344,7 @@ func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, logi
 	t.Helper()
 	compact, err := record.Sign(key, audience, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: host, Service: service},
-	}, "", loginHint, time.Now())
+	}, "", loginHint, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -848,6 +861,30 @@ func TestCreateRequestNeedingTwoApproversIs400MixedApprovers(t *testing.T) {
 		map[string]any{"request": compact, "session_id": nil})
 	if status != http.StatusBadRequest || decode[wireError](t, body).Code != "MIXED_APPROVERS" {
 		t.Fatalf("POST /v1/requests (DEEL_API_KEY, SHARED_KEY) = %d %s, want 400 MIXED_APPROVERS", status, body)
+	}
+}
+
+// TestCreateRequestWithAnotherLifetimeWhilePendingIs409RequestPending pins one pending request
+// per session and secret: changing --ttl cannot create another approver Inbox card.
+func TestCreateRequestWithAnotherLifetimeWhilePendingIs409RequestPending(t *testing.T) {
+	ts := newTestServer(t)
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")
+	first := signAgentSecretRequestFor(t, sessionKey, ts.URL, "two minutes", 120, "DEEL_API_KEY")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": first, "session_id": nil})
+	if status != http.StatusOK {
+		t.Fatalf("first POST /v1/requests = %d %s", status, body)
+	}
+	firstReply := decode[wireCreateRequestResponse](t, body)
+	if firstReply.RecordID == nil {
+		t.Fatalf("first request = %+v, want pending record", firstReply)
+	}
+	second := signAgentSecretRequestFor(t, sessionKey, ts.URL, "five minutes", 300, "DEEL_API_KEY")
+	status, body = ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": second, "session_id": nil})
+	err := decode[wireError](t, body)
+	if status != http.StatusConflict || err.Code != "REQUEST_PENDING" || !strings.Contains(err.Error, firstReply.RequestID) {
+		t.Fatalf("second POST /v1/requests = %d %+v, want 409 REQUEST_PENDING naming %s", status, err, firstReply.RequestID)
 	}
 }
 

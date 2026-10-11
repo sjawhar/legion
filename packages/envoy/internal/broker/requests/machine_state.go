@@ -51,6 +51,9 @@ var (
 	ErrGrantChainInvalid = errors.New("this grant's approval chain no longer verifies")
 	ErrSecretNotInStore  = errors.New("secret is not in the secrets store")
 	ErrMixedApprovers    = errors.New("the requested secrets need different approvers; request them separately")
+	// ErrRequestPending means this session already has a person deciding one of the requested
+	// names. Its returned error names that pending request.
+	ErrRequestPending = errors.New("a request for one or more of these secrets is already pending")
 	// ErrSessionIDInvalid: the request's own session_id override (requests.session_id — an
 	// unsigned claim any enrolled process may send, never verified against a signature) is too
 	// long or carries a whitespace or control character, refused before it is ever stored or
@@ -203,14 +206,16 @@ func (e enrollmentRow) requester(ctx context.Context, q querier, services map[st
 // name their own approver — that's the policy's job), rereads each name the live policy does not
 // serve (rereadMissing), and hands back a live grant for exactly these names when one may be
 // reused (reuseLiveGrant). Otherwise it decides and writes the request in one
-// transaction: it takes the advisory lock that serializes identical requests from one enrollment
-// (lockIdenticalPending), then locks the enrollment live (lockLiveEnrollment), so no request or
-// grant lands on an enrollment that ended after Create first read it (such an enrollment is
-// pgx.ErrNoRows, as one that had ended before), and no withhold (RevokeByApprover, which takes the
-// same row) lands between the read of what is withheld from the session and the write. It then
-// evaluates the policy for the session (a withheld name is human tier to it) and writes a granted
-// or denied request, with a granted one's grant, or a pending request and its credential-request
-// record, which a pending identical request already waiting coalesces onto instead.
+// reused (reuseLiveGrant). Otherwise it decides and writes the request in one transaction: it
+// takes the advisory locks that serialize pending requests for each requested name in one
+// enrollment (lockPendingNames), then locks the enrollment live (lockLiveEnrollment), so no
+// request or grant lands on an enrollment that ended after Create first read it (such an
+// enrollment is pgx.ErrNoRows, as one that had ended before), and no withhold
+// (RevokeByApprover, which takes the same row) lands between the read of what is withheld from
+// the session and the write. It then evaluates the policy for the session and writes a granted or
+// denied request, with a granted one's grant, or a pending request and its credential-request
+// record. A second pending request that overlaps one of its names is refused, so an untrusted
+// session cannot flood an approver's Inbox by varying --ttl.
 func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sessionID string) (Request, error) {
 	if !validSessionID(sessionID) {
 		return Request{}, ErrSessionIDInvalid
@@ -244,7 +249,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 		names[i] = d.Identifier
 	}
 
-	lifetime := lifetimeOf(obj)
+	lifetime := obj.LifetimeSeconds
 	set, err := m.rereadMissing(ctx, enrollmentID, names, m.Policy.Get())
 	if err != nil {
 		return Request{}, err
@@ -260,7 +265,7 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	}
 	defer tx.Rollback(ctx)
 	sorted := sortedCopy(names)
-	if err := lockIdenticalPending(ctx, tx, enrollmentID, sorted, lifetime); err != nil {
+	if err := lockPendingNames(ctx, tx, enrollmentID, sorted); err != nil {
 		return Request{}, err
 	}
 	if err := lockLiveEnrollment(ctx, tx, enrollmentID); err != nil {
@@ -274,6 +279,23 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 	if err != nil {
 		return Request{}, err
 	}
+	if e.state == "pending" {
+		pending, err := pendingRequest(ctx, tx, enrollmentID, sorted)
+		if err != nil {
+			return Request{}, err
+		}
+		if pending.ID != "" {
+			if slices.Equal(pending.Names, sorted) && sameLifetime(pending.Lifetime, lifetime) {
+				if err := tx.Commit(ctx); err != nil {
+					return Request{}, err
+				}
+				existing, err := m.Get(ctx, pending.ID)
+				existing.Coalesced = true
+				return existing, err
+			}
+			return Request{}, fmt.Errorf("%w: request %s is still pending", ErrRequestPending, pending.ID)
+		}
+	}
 	r := newRequest{
 		id: uuid.NewString(), enrollmentID: enrollmentID, reason: obj.Reason, state: e.state,
 		approver: e.approver, rulesVersion: set.Version, sessionID: sessionID, lifetime: lifetime, decisions: e.decisions,
@@ -284,26 +306,13 @@ func (m *Machine) Create(ctx context.Context, enrollmentID, compactRequest, sess
 			return Request{}, err
 		}
 		if r.state == "granted" {
-			grantID, err := insertGrant(ctx, tx, r.id, enrollmentID, "", derefInt(r.lifetime))
+			grantID, err := insertGrant(ctx, tx, r.id, enrollmentID, "", r.lifetime)
 			if err != nil {
 				return Request{}, err
 			}
 			req.GrantID = &grantID
 		}
 		return req, tx.Commit(ctx)
-	}
-	existingID, err := matchingRequest(ctx, tx, `select r.id, array_agg(s.name) from requests r join request_secrets s on s.request_id=r.id
-		where r.enrollment_id=$1 and r.lifetime_seconds is not distinct from $2 and r.state='pending' group by r.id`, enrollmentID, lifetime, sorted)
-	if err != nil {
-		return Request{}, err
-	}
-	if existingID != "" {
-		if err := tx.Commit(ctx); err != nil {
-			return Request{}, err
-		}
-		existing, err := m.Get(ctx, existingID)
-		existing.Coalesced = true
-		return existing, err
 	}
 	r.pendingExpiresAt = time.Now().Add(m.PendingTTL)
 	req, err := m.createPending(ctx, tx, enr, r, obj)
@@ -394,14 +403,6 @@ type newRequest struct {
 	pendingExpiresAt time.Time
 }
 
-// lifetimeOf is the lifetime obj signed for its grant, nil when it named none.
-func lifetimeOf(obj record.RequestObject) *int {
-	if obj.LifetimeSeconds == 0 {
-		return nil
-	}
-	return &obj.LifetimeSeconds
-}
-
 func (r newRequest) names() []string {
 	names := make([]string, len(r.decisions))
 	for i, d := range r.decisions {
@@ -443,7 +444,7 @@ func (m *Machine) createPending(ctx context.Context, tx pgx.Tx, enr enrollmentRo
 		Request:         obj.Compact,
 		Approver:        r.approver,
 		Enrollment:      record.Enrollment{Kind: enr.Kind, RuntimeID: enr.RuntimeID, Operator: deref(enr.Operator), Slot: enr.Slot},
-		LifetimeSeconds: derefInt(r.lifetime),
+		LifetimeSeconds: r.lifetime,
 		RulesVersion:    r.rulesVersion,
 		ExpiresAt:       r.pendingExpiresAt,
 	}
@@ -459,18 +460,18 @@ func (m *Machine) createPending(ctx context.Context, tx pgx.Tx, enr enrollmentRo
 	return Request{ID: r.id, State: "pending", Secrets: r.decisions, RecordID: &recordID, Approver: &body.Approver, LifetimeSeconds: r.lifetime}, nil
 }
 
-// lockIdenticalPending takes the advisory lock Create serializes identical requests from one
-// enrollment on, keyed by the enrollment, its sorted names and the lifetime it asks for, until tx
-// ends: a twin of a request that is still pending finds it and coalesces onto it instead of
-// writing a second record. A request for the same names with another lifetime is no twin: its
-// grant would last another length.
-func lockIdenticalPending(ctx context.Context, tx pgx.Tx, enrollmentID string, sorted []string, lifetime *int) error {
-	key, err := json.Marshal([]any{enrollmentID, sorted, lifetime})
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, string(key)); err != nil {
-		return fmt.Errorf("lock identical pending requests: %w", err)
+// lockPendingNames takes one advisory lock for each requested secret in this enrollment, in sorted
+// order, until tx ends. It lets an exact repeat coalesce but refuses any overlapping request that
+// would create a second card for the same approver and secret.
+func lockPendingNames(ctx context.Context, tx pgx.Tx, enrollmentID string, sorted []string) error {
+	for _, name := range sorted {
+		key, err := json.Marshal([]string{enrollmentID, name})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1, 0))`, string(key)); err != nil {
+			return fmt.Errorf("lock pending requests: %w", err)
+		}
 	}
 	return nil
 }
@@ -825,7 +826,7 @@ func withhold(ctx context.Context, tx pgx.Tx, enrollmentID, requestID, actor str
 			returning name
 		), ended as (
 			update grants g set revoked_at=now(), revoked_by=$3
-			where g.enrollment_id=$1 and g.revoked_at is null and `+GrantUnexpired("g")+`
+			where g.enrollment_id=$1 and g.revoked_at is null and `+grantUnexpired("g")+`
 			and exists (select 1 from request_secrets a where a.request_id=g.request_id and a.decision=$4 and a.name in (select name from withheld))
 			returning g.id, g.request_id
 		), audited as (
@@ -878,113 +879,11 @@ func lockLiveEnrollment(ctx context.Context, tx pgx.Tx, id string) error {
 	return tx.QueryRow(ctx, `select 1 from enrollments where id=$1 and revoked_at is null and lease_expires_at > now() for share`, id).Scan(&one)
 }
 
-// querier is what a read takes to run inside a transaction or straight on the pool.
-type querier interface {
-	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
-}
-
-// matchingRequest runs query (whose rows are a request id and that request's secret names, with
-// $1 bound to enrollmentID and $2 to lifetime, the lifetime the request must have asked for) and
-// answers the first request whose names are exactly sorted, or "" when none is. Names are compared
-// as sets of whole strings, never as one joined string, so a name containing a separator cannot
-// pass for two names.
-func matchingRequest(ctx context.Context, q querier, query, enrollmentID string, lifetime *int, sorted []string) (string, error) {
-	rows, err := q.Query(ctx, query, enrollmentID, lifetime)
-	if err != nil {
-		return "", err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var names []string
-		if err := rows.Scan(&id, &names); err != nil {
-			return "", err
-		}
-		sort.Strings(names)
-		if slices.Equal(names, sorted) {
-			return id, nil
-		}
-	}
-	return "", rows.Err()
-}
-
-// reuseLiveGrant answers Create's own "request (or reuse the live grant)" contract: an exact
-// name-set match (never a subset or superset — the same matching rule coalescing uses for pending
-// requests), asking for the same lifetime, against a still-live grant (not revoked, not expired)
-// under this enrollment is returned as-is, with no new request row and no new record, as long as
-// the policy it was decided under is still current and no granted name is a service's
-// (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts), or the current
-// policy still allows it to the session (stillAllowed, the check Values makes), and its whole
-// approval chain still verifies (VerifyChain, the same check Values makes). A caller that already
-// holds a live grant for these exact names never re-asks a human who already approved it, a policy
-// tightened since then is never bypassed by reuse, and neither is a chain that no longer verifies.
-// No live grant holds a withheld name nobody approved: the withhold ended each one (withhold).
-func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names []string, lifetime *int, set *policy.Set) (Request, bool, error) {
-	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
-		join request_secrets s on s.request_id=r.id
-		join grants g on g.request_id=r.id
-		where r.enrollment_id=$1 and r.lifetime_seconds is not distinct from $2 and r.state='granted' and g.revoked_at is null and `+GrantUnexpired("g")+`
-		group by r.id`, enr.ID, lifetime, sortedCopy(names))
-	if err != nil || id == "" {
-		return Request{}, false, err
-	}
-	var rulesVersion, decidedBy string
-	if err := m.Store.Pool.QueryRow(ctx, `select rules_version, coalesce(decided_by, '') from requests where id=$1`, id).Scan(&rulesVersion, &decidedBy); err != nil {
-		return Request{}, false, err
-	}
-	granted, err := requestedSecrets(ctx, m.Store.Pool, id)
-	if err != nil {
-		return Request{}, false, err
-	}
-	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
-		if err != nil {
-			return Request{}, false, err
-		}
-		for _, g := range granted {
-			if err := stillAllowed(set, g.name, g.decision, decidedBy, requester); errors.Is(err, ErrGrantNotLive) {
-				return Request{}, false, nil
-			} else if err != nil {
-				return Request{}, false, err
-			}
-		}
-	}
-	r, err := m.Get(ctx, id)
-	if err != nil {
-		return Request{}, false, err
-	}
-	if r.GrantID != nil {
-		if err := m.VerifyChain(ctx, *r.GrantID); errors.Is(err, ErrGrantChainInvalid) {
-			return Request{}, false, nil
-		} else if err != nil {
-			return Request{}, false, err
-		}
-	}
-	return r, true, nil
-}
-
 // anyServiceOwned reports whether set serves any of granted as a service's secret, whose grant is
 // re-checked on every use: who is a service's own session rests on BROKER_SERVICES' accounts,
 // which the policy's version does not cover (policy.Set.ServiceOwned).
 func anyServiceOwned(set *policy.Set, granted []requestedSecret) bool {
 	return slices.ContainsFunc(granted, func(g requestedSecret) bool { return set.ServiceOwned(g.name) })
-}
-
-// insertGrant writes a grant that lasts lifetimeSeconds from now, or, for 0, until its session
-// ends: a null expires_at, which endEnrollment's revoke alone ends.
-func insertGrant(ctx context.Context, tx pgx.Tx, requestID, enrollmentID, approver string, lifetimeSeconds int) (string, error) {
-	id := uuid.NewString()
-	_, err := tx.Exec(ctx, `insert into grants (id, request_id, enrollment_id, approver, expires_at)
-		values ($1,$2,$3,$4, now() + make_interval(secs => nullif($5::int, 0)))`,
-		id, requestID, enrollmentID, nullable(approver), lifetimeSeconds)
-	return id, err
-}
-
-// GrantUnexpired is the SQL predicate that grant alias's expiry has not passed: true for a grant
-// with no expiry, which lasts until its session ends. Every read that asks whether a grant is live
-// uses it, beside revoked_at is null.
-func GrantUnexpired(alias string) string {
-	return "(" + alias + ".expires_at is null or " + alias + ".expires_at > now())"
 }
 
 // auditDetail is an audit row's non-secret detail object; audit writes it as JSON.
@@ -1007,13 +906,6 @@ func nullable(s string) *string {
 		return nil
 	}
 	return &s
-}
-
-func derefInt(n *int) int {
-	if n == nil {
-		return 0
-	}
-	return *n
 }
 
 func sortedCopy(s []string) []string {

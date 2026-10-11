@@ -105,9 +105,9 @@ type RequestObject struct {
 	Details    []AuthorizationDetail
 	Reason     string
 	LoginHint  string // machine logins only
-	// LifetimeSeconds is how long the grant lasts once granted, a request for agent secrets only;
-	// 0 when the request names none, and the grant lasts until its session ends.
-	LifetimeSeconds int
+	// LifetimeSeconds is how long an agent-secret grant lasts once granted; nil when it lasts
+	// until the session ends.
+	LifetimeSeconds *int
 }
 
 // Service is the service a machine login is for: its one launcher_credential detail's service, ""
@@ -193,7 +193,6 @@ func VerifyRequestObject(compact, audience string, skew time.Duration, now time.
 	if err := validateReason(c.Reason); err != nil {
 		return RequestObject{}, fmt.Errorf("%w: %s", ErrRequestInvalid, err)
 	}
-	lifetime := 0
 	if c.LifetimeSeconds != nil {
 		switch {
 		case c.AuthorizationDetails[0].Type != KindAgentSecret:
@@ -201,7 +200,6 @@ func VerifyRequestObject(compact, audience string, skew time.Duration, now time.
 		case !ValidLifetime(*c.LifetimeSeconds):
 			return RequestObject{}, fmt.Errorf("%w: lifetime_seconds is not between 1 and %d", ErrRequestInvalid, math.MaxInt32)
 		}
-		lifetime = *c.LifetimeSeconds
 	}
 	return RequestObject{
 		Compact:         compact,
@@ -213,7 +211,7 @@ func VerifyRequestObject(compact, audience string, skew time.Duration, now time.
 		Details:         c.AuthorizationDetails,
 		Reason:          c.Reason,
 		LoginHint:       c.LoginHint,
-		LifetimeSeconds: lifetime,
+		LifetimeSeconds: c.LifetimeSeconds,
 	}, nil
 }
 
@@ -278,16 +276,16 @@ type Body struct {
 	Approver string // canonical login, or AnyoneApprover
 	// Enrollment is the requesting session, "-" in every field for a machine login.
 	Enrollment Enrollment
-	// LifetimeSeconds is how long the grant or launcher credential lasts once approved; 0 for a
+	// LifetimeSeconds is how long the grant or launcher credential lasts once approved; nil for a
 	// grant that lasts until its session ends, rendered "-".
-	LifetimeSeconds int
+	LifetimeSeconds *int
 	RulesVersion    string
 	ExpiresAt       time.Time // UTC, seconds precision
 	Code            string    // "" for agent_secret records
 }
 
 // Canonical renders the body in the contract's exact line format. Every line is "\n"-terminated;
-// an empty operator or code, and a lifetime of 0, render as "-". The enrollment line carries a
+// an empty operator or code, and a nil lifetime, render as "-". The enrollment line carries a
 // pod's slot as a fourth tab-separated field only when there is one: a body with no slot keeps the
 // three-field line, the bytes and record id every slotless record is stored under.
 func (b Body) Canonical() string {
@@ -320,10 +318,10 @@ func (b Body) Canonical() string {
 	}
 	sb.WriteByte('\n')
 	sb.WriteString("lifetime_seconds: ")
-	if b.LifetimeSeconds == 0 {
+	if b.LifetimeSeconds == nil {
 		sb.WriteByte('-')
 	} else {
-		sb.WriteString(strconv.Itoa(b.LifetimeSeconds))
+		sb.WriteString(strconv.Itoa(*b.LifetimeSeconds))
 	}
 	sb.WriteByte('\n')
 	sb.WriteString("rules_version: ")
@@ -389,13 +387,13 @@ func ParseBody(canonical string) (Body, error) {
 	if !ok {
 		return Body{}, fmt.Errorf("canonical body: bad lifetime_seconds line")
 	}
-	lifetime := 0
+	var lifetime *int
 	if lifetimeStr != "-" {
 		n, err := strconv.Atoi(lifetimeStr)
 		if err != nil || !ValidLifetime(n) {
 			return Body{}, fmt.Errorf("canonical body: lifetime_seconds is neither - nor a positive integer")
 		}
-		lifetime = n
+		lifetime = &n
 	}
 	rulesVersion, ok := strings.CutPrefix(lines[5], "rules_version: ")
 	if !ok {

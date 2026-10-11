@@ -16,9 +16,9 @@ import (
 // a launcher enrolled through its enroll-box op, which agentbox calls. Such a helper keeps running
 // until no session is registered with it (dotfiles' installers/agent-secrets.sh restarts it only
 // then), so the broker must enroll its sessions through any client rollout. Each such enrollment
-// logs "an enrollment named a legacy kind"; this map goes once the production broker has logged
+// logs "an enrollment named a legacy kind"; this set goes once the production broker has logged
 // none for 30 days.
-var legacyKinds = map[string]string{"host": "session", "box": "session"}
+var legacyKinds = map[string]struct{}{"host": {}, "box": {}}
 
 // createEnrollmentBody is POST /v1/enrollments's body (the shared broker contract's
 // enrollment route). It names no approver: the policy picks a request's approver at request time,
@@ -88,9 +88,11 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	if !readJSON(w, r, &body, "INVALID_ENROLLMENT") {
 		return
 	}
-	kind, legacy := legacyKinds[body.Kind]
+	_, legacy := legacyKinds[body.Kind]
+	kind := body.Kind
 	switch {
 	case legacy:
+		kind = "session"
 		slog.Info("broker: an enrollment named a legacy kind; recorded as session", "kind", body.Kind)
 	case body.Kind == "session" || body.Kind == "pod":
 		kind = body.Kind

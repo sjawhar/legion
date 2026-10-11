@@ -14,10 +14,10 @@ import (
 
 // ttlBroker is a fake broker for --ttl: POST /v1/requests verifies the signed request object
 // against its own URL, records the lifetime it signed, and answers by the first secret's name —
-// TTL_GRANTED and TTL_PENDING echo that lifetime as this broker does, OLD_GRANTED, OLD_PENDING
-// and OLD_DENIED answer as a broker from before lifetime_seconds (no such field), and
-// OTHER_GRANTED names a lifetime of its own. It serves values for every grant, and counts each
-// grant revoke and request cancel.
+// and OLD_APPROVED_GRANTED answer as a broker from before lifetime_seconds (no such field).
+// OLD_APPROVED_GRANTED is an existing human-approved grant reused by that broker; the client must
+// leave it alone when it refuses the mismatched lifetime. OTHER_GRANTED names a lifetime of its
+// own. It serves values for every grant, and counts each grant revoke and request cancel.
 type ttlBroker struct {
 	srv *httptest.Server
 
@@ -42,9 +42,13 @@ func newTTLBroker(t *testing.T) *ttlBroker {
 			return
 		}
 		obj, err := record.VerifyRequestObject(body.Request, b.srv.URL, time.Minute, time.Now())
+		lifetime := 0
+		if obj.LifetimeSeconds != nil {
+			lifetime = *obj.LifetimeSeconds
+		}
 		b.mu.Lock()
 		b.posts++
-		b.lifetimes = append(b.lifetimes, obj.LifetimeSeconds)
+		b.lifetimes = append(b.lifetimes, lifetime)
 		if err != nil {
 			b.verifyErr = err
 		}
@@ -60,8 +64,8 @@ func newTTLBroker(t *testing.T) *ttlBroker {
 			"grant_id": "grant-" + strings.ToLower(name), "record_id": nil, "approver": nil,
 		}
 		var echoed any
-		if obj.LifetimeSeconds != 0 {
-			echoed = obj.LifetimeSeconds
+		if obj.LifetimeSeconds != nil {
+			echoed = *obj.LifetimeSeconds
 		}
 		switch name {
 		case "TTL_GRANTED":
@@ -73,6 +77,8 @@ func newTTLBroker(t *testing.T) *ttlBroker {
 				answer["lifetime_seconds"] = echoed
 			}
 		case "OLD_GRANTED":
+		case "OLD_APPROVED_GRANTED":
+			answer["record_id"] = "rec-old-approved"
 		case "OLD_DENIED":
 			answer["state"], answer["grant_id"] = "denied", nil
 			answer["secrets"] = []map[string]string{{"name": name, "decision": "deny"}}
@@ -201,11 +207,11 @@ func TestATTLTheBrokerDidNotGiveEndsWhatTheRequestMade(t *testing.T) {
 		{"request granted with no lifetime", []string{"request", "OLD_GRANTED", "--ttl", "2m"}, 1, "grant-old_granted", "", "no lifetime", ""},
 		{"request --json granted with no lifetime", []string{"request", "OLD_GRANTED", "--ttl", "2m", "--json"}, 1, "grant-old_granted", "", "no lifetime", ""},
 		{"exec form granted with no lifetime", []string{"OLD_GRANTED", "--ttl", "2m", "--", "sh", "-c", "echo ran-the-child"}, 1, "grant-old_granted", "", "nothing was run", ""},
+		{"existing approved grant with no lifetime", []string{"request", "OLD_APPROVED_GRANTED", "--ttl", "2m"}, 1, "", "", "existing grant", ""},
 		{"exec form granted another lifetime", []string{"OTHER_GRANTED", "--ttl", "2m", "--", "sh", "-c", "echo ran-the-child"}, 1, "grant-other_granted", "", "a lifetime of 43200s", ""},
 		{"request pending with no lifetime", []string{"request", "OLD_PENDING", "--ttl", "2m"}, 1, "", "req-old_pending", "the request was ended", ""},
 		{"exec form pending with no lifetime", []string{"OLD_PENDING", "--ttl", "2m", "--wait", "1s", "--", "sh", "-c", "echo ran-the-child"}, 1, "", "req-old_pending", "the request was ended", ""},
 		{"request denied", []string{"request", "OLD_DENIED", "--ttl", "2m"}, exitDenied, "", "", "", "lifetime"},
-		{"request pending with the lifetime", []string{"request", "TTL_PENDING", "--ttl", "2m"}, exitPending, "", "", "", "lifetime"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			stdout, stderr, exit := runAgentSecrets(t, binary, b.srv.URL, keyDir, nil, tc.args...)

@@ -765,16 +765,18 @@ func TestEnrollWaitRidesOutTheLaunchersSetup(t *testing.T) {
 	keyDir := t.TempDir()
 	marker := writePendingMarker(t, keyDir, 0)
 
+	// The launcher writes each file whole (enroll's writeFileAtomic), so a waiting call never reads
+	// one half-written; the fixture does the same.
 	setupDone := make(chan error, 1)
 	go func() {
 		time.Sleep(time.Second)
 		data, err := os.ReadFile(filepath.Join(fixture, "key.pem"))
 		if err == nil {
-			err = os.WriteFile(filepath.Join(keyDir, "key.pem"), data, 0o600)
+			err = writeFileAtomic(filepath.Join(keyDir, "key.pem"), data, 0o600)
 		}
 		time.Sleep(time.Second)
 		if err == nil {
-			err = os.WriteFile(filepath.Join(keyDir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600)
+			err = writeFileAtomic(filepath.Join(keyDir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600)
 		}
 		if err == nil {
 			err = os.Remove(marker)

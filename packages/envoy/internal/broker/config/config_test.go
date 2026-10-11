@@ -58,6 +58,17 @@ func TestLoadRefusesUIOrigin(t *testing.T) {
 	}
 }
 
+// TestLoadRefusesMaxGrantSeconds pins that deployments cannot silently turn their explicit grant
+// cap into a session-length grant after that setting is removed.
+func TestLoadRefusesMaxGrantSeconds(t *testing.T) {
+	e := validEnv()
+	e["BROKER_MAX_GRANT_SECONDS"] = "3600"
+	_, err := Load(env(e))
+	if err == nil || !strings.HasPrefix(err.Error(), "BROKER_MAX_GRANT_SECONDS is removed; ") {
+		t.Fatalf("Load(BROKER_MAX_GRANT_SECONDS set) = %v, want a refusal naming BROKER_MAX_GRANT_SECONDS", err)
+	}
+}
+
 func TestLoadRequiresUIToken(t *testing.T) {
 	e := validEnv()
 	delete(e, "BROKER_UI_TOKEN")

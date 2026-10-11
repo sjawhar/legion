@@ -118,7 +118,7 @@ decided_by: session:2b8627f4-9a2a-4c12-85bf-910144bc0b5c
 Ending a session's enrollment revokes all of its grants and cancels all of its pending requests
 in one step, and the approver's Inbox drops them. A session ends in one of three ways:
 
-- **Its launcher revokes it.** A host session's ends when its process exits: the helper sees the
+- **Its launcher revokes it.** A machine session ends when its process exits: the helper sees the
   registered process go and revokes its enrollment (it logs
   `session retired … why="process exited"`). `agent-secrets-helper sessions` lists the live ones.
   A box's launcher revokes it with `agent-secrets unenroll --helper --enrollment <id>`.
@@ -136,7 +136,7 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
 
 A machine login lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval, but its sessions
 outlive it: a session renews its lease with its own key, never with the machine's credential, so a
-box keeps working after the machine's credential expires, and so does a host session while the
+box keeps working after the machine's credential expires, and so does a machine session while the
 helper that renews it runs. A login can be ended, with every session it enrolled, at any time: for
 a machine that is lost, compromised or no longer used, or a Legion daemon whose pods must lose
 their secrets now. Dispatch's machine-login page (`/credentials/machine`) lists **Machine logins**:
@@ -148,7 +148,7 @@ session it started, those of its earlier logins included. Click
 **Revoke** on its row and confirm. The broker then, at once:
 
 - refuses the login's credential, so it enrolls no more sessions; and
-- ends every session it enrolled (host sessions and boxes, or every worker pod of the Legion
+- ends every session it enrolled (machine sessions and boxes, or every worker pod of the Legion
   daemon's login) as [ending a session](#end-a-session) does: each one's grants are revoked and its
   pending requests cancelled, and its next call is refused `PROOF_INVALID`.
 
@@ -215,7 +215,7 @@ pods it had enrolled do not wait for that: their sessions ended with the revoke,
 `agent-secrets` calls are refused `PROOF_INVALID` from then on.
 
 Stopping the helper also stops the machine from enrolling sessions, since its credential lives only
-in the helper's memory, but it ends none. A host session lapses within `BROKER_LEASE_SECONDS` once
+in the helper's memory, but it ends none. A machine session lapses within `BROKER_LEASE_SECONDS` once
 the helper stops, since the helper is what renews it. A box renews itself (`agent-secrets renew`),
 so it keeps working after the helper stops and after the machine's credential expires. Revoking the
 machine login ends both, and its row stays on the machine-login page while either runs, marked

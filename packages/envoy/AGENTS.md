@@ -1990,12 +1990,11 @@ each fallback names its removal condition at its definition: the broker records 
 older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box`
 (`helper/broker.go`, `enroll`: gone once the production broker records `session`); the CLI asks an
 older helper, which answers `unknown op enroll-session-key`, its `enroll-box`/`unenroll-box`
-(`cmd/agent-secrets`, `legacySessionKeyOps`: gone once no helper older than this release runs); the
-helper answers an older CLI's `enroll-box`/`unenroll-box` as the kind-free pair and logs `a client
-asked a legacy op` (`helper/server.go`, `legacySessionKeyOps`: gone once dotfiles' pin is at this
-release and no helper has logged that line for 30 days); and `enroll --helper` drops the
-`--kind box` dotfiles' agentbox passes, refusing any other `--kind` (`dropLegacyKind`: gone once
-agentbox passes none).
+(`cmd/agent-secrets/enroll.go`, `oldHelperSessionKeyOps`: gone once no helper older than this
+release runs); the helper answers an older CLI's `enroll-box`/`unenroll-box` as the kind-free pair
+and logs `a client asked a legacy op` (`helper/server.go`, `oldCLISessionKeyOps`: gone once
+dotfiles' pin is at this release and no helper has logged that line for 30 days); and
+`enroll --helper` accepts agentbox's `--kind box` but refuses every other `--kind`.
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
@@ -2477,9 +2476,9 @@ so no Secrets Manager call holds a row lock), so a secret created a moment ago, 
 made, is served on its first request, then checks for a still-live grant covering the exact same
 name set (`reuseLiveGrant`: no new request, no new record, as long as the current policy still
 allows it and the grant's whole chain still verifies), then
-decides and writes in one transaction: it takes an advisory lock keyed on the enrollment and the
-sorted name set, then locks the requesting enrollment `for share` while it is live (that order;
-the reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
+decides and writes in one transaction: it takes one advisory lock per requested secret under the
+enrollment, then locks the requesting enrollment `for share` while it is live (that order; the
+reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
 and evaluates the policy per name for the session: any `deny` denies the whole request with no
 record written at all; a name the policy does not serve aborts the whole call with
 `policy.ErrUnknownSecret` (`400 UNKNOWN_SECRET`, per the broker's design overview) instead of being
@@ -2488,15 +2487,17 @@ time" wording; a name needing approval that names a *different* approver than an
 already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; the grant lasts
 the request object's `lifetime_seconds` (`record.ValidLifetime`: 1 to the int32 the column holds;
 refused on a machine login), or, when it names none, until its session ends (`grants.expires_at`
-null, migration 0013; `requests.GrantUnexpired` is the one liveness test, and reuse, coalescing and
-the advisory lock key on the lifetime too, so `--ttl 2m` never reuses a grant that lasts longer);
-`POST /v1/requests` and `GET /v1/requests/{id}` echo `lifetime_seconds` (null for none), which the
-CLI checks against its `--ttl`, revoking the grant or cancelling the request when a broker or
-helper from before the claim dropped it; when every name is decided (`granted`/`denied`) with nothing
-pending, the request and, if granted, its grant are written with no record; a request needing
-approval writes the request row and a `credential_requests` record together, and an identical
-concurrent request coalesces onto the same record (`coalesced: true`) instead of writing a second
-one. `Create` and `Get` answer that record's approver (`approver` on `POST /v1/requests` and
+null, migration 0013; `requests.grantUnexpired` is the one liveness test). Reuse matches the
+lifetime, except a no-lifetime request keeps an unexpired grant with the pre-migration 43200-second
+default until 12 hours after deployment; it never extends that grant's expiry. A pending request
+holds each of its secret names for its session: an identical request coalesces (`coalesced: true`),
+and another lifetime or overlapping name is `409 REQUEST_PENDING` naming the request already in the
+approver's Inbox. `POST /v1/requests` and `GET /v1/requests/{id}` echo `lifetime_seconds` (null
+for none), which the CLI checks against its `--ttl`, revoking a new grant or cancelling its pending
+request when a broker or helper from before the claim dropped it; when every name is decided
+(`granted`/`denied`) with nothing pending, the request and, if granted, its grant are written with
+no record.
+`Create` and `Get` answer that record's approver (`approver` on `POST /v1/requests` and
 `GET /v1/requests/{id}`, read from `credential_requests.approver`, the column
 `PendingForApprover` lists by, never re-evaluated from the current policy), so the asking session
 names whose list holds it; a request with no record answers null. The enrollment lock, taken

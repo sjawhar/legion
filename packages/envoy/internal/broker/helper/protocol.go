@@ -30,7 +30,7 @@ type Request struct {
 	URL             string   `json:"url,omitempty"`              // sign, sign-launcher: its absolute URL
 	Secrets         []string `json:"secrets,omitempty"`          // sign-request: the requested agent_secret names
 	Reason          string   `json:"reason,omitempty"`           // sign-request: why they're needed
-	LifetimeSeconds int      `json:"lifetime_seconds,omitempty"` // sign-request: how many seconds the grant lasts; 0 or absent for until the session ends
+	LifetimeSeconds *int     `json:"lifetime_seconds,omitempty"` // sign-request: how many seconds the grant lasts; nil for until the session ends
 	WaitSeconds     int      `json:"wait_seconds,omitempty"`     // register: wait up to this long for the enrollment, unless the helper holds no launcher credential
 	RuntimeID       string   `json:"runtime_id,omitempty"`       // enroll-session-key: the session's runtime id on this machine
 	Thumbprint      string   `json:"thumbprint,omitempty"`       // enroll-session-key: the session key's thumbprint

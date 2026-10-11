@@ -147,7 +147,7 @@ are refused `IN_SESSION`, so the session's own commands cannot act as you:
 
 ```console
 $ agent-secrets machine list
-agent-secrets machine list: IN_SESSION: pid 2857619 is inside a registered host session, which acts on itself alone; run machine and grant commands from your own shell
+agent-secrets machine list: IN_SESSION: pid 2857619 is inside a registered machine session, which acts on itself alone; run machine and grant commands from your own shell
 ```
 
 The refusal covers the session's process tree only: a process the session sends out of it (with

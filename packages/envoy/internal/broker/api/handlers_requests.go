@@ -71,6 +71,9 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 	case errors.Is(err, requests.ErrMixedApprovers):
 		writeError(w, http.StatusBadRequest, "MIXED_APPROVERS", err.Error())
 		return
+	case errors.Is(err, requests.ErrRequestPending):
+		writeError(w, http.StatusConflict, "REQUEST_PENDING", err.Error())
+		return
 	case errors.Is(err, requests.ErrSessionIDInvalid):
 		writeError(w, http.StatusBadRequest, "SESSION_ID_INPUT", err.Error())
 		return

@@ -203,7 +203,7 @@ func TestMachineAndGrantCommandsRefusedInsideASession(t *testing.T) {
 	for _, args := range [][]string{{"machine", "list"}, {"machine", "revoke", uuid.NewString()}, {"grant", "list"}, {"grant", "revoke", uuid.NewString()}} {
 		code, stdout, stderr := runInSession(t, binary, sock, args...)
 		prefix := "agent-secrets " + args[0] + " " + args[1] + ": IN_SESSION: pid "
-		if code != 1 || stdout != "" || !strings.HasPrefix(stderr, prefix) || !strings.HasSuffix(stderr, "is inside a registered host session, which acts on itself alone; run machine and grant commands from your own shell\n") {
+		if code != 1 || stdout != "" || !strings.HasPrefix(stderr, prefix) || !strings.HasSuffix(stderr, "is inside a registered machine session, which acts on itself alone; run machine and grant commands from your own shell\n") {
 			t.Fatalf("%v inside a session: exit %d, stdout %q, stderr %q; want 1 and IN_SESSION", args, code, stdout, stderr)
 		}
 	}

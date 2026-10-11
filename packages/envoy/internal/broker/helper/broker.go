@@ -183,7 +183,7 @@ func (b *Broker) Login(ctx context.Context, hostname string) (string, error) {
 		return "", err
 	}
 	details := []record.AuthorizationDetail{{Type: record.KindLauncherCredential, Identifier: hostname}}
-	compact, err := record.Sign(key, b.URL, details, "", operator, time.Now())
+	compact, err := record.Sign(key, b.URL, details, "", operator, nil, time.Now())
 	if err != nil {
 		return "", err
 	}
