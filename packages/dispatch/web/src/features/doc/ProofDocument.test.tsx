@@ -13,6 +13,7 @@ import { api } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
 import { heldSends } from "../conversation/held-sends";
 import { marginComposeSendKey } from "../margin/margin-context";
+import { appKeymap } from "../shell/keymap";
 import { colorForLogin } from "./connection";
 
 answerTextReadsWithTheSeededText();
@@ -624,4 +625,59 @@ test("mark placements are published to the margin after document changes", async
   } finally {
     view.unmount();
   }
+});
+
+/** Presses Control+Alt+M on `target` through the application's registry, as `KeymapProvider`'s
+ *  window listener does, and answers whether a binding claimed it. */
+function pressCommentChord(target: Element): boolean {
+  const event = new KeyboardEvent("keydown", {
+    altKey: true,
+    bubbles: true,
+    cancelable: true,
+    code: "KeyM",
+    ctrlKey: true,
+    key: "m",
+  });
+  target.dispatchEvent(event);
+  appKeymap.handleKeyDown(event);
+  return event.defaultPrevented;
+}
+
+test("Ctrl+Alt+M comments on the selection while the editor has focus, and nowhere else", async () => {
+  const { editors, rerender, sync, view } = renderProofDocument();
+  const composer = document.body.appendChild(document.createElement("textarea"));
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("no editor");
+    expect(
+      appKeymap.describe().filter((entry) => entry.id === "comment-on-selection")
+    ).toMatchObject([{ keys: ["$mod+Alt+m"], label: "Comment on selection", scope: "document" }]);
+    editor.root.contentEditable = "true";
+    editor.root.tabIndex = 0;
+    editor.root.focus();
+
+    // A caret, not a selection: the bar offers no Comment, so neither does the chord.
+    expect(pressCommentChord(editor.root)).toBe(false);
+    editor.selectionEmpty = false;
+    expect(pressCommentChord(editor.root)).toBe(true);
+    expect(editor.commented).toBe(1);
+
+    // Focus in a comment composer: the key is the composer's, and the chord does nothing.
+    composer.focus();
+    expect(pressCommentChord(composer)).toBe(false);
+    expect(editor.commented).toBe(1);
+
+    // A closed issue's document is read-only, where the bar offers nothing.
+    editor.root.focus();
+    rerender({ isClosed: true });
+    expect(pressCommentChord(editor.root)).toBe(false);
+    expect(editor.commented).toBe(1);
+  } finally {
+    composer.remove();
+    view.unmount();
+  }
+  expect(appKeymap.describe().some((entry) => entry.id === "comment-on-selection")).toBe(false);
 });

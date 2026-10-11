@@ -78,6 +78,63 @@ test("? matches the shifted character and $mod matches Meta or Control, never a 
   expect(priority.fired()).toBe(1);
 });
 
+test("$mod+Alt+m matches Control+Alt+M and Command+Option+M, whose key is µ, by the M key's position", () => {
+  const { keymap, press } = harness();
+  const comment = binding("comment", "$mod+Alt+m");
+  keymap.register("global", [comment.definition]);
+
+  expect(press("m", { altKey: true, code: "KeyM", ctrlKey: true })).toBe(true);
+  // Option turns M into µ on a Mac, so the character alone never names the chord there.
+  expect(press("µ", { altKey: true, code: "KeyM", metaKey: true })).toBe(true);
+  // AZERTY puts M where QWERTY has `;`: the character still matches.
+  expect(press("m", { altKey: true, code: "Semicolon", ctrlKey: true })).toBe(true);
+  expect(comment.fired()).toBe(3);
+});
+
+test("$mod+Alt+m wants both modifiers: Control, Command, Option or Shift alone never runs it", () => {
+  const { keymap, press } = harness();
+  const comment = binding("comment", "$mod+Alt+m");
+  keymap.register("global", [comment.definition]);
+
+  expect(press("m", { code: "KeyM", ctrlKey: true })).toBe(false);
+  expect(press("m", { code: "KeyM", metaKey: true })).toBe(false);
+  expect(press("µ", { altKey: true, code: "KeyM" })).toBe(false);
+  expect(press("M", { code: "KeyM", shiftKey: true })).toBe(false);
+  expect(press("m", { code: "KeyM" })).toBe(false);
+  expect(press("M", { altKey: true, code: "KeyM", ctrlKey: true, shiftKey: true })).toBe(false);
+  // Another key under the same modifiers.
+  expect(press("n", { altKey: true, code: "KeyN", ctrlKey: true })).toBe(false);
+  expect(comment.fired()).toBe(0);
+});
+
+test("a combo without Alt matches by the character alone, so a layout that moves a letter moves its key", () => {
+  const { keymap, press } = harness();
+  const priority = binding("priority", "p");
+  const pin = binding("pin", "Shift+P");
+  const search = binding("search", "$mod+k");
+  const p0 = binding("p0", "0");
+  keymap.register("global", [
+    priority.definition,
+    pin.definition,
+    search.definition,
+    p0.definition,
+  ]);
+
+  // Dvorak types `l` on the key QWERTY calls P: that press is `l`, not `p`.
+  expect(press("l", { code: "KeyP" })).toBe(false);
+  expect(press("p", { code: "KeyR" })).toBe(true);
+  expect(press("P", { code: "KeyR", shiftKey: true })).toBe(true);
+  expect(press("k", { code: "KeyV", ctrlKey: true })).toBe(true);
+  expect(press("k", { code: "KeyK", ctrlKey: true })).toBe(true);
+  // AZERTY's top row types `à` unshifted where QWERTY has 0.
+  expect(press("à", { code: "Digit0" })).toBe(false);
+  expect(press("0", { code: "Digit0", shiftKey: true })).toBe(true);
+  expect(priority.fired()).toBe(1);
+  expect(pin.fired()).toBe(1);
+  expect(search.fired()).toBe(2);
+  expect(p0.fired()).toBe(1);
+});
+
 test("a chord fires within the timeout, shows its pending prefix, and expires after 1000 ms", () => {
   const { advance, keymap, press } = harness();
   const inbox = binding("go-inbox", "g i");
@@ -279,6 +336,31 @@ test("project and board are page scopes: their bindings are described under thei
   expect(toggleView.fired()).toBe(1);
   expect(press("j")).toBe(true);
   expect(nextCard.fired()).toBe(1);
+});
+
+test("a binding two mounted instances register is described once, enabled when either applies", () => {
+  const { keymap, press } = harness();
+  let focused: "spec" | "runbook" | undefined;
+  const spec = binding("comment-on-selection", "$mod+Alt+m", {
+    inEditable: true,
+    when: () => focused === "spec",
+  });
+  const runbook = binding("comment-on-selection", "$mod+Alt+m", {
+    inEditable: true,
+    when: () => focused === "runbook",
+  });
+  keymap.register("document", [spec.definition]);
+  keymap.register("document", [runbook.definition]);
+  keymap.pushScope("document");
+  keymap.pushScope("document");
+
+  const described = () =>
+    keymap.describe().map((entry) => [entry.scope, entry.id, entry.enabled] as const);
+  expect(described()).toEqual([["document", "comment-on-selection", false]]);
+  focused = "runbook";
+  expect(described()).toEqual([["document", "comment-on-selection", true]]);
+  expect(press("m", { altKey: true, code: "KeyM", ctrlKey: true })).toBe(true);
+  expect([spec.fired(), runbook.fired()]).toEqual([0, 1]);
 });
 
 test("actions() lists each scope below the innermost dialog once, innermost scope first", () => {

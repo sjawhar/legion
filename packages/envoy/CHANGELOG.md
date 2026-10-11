@@ -4,6 +4,14 @@
 
 ### Added
 
+- `Ctrl+Alt+M` (`⌘+⌥+M` on a Mac), Google Docs' shortcut, comments on the text selected in a
+  document, as the selection bar's **Comment** does: it opens the margin's composer on the
+  selection and puts the cursor in it. It works in an issue's documents and a project's documents
+  while the cursor is in the document and text is selected, and does nothing in a comment being
+  written or on a document the reader cannot edit. The `?` help lists it under **Document** and
+  shows `⌥` for Alt on a Mac. The dashboard's shortcuts that hold Alt match the key's position as
+  well as its character, since Option changes the character on a Mac (Option+M types `µ`);
+  every other shortcut still matches by character alone (LEGION-680).
 - Every document version now carries `size`, the bytes of the markdown it stores, as file and
   image versions already carried theirs: on the issue and project artifact lists, the issue read,
   an artifact's read, each version's read, the reference closure and outgoing reference reads, the
