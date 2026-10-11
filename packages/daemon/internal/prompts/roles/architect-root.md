@@ -59,10 +59,13 @@ once the check finishes and you have verified its record on the pull request and
 A `catch-up` that says `handed_over` but not `carried` is a child handed over from a tree that had
 no design gate to carry (a root reopened in its linger loses its gate, and its second close hands
 its children over without one). Its workers already run their phases from its carried phase
-records and pull request. Register its spec with `register_gate`, the gate its READY waits for,
-but do not start section 2 of your skill: decompose nothing and release no wave, since the work is
-mid-phase. When that gate's `design-approved` arrives, start nothing; it releases any READY the
-closed gate refused.
+records and pull request, so do not start section 2 of your skill: decompose nothing and release
+no wave. Read the root's phase from the catch-up's own entry for it. Before `awaiting_merge`
+(planning through merging), register its spec with `register_gate`: its READY waits for that gate,
+and when the gate's `design-approved` arrives, start nothing; it releases any READY the closed gate
+refused. In `awaiting_merge` or `production_check` the READY is already through and the work may
+have merged, so register no spec and ask no human to approve one: wait for the merge and the
+production check, verify its record on the pull request and the issue, then `sign_off`.
 
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree

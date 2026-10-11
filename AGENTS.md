@@ -163,14 +163,14 @@ label as any root does. A root that stays `done` through its linger hands every 
 workflow to Legion as a root of its own: the daemon sets it `todo` with the label in one Dispatch
 write, and the write's event carries the child's phase, design gate, phase records and pull request
 into a new generation, then starts that phase's role. A child whose old root had no gate (cleared
-by a reopen in its linger) carries none: its architect registers its own spec but decomposes
-nothing anew, since its workers already run their phases. A child stays its own tree after
-hand-over; reopening the old root later does not take it back. A root reopened inside its linger
-instead keeps its children. Taking the label off a waiting root drops it from the waiting line, as
-a status that leaves `todo` does; taking it off a root already admitted does not stop its tree.
-The mark is a label rather than the issue's `route` because Dispatch publishes every event of a
-routed issue to the route's topic, where a label only marks the issue; it carries no workflow
-state.
+by a reopen in its linger) carries none: its architect registers its own spec while the child is
+before `awaiting_merge` (after that its READY is already through), and decomposes nothing anew,
+since its workers already run their phases. A child stays its own tree after hand-over; reopening
+the old root later does not take it back. A root reopened inside its linger instead keeps its
+children. Taking the label off a waiting root drops it from the waiting line, as a status that
+leaves `todo` does; taking it off a root already admitted does not stop its tree. The mark is a
+label rather than the issue's `route` because Dispatch publishes every event of a routed issue to
+the route's topic, where a label only marks the issue; it carries no workflow state.
 
 **Gate:** the design gate, when armed (`gates.design: root-issues` in `legion.yaml`, the default),
 is a human approving the root issue's spec document at a version in Dispatch: once the spec's

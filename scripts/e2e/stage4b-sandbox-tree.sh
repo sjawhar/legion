@@ -4654,7 +4654,9 @@ begin carried-child
 # label (labels_add) at the sequence the daemon read (expected_sequence). Which path completes it
 # depends on production Dispatch's version, which the checkpoint probes first, and on the Dispatch
 # status done recorded for child 3.
-# (a) A Dispatch that knows labels_add takes the hand-over PATCH, and the outbox consumes it at once.
+# (a) A Dispatch that knows labels_add takes the hand-over PATCH, and either consumer may complete
+# the hand-over: the outbox, right after its write (outbox consumeHandover), or admission, on that
+# write's own labelled event (`admission hand-over`), whichever reaches the fence first.
 # One that predates the field refuses the write by its name (400 INVALID_JSON); the daemon rides the
 # refusal out (dispatch.PermanentRefusal): the outbox retries the row and never drops it as refused
 # for good (handover_ridden_out, held to a fabricated drop here and in stage4b-verdict.test.ts), and
@@ -4717,8 +4719,8 @@ if [ "$dispatch_knows_labels_add" = yes ]; then
     fail "$child3's events hold no todo with the legion label written by legion-daemon:$project: the outbox's hand-over PATCH did not land"
   refusals=$(handover_refusals "$daemon_log" "$child3")
   [ "$refusals" = 0 ] || fail "a Dispatch that knows labels_add refused $child3's hand-over write $refusals times by that field"
-  carry_path="the daemon's hand-over PATCH, which the outbox consumed itself"
-  note "(a) production Dispatch took $child3's hand-over PATCH (todo with the legion label, written by legion-daemon:$project), and the outbox consumed it"
+  carry_path="the daemon's hand-over PATCH, consumed by whichever reached the fence first: the outbox after its write, or admission on the write's event"
+  note "(a) production Dispatch took $child3's hand-over PATCH (todo with the legion label, written by legion-daemon:$project), and the hand-over was consumed"
 else
   child3_refused_twice() { [ "$(handover_refusals "$daemon_log" "$child3")" -ge 2 ]; }
   until_true 600 "the outbox to retry $child3's hand-over write after production Dispatch refuses labels_add" child3_refused_twice
@@ -4807,8 +4809,12 @@ on_tree "$tree1" wait_for_worker "$tree1" architect
 pod=$(issue_pod "$tree1")
 recovered=$(pod_exec "$pod" architect cat "/legion/workspaces/$repo/${tree1,,}/.legion/$tree1/workspace-recovered.json")
 jq -e --arg b "legion/$tree1" 'tostring | contains($b)' <<<"$recovered" >/dev/null || fail "the recovery marker does not name legion/$tree1: $recovered"
-# Counted per issue: carried-child's child 3 lost its own volume once, and any other claim's loss
-# still fails here.
+# Counted per issue, and stricter than counting tree 1's own lines alone: in this run only tree 1's
+# and child 3's volumes are deleted while their claims stay resumable (tree 1's at its close, its
+# claims suspended for this re-admission; child 3's at the same close, its claim moved to its own
+# tree at carried-child, which counted its one loss). Every other issue's volume either survives
+# or goes with claims that are closed for good, so a lost-volume line for any other claim is a
+# defect, not noise, and fails here.
 lost=$(issue_lost_lines "$tree1" | wc -l)
 [ "$lost" = 1 ] || fail "the daemon reported $tree1's volume lost $lost times, want exactly once"
 others=$(log_lines "$lost_msg" | jq -c --arg a "$(claim_token "$tree1" "")" --arg b "$(claim_token "$child3" "")" 'select((.claim // "") | (startswith($a) or startswith($b)) | not)')

@@ -240,10 +240,13 @@ root of its own (`todo` with the `legion` label). It carries that child's phase,
 and pull request into a new generation and starts the role of that phase; that root's architect
 gets a catch-up that says `handed_over` and `carried` and resumes from the phase, never
 registering its spec or asking for approval again. A child whose old root had no gate carries
-none, and its catch-up says `handed_over` without `carried`: its architect registers its spec, but
-its workers already run their phases, so it decomposes nothing and starts nothing on that gate's
-`design-approved`. The child stays its own tree after hand-over; reopening the old root later does
-not take it back. Park a child first when its work should stop with the root.
+none, and its catch-up says `handed_over` without `carried`. Its workers already run their phases,
+so its architect decomposes nothing. Before `awaiting_merge` it registers its spec, the gate its
+READY waits for, and starts nothing on that gate's `design-approved`; in `awaiting_merge` or
+`production_check` the READY is already through, so it registers no spec, asks no human to approve
+one, and signs off after the production check. The child stays its own tree after hand-over;
+reopening the old root later does not take it back. Park a child first when its work should stop
+with the root.
 
 ## 4. Integration verification
 
