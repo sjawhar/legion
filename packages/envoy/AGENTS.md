@@ -2011,11 +2011,13 @@ expiry, a pod UID named) for both `Create` and `Renew`, before either opens a tr
 enrollment's pod UID and recorded subject (`403 POD_IDENTITY_MISMATCH`); one past its expiry is
 `403 POD_TOKEN_EXPIRED` naming that expiry, as at `Create`, which the renewer retries with the token
 its file holds next. A box's or host's renewal carries none, and any token on either renewal is the
-identity mismatch. `Create` sets a pod row's
-`pod_token_renewed_at`, so a renewal without the token is `403 POD_TOKEN_REQUIRED` from the first;
-only the pod rows 0012 found start null and renew without one, logged at WARN, until their first
-renewal carrying it sets the column. 0012 is forward-only too: an older broker inserts pod rows
-with the column null, and so lets them renew without a token. A pod enrollment is ended only by the
+identity mismatch. Every pod row starts with `pod_token_renewed_at` null, whether `Create` made it or
+0012 found it: a renewal without the token is accepted and logged at WARN until the first renewal
+carrying it sets the column, and from then on is `403 POD_TOKEN_REQUIRED`. So the copied-token gap
+is closed only for pods that have once renewed with their token; a pod whose renewer never sends one
+renews as before until the contract release requires it, once the unset-row count is 0 and no
+token-less WARN appears for one full `BROKER_LEASE_SECONDS`. No deploy order matters: an older
+broker ignores the token, and 0012 is additive and nullable. A pod enrollment is ended only by the
 launcher credential that made it (`DELETE` by any other is `403 NOT_ENROLLING_CREDENTIAL`), so a
 Legion daemon that logs in again (a restart, or its login's expiry) leaves its earlier login's pods
 to their leases or to a revoke of that login. The renew route alone maps proof.ErrNotLive to

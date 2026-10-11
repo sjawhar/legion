@@ -48,13 +48,14 @@ func (r podRenewalRig) setLease(t *testing.T, in time.Duration) {
 	}
 }
 
-// predateTheTokenCheck clears pod_token_renewed_at, as migration 0012 leaves every pod enrollment
-// that existed when it ran: one made by a broker that predates the renew token check.
-func (r podRenewalRig) predateTheTokenCheck(t *testing.T) {
+// tokenRenewedAt reads the enrollment's pod_token_renewed_at: nil until a renewal carries the token.
+func (r podRenewalRig) tokenRenewedAt(t *testing.T) *time.Time {
 	t.Helper()
-	if _, err := r.svc.Store.Pool.Exec(context.Background(), `update enrollments set pod_token_renewed_at=null where id=$1`, r.id); err != nil {
+	var at *time.Time
+	if err := r.svc.Store.Pool.QueryRow(context.Background(), `select pod_token_renewed_at from enrollments where id=$1`, r.id).Scan(&at); err != nil {
 		t.Fatal(err)
 	}
+	return at
 }
 
 func (r podRenewalRig) lease(t *testing.T) time.Time {
@@ -86,7 +87,7 @@ func TestARenewalCarryingThePodsCurrentTokenExtendsTheLease(t *testing.T) {
 // TestARenewalCarryingAnotherPodsOrAccountsTokenIsRefused: a token for another pod UID, for another
 // service account, one no trusted issuer signed, or one bound to no pod is ErrPodIdentity, and one
 // past its expiry is ErrPodTokenExpired naming that expiry (as Create answers it), and the lease is
-// left where it was: a projected token copied out of a pod stops renewing anything once it expires,
+// left where it was: a renewal carrying a token never renews an enrollment the token does not name,
 // and a token from another pod never renews this one.
 func TestARenewalCarryingAnotherPodsOrAccountsTokenIsRefused(t *testing.T) {
 	r := newPodRenewalRig(t)
@@ -123,32 +124,20 @@ func TestARenewalCarryingAnotherPodsOrAccountsTokenIsRefused(t *testing.T) {
 	}
 }
 
-// TestAPodEnrolledUnderTheTokenCheckRenewsOnlyWithItsToken: Create sets pod_token_renewed_at, so a
-// pod enrollment made by this broker is refused a renewal without its token from the first one.
-// An off-cluster key enrolled with a token copied out of a pod therefore stops renewing once that
-// token expires, whether or not its renewer ever sends one.
-func TestAPodEnrolledUnderTheTokenCheckRenewsOnlyWithItsToken(t *testing.T) {
+// TestAPodEnrollmentRenewsWithoutItsTokenUntilItFirstRenewsWithIt is the ratchet: Create leaves
+// pod_token_renewed_at null, so a new pod enrollment's renewal without a token extends the lease and
+// reports it renewed without one (which the API logs), as does one migration 0012 found. Its first
+// renewal carrying the pod's token sets the column, and from then on a renewal without one is
+// ErrPodTokenRequired and leaves the lease where it was.
+func TestAPodEnrollmentRenewsWithoutItsTokenUntilItFirstRenewsWithIt(t *testing.T) {
 	r := newPodRenewalRig(t)
-	before := r.lease(t)
-	if _, err := r.svc.Renew(context.Background(), r.id, ""); !errors.Is(err, ErrPodTokenRequired) {
-		t.Fatalf("Renew(no token, a pod enrolled under the token check) = %v, want ErrPodTokenRequired", err)
-	}
-	if lease := r.lease(t); !lease.Equal(before) {
-		t.Fatalf("lease after the refused token-less renewal = %v, want it left at %v", lease, before)
-	}
-}
-
-// TestAPodEnrollmentThatPredatesTheTokenCheckRenewsWithoutItUntilItFirstRenewsWithIt is the
-// compatibility rule: a pod enrollment migration 0012 found (pod_token_renewed_at null) keeps
-// renewing without a token, each such renewal saying so, until its first renewal with one; from
-// then a renewal without one is ErrPodTokenRequired and leaves the lease where it was.
-func TestAPodEnrollmentThatPredatesTheTokenCheckRenewsWithoutItUntilItFirstRenewsWithIt(t *testing.T) {
-	r := newPodRenewalRig(t)
-	r.predateTheTokenCheck(t)
 	ctx := context.Background()
+	if at := r.tokenRenewedAt(t); at != nil {
+		t.Fatalf("pod_token_renewed_at after Create = %v, want null", *at)
+	}
 	renewal, err := r.svc.Renew(ctx, r.id, "")
 	if err != nil {
-		t.Fatalf("Renew(no token, an enrollment that predates the check): %v", err)
+		t.Fatalf("Renew(no token, a new pod enrollment): %v", err)
 	}
 	if !renewal.WithoutPodToken || renewal.RuntimeID != renewPodUID || renewal.Slot != "implementer-g1" {
 		t.Fatalf("renewal = %+v, want it to report a renewal without the pod's token, naming the pod and slot", renewal)
@@ -156,9 +145,15 @@ func TestAPodEnrollmentThatPredatesTheTokenCheckRenewsWithoutItUntilItFirstRenew
 	if lease := r.lease(t); lease.Before(time.Now().Add(50 * time.Minute)) {
 		t.Fatalf("lease after the token-less renewal = %v, want about an hour out", lease)
 	}
+	if at := r.tokenRenewedAt(t); at != nil {
+		t.Fatalf("pod_token_renewed_at after a token-less renewal = %v, want still null", *at)
+	}
 
 	if _, err := r.svc.Renew(ctx, r.id, mintPodToken(t, r.issuer, r.key, renewAccount, renewPodUID)); err != nil {
 		t.Fatalf("Renew(the pod's token): %v", err)
+	}
+	if r.tokenRenewedAt(t) == nil {
+		t.Fatal("pod_token_renewed_at after a renewal with the token is null, want it set")
 	}
 	r.setLease(t, time.Minute)
 	before := r.lease(t)
@@ -167,6 +162,22 @@ func TestAPodEnrollmentThatPredatesTheTokenCheckRenewsWithoutItUntilItFirstRenew
 	}
 	if lease := r.lease(t); !lease.Equal(before) {
 		t.Fatalf("lease after the refused token-less renewal = %v, want it left at %v", lease, before)
+	}
+}
+
+// TestARefusedTokenNeverSetsTheRatchet: a renewal whose token is refused (another pod's) leaves
+// pod_token_renewed_at null, so only a token the broker accepted moves an enrollment onto the
+// token-required path.
+func TestARefusedTokenNeverSetsTheRatchet(t *testing.T) {
+	r := newPodRenewalRig(t)
+	if _, err := r.svc.Renew(context.Background(), r.id, mintPodToken(t, r.issuer, r.key, renewAccount, "pod-uid-other")); !errors.Is(err, ErrPodIdentity) {
+		t.Fatalf("Renew(another pod's token) = %v, want ErrPodIdentity", err)
+	}
+	if at := r.tokenRenewedAt(t); at != nil {
+		t.Fatalf("pod_token_renewed_at after a refused token = %v, want null", *at)
+	}
+	if _, err := r.svc.Renew(context.Background(), r.id, ""); err != nil {
+		t.Fatalf("Renew(no token) after a refused token: %v, want the token-less renewal still accepted", err)
 	}
 }
 

@@ -37,11 +37,13 @@ An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session
 renews host sessions, `agent-secrets renew` renews a box, and Legion's pod shim renews a pod. A
 pod's renewal carries the pod's current projected token, and the broker refuses it
 (`POD_IDENTITY_MISMATCH`) unless the token names the pod UID and service account the enrollment was
-made for, and refuses a renewal without one (`POD_TOKEN_REQUIRED`). So for every pod enrollment a
-broker of this release makes, a token copied out of a pod stops renewing anything once it expires.
-A pod enrollment made before the broker's migration 0012 (one whose `agent-secrets renew` predates
-the token) still renews without one, and the broker logs each such renewal, until its first renewal
-with the token; for those enrollments the copied-token hole stays open until they end. An
+made for. The token is not yet required. The broker ratchets each pod enrollment instead: the first
+renewal that carries the pod's token marks the enrollment, and from then on it refuses a renewal
+without one (`POD_TOKEN_REQUIRED`). So for every pod enrollment that has once renewed with its token,
+a token copied out of the pod stops renewing anything once it expires. A pod whose
+`agent-secrets renew` never sends a token, such as one on an older worker image, renews as it did
+before, and the broker logs each such renewal; for that enrollment a copied token still keeps it
+alive until the release that requires the token. An
 enrollment has **ended** once its launcher revokes it (the helper does as soon as a host session's
 process exits), whoever may revoke its machine login revokes that login
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its

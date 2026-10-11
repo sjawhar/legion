@@ -176,9 +176,9 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 		return issuer.Mint(t, podKey, claims)
 	}
 
-	t.Log("--- the pod renews: no token, another pod's token and its own expired token refused, a skewed proof retryable, its own token accepted")
-	if status, code := renew(nil); status != http.StatusForbidden || code != "POD_TOKEN_REQUIRED" {
-		t.Fatalf("the pod renews with no token = %d %s, want 403 POD_TOKEN_REQUIRED", status, code)
+	t.Log("--- the pod renews: no token accepted until its first token renewal, another pod's token and its own expired token refused, a skewed proof retryable, then no token refused")
+	if status, code := renew(nil); status != http.StatusOK {
+		t.Fatalf("the new pod renews with no token = %d %s, want 200 (the ratchet is not set yet)", status, code)
 	}
 	if status, code := renew(map[string]any{"pod_token": podToken("pod-2")}); status != http.StatusForbidden || code != "POD_IDENTITY_MISMATCH" {
 		t.Fatalf("the pod renews with another pod's token = %d %s, want 403 POD_IDENTITY_MISMATCH", status, code)
@@ -191,6 +191,9 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 	}
 	if status, code := renew(map[string]any{"pod_token": podToken("pod-1")}); status != http.StatusOK {
 		t.Fatalf("the pod renews with its own token = %d %s, want 200", status, code)
+	}
+	if status, code := renew(nil); status != http.StatusForbidden || code != "POD_TOKEN_REQUIRED" {
+		t.Fatalf("the pod renews with no token after renewing with it = %d %s, want 403 POD_TOKEN_REQUIRED", status, code)
 	}
 
 	t.Log("--- carol, who approved nothing, lists the daemon's login and revokes it")
