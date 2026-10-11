@@ -284,6 +284,8 @@ class ActionBarController {
    *  marks nothing and answers false for an empty or stale range, or while the view is read-only,
    *  where the bar offers no action. */
   act(kind: SelectionBarActionKind, range: MarkRange | null): boolean {
+    // Dispatch hides this bar on read-only surfaces; this also keeps a reachable button from
+    // writing a provisional mark into a closed or historical document.
     if (!this.view.editable || !isRangeValid(this.view, range)) return false;
     void this.runAction(kind, range);
     return true;

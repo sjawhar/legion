@@ -9,8 +9,8 @@ import { useLayoutEffect, useRef, useSyncExternalStore } from "react";
  * syntax — `"g i"` is a chord, `"$mod+k"` matches Meta or Control, `"Shift+P"` a shifted
  * letter, `"?"` the character an unshifted or shifted key produces. A combo is matched by the
  * character its key types, so a reader on AZERTY or Dvorak presses the letter a shortcut names
- * wherever it sits; one that holds `Alt` also matches by the key's position (`KeyM` for `m`),
- * because Option changes the character on a Mac: `$mod+Alt+m` types `µ` there.
+ * wherever it sits; on a Mac, one that holds `Alt` also matches by the key's position (`KeyM` for
+ * `m`), because Option changes the character: `$mod+Alt+m` types `µ` there.
  */
 
 export type KeymapScope =
@@ -164,15 +164,14 @@ function physicalCode(key: string): string | undefined {
   return /^[0-9]$/.test(key) ? `Digit${key}` : undefined;
 }
 
-function matchesCombo(combo: KeyCombo, press: KeyPress): boolean {
+function matchesCombo(combo: KeyCombo, press: KeyPress, isMac: boolean): boolean {
   const sameCharacter =
     press.key.length === 1
       ? press.key.toLowerCase() === combo.key.toLowerCase()
       : press.key === combo.key;
-  // Option rewrites the character on a Mac (`µ` for M), so only a combo holding Alt matches by
-  // position too. Every other combo keeps to the character: by position, Dvorak's `l` (on the
-  // QWERTY P key) would also press `p`.
-  const samePosition = combo.alt && press.code === physicalCode(combo.key);
+  // Option rewrites the character on a Mac (`µ` for M). Other platforms retain character
+  // matching, so AltGr keeps typing its layout's character instead of opening a shortcut.
+  const samePosition = combo.alt && isMac && press.code === physicalCode(combo.key);
   if (!(sameCharacter || samePosition) || combo.alt !== press.altKey) {
     return false;
   }
@@ -247,6 +246,8 @@ function isEditableTarget(target: EventTarget | null): boolean {
 }
 
 export interface KeymapOptions {
+  /** Whether Alt combos may match a physical key; production follows the browser's Mac identity. */
+  isMac?: boolean;
   /** Timer seam for the chord timeout; tests drive it without real waits. */
   clearTimeout?: (handle: number) => void;
   setTimeout?: (callback: () => void, ms: number) => number;
@@ -280,6 +281,7 @@ interface Resolution {
 }
 
 export function createKeymap(options: KeymapOptions = {}): Keymap {
+  const isMac = options.isMac ?? IS_MAC;
   const schedule = options.setTimeout ?? ((callback, ms) => window.setTimeout(callback, ms));
   const unschedule = options.clearTimeout ?? ((handle) => window.clearTimeout(handle));
   const strict = options.strict ?? false;
@@ -353,7 +355,7 @@ export function createKeymap(options: KeymapOptions = {}): Keymap {
         for (const chord of registration.chords) {
           if (
             chord.length < presses.length ||
-            !presses.every((press, index) => matchesCombo(chord[index] as KeyCombo, press))
+            !presses.every((press, index) => matchesCombo(chord[index] as KeyCombo, press, isMac))
           ) {
             continue;
           }

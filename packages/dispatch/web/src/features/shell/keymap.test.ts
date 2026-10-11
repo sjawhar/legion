@@ -9,7 +9,7 @@ interface Harness {
   press: (key: string, init?: KeyboardEventInit & { target?: Element }) => boolean;
 }
 
-function harness(): Harness {
+function harness(isMac = false): Harness {
   const timers: { at: number; callback: () => void; handle: number }[] = [];
   let now = 0;
   let nextHandle = 1;
@@ -18,6 +18,7 @@ function harness(): Harness {
       const index = timers.findIndex((timer) => timer.handle === handle);
       if (index !== -1) timers.splice(index, 1);
     },
+    isMac,
     setTimeout: (callback, ms) => {
       const handle = nextHandle++;
       timers.push({ at: now + ms, callback, handle });
@@ -78,17 +79,24 @@ test("? matches the shifted character and $mod matches Meta or Control, never a 
   expect(priority.fired()).toBe(1);
 });
 
-test("$mod+Alt+m matches Control+Alt+M and Command+Option+M, whose key is µ, by the M key's position", () => {
-  const { keymap, press } = harness();
-  const comment = binding("comment", "$mod+Alt+m");
-  keymap.register("global", [comment.definition]);
+test("$mod+Alt+m preserves AltGr typing away from a Mac and matches Option's physical M key on one", () => {
+  const nonMac = harness();
+  const nonMacComment = binding("comment", "$mod+Alt+m");
+  nonMac.keymap.register("global", [nonMacComment.definition]);
 
-  expect(press("m", { altKey: true, code: "KeyM", ctrlKey: true })).toBe(true);
-  // Option turns M into µ on a Mac, so the character alone never names the chord there.
-  expect(press("µ", { altKey: true, code: "KeyM", metaKey: true })).toBe(true);
+  expect(nonMac.press("m", { altKey: true, code: "KeyM", ctrlKey: true })).toBe(true);
+  // German AltGr+M is Ctrl+Alt with this µ key/code pair: it remains character input.
+  expect(nonMac.press("µ", { altKey: true, code: "KeyM", ctrlKey: true })).toBe(false);
   // AZERTY puts M where QWERTY has `;`: the character still matches.
-  expect(press("m", { altKey: true, code: "Semicolon", ctrlKey: true })).toBe(true);
-  expect(comment.fired()).toBe(3);
+  expect(nonMac.press("m", { altKey: true, code: "Semicolon", ctrlKey: true })).toBe(true);
+  expect(nonMacComment.fired()).toBe(2);
+
+  const mac = harness(true);
+  const macComment = binding("comment", "$mod+Alt+m");
+  mac.keymap.register("global", [macComment.definition]);
+  // Option turns M into µ on a Mac, so the character alone never names the chord there.
+  expect(mac.press("µ", { altKey: true, code: "KeyM", metaKey: true })).toBe(true);
+  expect(macComment.fired()).toBe(1);
 });
 
 test("$mod+Alt+m wants both modifiers: Control, Command, Option or Shift alone never runs it", () => {
