@@ -348,6 +348,10 @@ type Store interface {
 	ReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) (*ReleaseRetry, error)
 	PutReleaseRetry(ctx context.Context, tx pgx.Tx, retry ReleaseRetry) error
 	DeleteReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) error
+	// CarriedRoot is the generation at which issue became a root carrying a handed-over child's
+	// state, zero for none; PutCarriedRoot records it.
+	CarriedRoot(ctx context.Context, tx pgx.Tx, issue string) (uint64, error)
+	PutCarriedRoot(ctx context.Context, tx pgx.Tx, issue string, generation uint64) error
 	// WaitingNotices is every notice row of project's issues not yet due at now, oldest first.
 	WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error)
 	// ExpediteOutbox makes row id due at now if it was due later.

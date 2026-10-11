@@ -109,6 +109,13 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		// that claim moves it, and it is the turn that posts the day's report.
 		return nil, a.wakeController(ctx, tx, record.TickNotice, a.project, a.now())
 	}
+	if handover, ok := fact.(intake.Handover); ok {
+		if err := a.consumeHandover(ctx, tx, handover); err != nil {
+			return nil, err
+		}
+		_, err := a.promote(ctx, tx)
+		return nil, err
+	}
 
 	observation, ok := fact.(intake.DispatchIssue)
 	if !ok {
@@ -436,7 +443,7 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 		return nil
 	}
 	handed := observation.HandedOver
-	if observation.DaemonActor && observation.Status == "todo" {
+	if observation.DaemonActor && observation.HandedOver && observation.Status == "todo" {
 		if handover, err := a.store.Handover(ctx, tx, stored.Key); err != nil || handover == nil {
 			if err != nil {
 				return err
@@ -467,6 +474,25 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
 		Status: observation.Status, Shown: observation.Status, HandedOver: handed, Seq: observation.Seq,
 	})
+}
+
+// consumeHandover completes an outbox hand-over when Dispatch already showed its todo and label.
+// It is the direct equivalent of the daemon-authored event path, but cannot be mistaken for an
+// ordinary daemon todo echo because it carries the persisted fence identity.
+func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.Handover) error {
+	stored, err := a.store.Issue(ctx, tx, fact.Issue)
+	if err != nil || stored == nil {
+		return err
+	}
+	handover, err := a.store.Handover(ctx, tx, fact.Issue)
+	if err != nil || handover == nil || handover.Cancelled || handover.Tree != fact.Tree || handover.Generation != fact.Generation || stored.Tree != fact.Tree {
+		return err
+	}
+	root, err := a.store.Issue(ctx, tx, fact.Tree)
+	if err != nil || root == nil || !root.LingersAt(fact.Generation) {
+		return err
+	}
+	return a.readmit(ctx, tx, *stored, stored.Title, deref(stored.Parent), stored.Rank, stored.LastDispatchSeq, true)
 }
 
 // orphan says whether an observation makes a recorded child an orphan, admitted as a root of its
@@ -588,10 +614,17 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 				return fmt.Errorf("carry pull request to re-admitted orphan %s: %w", stored.Key, err)
 			}
 		}
+		if err := a.store.PutCarriedRoot(ctx, tx, stored.Key, stored.Generation); err != nil {
+			return err
+		}
 		return a.store.DeleteHandover(ctx, tx, stored.Key)
 	}
-	if err := a.store.CancelTreeHandovers(ctx, tx, oldTree, oldGeneration); err != nil {
-		return err
+	// Only the old tree's own root coming back cancels its pending hand-overs; an orphan of that
+	// tree admitted by a person leaves its siblings' fences standing.
+	if claim.IsTreeRoot(stored.Key, oldTree) {
+		if err := a.store.CancelTreeHandovers(ctx, tx, oldTree, oldGeneration); err != nil {
+			return err
+		}
 	}
 	// A root set back to todo is a new generation of the whole tree, so the old generation's pull
 	// request, gate, handoffs and pending READY go for every issue of it, not only the root's.

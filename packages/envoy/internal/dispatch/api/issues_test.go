@@ -692,6 +692,13 @@ func TestIssueLabelsCreateNormalizePatchAndFilter(t *testing.T) {
 	added := decodeBody[model.Issue](t, addedResponse)
 	expectLabels(added.Labels, "urgent", "api", "legion")
 
+	stale := sessionRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+first.Key, map[string]any{
+		"status": "todo", "labels_add": []string{"legion"}, "expected_sequence": first.LastSeq, "actor": sessionActor(),
+	})
+	if stale.Code != http.StatusConflict || !strings.Contains(stale.Body.String(), `"code":"ISSUE_CHANGED"`) {
+		t.Fatalf("stale additive label patch = %d %s, want ISSUE_CHANGED", stale.Code, stale.Body.String())
+	}
+
 	eventsResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+first.Key+"/events", nil, "alice")
 	if eventsResponse.Code != http.StatusOK {
 		t.Fatalf("list label update events: status=%d body=%s", eventsResponse.Code, eventsResponse.Body.String())
@@ -709,7 +716,7 @@ func TestIssueLabelsCreateNormalizePatchAndFilter(t *testing.T) {
 	for _, event := range events {
 		if event.Type == "issue.updated" {
 			foundLabelUpdate = true
-			expectLabels(event.Payload.Labels, "urgent", "api", "legion")
+			expectLabels(event.Payload.Labels, "urgent", "api")
 			break
 		}
 	}

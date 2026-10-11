@@ -20,6 +20,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		Rank          *rankInput            `json:"rank"`
 		Labels        *[]string             `json:"labels"`
 		LabelsAdd     *[]string             `json:"labels_add"`
+		ExpectedSeq   *int64                `json:"expected_sequence"`
 		Priority      json.RawMessage       `json:"priority"`
 		Route         *string               `json:"route"`
 		ExternalLinks *[]model.ExternalLink `json:"external_links"`
@@ -132,6 +133,10 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	before, err := s.loadIssue(r.Context(), tx, key)
 	if err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	if input.ExpectedSeq != nil && *input.ExpectedSeq != int64(before.LastSeq) {
+		writeError(w, "ISSUE_CHANGED", http.StatusConflict, "issue changed since the hand-over read")
 		return
 	}
 	if before.ClosedAt != nil {

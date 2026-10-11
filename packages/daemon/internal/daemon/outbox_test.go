@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -255,6 +256,111 @@ func TestAnOldTreeCloseOfAHandedOverChildFinishesAtTheGenerationFence(t *testing
 	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
 	if err := (&outbox{pool: pool, records: records, supervisor: sup, log: quietLogger()}).execute(context.Background(), row); err != nil {
 		t.Fatalf("old tree close = %v, want its older generation to finish without checking the old tree", err)
+	}
+}
+
+// When Dispatch already shows both todo and legion, PATCH would make no event. The status executor
+// consumes the durable fence through an intake.Handover fact instead; the child still becomes its
+// own carried-state root and the row finishes.
+func TestAnAlreadyTodoAndLabelledChildConsumesItsHandover(t *testing.T) {
+	const root, child = "LEGION-207", "LEGION-208"
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	until := time.Now().Add(time.Hour)
+	parent := root
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		for _, put := range []error{
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
+			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+		} {
+			if put != nil {
+				return put
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed hand-over: %v", err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())
+	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "todo", HandedOver: true, Labels: []string{"legion"}}}
+	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+	if err := (&outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission}, log: quietLogger()}).execute(context.Background(), row); err != nil {
+		t.Fatalf("consume already-todo hand-over: %v", err)
+	}
+	var got *record.Issue
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		var err error
+		got, err = records.Issue(context.Background(), tx, child)
+		return err
+	}); err != nil {
+		t.Fatalf("read child: %v", err)
+	}
+	if got.Tree != child || got.Generation != 2 || got.Phase != phase.Planning || got.Status != "in_progress" {
+		t.Fatalf("already-todo hand-over child = %#v, want its own carried planning root", got)
+	}
+}
+
+// A person's status move after the executor read the issue is caught by Dispatch's expected
+// sequence under its row lock. The outbox keeps the row for that transient conflict, then observes
+// the person's status and drops the hand-over fence without overwriting that move.
+func TestAPersonMoveBetweenTheHandOverReadAndPatchStands(t *testing.T) {
+	const root, child = "LEGION-207", "LEGION-208"
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	now := time.Now()
+	until := now.Add(time.Hour)
+	parent := root
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		for _, put := range []error{
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
+			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+		} {
+			if put != nil {
+				return put
+			}
+		}
+		row, err := record.NewOutboxRow(child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, now)
+		if err != nil {
+			return err
+		}
+		return records.Enqueue(context.Background(), tx, row)
+	}); err != nil {
+		t.Fatalf("seed hand-over: %v", err)
+	}
+	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "in_progress", LastSeq: 7}}
+	client.handOverHook = func() error {
+		client.issue.Status, client.issue.LastSeq = "backlog", 8
+		return &dispatch.Error{Status: http.StatusConflict, Code: "ISSUE_CHANGED", Message: "issue changed"}
+	}
+	runner := &outbox{pool: pool, records: records, dispatchProject: "LEGION", dispatch: client, now: func() time.Time { return now }, log: quietLogger()}
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("the sequence conflict is retried, not a tick failure: %v", err)
+	}
+	if rows := outboxRows(t, pool); rows != 1 {
+		t.Fatalf("rows after the sequence conflict = %d, want the hand-over retained", rows)
+	}
+	client.handOverHook = nil
+	runner.now = func() time.Time { return now.Add(time.Minute) }
+	if err := runner.RunOnce(context.Background()); err != nil {
+		t.Fatalf("observe the person's move: %v", err)
+	}
+	if rows := outboxRows(t, pool); rows != 0 {
+		t.Fatalf("rows after the person's move = %d, want the hand-over finished", rows)
+	}
+	if got := len(client.handOvers); got != 1 {
+		t.Fatalf("hand-over PATCH attempts = %d, want the one conditional attempt alone", got)
+	}
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		handover, err := records.Handover(context.Background(), tx, child)
+		if err != nil || handover != nil {
+			t.Fatalf("hand-over fence after the person move = %#v, %v, want none", handover, err)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 

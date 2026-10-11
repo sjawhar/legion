@@ -226,7 +226,7 @@ func (e *Engine) keepStatus(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 // the child. Keep the child in its live tree, reassert its workflow status, and fence admission
 // from seeing this todo by recording the event sequence.
 func (e *Engine) rejectStaleHandover(ctx context.Context, tx pgx.Tx, issue record.Issue, fact intake.DispatchIssue) (bool, error) {
-	if !fact.DaemonActor || fact.Status != "todo" {
+	if !fact.DaemonActor || !fact.HandedOver || fact.Status != "todo" {
 		return false, nil
 	}
 	handover, err := e.store.Handover(ctx, tx, issue.Key)

@@ -74,24 +74,51 @@ func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 	}
 }
 
-// A root promoted from a handed-over production-check child retains its merged pull request and
-// starts the implementer at that phase. Its architect's catch-up names that exceptional start, so
-// the architect skips the design gate and signs off once the check is recorded.
-func TestACatchUpMarksARootThatStartsAtProductionCheck(t *testing.T) {
-	pool := migratedPool(t)
-	root := record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.ProductionCheck, Generation: 2, Status: "in_progress", Rank: "U"}
-	seedIssue(t, pool, root)
-	claimReady(t, pool, testEngine(config.DesignGateRootIssues, nil), root.Key, claim.RoleArchitect, 1)
-	var marked bool
+// A root a hand-over created carries its child's phase and approved gate into that generation,
+// whatever the phase, so its architect's catch-up says `carried` and the architect resumes rather
+// than registering its spec again. The same root at a later generation (closed and reopened) is a
+// root like any other.
+func TestACatchUpMarksACarriedRootInEveryPhase(t *testing.T) {
+	for _, at := range []phase.Phase{phase.Planning, phase.Reviewing, phase.ProductionCheck} {
+		t.Run(string(at), func(t *testing.T) {
+			pool := migratedPool(t)
+			root := record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: at, Generation: 2, Status: "in_progress", Rank: "U"}
+			seedIssue(t, pool, root)
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				return record.NewStore().PutCarriedRoot(context.Background(), tx, root.Key, 2)
+			}); err != nil {
+				t.Fatalf("seed carried root: %v", err)
+			}
+			engine := testEngine(config.DesignGateRootIssues, nil)
+			claimReady(t, pool, engine, root.Key, claim.RoleArchitect, 1)
+			if !lastCatchUp(t, pool).Carried {
+				t.Fatalf("carried root in %s: catch-up did not say carried", at)
+			}
+			if _, err := pool.Exec(t.Context(), "delete from outbox"); err != nil {
+				t.Fatal(err)
+			}
+			root.Generation = 3
+			seedIssue(t, pool, root)
+			claimReady(t, pool, engine, root.Key, claim.RoleArchitect, 2)
+			if lastCatchUp(t, pool).Carried {
+				t.Fatalf("the root's later generation in %s: catch-up still said carried", at)
+			}
+		})
+	}
+}
+
+func lastCatchUp(t *testing.T, pool *pgxpool.Pool) record.CatchUp {
+	t.Helper()
+	var got *record.CatchUp
 	for _, payload := range noticeRows(t, pool) {
-		notice, ok := payload.(record.Notice)
-		if ok && notice.Kind == "catch-up" {
-			marked = notice.CatchUp.StartsAtProductionCheck
+		if notice, ok := payload.(record.Notice); ok && notice.Kind == "catch-up" {
+			got = notice.CatchUp
 		}
 	}
-	if !marked {
-		t.Fatal("production-check root catch-up did not set startsAtProductionCheck")
+	if got == nil {
+		t.Fatal("no catch-up queued")
 	}
+	return *got
 }
 
 // Only a live tree's root architect is told its tree. A tree that lingers or has left the

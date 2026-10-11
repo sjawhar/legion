@@ -90,23 +90,24 @@ func TestHandOverWritesTheStatusAndTheLabelsInOnePatch(t *testing.T) {
 		}
 		assertBearer(t, r)
 		var body struct {
-			Status    string   `json:"status"`
-			LabelsAdd []string `json:"labels_add"`
-			Actor     struct {
+			Status           string   `json:"status"`
+			LabelsAdd        []string `json:"labels_add"`
+			ExpectedSequence int64    `json:"expected_sequence"`
+			Actor            struct {
 				Kind string `json:"kind"`
 				ID   string `json:"id"`
 			} `json:"actor"`
 		}
 		decodeJSON(t, r, &body)
-		if body.Status != "todo" || len(body.LabelsAdd) != 1 || body.LabelsAdd[0] != LegionLabel ||
+		if body.Status != "todo" || len(body.LabelsAdd) != 1 || body.LabelsAdd[0] != LegionLabel || body.ExpectedSequence != 7 ||
 			body.Actor.Kind != "session" || body.Actor.ID != "legion-daemon:LEGION" {
-			t.Fatalf("hand-over request = %#v, want todo with an additive legion label from legion-daemon:LEGION", body)
+			t.Fatalf("hand-over request = %#v, want todo with additive legion at sequence 7 from legion-daemon:LEGION", body)
 		}
 		writeJSON(t, w, map[string]string{"status": "todo"})
 	}))
 	defer server.Close()
 
-	if err := New(server.URL, dispatchToken).HandOver(context.Background(), Issue{Key: "LEGION-4", Status: "in_progress", Labels: []string{"repo:x"}}, "todo"); err != nil {
+	if err := New(server.URL, dispatchToken).HandOver(context.Background(), Issue{Key: "LEGION-4", Status: "in_progress", Labels: []string{"repo:x"}, LastSeq: 7}, "todo"); err != nil {
 		t.Fatalf("hand over: %v", err)
 	}
 }

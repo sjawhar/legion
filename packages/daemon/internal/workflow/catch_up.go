@@ -9,7 +9,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/intake"
-	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
 
@@ -52,11 +51,16 @@ func (e *Engine) claimReady(ctx context.Context, tx pgx.Tx, fact intake.ClaimRea
 		CatchUp: &catchUp})
 }
 
-// catchUp is root's tree as the record holds it: the design gate policy and the root's gate, and
-// every issue of the tree in key order.
+// catchUp is root's tree as the record holds it: whether the root carries a handed-over child's
+// state into this generation, the design gate policy and the root's gate, and every issue of the
+// tree in key order.
 func (e *Engine) catchUp(ctx context.Context, tx pgx.Tx, root record.Issue) (record.CatchUp, error) {
-	catchUp := record.CatchUp{Generation: root.Generation, StartsAtProductionCheck: root.Phase == phase.ProductionCheck,
-		Gate: record.CatchUpGate{Policy: string(e.cfg.DesignGate)}}
+	catchUp := record.CatchUp{Generation: root.Generation, Gate: record.CatchUpGate{Policy: string(e.cfg.DesignGate)}}
+	carried, err := e.store.CarriedRoot(ctx, tx, root.Key)
+	if err != nil {
+		return record.CatchUp{}, err
+	}
+	catchUp.Carried = carried == root.Generation
 	gate, err := e.store.Gate(ctx, tx, root.Key)
 	if err != nil {
 		return record.CatchUp{}, err

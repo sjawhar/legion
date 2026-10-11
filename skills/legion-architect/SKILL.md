@@ -216,9 +216,10 @@ corrective child wave you create and release, and the tree returns to children-i
 downgrade the parent criterion or silently carry the failure forward. If the root stays `done`
 through its linger with a child still in the workflow, the daemon hands that child to Legion as a
 root of its own (`todo` with the `legion` label). It carries that child's phase, gate, phase records
-and pull request into a new generation and starts the role of that phase. The child stays its own
-tree after hand-over; reopening the old root later does not take it back. Park a child first when
-its work should stop with the root.
+and pull request into a new generation and starts the role of that phase; that root's architect
+gets a `carried` catch-up and resumes from the phase, never registering its spec or asking for
+approval again. The child stays its own tree after hand-over; reopening the old root later does
+not take it back. Park a child first when its work should stop with the root.
 
 ## 4. Integration verification
 

@@ -140,14 +140,15 @@ type Notice struct {
 // CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch
 // (a catch-up notice), which is the architect's first instruction: admission launches it with no
 // task. It is the tree as the daemon records it then: the root's generation, the launch of the
-// architect's claim it was written for, the design gate policy and the root's gate, and every issue
-// of the tree.
+// architect's claim it was written for, whether the root carries a handed-over child's phase and
+// approved design into this generation, the design gate policy and the root's gate, and every
+// issue of the tree.
 type CatchUp struct {
-	Generation              uint64         `json:"generation"`
-	Launch                  uint64         `json:"launch"`
-	StartsAtProductionCheck bool           `json:"startsAtProductionCheck,omitempty"`
-	Gate                    CatchUpGate    `json:"gate"`
-	Issues                  []CatchUpIssue `json:"issues"`
+	Generation uint64         `json:"generation"`
+	Launch     uint64         `json:"launch"`
+	Carried    bool           `json:"carried,omitempty"`
+	Gate       CatchUpGate    `json:"gate"`
+	Issues     []CatchUpIssue `json:"issues"`
 }
 
 // CatchUpGate is the design gate as a catch-up states it: the project's policy (gates.design,

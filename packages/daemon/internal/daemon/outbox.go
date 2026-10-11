@@ -290,16 +290,26 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 		return fmt.Errorf("read Dispatch issue %s before status write: %w", row.Issue, err)
 	}
 	if issue.Status != payload.ObservedStatus && issue.Status != payload.Status {
-		return nil
-	}
-	label := payload.HandOver && !issue.HandedOver
-	if issue.Status == payload.Status && !label {
+		if payload.HandOver {
+			if err := r.dropHandover(ctx, row.Issue); err != nil {
+				return err
+			}
+		}
 		return nil
 	}
 	if payload.HandOver {
 		if holds, err := r.handOverHolds(ctx, row, payload); err != nil || !holds {
 			return err
 		}
+		if issue.Status == payload.Status && issue.HandedOver {
+			_, err := intake.ApplyFact(ctx, r.pool, "outbox", fmt.Sprintf("handover:%s:%d", row.Issue, row.ID),
+				intake.Handover{Issue: row.Issue, Tree: payload.HandOverTree, Generation: payload.HandOverLinger}, r.handlers...)
+			return err
+		}
+	}
+	label := payload.HandOver && !issue.HandedOver
+	if issue.Status == payload.Status && !label {
+		return nil
 	}
 	// A done write's reason goes on the issue first: Dispatch refuses a message on a closed issue.
 	// It is posted as this row's message, so a retry after a failed write finds it and posts none.
@@ -351,6 +361,12 @@ func (r *outbox) handOverHolds(ctx context.Context, row record.OutboxRow, payloa
 	r.log.Info("outbox hand-over no longer holds; finished without writing", "row", row.ID, "issue", row.Issue,
 		"tree", payload.HandOverTree, "linger", payload.HandOverLinger)
 	return false, nil
+}
+
+func (r *outbox) dropHandover(ctx context.Context, issue string) error {
+	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		return r.records.DeleteHandover(ctx, tx, issue)
+	})
 }
 
 func (r *outbox) message(ctx context.Context, row record.OutboxRow, payload record.MessagePost) error {

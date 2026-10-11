@@ -54,3 +54,26 @@ func (s *Postgres) CancelTreeHandovers(ctx context.Context, tx pgx.Tx, tree stri
 	}
 	return nil
 }
+
+func (s *Postgres) CarriedRoot(ctx context.Context, tx pgx.Tx, issue string) (uint64, error) {
+	var generation int64
+	err := tx.QueryRow(ctx, `select generation from carried_roots where issue = $1`, issue).Scan(&generation)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("read carried root %s: %w", issue, err)
+	}
+	return uint64(generation), nil
+}
+
+func (s *Postgres) PutCarriedRoot(ctx context.Context, tx pgx.Tx, issue string, generation uint64) error {
+	if generation == 0 || generation > maxInt64 {
+		return fmt.Errorf("put carried root %s: generation %d is out of range", issue, generation)
+	}
+	if _, err := tx.Exec(ctx, `insert into carried_roots (issue, generation) values ($1, $2)
+		on conflict (issue) do update set generation = excluded.generation`, issue, int64(generation)); err != nil {
+		return fmt.Errorf("put carried root %s: %w", issue, err)
+	}
+	return nil
+}

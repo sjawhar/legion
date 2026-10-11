@@ -40,6 +40,16 @@ type DispatchIssue struct {
 	DaemonActor  bool
 }
 
+// Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo
+// with the legion label, so PATCH would make no event. Admission validates the durable fence.
+type Handover struct {
+	Issue      string
+	Tree       string
+	Generation uint64
+}
+
+func (Handover) isFact() {}
+
 func (DispatchIssue) isFact() {}
 
 // DispatchArtifactKind identifies the three Dispatch artifact observations that affect a gate.

@@ -127,7 +127,8 @@ func PermanentRefusal(err error) (*Error, bool) {
 		return nil, false
 	}
 	switch {
-	case refusal.Code == "",
+	case refusal.Code == "ISSUE_CHANGED",
+		refusal.Code == "",
 		refusal.Status < 400 || refusal.Status >= 500,
 		refusal.Status == http.StatusRequestTimeout,
 		refusal.Status == http.StatusTooManyRequests,

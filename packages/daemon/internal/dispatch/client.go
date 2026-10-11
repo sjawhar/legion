@@ -103,9 +103,10 @@ func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) error {
 // after this client reads issue cannot be overwritten.
 func (c *HTTPClient) HandOver(ctx context.Context, issue Issue, status string) error {
 	return c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(issue.Key), daemonWrite{
-		Status:    status,
-		LabelsAdd: []string{LegionLabel},
-		Actor:     daemonActor(issue.Key),
+		Status:           status,
+		LabelsAdd:        []string{LegionLabel},
+		ExpectedSequence: issue.LastSeq,
+		Actor:            daemonActor(issue.Key),
 	}, nil)
 }
 
@@ -328,9 +329,10 @@ type actor struct {
 }
 
 type daemonWrite struct {
-	Status    string   `json:"status,omitempty"`
-	Labels    []string `json:"labels,omitempty"`
-	LabelsAdd []string `json:"labels_add,omitempty"`
-	Body      string   `json:"body,omitempty"`
-	Actor     actor    `json:"actor"`
+	Status           string   `json:"status,omitempty"`
+	Labels           []string `json:"labels,omitempty"`
+	LabelsAdd        []string `json:"labels_add,omitempty"`
+	ExpectedSequence int64    `json:"expected_sequence,omitempty"`
+	Body             string   `json:"body,omitempty"`
+	Actor            actor    `json:"actor"`
 }

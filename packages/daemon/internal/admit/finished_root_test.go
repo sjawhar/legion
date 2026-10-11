@@ -221,6 +221,80 @@ func TestAStaleHandoverEventAfterTheRootReopensKeepsTheChild(t *testing.T) {
 	}
 }
 
+// Only the hand-over's own event consumes its fence: the daemon's todo carrying the legion label.
+// A delayed ordinary daemon todo of the child, without the label, neither promotes it nor touches
+// the fence; the hand-over still completes on its real event.
+func TestADaemonTodoWithoutTheLabelLeavesTheHandOverFence(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	const root, child = "LEGION-208", "LEGION-209"
+	seedLingeringHandovers(t, pool, root, child)
+
+	apply(t, pool, admission, "plain-echo", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", DaemonActor: true}, engine)
+	if got := issue(t, pool, child); got.Tree != root || got.Generation != 1 {
+		t.Fatalf("child after an unlabelled daemon todo = %#v, want it still in %s's tree", got, root)
+	}
+	if fence := handoverOf(t, pool, child); fence == nil || fence.Cancelled {
+		t.Fatalf("fence after an unlabelled daemon todo = %#v, want it standing", fence)
+	}
+	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 3, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	if got := issue(t, pool, child); got.Tree != child || got.Phase != phase.Planning {
+		t.Fatalf("child after its hand-over event = %#v, want its own planning root", got)
+	}
+}
+
+// A person labelling one child of a lingering tree todo admits that child as an ordinary orphan;
+// it is not the tree's root coming back, so its siblings' hand-over fences stand.
+func TestAnOrphanAdmittedByAPersonLeavesItsSiblingsFences(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	const root, first, second = "LEGION-208", "LEGION-209", "LEGION-210"
+	seedLingeringHandovers(t, pool, root, first, second)
+
+	apply(t, pool, admission, "person-labels", intake.DispatchIssue{Key: first, Seq: 2, Type: "issue.updated", Status: "todo", Title: first, Parent: root, Rank: "B", HandedOver: true}, engine)
+	if got := issue(t, pool, first); got.Tree != first {
+		t.Fatalf("labelled child = %#v, want an orphan root of its own", got)
+	}
+	if fence := handoverOf(t, pool, second); fence == nil || fence.Cancelled {
+		t.Fatalf("sibling's fence after an orphan admission = %#v, want it standing", fence)
+	}
+}
+
+func seedLingeringHandovers(t *testing.T, pool *pgxpool.Pool, root string, children ...string) {
+	t.Helper()
+	until := fixedNow.Add(time.Hour)
+	parent := root
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		if err := records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}); err != nil {
+			t.Fatalf("seed root: %v", err)
+		}
+		for _, child := range children {
+			if err := records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}); err != nil {
+				t.Fatalf("seed child: %v", err)
+			}
+			if err := records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}); err != nil {
+				t.Fatalf("seed fence: %v", err)
+			}
+		}
+	})
+}
+
+func handoverOf(t *testing.T, pool *pgxpool.Pool, issue string) *record.Handover {
+	t.Helper()
+	var got *record.Handover
+	inTx(t, pool, func(tx pgx.Tx) {
+		var err error
+		got, err = record.NewStore().Handover(context.Background(), tx, issue)
+		if err != nil {
+			t.Fatalf("read fence: %v", err)
+		}
+	})
+	return got
+}
+
 // A root a person sets todo again while its tree lingers is re-admitted, and its mid-run children
 // resume in its new run where they stood (startMidPhaseChildren). The end of the closed generation's
 // linger hands none of them over: the reopen wins, and the two never both act on one child.
