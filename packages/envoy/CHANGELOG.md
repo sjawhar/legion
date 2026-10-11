@@ -4,6 +4,22 @@
 
 ### Added
 
+- The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
+  (migration 0090), is a stable id, a name and the sessions it holds; a pull request whose first
+  session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,
+  colours, lanes, list and measures all follow the group while the Session facet keeps each
+  session apart. `POST /api/v1/delivery/session-groups` and `PATCH` and `DELETE
+  /api/v1/delivery/session-groups/{id}` write them on the delivery settings' rule (any signed-in
+  person or agent), refusing a session another group holds (`409 SESSION_IN_GROUP`), a name another
+  group has (`409 SESSION_GROUP_NAME_TAKEN`) and a name that is the title of a session outside the
+  group (`409 SESSION_GROUP_NAME_IS_SESSION_TITLE`). A session that takes a group's name as its
+  title afterwards shows as `<title> (<session id>)`. The timeline gains `session_groups`,
+  `session_titles` and `session_pr_counts`. The dashboard edits groups from the Parent agent
+  facet's **Edit groups**, chooses which Parent agents get their own colour and lane (the rest
+  share **Other**), and sets the window from its header: the last 7, 14, 28 or 84 days, rolling,
+  or a custom range of whole UTC days, refused past 84 days. A facet change no longer writes the
+  window into the address as fixed dates.
+
 - Every document version now carries `size`, the bytes of the markdown it stores, as file and
   image versions already carried theirs: on the issue and project artifact lists, the issue read,
   an artifact's read, each version's read, the reference closure and outgoing reference reads, the

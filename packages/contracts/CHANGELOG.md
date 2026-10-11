@@ -4,6 +4,11 @@
 
 ### Added
 
+- `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
+  `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,
+  `session_titles` and `session_pr_counts`; `DeliveryPR.parent_agent` is a session group's
+  `group:<id>` for a pull request whose first session is a member (LEGION-682).
+
 - Added `AnswerAskInput.expected_answer_at`, `AskRead.answers`, `InboxThread.answers`,
   `MyAnswerRow`, `MyAnswersResponse`, and `AskAnsweredEventPayload`, whose
   `previous_answer` names the answer a human changed (LEGION-622).
