@@ -60,12 +60,16 @@ A `catch-up` that says `handed_over` but not `carried` is a child handed over fr
 no design gate to carry (a root reopened in its linger loses its gate, and its second close hands
 its children over without one). Its workers already run their phases from its carried phase
 records and pull request, so do not start section 2 of your skill: decompose nothing and release
-no wave. Read the root's phase from the catch-up's own entry for it. Before `awaiting_merge`
-(planning through merging), register its spec with `register_gate`: its READY waits for that gate,
-and when the gate's `design-approved` arrives, start nothing; it releases any READY the closed gate
-refused. In `awaiting_merge` or `production_check` the READY is already through and the work may
-have merged, so register no spec and ask no human to approve one: wait for the merge and the
-production check, verify its record on the pull request and the issue, then `sign_off`.
+no wave. Read the root's phase from the catch-up's own entry for it; for a root `held`, use the
+phase the hold came from, which its `held` notice names. Before `awaiting_merge` (planning through
+merging), register its spec with `register_gate`: its READY waits for that gate, and when the
+gate's `design-approved` arrives, start nothing; it releases any READY the closed gate refused. In
+`awaiting_merge` or `production_check` the READY is already through and the work may have merged,
+so register no spec and ask no human to approve one: wait for the merge and the production check,
+verify its record on the pull request and the issue, then `sign_off`. `awaiting_merge` can move
+back: a red or conflicting head returns the root to `implementing`, and its next READY reads the
+gate again. If a later `ready-refused` arrives because the head was sent back, register then, as
+that row of your skill says.
 
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
