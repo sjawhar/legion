@@ -23,13 +23,15 @@ const strandedRoleRunBatchSize = 200
 //
 //   - A worker of its issue's phase: the role RoleFor gives the phase its worker works
 //     (workingPhase), which a held issue keeps from the phase it left. Only a start of that phase
-//     resumes a suspended worker or retries a failed one, and that start has run. An operator's
-//     suspend waits for the agent's turn to end, so it leaves no task a delivery would resume the
-//     claim for.
-//   - Its tree's architect: only its tree's admission starts it. A notice to a suspended one is
-//     held until it holds its role again, which nothing in the daemon brings about, and a notice to
-//     a failed one finishes undelivered (the notice executor). Its tree moves through its phases
-//     without it, and stops at the first decision that needs it.
+//     retries a failed worker, and that start has run. A suspended one is stranded only when an
+//     operator suspended it, or its source predates migration 0038 (supervise's RuleMayResume): the
+//     daemon resumes one it or its own exit suspended by rule, at boot (DaemonBooted) and at the
+//     phase's next start. An operator's suspend waits for the agent's turn to end, so it leaves no
+//     task a delivery would resume the claim for.
+//   - Its tree's architect: only its tree's admission starts it, whoever suspended it. A notice to a
+//     suspended one is held until it holds its role again, which nothing in the daemon brings
+//     about, and a notice to a failed one finishes undelivered (the notice executor). Its tree
+//     moves through its phases without it, and stops at the first decision that needs it.
 //
 // The operator's resume (`legion claims resume`) brings back a suspended one. A failed one ignores
 // resume and deliver: only a workflow start retries it, its architect's retry of the held phase for
@@ -74,6 +76,9 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 		switch {
 		case claim.IsTreeArchitect(c.Role, issue.Key, issue.Tree):
 		case RoleFor(workingPhase(issue)) == c.Role:
+			if c.State == supervise.StateSuspended && c.RuleMayResume() {
+				continue
+			}
 			current = issue.Phase
 		default:
 			continue

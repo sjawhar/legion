@@ -151,6 +151,43 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 	}
 }
 
+// A phase worker the daemon or its own exit suspended is not stranded: the daemon resumes it by rule,
+// at boot (DaemonBooted) and at its phase's next start. One an operator suspended, or whose source
+// predates migration 0038, is: only the operator's resume runs it again. A tree architect is
+// stranded whoever suspended it, since no rule resumes an architect.
+func TestStrandedLeavesOutTheWorkersTheRuleResumes(t *testing.T) {
+	issues := []record.Issue{
+		strandedIssue("LEGION-1", "LEGION-1", phase.Implementing),
+		strandedIssue("LEGION-2", "LEGION-2", phase.Testing),
+		strandedIssue("LEGION-3", "LEGION-3", phase.Reviewing),
+		strandedIssue("LEGION-4", "LEGION-4", phase.Merging),
+	}
+	by := func(c supervise.Claim, source supervise.SuspendSource) supervise.Claim {
+		c.SuspendedBy = source
+		return c
+	}
+	daemonWorker := by(strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleImplementer, supervise.StateSuspended), supervise.SuspendedByDaemon)
+	operatorWorker := by(strandedClaim(t, "LEGION-2", "LEGION-2", claim.RoleTester, supervise.StateSuspended), supervise.SuspendedByOperator)
+	unknownWorker := by(strandedClaim(t, "LEGION-3", "LEGION-3", claim.RoleReviewer, supervise.StateSuspended), supervise.SuspendedByUnknown)
+	exitWorker := by(strandedClaim(t, "LEGION-4", "LEGION-4", claim.RoleMerger, supervise.StateSuspended), supervise.SuspendedByExit)
+	daemonArchitect := by(strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleArchitect, supervise.StateSuspended), supervise.SuspendedByDaemon)
+	claims := []supervise.Claim{daemonWorker, operatorWorker, unknownWorker, exitWorker, daemonArchitect}
+	stored := map[claim.Token]supervise.Claim{}
+	for _, c := range claims {
+		stored[c.Token] = c
+	}
+
+	got, err := Stranded(context.Background(), nil, &strandedStore{issues: issues, claims: stored}, claims)
+	if err != nil {
+		t.Fatalf("Stranded: %v", err)
+	}
+
+	want := []supervise.Claim{daemonArchitect, operatorWorker, unknownWorker}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("stranded = %v, want %v", names(got), names(want))
+	}
+}
+
 func names(claims []supervise.Claim) []string {
 	out := make([]string, len(claims))
 	for i, c := range claims {
