@@ -139,13 +139,15 @@ const copiedAsksLockNamespace int32 = 0x434F5059
 
 // lockProjectCopies serialises, for a project document, its project's copy bookkeeping: a
 // settlement's copy-source read (copiedAskSources), and the owed copies a settlement's retraction
-// or a source's answer or resolution marks (owedCopiesOf). Without it two copies of one retracted
-// ask settling at once would each find no source and each open an ask. An issue's documents need
-// no lock of their own, since every one of those transactions already holds their issue's row
-// (lockArtifactOwner, requireOpenOwner); a project document's owner row is the document itself,
-// which no sibling takes. The lock is a transaction advisory lock keyed on the project, so read
-// marks, event appends and issue creation, which lock the project's row, never wait on a
-// settlement.
+// or restoration, a source's answer or resolution, or the boot's restoration marks (owedCopiesOf).
+// A caller holding several projects' documents takes their locks in the projects' sorted order,
+// all through owedCopiesOf, as the boot's restoration does (RestoreDecidedWordings). Without it
+// two copies of one retracted ask settling at once would each find no source and each open an ask.
+// An issue's documents need no lock of their own, since every one of those transactions already
+// holds their issue's row (lockArtifactOwner, requireOpenOwner); a project document's owner row is
+// the document itself, which no sibling takes. The lock is a transaction advisory lock keyed on the
+// project, so read marks, event appends and issue creation, which lock the project's row, never
+// wait on a settlement.
 //
 // It takes the two-key form, whose key space Postgres keeps apart from the single-key one: every
 // other advisory lock here - a document's room (lockDocumentRoom), a project's rank allocation, an

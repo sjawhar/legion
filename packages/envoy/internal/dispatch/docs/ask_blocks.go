@@ -217,7 +217,7 @@ func (s *Service) reconcileAskBlocks(
 	if err != nil {
 		return settlementReconciliation{}, err
 	}
-	restored, err := s.restoreDocumentDecidedWordings(ctx, tx, rows)
+	restoredDecided, err := s.restoreDocumentDecidedWordings(ctx, tx, rows)
 	if err != nil {
 		return settlementReconciliation{}, err
 	}
@@ -375,7 +375,7 @@ func (s *Service) reconcileAskBlocks(
 	// copy lock and every other document's pending row come before this document's own pending row
 	// and before any event.
 	reconciled.owedCopies, err = owedCopiesOf(ctx, tx, documentAsks{
-		artifactID: artifactID, owner: owner, asks: slices.Concat(reconciled.retracted, restored),
+		artifactID: artifactID, owner: owner, asks: slices.Concat(reconciled.retracted, restoredDecided),
 	})
 	if err != nil {
 		return settlementReconciliation{}, err
