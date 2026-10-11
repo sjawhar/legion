@@ -189,7 +189,11 @@
   token names the pod UID and service account the enrollment was made for, `403 POD_TOKEN_EXPIRED`
   (naming its expiry, and retried by the renewer with the token its file holds next) once it has
   expired, and `403 POD_TOKEN_REQUIRED` without one. A lapsed/revoked enrollment's next renewal is
-  `401 ENROLLMENT_NOT_LIVE`, distinct from retryable `PROOF_INVALID` proof failures such as iat skew.
+  `401 ENROLLMENT_NOT_LIVE`, distinct from retryable `PROOF_INVALID` proof failures such as iat skew;
+  the renew route alone answers it, and every other session route still answers a not-live proof
+  `PROOF_INVALID`. The renewer stops on `POD_TOKEN_REQUIRED` and `ENROLLMENT_NOT_LIVE` and retries
+  `POD_IDENTITY_MISMATCH`, which the broker also answers for a token it could not verify while its
+  issuer was unreachable; a real mismatch ends with the lease.
   `agent-secrets renew --pod-token-file FILE` reads the file before every renewal and sends it, and
   Legion's worker shim passes the projected token file. For every pod enrollment this broker makes,
   a token copied out of a pod no longer keeps the enrollment alive past the token's expiry. The pod
