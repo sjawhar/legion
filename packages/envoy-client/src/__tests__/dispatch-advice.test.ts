@@ -241,7 +241,6 @@ describe("Dispatch write advice", () => {
     expect(result.details.advice).toEqual(rawAdvice);
   });
 
-
   test("renders only decision-block advice for a project document", async () => {
     const rawAdvice: WriteAdvice = { decision_blocks: 0 };
     const result = await executeWrite(
