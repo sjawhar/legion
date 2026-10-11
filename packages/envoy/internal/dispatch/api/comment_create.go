@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/google/uuid"
@@ -424,10 +425,23 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 			suppressedRouteSessionID = route.sessionID
 		}
 	}
+	// A session a mention delivers this comment to hears it from the mention alone: the author
+	// routes skip it (suppressed_authors). A reply's author route reaches its thread's root
+	// author; a new comment's reaches the sessions that wrote its document, which the outbox reads
+	// when it publishes, so every session a mention resolved to is named, an author or not.
 	suppressedAuthors := []string{}
-	if replyRoot != nil && replyRoot.Author.Kind == "session" {
-		if _, mentioned := mentionedSessions[replyRoot.Author.ID]; mentioned {
-			suppressedAuthors = append(suppressedAuthors, replyRoot.Author.ID)
+	switch {
+	case replyRoot != nil:
+		if replyRoot.Author.Kind == "session" {
+			if _, mentioned := mentionedSessions[replyRoot.Author.ID]; mentioned {
+				suppressedAuthors = append(suppressedAuthors, replyRoot.Author.ID)
+			}
+		}
+	case input.AskID == nil:
+		for _, mention := range mentions {
+			if mention.SessionID != nil && !slices.Contains(suppressedAuthors, *mention.SessionID) {
+				suppressedAuthors = append(suppressedAuthors, *mention.SessionID)
+			}
 		}
 	}
 	turn := threadTarget.replyTurn(actor, input.Turn)

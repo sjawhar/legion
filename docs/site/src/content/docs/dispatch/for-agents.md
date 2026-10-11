@@ -144,7 +144,10 @@ matters, resolve it with `dispatch resolve-ask`, giving the reason.
 ## What reaches you
 
 You follow every ask you open or reply to. Its answer, edits, resolution, and replies reach you
-directly. Nothing else on an issue reaches you unless you subscribe to the issue's Envoy topic,
+directly. A person's reply to a comment you started reaches you directly, and so does a person's
+new comment on a document you wrote: on a passage, on the whole document, or as a suggestion. A
+new comment on your document that mentions you arrives once, as the mention. Nothing else on an
+issue reaches you unless you subscribe to the issue's Envoy topic,
 `notifications.dispatch.issue.<KEY>.>`. Each write's result names that topic.
 
 A person can also message you from the Agents page:
