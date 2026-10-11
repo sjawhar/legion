@@ -2807,3 +2807,34 @@ export interface DeliverySettingsInput {
   readonly population_authors: readonly string[];
   readonly excluded_repos: readonly string[];
 }
+
+/**
+ * One of the Delivery page's session groups: a stable id, a name and the agent sessions it holds.
+ * A pull request whose first session is a member has the group as its Parent agent, under the
+ * value `group:<id>`, so a rename keeps every filter and link that names it. A session is in at
+ * most one group, and a group's name may equal a session title only when the group holds every
+ * session with that title. The timeline lists every group (`DeliveryTimelineResponse.session_groups`).
+ */
+export interface DeliverySessionGroup {
+  readonly id: string;
+  readonly name: string;
+  /** Session ids, sorted. */
+  readonly sessions: readonly string[];
+  readonly created_by: Actor;
+  readonly created_at: string;
+  readonly updated_by: Actor;
+  readonly updated_at: string;
+}
+
+/** `POST /api/v1/delivery/session-groups`'s body. */
+export interface CreateDeliverySessionGroupInput {
+  readonly name: string;
+  readonly sessions: readonly string[];
+}
+
+/** `PATCH /api/v1/delivery/session-groups/{id}`'s body: each field optional. */
+export interface UpdateDeliverySessionGroupInput {
+  readonly name?: string;
+  readonly add?: readonly string[];
+  readonly remove?: readonly string[];
+}
