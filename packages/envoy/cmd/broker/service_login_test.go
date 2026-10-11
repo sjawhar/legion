@@ -105,7 +105,7 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 		t.Helper()
 		compact, err := record.Sign(key, base, []record.AuthorizationDetail{
 			{Type: record.KindLauncherCredential, Identifier: host, Service: service},
-		}, "", loginHint, time.Now())
+		}, "", loginHint, nil, time.Now())
 		if err != nil {
 			t.Fatal(err)
 		}

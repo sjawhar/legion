@@ -1,7 +1,7 @@
 // packages/envoy/cmd/agent-secrets/register.go
 //
 // cmdRegister implements "agent-secrets register [--wait SECONDS] [--exec -- COMMAND
-// [ARGS...]]": the one command a host session (not an agent box) runs at launch to become a
+// [ARGS...]]": the one command a machine session (not an agent box) runs at launch to become a
 // registered session root with agent-secrets-helper. The helper pins THIS process by pidfd, so
 // with --exec the command execs as the very pid that was registered — shims/omp wraps omp this
 // way, and omp becomes the session root every later `agent-secrets` invocation in its process
@@ -46,7 +46,7 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 	// where the default socket's directory would be, and no helper listens in it.
 	sock, named := helperSocket()
 	if !named && !exists(sock) {
-		fmt.Fprintf(stderr, "agent-secrets register: AGENT_SECRETS_HELPER_SOCK is unset and no helper socket is at %s (host sessions only; an agent box has a key dir instead)\n", sock)
+		fmt.Fprintf(stderr, "agent-secrets register: AGENT_SECRETS_HELPER_SOCK is unset and no helper socket is at %s (machine sessions only; an agent box has a key dir instead)\n", sock)
 		return exitUsageError
 	}
 

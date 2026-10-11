@@ -68,8 +68,9 @@ validates.
 
 `github.event.pull_request` is absent on a `merge_group` event. The PR-title check
 (`.github/workflows/pr-title.yaml`, moved out of `Tests` by LEGION-90 / #1059 because it alone
-needs the `edited` event) is therefore correctly `on: pull_request` only: a merge group has no
-title to check, and a merge-group payload never carries `edited`. Do not fold it back into `Tests`
+needs the `edited` event) is therefore correctly on `pull_request` and the pull request's comment
+and review events only, never `merge_group`: a merge group has no title, comment or review to
+check, and a merge-group payload never carries `edited`. Do not fold it back into `Tests`
 under "one workflow for the queue" pressure — re-derive that constraint first. A required check
 that is pull-request-only must not be in the ruleset's required list, or the queue waits for it
 forever.

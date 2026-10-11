@@ -53,9 +53,9 @@ instead.
 
 The fake secrets file holds two secrets of `ada@example.com`'s, under the namespace
 `example/agent-secrets/` and on its example key: `DEMO_READ_TOKEN`, tagged `tier=agent`, which her
-own box or host sessions ([the kinds of session](/legion/broker/concepts/#sessions-and-enrollment))
-get without asking, and `DEMO_API_KEY`, tagged `tier=human`, which she approves. A grant lives an
-hour (`BROKER_MAX_GRANT_SECONDS=3600`). Every command below runs in that second shell.
+own sessions ([the kinds of session](/legion/broker/concepts/#sessions-and-enrollment)) get without
+asking, and `DEMO_API_KEY`, tagged `tier=human`, which she approves. A grant lasts until its session
+ends, or for the `--ttl` its request names. Every command below runs in that second shell.
 
 ## Run a helper and log it in
 
@@ -85,7 +85,7 @@ Start a shell as a registered session and use the secrets:
 $ agent-secrets register --wait 10 --exec -- bash
 $ agent-secrets self
 enrollment_id: 2b8627f4-9a2a-4c12-85bf-910144bc0b5c
-kind: host
+kind: session
 operator: ada@example.com
 lease_expires_at: 2026-10-03T03:36:40Z
 $ agent-secrets DEMO_READ_TOKEN -- printenv DEMO_READ_TOKEN
@@ -106,6 +106,27 @@ A request has two ids: the request id `agent-secrets` prints, and the record id 
 shows and `agent-secrets-devrelay` takes. `agent-secrets request NAME --json` prints both, and
 `agent-secrets-devrelay deny --record <record id>` denies a request.
 
+Each grant so far lasts until the session ends (`agent-secrets self` lists it `until this session
+ends`). A request may ask for less with `--ttl`, and the grant then ends on its own once that has
+passed, while the session lives on:
+
+```console
+$ agent-secrets DEMO_READ_TOKEN --ttl 2m -- printenv DEMO_READ_TOKEN
+demo-read-token-value
+$ agent-secrets self
+enrollment_id: 7cf72ec3-d10f-46fd-984f-ddd856b229c2
+kind: session
+operator: ada@example.com
+lease_expires_at: 2026-10-11T01:51:13Z
+grant: f81251ab-6552-450c-9eca-12a793a29f4c (request 86237327-1f78-4c79-82a5-4f71174e71c5, expires 2026-10-11T01:38:14Z)
+```
+
+Two minutes later that grant releases nothing (`GRANT_NOT_LIVE`), `self` no longer lists it, and
+the same command asks again. `--ttl` is a whole number of seconds, `2m` or `90s`; anything else
+exits 2 before asking. When the broker or the machine's helper is from before `--ttl`, which would
+grant for longer, `agent-secrets` ends the grant it got (or cancels the request still waiting),
+says so, runs nothing and exits 1.
+
 ## List and revoke from your own shell
 
 In the third shell, which is outside every session, list your machine logins and the live grants
@@ -117,8 +138,8 @@ $ agent-secrets machine list
 CREDENTIAL_ID                         HOST                 APPROVED_BY      ISSUED                EXPIRES               STATE
 a0324632-0cc0-4113-bb26-d4123fab9da6  example-host-devbox  ada@example.com  2026-10-10T15:01:31Z  2026-10-17T15:01:31Z  ok
 $ agent-secrets grant list
-GRANT_ID                              SECRETS          GRANTED    APPROVER  SESSION                                    OPERATOR         EXPIRES
-8fe92a26-b355-4c28-8679-60e8ce98b1d9  DEMO_READ_TOKEN  automatic  -         host/example-host-devbox:2856922:35395441  ada@example.com  2026-10-10T16:01:37Z
+GRANT_ID                              SECRETS          GRANTED    APPROVER  SESSION                                       OPERATOR         EXPIRES
+8fe92a26-b355-4c28-8679-60e8ce98b1d9  DEMO_READ_TOKEN  automatic  -         session/example-host-devbox:2856922:35395441  ada@example.com  session-end
 ```
 
 `machine list` shows your own machines' logins alone; Dispatch's machine-login page also lists
@@ -128,7 +149,7 @@ are refused `IN_SESSION`, so the session's own commands cannot act as you:
 
 ```console
 $ agent-secrets machine list
-agent-secrets machine list: IN_SESSION: pid 2857619 is inside a registered host session, which acts on itself alone; run machine and grant commands from your own shell
+agent-secrets machine list: IN_SESSION: pid 2857619 is inside a registered machine session, which acts on itself alone; run machine and grant commands from your own shell
 ```
 
 The refusal covers the session's process tree only: a process the session sends out of it (with

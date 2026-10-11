@@ -284,7 +284,7 @@ func pluginEnabled(lock, name string) (string, bool) {
 // toolchain: the generic toolchain on PATH, and `go version` running, since Go is the one of them
 // whose own toolchain download or GOTOOLCHAIN setting can make a present binary fail to run.
 func toolchain(ctx context.Context, img Image) (string, bool) {
-	paths, detail, ok := onPath(img, "go", "curl", "wget", "python3", "node", "bun", "uv")
+	paths, detail, ok := onPath(img, "go", "curl", "wget", "python3", "node", "bun", "uv", "kubectl")
 	if !ok {
 		return detail, false
 	}

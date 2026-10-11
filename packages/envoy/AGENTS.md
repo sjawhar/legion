@@ -1969,9 +1969,10 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Secrets broker
 
-The secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
+The secrets broker (`cmd/broker`, `internal/broker/`) issues secret grants, each lasting until its
+session ends or for the shorter lifetime its request signed,
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
-client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
+client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
 its environment. Its `secret` forms are how a person manages the agent secrets themselves, in
@@ -1992,41 +1993,65 @@ service-account token). An operator credential's enrollment is its operator's, t
 person who approved its machine login: a launcher may leave `operator` out of the enrollment, and
 one naming anyone else is `403 OPERATOR_MISMATCH`. A live enrollment is unique per launcher
 credential, runtime id and slot: `POST /v1/enrollments` takes an optional pod-only `slot`
-(`^[a-z][a-z0-9-]{0,62}$`, else `400 INVALID_SLOT`, and a slot on a box or host is refused the
+(`^[a-z][a-z0-9-]{0,62}$`, else `400 INVALID_SLOT`, and a slot on a `session` enrollment is refused the
 same way) naming one of several independent identities in one pod. The launcher whose proof
 authenticates the enrollment chooses the slot; a session's proof cannot enroll anything
 (`401 LAUNCHER_INVALID`). So each slot of a pod holds its own key, lease, requests and grants,
 while a pod's `runtime_id` stays the pod UID its token proves. A pod token past its expiry is
 `403 POD_TOKEN_EXPIRED`, naming that expiry, and any other token that does not prove the pod is
 `403 POD_IDENTITY_MISMATCH`. Omitted or `""` is the runtime's
-one enrollment, every box's and host's. The same key
+one enrollment, every `session` enrollment's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
 ALREADY_ENROLLED`, and the policy never sees the slot: a pod is a requester with no operator, whose
 service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`. Migration 0007 is forward-only: an
 older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds
 two slots, so the binary is never rolled back past it once a slotted enrollment exists.
+An enrollment's kind is `session` (an agent session on a machine its person logged in: the
+helper's own, or a key a launcher such as agentbox brings through the helper's
+`enroll-session-key`) or `pod`; migration 0012 rewrote every stored `box`/`host` to `session`.
+Each side still meets the other's old shape until every running client is on this release, and
+each fallback names its removal condition at its definition: the broker records an old helper's
+`host`/`box` as `session` and logs `an enrollment named a legacy kind` (`api/handlers_enroll.go`,
+`legacyKinds`: gone after 30 days of no such line from the production broker); the helper asks an
+older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box`
+(`helper/broker.go`, `enroll`: gone once the production broker records `session`); the CLI asks an
+older helper, which answers `unknown op enroll-session-key`, its `enroll-box`/`unenroll-box`
+(`cmd/agent-secrets/enroll.go`, `oldHelperSessionKeyOps`: gone once no helper older than this
+release runs); the helper answers an older CLI's `enroll-box`/`unenroll-box` as the kind-free pair
+and logs `a client asked a legacy op` (`helper/server.go`, `oldCLISessionKeyOps`: gone once
+dotfiles' pin is at this release and no helper has logged that line for 30 days); and
+`enroll --helper` accepts agentbox's `--kind box` but refuses every other `--kind`
+(`cmd/agent-secrets/enroll.go`, `cmdEnroll`: gone once dotfiles' pin is legion-envoy 10 or later
+and `scripts/agentbox` on dotfiles' main passes no `--kind`).
 `enroll.Service.verifyPodToken` verifies a pod's projected token (issuer, audience, signature,
 expiry, a pod UID named) for both `Create` and `Renew`, before either opens a transaction. A pod's
 `POST /v1/enrollments/{id}/renew` carries its current token as `pod_token`, which must name the
 enrollment's pod UID and recorded subject (`403 POD_IDENTITY_MISMATCH`); one past its expiry is
 `403 POD_TOKEN_EXPIRED` naming that expiry, as at `Create`, which the renewer retries with the token
-its file holds next. A box's or host's renewal carries none, and any token on either renewal is the
-identity mismatch. Every pod row starts with `pod_token_renewed_at` null, whether `Create` made it or
-0012 found it: a renewal without the token is accepted and logged at WARN until the first renewal
-carrying it sets the column, and from then on is `403 POD_TOKEN_REQUIRED`. So the copied-token gap
-is closed only for pods that have once renewed with their token; a pod whose renewer never sends one
-renews as before until the contract release requires it, once the unset-row count is 0 and no
-token-less WARN appears for one full `BROKER_LEASE_SECONDS`. No deploy order matters: an older
-broker ignores the token, and 0012 is additive and nullable. A pod enrollment is ended only by the
-launcher credential that made it (`DELETE` by any other is `403 NOT_ENROLLING_CREDENTIAL`), so a
-Legion daemon that logs in again (a restart, or its login's expiry) leaves its earlier login's pods
-to their leases or to a revoke of that login. The renew route alone maps proof.ErrNotLive to
-`401 ENROLLMENT_NOT_LIVE` (its own `authRenewProof` case in `authenticate`, `sessionCaller`): a pod
-renewer stops only on it or `POD_TOKEN_REQUIRED`, and retries `POD_IDENTITY_MISMATCH`, which
-`verifyPodToken` also answers for a token it could not verify while the issuer or its key set was
-unreachable; a real mismatch ends with the lease, after which the renewal is `ENROLLMENT_NOT_LIVE`.
-Its iat/key/URL failures remain `PROOF_INVALID` and retry. Other session routes map a not-live
-proof to `PROOF_INVALID` as before.
+its file holds next. A machine session's renewal carries none, and any token on it is the identity
+mismatch. Every pod row starts with `pod_token_renewed_at` null, whether `Create` made it or 0014
+found it, and the first renewal that carries the token sets that row's column, the record. The
+ratchet is keyed on the pod UID: a renewal without the token is `403 POD_TOKEN_REQUIRED` once any
+live pod enrollment naming the same `runtime_id` has the column set, whichever launcher credential
+made it (`Renew`'s one lookup, on the partial index `enrollments_live_pod_token_renewed`, migration
+0014), and otherwise is accepted and logged at WARN. So the copied-token gap closes for every pod
+UID a current-image pod has renewed under, a second login's copy among the rows it refuses, and
+stays open for old-image UIDs until the contract release. A current-image pod still leaves a copied
+token the seconds before its own first token renewal. A gone pod's revoked or lapsed rows lock out
+no later enrollment of its UID. That release is safe once the unset-row count is 0, no token-less
+WARN appears for one full `BROKER_LEASE_SECONDS`, and no issue pod runs a worker image older than
+the one whose renewer sends the token (an old-image issue pod between role generations holds no
+enrollment, so it counts as 0 and logs nothing, yet its next phase enrolls an unmarked row). No
+deploy order matters: an older broker ignores the token, and 0014 is additive and nullable. A pod
+enrollment is ended only by the launcher credential that made it (`DELETE` by any other is
+`403 NOT_ENROLLING_CREDENTIAL`), so a Legion daemon that logs in again (a restart, or its login's
+expiry) leaves its earlier login's pods to their leases or to a revoke of that login. The renew
+route alone maps proof.ErrNotLive to `401 ENROLLMENT_NOT_LIVE` (its own `authRenewProof` case in
+`authenticate`, `sessionCaller`): a pod renewer stops only on it or `POD_TOKEN_REQUIRED`, and
+retries `POD_IDENTITY_MISMATCH`, which `verifyPodToken` also answers for a token it could not verify
+while the issuer or its key set was unreachable; a real mismatch ends with the lease, after which
+the renewal is `ENROLLMENT_NOT_LIVE`. Its iat/key/URL failures remain `PROOF_INVALID` and retry.
+Other session routes map a not-live proof to `PROOF_INVALID` as before.
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
@@ -2217,7 +2242,7 @@ against `secrets.Local` and a fake STS and broker (`secret_test.go`), and `secre
 runs create, delete, restore and retag against `brokertest.NewRig`'s real broker.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
-`enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
+`enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a machine session's helper), beside `AGENT_SECRETS_URL`.
 Unset, each falls back to its launcher's path, `$XDG_RUNTIME_DIR/agent-secrets` and the
 `helper.sock` inside it, used only when that file is there; a pod sets its variables and has no
 `XDG_RUNTIME_DIR`. The exec form's command keeps exactly those three variables, so an
@@ -2299,7 +2324,7 @@ human approves a new machine login`, the cause being `the launcher credential re
 broker that names no expiry gets a WARN that the helper cannot warn ahead. A refusal of a
 credential a newer login has already replaced drops nothing, and the enrollment it failed retries
 at once with the new one after the ordinary `enroll failed; retrying` WARN. While it holds none,
-every enrollment attempt, a session's or an `enroll-box`'s (and every revoke a re-pinned or lapsed
+every enrollment attempt, a session's or an `enroll-session-key`'s (and every revoke a re-pinned or lapsed
 session needs before it enrolls), logs at ERROR `session cannot enroll` with that `why`; an
 attempt that failed for want of a credential a login has installed since logs the WARN instead.
 SIGINT or SIGTERM, from systemd or anything else, stops the helper with exit 0 after a WARN
@@ -2336,7 +2361,7 @@ user. The check covers the session's process tree only: a process the session se
 uid can stop the helper. Through these routes such a process can list and revoke the operator's own
 machine logins, never a service's machine login, and the operator's grants, which include grants the
 operator approved on any session, a service's pod among them. The helper's `enroll --helper` path
-(`enroll-box`) is open to any process of the user, so the same process can enroll a box and read the
+(`enroll-session-key`) is open to any process of the user, so the same process can enroll a box and read the
 operator's agent secrets that way. Every refusal the helper gives reaches the CLI
 as one `launcherRefusal`, printed as it stands: no credential, a helper from before the op (which
 answers `unknown op sign-launcher`, read as a helper to restart on the pinned release), or the
@@ -2371,8 +2396,7 @@ it) — any other entry is refused naming it, and an account given twice names b
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
 set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600),
-`BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_MAX_GRANT_SECONDS` (default 43200, max
-43200 — how long every grant lives, unless its session ends first), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
+`BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
 (default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
 re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
@@ -2477,7 +2501,8 @@ for the current, authoritative route list.
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
 object verbatim, the approver, the enrollment's tab-separated kind, runtime id and operator, plus
-a pod's slot as a fourth field only when it has one, lifetime, policy version (the `rules_version`
+a pod's slot as a fourth field only when it has one, lifetime (`-` for a grant that lasts until its
+session ends; `ParseBody` refuses `0`), policy version (the `rules_version`
 line), expiry, and the
 machine-login code or `-`), `Body.ID()` is the lowercase-hex SHA-256 of that canonical form — the
 record's own content-addressed id, which a slotless record keeps byte for byte — and `ParseBody`
@@ -2529,20 +2554,32 @@ so no Secrets Manager call holds a row lock), so a secret created a moment ago, 
 made, is served on its first request, then checks for a still-live grant covering the exact same
 name set (`reuseLiveGrant`: no new request, no new record, as long as the current policy still
 allows it and the grant's whole chain still verifies), then
-decides and writes in one transaction: it takes an advisory lock keyed on the enrollment and the
-sorted name set, then locks the requesting enrollment `for share` while it is live (that order;
-the reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
+decides and writes in one transaction: it takes one advisory lock per requested secret under the
+enrollment, then locks the requesting enrollment `for share` while it is live (that order; the
+reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
 and evaluates the policy per name for the session: any `deny` denies the whole request with no
 record written at all; a name the policy does not serve aborts the whole call with
 `policy.ErrUnknownSecret` (`400 UNKNOWN_SECRET`, per the broker's design overview) instead of being
 folded into an ordinary `deny` decision — no request row is written either, matching the "at record
 time" wording; a name needing approval that names a *different* approver than an
-already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; every grant
-lives `BROKER_MAX_GRANT_SECONDS`; when every name is decided (`granted`/`denied`) with nothing
-pending, the request and, if granted, its grant are written with no record; a request needing
-approval writes the request row and a `credential_requests` record together, and an identical
-concurrent request coalesces onto the same record (`coalesced: true`) instead of writing a second
-one. `Create` and `Get` answer that record's approver (`approver` on `POST /v1/requests` and
+already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; the grant lasts
+the request object's `lifetime_seconds` (`record.ValidLifetime`: 1 to the int32 the column holds;
+refused on a machine login), or, when it names none, until its session ends (`grants.expires_at`
+null, migration 0013; `requests.grantUnexpired` is the one liveness test). Reuse matches the
+lifetime, except that a no-lifetime request takes the live grant of a request written before
+migration 0013 was applied (`requests.writtenBeforeMigration13`: lifetime 43200 and `created_at`
+before migration 13's `applied_at`), keeping its expiry. A pending request holds each of its secret
+names for its session: an identical request coalesces (`coalesced: true`), as does a no-lifetime
+request beside such a pre-migration pending request, and another lifetime or an overlapping name,
+with or without `--ttl`, is `409 REQUEST_PENDING` naming the request already in the approver's
+Inbox. No row written after the deploy matches, so the bridge ends on its own a day after it.
+`POST /v1/requests` and `GET /v1/requests/{id}` echo `lifetime_seconds` (null for none), which the
+CLI checks against its `--ttl`, revoking the grant or cancelling the pending request this call made
+when a broker or helper from before the claim dropped it, and never touching a reused approved
+grant or a pending request it joined (`coalesced`); when every name is decided
+(`granted`/`denied`) with nothing pending, the request and, if granted, its grant are written with
+no record.
+`Create` and `Get` answer that record's approver (`approver` on `POST /v1/requests` and
 `GET /v1/requests/{id}`, read from `credential_requests.approver`, the column
 `PendingForApprover` lists by, never re-evaluated from the current policy), so the asking session
 names whose list holds it; a request with no record answers null. The enrollment lock, taken
@@ -2738,7 +2775,7 @@ checks the same things: `alg` exactly ES256, the embedded JWK's thumbprint match
 signature, `iat` skew, `htm`/`htu`, and `jti` replay. `internal/broker/requests.Sweeper` is the one
 thing that moves state without a human: every `BROKER_SWEEP_SECONDS` tick it first ends every
 enrollment whose lease has lapsed (`enroll.Service.EndLapsed`: a gone pod, a box whose launcher
-stopped renewing, a host session whose helper died), as a revoke ends one, so its grants are
+stopped renewing, a machine session whose helper died), as a revoke ends one, so its grants are
 revoked and its pending requests cancelled and dropped from the approver's list, with an
 `enrollment.expired` audit row and one log line each; then it expires overdue pending
 `agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending

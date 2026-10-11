@@ -4,44 +4,89 @@ name: PR Title
 # needs the `edited` event (a renamed pull request must be re-checked), and putting it in Tests
 # made every body edit — a pull request body is edited several times per Legion round — re-run
 # lint, typecheck and test at an unchanged head. `synchronize` stays because a required check
-# needs a run at every head.
+# needs a run at every head. The comment events run check-pr-text.sh again whenever an issue
+# comment, review or review comment is posted, edited or deleted, since each is public on the pull
+# request's page and deleting one is how a hit is fixed (a submitted review cannot be deleted;
+# editing its body is its `edited`). GitHub sends an issue's comments on the same issue_comment
+# event as a pull request's, so the job skips an issue's.
+#
+# Where GitHub shows a run's result: a pull_request, pull_request_review or
+# pull_request_review_comment run reports `pr-title` on the pull request's head, which main's
+# ruleset requires, so a review or review comment that names something private blocks the merge
+# until it is deleted or edited, and the run its deletion or edit starts reports there too. An
+# issue_comment run reports on the default branch's latest commit, so an issue comment fails its
+# own run there; the head's required check reads it at the head's next pull_request or review run,
+# since every run reads every comment, and passes again at the next such run after its deletion.
+#
+# Anyone signed in can comment on or review a public pull request, so anyone can start these runs.
+# Every run therefore runs the whole check over the same set of comments, and check-pr-text.sh
+# decides whose text counts (an App installed here, or the repository's owner, members and
+# collaborators), so a run's result never depends on who started it. The job has no `if:` on the
+# author: a job skipped that way finishes `skipped`, which GitHub and the daemon
+# (classify.RunResult) count as a pass, and since the newest `pr-title` run on a head is the one
+# that stands, a stranger's comment would turn a real failure green.
+#
+# Cost: each comment, review, review comment, edit and deletion is one run of about ten seconds
+# (the job is a checkout and a few API reads), and a review with N inline comments is N + 1 runs.
 on:
   pull_request:
     types: [opened, edited, reopened, synchronize]
+  issue_comment:
+    types: [created, edited, deleted]
+  pull_request_review:
+    types: [submitted, edited]
+  pull_request_review_comment:
+    types: [created, edited, deleted]
 
-# A new push to a pull request cancels this workflow's still-running check; it has no other
-# trigger today, but the key still branches on event name for consistency with the other
-# three workflows' blocks (why: this PR's description).
+# A pull_request event cancels this workflow's still-running run for the same pull request (its
+# merge ref), as the other three workflows' blocks do. A comment, review or review comment run
+# never cancels or is cancelled: two comments posted together each get a run that reads every
+# comment, and a cancelled run would leave a cancelled required check on the head.
 concurrency:
-  group: pr-title-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  group: pr-title-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # The job clones the repository for check-pr-text.sh, which reads the pull request's commits
-# through the compare route (`contents: read`); it writes nothing.
+# through the compare route (`contents: read`), its reviews, review comments and, for an
+# issue_comment run, the pull request itself (`pull-requests: read`), and its issue comments
+# (`issues: read`); it writes nothing.
 permissions: {}
 
 jobs:
   pr-title:
+    if: github.event_name != 'issue_comment' || github.event.issue.pull_request
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      issues: read
+      pull-requests: read
     steps:
+      # A comment or review run checks out the default branch, so the script it runs is main's,
+      # never the pull request's: a pull_request_review or pull_request_review_comment run would
+      # otherwise check out the pull request's merge ref, which is its GITHUB_REF. A pull_request
+      # run checks out that merge ref as the required lint job does, so a pull request that changes
+      # the script is checked by its own version.
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          ref: ${{ github.event_name != 'pull_request' && github.event.repository.default_branch || '' }}
           persist-credentials: false
 
-      # The title, body and commit messages are as public as the tree (check-pr-text.sh says
-      # where each lands). The required lint job checks them at every push; this step checks an
-      # edit. Both steps read the event payload rather than an `env:` block, which the runner
-      # prints in the job log.
-      - name: Check the title, body, branch name and commits name nothing private
+      # The title, body, commit messages, comments and reviews are as public as the tree
+      # (check-pr-text.sh says where each lands). The required lint job checks them at every
+      # push; this step checks an edit, a comment or a review. Both steps read the event payload
+      # rather than an `env:` block, which the runner prints in the job log.
+      - name: Check the title, body, branch name, commits, comments and reviews name nothing private
         env:
           GH_TOKEN: ${{ github.token }}
         run: .github/scripts/check-pr-text.sh
 
+      # Every run checks the title: a review or review comment run reports `pr-title` on the pull
+      # request's head too, and one that skipped this step would add a passing `pr-title` there
+      # over a pull_request run that failed it. An issue_comment payload carries the title as its
+      # issue's.
       - name: Require a conventional PR title
         run: |
-          if jq -r '.pull_request.title' "$GITHUB_EVENT_PATH" | grep -qE '^[a-z]+(\([^)]+\))?!?: .+'; then
+          if jq -r '(.pull_request // .issue).title' "$GITHUB_EVENT_PATH" | grep -qE '^[a-z]+(\([^)]+\))?!?: .+'; then
             echo "PR title is conventional"
           else
             echo "::error::PR title must be a conventional commit subject (type(scope): summary). Squash merges use the PR title as the commit subject, and the release workflows version from conventional subjects — a non-conventional title makes the release pipelines rely on the squash body alone."

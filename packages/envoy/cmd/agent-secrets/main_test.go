@@ -228,7 +228,7 @@ func fakeBroker(t *testing.T) (*httptest.Server, *brokerCounters) {
 	})
 	mux.HandleFunc("GET /v1/enrollments/self", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
-			"enrollment_id": testEnrollmentID, "kind": "box", "operator": "ada@example.com",
+			"enrollment_id": testEnrollmentID, "kind": "session", "operator": "ada@example.com",
 			"lease_expires_at": time.Now().Add(time.Hour), "grants": []any{},
 		})
 	})
@@ -765,16 +765,18 @@ func TestEnrollWaitRidesOutTheLaunchersSetup(t *testing.T) {
 	keyDir := t.TempDir()
 	marker := writePendingMarker(t, keyDir, 0)
 
+	// The launcher writes each file whole (enroll's writeFileAtomic), so a waiting call never reads
+	// one half-written; the fixture does the same.
 	setupDone := make(chan error, 1)
 	go func() {
 		time.Sleep(time.Second)
 		data, err := os.ReadFile(filepath.Join(fixture, "key.pem"))
 		if err == nil {
-			err = os.WriteFile(filepath.Join(keyDir, "key.pem"), data, 0o600)
+			err = writeFileAtomic(filepath.Join(keyDir, "key.pem"), data, 0o600)
 		}
 		time.Sleep(time.Second)
 		if err == nil {
-			err = os.WriteFile(filepath.Join(keyDir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600)
+			err = writeFileAtomic(filepath.Join(keyDir, "enrollment"), []byte(testEnrollmentID+"\n"), 0o600)
 		}
 		if err == nil {
 			err = os.Remove(marker)
@@ -814,7 +816,7 @@ func TestEnrollWaitGivesUpAtItsBound(t *testing.T) {
 }
 
 // TestEnrollWaitNeedsAFreshMarker pins that only the launcher's live marker makes a call wait: an
-// empty key dir (a host session's, a pod's), a marker older than the launcher's own setup bound
+// empty key dir (a machine session's, a pod's), a marker older than the launcher's own setup bound
 // (a launcher killed outright), and a failed enrollment the launcher has already reported
 // (enrollment.error, marker removed) all fail at once, as they did before the wait existed.
 func TestEnrollWaitNeedsAFreshMarker(t *testing.T) {
@@ -1175,7 +1177,7 @@ func TestEnrollHelperPrintsEnrollmentID(t *testing.T) {
 	keyDir := t.TempDir()
 	stdout, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir,
 		[]string{"AGENT_SECRETS_HELPER_SOCK=" + sock},
-		"enroll", "--helper", "--kind", "box", "--runtime-id", "box-1", "--thumbprint", "tp-box")
+		"enroll", "--helper", "--runtime-id", "box-1", "--thumbprint", "tp-box")
 	if exit != 0 {
 		t.Fatalf("enroll --helper exit = %d: stdout=%q stderr=%q", exit, stdout, stderr)
 	}
@@ -1205,19 +1207,14 @@ func TestUnenrollHelperSucceeds(t *testing.T) {
 
 // TestEnrollHelperFlagValidation pins enroll/unenroll's remaining validation now that contract
 // v9 dropped launcher bearer tokens entirely: --helper is the only enrollment path left, so it
-// is required (not merely one of two mutually exclusive options), and enroll --helper still
-// supports only --kind box.
+// is required (not merely one of two mutually exclusive options).
 func TestEnrollHelperFlagValidation(t *testing.T) {
 	binary := buildAgentSecrets(t)
 	keyDir := t.TempDir()
 
 	if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, nil,
-		"enroll", "--kind", "box", "--runtime-id", "box-1", "--thumbprint", "tp-box"); exit != exitUsageError {
+		"enroll", "--runtime-id", "box-1", "--thumbprint", "tp-box"); exit != exitUsageError {
 		t.Fatalf("enroll without --helper exit = %d, want a usage error: %s", exit, stderr)
-	}
-	if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, nil,
-		"enroll", "--helper", "--kind", "host", "--runtime-id", "box-1", "--thumbprint", "tp-box"); exit != exitUsageError {
-		t.Fatalf("enroll --helper --kind host exit = %d, want a usage error naming box: %s", exit, stderr)
 	}
 	if _, stderr, exit := runAgentSecrets(t, binary, "http://unused", keyDir, nil,
 		"unenroll", "--enrollment", "enr-1"); exit != exitUsageError {
@@ -1226,8 +1223,8 @@ func TestEnrollHelperFlagValidation(t *testing.T) {
 }
 
 // TestRequestAndExecFormSendSessionIDWithFallbackOrder is the regression for the review's finding
-// I3: POST /v1/requests carries session_id so the broker can wake this host session directly
-// once its request is decided (host enrollments carry no session_id of their own) — both call
+// I3: POST /v1/requests carries session_id so the broker can wake this machine session directly
+// once its request is decided (machine session enrollments carry no session_id of their own) — both call
 // sites, cmdRequest and cmdExec, must forward requestSessionID()'s answer rather than leaving it
 // "" — and for LEGION-587's fallback order: with OMP_SESSION_ID unset, the request form still
 // sends ENVOY_SESSION_ID. requestSessionID's own three-way fallback order is pinned at the unit

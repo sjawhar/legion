@@ -23,7 +23,7 @@
 # TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget
 # and chromium (the browser Oh My Pi finds on PATH); and a generic toolchain for the
 # repositories the workers work, specific to none of them: uv and uvx, Node LTS with npm and corepack's
-# pnpm and yarn, and the AWS CLI v2 — each of these on PATH at /usr/local/bin or /usr/bin; and the
+# pnpm and yarn, the AWS CLI v2 and kubectl — each of these on PATH at /usr/local/bin or /usr/bin; and the
 # license of every third-party piece of all that at /usr/share/doc/legion/THIRD_PARTY_NOTICES (the
 # notices stage).
 # The last three RUNs gate the publish, as the runtime user: the first checks every binary runs on
@@ -65,8 +65,9 @@ ARG GO_VERSION=1.26.8
 ARG GO_SHA256=d0f743b33e8d8945e6b1f432edd15785c70507121d6e2a723b21285eddf8b57b
 # gopls, which the go stage builds static from golang.org/x/tools/gopls at this tag (gopls/v<version>).
 ARG GOPLS_VERSION=0.23.0
-# The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 archive the
-# stage downloads for it, which the build checks before unpacking anything.
+# The toolchain stage's pins: each is a release version and the SHA-256 of the linux/amd64 download the
+# stage fetches for it (an archive, or kubectl's single binary), which the build checks before unpacking
+# or installing anything.
 ARG UV_VERSION=0.12.21
 ARG UV_SHA256=23f02075b652bb1df64178cfae41b5caf160822e720e2663568f3f5d63bc52c0
 # Node 24 LTS.
@@ -77,6 +78,17 @@ ARG AWS_CLI_VERSION=2.37.6
 # `.sig` gpg verified as a good signature from the AWS CLI Team key
 # FB5DB77FD5C118B80511ADA8A6310ACC4672475C. A version bump repeats that check before taking its hash.
 ARG AWS_CLI_SHA256=cd40c7d1f41b3a4964e77a65377e480d71fe6ebc96bbbb64eb2239d69af6fbb2
+# kubectl, pinned to the minor version of the API server of the production cluster the Legion workers
+# run on (v1.35.7 when this pin was set): Kubernetes' version skew policy supports kubectl one minor
+# version either side of its server, so a bump follows that server's minor. A deployment whose cluster
+# runs another minor layers its own kubectl on this image (docs/kubernetes.md, "Per-deployment
+# toolchains layer on top"). The pin is the SHA-256 Kubernetes publishes beside the binary
+# (https://dl.k8s.io/release/v<version>/bin/linux/amd64/kubectl.sha256), taken only once the binary's
+# keyless Sigstore signature (kubectl.sig and kubectl.cert, beside it) verifies for the release identity
+# krel-staging@k8s-releng-prod.iam.gserviceaccount.com issued by https://accounts.google.com. A version
+# bump repeats both checks.
+ARG KUBECTL_VERSION=1.35.9
+ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb
 # The language servers Oh My Pi's LSP tools start for TypeScript and Python, installed by the
 # toolchain stage as npm global packages into Node's own prefix (/opt/node); npm verifies each tarball
 # against the integrity the registry publishes for it. TypeScript is the version the repository's own
@@ -241,20 +253,20 @@ RUN test -n "$LEGION_REVISION" \
 # toolchain: what a worker needs to work a repository that is not Legion's, specific to none: uv (which
 # installs each project's own Python from its `.python-version` or `requires-python`; the image's own
 # python3 is trixie's, installed by the runtime stage for Oh My Pi's Python eval), Node with npm and
-# corepack, the AWS CLI v2, the Go toolchain at go.work's version (the release the go stage builds
-# `legion` with, so a worker builds the daemon as CI does), and the TypeScript and Python language
-# servers Oh My Pi's LSP tools start. All four archives are checked against their pinned SHA-256
-# before any is unpacked. uv and uvx are single binaries, copied to /usr/local/bin as gh and jj are;
-# Node, Go and the AWS CLI keep their own trees under /opt, and /out/bin holds the symlinks into them
-# that the runtime stage copies to /usr/local/bin (the AWS installer's `--bin-dir` writes its two). The
-# pnpm, pnpx, yarn and yarnpkg links are the ones `corepack enable` would write beside node, which the
-# runtime user cannot: each runs the version a project's `packageManager` names, or else the default
-# this corepack ships (COREPACK_DEFAULT_TO_LATEST=0, the runtime stage's ENV), fetched on first use
-# into the user's own corepack cache. The language servers are npm global installs into Node's own
-# prefix (npm's default global prefix is the install prefix of the node it runs on, /opt/node once
-# /opt/node/bin leads PATH), so they land in /opt/node/lib/node_modules with their launchers in
-# /opt/node/bin, linked from /out/bin as node's are; each launcher is a `#!/usr/bin/env node` script,
-# which finds the image's node on PATH as npm's own does.
+# corepack, the AWS CLI v2, kubectl, the Go toolchain at go.work's version (the release the go stage
+# builds `legion` with, so a worker builds the daemon as CI does), and the TypeScript and Python language
+# servers Oh My Pi's LSP tools start. All five downloads are checked against their pinned SHA-256
+# before any is unpacked or installed. uv, uvx and kubectl are single binaries, copied to /usr/local/bin
+# as gh and jj are; Node, Go and the AWS CLI keep their own trees under /opt, and /out/bin holds the
+# symlinks into them that the runtime stage copies to /usr/local/bin (the AWS installer's `--bin-dir`
+# writes its two). The pnpm, pnpx, yarn and yarnpkg links are the ones `corepack enable` would write
+# beside node, which the runtime user cannot: each runs the version a project's `packageManager`
+# names, or else the default this corepack ships (COREPACK_DEFAULT_TO_LATEST=0, the runtime stage's
+# ENV), fetched on first use into the user's own corepack cache. The language servers are npm global
+# installs into Node's own prefix (npm's default global prefix is the install prefix of the node it
+# runs on, /opt/node once /opt/node/bin leads PATH), so they land in /opt/node/lib/node_modules with
+# their launchers in /opt/node/bin, linked from /out/bin as node's are; each launcher is a
+# `#!/usr/bin/env node` script, which finds the image's node on PATH as npm's own does.
 # typescript-language-server ships no TypeScript: it resolves `typescript` by Node's module resolution
 # from its own directory, which reaches the TypeScript installed beside it under /opt/node/lib/
 # node_modules, so a worker's tsserver is TYPESCRIPT_VERSION unless the repository's own node_modules
@@ -268,6 +280,8 @@ ARG NODE_VERSION
 ARG NODE_SHA256
 ARG AWS_CLI_VERSION
 ARG AWS_CLI_SHA256
+ARG KUBECTL_VERSION
+ARG KUBECTL_SHA256
 ARG GO_VERSION
 ARG GO_SHA256
 ARG TYPESCRIPT_VERSION
@@ -283,11 +297,14 @@ RUN set -eu; \
     curl -fsSLo "$t/node.tar.xz" "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz"; \
     curl -fsSLo "$t/awscli.zip" "https://awscli.amazonaws.com/awscli-exe-linux-x86_64-${AWS_CLI_VERSION}.zip"; \
     curl -fsSLo "$t/go.tar.gz" "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"; \
+    curl -fsSLo "$t/kubectl" "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/amd64/kubectl"; \
     printf '%s  %s\n' "$UV_SHA256" "$t/uv.tar.gz" "$NODE_SHA256" "$t/node.tar.xz" \
-      "$AWS_CLI_SHA256" "$t/awscli.zip" "$GO_SHA256" "$t/go.tar.gz" > "$t/SHA256SUMS"; \
+      "$AWS_CLI_SHA256" "$t/awscli.zip" "$GO_SHA256" "$t/go.tar.gz" \
+      "$KUBECTL_SHA256" "$t/kubectl" > "$t/SHA256SUMS"; \
     sha256sum --check --strict "$t/SHA256SUMS"; \
     tar -xzf "$t/uv.tar.gz" -C /out/bin --strip-components=1 --no-same-owner \
       uv-x86_64-unknown-linux-gnu/uv uv-x86_64-unknown-linux-gnu/uvx; \
+    install -m 0755 "$t/kubectl" /out/bin/kubectl; \
     tar -xJf "$t/node.tar.xz" -C /opt/node --strip-components=1 --no-same-owner; \
     for tool in node npm npx corepack; do ln -s "/opt/node/bin/$tool" "/out/bin/$tool"; done; \
     for shim in pnpm pnpx yarn yarnpkg; do \
@@ -320,7 +337,11 @@ RUN set -eu; \
 # compiles, links Go modules the same way, and its section names the go.mod that lists them rather
 # than a go-licenses report like `legion`'s, because go-licenses (go-third-party-notices.sh's
 # v2.0.1, under Go 1.26.8) finds no license for one of them, github.com/segmentio/asm, and would fail
-# the build. The language servers' own LICENSE files come from their installed trees in the toolchain
+# the build. kubectl's section names the go.mod of the Kubernetes release its binary is built from,
+# the same way. The k8s.io modules that go.mod replaces with ./staging/src, kubectl itself among them,
+# are that release's own source, each with its license file under staging/src/k8s.io at the release's
+# tag; the repository keeps the license text of every other module it links under LICENSES/vendor
+# there. The language servers' own LICENSE files come from their installed trees in the toolchain
 # stage; TypeScript's ThirdPartyNoticeText.txt and the typeshed LICENSE pyright bundles come with
 # them. A missing or empty file fails the build. The fetches depend only on the pins, so they come
 # first, in a layer a source change reuses; the assembly reads the other stages' outputs after them.
@@ -330,6 +351,7 @@ ARG JJ_TOOL
 ARG GH_TOOL
 ARG UV_VERSION
 ARG AWS_CLI_VERSION
+ARG KUBECTL_VERSION
 ARG CODEGRAPH_VERSION
 ARG GO_VERSION
 ARG GOPLS_VERSION
@@ -337,7 +359,7 @@ ARG TYPESCRIPT_VERSION
 ARG TYPESCRIPT_LANGUAGE_SERVER_VERSION
 ARG PYRIGHT_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
-# The fifteen reads below (twelve LICENSE/NOTICE fetches, three HEAD checks) are independent
+# The seventeen reads below (thirteen LICENSE/NOTICE fetches, four HEAD checks) are independent
 # of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
 # the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds
 # rarely), and running unauthenticated GitHub raw-content requests in parallel risks tripping its
@@ -360,6 +382,7 @@ RUN set -eu; \
     fetch astral-sh/uv "$UV_VERSION" LICENSE-APACHE uv-LICENSE-APACHE; \
     fetch astral-sh/uv "$UV_VERSION" LICENSE-MIT uv-LICENSE-MIT; \
     fetch aws/aws-cli "$AWS_CLI_VERSION" LICENSE.txt aws-cli-LICENSE.txt; \
+    fetch kubernetes/kubernetes "v${KUBECTL_VERSION}" LICENSE kubectl-LICENSE; \
     fetch colbymchenry/codegraph "v${CODEGRAPH_VERSION}" LICENSE codegraph-LICENSE; \
     fetch nodejs/node "$codegraph_node_tag" LICENSE codegraph-node-LICENSE; \
     fetch golang/go "go${GO_VERSION}" LICENSE go-LICENSE; \
@@ -371,7 +394,9 @@ RUN set -eu; \
     crates "$jj_repo" "$jj_tag" jj jj-crates; \
     crates astral-sh/uv "$UV_VERSION" uv uv-crates; \
     curl -fsSIo /dev/null "$(gh_raw_url golang/tools "gopls/v${GOPLS_VERSION}" gopls/go.mod)"; \
-    printf 'gopls links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/golang/tools/blob/gopls/v%s/gopls/go.mod, the module file of the release this image builds; the\nlicense of each is published with its source and shown on pkg.go.dev.\n' "$GOPLS_VERSION" > /in/gopls-modules
+    printf 'gopls links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/golang/tools/blob/gopls/v%s/gopls/go.mod, the module file of the release this image builds; the\nlicense of each is published with its source and shown on pkg.go.dev.\n' "$GOPLS_VERSION" > /in/gopls-modules; \
+    curl -fsSIo /dev/null "$(gh_raw_url kubernetes/kubernetes "v${KUBECTL_VERSION}" go.mod)"; \
+    printf 'kubectl links Go modules whose license texts its binary does not carry. They are the modules listed in\nhttps://github.com/kubernetes/kubernetes/blob/v%s/go.mod, the module file of the release this image installs.\nThe k8s.io modules that file replaces with ./staging/src (kubectl itself, client-go, apimachinery, cli-runtime\nand component-base among them) are source of the Kubernetes release itself, each with its license file under\nhttps://github.com/kubernetes/kubernetes/tree/v%s/staging/src/k8s.io; the license of every other module is in\nhttps://github.com/kubernetes/kubernetes/tree/v%s/LICENSES/vendor.\n' "$KUBECTL_VERSION" "$KUBECTL_VERSION" "$KUBECTL_VERSION" > /in/kubectl-modules
 COPY scripts/assemble-third-party-notices.sh /usr/local/bin/
 COPY --from=go /out/go-notices /in/go-notices
 COPY --from=plugin /out/pi-envoy/dist/THIRD_PARTY_NOTICES /in/pi-envoy-notices
@@ -402,6 +427,8 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "Node.js ${codegraph_node_tag}, /opt/codegraph/node (the runtime the CodeGraph CLI bundles): LICENSE of github.com/nodejs/node at ${codegraph_node_tag}" /in/codegraph-node-LICENSE \
       "AWS CLI v2, /opt/aws-cli: LICENSE.txt of github.com/aws/aws-cli at ${AWS_CLI_VERSION}" /in/aws-cli-LICENSE.txt \
       "AWS CLI v2: the THIRD_PARTY_LICENSES its installer archive ships" /in/aws-cli-THIRD_PARTY_LICENSES \
+      "kubectl v${KUBECTL_VERSION}, /usr/local/bin/kubectl: LICENSE of github.com/kubernetes/kubernetes at v${KUBECTL_VERSION}" /in/kubectl-LICENSE \
+      "kubectl: the Go modules it links" /in/kubectl-modules \
       "CodeGraph CLI, /opt/codegraph: LICENSE of github.com/colbymchenry/codegraph at v${CODEGRAPH_VERSION}" /in/codegraph-LICENSE \
       "Go ${GO_VERSION}, /opt/go (go and gofmt at /usr/local/bin): LICENSE of github.com/golang/go at go${GO_VERSION}" /in/go-LICENSE \
       "gopls v${GOPLS_VERSION}, /usr/local/bin/gopls: LICENSE of github.com/golang/tools at gopls/v${GOPLS_VERSION}" /in/gopls-LICENSE \
@@ -530,12 +557,13 @@ ENV COREPACK_DEFAULT_TO_LATEST=0
 # first and refuses without --stdio), so `pyright --version`, the same package's CLI, answers for it.
 # Being its own layer above `legion`, it reruns only when the toolchain or a layer before it changes,
 # so a commit that only rebuilds `legion` fetches nothing from a registry. pnpx is `pnpm dlx`, which
-# takes no --version; its --help, whose first line names the pnpm version, is the check.
+# takes no --version; its --help, whose first line names the pnpm version, is the check. `kubectl
+# version --client` reports the client alone: it reads no kubeconfig and contacts no API server.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \
     uv --version; uvx --version; node --version; npm --version; npx --version; corepack --version; \
-    aws --version; \
+    aws --version; kubectl version --client; \
     for shim in pnpm yarn yarnpkg; do "$shim" --version; done; \
     pnpx --help > "$scratch/pnpx-help"; sed -n 1p "$scratch/pnpx-help"; \
     go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; \
@@ -577,7 +605,7 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # worker's Oh My Pi would find each: `omp setup python --check`, the chromium on PATH (or the browser a
 # PUPPETEER_EXECUTABLE_PATH names) run with --version, gopls, typescript-language-server and pyright-langserver on PATH, the
 # CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, curl, wget, python3,
-# node, bun and uv on PATH with `go version` running (packages/daemon/internal/capabilities/image.go).
+# node, bun, uv and kubectl on PATH with `go version` running (packages/daemon/internal/capabilities/image.go).
 # It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then
 # `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped
 # capabilities=checked model-fallback=on daemon-api-version=<N>` — `on` here is Oh My Pi's own default for retry.modelFallback,

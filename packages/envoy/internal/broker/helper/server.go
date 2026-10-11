@@ -21,6 +21,16 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
+// oldCLISessionKeyOps are the op names an agent-secrets CLI before legion-envoy 10 asks the
+// kind-free pair under, each answered exactly as the op it maps to. The callers are dotfiles'
+// agentbox (scripts/agentbox: `enroll --helper --kind box` and `unenroll --helper`), which runs
+// whatever agent-secrets the machine's PATH holds, so a CLI older than this helper reaches it
+// whenever the helper moves first: a pin rolled back while the helper keeps running this release,
+// or a second agent-secrets install on the machine. Each use logs "a client asked a legacy op";
+// the map goes once dotfiles' agent-secrets pin is at this release or later and no helper has
+// logged that line for 30 days.
+var oldCLISessionKeyOps = map[string]string{"enroll-box": "enroll-session-key", "unenroll-box": "unenroll-session-key"}
+
 // Server answers the helper socket. PeerOf is a field so tests can present a chosen pid.
 type Server struct {
 	Registry *Registry
@@ -75,6 +85,10 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		s.reply(conn, Response{Code: CodeUnidentified, Error: "the peer exited before it was identified"})
 		return
 	}
+	if op, legacy := oldCLISessionKeyOps[req.Op]; legacy {
+		s.Log.Info("a client asked a legacy op; answered as "+op, "op", req.Op)
+		req.Op = op
+	}
 	var resp Response
 	switch req.Op {
 	case "register":
@@ -92,7 +106,7 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	case "sign-request":
 		// sign-request keeps peer's pidfd open through Registry.Root's ancestry walk exactly
 		// like sign, for the same pid-reuse reason (see sign's doc comment below).
-		resp = s.signRequest(peer, pid, req.Secrets, req.Reason)
+		resp = s.signRequest(peer, pid, req.Secrets, req.Reason, req.LifetimeSeconds)
 	case "sign-launcher":
 		// sign-launcher keeps peer's pidfd open through Registry.Root's ancestry walk too, and
 		// trusts its "no session" only once peer.PID() still names pid (see signLauncher).
@@ -103,20 +117,20 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		peer.Close()
 		resp = s.sessions()
 	case "login":
-		// login, login-status, enroll-box and unenroll-box are pass-through broker calls, not
-		// registry-session ops: a box enrollment is not a registry session (see EnrollBox's doc
-		// comment), so none of these needs peer's pid at all.
+		// login, login-status, enroll-session-key and unenroll-session-key are pass-through broker
+		// calls, not registry-session ops: a key the helper does not hold is not a registry session
+		// (see Broker.EnrollSessionKey), so none of these needs peer's pid at all.
 		peer.Close()
 		resp = s.login(ctx)
 	case "login-status":
 		peer.Close()
 		resp = s.loginStatus()
-	case "enroll-box":
+	case "enroll-session-key":
 		peer.Close()
-		resp = s.enrollBox(ctx, req.RuntimeID, req.Thumbprint, req.SessionID)
-	case "unenroll-box":
+		resp = s.enrollSessionKey(ctx, req.RuntimeID, req.Thumbprint, req.SessionID)
+	case "unenroll-session-key":
 		peer.Close()
-		resp = s.unenrollBox(ctx, req.EnrollmentID)
+		resp = s.unenrollSessionKey(ctx, req.EnrollmentID)
 	default:
 		peer.Close()
 		resp = Response{Code: CodeBadRequest, Error: "unknown op " + req.Op}
@@ -251,7 +265,7 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: "sign needs method and url"}
 	}
-	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session; a session root is started with `agent-secrets register --exec -- <agent argv>`", pid))
+	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered machine session; a session root is started with `agent-secrets register --exec -- <agent argv>`", pid))
 	if !ok {
 		return resp
 	}
@@ -269,17 +283,17 @@ func (s *Server) sign(peer *Peer, pid int, method, url string) Response {
 
 // signRequest builds and signs a credential-request object naming one agent_secret
 // authorization_detail per requested name (POST /v1/requests embeds this signed object
-// rather than carrying "secrets"/"reason" as plain fields), for a pid resolveDescendant
-// ties to a registered session. The audience is always s.Broker.URL, never a value the peer
-// supplies: a request object's aud claim must be the broker's own public URL for the broker to
-// accept it, and there is no reason to trust an untrusted local peer's opinion of that value
-// over the helper's own configuration.
-func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string) Response {
+// rather than carrying "secrets"/"reason" as plain fields), and lifetimeSeconds, the grant's
+// lifetime, when it is not nil, for a pid resolveDescendant ties to a registered session. The
+// audience is always s.Broker.URL, never a value the peer supplies: a request object's aud claim
+// must be the broker's own public URL for the broker to accept it, and there is no reason to trust
+// an untrusted local peer's opinion of that value over the helper's own configuration.
+func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string, lifetimeSeconds *int) Response {
 	if len(names) == 0 {
 		peer.Close()
 		return Response{Code: CodeBadRequest, Error: "sign-request needs at least one secret name"}
 	}
-	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session; a session root is started with `agent-secrets register --exec -- <agent argv>`", pid))
+	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered machine session; a session root is started with `agent-secrets register --exec -- <agent argv>`", pid))
 	if !ok {
 		return resp
 	}
@@ -290,7 +304,7 @@ func (s *Server) signRequest(peer *Peer, pid int, names []string, reason string)
 	for i, name := range names {
 		details[i] = record.AuthorizationDetail{Type: record.KindAgentSecret, Identifier: name, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(sess.Key, s.Broker.URL, details, reason, "", time.Now())
+	compact, err := record.Sign(sess.Key, s.Broker.URL, details, reason, "", lifetimeSeconds, time.Now())
 	if err != nil {
 		return Response{Code: CodeSign, Error: err.Error()}
 	}
@@ -325,11 +339,11 @@ func (s *Server) signLauncher(peer *Peer, pid int, method, url string) Response 
 	sess, unknown := s.Registry.RootOrUnknown(pid)
 	if sess != nil {
 		peer.Close()
-		return Response{Code: CodeInSession, Error: fmt.Sprintf("pid %d is inside a registered host session, which acts on itself alone; run machine and grant commands from your own shell", pid)}
+		return Response{Code: CodeInSession, Error: fmt.Sprintf("pid %d is inside a registered machine session, which acts on itself alone; run machine and grant commands from your own shell", pid)}
 	}
 	if unknown != nil {
 		peer.Close()
-		return Response{Code: CodeInSession, Error: fmt.Sprintf("pid %d may be inside a registered host session: %v; run machine and grant commands from your own shell", pid, unknown)}
+		return Response{Code: CodeInSession, Error: fmt.Sprintf("pid %d may be inside a registered machine session: %v; run machine and grant commands from your own shell", pid, unknown)}
 	}
 	if peer.PID() != pid {
 		peer.Close()
@@ -385,7 +399,7 @@ func pathSegment(seg string) bool {
 
 // unregister retires a pid resolveDescendant ties to a registered session.
 func (s *Server) unregister(ctx context.Context, peer *Peer, pid int) Response {
-	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered host session", pid))
+	sess, resp, ok := s.resolveDescendant(peer, pid, fmt.Sprintf("pid %d is not inside a registered machine session", pid))
 	if !ok {
 		return resp
 	}
@@ -428,8 +442,8 @@ func (s *Server) loginStatus() Response {
 	return resp
 }
 
-// cannotEnrollMsg is the ERROR an enrollment (a host session's or a box's) logs while the helper
-// holds no launcher credential to attempt it with, beside why (noCredentialReason).
+// cannotEnrollMsg is the ERROR an enrollment (a machine session's or a box's) logs while the
+// helper holds no launcher credential to attempt it with, beside why (noCredentialReason).
 const cannotEnrollMsg = "session cannot enroll: the helper holds no launcher credential; run: agent-secrets machine login, and have a human approve it"
 
 // lacksCredential reports whether err failed for want of a launcher credential the helper still
@@ -440,15 +454,15 @@ func (s *Server) lacksCredential(err error) bool {
 	return errors.Is(err, errNoCredential) && !s.Broker.HasCredential()
 }
 
-// enrollBox registers a box's key as kind box — a pass-through broker call requiring no
-// registered session (a box enrollment is not a registry session; see Broker.EnrollBox's doc
-// comment), so unlike sign it does not check descendancy at all. An enrollment the helper cannot
-// attempt for want of a launcher credential logs cannotEnrollMsg, as a host session's does.
-func (s *Server) enrollBox(ctx context.Context, runtimeID, thumbprint string, sessionID *string) Response {
+// enrollSessionKey enrolls a key a launcher holds for a session on this machine — a pass-through
+// broker call requiring no registered session (see Broker.EnrollSessionKey), so unlike sign it
+// does not check descendancy at all. An enrollment the helper cannot attempt for want of a
+// launcher credential logs cannotEnrollMsg, as a registered session's does.
+func (s *Server) enrollSessionKey(ctx context.Context, runtimeID, thumbprint string, sessionID *string) Response {
 	if runtimeID == "" || thumbprint == "" {
-		return Response{Code: CodeBadRequest, Error: "enroll-box needs runtime_id and thumbprint"}
+		return Response{Code: CodeBadRequest, Error: "enroll-session-key needs runtime_id and thumbprint"}
 	}
-	id, lease, err := s.Broker.EnrollBox(ctx, runtimeID, thumbprint, sessionID)
+	id, lease, err := s.Broker.EnrollSessionKey(ctx, runtimeID, thumbprint, sessionID)
 	if err != nil {
 		if s.lacksCredential(err) {
 			s.Log.Error(cannotEnrollMsg, "runtime_id", runtimeID, "why", s.Broker.noCredentialReason())
@@ -458,12 +472,13 @@ func (s *Server) enrollBox(ctx context.Context, runtimeID, thumbprint string, se
 	return Response{OK: true, EnrollmentID: id, LeaseExpires: lease.UTC().Format(time.RFC3339Nano)}
 }
 
-// unenrollBox deletes a box enrollment; idempotent like Broker.Revoke (204/404 both succeed).
-func (s *Server) unenrollBox(ctx context.Context, enrollmentID string) Response {
+// unenrollSessionKey ends an enrollment enroll-session-key made; idempotent like Broker.Revoke
+// (204/404 both succeed).
+func (s *Server) unenrollSessionKey(ctx context.Context, enrollmentID string) Response {
 	if enrollmentID == "" {
-		return Response{Code: CodeBadRequest, Error: "unenroll-box needs enrollment_id"}
+		return Response{Code: CodeBadRequest, Error: "unenroll-session-key needs enrollment_id"}
 	}
-	if err := s.Broker.UnenrollBox(ctx, enrollmentID); err != nil {
+	if err := s.Broker.Revoke(ctx, enrollmentID); err != nil {
 		return Response{Code: CodeUnenrollFailed, Error: err.Error()}
 	}
 	return Response{OK: true}
