@@ -73,14 +73,13 @@ func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, e
 		blockIDs = append(blockIDs, excerpt.BlockID)
 		texts = append(texts, excerpt.Text)
 	}
-	// The target's excerpt is a scalar subquery, so a mention whose target excerpts lacks (no
-	// block holds it) is still updated, with no excerpt, and leaves the drift index.
+	// The target's excerpt is one row-valued subquery, so a mention whose target excerpts lacks
+	// (no block holds it) is still updated, with no excerpt, and leaves the drift index.
 	if _, err := q.Exec(ctx, `
 		with e(kind, id, block_id, text) as (select * from unnest($3::text[], $4::text[], $5::text[], $6::text[]))
 		update refs r
 		set excerpt_version = $2,
-		    excerpt_block_id = (select e.block_id from e where e.kind = r.to_kind and e.id = r.to_id),
-		    excerpt_text = (select e.text from e where e.kind = r.to_kind and e.id = r.to_id)
+		    (excerpt_block_id, excerpt_text) = (select e.block_id, e.text from e where e.kind = r.to_kind and e.id = r.to_id)
 		where r.from_kind = 'artifact' and r.from_id = $1
 		  and coalesce(r.excerpt_version, 0) <= $2
 	`, fromID, version, kinds, ids, blockIDs, texts); err != nil {

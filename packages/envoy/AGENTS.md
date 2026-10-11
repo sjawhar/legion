@@ -1215,13 +1215,17 @@ source and reconciles the index (the text is the truth), deleting edges whose so
 exists, and refuses to run without `dispatch.server_url`. A document mention's backlink excerpt -
 the block holding the target's first mention, its id the `#b-<id>` jump and its markdown cut to
 480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
-`excerpt_version`, migration 0090) when the mention is indexed, cut from the one render that wrote
-the version's markdown: every renderer of a version's tree takes the block offsets from that render
-(`pmdoc.RenderWithBlockOffsets`; `renderTreeWithOffsets`, `documentMarkdownWithOffsets`), and a
-`docs.renderedTree` carries the tree, the markdown and the offsets together to
-`refs.MentionExcerpts` and `refs.RecordExcerpts` (`writeVersionTx`, and an upload's and a seeded
-spec's `docs.Service.IndexDocumentReferences`, which take the transaction's recorded rendering from
-the ledger), so the route reads no document and no write renders twice (LEGION-531). A null
+`excerpt_version`, migration 0090) when the mention is indexed, cut from a render of the version's
+tree that the write already makes: every renderer of a version's tree takes the block offsets from
+its own render (`pmdoc.RenderWithBlockOffsets`; `renderTreeWithOffsets`,
+`documentMarkdownWithOffsets`), and a `docs.renderedTree` carries the tree, the markdown and the
+offsets together to `refs.MentionExcerpts` and `refs.RecordExcerpts` (`writeVersionTx`, and an
+upload's and a seeded spec's `docs.Service.IndexDocumentReferences`, which take the transaction's
+recorded rendering from the ledger), so the route reads no document and no write renders its tree
+for the excerpts (LEGION-531). An edit, a named version, a seed, a rebuild and a settlement render
+the tree once; an upload that changes the document renders it twice, as it did before excerpts -
+`ReplaceText`'s render of the replacement, which is the stored markdown, and `applyLive`'s render
+of the fork - and its excerpts are cut from `applyLive`'s render only when the two agree. A null
 `excerpt_version` marks a mention owed an excerpt: every row 0090 found, each one `rebuild-refs`
 inserts, and every mention of an upload whose replacement left the document as it was, the one
 version write that records no rendering (`refs.ClearExcerpts`, which keeps the excerpt the row

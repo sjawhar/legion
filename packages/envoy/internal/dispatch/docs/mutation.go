@@ -275,7 +275,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	// settlement that indexes the seeded ask blocks needs to know who wrote them. The ledger
 	// records it once the transaction commits (Ledger.creditRooms), so a seed that never commits
 	// leaves the document no state.
-	ledgerFrom(ctx).seeded(artifactID, tree, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor)
+	ledgerFrom(ctx).seeded(artifactID, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor)
 	return canonical, nil
 }
 
@@ -1328,7 +1328,11 @@ type versionWriteResult struct {
 
 // renderedTree is a document tree with its canonical markdown and each identified block's byte
 // range in that markdown, all from one render (pmdoc.RenderWithBlockOffsets), so a version write
-// stores the markdown and cuts its mentions' excerpts without rendering the tree again.
+// stores the markdown and cuts its mentions' excerpts from that render rather than rendering the
+// tree again for them. An upload that changes the document still renders it twice: ReplaceText
+// renders the replacement to tell whether it changes anything, and applyLive renders the fork it
+// leaves; the excerpts are cut from applyLive's render, which IndexDocumentReferences checks is
+// the version's markdown.
 type renderedTree struct {
 	tree     *pmdoc.Node
 	markdown string

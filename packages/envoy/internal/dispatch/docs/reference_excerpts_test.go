@@ -82,3 +82,58 @@ func TestOneUnreadableDocumentDoesNotHoldBackItsBatch(t *testing.T) {
 		t.Fatalf("owed mention = %q (%v); want the unreadable document %q's", stillOwed, err, first)
 	}
 }
+
+// A document the reconciliation reads but cannot record - here a trigger refuses its refs rows'
+// update - is skipped for that pass and stays owed; the others of its batch are recorded, and the
+// tick reports no error.
+func TestADocumentTheReconciliationCannotRecordStaysOwed(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	documents := make([]string, 3)
+	for index := range documents {
+		documents[index] = createProjectDocument(t, database, fmt.Sprintf("# Document %d\n\nSee dispatch://CORE-%d here.\n", index, index+1))
+		if _, err := database.Pool.Exec(ctx, `insert into refs (from_kind, from_id, to_kind, to_id) values ('artifact', $1, 'issue', $2)`,
+			documents[index], fmt.Sprintf("CORE-%d", index+1)); err != nil {
+			t.Fatalf("index document %d: %v", index, err)
+		}
+	}
+	refused := documents[1]
+	if _, err := database.Pool.Exec(ctx, `
+		create function refuse_excerpt_record() returns trigger language plpgsql as $$
+		begin
+			raise exception 'injected: refs refuses this document''s excerpts';
+		end $$`); err != nil {
+		t.Fatalf("create the refusing function: %v", err)
+	}
+	if _, err := database.Pool.Exec(ctx, fmt.Sprintf(`
+		create trigger refuse_excerpt_record before update on refs for each row
+		when (old.from_id = '%s') execute function refuse_excerpt_record()`, refused)); err != nil {
+		t.Fatalf("create the refusing trigger: %v", err)
+	}
+	service := New(Deps{Store: database, Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: time.Hour})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+
+	reconciled, _, err := service.ReconcileReferenceExcerpts(ctx)
+	if err != nil {
+		t.Fatalf("a tick with one document it cannot record failed: %v", err)
+	}
+	if reconciled != len(documents)-1 {
+		t.Fatalf("reconciled %d documents; want the %d it could record", reconciled, len(documents)-1)
+	}
+	var stillOwed []string
+	rows, err := database.Pool.Query(ctx, `select from_id from refs where excerpt_version is null order by from_id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rows.Next() {
+		var fromID string
+		if err := rows.Scan(&fromID); err != nil {
+			t.Fatal(err)
+		}
+		stillOwed = append(stillOwed, fromID)
+	}
+	rows.Close()
+	if len(stillOwed) != 1 || stillOwed[0] != refused {
+		t.Fatalf("owed mentions = %v; want only the refused document %q's", stillOwed, refused)
+	}
+}

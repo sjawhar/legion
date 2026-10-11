@@ -16,7 +16,10 @@ import (
 // IndexDocumentReferences indexes the mentions of version's markdown, which the calling
 // transaction has just stored as the document's version (refs.ReplaceCounted), and stores each
 // mention's excerpt from the rendering of the tree that transaction wrote: an upload's
-// replacement, or a seeded spec. It refuses a context that was not joined.
+// replacement, or a seeded spec. A seed renders its tree once. An upload that changes the
+// document renders it twice - ReplaceText's render of the replacement, which is the version's
+// markdown, and applyLive's render of the fork, which the ledger records - so the excerpts are cut
+// from applyLive's render only when the two agree. It refuses a context that was not joined.
 func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string, version int, markdown string) (model.ReferenceChanges, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
