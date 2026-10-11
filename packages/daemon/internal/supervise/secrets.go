@@ -37,8 +37,8 @@ type Enroller interface {
 	Revoke(ctx context.Context, id string) error
 }
 
-// PermanentError is an Enroll failure a retry with the same identity cannot change (the broker's
-// 4xx); the machine drops the identity and waits for the shim's next hello.
+// PermanentError is an Enroll failure a retry with the same identity cannot change (a broker 4xx
+// other than an expired token); the machine drops the identity and waits for the shim's next hello.
 type PermanentError interface{ Permanent() bool }
 
 // ExpiredTokenError is an Enroll failure the broker gave because the pod token presented had
