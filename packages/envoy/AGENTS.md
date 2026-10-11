@@ -2037,15 +2037,22 @@ credential made it (`Renew`'s one lookup, `podTokenRatcheted`, on the partial in
 `enrollments_pod_token_renewed`, migration 0014), and otherwise is accepted and logged at WARN. So
 the copied-token gap closes for every pod UID a current-image pod has renewed under, a second
 login's copy among the rows it refuses, and stays open for old-image UIDs until the contract
-release. A current-image pod still leaves a copied token the seconds before its own first token
-renewal. Ended rows count: a pod UID names one pod for ever, so a mark refuses nothing of another
-pod, and it keeps refusing a copy between the pod's role generations and after the pod is gone.
+release. A current-image pod still leaves a copied token the time before its own first token
+renewal: seconds while the daemon holds an approved machine login, but after a daemon restart its
+pods enroll only once a person approves the new login, and a pod that ends before it enrolls never
+renews with its token, so its UID stays open as an old-image pod's does. Ended rows count: a pod
+UID names one pod for ever, so a mark refuses nothing of another pod, and it keeps refusing a copy
+between the pod's role generations and after the pod is gone.
 That release is safe once the unset-row count is 0 (rows older than a minute: a pod's row is
 unmarked until its first renewal), no token-less
 WARN appears for one full `BROKER_LEASE_SECONDS`, and no issue pod runs a worker image older than
 the one whose renewer sends the token (an old-image issue pod between role generations holds no
-enrollment, so it counts as 0 and logs nothing, yet its next phase enrolls an unmarked row). No
-deploy order matters: an older broker ignores the token, and 0014 is additive and nullable. A pod
+enrollment, so it counts as 0 and logs nothing, yet its next phase enrolls an unmarked row). Every
+deploy order keeps every pod renewing (an older broker ignores the token, and 0014 is additive and
+nullable), but that is liveness, not exposure: a grant lasts until its session ends, so a copy
+renewing an old-image UID keeps one approval's grant while it renews. The rollout therefore
+replaces every old-image issue pod before or right after the broker deploys, then revokes the
+login that made each enrollment a remaining token-less WARN names (the operate page). A pod
 enrollment is ended only by the launcher credential that made it (`DELETE` by any other is
 `403 NOT_ENROLLING_CREDENTIAL`), so a Legion daemon that logs in again (a restart, or its login's
 expiry) leaves its earlier login's pods to their leases or to a revoke of that login. The renew

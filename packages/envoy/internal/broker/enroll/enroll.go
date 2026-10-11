@@ -499,11 +499,16 @@ func (s *Service) verifyPodToken(ctx context.Context, raw string) (PodClaims, er
 // own (rows are unique per launcher credential, pod UID and slot), and that row is refused
 // token-less as soon as any enrollment of the real pod has renewed with its token, whichever came
 // first, and stays refused across the pod's role generations and after the pod is gone. What stays
-// open: a copied token's renewals before the pod's own first token renewal, seconds after the pod
-// enrolls, and every renewal of an old-image pod, whose renewer never sends a token, until the
-// contract release. A pod UID names one pod, so a mark refuses nothing of another. No deploy order
-// matters: an older broker ignores the token a newer client sends, and this broker accepts a
-// token-less renewal of a pod UID no enrollment has marked.
+// open: a copied token's renewals before the pod's own first token renewal (seconds while the
+// daemon holds an approved machine login; after a daemon restart its pods enroll only once a person
+// approves the new login, and a pod that ends before it enrolls never marks its UID), and every
+// renewal of an old-image pod, whose renewer never sends a token, until the contract release. A pod
+// UID names one pod, so a mark refuses nothing of another. Every deploy order keeps every pod
+// renewing: an older broker ignores the token a newer client sends, and this broker accepts a
+// token-less renewal of a pod UID no enrollment has marked. That bounds liveness, not exposure: a
+// grant lasts until its session ends, so a copy renewing an unmarked UID keeps its grant while it
+// renews, which the operate page's rollout closes by replacing old-image pods and revoking the
+// logins of the copies left.
 // The contract release removes the token-less path once
 // `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null and created_at < now() - interval '1 minute'`
 // answers 0, the broker has logged no "renewed without its projected token" line for one full

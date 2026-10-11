@@ -220,22 +220,37 @@ Each request is bounded to 45 seconds. Request bodies are JSON of at most 1 MiB.
 
 A pod enrollment is not required to renew with its projected token yet. The broker ratchets each
 pod UID instead: every enrollment starts unmarked, its first renewal carrying the pod's token marks
-it, and once any enrollment naming a pod UID, live or ended, is marked, a renewal without the token from every
-enrollment naming that pod, whichever machine login made it, is refused `POD_TOKEN_REQUIRED`. A pod
-on a worker image whose `agent-secrets renew` sends the token (`--pod-token-file`) marks its UID on
-its first renewal, within seconds of its enrollment, so the copied-token gap closes for every pod
-UID a current-image pod has renewed under; a copied token is used without refusal only in those
-seconds. A pod on an older image never marks its UID: it renews as before, each renewal logged as
-the first WARN line above, and the gap stays open for it until the release that requires the token.
-A pod UID names one pod for ever, so a mark refuses nothing of another pod, and it keeps refusing a
-copy between the pod's role generations and after the pod is gone. This holds in every deploy
-order: an older broker ignores the token a newer renewer sends, and this broker accepts a renewal
-without one from a pod no enrollment of which has sent one. A new worker image does not replace a running issue
-pod, so list the pods' images to find the old-image ones:
+it, and once any enrollment naming a pod UID, live or ended, is marked, a renewal without the token
+from every enrollment naming that pod, whichever machine login made it, is refused
+`POD_TOKEN_REQUIRED`. A pod on a worker image whose `agent-secrets renew` sends the token
+(`--pod-token-file`) marks its UID on its first renewal, so the copied-token gap closes for every
+pod UID a current-image pod has renewed under. Until that first renewal a copied token is used
+without refusal. That is seconds while the Legion daemon holds an approved machine login, but after
+a daemon restart its pods enroll only once a person approves its new login, and a pod that ends
+before it enrolls never renews with its token, so its UID stays open as an old-image pod's does. A
+pod on an older image never marks its UID: it renews as before, each renewal logged as the first
+WARN line above, and the gap stays open for it until the release that requires the token. A pod
+UID names one pod for ever, so a mark refuses nothing of another pod, and it keeps refusing a copy
+between the pod's role generations and after the pod is gone.
+
+Every deploy order keeps every pod renewing: an older broker ignores the token a newer renewer
+sends, and this broker accepts a renewal without one from a pod no enrollment of which has sent
+one. That is liveness, not exposure. A grant lasts until its session ends, so a copy renewing an
+old-image pod's UID keeps the grant one approval gave it for as long as it renews. So, before or
+right after the broker deploys, replace every old-image issue pod: a new worker image does not
+replace a running issue pod, so list the pods' images to find them.
 
 ```sh
 kubectl get pods -n <namespace> -l legion.dev/issue \
   -o custom-columns=POD:.metadata.name,UID:.metadata.uid,IMAGE:.spec.containers[*].image
+```
+
+Once that list shows no old-image pod, a token-less WARN line no longer names a pod of yours but a
+copy. For each one that remains, find the machine login that made its enrollment and revoke that
+login from Dispatch's machine-login page, which ends every enrollment it made:
+
+```sql
+select launcher_credential_id from enrollments where id = '<the line''s enrollment>';
 ```
 
 The release that requires the token from every pod is safe to deploy only when all three of these

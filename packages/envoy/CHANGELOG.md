@@ -212,14 +212,21 @@
   enrollment renewed without its projected token`. So the copied-token gap closes for every pod UID
   a current-image pod has renewed under, and stays open for old-image UIDs until the release that
   requires the token. A current-image pod still leaves one window: a copied token used before the
-  pod's own first renewal with its token, seconds after it enrolls. A pod UID names one pod for
-  ever, so a mark refuses nothing of another pod, and it keeps refusing a copy between the pod's
-  role generations and after the pod is gone. The renewer stops on `POD_TOKEN_REQUIRED` and `ENROLLMENT_NOT_LIVE` and
+  pod's own first renewal with its token. That is seconds while the Legion daemon holds an approved
+  machine login; after a daemon restart its pods enroll only once a person approves its new login,
+  and a pod that ends before it enrolls never renews with its token, so its UID stays open as an
+  old-image pod's does. A pod UID names one pod for ever, so a mark refuses nothing of another pod,
+  and it keeps refusing a copy between the pod's role generations and after the pod is gone. The
+  renewer stops on `POD_TOKEN_REQUIRED` and `ENROLLMENT_NOT_LIVE` and
   retries `POD_IDENTITY_MISMATCH`, which the broker also answers for a token it could not verify
   while its issuer was unreachable; a real mismatch ends with the lease. `agent-secrets renew
   --pod-token-file FILE` reads the file before every renewal and sends it, and Legion's worker shim
-  passes the projected token file. **Rollout:** any order; an older broker reads no renew body, and
-  this broker accepts a token-less renewal from a pod no enrollment of which has sent one. The
+  passes the projected token file. **Rollout:** any order keeps every pod renewing (an older
+  broker reads no renew body, and this broker accepts a token-less renewal from a pod no
+  enrollment of which has sent one), but it does not bound exposure: a grant lasts until its
+  session ends, so a copy renewing an old-image pod's UID keeps one approval's grant for as long as
+  it renews. Before or right after the broker deploys, replace every old-image issue pod, then
+  revoke the machine login that made each enrollment a remaining token-less WARN line names. The
   release that requires the token is safe once all three hold:
   `select count(*) from enrollments where kind='pod' and revoked_at is null and pod_token_renewed_at is null and created_at < now() - interval '1 minute'`
   answers 0; the broker has logged no token-less WARN line for one full `BROKER_LEASE_SECONDS`; and

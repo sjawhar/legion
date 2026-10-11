@@ -2139,9 +2139,11 @@ issue's pod (every role container of it alike) and the image probe's.
   older worker image never sends one and renews as before, each renewal logged at WARN, so the gap
   stays open for old-image UIDs until the release that requires the token (the broker's operate
   page, "The renew token check"). A renewer that cannot read its token file sends nothing and prints
-  `ERROR: enrollment <id> cannot read its pod token`, which the shim relays into the pod's log. No deploy order
-  matters: an older broker ignores the token, and this one accepts a renewal without it from a pod
-  no enrollment of which has sent one. The broker ends a pod
+  `ERROR: enrollment <id> cannot read its pod token`, which the shim relays into the pod's log. Every
+  deploy order keeps every pod renewing: an older broker ignores the token, and this one accepts a
+  renewal without it from a pod no enrollment of which has sent one. That is liveness, not
+  exposure: a grant lasts until its session ends, so replace every old-image issue pod before or
+  right after the broker deploys (the operate page names the steps). The broker ends a pod
   enrollment only for the machine login that made it, so a daemon that logs in again with a new key
   (after a restart, or once its login reaches its expiry, `BROKER_LAUNCHER_CREDENTIAL_SECONDS`)
   cannot revoke the enrollments its earlier login made (the broker answers

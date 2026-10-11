@@ -45,8 +45,12 @@ enrollment naming that pod renews without its token, and a token copied out of t
 renewing anything once it expires. It stays open for the UID of a pod on an older worker image,
 whose `agent-secrets renew` never sends a token: such a pod renews as it did before, the broker
 logging each such renewal, until the release that requires the token. One window is left even for a
-current-image pod: a copied token used to renew before the pod's own first renewal with its token,
-seconds after it enrolls. An enrollment has **ended** once its launcher revokes it (the helper does
+current-image pod: a copied token used to renew before the pod's own first renewal with its token.
+That is seconds while the Legion daemon holds an approved machine login, but after a daemon restart
+its pods enroll only once a person approves the daemon's new login, and a pod that ends before it
+enrolls never renews with its token, so its UID stays open as an old-image pod's does. A grant lasts
+until its session ends, so a copy that keeps renewing keeps the grant one approval gave it. An
+enrollment has **ended** once its launcher revokes it (the helper does
 as soon as a registered session's process exits), whoever may revoke its machine login revokes that
 login
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its
