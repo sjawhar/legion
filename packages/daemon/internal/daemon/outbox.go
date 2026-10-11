@@ -291,7 +291,7 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	}
 	if issue.Status != payload.ObservedStatus && issue.Status != payload.Status {
 		if payload.HandOver {
-			if err := r.dropHandover(ctx, row.Issue); err != nil {
+			if err := r.dropHandover(ctx, row.Issue, payload); err != nil {
 				return err
 			}
 		}
@@ -347,7 +347,7 @@ func (r *outbox) handOverHolds(ctx context.Context, row record.OutboxRow, payloa
 			return err
 		}
 		if handover.Cancelled {
-			return r.records.DeleteHandover(ctx, tx, row.Issue)
+			return r.records.DeleteHandoverAt(ctx, tx, row.Issue, payload.HandOverTree, payload.HandOverLinger)
 		}
 		root, err = r.records.Issue(ctx, tx, handover.Tree)
 		return err
@@ -363,9 +363,12 @@ func (r *outbox) handOverHolds(ctx context.Context, row record.OutboxRow, payloa
 	return false, nil
 }
 
-func (r *outbox) dropHandover(ctx context.Context, issue string) error {
+// dropHandover deletes the fence of a hand-over a person's move superseded, but only this row's
+// own: the tree and linger generation the row names. A newer linger's fence on the same child is
+// its own row's to settle.
+func (r *outbox) dropHandover(ctx context.Context, issue string, payload record.StatusWrite) error {
 	return pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		return r.records.DeleteHandover(ctx, tx, issue)
+		return r.records.DeleteHandoverAt(ctx, tx, issue, payload.HandOverTree, payload.HandOverLinger)
 	})
 }
 

@@ -45,6 +45,17 @@ func (s *Postgres) DeleteHandover(ctx context.Context, tx pgx.Tx, issue string) 
 	return nil
 }
 
+func (s *Postgres) DeleteHandoverAt(ctx context.Context, tx pgx.Tx, issue, tree string, generation uint64) error {
+	if generation > maxInt64 {
+		return fmt.Errorf("delete hand-over of %s: generation %d does not fit a bigint", issue, generation)
+	}
+	if _, err := tx.Exec(ctx, `delete from handovers where issue = $1 and tree = $2 and linger_generation = $3`,
+		issue, tree, int64(generation)); err != nil {
+		return fmt.Errorf("delete hand-over of %s: %w", issue, err)
+	}
+	return nil
+}
+
 func (s *Postgres) CancelTreeHandovers(ctx context.Context, tx pgx.Tx, tree string, generation uint64) error {
 	if generation > maxInt64 {
 		return fmt.Errorf("cancel hand-overs of %s: generation %d does not fit a bigint", tree, generation)

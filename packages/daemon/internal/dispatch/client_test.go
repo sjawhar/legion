@@ -356,3 +356,22 @@ func TestCarriesLegionLabelMatchesTheLabelInAnyCaseAndNothingElse(t *testing.T) 
 		}
 	}
 }
+
+// A daemon newer than its Dispatch sends fields the older server does not know yet (labels_add,
+// expected_sequence on a hand-over), which it answers 400 INVALID_JSON naming the unknown field.
+// That refusal ends when Dispatch is upgraded, so it is ridden out, not taken as permanent, and the
+// two need not be deployed in a set order. Any other unknown field or malformed body stays permanent.
+func TestAnUnknownFieldRefusalIsRiddenOutUntilDispatchKnowsTheField(t *testing.T) {
+	for _, field := range []string{"labels_add", "expected_sequence"} {
+		unknown := &Error{Status: http.StatusBadRequest, Code: "INVALID_JSON", Message: `invalid JSON body: json: unknown field "` + field + `"`}
+		if refusal, permanent := PermanentRefusal(unknown); permanent {
+			t.Fatalf("PermanentRefusal(unknown %s) = %v, permanent; want it ridden out", field, refusal)
+		}
+	}
+	for _, message := range []string{`invalid JSON body: json: unknown field "bogus"`, "invalid JSON body: unexpected EOF"} {
+		refused := &Error{Status: http.StatusBadRequest, Code: "INVALID_JSON", Message: message}
+		if _, permanent := PermanentRefusal(refused); !permanent {
+			t.Fatalf("PermanentRefusal(%q) = not permanent; want it permanent", message)
+		}
+	}
+}

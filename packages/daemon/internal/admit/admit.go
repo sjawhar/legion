@@ -467,11 +467,14 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 		return err
 	}
 	if orphan {
-		// An orphan still mid-run is the same work as a hand-over, whoever handed it to Legion: a
-		// child stranded by a root that closed before its hand-over existed carries its phase, gate
-		// and pull request too. One its tree finished or parked (phase done) starts fresh.
+		// An orphan that started a phase is the same work as a hand-over, whoever handed it to
+		// Legion: a child stranded by a root that closed before its hand-over existed carries its
+		// phase, gate and pull request too. One still admitted never started under its old tree's
+		// gate, and one its tree finished or parked (phase done) has no run to carry, so both start
+		// fresh, by the rule a linger's hand-over applies (workflow's settleUnfinished).
 		a.log.Info("admission orphan", "issue", stored.Key, "parent", observation.Parent)
-		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, stored.Phase != phase.Done)
+		started := stored.Phase != phase.Admitted && stored.Phase != phase.Done
+		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, started)
 	}
 	return a.recordObservation(ctx, tx, stored, observed{
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
@@ -563,12 +566,13 @@ func readmittable(stored record.Issue) bool {
 }
 
 // readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting
-// for a slot. A root starts a fresh generation: its facts clear across its whole tree. An orphan is
-// different: it is the same work moving from a finished root to a root of its own, so its phase,
-// phase rows, gate and pull request (with its observed head) carry into the new generation. Its
-// promotion starts both its architect and the role of that carried phase. A merged pull request is
-// never observed as merged again, but preserving every phase is equally necessary: a review, READY,
-// or production check otherwise reruns work already decided or landed.
+// for a slot. A root starts a fresh generation: its facts clear across its whole tree, as do those
+// of an orphan readmitted without carry. An orphan readmitted with carry (one that started a phase)
+// is the same work moving from a finished root to a root of its own, so its phase, phase rows, gate
+// and pull request (with its observed head) carry into the new generation, and its promotion starts
+// both its architect and the role of that carried phase. A merged pull request is never observed as
+// merged again, and a review, READY or production check would otherwise rerun work already decided
+// or landed.
 func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank string, seq int64, carry bool) error {
 	if stored.Generation == ^uint64(0) {
 		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)

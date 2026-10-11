@@ -364,6 +364,66 @@ func TestAPersonMoveBetweenTheHandOverReadAndPatchStands(t *testing.T) {
 	}
 }
 
+// A hand-over row only ever removes its own fence. A row from an earlier linger (a root that came
+// back, then closed and lingered out again) still in the outbox meets the newer linger's fence on
+// the same child. Whether Dispatch shows a person's move, or the newer fence is itself cancelled
+// (its own row's to clear), the stale row finishes without deleting the newer fence.
+func TestAStaleHandOverRowLeavesANewerLingersFence(t *testing.T) {
+	const root, child = "LEGION-207", "LEGION-208"
+	for _, tc := range []struct {
+		name      string
+		shown     dispatch.Issue
+		cancelled bool
+	}{
+		{name: "a person moved the child", shown: dispatch.Issue{Key: child, Status: "backlog"}},
+		{name: "the newer fence is cancelled", shown: dispatch.Issue{Key: child, Status: "in_progress"}, cancelled: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			until := time.Now().Add(time.Hour)
+			parent := root
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				for _, put := range []error{
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 2, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
+					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 2}),
+					func() error {
+						if !tc.cancelled {
+							return nil
+						}
+						return records.CancelTreeHandovers(context.Background(), tx, root, 2)
+					}(),
+				} {
+					if put != nil {
+						return put
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("seed the newer linger's fence: %v", err)
+			}
+			client := &outboxDispatch{issue: tc.shown}
+			stale := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+			if err := (&outbox{pool: pool, records: records, dispatch: client, log: quietLogger()}).execute(context.Background(), stale); err != nil {
+				t.Fatalf("execute the stale hand-over row: %v", err)
+			}
+			if len(client.handOvers) != 0 || len(client.statuses) != 0 {
+				t.Fatalf("stale row wrote hand-overs %v and statuses %v, want none", client.handOvers, client.statuses)
+			}
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				fence, err := records.Handover(context.Background(), tx, child)
+				if err != nil || fence == nil || fence.Generation != 2 || fence.Cancelled != tc.cancelled {
+					t.Fatalf("newer linger's fence after the stale row = %#v, %v; want it left at generation 2 (cancelled %t)", fence, err, tc.cancelled)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 // A done write with a reason posts the reason on the issue before it writes the status, since
 // Dispatch refuses a message on a closed issue, and no status is written until the message posts.
 // The message is the row's own, under its marker, so a retry after a failed status write finds it

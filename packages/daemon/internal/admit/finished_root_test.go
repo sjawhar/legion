@@ -300,24 +300,31 @@ func handoverOf(t *testing.T, pool *pgxpool.Pool, issue string) *record.Handover
 // cleanup confirmed with it still in production_check, its pull request merged. A person handing
 // it to Legion (todo with the label) admits it as an orphan, and that orphan carries its state as a
 // hand-over does: its own tree at a new generation, still in production_check with the merged pull
-// request, its implementer started there and its architect told it is carried. A child reopened
-// from done starts fresh, as before.
+// request, its implementer started there and its architect told it is carried. A child that never
+// started a phase (still admitted under the old root's unopened gate) has nothing to carry: it is
+// admitted fresh, with no copied gate and no carried mark, so its architect registers its own spec.
 func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T) {
 	ctx := context.Background()
 	pool := migratedPool(t)
-	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	admission := newAdmission(t, 2, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
 	root := record.Issue{Key: "LEGION-208", Project: testProject, Title: "finished root", Tree: "LEGION-208", Phase: phase.Done, Generation: 1, Status: "done", Rank: "A", LastDispatchSeq: 1}
 	parent := root.Key
 	child := record.Issue{Key: "LEGION-209", Project: testProject, Title: "merged child", Tree: root.Key, Parent: &parent,
 		Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}
+	unstarted := record.Issue{Key: "LEGION-210", Project: testProject, Title: "unstarted child", Tree: root.Key, Parent: &parent,
+		Phase: phase.Admitted, Generation: 1, Status: "todo", Rank: "C", LastDispatchSeq: 1}
 	putIssue(t, pool, root)
 	putIssue(t, pool, child)
+	putIssue(t, pool, unstarted)
 	inTx(t, pool, func(tx pgx.Tx) {
 		records := record.NewStore()
 		if err := records.PutPullRequest(ctx, tx, record.PullRequest{Issue: child.Key, Repo: "acme/widgets", Number: 42,
 			Branch: "legion/LEGION-209", HeadSHA: "merged-head", State: record.PullRequestMerged}); err != nil {
 			t.Fatalf("seed merged pull request: %v", err)
+		}
+		if err := records.PutGate(ctx, tx, record.DesignGate{Issue: root.Key, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 1}); err != nil {
+			t.Fatalf("seed the old root's unopened gate: %v", err)
 		}
 		if _, err := treelifecycle.Open(ctx, tx, "legion", root.Key, treelifecycle.AuthorityWorkflow); err != nil {
 			t.Fatalf("open old tree lifecycle: %v", err)
@@ -354,6 +361,27 @@ func TestAStrandedMidRunChildHandedToLegionByAPersonCarriesItsState(t *testing.T
 	}
 	if starts := phaseStarts(t, pool, child.Key, claim.RoleImplementer, phase.ProductionCheck); starts != 1 {
 		t.Fatalf("production-check implementer starts = %d, want one", starts)
+	}
+
+	apply(t, pool, admission, "person-hands-over-unstarted", intake.DispatchIssue{Key: unstarted.Key, Seq: 2, Type: "issue.updated",
+		Status: "todo", Title: unstarted.Title, Parent: root.Key, Rank: unstarted.Rank, HandedOver: handed}, engine)
+	fresh := issue(t, pool, unstarted.Key)
+	if fresh.Tree != unstarted.Key || fresh.Generation != 2 || fresh.Phase != phase.Admitted {
+		t.Fatalf("unstarted orphan = %#v, want its own admitted root at generation 2", fresh)
+	}
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		carried, err := records.CarriedRoot(ctx, tx, unstarted.Key)
+		if err != nil || carried != 0 {
+			t.Fatalf("unstarted orphan carried generation = %d, %v; want none", carried, err)
+		}
+		gate, err := records.Gate(ctx, tx, unstarted.Key)
+		if err != nil || gate != nil {
+			t.Fatalf("unstarted orphan gate = %#v, %v; want none copied from the old root", gate, err)
+		}
+	})
+	if starts := architectStarts(t, pool, unstarted.Key); starts != 1 {
+		t.Fatalf("unstarted orphan architect starts = %d, want one", starts)
 	}
 }
 

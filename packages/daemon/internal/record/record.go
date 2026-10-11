@@ -345,6 +345,9 @@ type Store interface {
 	PutHandover(ctx context.Context, tx pgx.Tx, handover Handover) error
 	CancelTreeHandovers(ctx context.Context, tx pgx.Tx, tree string, generation uint64) error
 	DeleteHandover(ctx context.Context, tx pgx.Tx, issue string) error
+	// DeleteHandoverAt deletes issue's fence only while it is the one tree and linger generation
+	// name: a newer linger's fence on the same issue belongs to its own outbox row.
+	DeleteHandoverAt(ctx context.Context, tx pgx.Tx, issue, tree string, generation uint64) error
 	ReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) (*ReleaseRetry, error)
 	PutReleaseRetry(ctx context.Context, tx pgx.Tx, retry ReleaseRetry) error
 	DeleteReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) error

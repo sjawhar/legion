@@ -120,7 +120,8 @@ func Missing(err error) bool {
 // later" (408, 429), a codeless 4xx from whatever sits in front of Dispatch, and a credential
 // answer (401, 403). A revoked or expired token says nothing about the write — an operator
 // restores it and the same body is taken — so reading one as permanent would drop the write for
-// good.
+// good. So is an older Dispatch's refusal of a field this daemon added (newerFields): it ends when
+// Dispatch is upgraded, so the two deploy in either order.
 func PermanentRefusal(err error) (*Error, bool) {
 	var refusal *Error
 	if !errors.As(err, &refusal) {
@@ -133,10 +134,25 @@ func PermanentRefusal(err error) (*Error, bool) {
 		refusal.Status == http.StatusRequestTimeout,
 		refusal.Status == http.StatusTooManyRequests,
 		refusal.Status == http.StatusUnauthorized,
-		refusal.Status == http.StatusForbidden:
+		refusal.Status == http.StatusForbidden,
+		refusal.Status == http.StatusBadRequest && refusal.Code == "INVALID_JSON" && unknownNewerField(refusal.Message):
 		return nil, false
 	}
 	return refusal, true
+}
+
+// newerFields are the request fields this daemon sends that a Dispatch one release older does not
+// know: a hand-over's labels_add and expected_sequence. That Dispatch's decoder refuses an unknown
+// field by name; any other malformed body stays a permanent refusal.
+var newerFields = []string{"labels_add", "expected_sequence"}
+
+func unknownNewerField(message string) bool {
+	for _, field := range newerFields {
+		if strings.Contains(message, `unknown field "`+field+`"`) {
+			return true
+		}
+	}
+	return false
 }
 
 // TransientError wraps a Dispatch request failure that is a transport problem — no response at
