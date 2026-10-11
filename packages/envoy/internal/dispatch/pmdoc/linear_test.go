@@ -362,21 +362,31 @@ func processCPUTime() time.Duration { return cputest.Process() }
 // window for the fresh memory it touches. The heap may grow to windowMemoryLimit while the
 // collector is stopped, so a regression that allocates without bound is collected rather than
 // killing the process; a window that reaches the limit fails t, since that collection would put
-// its noise back into the time.
+// its noise back into the time. op's caller builds its input before the window, since the input is
+// not the code under test. A call that misses its deadline may never return to restore the
+// collector, so runWithDeadline, which every call here runs under, restores it as well.
 func cpuTimeOf(t *testing.T, op func()) time.Duration {
 	t.Helper()
+	took, collected, limit := stoppedCollectorCPUTime(op)
+	if collected != 0 {
+		t.Errorf("%d collections ran inside a timed window, which grew the heap to the %d MiB memory limit; their CPU time is in its %s", collected, limit>>20, took.Round(time.Millisecond))
+	}
+	return took
+}
+
+// stoppedCollectorCPUTime is cpuTimeOf's window without its verdict: op's CPU time, how many
+// collections completed while it ran, and the memory limit the window held the heap to. It reports
+// through no *testing.T, so a test can run it past a deadline and outlive nothing.
+func stoppedCollectorCPUTime(op func()) (took time.Duration, collected uint64, limit int64) {
 	runtime.GC()
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	limit := min(debug.SetMemoryLimit(-1), windowMemoryLimit)
+	limit = min(debug.SetMemoryLimit(-1), windowMemoryLimit)
 	defer debug.SetMemoryLimit(debug.SetMemoryLimit(limit))
 	cycles := gcCycles()
 	before := processCPUTime()
 	op()
-	took := processCPUTime() - before
-	if collected := gcCycles() - cycles; collected != 0 {
-		t.Errorf("%d collections ran inside a timed window, which grew the heap to the %d MiB memory limit; their CPU time is in its %s", collected, limit>>20, took.Round(time.Millisecond))
-	}
-	return took
+	took = processCPUTime() - before
+	return took, gcCycles() - cycles, limit
 }
 
 // windowMemoryLimit is the most memory cpuTimeOf lets a window grow the heap to with the collector
@@ -389,6 +399,13 @@ func gcCycles() uint64 {
 	sample := []metrics.Sample{{Name: "/gc/cycles/total:gc-cycles"}}
 	metrics.Read(sample)
 	return sample[0].Value.Uint64()
+}
+
+// collectorSettings is GOGC and the memory limit as they stand, read without changing either.
+func collectorSettings() (percent int, limit int64) {
+	sample := []metrics.Sample{{Name: "/gc/gogc:percent"}}
+	metrics.Read(sample)
+	return int(int64(sample[0].Value.Uint64())), debug.SetMemoryLimit(-1)
 }
 
 // leaking counts how many of each what (growsLinearly's shape-and-size label) are currently
@@ -434,8 +451,13 @@ func leakedCallGuard(what string) string {
 // a deadline miss, and only then: on a call that truly never returns, it stays parked on result's
 // receive, at no CPU cost, for as long as the test binary runs. cleared, non-nil only on a
 // deadline miss, closes the instant that goroutine deregisters op's own entry - the signal
-// waitForLeakToClear waits on, rather than polling.
+// waitForLeakToClear waits on, rather than polling. It hands back the collector's settings as it
+// found them on either return, since an op stopped inside cpuTimeOf's window that misses its
+// deadline would otherwise leave the collector stopped for every later test in the binary.
 func runWithDeadline(what string, deadline time.Duration, op func() time.Duration) (took time.Duration, onTime bool, cleared <-chan struct{}) {
+	percent, limit := collectorSettings()
+	defer debug.SetMemoryLimit(limit)
+	defer debug.SetGCPercent(percent)
 	result := make(chan time.Duration, 1)
 	go func() { result <- op() }()
 	select {
@@ -485,40 +507,78 @@ func timedWithDeadline(t *testing.T, what string, deadline time.Duration, op fun
 // go test's own default timeout with none attached.
 func TestRunWithDeadlineReportsAHangPromptly(t *testing.T) {
 	const deadline = 20 * time.Millisecond
-	const hang = 200 * time.Millisecond
+	release := make(chan struct{})
 	started := time.Now()
 	_, onTime, cleared := runWithDeadline("synthetic prompt hang", deadline, func() time.Duration {
-		time.Sleep(hang) // longer than deadline, short enough this test and its cleanup stay fast
+		<-release // blocked until this test has its verdict, however the scheduler runs it
 		return 0
 	})
 	if elapsed := time.Since(started); elapsed > 10*deadline {
 		t.Errorf("runWithDeadline took %s to report a hang against a %s deadline, want close to immediate", elapsed, deadline)
 	}
 	if onTime {
-		t.Error("runWithDeadline reported onTime=true for an op that slept far longer than its deadline")
+		t.Error("runWithDeadline reported onTime=true for an op still blocked past its deadline")
 	}
+	close(release)
 	waitForLeakToClear(t, cleared)
 }
 
 // TestLeakedCallBlocksTheNextMeasurement proves leakedCallGuard directly: once a synthetic op has
 // missed its own deadline and is still running, a second, otherwise-healthy call through
 // timedWithDeadline refuses to start - naming the first call - rather than silently sharing its
-// still-accruing CPU (processCPUTime is this whole process's, not per-goroutine).
+// still-accruing CPU (processCPUTime is this whole process's, not per-goroutine). The op is held
+// until the guard has answered, so it is still running when asked, however late the test runs.
 func TestLeakedCallBlocksTheNextMeasurement(t *testing.T) {
 	const deadline = 20 * time.Millisecond
-	const hang = 200 * time.Millisecond
+	release := make(chan struct{})
 	_, onTime, cleared := runWithDeadline("synthetic leaked hang", deadline, func() time.Duration {
-		time.Sleep(hang)
+		<-release
 		return 0
 	})
 	if onTime {
-		t.Fatal("runWithDeadline reported onTime=true for an op that slept far longer than its deadline")
+		close(release)
+		t.Fatal("runWithDeadline reported onTime=true for an op still blocked past its deadline")
 	}
 	if msg := leakedCallGuard("a second call"); msg == "" {
 		t.Error("leakedCallGuard let a second call measure while the first was still registered as leaked, want it refused")
 	} else {
 		t.Logf("leakedCallGuard correctly refused: %s", msg)
 	}
+	close(release)
+	waitForLeakToClear(t, cleared)
+}
+
+// TestAMissedDeadlineLeavesTheCollectorAsItWas proves runWithDeadline hands back the collector as
+// it found it when a call misses its deadline inside cpuTimeOf's window, where the collector is
+// stopped: the call may never return to restore it, and a collector left stopped would hold every
+// later test in this binary to the window's memory limit with no collection below it.
+func TestAMissedDeadlineLeavesTheCollectorAsItWas(t *testing.T) {
+	percent, limit := collectorSettings()
+	stopped, release := make(chan struct{}), make(chan struct{})
+	runtime.GC() // so the window's own collection takes no part of the deadline
+	_, onTime, cleared := runWithDeadline("synthetic hang inside a timed window", time.Second, func() time.Duration {
+		took, _, _ := stoppedCollectorCPUTime(func() {
+			close(stopped)
+			<-release
+		})
+		return took
+	})
+	if onTime {
+		close(release)
+		t.Fatal("runWithDeadline reported onTime=true for an op still blocked past its deadline")
+	}
+	select {
+	case <-stopped:
+	default:
+		close(release)
+		waitForLeakToClear(t, cleared)
+		t.Fatal("the op had not stopped the collector by its deadline, so this test proves nothing")
+	}
+	gotPercent, gotLimit := collectorSettings()
+	if gotPercent != percent || gotLimit != limit {
+		t.Errorf("after a missed deadline the collector reads GOGC %d and a %d-byte memory limit, want %d and %d as before the call", gotPercent, gotLimit, percent, limit)
+	}
+	close(release)
 	waitForLeakToClear(t, cleared)
 }
 
