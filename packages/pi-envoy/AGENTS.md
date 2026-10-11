@@ -90,8 +90,10 @@ message it is comes from one process-wide record keyed by session (`matchInjecte
 `@legion/pi-shared/injected-user-turns`). A typed turn is found by the tag the host keeps on every
 message the input submits, a user message or a `skill-prompt` custom message, and by nothing else; it
 stays in the record past the run's `agent_end` until that message arrives, and goes when the host
-answers that the input submitted no message or the session changes (`forgetInjectedUserTurns`:
-every match asks under the live id, so nothing asks under the id left again). A `sendUserMessage`
+answers that the input submitted no message or the instance that sent it moves off its session id
+(`forgetInjectedUserTurns`, guarded by the ids this instance noted turns under: every match asks
+under the live id, and an ACP host's other sessions in the same process keep their own turns). A
+`sendUserMessage`
 turn is found by its text: the first user message that equals it, forgotten at the run's
 `agent_end`, so on such a host a Send or an Aside the host runs as a turn of its own after that run
 matches nothing. A message's identity

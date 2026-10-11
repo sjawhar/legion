@@ -6178,6 +6178,37 @@ describe("envoy OMP extension", () => {
       running.resolve({ handled: "prompt" });
     });
 
+    // An ACP host serves several top-level sessions in one process, each with its own pi-envoy,
+    // and its fork opens the source session in a new one before forking it (acp-agent.ts:1290-1310
+    // at the pin). The fork's instance leaving the source id must not forget the turns the source
+    // session's own instance sent in: that instance still serves the id and still asks under it.
+    test("a typed turn's note survives another instance in the process passing through its session", async () => {
+      const running = Promise.withResolvers<UserInputResult>();
+      const { agent, delivered } = await bootDirectSession("typed-note-acp-fork", {
+        accept: () => ({ accepted: true }),
+        sendUserInput: () => running.promise,
+      });
+      agent.push(directDispatchEnvelope("steer", "typed-note-acp-fork"));
+      await delivered(1);
+
+      const forkQuery = "typed-note-acp-fork-instance";
+      const { default: forkExtension } = await import(`./envoy.ts?${forkQuery}`);
+      const fork = createPi();
+      forkExtension(fork.pi);
+      await fork.handlers.get("session_start")?.({}, sessionContext("ses_fork_fresh"));
+      await fork.handlers.get("session_switch")?.({}, sessionContext("ses_delivery"));
+      await fork.handlers.get("session_switch")?.({}, sessionContext("ses_forked"));
+
+      const message = {
+        content: [{ text: DIRECT_MESSAGE_BODY, type: "text" }],
+        role: "user",
+        tag: DIRECT_MESSAGE_ID,
+        timestamp: 10,
+      };
+      expect(matchInjectedUserTurn("ses_delivery", message)).toBe(DIRECT_MESSAGE_ID);
+      running.resolve({ handled: "prompt" });
+    });
+
     for (const [name, first] of [
       ["the host's terminal-only answer", async () => ({ handled: "terminal-only" as const })],
       [

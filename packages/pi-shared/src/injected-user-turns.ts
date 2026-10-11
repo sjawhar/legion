@@ -18,9 +18,11 @@ import { envoyPluginInterface } from "./interface";
  * phase-stall check (`extensions/legion.ts`) counts it as an inbound event rather than the
  * daemon's assignment.
  *
- * Every match asks under the session id live when the message arrives, so the turns of a session
- * the process no longer serves are forgotten whole when the session changes
- * (`forgetInjectedUserTurns`): nothing asks under that id again.
+ * Every match asks under the session id live when the message arrives, so when an instance moves
+ * off a session id it forgets the turns it sent in there (`forgetInjectedUserTurns`): it never asks
+ * under that id again. The record is process-wide, and an ACP host serves several top-level
+ * sessions in one process, each with its own instance, so an instance forgets only an id it noted
+ * turns under; another instance still serving that id keeps its turns.
  *
  * The record is the `injectedUserTurns` member of the versioned interface (`interface.ts`):
  * envoy.ts writes what legion.ts reads, and each plugin bundles its own copy of this module.
@@ -125,8 +127,8 @@ export function endInjectedUserTurns(sessionID: string): void {
   else turns.set(sessionID, { found: new Map(), sent: typed });
 }
 
-/** The process no longer serves `sessionID`: every turn sent into it and every answer given for it
- *  go, since no message is matched under that id again. */
+/** An instance that noted turns under `sessionID` no longer serves it: every turn sent into it and
+ *  every answer given for it go, since that instance never matches under the id again. */
 export function forgetInjectedUserTurns(sessionID: string): void {
   envoyPluginInterface().injectedUserTurns.delete(sessionID);
 }

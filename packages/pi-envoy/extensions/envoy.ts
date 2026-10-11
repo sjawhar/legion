@@ -504,6 +504,11 @@ export default function envoyExtension(pi: PiApi): void {
   // (`HANDLED_ATTEMPT_ENTRY`): read from every entry of the session file, so a resume, a switch to
   // another branch of the tree, or both keep a delivered attempt from being accepted again.
   let handledDispatchAttempts = new Set<string>();
+  // The session ids this instance noted a person's turn under (`noteTypedUserTurn`,
+  // `noteInjectedUserTurn`). The record is process-wide, and an ACP host serves several top-level
+  // sessions in one process, each with its own instance: leaving an id forgets only the turns
+  // this instance sent in there, never another instance's.
+  const notedSessionIDs = new Set<string>();
 
   const availabilityWarningSessionIDs = new Set<string>();
 
@@ -601,7 +606,7 @@ export default function envoyExtension(pi: PiApi): void {
     markPicturesShown(shownPictures(sessionID), transcriptPictures(branch));
     if (previousSessionID !== sessionID) {
       forgetShownPictures(previousSessionID);
-      forgetInjectedUserTurns(previousSessionID);
+      if (notedSessionIDs.delete(previousSessionID)) forgetInjectedUserTurns(previousSessionID);
       typedPictures.dropOtherSessions(sessionID);
     }
   };
@@ -709,6 +714,7 @@ export default function envoyExtension(pi: PiApi): void {
       });
     }
     noteTypedUserTurn(noted, turn.messageId);
+    notedSessionIDs.add(noted);
     void Promise.resolve()
       .then(() =>
         sendUserInput(turn.body, {
@@ -935,6 +941,7 @@ export default function envoyExtension(pi: PiApi): void {
                 // load clears every text note (endInjectedUserTurns), and this turn must still be found.
                 const injectionSessionID = sessionID;
                 noteInjectedUserTurn(injectionSessionID, turn.body, turn.messageId);
+                notedSessionIDs.add(injectionSessionID);
                 pi.sendUserMessage(
                   delivery.content,
                   turn.mode === "aside" ? { deliverAs: "aside" } : undefined
