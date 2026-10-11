@@ -695,9 +695,9 @@ func (s *Postgres) RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, is
 	var pending bool
 	var task supervise.Delivery
 	var confirmed *time.Time
-	err = tx.QueryRow(ctx, `select c.state, c.last_start_row, d.claim_token is not null, coalesce(d.generation, 0), coalesce(d.phase, ''), d.confirmed_at
+	err = tx.QueryRow(ctx, `select c.state, c.suspended_by, c.last_start_row, d.claim_token is not null, coalesce(d.generation, 0), coalesce(d.phase, ''), d.confirmed_at
 		from claims c left join pending_task_deliveries d on d.claim_token = c.token where c.token = $1`, string(token)).
-		Scan(&held.State, &held.LastStartRow, &pending, &task.Generation, &task.Phase, &confirmed)
+		Scan(&held.State, &held.SuspendedBy, &held.LastStartRow, &pending, &task.Generation, &task.Phase, &confirmed)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 	case err != nil:

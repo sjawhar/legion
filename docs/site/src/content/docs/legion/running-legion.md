@@ -364,8 +364,30 @@ Closing the terminal leaves the project without one, and the daemon logs
    legion claims resume  --config legion.yaml --operator-token-file operator-token --claim <token>
    ```
 
-   A suspension waits for the agent's current turn to land; the resumed agent continues the same
-   conversation in a new pod.
+   An operator's suspension waits for the agent's current turn to land, at most
+   `worker_stop_timeout_seconds`; the resumed agent continues the same conversation in a new pod.
+
+   **An operator's suspension holds until the operator resumes the claim.** The daemon resumes a
+   suspended claim on its own when the claim owns its issue's current phase (at boot, at
+   re-admission, and whenever the phase moves to its role) or when a notice waits for it, but never
+   one an operator suspended: a phase start or a notice for it waits instead. A drain therefore ends
+   with the operator resuming every claim they suspended, one `legion claims resume` each;
+   `legion claims list --json` names each one's `suspendedBy` (`unknown`, `operator`, `daemon` or
+   `exit`). The daemon's own suspension of a claim in a turn (its issue left the workflow, or its
+   tree lingers) waits for the turn however long it takes, and a lingering tree's claims stay
+   suspended until the tree is re-admitted.
+
+   **After the first upgrade to a release that records `suspendedBy`, inspect every `unknown`
+   claim before declaring the drain complete.** Those claims were already suspended before the
+   column existed, so the daemon conservatively leaves them held:
+
+   ```sh
+   legion claims list --config legion.yaml --operator-token-file operator-token --json
+   legion claims resume --config legion.yaml --operator-token-file operator-token --claim <unknown-claim>
+   ```
+
+   Resume every `unknown` claim that was not deliberately drained. The boot report names them too,
+   so this list is the one command needed to choose them.
 5. **Restart the controller** with the new binary and plugins.
 
 ## Observe

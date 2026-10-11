@@ -327,10 +327,11 @@ func (m *Machine) confirm(ctx context.Context) error {
 // one of them: it takes the task whose turn it ended back first (interrupted), so settle finds
 // nothing of it to retire.
 //
-// A suspension ends the claim's phase, so a task queued for a phase is the finished phase's and
-// goes with it; the next resume is handed its new phase's task, never that one. A task of no
-// phase is not the workflow's to end: an operator asked for it and was answered 200, and a phase
-// change they had no part in must not take it. It waits out the suspension and goes on the resume.
+// A daemon suspension ends the claim's phase, so a task queued for a phase is the finished phase's
+// and goes with it; the next resume is handed its new phase's task, never that one. An operator
+// suspension is different: the operator resumes this same claim, so its pending phase task waits
+// through that suspension and is sent after the operator's resume. A task of no phase is likewise
+// not the workflow's to end.
 func (m *Machine) settle(ctx context.Context) error {
 	p := m.claim.Pending
 	if p == nil {
@@ -342,7 +343,7 @@ func (m *Machine) settle(ctx context.Context) error {
 		}
 	}
 	turnOver := !p.ConfirmedAt.IsZero() && m.claim.State != StateWorking
-	suspended := m.claim.State == StateSuspended && p.Phase != ""
+	suspended := m.claim.State == StateSuspended && p.Phase != "" && m.claim.SuspendedBy != SuspendedByOperator
 	if !turnOver && !suspended {
 		return nil
 	}

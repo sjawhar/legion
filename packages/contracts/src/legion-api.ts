@@ -332,6 +332,9 @@ export const LegionOperatorClaimResponse = z.strictObject({
   }),
   uncertainStreak: z.number().int().nonnegative(),
   pending: legionDeliveryView.optional(),
+  /** Who suspended the claim while it is suspended; absent otherwise. `unknown` is a suspension
+   * that predates migration 0038 and is held until the operator resumes it. */
+  suspendedBy: z.enum(["unknown", "operator", "daemon", "exit"]).optional(),
   /** A suspension the claim's machine holds for the agent's turn to end; absent when none is. */
   suspensionHeld: z.literal(true).optional(),
 });

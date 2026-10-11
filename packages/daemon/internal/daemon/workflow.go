@@ -398,6 +398,16 @@ func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise
 	return nil
 }
 
+// booted tells the workflow of this boot (intake.DaemonBooted), once every stored claim has its
+// machine and the terminal facts are replayed: it starts every suspended claim that owns its
+// issue's current phase, unless an operator suspended it, through the outbox's start.
+func (w *workflowRuntime) booted(ctx context.Context, bootID int64) error {
+	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", fmt.Sprintf("boot:%s:%d", w.dispatchProject, bootID), intake.DaemonBooted{Boot: bootID}, w.handlers...); err != nil {
+		return fmt.Errorf("apply the boot of %s: %w", w.dispatchProject, err)
+	}
+	return nil
+}
+
 func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState) {
 	if err := w.applyTerminal(context.Background(), c, state); err != nil {
 		w.log.Error("apply supervision terminal fact", "claim", c.Token, "state", state, "error", err)

@@ -381,10 +381,21 @@ func (r *outbox) notice(ctx context.Context, row record.OutboxRow, payload recor
 	if err != nil {
 		return fmt.Errorf("the architect of %s: %w", row.Issue, err)
 	}
-	if held := r.supervisedClaim(architect); stoppedWithTree(tree.root.Lingers(), held) {
+	held := r.supervisedClaim(architect)
+	if stoppedWithTree(tree.root.Lingers(), held) {
 		r.log.Info("outbox notice finished undelivered: its architect stopped with its finished tree",
 			"row", row.ID, "kind", payload.Kind, "issue", row.Issue, "architect", architect, "state", held.State, "stopping", held.Stopping)
 		return nil
+	}
+	// A notice waiting on an architect the daemon or its own exit suspended resumes it, on the
+	// claim's own goroutine so no relaunch holds the runner: once it holds its role again its ready
+	// releases the notices held for it (releaseWaiting), in the order they were written. An
+	// operator-suspended or unknown pre-0038 architect is not resumed; the publish below meets no
+	// holder, and the notice waits for the operator's resume.
+	if held.Claim.RuleMayResume() {
+		r.supervisor.post(architect, supervise.RequestRuleResume{Claim: architect,
+			Reason: fmt.Sprintf("notice row %d (%s on %s) waits for it", row.ID, payload.Kind, row.Issue)})
+		return fmt.Errorf("%w: %s is suspended, and is resumed for notice row %d", errNoticeWaits, architect, row.ID)
 	}
 	if earlier := earlierNoticeFor(tree, architect, r.holdsItsRole); earlier != 0 {
 		return fmt.Errorf("%w: %s's notice row %d waits behind its row %d", errNoticeWaits, architect, row.ID, earlier)
@@ -485,6 +496,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"tree", issue.Tree, "role", payload.Role)
 			return nil
 		}
+		// An operator's or unknown pre-0038 suspension holds its claim until the operator resumes
+		// it: the start, and the task it gives, wait on the row's backoff, before a quiesce
+		// interrupts the role whose phase it would take over. StartedBy refuses the same in the
+		// claim's own decision.
+		if found && machine.Claim().RuleHolds() {
+			return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, supervise.ErrHeldByOperator)
+		}
 		// A start that takes the phase over from a role still at work in it (CI settled red before
 		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
 		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
@@ -529,12 +547,20 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("start claim %s: %w", token, err)
 			}
 		case supervise.StateSuspended:
-			if err := machine.Handle(ctx, supervise.RequestResume{Claim: token}); err != nil {
+			// The role owns the issue's phase this start is for: the rule resumes it, unless an
+			// operator suspended it meanwhile, when the task's delivery below waits instead.
+			if err := machine.Handle(ctx, supervise.RequestRuleResume{Claim: token,
+				Reason: fmt.Sprintf("start row %d of %s (phase %q)", row.ID, issue.Key, payload.Phase)}); err != nil {
 				return fmt.Errorf("resume claim %s: %w", token, err)
 			}
 		case supervise.StateFailed:
-			// Only the workflow starts a role whose claim failed: the architect retrying the
-			// held phase, or a later transition that needs the role again.
+			// A boot rule-resume that spent its launch budget is terminal for this row: retrying it
+			// with RequestRetry would reset that budget and launch forever. The failure's workflow
+			// fact and boot report name it. Other workflow starts retain their existing retry rule.
+			if payload.RuleResume {
+				r.log.Info("outbox boot rule-resume finished: its claim spent the launch budget", "row", row.ID, "issue", issue.Key, "role", payload.Role)
+				return nil
+			}
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("retry claim %s: %w", token, err)
 			}
@@ -601,7 +627,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"row", row.ID, "issue", issue.Key, "role", payload.Role, "phase", issue.Phase, "start-row", last)
 			return nil
 		}
-		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason}); err != nil {
+		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason, By: supervise.SuspendedByDaemon}); err != nil {
 			return fmt.Errorf("suspend claim %s: %w", token, err)
 		}
 		return nil
