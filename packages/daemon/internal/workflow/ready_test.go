@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -461,7 +462,9 @@ func TestNoFactMovesAMemberOfALingeringTree(t *testing.T) {
 // belongs to the old root, so every approval of it arrives keyed by the old root. A copy carried
 // closed (a spec version bumped while the old tree lingered) refuses the carried merger's READY,
 // and the approval of that version opens every gate on the document, the old root's and the
-// copy, and releases the READY the copy refused.
+// copy, and releases the READY the copy refused. The old root's architect is told design-approved;
+// the carried root's is told carried-gate-opened, which starts nothing of section 2's design
+// approval, since its tree's design was approved before the carry.
 func TestAnApprovalOfTheOldRootsDocumentReleasesACarriedChildsREADY(t *testing.T) {
 	pool := migratedPool(t)
 	ctx := context.Background()
@@ -493,6 +496,23 @@ func TestAnApprovalOfTheOldRootsDocumentReleasesACarriedChildsREADY(t *testing.T
 		if err := pool.QueryRow(ctx, "select approved_version from design_gates where issue = $1", key).Scan(&approved); err != nil || approved == nil || *approved != 2 {
 			t.Fatalf("%s's gate approved version = %v, %v; want 2", key, approved, err)
 		}
+	}
+	var notices []string
+	rows, err := pool.Query(ctx, `select issue || ' ' || (payload->>'kind') from outbox where kind = 'notice'
+		and payload->>'kind' in ('design-approved', 'carried-gate-opened') order by id`)
+	if err != nil {
+		t.Fatalf("read notices: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var notice string
+		if err := rows.Scan(&notice); err != nil {
+			t.Fatalf("scan notice: %v", err)
+		}
+		notices = append(notices, notice)
+	}
+	if want := []string{"LEGION-208 design-approved", "LEGION-209 carried-gate-opened"}; !slices.Equal(notices, want) {
+		t.Fatalf("notices = %v, want %v", notices, want)
 	}
 }
 

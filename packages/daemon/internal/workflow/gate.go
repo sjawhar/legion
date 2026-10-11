@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 
@@ -57,10 +58,11 @@ func (e *Engine) dispatchArtifact(ctx context.Context, tx pgx.Tx, fact intake.Di
 		return intake.Result{}, err
 	}
 	for _, gate := range gates {
-		if gate.Issue != fact.Key && !copyTakes(gate, fact) {
+		carried := gate.Issue != fact.Key
+		if carried && !copyTakes(gate, fact) {
 			continue
 		}
-		if err := e.applyArtifact(ctx, tx, gate, fact); err != nil {
+		if err := e.applyArtifact(ctx, tx, gate, fact, carried); err != nil {
 			return intake.Result{}, err
 		}
 	}
@@ -80,8 +82,11 @@ func copyTakes(gate record.DesignGate, fact intake.DispatchArtifact) bool {
 // applyArtifact applies an artifact event to one gate, for the issue that holds it: an approval
 // opens it and advances that issue's admitted tree, a changes request or a new version closes it,
 // and an open gate releases the READYs it refused in that issue's tree. Each open or close is
-// logged, and a changes request that finds the gate closed has a line of its own.
-func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact) error {
+// logged, and a changes request that finds the gate closed has a line of its own. The architect is
+// told an opening as design-approved, which starts its tree's work, except for a carried copy
+// (carried): that tree's design was approved before the carry, so its architect is told
+// carried-gate-opened, which says only what the opening released.
+func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact, carried bool) error {
 	key := gate.Issue
 	wasOpen := classify.DesignGateOpen(gate)
 	kind := classify.DesignGateEventKind(fact.Kind)
@@ -106,7 +111,12 @@ func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.Desig
 		}
 	}
 	if !wasOpen && isOpen {
-		if err := e.notice(ctx, tx, key, record.Notice{Kind: "design-approved", Version: fact.Version}); err != nil {
+		opened := record.Notice{Kind: "design-approved", Version: fact.Version}
+		if carried {
+			opened = record.Notice{Kind: "carried-gate-opened", Version: fact.Version, Reason: fmt.Sprintf(
+				"a human approved %s's spec document at version %d, which opens the gate %s carried; any READY it refused is released and any child waiting on it starts", fact.Key, fact.Version, key)}
+		}
+		if err := e.notice(ctx, tx, key, opened); err != nil {
 			return err
 		}
 		issue, err := e.store.Issue(ctx, tx, key)

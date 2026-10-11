@@ -48,7 +48,8 @@ not begin planning anew: the daemon has already started the role of its current 
 the root is held, tells you of the hold with a `held` notice to retry or escalate. The carried gate
 is a copy on the old root's spec document, which belongs to the old tree: nothing done to that
 document after the carry closes your gate, and a gate carried closed opens when a human approves
-the old document at the carried version or a later one, releasing any READY it refused. Do nothing
+the old document at the carried version or a later one, releasing any READY it refused; you are
+told so with `carried-gate-opened`, never `design-approved`, and start nothing for it. Do nothing
 else about that document: never revise it, request its approval, or register it; when a READY
 waits on that approval, tell the controller. Resume the tree from there; at `production_check`,
 once the check finishes and you have verified its record on the pull request and the issue,
