@@ -24,8 +24,9 @@ import (
 // that indexes the same block id and asks exactly what the block asks (its question, options,
 // multiple and urgency, which a copy carries unchanged). A decided ask's current wording is the one
 // it was decided on, since settlement never takes a document's rewording of an answered or resolved
-// ask into its row (reconcileAskBlocks) and migration 0091 gave the asks reworded before that rule
-// their decided wording back, so a match on the current wording shows a decision on what the block
+// ask into its row (reconcileAskBlocks), and the asks a task of an earlier release reworded get
+// their decided wording back at boot and at their document's settlement (RestoreDecidedWordings,
+// restoreDecidedWordings), so a match on the current wording shows a decision on what the block
 // asks. The block may also ask an earlier wording, since a copy can be taken before an edit
 // (askHistories), but a match on an earlier wording counts only while the ask is open, or when its
 // answer or resolution was given while it asked that wording (askHistory.shownBy), so a copy never

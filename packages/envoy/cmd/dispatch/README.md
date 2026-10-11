@@ -386,13 +386,7 @@ Migration `0068_people` creates `people`, everyone who has signed in, holding th
 refresh token for a person who signed in through it, and drops `users`, the GitHub OAuth token pair
 of each GitHub login that signed in, which the GitHub proxy acted with before it read GitHub as the
 App. It locks `users` alone, `ACCESS EXCLUSIVE` for the drop; `people` is new. Its census counts the
-`users` rows the drop deletes, so wherever anyone signed in with GitHub it answers non-zero and the
-pre-deploy census of the release that carries it refuses:
-`REFUSED 0068_people.up.sql: its census counts <n> (0068_people.census.sql)`. That refusal is
-expected for this release: no code reads those rows once it ships. The deployer checks that `<n>`
-is `select count(*) from users` and that the report ends `census: REFUSED (1 reason)`, so 0068's
-count is its only refusal, and then rolls the release. Any other reason (a lock holder, a long
-transaction, a table over the limit) still stops the deploy.
+`users` rows the drop deletes.
 
 No migration retires the refresh tokens that `0068`'s release stored in plain text: every boot does
 (Identity, above), since a task of that release can write one during the roll, or after a
@@ -460,20 +454,19 @@ copy of and for the copies of an ask it retracts, and so do the answer and resol
 copies of the ask they close (LEGION-651). Building it takes `SHARE` on `artifacts`; its census
 answers `0` because it refuses and rewrites no row.
 
-Migration `0091_decided_ask_wording` gives each answered or resolved ask that a document edit
-reworded after its decision back the wording that decision was given on: the `previous` wording of
-the first `ask.edited` after its latest `ask.answered` or `ask.resolved`, with no `ask.opened`
-between (LEGION-651). It reads `events` through `events_ask_payload_id` and writes only the rows
-whose wording differs, taking `ROW EXCLUSIVE` on `asks`. Its census counts those rows, so the
-pre-deploy census of the release that carries it refuses wherever one exists:
-`REFUSED 0091_decided_ask_wording.up.sql: its census counts <n> (0091_decided_ask_wording.census.sql)`.
-That refusal is expected for this release, since rewriting those rows is the migration's purpose.
-The deployer checks that the report ends `census: REFUSED (1 reason)`, so 0091's count is its only
-refusal, and then rolls the release; any other reason still stops the deploy. It marks no
-settlement owed: each block is written back to its decided wording by its document's next
-settlement, whenever that document next changes. A settlement the task being replaced runs during
-the roll still takes a reworded block's text into its decided ask, as that release does, so a
-document edited in that window can undo the migration for its asks.
+A decided ask that a release before LEGION-651 reworded gets back, in code, the wording its decision
+was given on: the `previous` wording of the first `ask.edited` after its latest `ask.answered` or
+`ask.resolved`, with no `ask.opened` between. No migration rewrites those rows, since the census
+refuses one that does (Pre-deploy census, below). Every boot runs the restoration over every
+decided ask in one statement (`docs.Service.RestoreDecidedWordings`, bounded at 30 s), reading
+`events` through `events_ask_payload_id` and writing only the rows whose wording differs; it logs
+`dispatch: restored a decided ask's wording` for each with the ask, its document and the question
+it asks again, then `dispatch: restored decided asks' wordings` with the count. On the
+2026-10-11 production dump (3,739 asks, 82,153 events) it restores 5 asks in 1.3 s, so the first
+boot of the release that carries it logs those 5. Each document's settlement runs the same
+statement over its own decided asks before it reconciles them, so a rewording a task of the
+earlier release writes during the roll is undone by that document's next settlement on this
+release, which also writes the decided wording back into the block.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -483,7 +476,9 @@ it backfills each artifact's project and generated `ref_key`.
 ### Pre-deploy census
 
 Before a deployment rolls a new image, it runs `envoy-dispatch census` with the service's
-`DATABASE_URL`, as a one-off task under the service's own database credentials:
+`DATABASE_URL`, as a one-off task under the service's own database credentials, and the census is
+a gate: a census that refuses fails the deploy before the service moves, and nothing accepts a
+refusal and rolls past it.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch census
@@ -563,6 +558,12 @@ census like every later one. It refuses:
 - a census that fails or answers anything but one integer in one row;
 - a database that records no version yet holds tables, on its first migration: the runner would
   apply every migration from `0001` over them.
+
+So a migration that changes values readers already had, whose census counts the rows it rewrites,
+cannot pass the census wherever such a row exists, and a release that must repair existing rows
+does so in code instead: an idempotent pass at boot, and on the path that reads the rows, so a task
+of the earlier release still running during the roll cannot undo it. The restoration of decided
+asks' wordings (`docs.Service.RestoreDecidedWordings`, Database migrations above) is one.
 
 A migration declares its census in `<version>_<name>.census.sql` beside it: one `select` (or
 `with … select`) answering one integer, how many existing rows the migration would refuse (a

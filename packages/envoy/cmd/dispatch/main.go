@@ -264,6 +264,7 @@ func main() {
 		ServerURL: serverURL,
 		Settle:    boot.SettleDelay,
 	})
+	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
 
 	serviceTokens, err := oidc.Discover(ctx, boot.OIDCIssuer, boot.OIDCAudience, oidc.DiscoveryTimeout)
 	if err != nil {
@@ -738,6 +739,26 @@ func sessionSigningKey(boot bootConfig, dataDir string) (string, error) {
 func newDocumentService(boot bootConfig, built docs.Deps) *docs.Service {
 	built.AgentTokens = boot.AgentTokens
 	return docs.New(built)
+}
+
+// decidedWordingRestoreTimeout bounds the boot's restoration of decided asks' wordings. On a copy
+// of production's asks and events (3,547 asks, 77,061 events) its statement took 1.0-1.5 s.
+const decidedWordingRestoreTimeout = 30 * time.Second
+
+// restoreDecidedWordings is the boot's restoration of the wording each decided ask was decided on,
+// where a task of an earlier release reworded it (docs.Service.RestoreDecidedWordings), bounded by
+// timeout. Each ask it restored has its own line; this logs their count. A restoration that fails
+// or runs out of time is logged and the start goes on, since each document's next settlement
+// restores its own asks.
+func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeout time.Duration) {
+	restoreCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	restored, err := documents.RestoreDecidedWordings(restoreCtx)
+	if err != nil {
+		slog.Error("dispatch: restore decided asks' wordings", "error", err)
+		return
+	}
+	slog.Info("dispatch: restored decided asks' wordings", "restored", restored)
 }
 
 // appContextOptions is what main hands routes.BuildAppContext: built, what main made from the

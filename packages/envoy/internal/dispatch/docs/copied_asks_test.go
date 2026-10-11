@@ -466,6 +466,16 @@ const mondayAnswered = `:::ask{#ship urgency="med" multiple="false" state="answe
 
 var mondayAnswer = model.AskAnswer{User: "alice", Selected: []string{"Yes"}, At: time.Date(2026, 10, 9, 9, 0, 0, 0, time.UTC)}
 
+// decidedShip is how a test closes the ship block's ask, answered with mondayAnswer or resolved as
+// closing names (closeSource's answer, nil for a resolution), and the block's opener once its
+// source carries that decision on the Monday wording.
+func decidedShip(closing string) (*model.AskAnswer, string) {
+	if closing == "answered" {
+		return &mondayAnswer, mondayAnswered
+	}
+	return nil, `:::ask{#ship urgency="med" multiple="false" state="resolved"}` + "\nShip on Monday?\n\n- Yes: Monday.\n- No: Later.\n:::"
+}
+
 // askEditsOf counts the ask.edited events of ask.
 func askEditsOf(t *testing.T, service *Service, ask string) int {
 	t.Helper()
@@ -505,11 +515,7 @@ func TestADocumentEditOfADecidedAsksWordingIsWrittenBackAndLeavesItsRow(t *testi
 				seedServiceText(t, service, original, "Context\n\n"+shipBlock)
 				settleCurrentGeneration(t, service, original)
 				source := blockAskOn(t, service, original, "ship")
-				var answer *model.AskAnswer
-				opener := `:::ask{#ship urgency="med" multiple="false" state="resolved"}` + "\nShip on Monday?\n\n- Yes: Monday.\n- No: Later.\n:::"
-				if closing == "answered" {
-					answer, opener = &mondayAnswer, mondayAnswered
-				}
+				answer, opener := decidedShip(closing)
 				if err := closeSource(context.Background(), service, original, "ship", source, answer, nil); err != nil {
 					t.Fatal(err)
 				}
@@ -529,6 +535,94 @@ func TestADocumentEditOfADecidedAsksWordingIsWrittenBackAndLeavesItsRow(t *testi
 				}
 			})
 		}
+	}
+}
+
+// rewordAsAnEarlierRelease writes the Tuesday wording into ask's row, as a task of the release
+// before LEGION-651 did when its settlement found the ship block reworded on document (that
+// release's reconcileAskBlocks), whatever the ask's state: the row takes the block's question and
+// options with edited_at, its question is indexed again, and an ask.edited records the wording it
+// replaced, under the document's owner row.
+func rewordAsAnEarlierRelease(t *testing.T, service *Service, document string, ask model.Ask) {
+	t.Helper()
+	ctx := context.Background()
+	tx, err := service.store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the earlier release's rewording: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	owner, _, err := lockArtifactOwner(ctx, tx, document)
+	if err != nil {
+		t.Fatalf("lock the document's owner row: %v", err)
+	}
+	previous := model.NewAskEditPrevious(ask)
+	ask.Question = "Ship on Tuesday?"
+	ask.Options = []model.AskOption{{Label: "Tuesday", Description: "Ship it."}, {Label: "No", Description: "Later."}}
+	options, _ := json.Marshal(ask.Options)
+	var editedAt time.Time
+	if err := tx.QueryRow(ctx, `update asks set question = $2, options = $3, edited_at = now() where id = $1 returning edited_at`,
+		ask.ID, ask.Question, options).Scan(&editedAt); err != nil {
+		t.Fatalf("reword the decided ask's row: %v", err)
+	}
+	ask.EditedAt = askTimestamp(&editedAt)
+	changes, err := refs.ReplaceCounted(ctx, tx, "ask", ask.ID, ask.Question, service.serverURL)
+	if err != nil {
+		t.Fatalf("index the reworded question: %v", err)
+	}
+	if _, err := service.events.Append(ctx, tx, documentAskEvent(owner, document, "ask.edited", SettlementActor,
+		model.NewAskEditEventPayload(ask, previous, SettlementActor, changes))); err != nil {
+		t.Fatalf("append the rewording's ask.edited: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the earlier release's rewording: %v", err)
+	}
+}
+
+// A task of the release before LEGION-651, still running during a rolling deploy after this
+// release's boot restored every decided ask, takes a document's rewording of an answered or
+// resolved ask into its row: the row asks the new wording beside the decision made on the old. The
+// document's next settlement on this release gives the row back the wording the decision was given
+// on, writes it back into the block, and logs the ask, its document and the restored question;
+// the boot's restoration then finds nothing left to restore.
+func TestASettlementRestoresADecidedAskAnEarlierReleaseReworded(t *testing.T) {
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	for _, closing := range []string{"answered", "resolved"} {
+		t.Run(closing, func(t *testing.T) {
+			service, original := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, original, "Context\n\n"+shipBlock)
+			settleCurrentGeneration(t, service, original)
+			answer, opener := decidedShip(closing)
+			if err := closeSource(context.Background(), service, original, "ship", blockAskOn(t, service, original, "ship"), answer, nil); err != nil {
+				t.Fatal(err)
+			}
+			source := blockAskOn(t, service, original, "ship")
+			editLiveTree(t, service, original, func(tree *pmdoc.Node) *pmdoc.Node {
+				return replaceRun("Yes: Monday.", "Tuesday: Ship it.")(replaceRun("Ship on Monday?", "Ship on Tuesday?")(tree))
+			})
+			rewordAsAnEarlierRelease(t, service, original, source)
+
+			settleCurrentGeneration(t, service, original)
+			decided := blockAskOn(t, service, original, "ship")
+			if decided.State != closing || decided.Question != "Ship on Monday?" || len(decided.Options) != 2 || decided.Options[0].Label != "Yes" {
+				t.Fatalf("the %s ask reads %s %q %v after its document's settlement, want the wording it was decided on", closing, decided.State, decided.Question, decided.Options)
+			}
+			requireCopiedStates(t, service, original, opener)
+			line := logs.Lines(source.ID)
+			if !strings.Contains(line, "restored a decided ask's wording") || !strings.Contains(line, original) || !strings.Contains(line, `question="Ship on Monday?"`) {
+				t.Fatalf("the settlement logged %q, want a line naming the ask, its document and the restored question", line)
+			}
+			if strings.Contains(line, "Tuesday") {
+				t.Fatalf("the settlement logged the wording it replaced: %q", line)
+			}
+			restored, err := service.RestoreDecidedWordings(context.Background())
+			if err != nil || restored != 0 {
+				t.Fatalf("the boot's restoration after the settlement restored %d asks (%v), want none left", restored, err)
+			}
+		})
 	}
 }
 

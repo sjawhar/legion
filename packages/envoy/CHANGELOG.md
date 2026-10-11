@@ -439,9 +439,12 @@
   a document edit or an upload that changes its block's question, options, `multiple` or urgency
   no longer rewords the ask and leaves its answer beside a question nobody answered; settlement
   writes the decided wording back into the block and logs it, as `PATCH /api/v1/asks/{id}` already
-  refused such an edit (`ASK_NOT_OPEN`). Migration `0091_decided_ask_wording` gives each ask
-  reworded after its decision back the wording that decision was given on, and the document's next
-  settlement repairs its block (LEGION-651).
+  refused such an edit (`ASK_NOT_OPEN`). Each ask an earlier release reworded after its decision
+  gets back the wording that decision was given on, in code and not by a migration: every boot
+  restores them all in one statement and logs each ask, its document and its question, and each
+  document's settlement restores its own before it writes the decided wording back into the block,
+  which also undoes a rewording an earlier release's task writes during a rolling deploy
+  (LEGION-651).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

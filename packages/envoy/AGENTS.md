@@ -1605,9 +1605,19 @@ wording is left as it is, logged at ERROR, and the row still keeps its decided w
 wants another question writes a new ask block; reopening the ask would put a new question in a
 person's Inbox for an edit they may not have meant as one. An ask settlement restores after a
 retraction follows the state the restoration gives it: one restored open takes its block's text,
-one restored with its answer keeps the wording that answer was given on. Migration
-`0091_decided_ask_wording` gives back to each ask reworded after its decision before this rule the
-wording its decision was given on. A route that changes an ask's text or lifecycle writes both:
+one restored with its answer keeps the wording that answer was given on. A decided ask that a
+release before this rule reworded - its row holding a document's edit beside the decision made on
+the wording before it - gets back the wording its decision was given on, the previous wording of
+the first `ask.edited` after its latest `ask.answered` or `ask.resolved` with no `ask.opened`
+between, in code rather than by a migration, since the pre-deploy census refuses a migration that
+rewrites rows (`cmd/dispatch/README.md`, "Pre-deploy census"): once at boot over every decided ask
+(`docs.Service.RestoreDecidedWordings`, one statement), and at every settlement over its document's
+decided asks (`restoreDecidedWordings`, the same statement scoped to their ids), which also undoes
+a rewording a task of that release writes during a rolling deploy. Both are
+`decidedWordingRestore`, re-index the restored question's references and log each ask they
+restore, its document and the question it asks again (`dispatch: restored a decided ask's
+wording`), never the wording it replaced; the boot then logs the count (`dispatch: restored
+decided asks' wordings`). A route that changes an ask's text or lifecycle writes both:
 `PATCH /api/v1/asks/{id}` on a block ask (an open one; a decided one is `409 ASK_NOT_OPEN`) writes
 the block through the document ledger and then takes the row's values from what the block parses
 back to, and `POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the

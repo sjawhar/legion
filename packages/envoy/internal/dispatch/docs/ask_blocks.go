@@ -192,8 +192,10 @@ func settlementRetraction(resolution model.AskResolution) bool {
 
 // reconcileAskBlocks makes the asks rows and the ask blocks of tree, the document settlement read,
 // agree. A new block is authored by the update that introduced it (askBlockSources.author); one
-// whose update observer has not run is left for the settlement that observer arms. A block copied
-// from another document's ask opens none and shows that ask's state instead (copiedAskSources).
+// whose update observer has not run is left for the settlement that observer arms.
+// A block copied from another document's ask opens none and shows that ask's state instead
+// (copiedAskSources). A decided ask of this document that a task of an earlier release reworded
+// gets its decided wording back first (restoreDecidedWordings), so the block is written back to it.
 // before is the document's rendering as settlement read it ("" where it did not render), which the
 // answers settlement writes back into returning blocks are weighed against (withholdAnswers).
 func (s *Service) reconcileAskBlocks(
@@ -211,6 +213,9 @@ func (s *Service) reconcileAskBlocks(
 	}
 	rows, err := loadAskBlocks(ctx, tx, artifactID)
 	if err != nil {
+		return settlementReconciliation{}, err
+	}
+	if err := s.restoreDecidedWordings(ctx, tx, rows); err != nil {
 		return settlementReconciliation{}, err
 	}
 
