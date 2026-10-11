@@ -656,6 +656,67 @@ test("colouring by Parent agent offers the values to give their own colour and l
   }
 });
 
+test("a facet pick leaves the window rolling: it writes no from or to", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    facet_counts: { ...emptyCounts, priority: { P0: 1 } },
+  });
+  try {
+    renderPage("/delivery?mode=list");
+    fireEvent.click(await screen.findByRole("button", { name: /^Priority/ }));
+    fireEvent.click(
+      within(screen.getByRole("listbox", { name: "Priority options" })).getByRole("option", {
+        name: /^P0/,
+      })
+    );
+    await waitFor(() => expect(currentSearch().getAll("priority")).toEqual(["P0"]));
+    expect(currentSearch().has("from")).toBe(false);
+    expect(currentSearch().has("to")).toBe(false);
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("the window control: a preset rolls and clears the brush, a custom range writes its days", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
+  try {
+    renderPage(
+      `/delivery?mode=list&ws=${encodeURIComponent("2024-06-01T06:00:00Z")}&we=${encodeURIComponent("2024-06-01T12:00:00Z")}`
+    );
+    fireEvent.change(await screen.findByLabelText("Window"), { target: { value: "7d" } });
+    await waitFor(() => expect(currentSearch().get("window")).toBe("7d"));
+    expect(currentSearch().has("ws")).toBe(false);
+    expect(currentSearch().has("we")).toBe(false);
+    expect(currentSearch().has("from")).toBe(false);
+    await waitFor(() => {
+      const options = getDeliveryTimeline.mock.lastCall?.[0];
+      expect(Date.parse(options?.to ?? "") - Date.parse(options?.from ?? "")).toBe(
+        7 * 24 * 60 * 60 * 1000
+      );
+    });
+
+    fireEvent.change(screen.getByLabelText("Window"), { target: { value: "custom" } });
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-01-01" } });
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-01-07" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(currentSearch().get("from")).toBe("2026-01-01T00:00:00.000Z"));
+    expect(currentSearch().get("to")).toBe("2026-01-08T00:00:00.000Z");
+    expect(currentSearch().has("window")).toBe(false);
+    await waitFor(() =>
+      expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          from: "2026-01-01T00:00:00.000Z",
+          to: "2026-01-08T00:00:00.000Z",
+        })
+      )
+    );
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
 /** happy-dom has no canvas, and ECharts throws without a 2D context: a context that accepts every
  *  call lets the timeline mount, though it paints nothing. */
 function stubCanvasContext(): () => void {

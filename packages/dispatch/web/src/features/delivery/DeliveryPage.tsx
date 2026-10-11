@@ -42,13 +42,18 @@ import {
   type ReworkFacet,
 } from "./lib/facets";
 import { parentAgentLabel } from "./lib/parentAgent";
+import {
+  DEFAULT_WINDOW_PRESET,
+  presetRange,
+  readWindow,
+  type WindowChoice,
+  type WindowPreset,
+} from "./lib/window";
 import { MeasuresPanel } from "./MeasuresPanel";
 import { PRList } from "./PRList";
 import { SourceFreshness } from "./SourceFreshness";
 import { Timeline, type TimelineSelection } from "./Timeline";
-
-/** The window the page reads when its URL names none: the prototype's 28 days. */
-const DEFAULT_WINDOW_MS = 28 * 24 * 60 * 60 * 1000;
+import { WindowControl } from "./WindowControl";
 
 /** How long the search waits after the last keystroke before the server is asked again. */
 const SEARCH_DEBOUNCE_MS = 250;
@@ -86,6 +91,9 @@ export interface BrushWindow {
 }
 
 interface DeliveryUrlState {
+  /** The window the URL names: a rolling preset or a custom range. */
+  window: WindowChoice;
+  /** That window's range: a preset's ends at the moment the preset was chosen or first read. */
   from: string;
   to: string;
   filters: Filters;
@@ -100,19 +108,28 @@ interface DeliveryUrlState {
  *  identity, so a render with an unchanged URL hands `deliveryTimelineQuery` the same options. */
 function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => void] {
   const [searchParams] = useSearchParams();
-  const defaultWindowRef = useRef<{ from: string; to: string } | undefined>(undefined);
-  // Frozen at first render: computing "now" fresh on every render would mint a new ISO string
-  // (and so a new deliveryTimelineQuery cache key) on every render whenever the URL carries no
-  // explicit from/to, refetching in a tight loop instead of once.
-  if (defaultWindowRef.current === undefined) {
-    const nowMs = Date.now();
-    defaultWindowRef.current = {
-      from: new Date(nowMs - DEFAULT_WINDOW_MS).toISOString(),
-      to: new Date(nowMs).toISOString(),
-    };
+  const windowChoice = readWindow(searchParams);
+  // A preset's range is computed when the preset is chosen or first read, then held: computing
+  // "now" fresh on every render would mint a new ISO string (and so a new deliveryTimelineQuery
+  // cache key) on every render, refetching in a tight loop instead of once. A custom range drops
+  // it, so coming back to a preset starts it from that moment.
+  const presetRef = useRef<{ preset: WindowPreset; from: string; to: string } | undefined>(
+    undefined
+  );
+  let from: string;
+  let to: string;
+  if (windowChoice.kind === "custom") {
+    presetRef.current = undefined;
+    ({ from, to } = windowChoice);
+  } else {
+    if (presetRef.current?.preset !== windowChoice.preset) {
+      presetRef.current = {
+        preset: windowChoice.preset,
+        ...presetRange(windowChoice.preset, Date.now()),
+      };
+    }
+    ({ from, to } = presetRef.current);
   }
-  const from = searchParams.get("from") ?? defaultWindowRef.current.from;
-  const to = searchParams.get("to") ?? defaultWindowRef.current.to;
   const search = searchParams.get("q") ?? "";
   const colorByParam = searchParams.get("colorBy");
   const colorBy = COLOR_FACETS.find((facet) => facet === colorByParam) ?? DEFAULT_COLOR_BY;
@@ -141,8 +158,16 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
   const setState = useCallback(
     (next: DeliveryUrlState) => {
       update((params) => {
-        params.set("from", next.from);
-        params.set("to", next.to);
+        if (next.window.kind === "custom") {
+          params.set("from", next.window.from);
+          params.set("to", next.window.to);
+          params.delete("window");
+        } else {
+          params.delete("from");
+          params.delete("to");
+          if (next.window.preset === DEFAULT_WINDOW_PRESET) params.delete("window");
+          else params.set("window", next.window.preset);
+        }
         for (const key of FACET_KEYS) {
           params.delete(key);
           for (const value of next.filters[key]) params.append(key, value);
@@ -169,7 +194,7 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
     [update]
   );
 
-  return [{ from, to, filters, view, brush }, setState];
+  return [{ window: windowChoice, from, to, filters, view, brush }, setState];
 }
 
 /** `value`, once it has held still for `delayMs`. */
@@ -376,6 +401,17 @@ export function DeliveryPage(): ReactNode {
     <section className="flex flex-col gap-3 xl:h-[calc(100dvh-3rem)]">
       <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h1 className={`text-xl font-bold ${textPrimaryOnCanvas}`}>Delivery timeline</h1>
+        {notConfigured ? null : (
+          <WindowControl
+            key={
+              state.window.kind === "custom"
+                ? `${state.window.from}|${state.window.to}`
+                : state.window.preset
+            }
+            onChange={(window) => setState({ ...state, window, brush: null })}
+            value={state.window}
+          />
+        )}
         {data === undefined ? null : (
           <div className={`text-xs ${textMutedOnCanvas}`}>
             Generated {new Date(answeredAt).toLocaleString()} · window{" "}
