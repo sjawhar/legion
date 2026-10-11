@@ -15,11 +15,12 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
-// strandedStore is the issue record and the queued supervise rows Stranded reads; every claim's
-// stored row is the one its role run reads back.
+// strandedStore is the issue record, the admission slots and the queued supervise rows Stranded
+// reads; every claim's stored row is the one its role run reads back.
 type strandedStore struct {
 	record.Store
 	issues        []record.Issue
+	slots         []record.Slot
 	queued        map[claim.Token][]record.QueuedSupervise
 	claims        map[claim.Token]supervise.Claim
 	roleRunCalls  int
@@ -27,6 +28,17 @@ type strandedStore struct {
 }
 
 func (s *strandedStore) Issues(context.Context, pgx.Tx) ([]record.Issue, error) { return s.issues, nil }
+
+func (s *strandedStore) Slots(context.Context, pgx.Tx) ([]record.Slot, error) { return s.slots, nil }
+
+// slotsOf is one admission slot for each of keys.
+func slotsOf(keys ...string) []record.Slot {
+	slots := make([]record.Slot, len(keys))
+	for i, key := range keys {
+		slots[i] = record.Slot{Issue: key, Index: i}
+	}
+	return slots
+}
 
 func (s *strandedStore) RoleRun(_ context.Context, _ pgx.Tx, token claim.Token, _ string, _ claim.Role, _ uint64) (record.RoleRun, error) {
 	s.roleRunCalls++
@@ -75,6 +87,15 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 	held.Hold = &record.Hold{From: phase.Reviewing}
 	lingering := strandedIssue("LEGION-7", "LEGION-7", phase.Done)
 	lingering.LingerUntil = &until
+	// A lingering root re-admitted while every slot is taken: readmit has cleared its linger and
+	// recorded a new generation waiting for a slot, and the architect the linger suspended stays
+	// suspended with no start queued. Admission starts it once a slot frees; resumed now, it would
+	// run outside the cap.
+	waiting := strandedIssue("LEGION-10", "LEGION-10", phase.Admitted)
+	waiting.Generation, waiting.Status, waiting.HandedOver = 3, "todo", true
+	// A root a person moved out of the workflow gave up its slot; its claims wait on that person.
+	shelved := strandedIssue("LEGION-11", "LEGION-11", phase.Implementing)
+	shelved.Status = "backlog"
 	issues := []record.Issue{
 		strandedIssue("LEGION-1", "LEGION-1", phase.Implementing),
 		strandedIssue("LEGION-2", "LEGION-1", phase.Retro),
@@ -85,6 +106,8 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		lingering,
 		strandedIssue("LEGION-8", "LEGION-7", phase.ProductionCheck),
 		strandedIssue("LEGION-9", "LEGION-404", phase.Planning),
+		waiting,
+		shelved,
 	}
 
 	implementer := strandedClaim(t, "LEGION-1", "LEGION-1", claim.RoleImplementer, supervise.StateSuspended)
@@ -122,6 +145,10 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 		strandedClaim(t, "S2-1", "S2-1", claim.RoleImplementer, supervise.StateSuspended),
 		// A worker of its issue's phase that runs, or is launching, is not stranded.
 		strandedClaim(t, "LEGION-6", "LEGION-6", claim.RolePlanner, supervise.StateIdle),
+		// The architect of a root waiting for a slot, and the stalled tree a person shelved.
+		strandedClaim(t, "LEGION-10", "LEGION-10", claim.RoleArchitect, supervise.StateSuspended),
+		strandedClaim(t, "LEGION-11", "LEGION-11", claim.RoleArchitect, supervise.StateFailed),
+		strandedClaim(t, "LEGION-11", "LEGION-11", claim.RoleImplementer, supervise.StateSuspended),
 	}
 	stored := map[claim.Token]supervise.Claim{}
 	for _, c := range claims {
@@ -129,6 +156,7 @@ func TestStrandedNamesTheClaimsNothingWillWake(t *testing.T) {
 	}
 	s := &strandedStore{
 		issues: issues,
+		slots:  slotsOf("LEGION-1", "LEGION-3", "LEGION-4", "LEGION-5", "LEGION-6"),
 		claims: stored,
 		queued: map[claim.Token][]record.QueuedSupervise{
 			startQueued.Token:          {{ID: 11, Request: record.SuperviseRequest{Op: "start", Tree: "LEGION-4", Role: claim.RoleTester, Generation: 2, Phase: phase.Testing}}},
@@ -205,6 +233,7 @@ func TestStrandedReadsRoleRunsInBatches(t *testing.T) {
 	for i := range claimsCount {
 		issue := fmt.Sprintf("LEGION-%d", i+1)
 		store.issues = append(store.issues, strandedIssue(issue, issue, phase.Planning))
+		store.slots = append(store.slots, record.Slot{Issue: issue, Index: i})
 		current := strandedClaim(t, issue, issue, claim.RolePlanner, supervise.StateSuspended)
 		store.claims[current.Token] = current
 		claims = append(claims, current)

@@ -16,10 +16,9 @@ import (
 const strandedRoleRunBatchSize = 200
 
 // Stranded is every claim of s's issues that nothing will wake, by issue and then role. A claim is
-// stranded when its issue's tree runs — the tree's root is recorded and does not linger, since
-// linger holds every member where it stood and re-admission starts each one again — no start the
-// outbox still holds will wake it (StartFor, the rule promotion reads), and it is suspended or
-// failed and one of:
+// stranded when its issue's tree runs — the tree's root holds an admission slot and does not
+// linger, the rule admittedRoot applies — no start the outbox still holds will wake it (StartFor,
+// the rule promotion reads), and it is suspended or failed and one of:
 //
 //   - A worker of its issue's phase: the role RoleFor gives the phase its worker works
 //     (workingPhase), which a held issue keeps from the phase it left. Only a start of that phase
@@ -36,10 +35,14 @@ const strandedRoleRunBatchSize = 200
 // The operator's resume (`legion claims resume`) brings back a suspended one. A failed one ignores
 // resume and deliver: only a workflow start retries it, its architect's retry of the held phase for
 // a worker and its tree's re-admission for an architect.
+//
 // It names no other claim: a worker whose phase is not its own is started again when its phase
-// comes, and a lingering tree's members wait for its re-admission. claims are the caller's
-// transaction snapshot; the daemon's boot logs what this returns, and the state route serves it as
-// strandedClaims.
+// comes, and a tree whose root holds no slot runs nothing yet. That is a lingering tree, whose
+// members its re-admission starts again; a root re-admitted and waiting for a slot, whose architect
+// admission starts once one frees (resumed sooner, it would run outside the cap); and a root a
+// person moved out of the workflow, whose claims wait on that person. claims are the caller's
+// transaction snapshot, as are the slots read here; the daemon's boot logs what this returns, and
+// the state route serves it as strandedClaims.
 //
 // Candidates' queued starts and their claims are read through RoleRuns in bounded batches: a fleet
 // of hundreds of suspended claims makes a few snapshot queries, never one pair per claim.
@@ -51,6 +54,14 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 	recorded := make(map[string]record.Issue, len(issues))
 	for _, issue := range issues {
 		recorded[issue.Key] = issue
+	}
+	slots, err := s.Slots(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	slotted := make(map[string]struct{}, len(slots))
+	for _, slot := range slots {
+		slotted[slot.Issue] = struct{}{}
 	}
 	type candidate struct {
 		claim   supervise.Claim
@@ -69,6 +80,9 @@ func Stranded(ctx context.Context, tx pgx.Tx, s record.Store, claims []supervise
 		}
 		root, ok := recorded[issue.Tree]
 		if !ok || root.Lingers() {
+			continue
+		}
+		if _, running := slotted[root.Key]; !running {
 			continue
 		}
 		// current is the phase the start that would wake the claim names; the architect's names none.
