@@ -85,7 +85,7 @@ type workflowRuntime struct {
 	githubAPI string
 	// reviewAppLogin is the review App's bot login from its boot lease, as the engine holds it: a
 	// review it submits decides a round by that login and the reviewer's recorded session
-	// (workflow's decidesRound), so reviewerCanWrite asks GitHub nothing about it.
+	// (workflow's DecidesRound), so reviewerCanWrite asks GitHub nothing about it.
 	reviewAppLogin string
 	// permissions holds, by repository and login, until when reviewerCanWrite's read of GitHub
 	// stands as no write access; permissionTTL is how long one stands, zero, in production, being
@@ -95,6 +95,13 @@ type workflowRuntime struct {
 	permissions   map[permissionKey]time.Time
 	permissionTTL time.Duration
 	limitedUntil  time.Time
+	// refusedReviews is every review, by GitHub's review id, whose author the pass's read of a pull
+	// request's reviews found the workflow does not let decide (reviewToApply), so this process
+	// judges each such review once, as a webhook's review is judged once when it is delivered: an
+	// account given write access later never turns a review the read refused into a decision. It is
+	// held in memory only, so a restart's first pass judges again with the permission GitHub gives
+	// then. Only the pass touches it.
+	refusedReviews map[int64]bool
 	// failed carries the first supervision terminal fact that could not be applied. serve stops
 	// the daemon with it: the claim's terminal state is durable, so the next boot's replay applies
 	// the fact the failed callback lost.

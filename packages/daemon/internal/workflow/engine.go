@@ -39,7 +39,7 @@ type Config struct {
 	Clock           func() time.Time
 	// ReviewAppLogin is the review App's bot login (<slug>[bot]) from its boot token lease. A push
 	// by it is never a fix attempt, and a red on its red tests is planned; a review it submits decides
-	// a round whatever GitHub gives its bot account (decidesRound) and can be the reviewer's answer
+	// a round whatever GitHub gives its bot account (DecidesRound) and can be the reviewer's answer
 	// to a round it left undecided (reviewersAnswer). Empty matches no one. A workflow boot never
 	// leaves it empty: it refuses a review lease that names no login (daemon.mintAtBoot).
 	ReviewAppLogin string
@@ -420,11 +420,15 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 // pullRequestOpened records the pull request a branch opened, and a reopen is the same pull
 // request: its fix and blocked attempts are what bound the review rounds, so they are carried
 // over rather than rebuilt at zero, which made closing and reopening a way to buy a fresh cap, and
-// so is its newest review, which orders every review it will have, and what its base branch
-// requires - its required checks, and its required workflows with their runs at the head they were
-// read at - as last read, so the reopened head's first settlement is judged by all of it
-// (classify.HeadChecks). A new generation deletes a pull request that is not open, and all of them
-// with it.
+// so is the counted attempt the cap holds a red in (classify.FixAttemptCapHolds), and its newest
+// review, which orders every review it will have, and what its base branch requires - its required
+// checks, and its required workflows with their runs at the head they were read at - as last read,
+// so the reopened head's first settlement is judged by all of it (classify.HeadChecks). A reopen at
+// another head than the recorded one - commits pushed while the pull request was closed, which no
+// synchronize reports - is judged as a synchronize to that head would be
+// (classify.AdvancePullRequestHead): onto a red verdict it counts, onto a green one it leaves the
+// counted attempt. A new generation deletes a pull request that is not open, and all of them with
+// it.
 func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.PullRequestOpened) (intake.Result, error) {
 	issue, err := e.issueForBranch(ctx, tx, fact.Branch)
 	if err != nil || issue == nil {
@@ -453,7 +457,12 @@ func (e *Engine) pullRequestOpened(ctx context.Context, tx pgx.Tx, fact intake.P
 		if !fact.Reopened || recorded.State == record.PullRequestMerged {
 			return intake.Result{}, nil
 		}
-		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = recorded.FixAttempts, recorded.BlockedAttempts, recorded.ReviewSeen
+		carried := *recorded
+		if fact.HeadSHA != recorded.HeadSHA {
+			carried = classify.AdvancePullRequestHead(carried, fact.HeadSHA)
+		}
+		pr.FixAttempts, pr.BlockedAttempts, pr.ReviewSeen = carried.FixAttempts, carried.BlockedAttempts, recorded.ReviewSeen
+		pr.HeadCounted, pr.HeadCountedBefore = carried.HeadCounted, carried.HeadCountedBefore
 		pr.Required, pr.Workflows, pr.WorkflowsHead = recorded.Required, recorded.Workflows, recorded.WorkflowsHead
 		pr.HeadUpdatedAt = classify.LatestClock(recorded.HeadUpdatedAt, fact.UpdatedAt)
 	}

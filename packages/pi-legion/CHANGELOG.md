@@ -86,7 +86,7 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   from Dispatch's Agents page, and the controller answers it first, in the conversation. The
   daemon's `How this controller runs` prompt for that launch says the same.
   `legion.daemonApiVersion` is unchanged.
-- `legion.daemonApiVersion` is 19 (LEGION-668): the controller holds the review App's GitHub token
+- `legion.daemonApiVersion` is 20 (LEGION-668): the controller holds the review App's GitHub token
   like every role — a daemon-launched controller pod gets it as a mounted gh directory
   (`GH_CONFIG_DIR`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` emptied, backed by a
   `gh-controller` volume of the role Secret) and `legion controller start` fetches it over `POST

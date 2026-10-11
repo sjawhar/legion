@@ -60,7 +60,7 @@ func TestHelloResolverRejectsAnUnknownTokenAtOnceDuringTheBootWait(t *testing.T)
 // not rejected: a live pane reconnecting while the boot's readiness gate still waits out an
 // unreachable NATS or Dispatch (daemon.go's run, LEGION-580) waits on s.restored alone, with no
 // deadline of its own, and is judged only once restoration closes it (supervision.start, once every
-// stored claim has its machine and the boot's unfinished launches have been relaunched).
+// stored claim has its machine and the boot orphan reconciliation has run).
 func TestHelloResolverHoldsAKnownTokenUntilRestoredRatherThanRejectingItAfterTheTimeout(t *testing.T) {
 	sup := newSupervisor(context.Background(), nil, "PROJECT", "", quietLogger())
 	const resolveTimeout = 20 * time.Millisecond
@@ -234,20 +234,19 @@ func (s *relaunchingStore) RetireDelivery(ctx context.Context, c supervise.Claim
 	return s.PutClaim(ctx, c)
 }
 
-// A claim stored mid-launch across a restart (generation 1, no locator) relaunches to generation
-// 2 inside s.start — ahead of close(s.restored) — while a shim's hello for generation 1's own
-// token is already held in helloResolver, resolved once before the hold started. Judging that
-// hold by the first resolve alone would accept the old generation after its claim has already
-// moved on, taking the stream slot the real generation-2 shim's own hello then finds "already
-// bound to a live stream". The fix resolves the token again once restoration ends and judges
-// generation 1's hello by that second resolve. This process writes generation 1's claim before
-// generation 2's however the claim reaches the restart: supervisor.restore rewrites one stored
-// launching, or queued after a release, to StateLaunchUncertain, and one already stored
-// StateLaunchUncertain is written by its release (supervise's ReleaseUncertainLaunch), before the
-// launch writes generation 2. Every write goes through the Recording-wrapped store, which records
-// generation 1's hash in this process's own BootTokens though it never minted it, so the second
-// resolve comes back Stale, refused as "stale worker generation", and generation 2's own, freshly
-// minted hello is accepted.
+// A claim stored mid-launch across a restart (generation 1, no locator) is written at generation 2
+// while a shim's hello for generation 1's own token is already held in helloResolver, resolved once
+// before the hold started. Judging that hold by the first resolve alone would accept the old
+// generation after its claim has already moved on, taking the stream slot the real generation-2
+// shim's own hello then finds "already bound to a live stream". The fix resolves the token again
+// once restoration ends and judges generation 1's hello by that second resolve. This process
+// writes generation 1's claim before generation 2's however the claim reaches the restart:
+// supervisor.restore rewrites one stored launching, or queued after a release, to
+// StateLaunchUncertain, and one already stored StateLaunchUncertain is written by its release
+// (supervise's ReleaseUncertainLaunch), before the launch writes generation 2. Every write goes
+// through the Recording-wrapped store, which records generation 1's hash in this process's own
+// BootTokens though it never minted it, so the second resolve comes back Stale, refused as "stale
+// worker generation", and generation 2's own, freshly minted hello is accepted.
 func TestHelloResolverResolvesAgainAfterRestorationSoARelaunchDuringTheHoldIsNotMissed(t *testing.T) {
 	type result struct {
 		stale bool

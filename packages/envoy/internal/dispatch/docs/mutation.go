@@ -1292,10 +1292,10 @@ func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {
 	}
 	var authors []byte
 	if err := tx.QueryRow(ctx, `
-		select number, named, summary, authors, created_at, markdown, doc_update_version
-		from artifact_versions where artifact_id = $1
-		order by number desc limit 1
-	`, artifactID).Scan(&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt, &version.markdown, &version.docUpdateVersion); err != nil {
+		select v.number, v.named, v.summary, v.authors, v.created_at, `+model.VersionSize+`, v.markdown, v.doc_update_version
+		from artifact_versions v where v.artifact_id = $1
+		order by v.number desc limit 1
+	`, artifactID).Scan(&version.Number, &version.Named, &version.Summary, &authors, &version.CreatedAt, &version.Size, &version.markdown, &version.docUpdateVersion); err != nil {
 		return version, fmt.Errorf("read latest document version: %w", err)
 	}
 	if err := json.Unmarshal(authors, &version.Authors); err != nil {
@@ -1341,13 +1341,13 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	var version model.Version
 	var authorsRaw []byte
 	if err := tx.QueryRow(ctx, `
-		insert into artifact_versions (artifact_id, number, markdown, authors, named, summary, doc_update_version)
+		insert into artifact_versions as v (artifact_id, number, markdown, authors, named, summary, doc_update_version)
 		select $1, coalesce(max(number), 0) + 1, $2, $3, $4, $5,
 			coalesce($6, (select max(version) from doc_updates where artifact_id = $1), 0)
 		from artifact_versions where artifact_id = $1
-		returning number, named, summary, authors, created_at
+		returning number, named, summary, authors, created_at, `+model.VersionSize+`
 	`, artifactID, markdown, encodedAuthors, write.named, write.summary, write.docUpdateVersion).Scan(
-		&version.Number, &version.Named, &version.Summary, &authorsRaw, &version.CreatedAt,
+		&version.Number, &version.Named, &version.Summary, &authorsRaw, &version.CreatedAt, &version.Size,
 	); err != nil {
 		return versionWriteResult{}, fmt.Errorf("write document version: %w", err)
 	}

@@ -27,7 +27,7 @@ type Deployment struct {
 	// AgentSecrets is whether runtime.kubernetes.agent_secrets is configured.
 	AgentSecrets bool
 	// SecretsLogin is the broker login's state (agentsecrets.LoginState.State: "none", "pending",
-	// "issued", "denied" or "expired"); "" with no broker.
+	// "issued", "denied", "expired" or "failed"); "" with no broker.
 	SecretsLogin string
 	// RolesWithoutResources are the roles whose pods reserve no CPU and memory: those lacking CPU
 	// and memory requests and limits under runtime.kubernetes.resources, among claim.Roles and,

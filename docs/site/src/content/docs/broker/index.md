@@ -75,7 +75,7 @@ container](/legion/broker/guides/run-an-agent-in-a-container/) shows a box's set
 | Piece | What it does | Where it runs |
 | --- | --- | --- |
 | Secrets Broker (`envoy-broker`) | Enrolls sessions, decides each request from the secret's owner and tier, records requests and decisions, and releases granted values. | A server, beside Postgres and the secret store. |
-| `agent-secrets` | The command an agent runs to use a secret, the tool people and launchers use to log machines in and inspect sessions, and the tool people manage the secrets themselves with, under their own AWS sign-in. | Wherever agents run, and a person's own machine. |
+| `agent-secrets` | The command an agent runs to use a secret, the tool people and launchers use to log machines in and inspect sessions, the tool people list and revoke their machine logins and live grants with (`machine list`, `grant list`), and the tool people manage the secrets themselves with, under their own AWS sign-in. | Wherever agents run, and a person's own machine. |
 | `agent-secrets-helper` | A per-user daemon that holds each host agent session's key, enrolls it, and signs for it. | Each machine that runs agents directly. |
 | Dispatch | Shows people the requests they must decide and the grants they can revoke, and passes their decisions to the broker. | Dispatch's server and web app. |
 | Legion | Enrolls every worker pod it runs on Kubernetes, so a phase worker can use `agent-secrets` like any other session. | Legion's daemon. |
@@ -104,7 +104,8 @@ every worker pod it starts, so each pod's agent gets only the grants of that pod
   [approve a request](/legion/broker/guides/approve-a-request/),
   [log a machine in](/legion/broker/guides/log-a-machine-in/),
   [run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/),
-  [revoke a session or a grant](/legion/broker/guides/revoke-a-session/),
+  [revoke a session or a grant](/legion/broker/guides/revoke-a-session/), from Dispatch or from your
+  shell (`agent-secrets machine list`, `agent-secrets grant list`),
   [run the broker locally](/legion/broker/guides/run-locally/), and
   [troubleshooting](/legion/broker/guides/troubleshooting/).
 - [Operating the broker](/legion/broker/operate/): configuration, dependencies, health and logs.

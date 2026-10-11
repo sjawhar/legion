@@ -518,8 +518,11 @@ launches starts a fresh session.
    and the URL key, printing the import's lines, then deleted. It finds each tree's volume and root
    Sandbox by `legion-v10.0.0`'s labels (`legion.dev/project`, `legion.dev/role=architect`,
    `legion.dev/tree` and `legion.dev/issue`), not by name, and schedules the pod as the root
-   Sandbox's pods were: its pod template's node selector, tolerations, priority class and service
-   account. Before anything it refuses a project whose Sandboxes are issue pods (a later release),
+   Sandbox's pods were: its pod template's node selector, tolerations and priority class. The pod
+   runs as the namespace's `default` ServiceAccount with no token
+   (`automountServiceAccountToken: false`), never as the Sandbox's: it needs no identity, and a
+   namespace admission policy may let only the agent-sandbox controller create pods as the worker
+   ServiceAccount. Before anything it refuses a project whose Sandboxes are issue pods (a later release),
    one with a Sandbox not `Suspended`, whose pod could still start, and one with a pod that has not
    ended (any phase but `Succeeded` or `Failed`): each would be a writer the copy misses. It deletes
    a pod an interrupted run left before creating one, reports a pod that fails at once, exits 1
@@ -960,6 +963,8 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
   `runtime.kubernetes.resources.<role>.ephemeral_storage_request <request> exceeds ephemeral_storage
   <limit>`;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
+- `agent_secrets.operator`, removed with LEGION-664: the daemon's machine login is the
+  `legion-daemon` service's, which anyone signed in to Dispatch approves, so it names no approver;
 - an image that is not pinned by digest;
 - `session_store` other than `pvc` or `postgres`; `postgres` without `session_dsn_secret`, or with
   one that is empty or not a Secret data key (`[-._a-zA-Z0-9]+`); and a `session_dsn_secret` under
@@ -2073,17 +2078,23 @@ issue's pod (every role container of it alike) and the image probe's.
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
-  address); `operator` is the email the daemon's machine login names in its request, though anyone
-  signed in to Dispatch approves a service's login on the Dispatch credential page — there is no
-  launcher-token file and no manual CLI step. The daemon
-  runs its own login at boot, on a background context, and logs the confirmation code exactly once:
-  `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
-  <operator>); pod enrollment is held until approved`. The same code and the login's current status
-  ("none", "pending", "issued", "denied", or "expired") are on `GET /legion/v1/state`'s
+  address). The block names no approver: the daemon's login is the `legion-daemon` service's, which
+  anyone signed in to Dispatch approves on the Dispatch credential page, and a file that sets
+  `operator` is refused at load naming the key — there is no launcher-token file and no manual CLI
+  step. The daemon runs its own login at boot, on a background context, and logs the confirmation
+  code exactly once: `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential
+  page, where anyone signed in may approve it; pod enrollment is held until approved`. The same code and the login's current status
+  ("none", "pending", "issued", "denied", "expired", or "failed" when the broker never opened the
+  login) are on `GET /legion/v1/state`'s
   `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a
-  person signed in to Dispatch approves the code there. On expiry or revocation the daemon starts a
-  fresh login and logs a new
-  code. `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
+  person signed in to Dispatch approves the code there. When a login ends without a credential
+  (the broker refused it or could not be reached, its code expired undecided, or someone denied
+  it), or the broker revokes or expires the credential, the next pod enrollment starts a fresh
+  login, with no restart. The new code is on `agentSecretsLogin` and in the supervisor's
+  `enrollment failed; retrying on the next observation` warning. After a login that ends without a
+  credential the daemon waits 30 s before the next, doubling each time to at most 5 minutes, and an
+  approved login resets the wait. It never starts a login while one is pending.
+  `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
   `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the
   operator's middleman token. With the block, the worker container mounts that token read-only at

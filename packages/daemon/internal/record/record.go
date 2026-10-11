@@ -102,7 +102,7 @@ type PhaseRow struct {
 	// Decision is the review round's decision, on the reviewer's row: the newest review the
 	// reviewer's own review-App session (told from any other review-App session's by its Legion
 	// footer) or an account with write access to the repository submitted for the round that carried
-	// one (workflow's decidesRound), kept until the round ends, since the reviewer's completion can
+	// one (workflow's DecidesRound), kept until the round ends, since the reviewer's completion can
 	// come after the review it posted. Nil until a review decides.
 	Decision *ReviewDecision
 	// CompletedAt is when the workflow applied the role's completion of its current phase, zero until
@@ -173,8 +173,17 @@ type PullRequest struct {
 	// Pushes are the branch's pushes as they were classified: every push that changed only .legion/
 	// and said which head it replaced, which carry an approval across, and the pushes whose heads
 	// have not arrived yet. A push that may change code is spent once its head arrives.
-	Pushes      []ClassifiedPush
+	Pushes []ClassifiedPush
+	// HeadCounted is the head the fix-attempt count last counted, a push onto a red verdict, kept
+	// across every head pushed on top of it until one is pushed onto a green verdict
+	// (classify.AdvancePullRequestHead); empty when no such attempt stands. The fix-attempt cap holds
+	// a red within that attempt (classify.FixAttemptCapHolds).
 	HeadCounted string
+	// HeadCountedBefore is the mark HeadCounted held before the count that set it. A count made
+	// before its head's push arrived is taken back when that push proves handoff-only or the review
+	// App's (classify.ApplyPush), which restores this mark, so the counted attempt does not depend on
+	// which of the push and the head's arrival GitHub delivers first.
+	HeadCountedBefore string
 	// PlannedRed is whether the newest head that changed a path outside .legion/ was the review
 	// App's (the tester's red tests): a red on it is planned, so the next head is not a fix attempt.
 	PlannedRed bool

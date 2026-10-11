@@ -273,6 +273,9 @@ jobs:
               - 'packages/contracts/**'
               - 'packages/envoy/internal/dispatch/**'
               - 'packages/envoy/cmd/dispatch/**'
+              # e2e/__tests__/local-instance-support.test.ts holds shellQuote to this table, which
+              # dev-postgres.test.sh (envoy-go) reads too.
+              - 'packages/envoy/scripts/fixtures/shell-quote.json'
               # The modules the Dispatch server the browser tests start is built from, ygo's
               # document and websocket server among them.
               - 'packages/envoy/go.mod'
@@ -718,6 +721,9 @@ jobs:
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
+        working-directory: packages/envoy
+      - name: Reuse test for dev-postgres.sh (a fake docker; refuses a dispatch-pg off the pinned image)
+        run: bash scripts/dev-postgres.test.sh
         working-directory: packages/envoy
       - name: Verdict test for listener-deploy-probe.sh (two fake listener tasks on 127.0.0.1 and 127.0.0.2)
         run: bash scripts/listener-deploy-probe.test.sh

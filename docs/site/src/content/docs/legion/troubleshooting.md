@@ -293,7 +293,11 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
   architect decides what happens next, often with a question to you.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
-  stayed red through three fix attempts.
+  stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
+  counted head and every head pushed on top of it until a push lands on a head CI judged green) no
+  longer sends the work back by itself, so the issue waits in testing or review for the architect,
+  or for a worker's own decision such as a reviewer's request for changes. A `READY` is still
+  withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
@@ -383,11 +387,26 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   the `operation` and `subject`). The daemon's NATS user is missing a grant;
   [Envoy](/legion/dispatch/envoy/) lists the subjects it needs. A daemon can boot healthy and
   consume events with one grant missing, so search the log for this line after a NATS change.
-- **`agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page (approver:
-  <operator>); pod enrollment is held until approved`.** With `runtime.kubernetes.agent_secrets`
-  set, the daemon logs in to the [Secrets Broker](/legion/broker/) at boot and waits for the
-  `operator` to approve the code on Dispatch's credential page; pods are not enrolled until then.
+- **`agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page, where
+  anyone signed in may approve it; pod enrollment is held until approved`.** With
+  `runtime.kubernetes.agent_secrets` set, the daemon logs in to the [Secrets Broker](/legion/broker/)
+  at boot and waits for anyone signed in to Dispatch to approve the code on its credential page;
+  pods are not enrolled until then. Denying the code does not stop new ones: while a pod needs
+  enrolling or revoking, the daemon asks again after its wait (30 s after the first denial,
+  doubling to a cap of one code every 5 minutes). To stop the codes, stop the daemon, or remove its
+  `agent_secrets` block and restart it: the daemon reads `legion.yaml` only at start.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin
   ```
+- **`runtime.kubernetes.agent_secrets.operator was removed (LEGION-664)`.** The daemon's login is
+  the `legion-daemon` service's, which anyone signed in to Dispatch approves, so the block names no
+  approver. Delete the key.
+- **`agent-secrets machine login failed; a pod enrollment retries it`.** The broker refused the
+  daemon's boot login or could not be reached: a broker too old to accept a service's login with no
+  named approver, a `429` from the bucket every service's login shares, or a network fault.
+  `.agentSecretsLogin` reads `"state": "failed"` until the next login opens. Nothing needs
+  restarting. Fix the broker, and the next pod enrollment starts a fresh login whose code is on
+  `.agentSecretsLogin` and in the supervisor's `enrollment failed; retrying on the next
+  observation` warning. The daemon waits 30 s after a failed login before the next, doubling to at
+  most 5 minutes.

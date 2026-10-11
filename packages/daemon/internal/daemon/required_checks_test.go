@@ -110,7 +110,7 @@ func seedStuckRound(t *testing.T, pool *pgxpool.Pool) {
 func requiredRuntime(pool *pgxpool.Pool, api string, log *slog.Logger, reviewWorkflows ...string) *workflowRuntime {
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE", ReviewWorkflows: reviewWorkflows}, log)
 	return &workflowRuntime{
-		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, handlers: []intake.Handler{engine},
+		pool: pool, records: projectRecords{Store: record.NewStore(), project: "CAPTURE"}, engine: engine, handlers: []intake.Handler{engine},
 		tokens: outboxTokens{}, dispatchProject: "CAPTURE", bootID: "test-boot", log: log, githubAPI: api,
 	}
 }

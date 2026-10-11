@@ -743,7 +743,7 @@ func TestEveryDurationKeyReachesTheRuntimeOptionThatTakesIt(t *testing.T) {
 func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1") // the file's fixture (`:32-41`): testConfig under runtime: kubernetes
 	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
-		URL: "https://secrets.internal.example", Operator: "sjawhar", Audience: "agent-secrets", TokenExpirySeconds: 1800,
+		URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpirySeconds: 1800,
 	}
 	opts, err := sandboxOptions(cfg, *cfg.Runtime.Kubernetes, "test", "", lookup(nil), quietLogger())
 	if err != nil {
@@ -772,7 +772,7 @@ func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
 func TestNoCredentialMaterialReachesAPod(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
-		URL: "https://s", Operator: "sjawhar", Audience: "agent-secrets", TokenExpirySeconds: 3600,
+		URL: "https://s", Audience: "agent-secrets", TokenExpirySeconds: 3600,
 	}
 	for _, secret := range launchSecrets(cfg, lookup(nil)) {
 		if strings.HasPrefix(secret.name, "AGENT_SECRETS") {
@@ -790,8 +790,8 @@ func TestNoCredentialMaterialReachesAPod(t *testing.T) {
 	if enroller == nil || client == nil {
 		t.Fatalf("enroller %v, client %v; want both", enroller, client)
 	}
-	if client.URL != "https://s" || client.Operator != "sjawhar" {
-		t.Fatalf("client = %+v, want only the configured URL and operator, never a key or a bearer", client)
+	if client.URL != "https://s" {
+		t.Fatalf("client = %+v, want only the configured URL, never a key or a bearer", client)
 	}
 	cfg.Runtime.Kubernetes.AgentSecrets = nil
 	if enroller, client := newSecretsLogin(cfg, quietLogger()); enroller != nil || client != nil {
@@ -799,8 +799,8 @@ func TestNoCredentialMaterialReachesAPod(t *testing.T) {
 	}
 }
 
-// newSecretsLogin logs the contract's exact line, once, naming the code the broker issued and
-// the configured operator; a background poll goroutine keeps running against the (later closed)
+// newSecretsLogin logs the contract's exact line, once, naming the code the broker issued and that
+// anyone signed in may approve it; a background poll goroutine keeps running against the (later closed)
 // broker after the login is issued, which is fine — it is the same unbounded, backed-off retry
 // production leaves running for as long as the daemon is up.
 func TestNewSecretsLoginLogsTheConfirmationCode(t *testing.T) {
@@ -816,14 +816,14 @@ func TestNewSecretsLoginLogsTheConfirmationCode(t *testing.T) {
 
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
-		URL: server.URL, Operator: "sjawhar", Audience: "agent-secrets", TokenExpirySeconds: 3600,
+		URL: server.URL, Audience: "agent-secrets", TokenExpirySeconds: 3600,
 	}
 	var logged bytes.Buffer
 	enroller, client := newSecretsLogin(cfg, slog.New(slog.NewJSONHandler(&logged, nil)))
 	if enroller == nil || client == nil {
 		t.Fatal("want an enroller and a client")
 	}
-	want := "agent-secrets machine login: enter code ABCD-1234 on the Dispatch credential page (approver: sjawhar); pod enrollment is held until approved"
+	want := "agent-secrets machine login: enter code ABCD-1234 on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved"
 	deadline := time.Now().Add(2 * time.Second)
 	for !strings.Contains(logged.String(), want) {
 		if time.Now().After(deadline) {

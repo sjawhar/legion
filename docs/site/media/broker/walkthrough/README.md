@@ -91,70 +91,64 @@ no mark names gets a new `mark(...)` in the recorder and a new take.
 
 ## Review
 
-This take was recorded on 2026-10-09 on the branch where a waiting request names its approver
-(LEGION-666). The request's second line now reads `waiting for alice@example.com to approve it in
-Dispatch: <record page>`, where the take before it, of 2026-10-04, read `approve or deny it at
-<record page>`. That line shows in the opening payoff, in the poster, and as the request waits.
-Every section was recorded again in this one take: the sections show each other's ids, and footage
-from two takes would show ids that disagree across a cut. The person is `alice@example.com`
-everywhere: Dispatch's sidebar, the records' approver, the session's operator, the request's
-waiting line and its `decided_by`.
+This take was recorded on 2026-10-10. The terminal types `agent-secrets machine login` in `login`
+and `agent-secrets machine login-status` in `session`'s first command. Every section was
+recorded again in this one take: the sections show each other's ids, and footage from two takes
+would show ids that disagree across a cut. The person is `alice@example.com` everywhere:
+Dispatch's sidebar, the records' approver, the session's operator, the request's waiting line and
+its `decided_by`.
 
 No independent review has read this take; the read below is the author's.
 
-The shipped `walkthrough.mp4` is 78.47 s, 1280x720 at 30 fps, with AAC stereo: 4,935,376 bytes,
-sha256 `17cd34b0b47c93a569d14f89a68b140f941a986ca619ed0f59602fb860f185ca`. Its narration is at
--16.0 LUFS integrated with a true peak of -1.9 dBTP (ffmpeg's `ebur128`; loudnorm measures
--16.03 LUFS and -1.93 dBTP). The cut as `build.py` resolves it reads
-`10 clips, 78.2s, all narration and its 16 captions inside their clips`, and `build.py` found no
+The shipped `walkthrough.mp4` is 79.05 s, 1280x720 at 30 fps, with AAC stereo: 5,165,189 bytes,
+sha256 `5b7e48e1dcb34513d8f1d917fb38bef37a5af717e8822a5f68678b47bc3c3a3a`. Its narration is at
+-16.0 LUFS integrated with a true peak of -2.0 dBTP (ffmpeg's `ebur128`; loudnorm measures
+-16.04 LUFS and -1.99 dBTP). The cut as `build.py` resolves it reads
+`10 clips, 78.8s, all narration and its 16 captions inside their clips`, and `build.py` found no
 silence of 2 s or more over a frozen frame in it. Each clip's window in its file, and where each
 narration part falls in the video:
 
 ```
-  0.0s open: t4-ran.cast 20.71-25.01s (4.30s); open at 0.1s
-  4.3s login: t1-login.cast 0.05-5.64s (5.59s); login at 4.3s
-  9.9s machine: b1-machine.webm 1.17-11.80s (10.63s); machine-code at 10.6s, machine-approve at 15.2s
- 20.5s session: t2-session.cast 0.99-16.13s (15.13s); session-issued at 20.6s, session-register at 24.7s, session-self at 29.3s
- 35.7s request: t3-request.cast 0.88-11.27s (10.39s); request-ask at 35.9s, request-wait at 43.6s
- 46.1s approve: b2-approve.webm 0.26-12.78s (12.52s); approve-inbox at 46.1s, approve-record at 50.1s, approve-click at 56.6s
- 58.6s ran: t4-ran.cast 19.16-23.36s (4.20s); ran-runs at 58.8s
- 62.8s ran-status: t4-ran.cast 24.97-26.33s (1.37s)
- 64.1s ran-result: t4-ran.cast 28.21-32.08s (3.87s); ran-status at 64.7s
- 68.0s grants: b3-grants.webm 1.96-12.18s (10.22s); grants-list at 70.0s, grants-revoke at 75.1s
+  0.0s open: t4-ran.cast 20.72-25.02s (4.30s); open at 0.1s
+  4.3s login: t1-login.cast 0.05-5.77s (5.72s); login at 4.3s
+ 10.0s machine: b1-machine.webm 0.65-11.23s (10.58s); machine-code at 10.8s, machine-approve at 15.3s
+ 20.6s session: t2-session.cast 0.99-16.37s (15.38s); session-issued at 20.7s, session-register at 24.8s, session-self at 29.5s
+ 36.0s request: t3-request.cast 0.88-11.45s (10.56s); request-ask at 36.2s, request-wait at 44.0s
+ 46.5s approve: b2-approve.webm 0.32-12.88s (12.56s); approve-inbox at 46.5s, approve-record at 50.6s, approve-click at 57.1s
+ 59.1s ran: t4-ran.cast 19.17-23.37s (4.20s); ran-runs at 59.3s
+ 63.3s ran-status: t4-ran.cast 24.97-26.42s (1.44s)
+ 64.7s ran-result: t4-ran.cast 28.39-32.25s (3.87s); ran-status at 65.3s
+ 68.6s grants: b3-grants.webm 1.97-12.19s (10.22s); grants-list at 70.6s, grants-revoke at 75.7s
 ```
 
-The narration and its MP3s are unchanged: each part still says only what the new footage shows.
-Three offsets in `edl.py` changed for this take's pacing, which `build.py --check` named. This take's
-login section is shorter, so `login` starts its clip at the cast's `start` plus 0.05 s and its part
-at 0.06 s, where both were later. `session` ends 4.6 s after `self` rather than 4.4 s, so
-`session-self` fits. `request-wait` starts 0.3 s after `waiting`, so it no longer overlaps
-`request-ask`. Every other offset is the last take's.
+The narration, its MP3s and every offset in `edl.py` are unchanged: `build.py --check` fit the
+new take to the last take's cut, and each part still says only what the new footage shows.
 
 Capture rates, as `build.py` prints them (file length against the section's wall clock), and how
 closely each browser section's last frames match its result (`sections.json`):
 
 | Footage | Length | Wall clock | Ratio | Result similarity (end, before end) |
 | --- | --- | --- | --- | --- |
-| `t1-login.cast` | 5.84 s | 6.19 s | x0.944 | |
-| `b1-machine.webm` | 16.48 s | actions 15.62 s, page life 17.34 s | x1.055, x0.951 | 0.994, 0.994 |
-| `t2-session.cast` | 18.03 s | 18.30 s | x0.985 | |
-| `t3-request.cast` | 11.47 s | 11.76 s | x0.975 | |
-| `b2-approve.webm` | 17.40 s | actions 17.08 s, page life 17.82 s | x1.019, x0.976 | 0.981, 0.976 |
-| `t4-ran.cast` | 32.38 s | 32.67 s | x0.991 | |
-| `b3-grants.webm` | 17.24 s | actions 16.46 s, page life 18.34 s | x1.047, x0.940 | 0.995, 0.991 |
+| `t1-login.cast` | 5.97 s | 6.34 s | x0.941 | |
+| `b1-machine.webm` | 16.12 s | actions 15.35 s, page life 16.92 s | x1.050, x0.953 | 0.994, 0.993 |
+| `t2-session.cast` | 18.28 s | 18.56 s | x0.985 | |
+| `t3-request.cast` | 11.65 s | 11.94 s | x0.976 | |
+| `b2-approve.webm` | 17.68 s | actions 17.20 s, page life 18.15 s | x1.028, x0.974 | 0.981, 0.978 |
+| `t4-ran.cast` | 32.55 s | 32.86 s | x0.991 | |
+| `b3-grants.webm` | 17.80 s | actions 16.41 s, page life 18.34 s | x1.085, x0.970 | 0.995, 0.991 |
 
 No frame is held or stretched: each clip is its window of the file at the file's own speed. The
 casts hold none of `error`, `fail`, `denied`, `refus`, `warn`, `panic`, `traceback`, `exception`,
-`not found` or `invalid`, and no address but `127.0.0.1:31056`, the rig's Dispatch.
+`not found` or `invalid`, and no address but `127.0.0.1:21391`, the rig's Dispatch.
 
-Read by the author: a frame every 2 s from the start (39 frames, in sheets of twelve at half
-size), the frames either side of each of the nine cuts, the poster, and at native size the machine
-page once approved (20.4 s), the request page (51.5 s) and Live grants (71.0 s). No frame shows an
-error, a host but `example-host-build` and `127.0.0.1:31056`, a person but `alice@example.com`, or
-the secret's value (only its length and last four characters). Each cut joins the frames the cut
-names: the payoff to the empty prompt, the login code to the machine page, the approved machine
-login (and its row under Your machine logins) to the waiting prompt, `agent-secrets self` to the
-request, the waiting request and its approver line to the Inbox, the approved record to the
+Read by the author: a frame every 2 s from the start (40 frames, in sheets of twelve at half
+size), the frames either side of each of the nine cuts, the poster, and at native size
+`login-status` once issued (24.0 s), the machine page once approved (20.3 s) and Live grants
+(71.0 s). No frame shows an error, a host but `example-host-build` and `127.0.0.1:21391`, a person
+but `alice@example.com`, or the secret's value (only its length and last four characters). Each
+cut joins the frames the cut names: the payoff to the empty prompt, the login code to the machine
+page, the approved machine login to the prompt `login-status` is typed at, `agent-secrets self` to
+the request, the waiting request and its approver line to the Inbox, the approved record to the
 waiting command, the command's line under a fresh prompt to itself, `agent-secrets status` to the
 id half typed, and `decided_by` to the approved record with the pointer on Settings.
 
@@ -162,13 +156,13 @@ The ids agree wherever more than one section shows them:
 
 | Id | Where |
 | --- | --- |
-| Machine login code `BL9K-JHNB` | `login` prints it; `machine` types it |
-| Machine login credential `0462ce66-1b27-43a3-92ab-76436e7d9b52` | `machine`'s approved line; the helper's log issues it for `alice@example.com` |
-| Request `e9b58d3d-d512-48f5-baea-70f0da1dfb81` | `request` prints it waiting; `ran-result` types it into `agent-secrets status` |
-| Record `c620da0824dc…f65fd6777a8e9` | the address `request`'s approver line prints; `grants` opens that record (`/credentials/<record>`) |
-| Enrollment `7c01fed6-1900-4d8c-ba4e-709b310a7876` | `session`'s `agent-secrets self`; the helper's log enrolls it as `example-host-build:1787128:29409730` |
-| Session `host · example-host-build:1787128:29409730 · alice@example.com` | the request page in `approve`, and the Live grants row in `grants` |
-| Grant `a268572f-7735-407f-9a0b-ad6311436689` | `ran-result`'s status; `grants` lists one live grant, on that session |
+| Machine login code `USQZ-LK6Z` | `login` prints it; `machine` types it |
+| Machine login credential `b106e3de-b58d-4a2c-a5ea-32c4105c89b4` | `machine`'s approved line; the helper's log issues it for `alice@example.com` |
+| Request `64589511-f4b5-46f3-a8e1-5fc4ca1517d7` | `request` prints it waiting; `ran-result` types it into `agent-secrets status` |
+| Record `97cb386a8235…2c7948e6b` | the address `request`'s approver line prints; `grants` opens that record (`/credentials/<record>`) |
+| Enrollment `b87fded0-11ad-44f6-a8f2-f48d5d724880` | `session`'s `agent-secrets self`; the helper's log enrolls it as `example-host-build:492470:32609590` |
+| Session `host · example-host-build:492470:32609590 · alice@example.com` | the request page in `approve`, and the Live grants row in `grants` |
+| Grant `3821be0f-6c27-435a-b3ea-79f5c997e4a2` | `ran-result`'s status; `grants` lists one live grant, on that session |
 | `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a` | `open` and `ran`; the rig's made-up value is 31 characters and ends in `7f3a` |
 
 Script to screen, line by line (narration as `build.py` places it, the screen from the recorder's
@@ -176,22 +170,22 @@ marks and the frames read):
 
 | At | Narration | On screen |
 | --- | --- | --- |
-| 0.1 s | This command just got a key that a person approved. | The request command, its line `waiting for alice@example.com to approve it in Dispatch: …`, and `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a`, one still to 4.3 s. The key arrives live at 60.1 s. |
-| 4.3 s | First, the machine logs in, and prints a code to enter in Dispatch. | `agent-secrets launcher login` typed from 5.6 s; `machine login code: BL9K-JHNB` and `enter it at http://127.0.0.1:31056/credentials/machine` by 7.6 s. |
-| 10.6 s | There, alice types it into the machine login page. | Enter machine login code, with Needs you 1 beside Inbox and an empty Your machine logins; the code typed from 11.9 s; the sidebar reads Signed in as alice@example.com. |
-| 15.2 s | It names example-host-build. She approves it. | The record by 14.7 s: Identifiers example-host-build, Approver alice@example.com. Approve clicked at 19.1 s; `Approved. example-host-build can start agent sessions as you.`, `Credential 0462ce66-…`, and under Your machine logins `example-host-build`. |
-| 20.6 s | Back on the machine, the login is issued. | `agent-secrets launcher login-status` typed from 20.8 s; `issued` by 23.3 s, then the note that the launcher credential expires in 6d23h59m and a new machine login must replace it. |
-| 24.7 s | Next, it registers a session for an agent. | `agent-secrets register --wait 10 --exec -- bash` typed from 24.8 s. |
-| 29.3 s | The broker calls this session an enrollment; its operator is alice. | `agent-secrets self` typed from 29.6 s; `enrollment_id: 7c01fed6-…`, `kind: host` and `operator: alice@example.com` by 31.0 s. |
-| 35.9 s | Now the session asks for the demo API key to run one command, and says why. | The request typed from 36.1 s with `--reason "Publish the docs preview for PR 42 with the demo API" -- ./check-demo-key.sh`. |
-| 43.6 s | Now it waits for a person. | `request e9b58d3d-… is waiting for approval; waiting up to 30m0s` and `waiting for alice@example.com to approve it in Dispatch: http://127.0.0.1:31056/credentials/c620da08…`, by 43.3 s. |
-| 46.1 s | The request is in alice's Inbox. | Inbox, Credential requests: Secret request DEMO_API_KEY just now, Needs you 1 and `Blocked on you: 1 item, oldest 0m`, from the clip's first frame. |
-| 50.1 s | Its page shows the enrollment, the lifetime, and the agent's reason. | The request page by 50.4 s: Enrollment `host · example-host-build:1787128:29409730 · alice@example.com`, Lifetime 1 hour, Approver alice@example.com, the agent's stated reason. |
-| 56.6 s | She approves it. | Approve clicked at 57.3 s; `Approved just now`, the sidebar's count gone. |
-| 58.8 s | The waiting command gets the key, and runs. | The waiting cursor from 58.6 s; `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a` at 60.1 s, about 2.8 s after the click. |
-| 64.7 s | Its status says alice decided it. | `agent-secrets status ` typed from 63.0 s, then the request id jumped at 64.1 s; `state: granted` and `decided_by: alice@example.com` by 64.8 s. |
-| 70.0 s | Settings lists the live grant, with alice as its approver. | Settings clicked at 68.8 s, scrolled to Live grants by 70.0 s: the example-host-build enrollment, DEMO_API_KEY, Granted `Approved by alice@example.com`, the pointer on it. |
-| 75.1 s | Each live grant has a Revoke button. | The pointer on Revoke from about 73.4 s to the end. |
+| 0.1 s | This command just got a key that a person approved. | The request command, its line `waiting for alice@example.com to approve it in Dispatch: …`, and `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a`, one still to 4.3 s. The key arrives live at 60.6 s. |
+| 4.3 s | First, the machine logs in, and prints a code to enter in Dispatch. | `agent-secrets machine login` typed from 5.5 s; `machine login code: USQZ-LK6Z` and `enter it at http://127.0.0.1:21391/credentials/machine` by 7.7 s. |
+| 10.8 s | There, alice types it into the machine login page. | Enter machine login code, with Needs you 1 beside Inbox and an empty Machine logins; the code typed from 11.9 s; the sidebar reads Signed in as alice@example.com. |
+| 15.3 s | It names example-host-build. She approves it. | The record by 14.7 s: Identifiers example-host-build, Approver alice@example.com. Approve clicked at 19.1 s; `Approved. example-host-build can start agent sessions as you.` and `Credential b106e3de-…`. |
+| 20.7 s | Back on the machine, the login is issued. | `agent-secrets machine login-status` typed from 20.9 s; `issued` by 23.4 s, then the note that the launcher credential expires in 6d23h59m and a new machine login must replace it. |
+| 24.8 s | Next, it registers a session for an agent. | `agent-secrets register --wait 10 --exec -- bash` typed from 24.9 s. |
+| 29.5 s | The broker calls this session an enrollment; its operator is alice. | `agent-secrets self` typed from 29.8 s; `enrollment_id: b87fded0-…`, `kind: host` and `operator: alice@example.com` by 31.4 s. |
+| 36.2 s | Now the session asks for the demo API key to run one command, and says why. | The request typed from 36.4 s with `--reason "Publish the docs preview for PR 42 with the demo API" -- ./check-demo-key.sh`. |
+| 44.0 s | Now it waits for a person. | `request 64589511-… is waiting for approval; waiting up to 30m0s` and `waiting for alice@example.com to approve it in Dispatch: http://127.0.0.1:21391/credentials/97cb386a…`, by 43.8 s. |
+| 46.5 s | The request is in alice's Inbox. | Inbox, Credential requests: Secret request DEMO_API_KEY just now, Needs you 1 and `Blocked on you: 1 item, oldest 0m`, from the clip's first frame. |
+| 50.6 s | Its page shows the enrollment, the lifetime, and the agent's reason. | The request page by 50.7 s: Enrollment `host · example-host-build:492470:32609590 · alice@example.com`, Lifetime 1 hour, Approver alice@example.com, the agent's stated reason. |
+| 57.1 s | She approves it. | Approve clicked at 57.7 s; `Approved just now`, the sidebar's count gone. |
+| 59.3 s | The waiting command gets the key, and runs. | The waiting cursor from 59.1 s; `DEMO_API_KEY reached this command: 31 characters, ending in 7f3a` at 60.6 s, about 2.9 s after the click. |
+| 65.3 s | Its status says alice decided it. | `agent-secrets status ` typed from 63.5 s, then the request id jumped at 64.7 s; `state: granted` and `decided_by: alice@example.com` by 65.4 s. |
+| 70.6 s | Settings lists the live grant, with alice as its approver. | Settings clicked at 69.4 s, scrolled to Live grants by 70.6 s: the example-host-build enrollment, DEMO_API_KEY, Granted `Approved by alice@example.com`, the pointer on it. |
+| 75.7 s | Each live grant has a Revoke button. | The pointer on Revoke from about 74.0 s to the end. |
 
-Outside the video: the cut shows about 2.8 s from the click to the key, where the agent's poll took
+Outside the video: the cut shows about 2.9 s from the click to the key, where the agent's poll took
 7.9 s (the cast's `approve` and `key` marks), which the walkthrough page says.
