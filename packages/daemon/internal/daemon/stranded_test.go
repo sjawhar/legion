@@ -19,7 +19,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
-	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/treelifecycle"
 )
 
@@ -203,12 +202,11 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	var logs syncBuffer
 	o := fakeRuntime(fake.NewRuntime(), &built{})
 	o.workflowTokens = &workflowTokenRecorder{}
+	reported := strandedReportDone(&o)
 
 	d := startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(&logs, nil)))
 
-	testwait.Eventually(t, "the boot stranded-claim report", func() bool {
-		return len(loggedLines(t, logs.String(), strandedLine)) == 1
-	})
+	awaitStrandedReport(t, reported)
 	lines := loggedLines(t, logs.String(), strandedLine)
 	if len(lines) != 1 {
 		t.Fatalf("the boot logged %d lines %q, want one; log:\n%s", len(lines), strandedLine, logs.String())
@@ -263,14 +261,37 @@ func TestABootWithOnlyIdleSuspendedClaimsReportsNothing(t *testing.T) {
 	var logs syncBuffer
 	o := fakeRuntime(fake.NewRuntime(), &built{})
 	o.workflowTokens = &workflowTokenRecorder{}
+	reported := strandedReportDone(&o)
 
 	d := startDaemonLogging(t, cfg, o, slog.New(slog.NewJSONHandler(&logs, nil)))
 
+	// The report runs beside the API: /healthz answering says nothing about whether it has read
+	// yet, so "no line" is asserted only once it has finished.
+	awaitStrandedReport(t, reported)
 	if lines := loggedLines(t, logs.String(), strandedLine); len(lines) != 0 {
 		t.Fatalf("the boot logged %v, want no line %q", lines, strandedLine)
 	}
 	if got := strandedOnTheWire(t, bootState(t, d)); len(got) != 0 {
 		t.Fatalf("strandedClaims = %v, want none", got)
+	}
+}
+
+// strandedReportDone hooks o so the returned channel closes once the boot's stranded report has
+// finished, logged or not.
+func strandedReportDone(o *overrides) <-chan struct{} {
+	reported := make(chan struct{})
+	o.strandedReported = func() { close(reported) }
+	return reported
+}
+
+// awaitStrandedReport waits for the report strandedReportDone hooked, bounded by the report's own
+// timeout with room for the boot around it.
+func awaitStrandedReport(t *testing.T, reported <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-reported:
+	case <-time.After(strandedReportTimeout + 30*time.Second):
+		t.Fatal("the boot's stranded report did not finish")
 	}
 }
 
