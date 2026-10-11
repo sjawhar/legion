@@ -302,6 +302,80 @@ func TestAnAlreadyTodoAndLabelledChildConsumesItsHandover(t *testing.T) {
 	}
 }
 
+// A hand-over write Dispatch takes is consumed by the outbox at once, with the same intake.Handover
+// fact the already-todo path applies, rather than only by the event the write makes. That event can
+// be lost to a restart: a boot read records the sequence before the live event arrives, and the
+// event then stops at the sequence fence. This holds for both writes a hand-over can make: the
+// hand-over PATCH for an unlabelled child, and the plain status write for a child a person already
+// labelled (the one a Dispatch that refuses labels_add takes). The fact is idempotent, so the
+// event, when it does come, changes nothing more.
+func TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		shown               dispatch.Issue
+		handOvers, statuses int
+	}{
+		{name: "unlabelled: the hand-over PATCH", shown: dispatch.Issue{Key: "LEGION-208", Status: "in_progress", LastSeq: 4}, handOvers: 1},
+		{name: "already labelled: the status write", shown: dispatch.Issue{Key: "LEGION-208", Status: "in_progress", Labels: []string{"legion"}, HandedOver: true, LastSeq: 4}, statuses: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const root, child = "LEGION-207", "LEGION-208"
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			until := time.Now().Add(time.Hour)
+			parent := root
+			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+				for _, put := range []error{
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B"}),
+					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+				} {
+					if put != nil {
+						return put
+					}
+				}
+				return nil
+			}); err != nil {
+				t.Fatalf("seed hand-over: %v", err)
+			}
+			engine := workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())
+			admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+			client := &outboxDispatch{issue: tc.shown}
+			row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+			if err := (&outbox{pool: pool, records: records, dispatch: client, handlers: []intake.Handler{engine, admission}, log: quietLogger()}).execute(context.Background(), row); err != nil {
+				t.Fatalf("write the hand-over: %v", err)
+			}
+			if len(client.handOvers) != tc.handOvers || len(client.statuses) != tc.statuses {
+				t.Fatalf("hand-over PATCHes %v and status writes %v, want %d and %d", client.handOvers, client.statuses, tc.handOvers, tc.statuses)
+			}
+			read := func() *record.Issue {
+				t.Helper()
+				var got *record.Issue
+				if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+					var err error
+					got, err = records.Issue(context.Background(), tx, child)
+					return err
+				}); err != nil {
+					t.Fatalf("read child: %v", err)
+				}
+				return got
+			}
+			if got := read(); got.Tree != child || got.Generation != 2 || got.Phase != phase.Planning || got.Status != "in_progress" {
+				t.Fatalf("child after its hand-over write = %#v, want its own carried planning root without waiting for the event", got)
+			}
+			// The write's own event, arriving afterward, changes nothing more.
+			if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "handover-event", intake.DispatchIssue{
+				Key: child, Seq: 5, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true,
+			}, engine, admission); err != nil {
+				t.Fatalf("apply the hand-over's event: %v", err)
+			}
+			if got := read(); got.Tree != child || got.Generation != 2 || got.Phase != phase.Planning || got.Status != "in_progress" {
+				t.Fatalf("child after the hand-over's event = %#v, want it unchanged", got)
+			}
+		})
+	}
+}
+
 // A person's status move after the executor read the issue is caught by Dispatch's expected
 // sequence under its row lock. The outbox keeps the row for that transient conflict, then observes
 // the person's status and drops the hand-over fence without overwriting that move.

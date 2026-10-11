@@ -556,3 +556,94 @@ func architectStarts(t *testing.T, pool *pgxpool.Pool, key string) int {
 	}
 	return starts
 }
+
+// A hand-over carries a child's run only when the child started one. A child its tree finished,
+// which a person set back to todo while the tree lingered, is handed over at phase done; carried
+// there, its new root would take a slot, show in_progress, start an architect, and lose the slot to
+// releaseDoneSlots with nothing running. It is admitted fresh instead, whether its hand-over event
+// arrives or the outbox consumes the hand-over directly: no carried mark, no copied gate, and its
+// fence gone.
+func TestAHandedOverChildThatFinishedIsAdmittedFresh(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		consume func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler)
+	}{
+		{name: "its hand-over event", consume: func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler) {
+			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+		}},
+		{name: "the outbox's direct consumption", consume: func(t *testing.T, pool *pgxpool.Pool, admission *Admission, engine intake.Handler) {
+			if _, err := intake.ApplyFact(context.Background(), pool, "outbox", "handover", intake.Handover{Issue: "LEGION-209", Tree: "LEGION-208", Generation: 1}, engine, admission); err != nil {
+				t.Fatalf("consume the hand-over: %v", err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			seedFinishedChildUnderLingeringRoot(t, pool, "LEGION-208", "LEGION-209")
+
+			tc.consume(t, pool, admission, engine)
+			got := issue(t, pool, "LEGION-209")
+			if got.Tree != "LEGION-209" || got.Generation != 2 || got.Phase != phase.Admitted {
+				t.Fatalf("handed-over finished child = %#v, want its own admitted root at generation 2", got)
+			}
+			inTx(t, pool, func(tx pgx.Tx) {
+				records := record.NewStore()
+				carried, err := records.CarriedRoot(ctx, tx, "LEGION-209")
+				if err != nil || carried != 0 {
+					t.Fatalf("carried generation = %d, %v; want none", carried, err)
+				}
+				gate, err := records.Gate(ctx, tx, "LEGION-209")
+				if err != nil || gate != nil {
+					t.Fatalf("gate = %#v, %v; want none copied", gate, err)
+				}
+			})
+			if fence := handoverOf(t, pool, "LEGION-209"); fence != nil {
+				t.Fatalf("fence after the fresh admission = %#v, want none", fence)
+			}
+		})
+	}
+}
+
+// A fence whose child leaves its old tree some other way goes with it. A person who labels the
+// finished child todo before the daemon's hand-over event arrives admits it fresh as an orphan; its
+// fence is deleted then, so no later daemon todo of that root (a controller's reopen of it) is
+// mistaken for the stale hand-over and swallowed.
+func TestAFreshOrphanAdmissionDeletesTheChildsFence(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	seedFinishedChildUnderLingeringRoot(t, pool, "LEGION-208", "LEGION-209")
+
+	apply(t, pool, admission, "person-labels", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true}, engine)
+	if got := issue(t, pool, "LEGION-209"); got.Tree != "LEGION-209" || got.Phase != phase.Admitted {
+		t.Fatalf("labelled finished child = %#v, want its own admitted root", got)
+	}
+	if fence := handoverOf(t, pool, "LEGION-209"); fence != nil {
+		t.Fatalf("fence after the fresh orphan admission = %#v, want none", fence)
+	}
+}
+
+// seedFinishedChildUnderLingeringRoot is a done root lingering with an approved gate, and a child it
+// finished that a person set back to todo during the linger, with the hand-over fence its expiry
+// wrote for it.
+func seedFinishedChildUnderLingeringRoot(t *testing.T, pool *pgxpool.Pool, root, child string) {
+	t.Helper()
+	until := fixedNow.Add(time.Hour)
+	parent := root
+	inTx(t, pool, func(tx pgx.Tx) {
+		records, ctx := record.NewStore(), context.Background()
+		for _, put := range []error{
+			records.PutIssue(ctx, tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(ctx, tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Done, Generation: 1, Status: "todo", DispatchStatus: "todo", Rank: "B", LastDispatchSeq: 1}),
+			records.PutGate(ctx, tx, record.DesignGate{Issue: root, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 1, ApprovedVersion: new(1)}),
+			records.PutHandover(ctx, tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+		} {
+			if put != nil {
+				t.Fatalf("seed: %v", put)
+			}
+		}
+	})
+}

@@ -455,7 +455,7 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 			}
 			if !handover.Cancelled && root != nil && root.LingersAt(handover.Generation) {
 				a.log.Info("admission hand-over", "issue", stored.Key, "tree", handover.Tree, "linger", handover.Generation)
-				return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, true)
+				return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, startedRun(stored))
 			}
 		}
 	}
@@ -469,12 +469,9 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 	if orphan {
 		// An orphan that started a phase is the same work as a hand-over, whoever handed it to
 		// Legion: a child stranded by a root that closed before its hand-over existed carries its
-		// phase, gate and pull request too. One still admitted never started under its old tree's
-		// gate, and one its tree finished or parked (phase done) has no run to carry, so both start
-		// fresh, by the rule a linger's hand-over applies (workflow's settleUnfinished).
+		// phase, gate and pull request too (startedRun).
 		a.log.Info("admission orphan", "issue", stored.Key, "parent", observation.Parent)
-		started := stored.Phase != phase.Admitted && stored.Phase != phase.Done
-		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, started)
+		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, startedRun(stored))
 	}
 	return a.recordObservation(ctx, tx, stored, observed{
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
@@ -498,7 +495,7 @@ func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.
 	if err != nil || root == nil || !root.LingersAt(fact.Generation) {
 		return err
 	}
-	return a.readmit(ctx, tx, *stored, stored.Title, deref(stored.Parent), stored.Rank, stored.LastDispatchSeq, true)
+	return a.readmit(ctx, tx, *stored, stored.Title, deref(stored.Parent), stored.Rank, stored.LastDispatchSeq, startedRun(*stored))
 }
 
 // orphan says whether an observation makes a recorded child an orphan, admitted as a root of its
@@ -565,6 +562,16 @@ func readmittable(stored record.Issue) bool {
 	return claim.IsTreeRoot(stored.Key, stored.Tree) && (stored.Lingers() || stored.Phase == phase.Done)
 }
 
+// startedRun says whether a child moving to a root of its own carries its run there: it started a
+// phase, and its tree neither left it admitted nor finished or parked it (phase done). One still
+// admitted never started under its old tree's gate, and a finished one (set back to todo during its
+// tree's linger, say) has no run to carry: carried at done, its new root would take a slot and start
+// an architect with nothing to run. Every path that moves a child to a tree of its own applies it:
+// a hand-over's event, the outbox's direct consumption, and a person's labelling of an orphan.
+func startedRun(issue record.Issue) bool {
+	return issue.Phase != phase.Admitted && issue.Phase != phase.Done
+}
+
 // readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting
 // for a slot. A root starts a fresh generation: its facts clear across its whole tree, as do those
 // of an orphan readmitted without carry. An orphan readmitted with carry (one that started a phase)
@@ -608,6 +615,13 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	if err := a.store.PutIssue(ctx, tx, stored); err != nil {
 		return fmt.Errorf("record re-admission %s: %w", stored.Key, err)
 	}
+	// A child leaving its old tree, carried or fresh, takes its hand-over fence with it: left behind,
+	// it would read a later daemon todo of this root (a controller's reopen) as the stale hand-over.
+	if oldTree != stored.Key {
+		if err := a.store.DeleteHandover(ctx, tx, stored.Key); err != nil {
+			return err
+		}
+	}
 	if orphan {
 		if gate != nil {
 			gate.Issue = stored.Key
@@ -621,10 +635,7 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 				return fmt.Errorf("carry pull request to re-admitted orphan %s: %w", stored.Key, err)
 			}
 		}
-		if err := a.store.PutCarriedRoot(ctx, tx, stored.Key, stored.Generation); err != nil {
-			return err
-		}
-		return a.store.DeleteHandover(ctx, tx, stored.Key)
+		return a.store.PutCarriedRoot(ctx, tx, stored.Key, stored.Generation)
 	}
 	// Only the old tree's own root coming back cancels its pending hand-overs; an orphan of that
 	// tree admitted by a person leaves its siblings' fences standing.
