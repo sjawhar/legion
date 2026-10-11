@@ -45,7 +45,7 @@ not reach them:
 | `src/record-mark-target.ts` | Which mark a click or a hover in the document names: of the mark spans around the target, the record mark whose range is the smallest, the innermost span's among marks the same size, since which of two overlapping record marks nests inside the other follows the order they were made in (LEGION-458); it is also biome-checked |
 | `src/tests/harness.ts` | The `bun test` registration the copied suites call instead of their own `test()` tally |
 
-Fourteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
+Fifteen kinds of edit are allowed in the copied files, and no others: the import specifiers of
 upstream modules; `bun test` registration in the suites (`src/tests/harness.ts` replaces each
 file's own `test()` tally and its `process.exit` tail); `src/tests/headless-no-dom.test.ts`,
 whose entry named the fork's built `dist/headless.js` and now names `../lib-headless.js` — its
@@ -73,12 +73,16 @@ so two readers' asks may cover the same text, with `removeAskMark` removing that
 by id rather than every `dispatchAsk` over its range and the parse runner closing its own span of
 nested asks rather than every open ask (LEGION-458); `src/dispatch-mark-events.ts` reading the mark
 a click or a hover names from `./record-mark-target` rather than taking the innermost mark span,
-so a click on text two record marks cover opens the narrower one (LEGION-458); and annotations,
-casts and assertions that make a file type-check, each of which erases before runtime (below).
+so a click on text two record marks cover opens the narrower one (LEGION-458);
+`src/dispatch-action-bar.ts`'s Comment / Suggest / Ask buttons and its exported
+`commentOnSelection` taking one path, `ActionBarController.act`, which marks nothing for an empty
+or stale range or a read-only view, with `src/lib.ts` exposing `commentOnSelection` on the handle
+for Dispatch's `Ctrl+Alt+M` (LEGION-680); and annotations, casts and assertions that make a file
+type-check, each of which erases before runtime (below).
 
 To audit a copied file, diff it against `jj --ignore-working-copy -R <proof-sdk> file show -r
 24a5fc94 root:src/<file>`; every file in the copied-files table has that counterpart, and the
-only lines that differ should be the fourteen kinds.
+only lines that differ should be the fifteen kinds.
 
 `scripts/`, `tests/` and `upstream/` are legion's own. `scripts/` and `tests/` are linted and
 type-checked like any other package's; `upstream/` is generated, and Biome is off over it the
