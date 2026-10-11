@@ -1224,7 +1224,39 @@ relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifact
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
-exists, and refuses to run without `dispatch.server_url`.
+exists, and refuses to run without `dispatch.server_url`. A document mention's backlink excerpt -
+the block holding the target's first mention, its id the `#b-<id>` jump and its markdown cut to
+480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
+`excerpt_version`, migration 0092) when the mention is indexed, cut from a render of the version's
+tree that the write already makes: every renderer of a version's tree takes the block offsets from
+its own render (`pmdoc.RenderWithBlockOffsets`; `renderTreeWithOffsets`,
+`documentMarkdownWithOffsets`), and a `docs.renderedTree` carries the tree, the markdown and the
+offsets together to `refs.MentionExcerpts` and `refs.RecordExcerpts` (`writeVersionTx`, and an
+upload's and a seeded spec's `docs.Service.IndexDocumentReferences`, which take the transaction's
+recorded rendering from the ledger), so the route reads no document and no write renders its tree
+for the excerpts (LEGION-531). An edit, a named version, a seed, a rebuild and a settlement render
+the tree once; an upload that changes the document renders it twice, as it did before excerpts -
+`ReplaceText`'s render of the replacement, which is the stored markdown, and `applyLive`'s render
+of the fork - and its excerpts are cut from `applyLive`'s render only when the two agree. A null
+`excerpt_version` marks a mention owed an excerpt: every row 0092 found, each one `rebuild-refs`
+inserts, and every mention of an upload whose replacement left the document as it was, the one
+version write that records no rendering (`refs.ClearExcerpts`, which keeps the payload the row
+holds for the reconciliation but sets its version null). `cmd/dispatch` runs
+`docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows through the partial index
+`refs_excerpt_drift` (an empty index once it has caught up), stores one batch of 20 documents per
+tick, every 2 s while a batch is full and every five minutes after, and for the hour after its
+start first marks owed the excerpts a version written by the binary a deploy replaces left
+behind (`refs.MarkStaleExcerpts`). A document the reconciliation cannot read for any reason but
+an unloadable history or a tree outside the schema (which it records as having no block), or whose
+excerpts it cannot store, is logged at ERROR and skipped for that tick, its mentions left owed, so
+one document never holds back the rest of its batch. `refs.StoredExcerpts` serves only a row whose
+`excerpt_version` is non-null; a row owed an excerpt is answered with the document's name, not the
+payload it still holds. One window is left: during the one rolling deploy that ships 0092, a
+version the binary it replaces writes leaves the previous version's excerpt with its
+`excerpt_version` still set, and the route serves that excerpt until `refs.MarkStaleExcerpts`
+marks it owed at the reconciliation's next tick, which starts within five minutes
+(`docs.ReferenceExcerptReconcileInterval`) of the last one ending. The deploy's overlap lies inside
+the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
@@ -1546,14 +1578,111 @@ against its schema content rule. Schema changes are additive: add a type, add a 
 attribute, add an enum choice, or widen a content rule. Tightening content, removing or renaming a
 type or attribute, or requiring a new attribute requires a document migration and version bump.
 
+An ask block whose id no ask of its document indexes is a copy when another document of the same
+owner (the same issue, or for a project document the same project's other documents) holds an ask
+under that id that asks, or once asked (its `ask.opened` and `ask.edited` events), exactly what the
+block asks - its question, options, `multiple` and urgency, which a copy carries unchanged
+(`copiedAskSources`, `docs/copied_asks.go`): a record copy of a spec uploaded beside it carries its
+blocks under their ids. Block ids are unique per document only (`asks_block_id_unique` is on
+`block_artifact_id` and `block_id`), so the text has to match as well, since an author-chosen id
+such as `decision` can name unrelated questions on two documents. A match on an earlier wording
+counts only while the ask is open, or when its answer or resolution was given while that wording was
+current: its `ask.answered` or `ask.resolved` event comes after the event that made the wording
+current and before the `ask.edited` that retired it, ordered by `events.id`, which the broker
+allocates in commit order (`askHistory.shownBy`). An answer or resolution given after the rewording
+decides a question the block does not ask, so the block is no copy of that ask and opens its own, as
+a block whose options differ does. Where several asks match, the earliest asked is the source,
+whether it matched on its current wording or an earlier one, so two unrelated asks of one owner
+under one id asking the same thing are one question to a copy. A copy opens no ask: settlement
+writes its source's state and answer into the block, names the source in
+the server-owned `copied_from` and its document's `dispatch://` address (`refs.ArtifactRef`) in
+`copied_from_document`, neither of which an upload can set (`asUploaded`). The block is read-only
+there, since the copy has no ask row an answer or resolve route could reach and settlement only
+reads the source's; `dispatch request-approval`'s refusal and the dashboard's decision card name
+the source, its document and its state from those attributes, reading no ask. A copy shows its
+source as of its own last settlement, and settles again when its own content changes, when a
+restart resumes a settlement it owed, when its source is answered or resolved, when settlement
+retracts its source, and when its source's decided wording is restored (below): the answer and
+resolve routes (`SettleCopiesOf`), a retracting or restoring settlement (`reconcileAskBlocks`) and
+the boot's restoration (`RestoreDecidedWordings`) mark owed, in one `doc_settlements_pending`
+upsert (`markSettlementPending`), and arm once they commit, the settlement of every other document
+of the owner whose latest version holds the block with no ask of its own under that id
+(`lockedCopiesOf`, which takes the copy lock of each project among the documents it is given, in
+the projects' order, through `owedCopiesOf` for all but the boot). Each time settlement writes a
+copy's attributes into a block - the block becoming a copy, or the state it shows changing - it
+logs, once its transaction commits, `dispatch: settled an ask block as a copy of another
+document's ask` with the copy's `artifact` and `block`, the `source_ask`, its `source_document`
+and the `source_state` it shows, never the question; a copy left as it was logs nothing. That
+line is how a block taken for a copy that was meant as a new question is found, since it opens no
+ask and reaches nobody's Inbox: a recurring templated ask under an id its author chose, asking
+what an earlier document of the owner already asked, is one. After a retraction the first copy to
+settle opens the block's own ask, credited to the author who wrote the block into it, whom the
+room keeps owed while the block is a copy; every other copy then matches that ask and names it, so
+copies of one owner share one ask once their source is retracted and the question waits in one
+place, and a block pasted elsewhere and then cut, in either order, is open in one place. That needs
+the owner's copies to settle one at a time: an issue's documents do, under their issue's row
+(`lockArtifactOwner`), but a project document's owner row is the document itself, so a
+project's copy bookkeeping - a settlement's copy-source read, and every marking of copies owed -
+takes a transaction advisory lock keyed on the project (`lockProjectCopies`), so nothing that locks
+the project's row waits on it. It is the two-key form, `pg_advisory_xact_lock(copiedAsksLockNamespace,
+hashtext(project))`, whose key space Postgres keeps apart from the single-key locks every other
+advisory lock here takes (a document's room, a project's rank allocation, the events' commit
+order), so it never waits on one of those; two projects whose hashes collide only take turns on
+their copy bookkeeping. Every holder takes it before any `doc_settlements_pending` row and before
+the events' commit-order lock (`TestCopyLockComesBeforeEveryPendingRowAndEvent`, a static check
+of every Dispatch function's calls in statement order), and a settlement deletes its own pending
+row before it appends its first event, since a route marking that document owed holds the row
+while it waits for the commit-order lock. Every other writer of a document's own pending row takes
+it before it appends an event too: an upload's or a seed's document write marks it
+(`appendUpdateTxClass`) before the route appends its event, so `Ledger.Commit`'s later record of
+the edit source touches a row the transaction already holds
+(`TestAnUploadOfACopyAndAnAnswerToItsSourceBothTakeTheCopysPendingRowBeforeTheirEvents`). A
+copy whose text is changed and an id no ask of the owner indexes open an ask as any new block does
+(LEGION-651). A project document's lookups read `artifacts_project_documents` (migration 0091), an
+issue document's `artifacts_issue_key`, and the owed copies' latest versions `artifact_versions`'
+unique `(artifact_id, number)`; `copied_asks_plan_test.go` holds each. Finding the owed copies
+reads, with `LIKE`, the latest markdown of every other document of the owner, so a retraction, an
+answer or a resolution of a block ask costs in proportion to the owner's markdown bytes.
+
 `ask` blocks are indexed at settlement: their body and client-owned attributes update the ask row,
 the row restores server-owned answer state into the block, and removal retracts the indexed ask.
-The block is therefore the source of truth for an ask's **text** (question, options, `multiple`,
-`urgency`) and the row for its **lifecycle** (`state`, `answer`, `resolution`), so a route that
-changes either writes both: `PATCH /api/v1/asks/{id}` on a block ask writes the block through
-the document ledger and then takes the row's values from what the block parses back to, and
-`POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the fields it
-names: the row holds the question as plain text, so rebuilding the whole body from it would
+The block is therefore the source of truth for an open ask's **text** (question, options,
+`multiple`, `urgency`) and the row for its **lifecycle** (`state`, `answer`, `resolution`). A
+decided ask's wording is fixed: its answer or resolution decides the question it was given on, so
+where an answered or resolved ask's block asks something else - a document edit or an upload
+reworded it - settlement leaves the row as it was decided and writes the decided wording back into
+the block (`writeDecidedWording`, through the same repair as the server-owned attributes, with one
+`block.repaired` event), logging `dispatch: wrote a decided ask's wording back into its block` with
+the ask and the document. That repair keeps the parts the block already asks, and rewrites the
+rest through the markdown pipeline, as the edit route does; a block it cannot give the decided
+wording is left as it is, logged at ERROR, and the row still keeps its decided wording. A person who
+wants another question writes a new ask block; reopening the ask would put a new question in a
+person's Inbox for an edit they may not have meant as one. An ask settlement restores after a
+retraction follows the state the restoration gives it: one restored open takes its block's text,
+one restored with its answer keeps the wording that answer was given on. A decided ask that a
+release before this rule reworded - its row holding a document's edit beside the decision made on
+the wording before it - gets back the wording its decision was given on, the previous wording of
+the first `ask.edited` after its latest `ask.answered` or `ask.resolved` with no `ask.opened`
+between, in code rather than by a migration, since the pre-deploy census refuses a migration that
+rewrites rows (`cmd/dispatch/README.md`, "Pre-deploy census"): once at boot over every decided ask
+(`docs.Service.RestoreDecidedWordings`), and at every settlement over its document's decided asks
+(`restoreDocumentDecidedWordings`), which also undoes a rewording a task of that release writes
+during a rolling deploy. Both run `decidedWordingRestore`, one statement whose `$1` names the asks
+it may restore, null at boot for every decided ask; both re-index the restored question's
+references, log each ask they restore, its document and the question it asks again (`dispatch:
+restored a decided ask's wording`), never the wording it replaced, and mark the restored asks'
+copies owed: a copy that settled while its source's row held the rewording matched that wording and
+shows the decision on it, and its next settlement opens the block's own ask. The boot also marks
+each restored block ask's own document owed in the same upsert, since its block still asks the
+rewording beside the decision and nothing else settles that document until someone edits it; the
+settlement it arms writes the decided wording back into the block (a settlement's own restoration
+does that in the same pass). The boot then logs the asks' and the copies' counts (`dispatch:
+restored decided asks' wordings`, `restored=<n> copies=<n>`). A route that changes an ask's text or
+lifecycle writes both:
+`PATCH /api/v1/asks/{id}` on a block ask (an open one; a decided one is `409 ASK_NOT_OPEN`) writes
+the block through the document ledger and then takes the row's values from what the block parses
+back to, and `POST /api/v1/asks/{id}/resolve` writes the block's `state`. An edit writes only the
+fields it names: the row holds the question as plain text, so rebuilding the whole body from it would
 flatten an untouched question's formatting and links and mint fresh ids for the paragraphs a
 comment anchors into. Naming `urgency` or `multiple` alone therefore goes through the attribute
 path and leaves every child node, mark and inner block id exactly as it was; naming `question`
@@ -1599,7 +1728,8 @@ rowspan, or rows the budget ran out partway through. Where a table outside the a
 it first, the check can write span cells the document did not, and the ask is refused unless
 padding its stored rows gives those cells.
 An answered block carries `state`, `answered_by`, `answered_at`, `selected`, and `answer` in
-canonical markdown.
+canonical markdown, and a copy also `copied_from` and `copied_from_document`, the ask it was copied
+from and that ask's document.
 
 ## Critical conventions
 
@@ -1969,9 +2099,10 @@ the synchronous listener call records the sent or failed attempt instead of blin
 
 ## Secrets broker
 
-The secrets broker (`cmd/broker`, `internal/broker/`) issues short-lived secret grants
+The secrets broker (`cmd/broker`, `internal/broker/`) issues secret grants, each lasting until its
+session ends or for the shorter lifetime its request signed,
 and key-bound launcher credentials to enrolled agent sessions and pods; `cmd/agent-secrets` is its
-client (a box's or pod's own key, or a host session's `cmd/agent-secrets-helper`), which enrolls a
+client (a box's or pod's own key, or a machine session's `cmd/agent-secrets-helper`), which enrolls a
 runtime, requests grants, polls a pending decision to completion, and either prints session/grant
 state (`self`, `status --json`) or `syscall.Exec`s a command with the granted values injected into
 its environment. Its `secret` forms are how a person manages the agent secrets themselves, in
@@ -1992,19 +2123,36 @@ service-account token). An operator credential's enrollment is its operator's, t
 person who approved its machine login: a launcher may leave `operator` out of the enrollment, and
 one naming anyone else is `403 OPERATOR_MISMATCH`. A live enrollment is unique per launcher
 credential, runtime id and slot: `POST /v1/enrollments` takes an optional pod-only `slot`
-(`^[a-z][a-z0-9-]{0,62}$`, else `400 INVALID_SLOT`, and a slot on a box or host is refused the
+(`^[a-z][a-z0-9-]{0,62}$`, else `400 INVALID_SLOT`, and a slot on a `session` enrollment is refused the
 same way) naming one of several independent identities in one pod. The launcher whose proof
 authenticates the enrollment chooses the slot; a session's proof cannot enroll anything
 (`401 LAUNCHER_INVALID`). So each slot of a pod holds its own key, lease, requests and grants,
 while a pod's `runtime_id` stays the pod UID its token proves. A pod token past its expiry is
 `403 POD_TOKEN_EXPIRED`, naming that expiry, and any other token that does not prove the pod is
 `403 POD_IDENTITY_MISMATCH`. Omitted or `""` is the runtime's
-one enrollment, every box's and host's. The same key
+one enrollment, every `session` enrollment's. The same key
 in the same slot gets its live enrollment back (200), a different key in a live slot is `409
 ALREADY_ENROLLED`, and the policy never sees the slot: a pod is a requester with no operator, whose
 service is its launcher credential's only when its verified subject matches `BROKER_SERVICES`. Migration 0007 is forward-only: an
 older broker binary's conflict lookup reads one live row per runtime id, unsafe once a pod holds
 two slots, so the binary is never rolled back past it once a slotted enrollment exists.
+An enrollment's kind is `session` (an agent session on a machine its person logged in: the
+helper's own, or a key a launcher such as agentbox brings through the helper's
+`enroll-session-key`) or `pod`; migration 0012 rewrote every stored `box`/`host` to `session`.
+Each side still meets the other's old shape until every running client is on this release, and
+each fallback names its removal condition at its definition: the broker records an old helper's
+`host`/`box` as `session` and logs `an enrollment named a legacy kind` (`api/handlers_enroll.go`,
+`legacyKinds`: gone after 30 days of no such line from the production broker); the helper asks an
+older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box`
+(`helper/broker.go`, `enroll`: gone once the production broker records `session`); the CLI asks an
+older helper, which answers `unknown op enroll-session-key`, its `enroll-box`/`unenroll-box`
+(`cmd/agent-secrets/enroll.go`, `oldHelperSessionKeyOps`: gone once no helper older than this
+release runs); the helper answers an older CLI's `enroll-box`/`unenroll-box` as the kind-free pair
+and logs `a client asked a legacy op` (`helper/server.go`, `oldCLISessionKeyOps`: gone once
+dotfiles' pin is at this release and no helper has logged that line for 30 days); and
+`enroll --helper` accepts agentbox's `--kind box` but refuses every other `--kind`
+(`cmd/agent-secrets/enroll.go`, `cmdEnroll`: gone once dotfiles' pin is legion-envoy 10 or later
+and `scripts/agentbox` on dotfiles' main passes no `--kind`).
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
@@ -2195,7 +2343,7 @@ against `secrets.Local` and a fake STS and broker (`secret_test.go`), and `secre
 runs create, delete, restore and retag against `brokertest.NewRig`'s real broker.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
-`enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a host session's helper), beside `AGENT_SECRETS_URL`.
+`enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a machine session's helper), beside `AGENT_SECRETS_URL`.
 Unset, each falls back to its launcher's path, `$XDG_RUNTIME_DIR/agent-secrets` and the
 `helper.sock` inside it, used only when that file is there; a pod sets its variables and has no
 `XDG_RUNTIME_DIR`. The exec form's command keeps exactly those three variables, so an
@@ -2211,19 +2359,41 @@ or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but c
 for callers that choose between the broker and another backend. A helper holding no launcher
 credential, from every restart until the operator logs the machine in, enrolls no one: its sign
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
-with the same not-logged-in notice naming `agent-secrets machine login`. The login that installs
-a credential wakes every registered session's enrollment retry, so those sessions reach the broker
-within about a second of it rather than when a backoff of up to a minute comes round. A session
-whose renew the broker refuses (its lease lapsed) stops counting as enrolled at once, and its
-enrollment becomes the session's lapsed id; so does a re-pinned session's recorded enrollment
-after a helper restart. While it is lapsed and the helper holds a credential, sign answers
-NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its re-enrollment. The
-helper revokes a lapsed id before the session enrolls again, and while the session lives its
-record keeps that id until the revoke lands, so a restart meanwhile, even a second one before any
-login, still revokes it. A session that ends first takes its record with it and hands the id to a
-bounded revoke (three tries); before a login those fail, and the broker's sweeper ends the id once
-its lease lapses. A revoke refused 403 `OPERATOR_MISMATCH` (an enrollment made under another
-operator's launcher credential) counts as done, and the session enrolls afresh.
+with the same not-logged-in notice naming `agent-secrets machine login`.
+
+`agent-secrets renew --pod-token-file FILE` is the pod renewer: it re-reads and trims the
+projected token before every broker request, and sends it as `pod_token`. A blank or unreadable
+file makes no request: the renewer prints `ERROR: enrollment <id> cannot read its pod token
+(<reason>); nothing was sent, so its lease lapses unless the file becomes readable`, the only
+record naming the lapsing enrollment since the broker hears nothing, and retries rather than
+exiting 76 - at start it exits 2 and the shim starts it again, and after a renewal it waits and
+reads again. The worker shim passes its projected token file and writes the renewer's stderr to
+its own.
+The client works against a broker that predates the renewal body because that handler reads no
+body. The terminal renewal refusals are one set in `cmd/agent-secrets` (`terminalRenewal`):
+`POD_TOKEN_REQUIRED`, `ENROLLMENT_NOT_LIVE`, and an older broker's `PROOF_INVALID` whose message
+says `not live` (its word for an ended enrollment). Only those exit 76 (`EX_PROTOCOL`) with the
+enrollment id, HTTP status and broker code; the shim quotes that terminal line beside its own
+enrollment id and stops rather than restarting a renewer that cannot succeed. Every other refusal
+keeps the retry backoff: `POD_IDENTITY_MISMATCH`, because the broker also answers it for a token
+it could not verify while its issuer or key set was unreachable (a real mismatch ends with the
+lease, and the next renewal is `ENROLLMENT_NOT_LIVE`); `POD_TOKEN_EXPIRED`, retried with the token
+the file holds next; and any other `PROOF_INVALID`, since a clock or URL correction can make the
+next proof valid.
+
+The login that installs a credential wakes every registered session's enrollment retry, so those
+sessions reach the broker within about a second of it rather than when a backoff of up to a minute
+comes round. A session whose renew the broker refuses (its lease lapsed) stops counting as enrolled
+at once, and its enrollment becomes the session's lapsed id; so does a re-pinned session's recorded
+enrollment after a helper restart. While it is lapsed and the helper holds a credential, sign
+answers NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its
+re-enrollment. The helper revokes a lapsed id before the session enrolls again, and while the
+session lives its record keeps that id until the revoke lands, so a restart meanwhile, even a
+second one before any login, still revokes it. A session that ends
+first takes its record with it and hands the id to a bounded revoke (three tries); before a login
+those fail, and the broker's sweeper ends the id once its lease lapses. A revoke refused 403
+`OPERATOR_MISMATCH` (an enrollment made under another operator's launcher credential) counts as
+done, and the session enrolls afresh.
 `agent-secrets machine login-status`, which the helper answers, exits 0 while the helper holds a
 launcher credential and prints `issued`. A
 re-login that is denied, expires unapproved or is still pending leaves the credential an earlier
@@ -2258,7 +2428,7 @@ human approves a new machine login`, the cause being `the launcher credential re
 broker that names no expiry gets a WARN that the helper cannot warn ahead. A refusal of a
 credential a newer login has already replaced drops nothing, and the enrollment it failed retries
 at once with the new one after the ordinary `enroll failed; retrying` WARN. While it holds none,
-every enrollment attempt, a session's or an `enroll-box`'s (and every revoke a re-pinned or lapsed
+every enrollment attempt, a session's or an `enroll-session-key`'s (and every revoke a re-pinned or lapsed
 session needs before it enrolls), logs at ERROR `session cannot enroll` with that `why`; an
 attempt that failed for want of a credential a login has installed since logs the WARN instead.
 SIGINT or SIGTERM, from systemd or anything else, stops the helper with exit 0 after a WARN
@@ -2295,7 +2465,7 @@ user. The check covers the session's process tree only: a process the session se
 uid can stop the helper. Through these routes such a process can list and revoke the operator's own
 machine logins, never a service's machine login, and the operator's grants, which include grants the
 operator approved on any session, a service's pod among them. The helper's `enroll --helper` path
-(`enroll-box`) is open to any process of the user, so the same process can enroll a box and read the
+(`enroll-session-key`) is open to any process of the user, so the same process can enroll a box and read the
 operator's agent secrets that way. Every refusal the helper gives reaches the CLI
 as one `launcherRefusal`, printed as it stands: no credential, a helper from before the op (which
 answers `unknown op sign-launcher`, read as a helper to restart on the pinned release), or the
@@ -2329,8 +2499,7 @@ to one name — any other entry is refused naming it, and an account given twice
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
 set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600),
-`BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_MAX_GRANT_SECONDS` (default 43200, max
-43200 — how long every grant lives, unless its session ends first), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
+`BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
 (default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
 re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
@@ -2434,7 +2603,8 @@ for the current, authoritative route list.
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
 object verbatim, the approver, the enrollment's tab-separated kind, runtime id and operator, plus
-a pod's slot as a fourth field only when it has one, lifetime, policy version (the `rules_version`
+a pod's slot as a fourth field only when it has one, lifetime (`-` for a grant that lasts until its
+session ends; `ParseBody` refuses `0`), policy version (the `rules_version`
 line), expiry, and the
 machine-login code or `-`), `Body.ID()` is the lowercase-hex SHA-256 of that canonical form — the
 record's own content-addressed id, which a slotless record keeps byte for byte — and `ParseBody`
@@ -2486,20 +2656,32 @@ so no Secrets Manager call holds a row lock), so a secret created a moment ago, 
 made, is served on its first request, then checks for a still-live grant covering the exact same
 name set (`reuseLiveGrant`: no new request, no new record, as long as the current policy still
 allows it and the grant's whole chain still verifies), then
-decides and writes in one transaction: it takes an advisory lock keyed on the enrollment and the
-sorted name set, then locks the requesting enrollment `for share` while it is live (that order;
-the reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
+decides and writes in one transaction: it takes one advisory lock per requested secret under the
+enrollment, then locks the requesting enrollment `for share` while it is live (that order; the
+reverse breaks `TestCreateWaitsOutTheSweepItRaces`), reads the names withheld from the session,
 and evaluates the policy per name for the session: any `deny` denies the whole request with no
 record written at all; a name the policy does not serve aborts the whole call with
 `policy.ErrUnknownSecret` (`400 UNKNOWN_SECRET`, per the broker's design overview) instead of being
 folded into an ordinary `deny` decision — no request row is written either, matching the "at record
 time" wording; a name needing approval that names a *different* approver than an
-already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; every grant
-lives `BROKER_MAX_GRANT_SECONDS`; when every name is decided (`granted`/`denied`) with nothing
-pending, the request and, if granted, its grant are written with no record; a request needing
-approval writes the request row and a `credential_requests` record together, and an identical
-concurrent request coalesces onto the same record (`coalesced: true`) instead of writing a second
-one. `Create` and `Get` answer that record's approver (`approver` on `POST /v1/requests` and
+already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; the grant lasts
+the request object's `lifetime_seconds` (`record.ValidLifetime`: 1 to the int32 the column holds;
+refused on a machine login), or, when it names none, until its session ends (`grants.expires_at`
+null, migration 0013; `requests.grantUnexpired` is the one liveness test). Reuse matches the
+lifetime, except that a no-lifetime request takes the live grant of a request written before
+migration 0013 was applied (`requests.writtenBeforeMigration13`: lifetime 43200 and `created_at`
+before migration 13's `applied_at`), keeping its expiry. A pending request holds each of its secret
+names for its session: an identical request coalesces (`coalesced: true`), as does a no-lifetime
+request beside such a pre-migration pending request, and another lifetime or an overlapping name,
+with or without `--ttl`, is `409 REQUEST_PENDING` naming the request already in the approver's
+Inbox. No row written after the deploy matches, so the bridge ends on its own a day after it.
+`POST /v1/requests` and `GET /v1/requests/{id}` echo `lifetime_seconds` (null for none), which the
+CLI checks against its `--ttl`, revoking the grant or cancelling the pending request this call made
+when a broker or helper from before the claim dropped it, and never touching a reused approved
+grant or a pending request it joined (`coalesced`); when every name is decided
+(`granted`/`denied`) with nothing pending, the request and, if granted, its grant are written with
+no record.
+`Create` and `Get` answer that record's approver (`approver` on `POST /v1/requests` and
 `GET /v1/requests/{id}`, read from `credential_requests.approver`, the column
 `PendingForApprover` lists by, never re-evaluated from the current policy), so the asking session
 names whose list holds it; a request with no record answers null. The enrollment lock, taken
@@ -2693,7 +2875,7 @@ checks the same things: `alg` exactly ES256, the embedded JWK's thumbprint match
 signature, `iat` skew, `htm`/`htu`, and `jti` replay. `internal/broker/requests.Sweeper` is the one
 thing that moves state without a human: every `BROKER_SWEEP_SECONDS` tick it first ends every
 enrollment whose lease has lapsed (`enroll.Service.EndLapsed`: a gone pod, a box whose launcher
-stopped renewing, a host session whose helper died), as a revoke ends one, so its grants are
+stopped renewing, a machine session whose helper died), as a revoke ends one, so its grants are
 revoked and its pending requests cancelled and dropped from the approver's list, with an
 `enrollment.expired` audit row and one log line each; then it expires overdue pending
 `agent_secret` requests (waking each one's owner through the Envoy wake seam) and overdue pending

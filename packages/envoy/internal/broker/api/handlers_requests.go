@@ -26,10 +26,10 @@ type createRequestBody struct {
 }
 
 // createRequestResponse is POST /v1/requests's exact wire shape: request_id, state, secrets,
-// grant_id, record_id, approver, coalesced — nothing else. requests.Request itself carries
-// additional fields (decided_at, decided_by, detail) this route's contract does not define, so the
-// handler below builds this dedicated response rather than marshaling the Request it gets back from
-// Machine.Create directly.
+// grant_id, record_id, approver, lifetime_seconds, coalesced — nothing else. requests.Request itself
+// carries additional fields (decided_at, decided_by, detail) this route's contract does not define,
+// so the handler below builds this dedicated response rather than marshaling the Request it gets
+// back from Machine.Create directly.
 type createRequestResponse struct {
 	// The request's id, which GET /v1/requests/{id} and its cancel route take.
 	RequestID string `json:"request_id"`
@@ -46,6 +46,11 @@ type createRequestResponse struct {
 	// it is pending it waits in that person's Dispatch Inbox, or in everyone's for "anyone". Null
 	// when the policy decided it at once, so no record names one.
 	Approver *string `json:"approver"`
+	// How many seconds its grant lasts, as the signed request asked; null when it asked for no
+	// lifetime, and the grant lasts until the session ends. A reused or coalesced request answers
+	// its own, which equals the one asked for. A client that asked for a lifetime and reads null,
+	// or no such field from a broker before it, was not given that lifetime.
+	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// True when the request joined an identical one this session already had pending.
 	Coalesced bool `json:"coalesced,omitempty"`
 }
@@ -66,6 +71,9 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 	case errors.Is(err, requests.ErrMixedApprovers):
 		writeError(w, http.StatusBadRequest, "MIXED_APPROVERS", err.Error())
 		return
+	case errors.Is(err, requests.ErrRequestPending):
+		writeError(w, http.StatusConflict, "REQUEST_PENDING", err.Error())
+		return
 	case errors.Is(err, requests.ErrSessionIDInvalid):
 		writeError(w, http.StatusBadRequest, "SESSION_ID_INPUT", err.Error())
 		return
@@ -83,13 +91,14 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 		return
 	}
 	writeJSON(w, http.StatusOK, createRequestResponse{
-		RequestID: req.ID,
-		State:     req.State,
-		Secrets:   req.Secrets,
-		GrantID:   req.GrantID,
-		RecordID:  req.RecordID,
-		Approver:  req.Approver,
-		Coalesced: req.Coalesced,
+		RequestID:       req.ID,
+		State:           req.State,
+		Secrets:         req.Secrets,
+		GrantID:         req.GrantID,
+		RecordID:        req.RecordID,
+		Approver:        req.Approver,
+		LifetimeSeconds: req.LifetimeSeconds,
+		Coalesced:       req.Coalesced,
 	})
 }
 
@@ -118,6 +127,9 @@ type requestStatusResponse struct {
 	// move it, and it stays once the request is decided. Null when the policy decided it at once,
 	// so no record names one.
 	Approver *string `json:"approver"`
+	// How many seconds its grant lasts, as the signed request asked; null for a grant that lasts
+	// until the session ends.
+	LifetimeSeconds *int `json:"lifetime_seconds"`
 	// When it left "pending"; null while pending.
 	DecidedAt *time.Time `json:"decided_at"`
 	// Who decided it and when; null while pending, when the policy decided it at once, and when it
@@ -127,8 +139,9 @@ type requestStatusResponse struct {
 
 // grantValuesResponse is POST /v1/grants/{id}/values's answer.
 type grantValuesResponse struct {
-	// When the grant expires; the session can read the values again until then.
-	ExpiresAt time.Time `json:"expires_at"`
+	// When the grant expires; the session can read the values again until then. Null for a grant
+	// that lasts until the session ends.
+	ExpiresAt *time.Time `json:"expires_at"`
 	// Each granted name's value, read fresh from the secret store.
 	Values map[string]string `json:"values"`
 }
@@ -158,7 +171,7 @@ func (s *server) readRequest(w http.ResponseWriter, r *http.Request, enrollmentI
 		writeInternal(w, "read request", err)
 		return
 	}
-	resp := requestStatusResponse{State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, Approver: req.Approver, DecidedAt: req.DecidedAt}
+	resp := requestStatusResponse{State: req.State, GrantID: req.GrantID, RecordID: req.RecordID, Approver: req.Approver, LifetimeSeconds: req.LifetimeSeconds, DecidedAt: req.DecidedAt}
 	if req.DecidedBy != nil && req.DecidedAt != nil {
 		resp.Decision = &requestDecision{By: *req.DecidedBy, At: *req.DecidedAt}
 	}

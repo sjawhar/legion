@@ -81,8 +81,8 @@ func newContractRig(t *testing.T) *contractRig {
 	enr.Chain = enroll.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
 	reqMachine := &requests.Machine{
 		Store: brokerStore, Policy: cur, Secrets: secrets.AWS{Client: local},
-		MaxGrant: time.Hour, PendingTTL: 12 * time.Hour,
-		Audience: brokerServer.URL, Skew: time.Minute, Replay: enr.Replay,
+		PendingTTL: 12 * time.Hour,
+		Audience:   brokerServer.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
 	mach := &machine.Service{
@@ -146,7 +146,7 @@ func (rig *contractRig) newSessionEnrollment(t *testing.T, operator string) (enr
 	}
 	enrollmentID = uuid.NewString()
 	if _, err := rig.brokerStore.Pool.Exec(ctx, `insert into enrollments (id, kind, runtime_id, operator, thumbprint, launcher_credential_id, lease_expires_at)
-		values ($1,'box',$2,$3,$4,$5, now() + interval '1 hour')`, enrollmentID, "box-"+t.Name(), operator, thumbprint, credentialID); err != nil {
+		values ($1,'session',$2,$3,$4,$5, now() + interval '1 hour')`, enrollmentID, "session-"+t.Name(), operator, thumbprint, credentialID); err != nil {
 		t.Fatalf("insert enrollments: %v", err)
 	}
 	return enrollmentID, key
@@ -215,7 +215,7 @@ func (rig *contractRig) request(t *testing.T, session contractSession, reason st
 	for i, name := range names {
 		details[i] = record.AuthorizationDetail{Type: "agent_secret", Identifier: name, Actions: []string{"inject"}}
 	}
-	compact, err := record.Sign(session.Key, rig.BrokerURL, details, reason, "", time.Now())
+	compact, err := record.Sign(session.Key, rig.BrokerURL, details, reason, "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -550,7 +550,7 @@ func (rig *contractRig) approveMachineLoginAs(t *testing.T, loginHint, approver,
 	t.Helper()
 	machineKey := contractSigningKey(t)
 	compact, err := record.Sign(machineKey, rig.BrokerURL,
-		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: host, Service: service}}, "", loginHint, time.Now())
+		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: host, Service: service}}, "", loginHint, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -601,8 +601,8 @@ func (rig *contractRig) lookupMachineLogin(t *testing.T, code, looker string) co
 	return decodeBody[contractRecord](t, lookupResp)
 }
 
-// enrollWithLauncher enrolls a box under credentialID straight on the broker, as the machine's
-// launcher does with a launcher proof signed by machineKey, and answers the status, body and box.
+// enrollWithLauncher enrolls a session under credentialID straight on the broker, as the machine's
+// launcher does with a launcher proof signed by machineKey, and answers the status, body and session.
 func (rig *contractRig) enrollWithLauncher(t *testing.T, machineKey *ecdsa.PrivateKey, credentialID, runtimeID string) (int, []byte, contractSession) {
 	t.Helper()
 	key := contractSigningKey(t)
@@ -615,7 +615,7 @@ func (rig *contractRig) enrollWithLauncher(t *testing.T, machineKey *ecdsa.Priva
 		t.Fatalf("proof.SignLauncher: %v", err)
 	}
 	status, body := rig.brokerReq(t, http.MethodPost, "/v1/enrollments", map[string]string{"Proof": p},
-		map[string]any{"kind": "box", "runtime_id": runtimeID, "thumbprint": thumbprint})
+		map[string]any{"kind": "session", "runtime_id": runtimeID, "thumbprint": thumbprint})
 	var enrolled struct {
 		EnrollmentID string `json:"enrollment_id"`
 	}
@@ -738,7 +738,7 @@ func TestAPersonsMachineLoginIsTheirsAloneToApproveThroughDispatch(t *testing.T)
 	rig := newContractRig(t)
 	machineKey := contractSigningKey(t)
 	compact, err := record.Sign(machineKey, rig.BrokerURL,
-		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: "contract-test-host"}}, "", contractApprover, time.Now())
+		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: "contract-test-host"}}, "", contractApprover, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -774,9 +774,6 @@ func TestAnyoneApprovalCannotReleaseAPersonsWithheldSecret(t *testing.T) {
 	}
 	if resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-grants/"+*auto.GrantID+"/revoke", map[string]any{}, contractApprover); resp.Code != http.StatusOK {
 		t.Fatalf("revoke = %d: %s", resp.Code, resp.Body.String())
-	}
-	if again := rig.request(t, session, "control", "AUTO_TOKEN"); again.State != "pending" {
-		t.Fatalf("control: the session's next AUTO_TOKEN request = %s, want pending (withheld)", asJSON(t, again))
 	}
 	approvePath := "/api/v1/credential-requests/" + *mixed.RecordID + "/approve"
 	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, contractOther)

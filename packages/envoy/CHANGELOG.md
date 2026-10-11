@@ -50,6 +50,18 @@
   `grant list` the grant, secrets, how it was granted, approver, session, operator and expiry, and
   `--json` prints the broker's body verbatim. `machine revoke` warns on stderr when it ends this
   machine's own login, its id typed in any case.
+- A request for agent secrets can ask for a shorter grant: `agent-secrets request NAME... --ttl 2m`
+  and the exec form's `agent-secrets NAME... --ttl 2m -- cmd` sign the lifetime into the request
+  object (`lifetime_seconds`), the record body carries it (`lifetime_seconds: 120`), and the grant
+  ends that long after it is granted while its session lives on. `--ttl` takes a whole number of
+  seconds from 1s to 2147483647s; `0`, a fraction of a second or anything else exits 2 before any
+  broker call. `POST /v1/requests` and `GET /v1/requests/{id}` answer the `lifetime_seconds` the
+  grant got (null for none), and the CLI checks it: a broker or helper from before `--ttl`, which
+  drops the claim and grants for longer, has the grant or pending request this call made revoked or
+  cancelled at once, and the command exits 1 naming why, running nothing. What an earlier call
+  made is left alone and named: an approved grant such a broker reuses, and a pending request it
+  answers this call joined (`coalesced`). A request with `--ttl` never reuses a live grant of
+  another lifetime.
 - A pending secret request names whom it waits on. `POST /v1/requests` and
   `GET /v1/requests/{id}` answer `approver`: the approver the request's credential-request record
   names, a person's Dispatch login or `anyone` for a shared secret, read from the record rather than
@@ -179,6 +191,80 @@
 
 ### Changed
 
+- `agent-secrets renew --pod-token-file FILE` re-reads the projected pod token before each renewal
+  and sends the token as `pod_token`. A blank or unreadable file posts no renewal: the renewer
+  prints `ERROR: enrollment <id> cannot read its pod token (<reason>); nothing was sent, so its
+  lease lapses unless the file becomes readable` and retries rather than exiting 76 (at start it
+  exits 2 and the shim starts it again). The worker shim passes its projected token file. This
+  client works against a broker that predates the renewal body because that handler ignores it.
+  The terminal renewal refusals `POD_TOKEN_REQUIRED` and `ENROLLMENT_NOT_LIVE`, and an older
+  broker's `PROOF_INVALID` saying `not live`, exit 76 (`EX_PROTOCOL`) naming the enrollment, HTTP
+  status and broker code; the shim quotes that terminal line beside its own enrollment and stops.
+  Every other refusal retries, `POD_IDENTITY_MISMATCH` among them, which the broker also answers
+  for a token it could not verify while its issuer was unreachable.
+- `GET /api/v1/references` no longer renders every document that mentions its target to cut each
+  backlink's one-block excerpt (LEGION-531; 24.6% of a week's production CPU). Each document
+  mention's excerpt - the block holding the target's first mention, its `#b-<id>` jump and its
+  markdown cut to 480 characters - is stored on its `refs` row when the mention is indexed, cut
+  from the render the version write already makes, so the route reads one indexed query and loads
+  no document. Migration `0092_refs_excerpts` adds the three nullable columns (`excerpt_block_id`,
+  `excerpt_text`, `excerpt_version`) and the partial index `refs_excerpt_drift`; its census answers
+  `0`. `envoy-dispatch` runs a reconciliation that fills every row indexed before it, one batch of
+  20 documents per tick. Until it reaches a row, the route answers that mention with the
+  document's name, the fallback a mention in no block already got. The excerpts the dashboard
+  shows are unchanged: on the 2026-10-10 production dump, all 7,537 document mentions match the
+  rendered path. In the rolling deploy that ships 0092, a version the outgoing task writes keeps
+  the previous version's excerpt until the reconciliation's next tick, within five minutes.
+- **Breaking:** an agent session on a machine its person logged in is one enrollment kind,
+  `session`, where the broker recorded `host` for a session the helper enrolled for itself and `box`
+  for a key a launcher such as agentbox brought; a pod stays `pod`. Migration
+  `0012_one_session_kind` rewrites every stored `host` and `box` row to `session` and allows only
+  `session` and `pod`. Every place the kind is shown says `session`: `GET /v1/enrollments/self`,
+  the grant and record reads (`agent-secrets self`, `grant list`, Dispatch's credential page and
+  Live grants), and a new record's enrollment line, while a record written before keeps its body,
+  which its id hashes, verbatim. A reader matching `host` or `box` must match `session`. The
+  clients in the field keep working through the rollout in either order: the broker records an
+  older helper's `host` or `box` as `session` and logs `an enrollment named a legacy kind`; this
+  helper asks an older broker, which refuses `session` with `400 INVALID_KIND`, once more as
+  `host` or `box`. The broker is forward-only from this migration: a broker before it inserts
+  `host` and `box`, which the new constraint refuses, so roll forward rather than back.
+- **Breaking:** a grant lasts until its session ends unless its request asked for a shorter
+  lifetime (`--ttl`, above); there is no fixed lifetime and no cap. `BROKER_MAX_GRANT_SECONDS`
+  (default and most 43200, 12 hours) is removed: a deployment that still sets it refuses to start,
+  naming the variable and explaining that a request's `--ttl` now chooses a shorter lifetime. A
+  grant with no lifetime answers `expires_at: null` on every
+  grant read (`GET /v1/enrollments/self`, `GET /v1/grants`, `GET /v1/operator/grants`), and its
+  record reads `lifetime_seconds: null` on `GET /v1/credential-requests/{id}` and
+  `lifetime_seconds: -` in its body. Migration `0013_grant_until_session_ends` drops not null from
+  `requests.lifetime_seconds` and `grants.expires_at`, and every liveness check reads a null expiry
+  as one that has not passed. `agent-secrets self` prints `until this session ends` for such a
+  grant and `grant list` prints `session-end`; an `agent-secrets` from before this release prints
+  `0001-01-01T00:00:00Z` for it, and nothing else changes for that client. Dispatch's credential
+  page shows **Until the session ends** and Live grants **When the session ends**. A broker before
+  this migration cannot read a grant with no expiry, so roll forward rather than back.
+  A running session keeps what it was given across the deploy: a request without a lifetime takes
+  the live grant of a request written before this migration (which recorded the old fixed 43200
+  seconds), keeping its expiry, and joins such a request while it is still pending. Only rows
+  written before migration 13 was applied match, so a later `--ttl 12h` request is never taken for
+  one, and nothing matches a day after the deploy.
+- **Breaking:** a session has at most one pending request for each secret. `POST /v1/requests`
+  answers a request naming a secret one of the session's pending requests names, with another set of
+  names or another lifetime, `409 REQUEST_PENDING`, naming the pending request; `agent-secrets`
+  exits 1 with that message. This holds for requests without `--ttl` too: a request for `A` and `B`
+  while one for `A` waits used to open a second record for the approver, and is now refused. The
+  identical request (the same names and the same lifetime, or none) still joins the pending one,
+  answered with that request and `coalesced: true`. Wait for the named request to be decided, or
+  `agent-secrets cancel` it and ask again.
+- The helper's `enroll-box` and `unenroll-box` ops are `enroll-session-key` and
+  `unenroll-session-key`, which name no kind, and `agent-secrets enroll --helper` needs no `--kind`.
+  Every older client keeps working: the helper still answers `enroll-box` and `unenroll-box`, from
+  an `agent-secrets` before this release, as the new pair, logging `a client asked a legacy op`;
+  this `agent-secrets` asks a helper before this release, which answers
+  `unknown op enroll-session-key`, its `enroll-box` and `unenroll-box` instead, saying so on
+  stderr; and `enroll --helper --kind box`, which dotfiles' agentbox passes, enrolls as before
+  until dotfiles pins this release and agentbox stops passing it, while any other `--kind` exits 2
+  naming the flag, as every `--kind` but `box` did before. An `enroll` without `--helper` is
+  refused for that first, whatever `--kind` it carries, as before.
 - `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
   naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
   Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not
@@ -465,6 +551,40 @@
   successful runs. Such a run still counts as no deploy. Every warning is now logged once per run
   and configured job name for the life of the process rather than on every read: one dev-only run
   had been logging the line twice every three minutes (LEGION-567).
+- A document uploaded or seeded with another document's ask blocks, under their block ids and with
+  the same question, options, `multiple` and urgency, on the same issue (or the same project for a
+  project document) opens no ask for them: each copied block shows the state and answer of the ask
+  it was copied from, read-only, and names it and its document in the server-owned `copied_from`
+  and `copied_from_document`, where settlement had opened a new ask in a person's Inbox for every
+  copied block, answered and resolved ones included. Of several matching asks the earliest asked
+  is the source, whichever wording it matched on. A block matching only a source's earlier wording
+  is a copy of it while the source is open, or when the source's answer or resolution was given
+  while it asked that wording, ordered by the events' commit order; one answered or resolved after
+  the rewording opens its own ask, so no copy shows a decision on a question it does not ask.
+  Answering or resolving the source reaches its copies a settlement later. Each block settlement
+  takes for a copy, and each change of the state a copy shows, is logged once (`dispatch: settled
+  an ask block as a copy of another document's ask`, naming the copy, its block, the source ask,
+  its document and its state, never the question), since such a block opens no ask and reaches no
+  one's Inbox.
+  `dispatch request-approval`'s refusal and the dashboard's decision card name the source, its
+  document and its state from those attributes. A copy whose text is changed, or an id no ask of
+  the owner indexes, still opens one, and so do a source's copies once its block
+  leaves its document: settlement of the source retracts its ask and settles every copy, the first
+  opens one ask, credited to whoever wrote the block into it, and the others name that ask, on a
+  project's documents as on an issue's. Migration `0091_artifacts_project_documents` adds the
+  partial index a project document's lookups read. An answered or resolved ask's wording is fixed:
+  a document edit or an upload that changes its block's question, options, `multiple` or urgency
+  no longer rewords the ask and leaves its answer beside a question nobody answered; settlement
+  writes the decided wording back into the block and logs it, as `PATCH /api/v1/asks/{id}` already
+  refused such an edit (`ASK_NOT_OPEN`). Each ask an earlier release reworded after its decision
+  gets back the wording that decision was given on, in code and not by a migration: every boot
+  restores them all in one statement and logs each ask, its document and its question, and each
+  document's settlement restores its own before it writes the decided wording back into the block,
+  which also undoes a rewording an earlier release's task writes during a rolling deploy. The boot
+  settles each restored ask's own document, whose block still asks the rewording until that
+  settlement writes the decided wording back. Either restoration settles the restored asks' copies
+  again: a copy that settled while its source's row held the rewording showed the decision on the
+  reworded question, and now opens its own ask (LEGION-651).
 - A document opens in the editor however many documents the process has touched: the 1,000-room
   cap counts ygo's live rooms, and a document's in-memory state is released once its room goes and
   nothing still holds it. Before, every document opened since a restart kept its state and counted

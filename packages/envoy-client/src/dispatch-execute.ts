@@ -192,10 +192,6 @@ export function adviceMemory(): Set<string> {
   return triageAdviceShown;
 }
 
-// Appended where a spec is created or sent to a human for approval; it never blocks the write.
-const SPEC_CHECK_REMINDER =
-  'Has a fresh reader checked this spec? Each claim about how a system works today should trace to code read or a command run, and each requirement to the human\'s words or a cited fact. If not, have a fresh read-only subagent check it now and fix what it finds: on Oh My Pi, `task(agent="scout")`, or whatever read-only agent your host bundles; a Legion architect\'s own spec uses the Legion plugin\'s `plan-gap-analyst` agent instead, which only a Legion session has. See the `dispatch-first` skill, "Design in the spec".';
-
 function renderAdvice(
   tool: string,
   key: string,
@@ -1820,30 +1816,54 @@ async function refuseOpenDecisionBlocks(
   ]);
   const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version.markdown.split("\n");
-  const open = blocks.flatMap((block) => {
+  // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
+  const stillOpen = (named: string, state: string): string => {
+    const next =
+      state === "answered" ? "fold the answer into the text" : "write the decision into the text";
+    return `${named}, ${state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`;
+  };
+  const open = blocks.flatMap((block): string[] => {
     const ask = asks.get(block.id);
+    // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
+    // quotes the opener (in code, say) can add an open block but never hide one; a block none of
+    // whose lines carries a state is open.
+    const openers = lines.filter(
+      (line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`)
+    );
+    const states = openers.map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
     const named =
       ask === undefined
         ? `block ${block.id}`
         : `${JSON.stringify(ask.question)} (block ${block.id}, ask ${ask.id})`;
-    // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
-    // quotes the opener (in code, say) can add an open block but never hide one; a block none of
-    // whose lines carries a state is open.
-    const states = lines
-      .filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`))
-      .map((line) => /\bstate="(\w+)"/.exec(line)?.[1]);
     if (states.length === 0) return [`${named}, which version ${latest} does not hold yet`];
     if (!states.includes("open") && states.some((state) => state !== undefined)) return [];
-    if (ask === undefined) return [`${named}, whose ask Dispatch has not opened yet`];
-    if (ask.state === "open") return [named];
-    // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
-    const next =
-      ask.state === "answered"
-        ? "fold the answer into the text"
-        : "write the decision into the text";
-    return [
-      `${named}, ${ask.state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`,
-    ];
+    if (ask !== undefined) return ask.state === "open" ? [named] : [stillOpen(named, ask.state)];
+    // A block copied from another document's ask opens none: settlement names that ask in
+    // `copied_from`, its document in `copied_from_document`, and writes its state into the block,
+    // which this version shows open, so the source is where it is answered. The document is named
+    // as the dashboard's decision card names it, its issue key and slug or its project's
+    // `<project>/<slug>`, so the ask's address is the line's one link.
+    const attribute = (name: string): string | undefined =>
+      openers
+        .map((line) => new RegExp(`\\b${name}="([^"]+)"`).exec(line)?.[1])
+        .find((value) => value !== undefined);
+    const sourceId = attribute("copied_from");
+    const document = attribute("copied_from_document");
+    if (sourceId === undefined || document === undefined) {
+      return [`${named}, whose ask Dispatch has not opened yet`];
+    }
+    const source = parseDispatchRef(document);
+    const where =
+      source === null
+        ? document
+        : source.owner.kind === "project"
+          ? documentLabel(source.owner.project, source.id)
+          : `${source.owner.issue} ${source.id}`;
+    const ref =
+      source?.owner.kind === "issue"
+        ? dispatchChildRef(dispatchIssueRef(source.owner.issue), "ask", sourceId)
+        : dispatchChildRef(document, "ask", sourceId);
+    return [`${named}, a copy of ask ${ref}, which is open on ${where}: answer it there`];
   });
   if (open.length === 0) return;
   const count = open.length === 1 ? "1 open decision block" : `${open.length} open decision blocks`;
@@ -2194,7 +2214,6 @@ export async function executeDispatchTool(
         return {
           text: [
             `Created ${created.key}: ${created.title} ${notSubscribed(issueTopic(created.key))}`,
-            ...(spec === undefined ? [] : [SPEC_CHECK_REMINDER]),
             ...adviceLines,
           ].join("\n"),
           details: {
@@ -2988,7 +3007,7 @@ export async function executeDispatchTool(
         ? `Approval requested for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}).`
         : `The approval request for ${resolved.artifact.name} (document id ${resolved.artifact.id}) at version ${result.version} (ask ${result.ask.id}) already waits on the human, so this call changed nothing: nothing since it last reached the human (a newer version, a human's reply in its thread, or your progress note) left it waiting on you.`;
       return {
-        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.${result.recorded ? `\n${SPEC_CHECK_REMINDER}` : ""}`,
+        text: `${outcome} The human's Inbox asks: ${JSON.stringify(result.ask.question)}. The answer arrives as artifact.approved or artifact.changes_requested. An edit before the answer moves this request to the new version and leaves it waiting on you, and an edit after approval makes the approval stale: either way, request again for the new version once the human has agreed to every point in it, which hands this request back or opens a new one.`,
         details: { ...details, artifact: resolved.artifact.id, version: result.version },
       };
     }
