@@ -102,8 +102,9 @@ func TestAWriteRepeatingAHeldBlockIDIsRefused(t *testing.T) {
 }
 
 // An accepted suggestion that rewrites a typed block in place under its own id writes one block
-// under that id, so it is taken as on main: the answered free-text ask keeps its row, its answer
-// and its block, whether the suggestion quotes the ask's whole text or a span across it.
+// under that id, so it is taken as on main: the answered free-text ask keeps its row, its answer,
+// its block and the question it was answered on, which settlement writes back into the block,
+// whether the suggestion quotes the ask's whole text or a span across it.
 func TestAnAcceptRewritingATypedBlockUnderItsOwnIDIsTaken(t *testing.T) {
 	const freeText = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n"
 	const reworded = ":::ask{#decision urgency=\"high\" multiple=\"false\"}\nWhich transport, first?\n:::\n"
@@ -141,9 +142,12 @@ func TestAnAcceptRewritingATypedBlockUnderItsOwnIDIsTaken(t *testing.T) {
 			if held := blockAskID(t, handler, issue.Key, "decision"); held != askID {
 				t.Fatalf("block decision holds ask %s, want %s", held, askID)
 			}
-			if ask := readBlockAsk(t, handler, askID); ask.Question != "Which transport, first?" || ask.State != "answered" ||
+			if ask := readBlockAsk(t, handler, askID); ask.Question != "Which transport?" || ask.State != "answered" ||
 				ask.Answer == nil || ask.Answer.Text == nil || *ask.Answer.Text != "REST first." {
 				t.Fatalf("the answered ask after the accept: question=%q state=%q answer=%+v", ask.Question, ask.State, ask.Answer)
+			}
+			if text := documentMarkdown(t, handler, issue.PrimaryArtifactID); !strings.Contains(text, "\nWhich transport?\n") {
+				t.Fatalf("the document after the accept holds no decided question written back:\n%s", text)
 			}
 		})
 	}
