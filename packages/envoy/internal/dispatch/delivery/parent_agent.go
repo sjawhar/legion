@@ -37,10 +37,7 @@ func (p ParentAgents) Value(session string) string {
 		return group.ParentAgentValue()
 	}
 	title := SessionTitle(p.titles, session)
-	if title == session {
-		return session
-	}
-	if p.names[strings.ToLower(title)] {
+	if _, hasTitle := p.titles[session]; hasTitle && p.names[strings.ToLower(title)] {
 		return title + " (" + session + ")"
 	}
 	return title

@@ -32,6 +32,13 @@ test("chosen values take the palette in the chosen order; the rest are Other and
   expect(scale.get(NO_SESSION)).toBe(PLACEHOLDER_COLOR);
 });
 
+test("a repeated chosen value consumes one palette slot", () => {
+  const scale = buildColorScale({ a: 5, b: 3, c: 1 }, ["a", "a", "b"]);
+  expect(scale.get("a")).toBe(COLOR_PALETTE[0]);
+  expect(scale.get("b")).toBe(COLOR_PALETTE[1]);
+  expect(scale.get("c")).toBe(OTHER_COLOR);
+});
+
 test("a chosen value the window does not hold takes no colour from the ones it does", () => {
   const scale = buildColorScale({ a: 5, b: 3 }, ["gone", "a"]);
   expect(scale.get("a")).toBe(COLOR_PALETTE[1]);

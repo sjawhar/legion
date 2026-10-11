@@ -12,6 +12,17 @@ func TestSessionTitleFallsBackToID(t *testing.T) {
 	}
 }
 
+func TestParentAgentsDisambiguatesATitleEqualToItsSessionID(t *testing.T) {
+	const session = "planner-session"
+	agents := NewParentAgents(
+		[]SessionGroup{{ID: "11111111-1111-1111-1111-111111111111", Name: session, Sessions: []string{"other"}}},
+		map[string]string{session: session},
+	)
+	if got, want := agents.Value(session), session+" ("+session+")"; got != want {
+		t.Errorf("Value(%q) = %q, want %q", session, got, want)
+	}
+}
+
 func TestParentAgentsValue(t *testing.T) {
 	planners := SessionGroup{ID: "11111111-1111-1111-1111-111111111111", Name: "planner", Sessions: []string{"s1", "s2"}}
 	agents := NewParentAgents([]SessionGroup{planners}, map[string]string{

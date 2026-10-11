@@ -74,7 +74,7 @@ export function buildColorScale(
 ): Map<string, string> {
   const scale = new Map<string, string>();
   const ranked = Object.keys(counts).sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0));
-  const order = chosen.length === 0 ? ranked : chosen;
+  const order = chosen.length === 0 ? ranked : [...new Set(chosen)];
   let next = 0;
   for (const key of order) {
     if (key in PLACEHOLDER_LABELS) continue;
