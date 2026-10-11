@@ -1,7 +1,7 @@
 import { useMutation } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 
-import { ApiError, api, apiErrorMessage } from "../../api/client";
+import { api, apiErrorCodeIn, apiErrorMessage } from "../../api/client";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
 
 export type CommentAction = "accept" | "reject" | "resolve" | "reopen";
@@ -28,12 +28,10 @@ const permanentRefusals = new Set([
 ]);
 
 function actionFailure(id: string, error: Error): CommentActionFailure {
-  const refused =
-    error instanceof ApiError && error.code !== undefined && permanentRefusals.has(error.code);
   return {
     id,
     message: apiErrorMessage(error, "Could not save this action."),
-    retryable: !refused,
+    retryable: !apiErrorCodeIn(error, permanentRefusals),
   };
 }
 

@@ -320,6 +320,17 @@ export interface IssueSummary
 }
 
 /**
+ * The longest issue title, in UTF-16 units, counted after the trim `POST /api/v1/issues` and
+ * `PATCH /api/v1/issues/{key}` apply; a longer one is `400 CAP_EXCEEDED`. Production's longest
+ * title was 326 characters when this was set. It bounds the duplicate-title check, which compares
+ * the new title with every title's lexemes in the project on each creation, and the
+ * `POSSIBLE_DUPLICATE` message, which quotes a candidate's whole title. Generated into Go as
+ * `contracts.IssueTitleMax`, which the server enforces, and the dashboard's title fields take it as
+ * their `maxLength`, so the two agree.
+ */
+export const ISSUE_TITLE_MAX = 1000;
+
+/**
  * The most issues one page of `GET /api/v1/issues` holds: `limit` is 1 to this. Generated into Go
  * as `contracts.MaxIssuePageLimit`, which the server enforces, and the `dispatch_issues` tool's
  * `limit` takes the same bound, so the two ends agree.
@@ -598,6 +609,10 @@ export interface Version {
   readonly summary: string | null;
   readonly authors: Actor[];
   readonly created_at: string;
+  /** How many bytes the version stores: a document's markdown (the rendering the version
+   *  recorded), or a file's or an image's bytes. The server reads it from the stored row without
+   *  rendering the document, so a list can name a document near the size cap without opening it.
+   *  Absent on a document version from a server that predates it. */
   readonly size?: number;
   readonly mime?: string;
   readonly sha256?: string;

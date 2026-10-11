@@ -316,6 +316,40 @@ func decodeBody[T any](t *testing.T, response *httptest.ResponseRecorder) T {
 	return value
 }
 
+// overCapCases are texts just past a cap of limit UTF-16 units, the one-character-over case and
+// one counted in UTF-16 units, each with the length the refusal names.
+func overCapCases(limit int) map[string]struct {
+	text   string
+	length int
+} {
+	return map[string]struct {
+		text   string
+		length int
+	}{
+		"one character over": {strings.Repeat("a", limit+1), limit + 1},
+		// 501 characters outside the Basic Multilingual Plane are 1,002 UTF-16 units.
+		"counted in UTF-16 units": {strings.Repeat("😀", limit/2+1), limit + 2},
+	}
+}
+
+// assertCapExceeded requires response to be the 400 CAP_EXCEEDED capExceededError writes for a
+// field of length units past a cap of limit, followed by "; hint" when hint is not empty.
+func assertCapExceeded(t *testing.T, request string, response *httptest.ResponseRecorder, field string, length, limit int, hint string) {
+	t.Helper()
+	want := fmt.Sprintf("%s is %d characters over the %d-character limit (%d/%d)", field, length-limit, limit, length, limit)
+	if hint != "" {
+		want += "; " + hint
+	}
+	body := response.Body.String()
+	refusal := decodeBody[struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}](t, response)
+	if response.Code != http.StatusBadRequest || refusal.Code != "CAP_EXCEEDED" || refusal.Error != want {
+		t.Fatalf("%s: status=%d body=%.300s, want 400 CAP_EXCEEDED %q", request, response.Code, body, want)
+	}
+}
+
 func TestCreateProjectIssueAndReadPrimaryDocument(t *testing.T) {
 	handler := newTestHandler(t)
 	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{

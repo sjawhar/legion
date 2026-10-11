@@ -168,9 +168,8 @@ export function ArtifactDetails({ artifact }: { artifact: Artifact }): ReactNode
                 </a>
                 <span className={`w-full break-all text-xs ${textMutedOnSurface}`}>
                   <Timestamp at={version.created_at} />
-                  {artifact.kind === "doc"
-                    ? null
-                    : ` · ${formatArtifactBytes(version.size)} · SHA-256 ${version.sha256 ?? "unavailable"}`}
+                  {version.size === undefined ? null : ` · ${formatArtifactBytes(version.size)}`}
+                  {artifact.kind === "doc" ? null : ` · SHA-256 ${version.sha256 ?? "unavailable"}`}
                 </span>
               </li>
             ))}

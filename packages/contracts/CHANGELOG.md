@@ -14,9 +14,17 @@
   and the picture syntax; `SESSION_ID_PATTERN` and `isSessionId`, the one session-id rule the
   dashboard and envoy-client read a reference by (the server's `text.IsSessionID`), and
   `pictureCaption`, the one caption a picture line carries (LEGION-541).
+- `Version.size` is documented for document versions too: the bytes of the markdown a version
+  stores, which Dispatch now answers on every document version it lists or reads, read from the
+  stored row without rendering the document (LEGION-481). It stays optional, absent on a document
+  version from a server that predates it.
 
 ### Changed
 
+- Added `ISSUE_TITLE_MAX` (1,000), the longest issue title in UTF-16 units that
+  `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept, generated into Go as
+  `contracts.IssueTitleMax`; the dashboard's title fields take it as their `maxLength`
+  (LEGION-505).
 - Added `WriteAdvice.suggestions`, `Suggestions` and `WriteSuggestion`: `POST /api/v1/issues` and
   `POST /api/v1/issues/{key}/asks` now return, without ever refusing or delaying the write, the
   three fused-search hits (sjawhar/legion#1764) most like what was just filed and, for an ask,

@@ -106,7 +106,7 @@ func (s *server) deliveryMeasuresFor(ctx context.Context, settings delivery.Deli
 		return deliveryMeasuresResponse{}, err
 	}
 	reached := map[int64]bool{}
-	for _, apply := range delivery.ProductionApplies(windowRuns, jobsByRun, settings.ProductionJobName) {
+	for _, apply := range s.productionApplies(windowRuns, jobsByRun, settings.ProductionJobName) {
 		reached[apply.RunID] = true
 	}
 	runs := make([]measures.Run, len(windowRuns))

@@ -717,6 +717,7 @@ bun run check:classes
 bun run typecheck
 bun run lint
 bun test
+bun run dispatch:local
 ```
 
 No module in the SPA may import, directly or through a chain, a module that imports it back: a
@@ -781,7 +782,8 @@ guard requires on writes. A cookie names its login's generation in
 `user_sessions`, which `resetDatabase` truncates, so a context signs in after the
 reset, never before it. Address the harness as `127.0.0.1:<port>`, never
 `localhost`: the router refuses any other `Host`. Do not replace the server with
-a fixture server.
+a fixture server. `bun run dispatch:local` runs the same harness by hand,
+seeded and signed in, and leaves it running (below, after the port rules).
 
 A third keeps an Inbox assertion from measuring the wrong mechanism: a test that expects a row to leave the Inbox list releases focus AND the pointer from it first, because `ViewportAnchor` and `heldRow` keep the row the reader's hand is on rendered wherever the list has moved it. Blurring alone is not enough - `.check()` and `.click()` leave the mouse over the row.
 
@@ -937,7 +939,9 @@ truncate a database the server's own loopback check never saw. `PGHOST` and `PGS
 since pgx and libpq read both; a service entry's `hostaddr`, the one key they part on, pgx sends
 to Postgres as a setting, which refuses the connection, so the harness server never boots on one.
 `e2e/psql.ts` imports nothing from `e2e/`, so a module can import it statically before the harness
-is up, without evaluating `e2e/api.ts`.
+is up, without evaluating `e2e/api.ts`; its `sqlAt` runs the same psql against a URL it is given,
+and kills it when an `AbortSignal` it is passed fires, which `e2e/local-instance.ts` uses to
+create its database through the server's `postgres` one.
 
 That reset is also the one rig failure that presents as a code failure. A transaction that holds
 one of the truncated tables for 5 s, such as a session left idle in a transaction, a long query, or
@@ -966,10 +970,12 @@ resolution, those listeners refuse it too, not only the Playwright config.
 
 `e2e/playwright.config.ts` probes every port it starts before any web server starts and fails the
 run with one message listing every taken port beside its own variable, before a single spec runs.
-One table in the config names each listener, its port's variable and whether a deployed run starts
-it, and both the probe and `webServer` read the started rows: all five ports for a local run, and
-`FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The refusal names only the variables
-the run probes. Its remedies are
+One table, `e2e/harness-listeners.ts`, names each listener, its command, its port's variable and
+whether a deployed run starts it; the config's probe and `webServer` read the rows it starts: all
+five ports for a local run, and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The
+probe is `e2e/port-probe.ts`: `isPortUsed` is Playwright's own predicate, and `takenPorts` lists
+the taken ports of a set of rows, which the config and `e2e/local-instance.ts` both refuse on. The
+refusal names only the variables the run probes. Its remedies are
 to stop whatever listens there, or to move a local run to free ports **and its own
 `DATABASE_URL`** — moving only the ports starts this run's servers elsewhere and still truncates
 the database the leftover server holds, and `e2e/seed.ts`'s quiesce reaches only the server at the
@@ -982,6 +988,27 @@ not behave alike; a lane that shares one hand-started harness across runs sets
 file, which derives the target's `ENVOY_URL` from that same value; the README's acceptance recipe
 wires the pair. A listing run starts no web server, so it skips the probe. The port validation above
 is not gated on that mode, so a malformed or duplicated port is refused in every invocation.
+
+`bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
+starts every row of `e2e/harness-listeners.ts`, each as the leader of a process group of its own,
+waits for the server's `/healthz` and every other listener's port, empties the database with
+`resetDatabase`, seeds `e2e/workspace.ts`, and prints the signed-in URL; `README.md`'s "Local
+instance" section is its user's guide. Its database is `DATABASE_URL` or the `dispatch_local`
+database on `packages/envoy/scripts/dev-postgres.sh`'s container. Before it hands out the URL its
+startup smoke checks, over HTTP with a dev sign-in cookie, that `/auth/whoami` names `alice`, the
+Inbox holds the seed's rows, the seeded broadcast is listed and every seeded session is an agent.
+It deliberately does not check a broadcast's recipient order: `e2e/broadcast.e2e.ts` owns that
+assertion, so the command has to start on a server without that fix for the spec to go red
+against it. What it runs on lives in `e2e/local-instance-support.ts`, which runs nothing on
+import: `Supervisor`, which starts each process and stops them all (Ctrl-C, a SIGTERM, a failure
+at any step), signalling every process group, SIGKILLing whatever still runs after 10 s, aborting
+the signal its psql calls carry, and returning once every leader has exited; `databaseUrlRefusal`,
+its own `DATABASE_URL` check; and `shellQuote`, for the commands it prints.
+`e2e/__tests__/local-instance-support.test.ts` (`bun run test`) drives them with real processes
+and no server. That check reads the URL with `new URL`, as libpq would only in part; the order
+closes the gap, since the reset runs only after the server's `/healthz` answered, and the server
+refuses to boot on a non-loopback database under `DISPATCH_DEV_SIGNIN`. Keep the health wait ahead
+of the reset.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Where a caret lands beside
