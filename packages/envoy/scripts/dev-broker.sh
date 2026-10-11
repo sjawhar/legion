@@ -2,7 +2,7 @@
 # packages/envoy/scripts/dev-broker.sh
 #
 # The local dev surface a human can drive without AWS or Dispatch. Boots Postgres
-# (dev-postgres.sh, made idempotent here since that script has no guard of its own), builds the
+# (the dispatch-pg container, through dev-postgres.sh), builds the
 # broker and its three clients (agent-secrets, agent-secrets-helper and agent-secrets-devrelay),
 # writes a fake secrets file standing in for Secrets Manager (DEMO_READ_TOKEN, tagged
 # owner=APPROVER_LOGIN tier=agent, so APPROVER_LOGIN's sessions get it without asking, and
@@ -14,8 +14,9 @@
 # Each invocation creates and drops its own isolated Postgres database (named from this run's own
 # WORK_DIR, below) and binds an OS-assigned ephemeral port (BROKER_LISTEN_ADDR=127.0.0.1:0), so two
 # agent sessions each running their own dev broker stack never see each other's enrollments,
-# requests or grants. The database lives in the shared dispatch-pg container, which this script
-# starts in Docker when it is not running, or, with DEV_BROKER_POSTGRES_URL set
+# requests or grants. The database lives in the shared dispatch-pg container, which
+# dev-postgres.sh creates, starts or reuses, and refuses when it runs an image other than that
+# script's pinned pgvector one, or, with DEV_BROKER_POSTGRES_URL set
 # (postgres://<user>@<host>:<port>/<database>, a role that may create databases), on that server
 # through psql, with no Docker at all. cmd/broker binds before it reports anything and
 # logs the address it actually bound; this script waits for that line and reads the real port from
@@ -98,18 +99,10 @@ trap cleanup EXIT
 echo "dev-broker: workdir $WORK_DIR" >&2
 
 if [ -z "${DEV_BROKER_POSTGRES_URL:-}" ]; then
-  # --- Postgres: dev-postgres.sh has no idempotency guard of its own, so check first. ---
-  if docker ps -a --format '{{.Names}}' | grep -qx "$POSTGRES_CONTAINER"; then
-    if ! docker ps --format '{{.Names}}' | grep -qx "$POSTGRES_CONTAINER"; then
-      echo "dev-broker: starting existing $POSTGRES_CONTAINER container..." >&2
-      docker start "$POSTGRES_CONTAINER" >/dev/null
-    else
-      echo "dev-broker: $POSTGRES_CONTAINER is already running, reusing it" >&2
-    fi
-  else
-    echo "dev-broker: booting Postgres via dev-postgres.sh..." >&2
-    "$SCRIPT_DIR/dev-postgres.sh" >&2
-  fi
+  # --- Postgres: dev-postgres.sh creates, starts or reuses dispatch-pg, and refuses one on an
+  # image other than its pinned one before this run creates anything. ---
+  echo "dev-broker: Postgres via dev-postgres.sh..." >&2
+  "$SCRIPT_DIR/dev-postgres.sh" >&2
   for _ in $(seq 1 30); do
     if docker exec "$POSTGRES_CONTAINER" pg_isready -U postgres >/dev/null 2>&1; then
       break

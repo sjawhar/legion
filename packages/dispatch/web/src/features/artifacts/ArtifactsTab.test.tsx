@@ -85,6 +85,41 @@ test("renders one row per artifact with no compare controls", async () => {
   }
 });
 
+// A row names how big its latest version is stored, a document's markdown as a file's bytes, so a
+// person finds a document near the size cap from the list without opening it.
+test("a row names its latest version's stored size", async () => {
+  const spec: Artifact = {
+    ...artifact,
+    id: "artifact-spec",
+    kind: "doc",
+    name: "near-cap.md",
+    slug: "near-cap-md",
+    versions: [
+      {
+        authors: [{ id: "alice", kind: "user" }],
+        created_at: "2026-09-09T02:00:00Z",
+        named: false,
+        number: 1,
+        size: 1_048_475,
+        summary: null,
+      },
+    ],
+  };
+  const { getIssueReferences, listArtifacts, view } = renderTab([artifact, spec]);
+
+  try {
+    const document = await screen.findByTestId("artifact-near-cap-md");
+    expect(document.querySelector("p")?.textContent).toContain("doc · 1 version · 1023.9 KB ·");
+    expect(screen.getByTestId("artifact-diagram-png").querySelector("p")?.textContent).toContain(
+      "image · 2 versions · 20 B ·"
+    );
+  } finally {
+    view.unmount();
+    listArtifacts.mockRestore();
+    getIssueReferences.mockRestore();
+  }
+});
+
 test("artifacts tab renders no make-primary control", async () => {
   const artifacts: Artifact[] = [
     {

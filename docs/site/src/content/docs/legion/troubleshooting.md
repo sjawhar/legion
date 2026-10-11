@@ -332,7 +332,11 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   ([what counts a round](/legion/legion/concepts/#review-signalling)). The work goes on, and the
   architect decides what happens next, often with a question to you.
 - **`Pull request #<n> reached max_fix_attempts=3.`** A check or workflow the base branch requires
-  stayed red through three fix attempts.
+  stayed red through three fix attempts. Red CI within the attempt that ran the count out (the
+  counted head and every head pushed on top of it until a push lands on a head CI judged green) no
+  longer sends the work back by itself, so the issue waits in testing or review for the architect,
+  or for a worker's own decision such as a reviewer's request for changes. A `READY` is still
+  withdrawn on red CI.
 - **A review round that no review decides.** Legion's reviewer must approve the head or request
   changes; a plain comment leaves the issue in `needs_review`, and the architect asks the reviewer
   for the decision. Only the review App or an account with write access to the repository decides a
@@ -389,8 +393,8 @@ branch requires`); the daemon reads again every two minutes.
 ## A status change did not stick
 
 The daemon owns a running tree's status. A status an agent session writes on a running root is set
-back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, or
-`legion status` from the controller or an operator's shell, is what takes a tree out.
+back, and the tree's architect is told who wrote it. A person's move in the Dispatch dashboard, the
+controller's `set_status`, or `legion status` from an operator's shell, is what takes a tree out.
 
 When the daemon's own status writes to Dispatch are failing, `legion state` says so on its third
 line:

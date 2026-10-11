@@ -29,7 +29,7 @@ import {
   parseIssuePath,
 } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
-import { artifactVersionUrl, versionsNewestFirst } from "./ArtifactHeader";
+import { artifactVersionUrl, formatArtifactBytes, versionsNewestFirst } from "./ArtifactHeader";
 import { ArtifactDropZone, ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
 
 function kindIcon(kind: Artifact["kind"]): ReactNode {
@@ -183,9 +183,13 @@ function ArtifactRow({
           <TruncatedText title={artifact.name}>{artifact.name}</TruncatedText>
         </Link>
         {/* The name truncates; its details wrap. Truncating them hid the update time on a row
-            with room to spare. */}
+            with room to spare. The size is the latest version's as stored (a document's
+            markdown), so a document near the size cap shows here without being opened. */}
         <p className={`text-xs ${textMutedOnSurface}`}>
           {artifact.kind} · {versions.length} {versions.length === 1 ? "version" : "versions"} ·
+          {latestVersion?.size === undefined
+            ? null
+            : ` ${formatArtifactBytes(latestVersion.size)} ·`}{" "}
           Updated <Timestamp at={latestVersion?.created_at ?? artifact.created_at} />
         </p>
       </div>
