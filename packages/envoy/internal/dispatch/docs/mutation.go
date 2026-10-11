@@ -139,8 +139,9 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	}
 	tree, err := treeOf(fork)
 	var markdown string
+	var offsets []pmdoc.BlockOffset
 	if err == nil {
-		markdown, err = documentMarkdown(tree)
+		markdown, offsets, err = documentMarkdownWithOffsets(tree)
 	}
 	if err != nil {
 		return joinedSchemaError(err, start)
@@ -189,8 +190,8 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	// The rendering this operation produced is the document as the transaction now sees it, so
 	// a version it writes later snapshots this tree rather than walking and rendering the
 	// document again (captureLiveTextAndAuthors). forkLive drops both the moment the fork moves.
-	write.tree, write.markdown = tree, markdown
-	if _, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, nil); err != nil {
+	write.tree, write.markdown, write.offsets = tree, markdown, offsets
+	if _, err := s.writeVersionTx(ctx, tx, artifactID, renderedTree{tree: tree, markdown: markdown, offsets: offsets}, actor, nil); err != nil {
 		return fmt.Errorf("refresh transactional document anchors: %w", err)
 	}
 	write.anchorsTree = tree
@@ -255,7 +256,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	if err := pmdoc.AskContentError(tree); err != nil {
 		return "", &ErrInvalidAskBlock{Reason: err}
 	}
-	canonical, err := renderTree(tree)
+	canonical, offsets, err := renderTreeWithOffsets(tree)
 	if err != nil {
 		return "", err
 	}
@@ -274,7 +275,7 @@ func (s *Service) SeedText(ctx context.Context, artifactID, markdown string, act
 	// settlement that indexes the seeded ask blocks needs to know who wrote them. The ledger
 	// records it once the transaction commits (Ledger.creditRooms), so a seed that never commits
 	// leaves the document no state.
-	ledgerFrom(ctx).seeded(artifactID, tree, actor)
+	ledgerFrom(ctx).seeded(artifactID, tree, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor)
 	return canonical, nil
 }
 
@@ -644,7 +645,7 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 	if !joined {
 		return VersionResult{}, errUnjoined
 	}
-	tree, markdown, capture, err := s.captureLiveTextAndAuthors(ctx, artifactID, nil)
+	rendered, capture, err := s.captureLiveTextAndAuthors(ctx, artifactID, nil)
 	if err != nil {
 		return VersionResult{}, err
 	}
@@ -652,11 +653,11 @@ func (s *Service) SnapshotVersion(ctx context.Context, artifactID string, actor 
 	if err != nil {
 		return VersionResult{}, err
 	}
-	if latest.markdown == markdown {
+	if latest.markdown == rendered.markdown {
 		return VersionResult{Version: latest.Version}, nil
 	}
 	capture.authors[actorKey(actor)] = actor
-	result, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, &versionWrite{
+	result, err := s.writeVersionTx(ctx, tx, artifactID, rendered, actor, &versionWrite{
 		authors: actorSlice(capture.authors),
 		capture: &capture,
 	})
@@ -1091,7 +1092,7 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	if !joined {
 		return VersionResult{}, errUnjoined
 	}
-	tree, markdown, capture, err := s.captureLiveTextAndAuthors(ctx, artifactID, &actor)
+	rendered, capture, err := s.captureLiveTextAndAuthors(ctx, artifactID, &actor)
 	if err != nil {
 		return VersionResult{}, err
 	}
@@ -1102,7 +1103,7 @@ func (s *Service) NamedVersion(ctx context.Context, artifactID, summary string, 
 	if !open {
 		return VersionResult{}, ErrIssueClosed
 	}
-	result, err := s.writeVersionTx(ctx, tx, artifactID, markdown, tree, actor, &versionWrite{
+	result, err := s.writeVersionTx(ctx, tx, artifactID, rendered, actor, &versionWrite{
 		named:   true,
 		summary: new(summary),
 		authors: actorSlice(capture.authors),
@@ -1199,20 +1200,20 @@ func (s *Service) registerStampedAskBlocks(ctx context.Context, room string, sta
 // after the take, for a change the version holds or not, stays pending for the next version
 // (LEGION-503). The room is taken inside the Apply that loads and as docTree reads it: a room
 // looked up again once that Apply returned can have been evicted in between.
-func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (*pmdoc.Node, string, authorCapture, error) {
+func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, actor *model.Actor) (renderedTree, authorCapture, error) {
 	tx, _ := txFromContext(ctx)
 	write := joinedLiveWrite(ctx, room)
 	if write == nil {
 		fork, err := s.joinRead(ctx, room)
 		if err != nil {
-			return nil, "", authorCapture{}, err
+			return renderedTree{}, authorCapture{}, err
 		}
 		if err := s.refuseLostWrite(ctx, room, fork, actor); err != nil {
-			return nil, "", authorCapture{}, err
+			return renderedTree{}, authorCapture{}, err
 		}
 	}
 	if err := s.warmLiveDocument(ctx, room); err != nil {
-		return nil, "", authorCapture{}, err
+		return renderedTree{}, authorCapture{}, err
 	}
 	// The warmed-read hook deliberately evicts a loaded room in tests. It runs before this
 	// transaction takes the document lock: CloseRoom flushes a room's persistence, which may
@@ -1223,34 +1224,34 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 		s.afterReadWarm(room)
 	}
 	if err := lockDocumentRoom(ctx, tx, room); err != nil {
-		return nil, "", authorCapture{}, err
+		return renderedTree{}, authorCapture{}, err
 	}
 	var tree *pmdoc.Node
 	var capture authorCapture
 	var err error
 	if write != nil {
 		if capture, err = s.capturePendingAuthors(ctx, tx, room, write, actor); err != nil {
-			return nil, "", authorCapture{}, err
+			return renderedTree{}, authorCapture{}, err
 		}
 		fork, err := s.joinRead(ctx, room)
 		if err != nil {
-			return nil, "", authorCapture{}, err
+			return renderedTree{}, authorCapture{}, err
 		}
 		if err := s.refuseLostWrite(ctx, room, fork, actor); err != nil {
-			return nil, "", authorCapture{}, err
+			return renderedTree{}, authorCapture{}, err
 		}
 		if s.afterCaptureFork != nil {
 			s.afterCaptureFork(room)
 		}
 		if write.tree != nil && write.fork == fork {
-			return write.tree, write.markdown, capture, nil
+			return renderedTree{tree: write.tree, markdown: write.markdown, offsets: write.offsets}, capture, nil
 		}
 		if tree, err = treeOf(fork); err != nil {
-			return nil, "", authorCapture{}, err
+			return renderedTree{}, authorCapture{}, err
 		}
 	} else {
 		if capture, err = s.capturePendingAuthors(ctx, tx, room, nil, actor); err != nil {
-			return nil, "", authorCapture{}, err
+			return renderedTree{}, authorCapture{}, err
 		}
 		if s.afterCaptureAuthorsTake != nil {
 			s.afterCaptureAuthorsTake(room)
@@ -1267,17 +1268,17 @@ func (s *Service) captureLiveTextAndAuthors(ctx context.Context, room string, ac
 			tree, readErr = treeOf(doc)
 		})
 		if readErr != nil {
-			return nil, "", authorCapture{}, readErr
+			return renderedTree{}, authorCapture{}, readErr
 		}
 		if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
-			return nil, "", authorCapture{}, fmt.Errorf("warm live document: %w", err)
+			return renderedTree{}, authorCapture{}, fmt.Errorf("warm live document: %w", err)
 		}
 	}
-	markdown, err := documentMarkdown(tree)
+	markdown, offsets, err := documentMarkdownWithOffsets(tree)
 	if err != nil {
-		return nil, "", authorCapture{}, err
+		return renderedTree{}, authorCapture{}, err
 	}
-	return tree, markdown, capture, nil
+	return renderedTree{tree: tree, markdown: markdown, offsets: offsets}, capture, nil
 }
 
 func latestVersion(ctx context.Context, tx pgx.Tx, artifactID string) (struct {
@@ -1325,11 +1326,21 @@ type versionWriteResult struct {
 	changes model.ReferenceChanges
 }
 
+// renderedTree is a document tree with its canonical markdown and each identified block's byte
+// range in that markdown, all from one render (pmdoc.RenderWithBlockOffsets), so a version write
+// stores the markdown and cuts its mentions' excerpts without rendering the tree again.
+type renderedTree struct {
+	tree     *pmdoc.Node
+	markdown string
+	offsets  []pmdoc.BlockOffset
+}
+
 // writeVersionTx is the only path that changes the durable version protocol:
 // version writes index references, move open approval asks to the new version, refresh anchors,
 // and retain their author capture until the enclosing transaction commits. A nil write records no
 // version but keeps a transactional tree mutation's anchors in the same path.
-func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, markdown string, tree *pmdoc.Node, actor model.Actor, write *versionWrite) (versionWriteResult, error) {
+func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID string, rendered renderedTree, actor model.Actor, write *versionWrite) (versionWriteResult, error) {
+	markdown, tree := rendered.markdown, rendered.tree
 	if write == nil {
 		return versionWriteResult{}, s.refreshAnchors(ctx, tx, artifactID, tree, actor)
 	}
@@ -1363,9 +1374,9 @@ func (s *Service) writeVersionTx(ctx context.Context, tx pgx.Tx, artifactID, mar
 	if err != nil {
 		return versionWriteResult{}, err
 	}
-	// The mentions' excerpts are cut from the tree this version was rendered from, in its own
+	// The mentions' excerpts are cut from the render this version's markdown came from, in its own
 	// transaction, so GET /api/v1/references serves them without rendering the document.
-	if err := s.recordTreeExcerpts(ctx, tx, artifactID, version.Number, markdown, tree); err != nil {
+	if err := s.recordTreeExcerpts(ctx, tx, artifactID, version.Number, rendered); err != nil {
 		return versionWriteResult{}, err
 	}
 	// The open approval request follows the document version without leaving its thread or opening

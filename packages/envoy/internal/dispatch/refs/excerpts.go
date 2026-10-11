@@ -50,6 +50,18 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, serverURL st
 // answers that mention with. A row already holding a later version's excerpt is left as it is, so
 // the reconciliation, which reads the document outside the version write's transaction, never
 // overwrites what a later version stored.
+//
+// The guard admits a row a version write has just marked owed (ClearExcerpts, excerpt_version
+// null) while the reconciliation, holding an older version's number, read the document, so the
+// row can take that older number. The invariant that keeps the excerpt right: a version write
+// marks its mentions owed only when its transaction recorded no rendering of the tree it wrote,
+// which is an upload whose replacement left the document as it was (ReplaceText returns before
+// applyLive records one). Every other version write cuts its excerpts from the render its
+// markdown came from (recordTreeExcerpts), so IndexDocumentReferences' check that the recorded
+// rendering is the version's markdown never clears. That unchanged upload's markdown is the
+// document the reconciliation read, so the excerpt stored under the older number is the one the
+// version would have stored, and nothing reads the number but MarkStaleExcerpts, whose re-marking
+// only recomputes the same excerpt.
 func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, excerpts map[Target]model.GraphExcerpt) error {
 	kinds := make([]string, 0, len(excerpts))
 	ids := make([]string, 0, len(excerpts))
@@ -61,15 +73,15 @@ func RecordExcerpts(ctx context.Context, q Execer, fromID string, version int, e
 		blockIDs = append(blockIDs, excerpt.BlockID)
 		texts = append(texts, excerpt.Text)
 	}
+	// The target's excerpt is a scalar subquery, so a mention whose target excerpts lacks (no
+	// block holds it) is still updated, with no excerpt, and leaves the drift index.
 	if _, err := q.Exec(ctx, `
+		with e(kind, id, block_id, text) as (select * from unnest($3::text[], $4::text[], $5::text[], $6::text[]))
 		update refs r
-		set excerpt_version = $2, excerpt_block_id = e.block_id, excerpt_text = e.text
-		from refs s
-		left join unnest($3::text[], $4::text[], $5::text[], $6::text[]) as e(kind, id, block_id, text)
-		  on e.kind = s.to_kind and e.id = s.to_id
+		set excerpt_version = $2,
+		    excerpt_block_id = (select e.block_id from e where e.kind = r.to_kind and e.id = r.to_id),
+		    excerpt_text = (select e.text from e where e.kind = r.to_kind and e.id = r.to_id)
 		where r.from_kind = 'artifact' and r.from_id = $1
-		  and s.from_kind = r.from_kind and s.from_id = r.from_id
-		  and s.to_kind = r.to_kind and s.to_id = r.to_id
 		  and coalesce(r.excerpt_version, 0) <= $2
 	`, fromID, version, kinds, ids, blockIDs, texts); err != nil {
 		return fmt.Errorf("record reference excerpts of %s: %w", fromID, err)
@@ -163,8 +175,9 @@ func ClearExcerpts(ctx context.Context, q Execer, fromID string) error {
 // MarkStaleExcerpts marks owed every mention whose excerpt is older than its document's latest
 // version, and returns how many it marked. Every version write stores its own mentions' excerpts,
 // so only a version a binary predating migration 0090 wrote - the task a deploy replaces, while
-// both run - leaves one behind; it reads every stored excerpt, so the reconciliation runs it only
-// in the hour after its process starts.
+// both run - leaves one behind. No index supports it: it reads every artifact mention holding an
+// excerpt (7,537 rows on the 2026-10-10 production dump, 26 ms), so the reconciliation runs it
+// only in the hour after its process starts.
 func MarkStaleExcerpts(ctx context.Context, q Execer) (int64, error) {
 	tag, err := q.Exec(ctx, `
 		update refs r set excerpt_version = null

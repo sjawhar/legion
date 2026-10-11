@@ -11,6 +11,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -69,7 +70,7 @@ func renderedMentionExcerpt(t *testing.T, service *docs.Service, artifactID, ref
 	}
 	for _, block := range blocks {
 		if block.From <= offset && offset < block.To {
-			return model.GraphExcerpt{BlockID: block.ID, Text: text.HeadRunes(markdown[block.From:block.To], blockExcerptRunes)}
+			return model.GraphExcerpt{BlockID: block.ID, Text: text.HeadRunes(markdown[block.From:block.To], refs.BlockExcerptRunes)}
 		}
 	}
 	t.Fatalf("no block of %s holds %s at %d: %#v", artifactID, reference, offset, blocks)

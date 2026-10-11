@@ -1215,18 +1215,25 @@ source and reconciles the index (the text is the truth), deleting edges whose so
 exists, and refuses to run without `dispatch.server_url`. A document mention's backlink excerpt -
 the block holding the target's first mention, its id the `#b-<id>` jump and its markdown cut to
 480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
-`excerpt_version`, migration 0090) when the mention is indexed, cut from the tree the version was
-rendered from (`refs.MentionExcerpts`, `refs.RecordExcerpts`: `writeVersionTx`, and an upload's
-and a seeded spec's `docs.Service.IndexDocumentReferences`), so the route reads no document
-(LEGION-531). A null `excerpt_version` marks a mention owed an excerpt: every row 0090 found, each
-one `rebuild-refs` inserts, and every mention of a version whose tree does not render as its
-markdown (`refs.ClearExcerpts`, which keeps the excerpt the row holds). `cmd/dispatch` runs
-`docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows through the partial index
-`refs_excerpt_drift` (an empty index once it has caught up), stores one batch of 20 documents per
-tick, every 2 s while a batch is full and every five minutes after, and for the hour after its
-start first marks owed the excerpts a version written by the binary a deploy replaces left
-behind (`refs.MarkStaleExcerpts`). Until a row is filled, the route answers that mention with the
-excerpt it holds, or the document's name when it holds none.
+`excerpt_version`, migration 0090) when the mention is indexed, cut from the one render that wrote
+the version's markdown: every renderer of a version's tree takes the block offsets from that render
+(`pmdoc.RenderWithBlockOffsets`; `renderTreeWithOffsets`, `documentMarkdownWithOffsets`), and a
+`docs.renderedTree` carries the tree, the markdown and the offsets together to
+`refs.MentionExcerpts` and `refs.RecordExcerpts` (`writeVersionTx`, and an upload's and a seeded
+spec's `docs.Service.IndexDocumentReferences`, which take the transaction's recorded rendering from
+the ledger), so the route reads no document and no write renders twice (LEGION-531). A null
+`excerpt_version` marks a mention owed an excerpt: every row 0090 found, each one `rebuild-refs`
+inserts, and every mention of an upload whose replacement left the document as it was, the one
+version write that records no rendering (`refs.ClearExcerpts`, which keeps the excerpt the row
+holds). `cmd/dispatch` runs `docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows
+through the partial index `refs_excerpt_drift` (an empty index once it has caught up), stores one
+batch of 20 documents per tick, every 2 s while a batch is full and every five minutes after, and
+for the hour after its start first marks owed the excerpts a version written by the binary a deploy
+replaces left behind (`refs.MarkStaleExcerpts`). A document the reconciliation cannot read for any
+reason but an unloadable history or a tree outside the schema (which it records as having no
+block), or whose excerpts it cannot store, is logged at ERROR and skipped for that tick, its
+mentions left owed, so one document never holds back the rest of its batch. Until a row is filled,
+the route answers that mention with the excerpt it holds, or the document's name when it holds none.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the

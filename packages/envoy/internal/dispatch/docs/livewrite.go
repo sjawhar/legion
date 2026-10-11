@@ -69,10 +69,12 @@ type liveWrite struct {
 	// versions are the doc_updates versions updates were appended at, one each.
 	versions []persistence.Version
 	// tree and markdown are the document as this transaction's latest operation left it,
-	// rendered once by that operation (applyLive) for the version its transaction may write.
+	// rendered once by that operation (applyLive) for the version its transaction may write, and
+	// offsets each identified block's byte range in markdown from that same render.
 	// forkLive drops them whenever the fork they describe moves.
 	tree     *pmdoc.Node
 	markdown string
+	offsets  []pmdoc.BlockOffset
 	// anchorsTree is the tree the transaction's anchors were last refreshed against, so the
 	// version write does not refresh the same tree's anchors a second time.
 	anchorsTree *pmdoc.Node
@@ -280,7 +282,7 @@ func buildFork(write *liveWrite, incremental bool, gained []byte) (*crdt.Doc, er
 
 // dropRendering forgets the rendering and the anchor refresh taken from a fork that has moved.
 func (w *liveWrite) dropRendering() {
-	w.tree, w.markdown, w.anchorsTree = nil, "", nil
+	w.tree, w.markdown, w.offsets, w.anchorsTree = nil, "", nil, nil
 }
 
 // forkHeld reports whether fork still carries exactly the content clocks and deletes describe.

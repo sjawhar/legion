@@ -3,22 +3,20 @@ package docs
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
 // IndexDocumentReferences indexes the mentions of version's markdown, which the calling
 // transaction has just stored as the document's version (refs.ReplaceCounted), and stores each
-// mention's excerpt from the tree that transaction wrote: an upload's replacement, or a seeded
-// spec. It refuses a context that was not joined.
+// mention's excerpt from the rendering of the tree that transaction wrote: an upload's
+// replacement, or a seeded spec. It refuses a context that was not joined.
 func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string, version int, markdown string) (model.ReferenceChanges, error) {
 	tx, joined := txFromContext(ctx)
 	if !joined {
@@ -28,30 +26,29 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	return changes, s.recordTreeExcerpts(ctx, tx, artifactID, version, markdown, ledgerFrom(ctx).writtenTree(artifactID))
+	rendered := ledgerFrom(ctx).writtenRendering(artifactID)
+	if rendered.tree != nil && rendered.markdown != markdown {
+		slog.Warn("dispatch: a document version left its reference excerpts to the reconciliation: the tree its transaction wrote does not render as the version's markdown",
+			"artifact", artifactID, "version", version)
+		rendered = renderedTree{}
+	}
+	return changes, s.recordTreeExcerpts(ctx, tx, artifactID, version, rendered)
 }
 
 // recordTreeExcerpts stores the excerpt of every mention the document's version writes, cut from
-// tree, the tree the version's markdown was rendered from, so the block ids are the ones the
-// document carries. A version with no tree, or whose tree does not render as its markdown, marks
-// its mentions owed (refs.ClearExcerpts) for the reconciliation, which reads the document itself.
-func (s *Service) recordTreeExcerpts(ctx context.Context, tx pgx.Tx, artifactID string, version int, markdown string, tree *pmdoc.Node) error {
-	if tree == nil {
-		slog.Warn("dispatch: a document version left its reference excerpts to the reconciliation: no tree",
-			"artifact", artifactID, "version", version)
+// rendered, the render the version's markdown came from, so the block ids are the ones the
+// document carries. A version with no rendering - an upload whose replacement changed nothing,
+// which writes no tree - marks its mentions owed (refs.ClearExcerpts) for the reconciliation,
+// which reads the document itself.
+func (s *Service) recordTreeExcerpts(ctx context.Context, tx pgx.Tx, artifactID string, version int, rendered renderedTree) error {
+	if rendered.tree == nil {
 		return refs.ClearExcerpts(ctx, tx, artifactID)
 	}
-	rendered, offsets, err := pmdoc.RenderWithBlockOffsets(tree)
-	if err != nil || rendered != markdown {
-		slog.Warn("dispatch: a document version left its reference excerpts to the reconciliation: its tree does not render as its markdown",
-			"artifact", artifactID, "version", version, "error", err)
-		return refs.ClearExcerpts(ctx, tx, artifactID)
-	}
-	blocks := make([]model.ArtifactBlock, len(offsets))
-	for index, offset := range offsets {
+	blocks := make([]model.ArtifactBlock, len(rendered.offsets))
+	for index, offset := range rendered.offsets {
 		blocks[index] = model.ArtifactBlock{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
 	}
-	return refs.RecordExcerpts(ctx, tx, artifactID, version, refs.MentionExcerpts(rendered, blocks, s.serverURL))
+	return refs.RecordExcerpts(ctx, tx, artifactID, version, refs.MentionExcerpts(rendered.markdown, blocks, s.serverURL))
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep
@@ -110,7 +107,10 @@ func (s *Service) RunReferenceExcerptReconciliation(ctx context.Context) {
 // caller sees it (TextWithBlocks), with no transaction or connection held, and stores its
 // mentions' excerpts at the version the drift named. A document whose stored history does not
 // load or whose tree is outside the schema has no block to show, so its mentions are stored with
-// none and keep the document's name until its next version. full reports a batch that was full.
+// none and keep the document's name until its next version. A document it cannot read or record
+// for any other reason is logged and skipped for this tick, its mentions left owed, so one
+// document never holds back the rest of its batch; documents counts the ones recorded, and full
+// reports a batch that was full.
 func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int, full bool, err error) {
 	drifted, err := refs.DriftedExcerpts(ctx, s.store.Pool, referenceExcerptBatch)
 	if err != nil {
@@ -126,12 +126,19 @@ func (s *Service) ReconcileReferenceExcerpts(ctx context.Context) (documents int
 			slog.Warn("dispatch: reference excerpt reconciliation cannot read the document; its mentions keep the document's name",
 				"artifact", document.FromID, "error", err)
 		case err != nil:
-			return documents, false, fmt.Errorf("read document %s for its reference excerpts: %w", document.FromID, err)
+			slog.Error("dispatch: reference excerpt reconciliation skipped a document it could not read",
+				"artifact", document.FromID, "error", err)
+			continue
 		default:
 			excerpts = refs.MentionExcerpts(markdown, blocks, s.serverURL)
 		}
 		if err := refs.RecordExcerpts(ctx, s.store.Pool, document.FromID, document.Version, excerpts); err != nil {
-			return documents, false, err
+			if ctx.Err() != nil {
+				return documents, false, ctx.Err()
+			}
+			slog.Error("dispatch: reference excerpt reconciliation skipped a document it could not record",
+				"artifact", document.FromID, "error", err)
+			continue
 		}
 		documents++
 	}
