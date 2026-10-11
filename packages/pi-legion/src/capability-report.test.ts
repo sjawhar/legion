@@ -782,15 +782,22 @@ describe("cleanDetail", () => {
     });
   }
 
-  test("is idempotent at the cut: every case, pushed so each byte in turn straddles 1024 bytes", () => {
-    const unstable: string[] = [];
-    for (const { pattern, name, detail } of redaction.patterns) {
-      for (let pad = 1024 - 64; pad <= 1024 + 8; pad++) {
-        const once = cleanDetail(`${"a".repeat(pad)} ${detail}`);
-        if (cleanDetail(once) !== once) unstable.push(`${pattern}: ${name}, pushed by ${pad}`);
+  test("at the cut keeps what came before it and is idempotent: each byte of every case cut once", () => {
+    const problems: string[] = [];
+    for (const { pattern, name, pad, detail } of redaction.patterns) {
+      const whole = cleanDetail(detail);
+      for (let letters = 1024 - Buffer.byteLength(detail) - 16; letters <= 1024 + 8; letters++) {
+        const padding = "a".repeat(letters);
+        const once = cleanDetail(`${padding} ${detail}`);
+        const label = `${pattern}: ${name}, pushed by ${letters} letters`;
+        if (cleanDetail(once) !== once) problems.push(`${label}: not idempotent`);
+        if (!once.startsWith(padding.slice(0, 1024))) problems.push(`${label}: lost its padding`);
+        if (pad === undefined && !`${padding} ${whole}`.startsWith(once)) {
+          problems.push(`${label}: not a prefix of the case cleaned whole`);
+        }
       }
     }
-    expect(unstable).toEqual([]);
+    expect(problems).toEqual([]);
   });
 });
 

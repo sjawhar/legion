@@ -187,16 +187,17 @@ type Session struct {
 const MaxReportDetail = 1024
 
 // Normalize turns a wire report's rows into the rows the daemon keeps: a name Table has no live
-// row for is dropped (returned in dropped, in wire order), each kept row is built by NewRow, a live
-// row the wire lacks is appended as not OK with the detail "not reported by this session", and the
-// kept rows are in Table order; a name sent twice keeps the first.
+// row for is dropped (returned in dropped, cleaned as a detail is, since the log quotes it, in wire
+// order), each kept row is built by NewRow, a live row the wire lacks is appended as not OK with
+// the detail "not reported by this session", and the kept rows are in Table order; a name sent
+// twice keeps the first.
 func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 	live := Live()
 	byName := make(map[Name]Row, len(live))
 	for _, row := range rows {
 		name := Name(row.Name)
 		if !slices.Contains(live, name) {
-			dropped = append(dropped, row.Name)
+			dropped = append(dropped, cleanDetail(row.Name))
 			continue
 		}
 		if _, seen := byName[name]; seen {
@@ -220,20 +221,23 @@ func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 // repository chooses (a server in `.mcp.json`, a file under `.omp/`): neither may split a log line,
 // put a line of its own into the controller's instructions, or show a credential on the state.
 //
-// Every space rune (unicode.IsSpace: a newline, a tab, a next line, a Unicode space) is a space.
-// Every ANSI control sequence (csi), and every other control rune (an escape, a C1 control), is
-// replaced by held while credentials are redacted, then is a space too: a credential value runs on
-// across held, since nothing delimited it there, so a control rune inside a credential never leaves
-// part of it unredacted, and a colour sequence never glues its final letter to the token it
-// colours. When anything was held, the rules run once more once held is a space, for a credential
-// held stood right before. Space runs then collapse to one space with none at either end.
-// Redaction runs on the one line, so a credential a session split across lines is still found, and
-// before the cut, so a cut never leaves a credential's head too short to match. After a cut,
-// trailing space goes, and so does each trailing word the rules would still change — a label the
-// cut parted from its value, or a value it parted from the rest of its `***` — so cleaning what
-// this returns gives it back unchanged. The Legion plugin cleans its report the same way before it
-// sends it (`cleanDetail` in `packages/pi-legion/src/capability-report.ts`); both are held to
-// `packages/contracts/fixtures/capability-redaction.json`.
+// Every space rune (unicode.IsSpace: a newline, a tab, a next line, a Unicode space) is a space,
+// and every other control rune (an escape, a C1 control) is held: a credential value runs on across
+// held, since nothing delimited it there, so a control rune inside a credential never leaves part
+// of it unredacted. An escape followed by `[` may open an ANSI control sequence, or may stand
+// alone before a credential's first letter, so the rules run on both readings in turn. First each
+// control rune is held on its own, which redacts a credential right after an unterminated `ESC [`.
+// Then, when anything was held, each whole sequence (heldSequence) is a space, as a terminal would
+// show it, every other held rune is a space too, and the rules run again: that pass redacts a
+// credential a colour sequence glued its final letter to, and a JWT right after a held rune, which
+// the JWT rule reads as the middle of a base64url run. Space runs then collapse to one space with
+// none at either end. Redaction runs on the one line, so a credential a session split across lines
+// is still found, and before the cut, so a cut never leaves a credential's head too short to match.
+// After a cut, trailing space goes, and so does each trailing word the rules would still change — a
+// label the cut parted from its value, or a value it parted from the rest of its `***` — so
+// cleaning what this returns gives it back unchanged. The Legion plugin cleans its report the same
+// way before it sends it (`cleanDetail` in `packages/pi-legion/src/capability-report.ts`); both
+// are held to `packages/contracts/fixtures/capability-redaction.json`.
 func cleanDetail(text string) string {
 	marked := strings.Map(func(r rune) rune {
 		switch {
@@ -243,10 +247,11 @@ func cleanDetail(text string) string {
 			return held
 		}
 		return r
-	}, csi.ReplaceAllString(text, string(held)))
+	}, strings.ReplaceAll(text, "\u009b", "\x1b["))
 	redacted := redactCredentials(marked)
 	if strings.ContainsRune(marked, held) {
-		redacted = redactCredentials(strings.ReplaceAll(redacted, string(held), " "))
+		spaced := strings.ReplaceAll(heldSequence.ReplaceAllString(redacted, " "), string(held), " ")
+		redacted = redactCredentials(spaced)
 	}
 	line := strings.Join(strings.Fields(redacted), " ")
 	cut := strings.TrimRight(truncate(line, MaxReportDetail), " ")
@@ -258,41 +263,45 @@ func cleanDetail(text string) string {
 	return cut
 }
 
-// held is what cleanDetail holds a control rune or sequence as while it redacts: a noncharacter,
-// which no text carries, so it stands for nothing else.
+// held is what cleanDetail holds a control rune as while it redacts: a noncharacter, which no text
+// carries, so it stands for nothing else.
 const held = '\uFFFF'
 
-// csi is an ANSI control sequence, in its 7-bit form (ESC `[`) or its C1 form, parameters,
-// intermediates and final byte: a colour sequence such as `ESC [ 1 m` among them.
-var csi = regexp.MustCompile(`\x1b\[[0-?]*[ -/]*[@-~]|\x{9b}[0-?]*[ -/]*[@-~]`)
+// heldSequence is an ANSI control sequence once its escape is held: `[`, parameters, intermediates
+// and the final byte, a colour sequence such as `ESC [ 1 m` among them. cleanDetail writes the C1
+// introducer as `ESC [` first, so both forms read alike. A space or a `*` never stands in as an
+// intermediate, so neither a word nor a redacted `***` the first pass left reads as one.
+var heldSequence = regexp.MustCompile(`\x{FFFF}\[[0-?]*[!-)+-/]*[@-~]`)
 
 // credentialRules are the credential shapes redactCredentials replaces, each keeping what names
 // the credential and replacing the secret with `***`; the shared fixture names each with an
-// example. They run on cleanDetail's line, where a space is the only whitespace and held stands for
-// a control rune: a value class takes held, and a separator a space or held. A quote may follow a
-// backslash, as it does in JSON that was escaped again. Order matters: the query rule runs before
-// the connection-string password, the Authorization header before the bare bearer rule, so a
-// header under any scheme loses its whole value and keeps a listed scheme's label, and the GitHub
-// rule before the JWT rule, so a stateless installation token (`ghs_<app id>_<JWT>`) reads
-// `ghs_***`. A JWT starts only where a run of base64url characters starts, or right after a
-// percent or `\u` escape, as the plugin's lookbehind has it: JavaScriptCore would otherwise read a
-// long run once per `eyJ` in it. An Authorization value opened by an escaped quote ends at the next
-// backslash or quote; one opened by a quote runs over escaped characters to an unescaped quote; one
-// with neither runs to a closing bracket or the end of the line, since an AWS signature or a Digest
-// credential carries commas, semicolons and quotes of its own. A rule whose value may be short
-// takes `*` in its value class, so a value already redacted is matched whole and left as it is;
-// the others need more than `***` to match at all.
+// example, in this order. They run on cleanDetail's line, where a space is the only whitespace and
+// held stands for a control rune: a value class takes held, and a separator a space or held, but a
+// bearer or API-key value never starts on held, which may open the colour sequence before it. A
+// quote may follow a backslash, as it does in JSON that was escaped again. Order matters: the
+// Authorization header runs before the bare bearer rule, so a header under any scheme loses its
+// whole value and keeps a listed scheme's label, and the GitHub rule before the JWT rule, so a
+// stateless installation token (`ghs_<app id>_<JWT>`) reads `ghs_***`. A JWT starts only where a
+// run of base64url characters starts, or right after a percent or `\u` escape, as the plugin's
+// lookbehind has it: JavaScriptCore would otherwise read a long run once per `eyJ` in it. An
+// Authorization value opened by an escaped quote ends at the next backslash or quote; one opened by
+// a quote runs over escaped characters to an unescaped quote; one with neither runs to a closing
+// bracket or the end of the line, since an AWS signature or a Digest credential carries commas,
+// semicolons and quotes of its own. The API-key rule has no left anchor, so `api-key` also covers
+// `x-api-key` and `x-goog-api-key`. A rule whose value may be short takes `*` in its value class,
+// and a quoted connection-string password keeps its quotes, so a value already redacted is matched
+// whole and left as it is; the others need more than `***` to match at all.
 var credentialRules = []struct {
 	pattern     *regexp.Regexp
 	replacement string
 }{
 	{regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^ /?#]+@`), "${1}***@"},
 	{regexp.MustCompile(`(?i)([?&](?:token|key|secret|password|access_token|accesstoken|refresh_token|id_token|auth_token|private_token|api_key|apikey|client_secret|sig|signature|x-amz-security-token|x-amz-signature|x-goog-signature)=)[^ &#"'<>]+`), "${1}***"},
-	{regexp.MustCompile(`(?i)\b(password[ \x{FFFF}]*=[ \x{FFFF}]*)(?:'(?:[^'\\]|\\.)*'?|[^ &#"'<>]+)`), "${1}***"},
+	{regexp.MustCompile(`(?i)\b(password[ \x{FFFF}]*=[ \x{FFFF}]*)(?:(')(?:[^'\\]|\\.)*('?)|[^ &#"'<>]+)`), "${1}${2}***${3}"},
 	{regexp.MustCompile(`(?i)(authorization\\?["']?[ \x{FFFF}]*[:=][ \x{FFFF}]*)(?:(\\["'])((?:bearer|basic|token|digest)[ \x{FFFF}]+)?[^"'\\]+|(["'])((?:bearer|basic|token|digest)[ \x{FFFF}]+)?(?:[^"'\\]|\\.)+|(\[?)((?:bearer|basic|token|digest)[ \x{FFFF}]+)?[^)\]}>]+)`), "${1}${2}${3}${4}${5}${6}${7}***"},
-	{regexp.MustCompile(`(?i)((?:(?:x-(?:goog-)?)?api-key|ocp-apim-subscription-key|x-subscription-token)\\?["']?[ \x{FFFF}]*[:=][ \x{FFFF}]*\\?["']?)[A-Za-z0-9._~+/=*\x{FFFF}-]+`), "${1}***"},
+	{regexp.MustCompile(`(?i)((?:api-key|ocp-apim-subscription-key|x-subscription-token)\\?["']?[ \x{FFFF}]*[:=][ \x{FFFF}]*\\?["']?)[A-Za-z0-9._~+/=*-][A-Za-z0-9._~+/=*\x{FFFF}-]*`), "${1}***"},
 	{regexp.MustCompile(`(?i)(\\?["'](?:api_key|access_token)\\?["'][ \x{FFFF}]*:[ \x{FFFF}]*\\?["'])[^"'\\]+`), "${1}***"},
-	{regexp.MustCompile(`(?i)\b(bearer[ \x{FFFF}]+)[A-Za-z0-9._~+/=*\x{FFFF}-]+`), "${1}***"},
+	{regexp.MustCompile(`(?i)\b(bearer[ \x{FFFF}]+)[A-Za-z0-9._~+/=*-][A-Za-z0-9._~+/=*\x{FFFF}-]*`), "${1}***"},
 	{regexp.MustCompile(`\b(gh[pousr]_|github_pat_)[A-Za-z0-9._\x{FFFF}-]{20,}`), "${1}***"},
 	{regexp.MustCompile(`(^|[^A-Za-z0-9_\x{FFFF}-]|%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4})eyJ[A-Za-z0-9_\x{FFFF}-]{8,}\.[A-Za-z0-9_\x{FFFF}-]{8,}\.[A-Za-z0-9_\x{FFFF}-]*`), "${1}***"},
 	{regexp.MustCompile(`\b(sk-|dsp_|ya29\.|xox[a-z]-|glpat-|npm_)[A-Za-z0-9_\x{FFFF}-]{20,}`), "${1}***"},

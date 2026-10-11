@@ -2,6 +2,7 @@ package capabilities
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -159,6 +160,12 @@ func TestNormalizeKeepsTheLiveRowsInTableOrder(t *testing.T) {
 			wantDropped: []string{"teleport", "eval-js"},
 		},
 		{
+			name:        "drops an unknown name cleaned, since the log quotes it",
+			rows:        []claim.CapabilityRow{{Name: "teleport\nghp_EXAMPLEtoken0123456789abcdefghijklmn", OK: false, Detail: "no such row"}},
+			wantKept:    unreported(),
+			wantDropped: []string{"teleport ghp_***"},
+		},
+		{
 			name:     "cuts a long detail on a rune boundary",
 			rows:     []claim.CapabilityRow{{Name: "web-search", OK: false, Detail: long}},
 			wantKept: unreported(Row{Name: WebSearch, Detail: strings.Repeat("€", 341)}),
@@ -283,20 +290,31 @@ func TestNormalizeCleansEachDetailAsTheSharedFixtureSays(t *testing.T) {
 	}
 }
 
-// Cleaning is idempotent at the cut too: every case of the shared fixture, pushed by a run of
-// letters so that each byte of it in turn straddles MaxReportDetail, comes back from a second
-// cleaning as the first left it, so a label the cut leaves without its value is dropped rather than
-// redacted only by the daemon's pass.
-func TestCleanDetailIsIdempotentAtTheCut(t *testing.T) {
+// At the cut, cleaning keeps what came before it and is idempotent: every case of the shared
+// fixture, pushed by a run of letters so that each byte of its cleaned text in turn straddles
+// MaxReportDetail, still starts with those letters (as many as fit), is — for a case with no pad of
+// its own — a prefix of the letters and the case cleaned whole, and comes back from a second
+// cleaning as the first left it. A label the cut parts from its value is dropped, not redacted only
+// by the daemon's pass, and nothing before it goes with it.
+func TestCleanDetailKeepsWhatCameBeforeTheCutAndIsIdempotent(t *testing.T) {
 	var fixture struct {
 		Patterns []redactionCase `json:"patterns"`
 	}
 	readFixture(t, "capability-redaction.json", &fixture)
 	for _, testCase := range fixture.Patterns {
-		for pad := MaxReportDetail - 64; pad <= MaxReportDetail+8; pad++ {
-			once := cleanDetail(strings.Repeat("a", pad) + " " + testCase.Detail)
+		whole := cleanDetail(testCase.Detail)
+		for letters := MaxReportDetail - len(testCase.Detail) - 16; letters <= MaxReportDetail+8; letters++ {
+			padding := strings.Repeat("a", letters)
+			once := cleanDetail(padding + " " + testCase.Detail)
+			label := fmt.Sprintf("%s: %s, pushed by %d letters", testCase.Pattern, testCase.Name, letters)
 			if twice := cleanDetail(once); twice != once {
-				t.Errorf("%s: %s, pushed by %d letters: cleaned again\n %q\nwant\n %q", testCase.Pattern, testCase.Name, pad, twice, once)
+				t.Errorf("%s: cleaned again\n %q\nwant\n %q", label, twice, once)
+			}
+			if !strings.HasPrefix(once, padding[:min(letters, MaxReportDetail)]) {
+				t.Errorf("%s: lost its padding: %q", label, once)
+			}
+			if testCase.Pad == 0 && !strings.HasPrefix(padding+" "+whole, once) {
+				t.Errorf("%s: %q is not a prefix of the case cleaned whole, %q", label, once, whole)
 			}
 		}
 	}
