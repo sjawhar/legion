@@ -20,6 +20,24 @@ import (
 // than hanging it until go test's own timeout.
 const renewTestBound = 10 * time.Second
 
+// syncWriter is a stderr a renew loop running on its own goroutine writes and a test reads.
+type syncWriter struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buf.String()
+}
+
 // receive is the next value from ch, failing the test when none arrives within renewTestBound.
 func receive[T any](t *testing.T, ch <-chan T, what string) T {
 	t.Helper()
@@ -267,7 +285,8 @@ func TestRenewRetriesEveryOtherRefusal(t *testing.T) {
 
 // TestRenewRefusesAnUnreadableOrBlankPodTokenFile: a configured token file must be nonblank before
 // cmdRenew sends anything. A blank projected file is never silently turned into the legacy
-// bodyless renewal, at startup or after a successful renewal.
+// bodyless renewal, at startup or after a successful renewal, and the refusal is an ERROR naming
+// the enrollment, since the broker hears nothing and the lease lapses.
 func TestRenewRefusesAnUnreadableOrBlankPodTokenFile(t *testing.T) {
 	var requests int
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -297,6 +316,9 @@ func TestRenewRefusesAnUnreadableOrBlankPodTokenFile(t *testing.T) {
 			if code := cmdRenew([]string{"--pod-token-file", path}, io.Discard, &stderr); code != exitUsageError || !strings.Contains(stderr.String(), path) {
 				t.Fatalf("renew --pod-token-file %s: exit %d stderr %q, want usage naming the file", name, code, stderr.String())
 			}
+			if want := "ERROR: enrollment " + testEnrollmentID + " cannot read its pod token"; !strings.Contains(stderr.String(), want) {
+				t.Fatalf("renew --pod-token-file %s: stderr %q, want %q", name, stderr.String(), want)
+			}
 			if requests != 0 {
 				t.Fatalf("blank/unreadable token sent %d broker requests, want none", requests)
 			}
@@ -305,7 +327,8 @@ func TestRenewRefusesAnUnreadableOrBlankPodTokenFile(t *testing.T) {
 }
 
 // TestRenewNeverSendsABlankLaterToken: after one successful renewal, a token file that turns blank
-// is a local transient error and starts the retry wait; it never makes a second, bodyless request.
+// is a local transient error and starts the retry wait, printed as an ERROR naming the enrollment;
+// it never makes a second, bodyless request.
 func TestRenewNeverSendsABlankLaterToken(t *testing.T) {
 	tokenFile := filepath.Join(t.TempDir(), "token")
 	if err := os.WriteFile(tokenFile, []byte("first-token\n"), 0o600); err != nil {
@@ -337,8 +360,9 @@ func TestRenewNeverSendsABlankLaterToken(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan int, 1)
+	var stderr syncWriter
 	go func() {
-		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return readPodToken(tokenFile) }, io.Discard, after)
+		result <- renewLoop(ctx, client, signer, enrollmentID, func() (string, error) { return readPodToken(tokenFile) }, &stderr, after)
 	}()
 	receive(t, first, "first renewal")
 	awaitRetry(t, waits, result, "the wait after the first renewal") <- time.Now()
@@ -348,6 +372,9 @@ func TestRenewNeverSendsABlankLaterToken(t *testing.T) {
 	mu.Unlock()
 	if got != 1 {
 		t.Fatalf("blank later token sent %d broker requests, want one", got)
+	}
+	if want := "ERROR: enrollment " + enrollmentID + " cannot read its pod token"; !strings.Contains(stderr.String(), want) {
+		t.Fatalf("blank later token stderr %q, want %q", stderr.String(), want)
 	}
 	cancel()
 	if code := receive(t, result, "renew loop exit after cancellation"); code != 0 {

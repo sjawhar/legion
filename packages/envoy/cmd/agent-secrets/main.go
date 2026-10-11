@@ -562,7 +562,7 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	if *podTokenFile != "" {
 		podToken = func() (string, error) { return readPodToken(*podTokenFile) }
 		if _, err := podToken(); err != nil {
-			fmt.Fprintf(stderr, "agent-secrets renew: %v\n", err)
+			fmt.Fprintf(stderr, "agent-secrets renew: %s\n", tokenUnreadable(enrollmentID, err))
 			return exitUsageError
 		}
 	}
@@ -571,11 +571,20 @@ func cmdRenew(args []string, stdout, stderr io.Writer) int {
 	return renewLoop(ctx, newClient(base), signer, enrollmentID, podToken, stderr, time.After)
 }
 
+// tokenUnreadable is the ERROR a pod's renewer prints when it cannot read its projected token: it
+// sends nothing (a bodyless renewal of a pod whose UID has renewed with its token is refused, and
+// would hide the fault), so the broker never hears of it, and this line, which the worker shim
+// relays into the pod's log, is the only record naming the enrollment whose lease is lapsing.
+func tokenUnreadable(enrollmentID string, err error) string {
+	return fmt.Sprintf("ERROR: enrollment %s cannot read its pod token (%v); nothing was sent, so its lease lapses unless the file becomes readable", enrollmentID, err)
+}
+
 func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID string, podToken func() (string, error), stderr io.Writer, after func(time.Duration) <-chan time.Time) int {
 	backoff := 2 * time.Second
 	for {
-		token, err := podToken()
+		token, tokenErr := podToken()
 		var expires time.Time
+		err := tokenErr
 		if err == nil {
 			expires, err = c.RenewEnrollment(ctx, signer, enrollmentID, token)
 		}
@@ -592,7 +601,11 @@ func renewLoop(ctx context.Context, c *client, signer Signer, enrollmentID strin
 				fmt.Fprintf(stderr, "agent-secrets renew: enrollment %s permanently refused by broker: HTTP %d %s: %s\n", enrollmentID, refused.Status, code, refused.Message)
 				return exitRenewRefused
 			}
-			fmt.Fprintf(stderr, "agent-secrets renew: %v; retrying in %s\n", err, backoff)
+			if tokenErr != nil {
+				fmt.Fprintf(stderr, "agent-secrets renew: %s; retrying in %s\n", tokenUnreadable(enrollmentID, tokenErr), backoff)
+			} else {
+				fmt.Fprintf(stderr, "agent-secrets renew: %v; retrying in %s\n", err, backoff)
+			}
 			select {
 			case <-ctx.Done():
 				return 0
