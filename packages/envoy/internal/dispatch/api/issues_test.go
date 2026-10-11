@@ -680,6 +680,18 @@ func TestIssueLabelsCreateNormalizePatchAndFilter(t *testing.T) {
 	updated := decodeBody[model.Issue](t, updatedResponse)
 	expectLabels(updated.Labels, "urgent", "api")
 
+	// An additive patch runs under the issue row lock and merges the labels that are on the row at
+	// that instant, unlike a replacement labels write made from an earlier GET.
+	addedResponse := sessionRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+first.Key, map[string]any{
+		"labels_add": []string{" urgent ", "legion"},
+		"actor":      sessionActor(),
+	})
+	if addedResponse.Code != http.StatusOK {
+		t.Fatalf("add labels: status=%d body=%s", addedResponse.Code, addedResponse.Body.String())
+	}
+	added := decodeBody[model.Issue](t, addedResponse)
+	expectLabels(added.Labels, "urgent", "api", "legion")
+
 	eventsResponse := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+first.Key+"/events", nil, "alice")
 	if eventsResponse.Code != http.StatusOK {
 		t.Fatalf("list label update events: status=%d body=%s", eventsResponse.Code, eventsResponse.Body.String())
@@ -697,7 +709,7 @@ func TestIssueLabelsCreateNormalizePatchAndFilter(t *testing.T) {
 	for _, event := range events {
 		if event.Type == "issue.updated" {
 			foundLabelUpdate = true
-			expectLabels(event.Payload.Labels, "urgent", "api")
+			expectLabels(event.Payload.Labels, "urgent", "api", "legion")
 			break
 		}
 	}

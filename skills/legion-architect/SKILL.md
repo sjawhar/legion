@@ -213,11 +213,12 @@ child has closed, and sign off the root only after it closes. This holds until t
 integrating phase ships (dispatch://LEGION-223). When that check's tester fails, the daemon sends
 the child back to its implementer; a failure whose fix belongs in other work becomes a new
 corrective child wave you create and release, and the tree returns to children-in-flight. Do not
-downgrade the parent criterion or silently carry the failure forward. If the root still stays
-`done` through its linger with a child in its first phases (planning through reviewing), the
-daemon hands that child to Legion as a root of its own (`todo` with the `legion` label, a new
-generation that redoes its design approval and its work); a child past an approved review is left
-for a person. Park a child first when its work should stop with the root.
+downgrade the parent criterion or silently carry the failure forward. If the root stays `done`
+through its linger with a child still in the workflow, the daemon hands that child to Legion as a
+root of its own (`todo` with the `legion` label). It carries that child's phase, gate, phase records
+and pull request into a new generation and starts the role of that phase. The child stays its own
+tree after hand-over; reopening the old root later does not take it back. Park a child first when
+its work should stop with the root.
 
 ## 4. Integration verification
 

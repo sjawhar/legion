@@ -143,10 +143,11 @@ type Notice struct {
 // architect's claim it was written for, the design gate policy and the root's gate, and every issue
 // of the tree.
 type CatchUp struct {
-	Generation uint64         `json:"generation"`
-	Launch     uint64         `json:"launch"`
-	Gate       CatchUpGate    `json:"gate"`
-	Issues     []CatchUpIssue `json:"issues"`
+	Generation              uint64         `json:"generation"`
+	Launch                  uint64         `json:"launch"`
+	StartsAtProductionCheck bool           `json:"startsAtProductionCheck,omitempty"`
+	Gate                    CatchUpGate    `json:"gate"`
+	Issues                  []CatchUpIssue `json:"issues"`
 }
 
 // CatchUpGate is the design gate as a catch-up states it: the project's policy (gates.design,
@@ -491,7 +492,7 @@ func validateOutboxPayload(payload OutboxPayload) error {
 
 func validNoticeKind(kind NoticeKind) bool {
 	switch kind {
-	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status", "catch-up", "checks-red", "review-stuck", "status-reasserted":
+	case "phase-finished", "worker-died", "held", "pr-blocked", "pr-merged", "pr-closed-unmerged", "design-approved", "design-changes-requested", "ready-refused", "child-closed", "child-status", "child-release-stalled", "catch-up", "checks-red", "review-stuck", "status-reasserted":
 		return true
 	default:
 		return false

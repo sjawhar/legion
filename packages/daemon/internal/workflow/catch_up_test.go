@@ -74,6 +74,26 @@ func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 	}
 }
 
+// A root promoted from a handed-over production-check child retains its merged pull request and
+// starts the implementer at that phase. Its architect's catch-up names that exceptional start, so
+// the architect skips the design gate and signs off once the check is recorded.
+func TestACatchUpMarksARootThatStartsAtProductionCheck(t *testing.T) {
+	pool := migratedPool(t)
+	root := record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: phase.ProductionCheck, Generation: 2, Status: "in_progress", Rank: "U"}
+	seedIssue(t, pool, root)
+	claimReady(t, pool, testEngine(config.DesignGateRootIssues, nil), root.Key, claim.RoleArchitect, 1)
+	var marked bool
+	for _, payload := range noticeRows(t, pool) {
+		notice, ok := payload.(record.Notice)
+		if ok && notice.Kind == "catch-up" {
+			marked = notice.CatchUp.StartsAtProductionCheck
+		}
+	}
+	if !marked {
+		t.Fatal("production-check root catch-up did not set startsAtProductionCheck")
+	}
+}
+
 // Only a live tree's root architect is told its tree. A tree that lingers or has left the
 // workflow is told nothing, nor is a sub-architect, nor a phase worker on the root.
 func TestOnlyALiveTreesRootArchitectIsToldItsTree(t *testing.T) {

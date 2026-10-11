@@ -276,6 +276,25 @@ type OutboxRow struct {
 	LeaseUntil *time.Time
 }
 
+// Handover is a root linger's pending move of one child to an independent tree. It persists from
+// the decision until the daemon-authored Dispatch event consumes or rejects it.
+type Handover struct {
+	Issue      string
+	Tree       string
+	Generation uint64
+	Cancelled  bool
+}
+
+// ReleaseRetry is the bounded wait for a released todo child whose parent event has not reached the
+// daemon yet. A changed Dispatch sequence begins a fresh bounded attempt.
+type ReleaseRetry struct {
+	Issue     string
+	Sequence  int64
+	Attempts  int
+	NextAt    time.Time
+	Exhausted bool
+}
+
 // Store contains only transactional operations. The caller owns each transaction so intake can
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
@@ -322,6 +341,13 @@ type Store interface {
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
+	Handover(ctx context.Context, tx pgx.Tx, issue string) (*Handover, error)
+	PutHandover(ctx context.Context, tx pgx.Tx, handover Handover) error
+	CancelTreeHandovers(ctx context.Context, tx pgx.Tx, tree string, generation uint64) error
+	DeleteHandover(ctx context.Context, tx pgx.Tx, issue string) error
+	ReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) (*ReleaseRetry, error)
+	PutReleaseRetry(ctx context.Context, tx pgx.Tx, retry ReleaseRetry) error
+	DeleteReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) error
 	// WaitingNotices is every notice row of project's issues not yet due at now, oldest first.
 	WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error)
 	// ExpediteOutbox makes row id due at now if it was due later.

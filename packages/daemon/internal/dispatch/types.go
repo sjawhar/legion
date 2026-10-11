@@ -72,8 +72,8 @@ type IssueSummary struct {
 }
 
 // Issue is the workflow data from Dispatch's issue-detail route. HandedOver is resolved here, at
-// the client boundary, as IssueSummary's is; Labels is the raw list it was resolved from, which a
-// hand-over writes back with LegionLabel added, since Dispatch replaces an issue's whole label list.
+// the client boundary, as IssueSummary's is. Labels remain available to readers, while HandOver
+// adds LegionLabel through Dispatch's additive labels_add update rather than rewriting them.
 type Issue struct {
 	Key               string
 	Project           string

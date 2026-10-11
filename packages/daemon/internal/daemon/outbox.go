@@ -320,25 +320,36 @@ func (r *outbox) status(ctx context.Context, row record.OutboxRow, payload recor
 	return nil
 }
 
-// handOverHolds says whether a hand-over still acts: its issue is still a child of the tree it
-// names, and that tree's root still lingers at the generation whose linger ended with it done. A
-// root a person set todo again since has been re-admitted (its generation moved on, its linger
-// cleared), and admission's startMidPhaseChildren resumes the child in it; the hand-over finishes
-// without writing, so the two never both act on one child.
+// handOverHolds is an early check only; the durable fence is enforced again by intake when the
+// PATCH's daemon event arrives. The one transaction confirms this row still owns the child and the
+// linger it names, avoiding a needless write once a root reopen already removed that fence.
 func (r *outbox) handOverHolds(ctx context.Context, row record.OutboxRow, payload record.StatusWrite) (bool, error) {
-	issue, err := r.issue(ctx, row.Issue)
-	if err != nil {
-		return false, err
+	var issue, root *record.Issue
+	var handover *record.Handover
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		var err error
+		issue, err = r.records.Issue(ctx, tx, row.Issue)
+		if err != nil || issue == nil {
+			return err
+		}
+		handover, err = r.records.Handover(ctx, tx, row.Issue)
+		if err != nil || handover == nil {
+			return err
+		}
+		if handover.Cancelled {
+			return r.records.DeleteHandover(ctx, tx, row.Issue)
+		}
+		root, err = r.records.Issue(ctx, tx, handover.Tree)
+		return err
+	}); err != nil {
+		return false, fmt.Errorf("read hand-over of %s: %w", row.Issue, err)
 	}
-	root, err := r.root(ctx, issue)
-	if err != nil {
-		return false, err
-	}
-	if issue.Tree == payload.HandOverTree && root != nil && root.LingersAt(payload.HandOverLinger) {
+	if issue != nil && handover != nil && !handover.Cancelled && root != nil && issue.Tree == handover.Tree && handover.Tree == payload.HandOverTree &&
+		handover.Generation == payload.HandOverLinger && root.LingersAt(handover.Generation) {
 		return true, nil
 	}
-	r.log.Info("outbox hand-over of a child whose tree came back; finished without writing", "row", row.ID, "issue", row.Issue,
-		"tree", payload.HandOverTree, "linger", payload.HandOverLinger, "current_tree", issue.Tree)
+	r.log.Info("outbox hand-over no longer holds; finished without writing", "row", row.ID, "issue", row.Issue,
+		"tree", payload.HandOverTree, "linger", payload.HandOverLinger)
 	return false, nil
 }
 

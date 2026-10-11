@@ -37,12 +37,14 @@ const (
 // sets the child todo with the legion label, and that write's event admits the child as an orphan
 // with its own architect, as the label and the todo do when a person sets them. Before, the child
 // stayed suspended, unlabelled and with no architect, and nothing ran it again (LEGION-624). A child
-// past an approved review — in retro, merging, awaiting_merge or production_check — is not handed
-// over, since its re-admission would clear its review, its READY and its pull request's record and
-// run work already merged again; the issue says a person finishes it. A finished, parked, or
-// still-admitted child stays with the tree. The settling waits for the linger to end: a root that
-// comes back in it resumes its children where they stood, and hands none over. A root a person
-// parked and then closed settles the same way.
+// stays done through its linger hands every child it left mid-run to Legion as a root of its own:
+// one Dispatch write sets the child todo with the legion label, and that write's daemon event
+// admits the child as an orphan with its own architect and the role of its carried phase started
+// (LEGION-624). Every phase carries into the new generation: re-planning a merged child or
+// withdrawing a READY would lose completed work. A child that is still admitted, finished or
+// parked stays with the tree. The hand-over remains pending during the linger, so a root that comes
+// back in it resumes its children where they stood and hands none over. A root a person parked and
+// then closed settles the same way.
 func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -66,25 +68,156 @@ func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T
 			}
 
 			expireLinger(t, pool, admission, engine)
-			if got, want := handOvers(t, pool), []string{planning, heldTesting}; !slices.Equal(got, want) {
+			if got, want := handOvers(t, pool), []string{planning, heldTesting, inRetro, awaiting, checking}; !slices.Equal(got, want) {
 				t.Fatalf("hand-overs once the linger ended = %v, want %v", got, want)
 			}
-			if got, want := messagedChildren(t, pool), []string{inRetro, awaiting, checking}; !slices.Equal(got, want) {
-				t.Fatalf("children told a person finishes them = %v, want %v", got, want)
+			if got := messagedChildren(t, pool); len(got) != 0 {
+				t.Fatalf("children told a person finishes them = %v, want none: every phase carries over", got)
 			}
 
-			// The write's event carries the todo and the label.
-			apply(t, pool, admission, "planning-handed-over", intake.DispatchIssue{Key: planning, Seq: 4, Type: "issue.updated", Status: "todo", Title: planning, Parent: finishedRoot, Rank: "B", HandedOver: true}, engine)
+			// The write's event carries the todo and label. The hand-over fence identifies it as a
+			// state-carrying root promotion, rather than the ordinary child re-entry path.
+			apply(t, pool, admission, "planning-handed-over", intake.DispatchIssue{Key: planning, Seq: 4, Type: "issue.updated", Status: "todo", Title: planning, Parent: finishedRoot, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 			got := issue(t, pool, planning)
-			if got.Tree != planning || got.Phase != phase.Admitted || got.Generation != 2 || got.Status != "in_progress" || architectStarts(t, pool, planning) != 1 {
-				t.Fatalf("the handed-over child = %#v with %d architect starts, want its own admitted root, generation 2, with its architect started once", got, architectStarts(t, pool, planning))
+			if got.Tree != planning || got.Phase != phase.Planning || got.Generation != 2 || got.Status != "in_progress" || architectStarts(t, pool, planning) != 1 {
+				t.Fatalf("the handed-over child = %#v with %d architect starts, want its own planning root, generation 2, with its architect started once", got, architectStarts(t, pool, planning))
 			}
-			for _, key := range []string{inRetro, awaiting, checking, finished, parked, unstarted} {
+			for _, key := range []string{heldTesting, inRetro, awaiting, checking, finished, parked, unstarted} {
 				if got := issue(t, pool, key); got.Tree != finishedRoot || got.Generation != 1 {
-					t.Fatalf("%s = %#v, want it left in %s's tree", key, got, finishedRoot)
+					t.Fatalf("%s = %#v, want it left in %s's tree until its own hand-over event", key, got, finishedRoot)
 				}
 			}
 		})
+	}
+}
+
+// Every phase carries across a durable hand-over. The child is a new root generation, but its gate,
+// pull request head, phase rows and phase itself stay intact; promotion starts the architect and the
+// role that owns a worked phase. In particular production_check keeps a merged pull request that
+// GitHub will never report merged again.
+func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		phase    phase.Phase
+		prState  record.PullRequestState
+		role     claim.Role
+		wantRole bool
+	}{
+		{name: "planning", phase: phase.Planning, prState: record.PullRequestOpen, role: claim.RolePlanner, wantRole: true},
+		{name: "implementing", phase: phase.Implementing, prState: record.PullRequestOpen, role: claim.RoleImplementer, wantRole: true},
+		{name: "testing", phase: phase.Testing, prState: record.PullRequestOpen, role: claim.RoleTester, wantRole: true},
+		{name: "reviewing", phase: phase.Reviewing, prState: record.PullRequestOpen, role: claim.RoleReviewer, wantRole: true},
+		{name: "retro", phase: phase.Retro, prState: record.PullRequestOpen, role: claim.RoleImplementer, wantRole: true},
+		{name: "merging", phase: phase.Merging, prState: record.PullRequestOpen, role: claim.RoleMerger, wantRole: true},
+		{name: "awaiting merge", phase: phase.AwaitingMerge, prState: record.PullRequestOpen},
+		{name: "production check", phase: phase.ProductionCheck, prState: record.PullRequestMerged, role: claim.RoleImplementer, wantRole: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+			const root, child, artifact = "LEGION-208", "LEGION-209", "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26"
+			until := fixedNow.Add(time.Hour)
+			parent := root
+			inTx(t, pool, func(tx pgx.Tx) {
+				records := record.NewStore()
+				for _, put := range []error{
+					records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+					records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: tc.phase, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1}),
+					records.PutGate(context.Background(), tx, record.DesignGate{Issue: root, ArtifactID: artifact, LatestVersion: 2, ApprovedVersion: new(2)}),
+					records.PutPullRequest(context.Background(), tx, record.PullRequest{Issue: child, Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head-42", Generation: 1, State: tc.prState}),
+					records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+				} {
+					if put != nil {
+						t.Fatalf("seed: %v", put)
+					}
+				}
+			})
+
+			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+			got := issue(t, pool, child)
+			if got.Tree != child || got.Generation != 2 || got.Phase != tc.phase || got.Status != "in_progress" {
+				t.Fatalf("handed-over child = %#v, want own tree, generation 2, phase %s, in_progress", got, tc.phase)
+			}
+			inTx(t, pool, func(tx pgx.Tx) {
+				records := record.NewStore()
+				gate, err := records.Gate(context.Background(), tx, child)
+				if err != nil || gate == nil || gate.ArtifactID != artifact || gate.LatestVersion != 2 || gate.ApprovedVersion == nil || *gate.ApprovedVersion != 2 {
+					t.Fatalf("carried gate = %#v, %v", gate, err)
+				}
+				pr, err := records.PullRequest(context.Background(), tx, child)
+				if err != nil || pr == nil || pr.HeadSHA != "head-42" || pr.State != tc.prState || pr.Generation != 2 {
+					t.Fatalf("carried pull request = %#v, %v", pr, err)
+				}
+				handover, err := records.Handover(context.Background(), tx, child)
+				if err != nil || handover != nil {
+					t.Fatalf("handover fence after admission = %#v, %v, want none", handover, err)
+				}
+			})
+			if starts := phaseStarts(t, pool, child, tc.role, tc.phase); (starts == 1) != tc.wantRole {
+				t.Fatalf("starts of %s at %s = %d, want role start %t", tc.role, tc.phase, starts, tc.wantRole)
+			}
+		})
+	}
+}
+
+func phaseStarts(t *testing.T, pool *pgxpool.Pool, issue string, role claim.Role, at phase.Phase) int {
+	t.Helper()
+	starts := 0
+	for _, effect := range effects(t, pool) {
+		if request, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == issue && request.Op == "start" && request.Role == role && request.Phase == at {
+			starts++
+		}
+	}
+	return starts
+}
+
+// A root's reopen can commit after the outbox handed its child to Dispatch but before the daemon
+// consumes that event. The durable hand-over fence then rejects the stale daemon todo inside intake:
+// the child stays in the reopened root's tree, and the daemon reasserts its phase status instead of
+// re-entering it or making it an orphan.
+func TestAStaleHandoverEventAfterTheRootReopensKeepsTheChild(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	const root, child = "LEGION-208", "LEGION-209"
+	parent := root
+	until := fixedNow.Add(time.Hour)
+	inTx(t, pool, func(tx pgx.Tx) {
+		records := record.NewStore()
+		for _, put := range []error{
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
+			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+		} {
+			if put != nil {
+				t.Fatalf("seed: %v", put)
+			}
+		}
+	})
+
+	// The reopen is an intake fact serialized before the child PATCH's daemon event, and it cancels
+	// the durable hand-over fence instead of deleting it. The next event sees that cancellation.
+	apply(t, pool, admission, "root-reopened", intake.DispatchIssue{Key: root, Seq: 2, Type: "issue.updated", Status: "todo", Title: root, Rank: "A", HandedOver: true}, engine)
+	apply(t, pool, admission, "late-handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	got := issue(t, pool, child)
+	if got.Tree != root || got.Phase != phase.Planning || got.Generation != 1 || got.Status != "in_progress" || got.LastDispatchSeq != 2 {
+		t.Fatalf("child after a stale hand-over = %#v, want it unchanged in %s's live tree with its event sequence fenced", got, root)
+	}
+	inTx(t, pool, func(tx pgx.Tx) {
+		handover, err := record.NewStore().Handover(context.Background(), tx, child)
+		if err != nil || handover != nil {
+			t.Fatalf("stale hand-over fence = %#v, %v, want none", handover, err)
+		}
+	})
+	var reasserted int
+	for _, effect := range effects(t, pool) {
+		if write, ok := effect.payload.(record.StatusWrite); ok && effect.issue == child && write.Status == "in_progress" && write.ObservedStatus == "todo" {
+			reasserted++
+		}
+	}
+	if reasserted != 1 {
+		t.Fatalf("reasserted child writes = %d, want one", reasserted)
 	}
 }
 

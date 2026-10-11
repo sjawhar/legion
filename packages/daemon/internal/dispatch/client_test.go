@@ -81,8 +81,8 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 	}
 }
 
-// A hand-over is one PATCH carrying the status and the issue's labels with the legion label added,
-// under the daemon's actor, so the one event it makes carries both.
+// A hand-over is one PATCH carrying the status and an additive legion label under the daemon's
+// actor, so concurrent labels survive and the one event it makes carries both.
 func TestHandOverWritesTheStatusAndTheLabelsInOnePatch(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPatch || r.URL.Path != "/api/v1/issues/LEGION-4" {
@@ -90,17 +90,17 @@ func TestHandOverWritesTheStatusAndTheLabelsInOnePatch(t *testing.T) {
 		}
 		assertBearer(t, r)
 		var body struct {
-			Status string   `json:"status"`
-			Labels []string `json:"labels"`
-			Actor  struct {
+			Status    string   `json:"status"`
+			LabelsAdd []string `json:"labels_add"`
+			Actor     struct {
 				Kind string `json:"kind"`
 				ID   string `json:"id"`
 			} `json:"actor"`
 		}
 		decodeJSON(t, r, &body)
-		if body.Status != "todo" || len(body.Labels) != 2 || body.Labels[0] != "repo:x" || body.Labels[1] != LegionLabel ||
+		if body.Status != "todo" || len(body.LabelsAdd) != 1 || body.LabelsAdd[0] != LegionLabel ||
 			body.Actor.Kind != "session" || body.Actor.ID != "legion-daemon:LEGION" {
-			t.Fatalf("hand-over request = %#v, want todo with repo:x and legion from legion-daemon:LEGION", body)
+			t.Fatalf("hand-over request = %#v, want todo with an additive legion label from legion-daemon:LEGION", body)
 		}
 		writeJSON(t, w, map[string]string{"status": "todo"})
 	}))

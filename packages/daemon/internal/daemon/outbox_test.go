@@ -73,6 +73,7 @@ type outboxDispatch struct {
 	issue          dispatch.Issue
 	statuses       []string
 	handOvers      []string
+	handOverHook   func() error
 	bodies         []string
 	messages       []string
 	getErr         error
@@ -95,6 +96,9 @@ func (d *outboxDispatch) SetStatus(_ context.Context, _ string, status string) e
 }
 func (d *outboxDispatch) HandOver(_ context.Context, issue dispatch.Issue, status string) error {
 	d.handOvers = append(d.handOvers, fmt.Sprintf("%s %s %v", issue.Key, status, issue.Labels))
+	if d.handOverHook != nil {
+		return d.handOverHook()
+	}
 	return d.statusErr
 }
 func (d *outboxDispatch) PostMessage(_ context.Context, _ string, body string) error {
@@ -166,7 +170,10 @@ func TestAHandOverWritesTheStatusAndTheLabelTogether(t *testing.T) {
 				if err := records.PutIssue(context.Background(), tx, tc.root); err != nil {
 					return err
 				}
-				return records.PutIssue(context.Background(), tx, tc.child)
+				if err := records.PutIssue(context.Background(), tx, tc.child); err != nil {
+					return err
+				}
+				return records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 3})
 			}); err != nil {
 				t.Fatalf("seed the tree: %v", err)
 			}
@@ -178,6 +185,76 @@ func TestAHandOverWritesTheStatusAndTheLabelTogether(t *testing.T) {
 				t.Fatalf("status writes %v and hand-overs %v, want %v and %v", client.statuses, client.handOvers, tc.statuses, tc.handOvers)
 			}
 		})
+	}
+}
+
+// The outbox can verify a hand-over fence, then lose the root to a reopen before its PATCH reaches
+// Dispatch. The daemon event from that late PATCH is still fenced in intake: re-admission cancels
+// the persistent hand-over, so the child stays in the reopened root's tree rather than restarting
+// there or becoming an orphan.
+func TestAReopenBetweenTheHandOverCheckAndItsPatchKeepsTheChild(t *testing.T) {
+	const root, child = "LEGION-207", "LEGION-208"
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	until := time.Now().Add(time.Hour)
+	parent := root
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		for _, put := range []error{
+			records.PutIssue(context.Background(), tx, record.Issue{Key: root, Tree: root, Project: "LEGION", Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(context.Background(), tx, record.Issue{Key: child, Tree: root, Project: "LEGION", Title: child, Parent: &parent, Phase: phase.Planning, Generation: 1, Status: "in_progress", Rank: "B", LastDispatchSeq: 1}),
+			records.PutHandover(context.Background(), tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+		} {
+			if put != nil {
+				return put
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed hand-over: %v", err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "LEGION"}, quietLogger())
+	admission := admit.New(records, engine, 1, "LEGION", quietLogger())
+	reopen := func() error {
+		_, err := intake.ApplyFact(context.Background(), pool, "dispatch", "root-reopened", intake.DispatchIssue{
+			Key: root, Seq: 2, Type: "issue.updated", Status: "todo", Title: root, Rank: "A", HandedOver: true,
+		}, engine, admission)
+		return err
+	}
+	client := &outboxDispatch{issue: dispatch.Issue{Key: child, Status: "in_progress"}, handOverHook: reopen}
+	row := mustOutboxRow(t, child, record.StatusWrite{ObservedStatus: "in_progress", Status: "todo", HandOver: true, HandOverTree: root, HandOverLinger: 1}, time.Now())
+	if err := (&outbox{pool: pool, records: records, dispatch: client, log: quietLogger()}).execute(context.Background(), row); err != nil {
+		t.Fatalf("write the hand-over: %v", err)
+	}
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "late-handover", intake.DispatchIssue{
+		Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true,
+	}, engine, admission); err != nil {
+		t.Fatalf("consume the late hand-over: %v", err)
+	}
+	var got *record.Issue
+	if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+		var err error
+		got, err = records.Issue(context.Background(), tx, child)
+		return err
+	}); err != nil {
+		t.Fatalf("read child: %v", err)
+	}
+	if got.Tree != root || got.Phase != phase.Planning || got.Generation != 1 || got.Status != "in_progress" {
+		t.Fatalf("child after reopen race = %#v, want its live root's planning run", got)
+	}
+}
+
+// The old tree's queued closes name the generation a child had before its hand-over. Carrying the
+// child into a new root generation makes those rows finish at the generation fence before checking
+// their old tree name, so they never retry forever on a tree mismatch.
+func TestAnOldTreeCloseOfAHandedOverChildFinishesAtTheGenerationFence(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	issue := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "child", Phase: phase.ProductionCheck, Generation: 2, Status: "in_progress"}
+	putOutboxIssue(t, pool, records, issue)
+	row := mustOutboxRow(t, issue.Key, record.SuperviseRequest{Op: "tree_close", Tree: "LEGION-207", Role: claim.RoleImplementer, Generation: 1, Linger: 1}, time.Now())
+	sup, _ := newOutboxSupervisor(t, "legion", t.TempDir())
+	if err := (&outbox{pool: pool, records: records, supervisor: sup, log: quietLogger()}).execute(context.Background(), row); err != nil {
+		t.Fatalf("old tree close = %v, want its older generation to finish without checking the old tree", err)
 	}
 }
 

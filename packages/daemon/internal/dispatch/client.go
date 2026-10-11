@@ -10,7 +10,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"slices"
 	"strings"
 	"time"
 )
@@ -99,15 +98,14 @@ func (c *HTTPClient) SetStatus(ctx context.Context, key, status string) error {
 	}, nil)
 }
 
-// HandOver sets issue's status and puts LegionLabel on it, in one PATCH, so the one event the write
-// makes carries both. The labels written are the ones issue carried when it was read, with
-// LegionLabel added: Dispatch replaces an issue's whole label list, and has no write that adds one.
+// HandOver sets issue's status and adds LegionLabel in one PATCH, so the one event the write makes
+// carries both. labels_add is resolved inside Dispatch's row lock, so a label another actor adds
+// after this client reads issue cannot be overwritten.
 func (c *HTTPClient) HandOver(ctx context.Context, issue Issue, status string) error {
-	labels := append(slices.Clip(issue.Labels), LegionLabel)
 	return c.request(ctx, http.MethodPatch, "/api/v1/issues/"+url.PathEscape(issue.Key), daemonWrite{
-		Status: status,
-		Labels: labels,
-		Actor:  daemonActor(issue.Key),
+		Status:    status,
+		LabelsAdd: []string{LegionLabel},
+		Actor:     daemonActor(issue.Key),
 	}, nil)
 }
 
@@ -330,8 +328,9 @@ type actor struct {
 }
 
 type daemonWrite struct {
-	Status string   `json:"status,omitempty"`
-	Labels []string `json:"labels,omitempty"`
-	Body   string   `json:"body,omitempty"`
-	Actor  actor    `json:"actor"`
+	Status    string   `json:"status,omitempty"`
+	Labels    []string `json:"labels,omitempty"`
+	LabelsAdd []string `json:"labels_add,omitempty"`
+	Body      string   `json:"body,omitempty"`
+	Actor     actor    `json:"actor"`
 }

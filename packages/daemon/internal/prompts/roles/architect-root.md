@@ -42,6 +42,11 @@ delivered `catch-up` notice is the authoritative wake-equivalent: when its desig
 the daemon is already running the tree's phases, and you start none.
 During a live session, react only to delivered wakes; do not poll.
 
+When a `catch-up` says `startsAtProductionCheck`, this root was promoted from a handed-over child
+whose pull request already merged. Do not `register_gate` or begin planning: the daemon has already
+started the implementer on the production check. Once that check finishes and you have verified its
+record on the pull request and the issue, `sign_off`.
+
 Necessary work remains your responsibility until it is complete. The only legitimate
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
 conflicts go to the controller. A product, scope, or design decision the human must make, yours or

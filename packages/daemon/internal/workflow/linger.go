@@ -97,55 +97,33 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	return nil
 }
 
-// settleUnfinished is the close, at the end of a done root's linger, of each child of its tree
-// still in the workflow and past admission. The linger is the window in which the root can come
-// back: a person setting it todo re-admits the tree, and admission's startMidPhaseChildren resumes
-// each such child where it stood. So the settling waits for the linger to end with the root still
-// done, whether a sign-off, a close, or a person closing a root they had parked put it there, and
-// lingerExpired's fence on the root's generation means a root that came back settles nothing.
-//
-// A child in its first phases (planning through reviewing, or held from one) is handed to Legion
-// as a root of its own (handOver). Its re-admission is a new generation that clears the old one's
-// record (admit's readmit): under an armed design gate a person approves its spec again, and it
-// plans and works again from its branch. A child nearer done (retro, merging, awaiting_merge,
-// production_check, or held from one) is not handed over: that clearing would drop its approved
-// review, its READY, and the record of a pull request that may already be merged, and run work
-// already on its base again. It is left for a person to finish, and the issue says so. A child still
-// admitted never started under its tree's design, and one finished or parked has no run to carry on.
+// settleUnfinished records a hand-over for every child a done root leaves in the workflow at the
+// end of its linger. A reopen inside the linger resumes those children in the old tree instead:
+// lingerExpired is fenced on the root generation, and the durable hand-over record makes a late
+// daemon PATCH no-op when the root came back before its event arrives. Each hand-over keeps the
+// child's phase, gate, phase rows and pull request across a new root generation; promotion starts
+// the phase's role again in that phase. A child still admitted never started under its tree's
+// design, and one finished or parked has no run to carry on.
 func (e *Engine) settleUnfinished(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) error {
 	for _, member := range members {
-		if member.Key == root.Key || record.OutOfWorkflow(member.Status) {
+		if member.Key == root.Key || member.Phase == phase.Admitted || record.OutOfWorkflow(member.Status) {
 			continue
 		}
-		at := member.Phase
-		if at == phase.Held && member.Hold != nil {
-			at = member.Hold.From
-		}
-		var err error
-		switch at {
-		case phase.Planning, phase.Implementing, phase.Testing, phase.Reviewing:
-			err = e.handOver(ctx, tx, root, member)
-		case phase.Retro, phase.Merging, phase.AwaitingMerge, phase.ProductionCheck:
-			e.logOnCommit(ctx, "workflow: a finished root leaves its nearly done child for a person", "issue", member.Key, "tree", root.Key, "phase", at)
-			err = e.enqueue(ctx, tx, member.Key, record.MessagePost{Body: fmt.Sprintf(
-				"%s closed while this issue was in %s, and Legion no longer runs it. It is not handed over as a root of its own, since that would clear its review and pull request record and run its work again; a person finishes it.", root.Key, at)})
-		}
-		if err != nil {
+		if err := e.handOver(ctx, tx, root, member); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// handOver hands a child its finished root leaves in its first phases to Legion as a root of its
-// own, with the write a person makes to do so: the child todo, with the legion label, in one
-// Dispatch write. The event that write makes admits the child as an orphan (admit's orphan). The
-// write names the tree and the root generation whose linger ended, and the outbox writes it only
-// while the child is still that tree's and the root still lingers at that generation, so a root
-// re-admitted before the write runs keeps its child (record.StatusWrite's HandOverTree). It runs
-// after any status write of the child still queued, as an issue's status writes run in order, and a
-// person's move of the child before it runs stands.
+// handOver writes the durable fence before queuing the one Dispatch PATCH that sets the child todo
+// and adds the legion label. intake consumes its daemon-authored event only while the fence names a
+// root that still lingers at this generation; the direct child re-admission then carries state into
+// the child's independent tree.
 func (e *Engine) handOver(ctx context.Context, tx pgx.Tx, root, child record.Issue) error {
+	if err := e.store.PutHandover(ctx, tx, record.Handover{Issue: child.Key, Tree: root.Tree, Generation: root.Generation}); err != nil {
+		return err
+	}
 	e.logOnCommit(ctx, "workflow: a finished root hands its unfinished child to Legion", "issue", child.Key, "tree", root.Key,
 		"phase", child.Phase, "status", child.Status)
 	return e.enqueue(ctx, tx, child.Key, record.StatusWrite{Status: "todo", ObservedStatus: child.Status, HandOver: true,

@@ -148,3 +148,49 @@ func TestWaveReleaseRetryRecordsATodoChildOfAChildTheWaveReleased(t *testing.T) 
 		t.Fatalf("Dispatch writes = %#v, want only the parent's release", statuses.writes)
 	}
 }
+
+// A child whose parent still has not reached the daemon does not make an architect retry forever.
+// After the bounded backoff attempts, release_children answers CHILD_RELEASE_STALLED and queues one
+// notice to the tree architect.
+func TestWaveReleaseBoundsAnUnrecordedChildRetryAndNotifiesTheArchitect(t *testing.T) {
+	h := newHarness(t)
+	records := record.NewStore()
+	engine := workflow.New(records, workflow.Config{Project: testProject}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	statuses := &statusRecorder{}
+	h.handler = NewServer("127.0.0.1", 8437, Options{
+		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
+		Controller: h.store, Grants: credential.New(nil), Pool: h.store.Pool(), Record: records,
+		Handlers: []intake.Handler{engine}, Dispatch: statuses,
+	}).Handler
+	root, parent, child := "LEGION-208", "LEGION-209", "LEGION-210"
+	h.recordIssue(record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Planning, Generation: 1, Status: "in_progress", HandedOver: true})
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		for _, put := range []error{
+			records.PutSlot(context.Background(), tx, record.Slot{Issue: root, Index: 0, AdmittedAt: time.Now()}),
+			records.PutReleaseRetry(context.Background(), tx, record.ReleaseRetry{Issue: child, Sequence: 5, Attempts: maxChildReleaseAttempts - 1, NextAt: time.Now().Add(-time.Second)}),
+		} {
+			if put != nil {
+				return put
+			}
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("seed retry: %v", err)
+	}
+	statuses.issues = map[string]dispatch.Issue{
+		root:   {Key: root, Status: "in_progress"},
+		parent: {Key: parent, Title: parent, Status: "todo", Parent: &root, LastSeq: 3},
+		child:  {Key: child, Title: child, Status: "todo", Parent: &parent, LastSeq: 5},
+	}
+	architect := newLiveClaim(t, h, root, claim.RoleArchitect)
+	assertFailure(t, h.request(http.MethodPost, "/legion/v1/waves/release", map[string]any{"grantId": architect.grant(t), "issues": []string{child}}, nil), http.StatusConflict, "CHILD_RELEASE_STALLED")
+	var notices int
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		return tx.QueryRow(context.Background(), `select count(*) from outbox where issue = $1 and kind = 'notice' and payload->>'kind' = 'child-release-stalled'`, root).Scan(&notices)
+	}); err != nil {
+		t.Fatalf("read the stalled notice: %v", err)
+	}
+	if notices != 1 {
+		t.Fatalf("stalled notices = %d, want one", notices)
+	}
+}
