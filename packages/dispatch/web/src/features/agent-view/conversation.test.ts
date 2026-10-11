@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AgentStreamCommand, AgentStreamFrame } from "@legion/contracts";
+import {
+  AGENT_STREAM_LIMITS,
+  AGENT_STREAM_TRUNCATION_SUFFIX,
+  type AgentStreamCommand,
+  type AgentStreamFrame,
+} from "@legion/contracts";
 
 import {
   applyFrames,
@@ -374,5 +379,37 @@ describe("the session's slash commands", () => {
     ] as unknown as AgentStreamFrame[];
     const state = applyFrames(EMPTY_CONVERSATION, [commandsFrame(1, LISTED), ...bad]);
     expect(sessionCommands(state)).toEqual(LISTED);
+  });
+
+  test("drops a command list over its count, name or publisher-capped description bound", () => {
+    const cappedDescription =
+      "d".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars) + AGENT_STREAM_TRUNCATION_SUFFIX;
+    const maximum = Array.from({ length: AGENT_STREAM_LIMITS.commands }, (_, index) => ({
+      description: cappedDescription,
+      name: `command-${index}`,
+      source: "extension" as const,
+    }));
+    const bad = [
+      commandsFrame(2, [...maximum, { name: "one-too-many", source: "extension" }]),
+      commandsFrame(3, [
+        { name: "n".repeat(AGENT_STREAM_LIMITS.commandNameChars + 1), source: "extension" },
+      ]),
+      commandsFrame(4, [
+        {
+          description: "d".repeat(
+            AGENT_STREAM_LIMITS.commandDescriptionChars + AGENT_STREAM_TRUNCATION_SUFFIX.length + 1
+          ),
+          name: "too-long-description",
+          source: "extension",
+        },
+      ]),
+    ];
+
+    expect(
+      sessionCommands(applyFrames(EMPTY_CONVERSATION, [commandsFrame(1, LISTED), ...bad]))
+    ).toEqual(LISTED);
+    expect(sessionCommands(applyFrames(EMPTY_CONVERSATION, [commandsFrame(1, maximum)]))).toEqual(
+      maximum
+    );
   });
 });

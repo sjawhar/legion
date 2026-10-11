@@ -1,9 +1,11 @@
 import type { ThreadMessageLike } from "@assistant-ui/react";
-import type {
-  AgentStreamCommand,
-  AgentStreamFrame,
-  AgentStreamMessage,
-  AgentStreamToolResult,
+import {
+  AGENT_STREAM_LIMITS,
+  AGENT_STREAM_TRUNCATION_SUFFIX,
+  type AgentStreamCommand,
+  type AgentStreamFrame,
+  type AgentStreamMessage,
+  type AgentStreamToolResult,
 } from "@legion/contracts";
 import { dispatchMetadata } from "./dispatch-marks";
 
@@ -61,14 +63,17 @@ function isCommand(command: unknown): command is AgentStreamCommand {
   if (
     "description" in command &&
     command.description !== undefined &&
-    typeof command.description !== "string"
+    (typeof command.description !== "string" ||
+      command.description.length >
+        AGENT_STREAM_LIMITS.commandDescriptionChars + AGENT_STREAM_TRUNCATION_SUFFIX.length)
   ) {
     return false;
   }
   return (
-    !("terminalOnly" in command) ||
-    command.terminalOnly === undefined ||
-    command.terminalOnly === true
+    command.name.length <= AGENT_STREAM_LIMITS.commandNameChars &&
+    (!("terminalOnly" in command) ||
+      command.terminalOnly === undefined ||
+      command.terminalOnly === true)
   );
 }
 
@@ -94,7 +99,11 @@ export function isRenderableFrame(frame: AgentStreamFrame): boolean {
   if (frame.kind === "commands") {
     // The whole list or nothing: a list missing one entry would tell the person a command they
     // could send does not exist.
-    return Array.isArray(frame.commands) && frame.commands.every(isCommand);
+    return (
+      Array.isArray(frame.commands) &&
+      frame.commands.length <= AGENT_STREAM_LIMITS.commands &&
+      frame.commands.every(isCommand)
+    );
   }
   if (frame.kind !== "message") return false;
   const { message } = frame;

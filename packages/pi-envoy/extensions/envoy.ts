@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { delimiter, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  AGENT_STREAM_WATCH_INTERVAL_MS,
   type AgentStreamCommand,
   type AgentStreamControlMessage,
   agentStreamControlSubject,
@@ -959,9 +960,6 @@ export default function envoyExtension(pi: PiApi): void {
   };
 
   const RESUBSCRIBE_DELAY_MS = Number(process.env.ENVOY_RESUBSCRIBE_DELAY_MS ?? "") || 5_000;
-  // A Dispatch page watches every 10 s. Replay must always refresh, but a burst of watches should
-  // read the host command list once.
-  const AGENT_STREAM_WATCH_INTERVAL_MS = 10_000;
   let shuttingDown = false;
 
   // Topics this session closed on purpose: the session-switch rebind and the
