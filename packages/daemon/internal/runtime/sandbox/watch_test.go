@@ -1,6 +1,7 @@
 package sandbox
 
 import (
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -329,5 +330,77 @@ func TestAStaleKnownLocatorNeverDisplacesANewerIncarnation(t *testing.T) {
 	}
 	if obs, err := g.r.Probe(g.ctx, newer); err != nil || obs.Kind != runtime.Alive {
 		t.Fatalf("a stale Suspend after a stale sweep left the newer generation %s, %v", obs.Kind, err)
+	}
+}
+
+// The boot reconciliation names, in the log, each Sandbox whose pod runs an image other than the
+// runtime's — a pod the previous release launched, whose agents call this daemon as that release
+// until a relaunch replaces the pod — with the image it runs and the configured one, one warning
+// per Sandbox, the daemon-launched controller's included, and nothing of a pod on the configured
+// image. A warning alone: the drifted pod's claim is adopted as any other and nothing is written.
+// Every later sweep warns again until the pod is replaced, and not after.
+func TestTheBootReconciliationWarnsOfEachPodRunningAnotherImage(t *testing.T) {
+	g := newRig(t, nil)
+	spec := workerSpec(t)
+	issue, controller := g.spawn(spec), g.spawn(controllerSpec(t))
+	child := g.spawn(childSpec(t))
+	// The child's pod already runs the release the restarted daemon pins.
+	g.update(g.pod(child.Sandbox.Name), func(pod *corev1.Pod) {
+		for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
+			for i := range containers {
+				containers[i].Image = nextImage
+			}
+		}
+	})
+	logs := &lockedLog{}
+	r2 := secondRuntime(t, g, func(o *Options) {
+		o.Image = nextImage
+		o.Log = slog.New(slog.NewTextHandler(logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	})()
+	warnings := func(sandbox string) int {
+		return strings.Count(logs.String(), "sandbox runtime: "+sandbox+" runs image ")
+	}
+	known := []runtime.Known{{Claim: workerToken, Locator: &issue}, {Claim: controllerToken, Locator: &controller}, {Claim: childToken, Locator: &child}}
+
+	g.clearActions()
+	if err := r2.ReconcileOrphans(g.ctx, known, 0); err != nil {
+		t.Fatal(err)
+	}
+	for _, loc := range []runtime.Locator{issue, controller} {
+		want := "sandbox runtime: " + loc.Sandbox.Name + " runs image " + testImage + ", the configured image is " + nextImage +
+			"; its agents call this daemon as the older release until the pod is relaunched"
+		if !strings.Contains(logs.String(), want) || warnings(loc.Sandbox.Name) != 1 {
+			t.Errorf("the boot reconciliation logged %q, want one warning %q", logs.String(), want)
+		}
+	}
+	if warnings(child.Sandbox.Name) != 0 {
+		t.Errorf("the boot reconciliation warned of %s, whose pod runs the configured image: %q", child.Sandbox.Name, logs.String())
+	}
+	if recorded, ok := r2.recorded(workerToken); !ok || recorded != issue {
+		t.Errorf("the watch holds %+v for the drifted pod's claim, want it adopted at %s", recorded, issue.Incarnation)
+	}
+	if writes := g.writes(); len(writes) > 0 {
+		t.Fatalf("the boot reconciliation wrote %v; a drifted pod is only warned of", writes)
+	}
+
+	g.connectRunning(workerToken, issue.Sandbox.Generation)
+	g.eventually("the tester's launcher to report its child to the restarted daemon", func() bool {
+		state, connected := r2.launchers.state(workerToken, issue.Sandbox.PodUID)
+		return connected && state.Child != nil
+	})
+	spec.Generation, spec.BootToken, spec.ResumeSessionFile = 2, "boot-g2", resumeSession
+	newIssue, err := r2.Resume(g.ctx, &issue, spec)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if newIssue.Sandbox.PodUID == issue.Sandbox.PodUID {
+		t.Fatalf("Resume kept the pod %s running the older image", issue.Sandbox.PodUID)
+	}
+	known[0].Locator = &newIssue
+	if err := r2.ReconcileOrphans(g.ctx, known, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if warnings(issue.Sandbox.Name) != 1 || warnings(controller.Sandbox.Name) != 2 {
+		t.Errorf("after the issue pod's relaunch the sweep logged %q, want the controller's pod warned of again and the issue's not", logs.String())
 	}
 }

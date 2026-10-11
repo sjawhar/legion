@@ -14,7 +14,7 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
 
 ## Layout
 
-- `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar, main-content, and margin shell. The sidebar provides Inbox, Pinned issues, Projects, Agents, Delivery, and Settings without loading the full issue list. The `/agents` route groups live sessions by Dispatch activity and freshness, with targeted exchanges and the shared Send/Aside/BTW composer. Issue pages have Spec, Conversation, Children, and Artifacts tabs. Issue margins show Comments (anchored threads beside the document, Proof's model) and Pinned; standalone project-document margins show Comments only. At `xl` the sidebar and margin are independently collapsible rails; compact widths use their respective sheets. A margin is a property of a document surface, so on a desktop route that has none - the Inbox, a project, Settings, Agents - `features/margin/Margin.tsx` renders nothing at all rather than a 384 px column holding a placeholder sentence; it keys on the route (an issue path, or a project-document path) rather than on `useMarginOwner`, whose document owner only resolves once the artifact query lands, and the reader's own collapse preference is untouched, so the margin returns as they left it on the next issue or document. The desktop sidebar is a `sticky top-0` viewport-tall flex column inside its full-height `<aside>`: the navigation stays reachable on a long issue, and the signed-in name and `Sign out` sit in an `mt-auto` footer beneath the links rather than above them, because identity is read once and the navigation on every visit. Per-user sidebar visibility, margin visibility, and margin width persist in browser storage.
+- `web/src/app.tsx` owns authentication, the React Router shell, and the responsive sidebar, main-content, and margin shell. The sidebar provides Inbox, Pinned issues, Projects, Agents, Delivery, Pipeline, and Settings without loading the full issue list. The `/agents` route groups live sessions by Dispatch activity and freshness, with targeted exchanges and the shared Send/Aside/BTW composer. Issue pages have Spec, Conversation, Children, and Artifacts tabs. Issue margins show Comments (anchored threads beside the document, Proof's model) and Pinned; standalone project-document margins show Comments only. At `xl` the sidebar and margin are independently collapsible rails; compact widths use their respective sheets. A margin is a property of a document surface, so on a desktop route that has none - the Inbox, a project, Settings, Agents - `features/margin/Margin.tsx` renders nothing at all rather than a 384 px column holding a placeholder sentence; it keys on the route (an issue path, or a project-document path) rather than on `useMarginOwner`, whose document owner only resolves once the artifact query lands, and the reader's own collapse preference is untouched, so the margin returns as they left it on the next issue or document. The desktop sidebar is a `sticky top-0` viewport-tall flex column inside its full-height `<aside>`: the navigation stays reachable on a long issue, and the signed-in name and `Sign out` sit in an `mt-auto` footer beneath the links rather than above them, because identity is read once and the navigation on every visit. Per-user sidebar visibility, margin visibility, and margin width persist in browser storage.
 - `web/src/api/types.ts` mirrors the Dispatch JSON entities.
 - `web/src/lib/timestamps.ts`'s `compareTimestamps` is how the SPA orders two server timestamps.
   The server writes RFC 3339 with trailing fractional zeros dropped (`…00.12Z`, `…00.123456Z`), so
@@ -193,6 +193,8 @@ The configured page ports the prototype's timeline view (`dispatch://LEGION-567`
 The page's window is the header's `WindowControl` (`lib/window.ts` holds the presets, `readWindow` and the 84-day check): a rolling preset kept as `window=7d|14d|84d` (the 28-day default leaves the URL bare), or a custom range of whole UTC days kept as `from`/`to`, its exclusive `to` the midnight after its last day, a range over 84 days refused in the control with the limit stated. A preset's range is computed when it is chosen or first read and held while it stays chosen, so the query key holds still; only the control writes the window, and each change clears the brush. Session groups (`dispatch://LEGION-682`) are the server's: a pull request whose first session a group holds has `parent_agent` `group:<id>`, and the timeline carries `session_groups`, `session_titles` and `session_pr_counts`. `lib/parentAgent.ts`'s `parentAgentLabel` is the one place a Parent agent value turns into words (a group by its name, a placeholder in words, anything else as written), read by the facet, the lanes, the list and the drill-down. `SessionGroupsEditor` (the facet's **Edit groups**, mounted only while open) creates, renames, adds to, removes from and deletes groups through `api.createDeliverySessionGroup`/`updateDeliverySessionGroup`/`deleteDeliverySessionGroup`, invalidates every `["delivery", …]` read on success, and shows a refusal as the server wrote it; a member no window pull request names first shows by its id. Coloured by Parent agent, the `Own colour and lane` picker writes repeatable `agents` parameters: `buildColorScale(counts, chosen)` gives the chosen values the palette in the order chosen and every other value `OTHER_COLOR`, and `foldLanes`' `chosen` gives each its own lane, never folded, and the rest one Other lane; with nothing chosen both behave as before.
 
 Above the timeline sits `features/delivery/MeasuresPanel.tsx`, the delivery prototype's `DoraPanel` ported as it is: six KPI cards, the headline strip, and a `Definitions & alternatives` fold holding the alternative definitions and a per-day table, newest first. Every number, target and met/missed verdict comes from the server; the panel computes nothing. The measures follow the page's window, search and facets, and a brush window (`ws`/`we`) as well, which the timeline's own read does not take. With no brush the panel shows the timeline response's own `measures`, computed from the population that read already holds, so the page reads it once; a brush adds `GET /api/v1/delivery/measures` for the brush window under `deliveryMeasuresQuery` (`["delivery", "measures", <facets>]`), so the settings form's `["delivery", …]` invalidation refreshes both. A brushed measures failure shows its own `QueryError` with Retry and leaves the timeline in place. The cards lay out by the panel's own width (Tailwind container queries), since the sidebar takes a share of the viewport that varies by breakpoint. The charts are `Sparkbars` and `SpreadBars`, which share one scale (`lib/barScale.ts`) and fill with the `chartBar` tokens in `theme/classes.ts`. `e2e/delivery-seed.ts` is the one fixture the timeline's and the measures' browser rows and the docs screenshot seed.
+
+`features/delivery/PipelinePage.tsx` is `/pipeline` (the sidebar's `Pipeline` row under Delivery), the delivery prototype's Pipeline page ported as it is: the header line naming the seven UTC days, six cards with their `data-metric` attributes, then the slowest-jobs and failed-in-24-hours tables (`data-section`, `data-job`, `data-failing-job`). The cards take the prototype's column counts at the prototype's content widths - one column, two from 46rem, six from 78rem, its `md:grid-cols-2 xl:grid-cols-6` less its page padding - measured on the page's own width (Tailwind container queries) rather than the viewport, as the measures panel's are, since beside the sidebar the viewport rule left six cards too little room for their figures. It reads `GET /api/v1/delivery/pipeline` under `deliveryPipelineQuery` (`["delivery", "pipeline", {at}]`, so the settings form's `["delivery"]` invalidation refreshes it), and computes nothing but the two lead-time cards' met/missed badge (`data-target-met`), judged as the prototype judges it against the `targets` the response carries: merge to production on the seven days' longest change, PR open to merge on their median. A settings row naming no staging end-to-end or staging deploy job answers that card `null`, and the page omits it. `?at=` in the page's URL is the test and screenshot hook: the page forwards it to the route and never writes it, so a fixture dated in the past renders as today, and a failed job's age is measured from it. Unconfigured delivery (`DELIVERY_NOT_CONFIGURED`) links to `/delivery`, whose setup form configures both pages. `e2e/delivery-seed.ts`'s `seedPipelineFixture` (with `PIPELINE_AT`) seeds the browser rows (`e2e/pipeline.e2e.ts`), and its `seedPipelineRows` the docs screenshot beside the measures fixture.
 
 The primary document's `Version`, `Name version`, connection dot, and block-link controls live at the end of the active Spec tab row; on phones they wrap below the tabs. `Conversation`, `Children`, and the artifact list do not render those primary-Spec controls. Every other document page (a project document, an issue's other documents) carries them in `ArtifactHeader`, where `Name version`, `Diff vs current` and the connection dot are one group that wraps as a unit: at 390 px the picker, `Name version` and the dot are wider than the header card, and the dot alone would otherwise wrap onto a line of its own.
 
@@ -719,6 +721,7 @@ bun run check:classes
 bun run typecheck
 bun run lint
 bun test
+bun run dispatch:local
 ```
 
 No module in the SPA may import, directly or through a chain, a module that imports it back: a
@@ -783,7 +786,8 @@ guard requires on writes. A cookie names its login's generation in
 `user_sessions`, which `resetDatabase` truncates, so a context signs in after the
 reset, never before it. Address the harness as `127.0.0.1:<port>`, never
 `localhost`: the router refuses any other `Host`. Do not replace the server with
-a fixture server.
+a fixture server. `bun run dispatch:local` runs the same harness by hand,
+seeded and signed in, and leaves it running (below, after the port rules).
 
 A third keeps an Inbox assertion from measuring the wrong mechanism: a test that expects a row to leave the Inbox list releases focus AND the pointer from it first, because `ViewportAnchor` and `heldRow` keep the row the reader's hand is on rendered wherever the list has moved it. Blurring alone is not enough - `.check()` and `.click()` leave the mouse over the row.
 
@@ -939,7 +943,9 @@ truncate a database the server's own loopback check never saw. `PGHOST` and `PGS
 since pgx and libpq read both; a service entry's `hostaddr`, the one key they part on, pgx sends
 to Postgres as a setting, which refuses the connection, so the harness server never boots on one.
 `e2e/psql.ts` imports nothing from `e2e/`, so a module can import it statically before the harness
-is up, without evaluating `e2e/api.ts`.
+is up, without evaluating `e2e/api.ts`; its `sqlAt` runs the same psql against a URL it is given,
+and kills it when an `AbortSignal` it is passed fires, which `e2e/local-instance.ts` uses to
+create its database through the server's `postgres` one.
 
 That reset is also the one rig failure that presents as a code failure. A transaction that holds
 one of the truncated tables for 5 s, such as a session left idle in a transaction, a long query, or
@@ -968,10 +974,12 @@ resolution, those listeners refuse it too, not only the Playwright config.
 
 `e2e/playwright.config.ts` probes every port it starts before any web server starts and fails the
 run with one message listing every taken port beside its own variable, before a single spec runs.
-One table in the config names each listener, its port's variable and whether a deployed run starts
-it, and both the probe and `webServer` read the started rows: all five ports for a local run, and
-`FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The refusal names only the variables
-the run probes. Its remedies are
+One table, `e2e/harness-listeners.ts`, names each listener, its command, its port's variable and
+whether a deployed run starts it; the config's probe and `webServer` read the rows it starts: all
+five ports for a local run, and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The
+probe is `e2e/port-probe.ts`: `isPortUsed` is Playwright's own predicate, and `takenPorts` lists
+the taken ports of a set of rows, which the config and `e2e/local-instance.ts` both refuse on. The
+refusal names only the variables the run probes. Its remedies are
 to stop whatever listens there, or to move a local run to free ports **and its own
 `DATABASE_URL`** — moving only the ports starts this run's servers elsewhere and still truncates
 the database the leftover server holds, and `e2e/seed.ts`'s quiesce reaches only the server at the
@@ -984,6 +992,27 @@ not behave alike; a lane that shares one hand-started harness across runs sets
 file, which derives the target's `ENVOY_URL` from that same value; the README's acceptance recipe
 wires the pair. A listing run starts no web server, so it skips the probe. The port validation above
 is not gated on that mode, so a malformed or duplicated port is refused in every invocation.
+
+`bun run dispatch:local` (`e2e/local-instance.ts`) is that harness, left running and seeded: it
+starts every row of `e2e/harness-listeners.ts`, each as the leader of a process group of its own,
+waits for the server's `/healthz` and every other listener's port, empties the database with
+`resetDatabase`, seeds `e2e/workspace.ts`, and prints the signed-in URL; `README.md`'s "Local
+instance" section is its user's guide. Its database is `DATABASE_URL` or the `dispatch_local`
+database on `packages/envoy/scripts/dev-postgres.sh`'s container. Before it hands out the URL its
+startup smoke checks, over HTTP with a dev sign-in cookie, that `/auth/whoami` names `alice`, the
+Inbox holds the seed's rows, the seeded broadcast is listed and every seeded session is an agent.
+It deliberately does not check a broadcast's recipient order: `e2e/broadcast.e2e.ts` owns that
+assertion, so the command has to start on a server without that fix for the spec to go red
+against it. What it runs on lives in `e2e/local-instance-support.ts`, which runs nothing on
+import: `Supervisor`, which starts each process and stops them all (Ctrl-C, a SIGTERM, a failure
+at any step), signalling every process group, SIGKILLing whatever still runs after 10 s, aborting
+the signal its psql calls carry, and returning once every leader has exited; `databaseUrlRefusal`,
+its own `DATABASE_URL` check; and `shellQuote`, for the commands it prints.
+`e2e/__tests__/local-instance-support.test.ts` (`bun run test`) drives them with real processes
+and no server. That check reads the URL with `new URL`, as libpq would only in part; the order
+closes the gap, since the reset runs only after the server's `/healthz` answered, and the server
+refuses to boot on a non-loopback database under `DISPATCH_DEV_SIGNIN`. Keep the health wait ahead
+of the reset.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Where a caret lands beside

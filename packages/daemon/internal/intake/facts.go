@@ -145,7 +145,7 @@ type PullRequestReview struct {
 	// applied, since the workflow decides inside a transaction and performs no I/O). It is never
 	// looked up, and stays false, for a review that does not decide (Decides), one with no author,
 	// one on a pull request the daemon does not record, and one the review App submitted, which
-	// decides by its login alone (workflow's decidesRound). It is also false for an author GitHub
+	// decides by its login alone (workflow's DecidesRound). It is also false for an author GitHub
 	// does not give write access.
 	AuthorCanWrite bool
 	Body           string
@@ -160,6 +160,14 @@ func (PullRequestReview) isFact() {}
 func (r PullRequestReview) Decides() bool {
 	state := strings.ToLower(r.State)
 	return state == "approved" || state == "changes_requested"
+}
+
+// Order is where the review falls among the pull request's reviews (record.ReviewOrder): when it
+// was submitted, then GitHub's review id. The workflow orders a deciding review against the pull
+// request's newest by it, and the daemon's read of a pull request's reviews orders what GitHub
+// lists by it, so both order reviews alike.
+func (r PullRequestReview) Order() record.ReviewOrder {
+	return record.ReviewOrder{SubmittedAt: r.SubmittedAt, ID: r.ID}
 }
 
 // CheckRun is one latest-run identity in a checks settlement.

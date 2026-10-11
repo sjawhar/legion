@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -61,19 +63,11 @@ var deliveryPrioritySelection = regexp.MustCompile(`^[pP]?([0-3])$`)
 // either is absent, and refuses a malformed value, an inverted window, or one wider than
 // maxDeliveryWindow.
 func parseDeliveryWindow(query url.Values) (from, to time.Time, err error) {
-	to = time.Now().UTC()
-	if query.Has("to") {
-		to, err = time.Parse(time.RFC3339, strings.TrimSpace(query.Get("to")))
-		if err != nil {
-			return time.Time{}, time.Time{}, errors.New("to must be an RFC3339 timestamp")
-		}
+	if to, err = parseOptionalRFC3339(query, "to", time.Now().UTC()); err != nil {
+		return time.Time{}, time.Time{}, err
 	}
-	from = to.Add(-defaultDeliveryWindow)
-	if query.Has("from") {
-		from, err = time.Parse(time.RFC3339, strings.TrimSpace(query.Get("from")))
-		if err != nil {
-			return time.Time{}, time.Time{}, errors.New("from must be an RFC3339 timestamp")
-		}
+	if from, err = parseOptionalRFC3339(query, "from", to.Add(-defaultDeliveryWindow)); err != nil {
+		return time.Time{}, time.Time{}, err
 	}
 	if !from.Before(to) {
 		return time.Time{}, time.Time{}, errors.New("from must be before to")
@@ -82,6 +76,19 @@ func parseDeliveryWindow(query url.Values) (from, to time.Time, err error) {
 		return time.Time{}, time.Time{}, errors.New("from..to must not span more than 84 days")
 	}
 	return from, to, nil
+}
+
+// parseOptionalRFC3339 is query's name parameter as an RFC3339 time, or fallback when the query
+// has no such parameter, refusing a value that does not parse with an error naming the parameter.
+func parseOptionalRFC3339(query url.Values, name string, fallback time.Time) (time.Time, error) {
+	if !query.Has(name) {
+		return fallback, nil
+	}
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(query.Get(name)))
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must be an RFC3339 timestamp", name)
+	}
+	return parsed, nil
 }
 
 // deliverySettings reads the timeline's configuration record, answering 404
@@ -336,7 +343,7 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	if err := reads.Wait(); err != nil {
 		return deliveryPopulation{}, err
 	}
-	applies := delivery.ProductionApplies(applyRuns, jobsByRun, settings.ProductionJobName)
+	applies := s.productionApplies(applyRuns, jobsByRun, settings.ProductionJobName)
 
 	sessionIDs := []string{}
 	issueKeys := []string{}
@@ -533,6 +540,23 @@ func deliveryProductionView(jobs []delivery.DeliveryRunJob, productionJobName st
 		}
 	}
 	return nil
+}
+
+// productionApplies is delivery.ProductionApplies for a read, which warns about each run it sets
+// apart, a successfully concluded run with no production job, once per run and configured job
+// name for the life of the process: the timeline and the measures judge the same runs on every
+// read, so the line would otherwise repeat for one run on every page load. A changed
+// production_job_name is a new key, so a misconfiguration is named again under its new value.
+func (s *server) productionApplies(runs []delivery.DeliveryRun, jobsByRun map[int64][]delivery.DeliveryRunJob, productionJobName string) []delivery.Apply {
+	applies, unmatched := delivery.ProductionApplies(runs, jobsByRun, productionJobName)
+	for _, missing := range unmatched {
+		if _, warned := s.warnedUnmatchedRuns.LoadOrStore(warnedProductionRun{missing.Run.Repo, missing.Run.RunID, productionJobName}, struct{}{}); warned {
+			continue
+		}
+		slog.Warn("dispatch delivery: a successfully concluded run has no job matching the configured production_job_name -- it will never count as a deploy",
+			"repo", missing.Run.Repo, "run_id", missing.Run.RunID, "configured_job_name", productionJobName, "job_names_seen", missing.JobNames)
+	}
+	return applies
 }
 
 // deliveryIssue is what the timeline reads of one issue a pull request names: its project, title,

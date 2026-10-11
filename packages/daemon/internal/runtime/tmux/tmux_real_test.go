@@ -33,6 +33,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
+	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
 	"github.com/sjawhar/legion/daemon/internal/runtime/workerbin"
@@ -493,20 +494,21 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 func (r *rig) newRuntime(adjust ...func(*Options)) *Runtime {
 	r.t.Helper()
 	opts := Options{
-		Project:        r.project,
-		StateDir:       r.stateDir,
-		StreamAddress:  "unix://" + filepath.Join(r.dir, "stream.sock"),
-		DaemonURL:      r.daemon.server.URL,
-		EnvoyURL:       "http://127.0.0.1:9020",
-		NatsURLs:       []string{"nats://127.0.0.1:4222"},
-		OmpInvocation:  shellprefix.Word(r.omp),
-		StopGrace:      5 * time.Second,
-		ProbeInterval:  100 * time.Millisecond,
-		AdoptTimeout:   5 * time.Second,
-		CommandTimeout: 10 * time.Second,
-		Conns:          r.stream,
-		Environ:        r.environ,
-		Executable:     func() (string, error) { return r.legion, nil },
+		Project:          r.project,
+		StateDir:         r.stateDir,
+		StreamAddress:    "unix://" + filepath.Join(r.dir, "stream.sock"),
+		DaemonURL:        r.daemon.server.URL,
+		EnvoyURL:         "http://127.0.0.1:9020",
+		NatsURLs:         []string{"nats://127.0.0.1:4222"},
+		OmpInvocation:    shellprefix.Word(r.omp),
+		StopGrace:        5 * time.Second,
+		ProbeInterval:    100 * time.Millisecond,
+		AdoptTimeout:     5 * time.Second,
+		CommandTimeout:   10 * time.Second,
+		Conns:            r.stream,
+		Environ:          r.environ,
+		Executable:       func() (string, error) { return r.legion, nil },
+		GitHubCredential: staticCredential,
 	}
 	for _, f := range adjust {
 		f(&opts)
@@ -766,9 +768,9 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		t.Fatalf("GetState = (%+v, %v)", state, err)
 	}
 
-	// The pane ran `sh -c`, and its OMP runs under the environment the runtime promises: the grant
-	// file's pointer included, from OMP's start, since Oh My Pi copies its own environment once for
-	// every `gh` it runs to resolve a pr:// or issue:// read (LEGION-262).
+	// The pane ran `sh -c`, and its OMP runs under the environment the runtime promises, from OMP's
+	// start: Oh My Pi copies its own environment once for every `gh` it runs to resolve a pr:// or
+	// issue:// read (LEGION-262), so GH_CONFIG_DIR must be there before its first.
 	pid := panePid(t, loc)
 	if argv := procCmdline(pid); len(argv) < 2 || argv[0] != "/bin/sh" || argv[1] != "-c" {
 		t.Errorf("the pane's process is %q, want /bin/sh -c", argv)
@@ -777,7 +779,11 @@ func TestRealTmuxLifecycle(t *testing.T) {
 	env := procEnviron(t, omp)
 	secrets := filepath.Join(r.stateDir, "secrets")
 	for name, want := range map[string]string{
-		"PATH":                   filepath.Join(r.stateDir, "worker-bin") + ":" + filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"],
+		"PATH":                   filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"],
+		"GH_CONFIG_DIR":          filepath.Join(secrets, string(spec.Claim)+"-gh"),
+		"GH_TOKEN":               "",
+		"GITHUB_TOKEN":           "",
+		"GH_HOST":                "",
 		"XDG_CONFIG_HOME":        filepath.Join(r.stateDir, "home", ".config"),
 		"XDG_CACHE_HOME":         filepath.Join(r.stateDir, "home", ".cache"),
 		"XDG_DATA_HOME":          filepath.Join(r.stateDir, "home", ".local", "share"),
@@ -793,7 +799,6 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		"ENVOY_NATS_URL":         "nats://127.0.0.1:4222",
 		"ENVOY_URL":              "http://127.0.0.1:9020",
 		"GIT_TERMINAL_PROMPT":    "0",
-		"LEGION_GRANT_FILE":      filepath.Join(secrets, string(spec.Claim)+"-grant"),
 		"LEGION_BOOT_TOKEN_FILE": filepath.Join(secrets, string(spec.Claim)),
 		"ENVOY_TOKEN_FILE":       filepath.Join(secrets, string(spec.Claim)+"-envoy_token"),
 		"NATS_NKEY_SEED_FILE":    filepath.Join(secrets, string(spec.Claim)+"-nats_nkey_seed"),
@@ -820,6 +825,20 @@ func TestRealTmuxLifecycle(t *testing.T) {
 		if got, _ := os.ReadFile(env[pointer]); string(got) != want {
 			t.Errorf("%s file holds the wrong secret", pointer)
 		}
+	}
+	// The pane's GH_CONFIG_DIR holds the role's gh files, which its plain gh reads the App token
+	// from: a 0700 directory of 0600 files, no token in the environment.
+	if info, err := os.Stat(env["GH_CONFIG_DIR"]); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
+		t.Errorf("GH_CONFIG_DIR %s: %v, %v; want a 0700 directory", env["GH_CONFIG_DIR"], info, err)
+	}
+	hosts, err := os.ReadFile(filepath.Join(env["GH_CONFIG_DIR"], ghconfig.HostsFile))
+	if err != nil {
+		t.Errorf("the pane's hosts.yml: %v", err)
+	} else if token, err := ghconfig.TokenFromHosts(hosts); err != nil || token != staticCredentialToken(spec.Role) {
+		t.Errorf("the pane's hosts.yml holds %q (%v), want %q", token, err, staticCredentialToken(spec.Role))
+	}
+	if info, err := os.Stat(filepath.Join(env["GH_CONFIG_DIR"], ghconfig.ConfigFile)); err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("the pane's config.yml: %v, %v; want mode 0600", info, err)
 	}
 	if info, err := os.Stat(secrets); err != nil {
 		t.Errorf("secrets directory: %v", err)
@@ -1634,8 +1653,9 @@ func TestRealTmuxOMPGetsTheConfiguredDispatchURLAndTokenFile(t *testing.T) {
 }
 
 // A Go pane's bash tool must run this daemon's `legion`, not whichever `legion` the operator's PATH
-// holds (a TypeScript CLI has no `handoff complete`). The worker gh shim strips only worker-bin, so
-// its `legion gh` must reach the same launcher.
+// holds (a TypeScript CLI has no `handoff complete`): the launcher directory leads the pane's PATH.
+// Its gh is not intercepted — whatever gh the PATH gives reads the pane's credential from
+// GH_CONFIG_DIR — so nothing of the daemon's stands between the agent and gh.
 func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	ctx := context.Background()
 	r := newRig(t)
@@ -1656,7 +1676,7 @@ func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	r.daemon.awaitReady(t, spec.BootToken)
 	env := procEnviron(t, descendant(t, panePid(t, loc), "omp"))
 	launcher := filepath.Join(r.stateDir, "bin", "legion")
-	want := filepath.Join(r.stateDir, "worker-bin") + ":" + filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"]
+	want := filepath.Join(r.stateDir, "bin") + ":" + spec.Env["PATH"]
 	if env["PATH"] != want {
 		t.Fatalf("OMP's PATH = %q, want %q", env["PATH"], want)
 	}
@@ -1674,11 +1694,8 @@ func TestRealTmuxPaneResolvesThisDaemonsLegionCLI(t *testing.T) {
 	if info, err := os.Stat(launcher); err != nil || info.Mode().Perm() != 0o700 {
 		t.Fatalf("launcher stat = %v, %v; want mode 0700", info, err)
 	}
-	// The gh shim drops worker-bin only; the next `legion` it reaches is still the launcher.
-	gh := exec.Command("/bin/sh", "-c", `PATH=${PATH#`+filepath.Join(r.stateDir, "worker-bin")+`:}; command -v legion`)
-	gh.Env = []string{"PATH=" + env["PATH"]}
-	if out, err := gh.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != launcher {
-		t.Fatalf("legion after the gh shim's PATH edit = %q (%v), want %s", out, err, launcher)
+	if _, err := os.Stat(filepath.Join(r.stateDir, "worker-bin")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the state directory holds a worker-bin (%v), want no gh interception directory", err)
 	}
 }
 

@@ -79,7 +79,7 @@ func runControllerStart(ctx context.Context, args []string, stdout, stderr io.Wr
 // bearer, naming the contract the probe held the plugin to, which the daemon refuses before it
 // mints when it is not its own (the daemon mints a fresh capability and revokes the previous
 // controller's); write it
-// 0600 under the local state directory beside the gh shim, the `legion` launcher, and the
+// 0600 under the local state directory beside the `legion` launcher and the
 // deployment instructions; then run Oh My Pi interactive — the launch prefix and the resolved
 // invocation with one joined `--append-system-prompt`, no `--resume`, no `--mode rpc`, and
 // daemon.ControllerStartMessage as LEGION_CONTROLLER_START_MESSAGE in its environment for the
@@ -151,7 +151,7 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 	delete(env, natsauth.DaemonSeedFileVariable)
 	delete(env, "LEGION_BOOT_TOKEN")
 	delete(env, "LEGION_BOOT_TOKEN_FILE")
-	for _, pair := range controllerEnvironment(cfg, stateDir, token, runtime.SecretFilePath(stateDir, token)) {
+	for _, pair := range controllerEnvironment(cfg, stateDir, runtime.SecretFilePath(stateDir, token)) {
 		env[pair[0]] = pair[1]
 	}
 	created, err := makeDirs(controllerDir)
@@ -231,13 +231,12 @@ func controllerStart(ctx context.Context, configPath, daemonURL string, stderr i
 // controllerEnvironment is what the controller's Oh My Pi is told on top of the operator's own
 // environment: the controller marker and role, the daemon, project and state directory, the Envoy,
 // GitHub and Dispatch settings every pane carries, PI_SHELL_PREFIX, which keeps this state
-// directory's gh shim and legion launcher first in the agent's bash tool as on every pane, and
+// directory's legion launcher first in the agent's bash tool as on every pane, and
 // LEGION_CONTROLLER_START_MESSAGE, which the pi-legion extension sends as the session's first turn
 // once its claim succeeds (daemon.ControllerStartMessage). Secrets travel as `<NAME>_FILE`
 // pointers only. Later pairs replace any inherited value of the same name.
-func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretFile string) [][2]string {
-	workerBin, bin := workerbin.Dir(stateDir), workerbin.LauncherDir(stateDir)
-	separator := string(filepath.ListSeparator)
+func controllerEnvironment(cfg config.ControllerConfig, stateDir, secretFile string) [][2]string {
+	bin := workerbin.LauncherDir(stateDir)
 	env := [][2]string{
 		{"LEGION_CONTROLLER", "1"},
 		{"LEGION_ROLE", "controller"},
@@ -246,15 +245,14 @@ func controllerEnvironment(cfg config.ControllerConfig, stateDir, token, secretF
 		{"LEGION_STATE_DIR", stateDir},
 		{"ENVOY_NATS_URL", strings.Join(cfg.NatsURLs, ",")},
 		{"ENVOY_URL", cfg.EnvoyURL},
-		// Every inherited worker-bin is dropped (the shipped pathWithoutWorkerBin), so a start
-		// from inside a Legion pane never puts that pane's shim behind this one.
-		{"PATH", workerBin + separator + bin + separator + workerbin.FreePath(os.Getenv("PATH"))},
-		{"PI_SHELL_PREFIX", shellprefix.For(workerBin, bin)},
+		// The launcher directory leads exactly once, so a start from inside a Legion pane never
+		// puts that pane's legion ahead of this one.
+		{"PATH", workerbin.Path(os.Getenv("PATH"), stateDir)},
+		{"PI_SHELL_PREFIX", shellprefix.For(bin)},
 		{"GH_CONFIG_DIR", filepath.Join(stateDir, "gh")},
 		{"GH_TOKEN", ""},
 		{"GITHUB_TOKEN", ""},
 		{"GH_HOST", ""},
-		{"LEGION_GRANT_FILE", runtime.GrantFile(stateDir, legionclaim.Token(token))},
 		{"LEGION_CONTROLLER_START_MESSAGE", daemon.ControllerStartMessage},
 	}
 	if cfg.DispatchURL != "" {

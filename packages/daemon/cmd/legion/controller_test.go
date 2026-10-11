@@ -245,7 +245,7 @@ exit %[2]d
 	t.Setenv("OMP_PROFILE", "")
 	t.Setenv("PI_CONFIG_DIR", "")
 	t.Setenv("PI_CODING_AGENT_DIR", "")
-	t.Setenv("PATH", "/usr/bin:/bin:/opt/x/worker-bin")
+	t.Setenv("PATH", "/usr/bin:/bin")
 	t.Setenv("LEGION_OMP_PATH", omp)
 	c.installPlugin(api.DaemonAPIVersion)
 	return c
@@ -459,9 +459,6 @@ func TestControllerStartWritesTheSecretAndTheControllersFilesUnderTheStateDirect
 	if got := modeOf(t, filepath.Join(c.defaultDir, "secrets")); got != 0o700 {
 		t.Errorf("secrets directory mode %o, want 0700", got)
 	}
-	if got := modeOf(t, filepath.Join(c.defaultDir, "worker-bin", "gh")); got != 0o700 {
-		t.Errorf("gh shim mode %o, want 0700", got)
-	}
 	if got := modeOf(t, filepath.Join(c.defaultDir, "bin", "legion")); got&0o111 == 0 {
 		t.Errorf("legion launcher mode %o, want executable", got)
 	}
@@ -527,7 +524,7 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		delete(added, shells)
 	}
 	secrets := filepath.Join(c.defaultDir, "secrets")
-	workerBin, bin := filepath.Join(c.defaultDir, "worker-bin"), filepath.Join(c.defaultDir, "bin")
+	bin := filepath.Join(c.defaultDir, "bin")
 	want := map[string]string{
 		"LEGION_TEST_PREFIX_RAN":          "1",
 		"LEGION_CONTROLLER":               "1",
@@ -537,13 +534,12 @@ func TestControllerStartLaunchesOhMyPiWithTheSharedControllerEnvironment(t *test
 		"LEGION_STATE_DIR":                c.defaultDir,
 		"ENVOY_NATS_URL":                  "nats://a:4222,nats://b:4222",
 		"ENVOY_URL":                       "http://envoy.test:9020",
-		"PATH":                            workerBin + ":" + bin + ":/usr/bin:/bin",
-		"PI_SHELL_PREFIX":                 shellprefix.For(workerBin, bin),
+		"PATH":                            bin + ":/usr/bin:/bin",
+		"PI_SHELL_PREFIX":                 shellprefix.For(bin),
 		"GH_CONFIG_DIR":                   filepath.Join(c.defaultDir, "gh"),
 		"GH_TOKEN":                        "",
 		"GITHUB_TOKEN":                    "",
 		"GH_HOST":                         "",
-		"LEGION_GRANT_FILE":               filepath.Join(secrets, "legion-demo-controller-grant"),
 		"LEGION_CONTROLLER_START_MESSAGE": daemon.ControllerStartMessage,
 		"DISPATCH_URL":                    "https://dispatch.test",
 		"DISPATCH_TOKEN_FILE":             filepath.Join(c.dir, "dispatch-token"),
@@ -1010,7 +1006,7 @@ func TestControllerStartDropsAnInheritedBootToken(t *testing.T) {
 }
 
 // `project: sjawhar/Legion`, copied from the daemon's legion.yaml, names the daemon's own token in
-// the state directory, the secret file, the grant file, and LEGION_PROJECT.
+// the state directory, the secret file and LEGION_PROJECT.
 func TestControllerStartSanitizesTheProjectAsTheDaemonDoes(t *testing.T) {
 	d := newControllerDaemon(t)
 	c := newControllerStart(t, d, controllerOptions{lines: []string{
@@ -1026,7 +1022,6 @@ func TestControllerStartSanitizesTheProjectAsTheDaemonDoes(t *testing.T) {
 		"LEGION_PROJECT":                "sjawharlegion",
 		"LEGION_STATE_DIR":              stateDir,
 		"LEGION_CONTROLLER_SECRET_FILE": filepath.Join(stateDir, "secrets", "legion-sjawharlegion-controller"),
-		"LEGION_GRANT_FILE":             filepath.Join(stateDir, "secrets", "legion-sjawharlegion-controller-grant"),
 	} {
 		if env[name] != want {
 			t.Errorf("%s = %q, want %q", name, env[name], want)

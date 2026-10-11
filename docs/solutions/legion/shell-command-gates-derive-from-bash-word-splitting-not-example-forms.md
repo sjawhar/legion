@@ -12,7 +12,7 @@ tags:
   - review-rounds
   - pi-envoy
 date: 2026-09-13
-status: active
+status: superseded by LEGION-631 — the pane-rule mechanism this tokenizer served (the LEGION-45 operation-log gate in the plugin's `tool_call` hook, `splitShellCommands` and `jjLogRewriteInvocation`) is deleted whole and no prompt or skill forbids `jj undo`, `jj abandon` or `jj op restore` any more; a mistake on the tmux runtime's shared operation log is recovered forward
 module: packages/pi-envoy/extensions/legion.ts
 related_issues:
   - "LEGION-45"

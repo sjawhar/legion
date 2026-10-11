@@ -208,6 +208,19 @@ const dispatch: ShotSet<DispatchWorkspace> = {
       },
       element: (page) => page.getByLabel("KPI targets").locator(".."),
     },
+    {
+      id: "pipeline",
+      alt: "The Pipeline page: six timing cards over the slowest-jobs and failing-jobs tables.",
+      // The e2e seed's pinned day (e2e/delivery-seed.ts PIPELINE_AT), so the fixture's runs are
+      // the seven days shown.
+      route: "/pipeline?at=2026-10-02T12%3A00%3A00Z",
+      viewport: "desktop",
+      theme: "light",
+      ready: async (page) => {
+        await expect(page.locator('[data-metric="staging_e2e"]')).toContainText("55m");
+        await expect(page.locator('[data-failing-job="build / unit"]')).toBeVisible();
+      },
+    },
   ],
 };
 

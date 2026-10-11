@@ -7,25 +7,31 @@ import (
 )
 
 // DeliverySettings is LEGION-567's one configuration record: which repository deploys, its
-// workflow paths and production job name, and the population rule's authors and excluded
-// repositories (LEGION-294). At most one row ever exists. LastEventAt and LastReconcileAt are the
+// workflow paths and production job name, the population rule's authors and excluded
+// repositories (LEGION-294), and the three optional job names the Pipeline page follows besides
+// the production job (the deploy workflow's staging end-to-end gate and staging deploy, and the
+// PR-checks workflow's roll-up job, which the failing-jobs table leaves out); each is nil when the
+// pipeline has no such step. At most one row ever exists. LastEventAt and LastReconcileAt are the
 // Delivery page's freshness: the last GitHub event the intake consumer processed, and the last
 // time the five-minute reconcile *completed successfully*. LastError is the most recent
 // reconcile pass's failure (a missing permission, a rate limit, any other GitHub or store error),
 // cleared the next time a pass succeeds -- LastReconcileAt does not advance on a failed pass, so
 // the two together answer both "when did this last actually work" and "what's wrong right now."
 type DeliverySettings struct {
-	DeployRepo           string      `json:"deploy_repo"`
-	DeployWorkflowPath   string      `json:"deploy_workflow_path"`
-	ProductionJobName    string      `json:"production_job_name"`
-	PRChecksWorkflowPath string      `json:"pr_checks_workflow_path"`
-	PopulationAuthors    []string    `json:"population_authors"`
-	ExcludedRepos        []string    `json:"excluded_repos"`
-	LastEventAt          *time.Time  `json:"last_event_at"`
-	LastReconcileAt      *time.Time  `json:"last_reconcile_at"`
-	LastError            *string     `json:"last_error"`
-	UpdatedBy            model.Actor `json:"updated_by"`
-	UpdatedAt            time.Time   `json:"updated_at"`
+	DeployRepo            string      `json:"deploy_repo"`
+	DeployWorkflowPath    string      `json:"deploy_workflow_path"`
+	ProductionJobName     string      `json:"production_job_name"`
+	PRChecksWorkflowPath  string      `json:"pr_checks_workflow_path"`
+	PopulationAuthors     []string    `json:"population_authors"`
+	ExcludedRepos         []string    `json:"excluded_repos"`
+	StagingE2EJobName     *string     `json:"staging_e2e_job_name"`
+	StagingApplyJobName   *string     `json:"staging_apply_job_name"`
+	PRChecksRollupJobName *string     `json:"pr_checks_rollup_job_name"`
+	LastEventAt           *time.Time  `json:"last_event_at"`
+	LastReconcileAt       *time.Time  `json:"last_reconcile_at"`
+	LastError             *string     `json:"last_error"`
+	UpdatedBy             model.Actor `json:"updated_by"`
+	UpdatedAt             time.Time   `json:"updated_at"`
 }
 
 // DeliveryPullRequest is one population pull request (LEGION-294's rule): authored by one of

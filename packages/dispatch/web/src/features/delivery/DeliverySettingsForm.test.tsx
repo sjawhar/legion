@@ -14,8 +14,11 @@ const record: DeliverySettings = {
   last_event_at: null,
   last_reconcile_at: null,
   population_authors: ["octocat", "octocat-agent[bot]"],
+  pr_checks_rollup_job_name: null,
   pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
   production_job_name: "widgets-release",
+  staging_apply_job_name: null,
+  staging_e2e_job_name: null,
   updated_at: "2026-10-07T12:00:00Z",
   updated_by: { id: "alice@example.com", kind: "user" },
 };
@@ -109,8 +112,11 @@ test("Save sends the fields trimmed and each list split into its entries", async
       deploy_workflow_path: ".github/workflows/deploy.yml",
       excluded_repos: ["acme/dojo", "acme/widgets-smoke"],
       population_authors: ["octocat", "octocat-agent[bot]", "hubot"],
+      pr_checks_rollup_job_name: null,
       pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
       production_job_name: "widgets-release",
+      staging_apply_job_name: null,
+      staging_e2e_job_name: null,
     });
     // A save refreshes the record and every delivery timeline read beneath ["delivery"].
     await waitFor(() =>
@@ -119,6 +125,48 @@ test("Save sends the fields trimmed and each list split into its entries", async
         ["delivery"],
       ])
     );
+  } finally {
+    cleanup();
+    getDeliverySettings.mockRestore();
+    putDeliverySettings.mockRestore();
+  }
+});
+
+test("the three optional pipeline job names round-trip, and an emptied one saves null", async () => {
+  const stored: DeliverySettings = {
+    ...record,
+    pr_checks_rollup_job_name: "checks-complete",
+    staging_apply_job_name: "staging-release / apply",
+    staging_e2e_job_name: "staging-e2e / run",
+  };
+  const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(stored);
+  const putDeliverySettings = spyOn(api, "putDeliverySettings").mockResolvedValue(stored);
+
+  try {
+    renderForm();
+    await screen.findByDisplayValue("acme/widgets");
+    expect(field("Staging end-to-end job").value).toBe("staging-e2e / run");
+    expect(field("Staging deploy job").value).toBe("staging-release / apply");
+    expect(field("PR checks roll-up job").value).toBe("checks-complete");
+    expect(field("Staging end-to-end job").placeholder).toBe(
+      "The staging end-to-end job, as a deploy run lists it (optional)"
+    );
+    expect(field("Staging deploy job").placeholder).toBe("The staging deploy job (optional)");
+    expect(field("PR checks roll-up job").placeholder).toBe(
+      "The PR-checks roll-up job the failing-jobs table leaves out (optional)"
+    );
+    expect(field("Staging end-to-end job").required).toBe(false);
+
+    fireEvent.change(field("Staging deploy job"), { target: { value: " staging-release / go " } });
+    fireEvent.change(field("PR checks roll-up job"), { target: { value: "   " } });
+    fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+
+    await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(1));
+    expect(putDeliverySettings.mock.calls[0]?.[0]).toMatchObject({
+      pr_checks_rollup_job_name: null,
+      staging_apply_job_name: "staging-release / go",
+      staging_e2e_job_name: "staging-e2e / run",
+    });
   } finally {
     cleanup();
     getDeliverySettings.mockRestore();

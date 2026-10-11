@@ -40,6 +40,7 @@ import type {
   CredentialPendingResponse,
   CredentialRecord,
   DeliveryMeasuresResponse,
+  DeliveryPipelineResponse,
   DeliveryRunDetail,
   DeliverySessionGroup,
   DeliverySettings,
@@ -721,6 +722,12 @@ export class DispatchApiClient {
   /** One deploy-repository run with every job it ran, for the drill-down's job lists. */
   getDeliveryRun(id: number): Promise<DeliveryRunDetail> {
     return this.json<DeliveryRunDetail>(`/api/v1/delivery/runs/${id}`);
+  }
+
+  /** The Pipeline page's seven UTC days ending today, or ending on `at`'s day when it is given
+   *  (the page's test and screenshot hook). */
+  getDeliveryPipeline(options: { at?: string }): Promise<DeliveryPipelineResponse> {
+    return this.json<DeliveryPipelineResponse>(pathWithQuery("/api/v1/delivery/pipeline", options));
   }
 
   /** The delivery timeline's configuration record, or `null` until someone sets it. */
