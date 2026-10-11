@@ -123,9 +123,10 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
   `session retired … why="process exited"`). `agent-secrets-helper sessions` lists the live ones.
   A box's launcher revokes it with `agent-secrets unenroll --helper --enrollment <id>`.
 - **Its lease lapses.** A session that stops renewing (a pod that is gone, a box whose
-  `agent-secrets renew` stopped, or a machine that went away) is refused `PROOF_INVALID` from the
-  moment its lease lapses, `BROKER_LEASE_SECONDS` after its last renewal. The broker's sweep ends it
-  on its next run, within `BROKER_SWEEP_SECONDS`, and logs
+  `agent-secrets renew` stopped, or a machine that went away) is refused
+  `ENROLLMENT_NOT_LIVE` on its next renewal from the moment its lease lapses,
+  `BROKER_LEASE_SECONDS` after its last renewal. Other session calls are refused `PROOF_INVALID`.
+  The broker's sweep ends it on its next run, within `BROKER_SWEEP_SECONDS`, and logs
   `broker sweeper: ended an enrollment whose lease lapsed`. The
   [configuration reference](/legion/broker/reference/config/) gives both settings' defaults.
 - **Its machine login is revoked.** Whoever may revoke the machine login that enrolled it — the
@@ -141,8 +142,10 @@ helper that renews it runs. A login can be ended, with every session it enrolled
 a machine that is lost, compromised or no longer used, or a Legion daemon whose pods must lose
 their secrets now. Dispatch's machine-login page (`/credentials/machine`) lists **Machine logins**:
 every machine logged in as you, and every service's login, such as the Legion daemon's, shown as
-`legion-daemon on <host>` whoever approved it, each with who approved it, when its login was issued
-and when it expires. A login that has expired stays listed, marked `expired, sessions still
+`legion-daemon on <host>` whoever approved it, each with its **Credential** id, who approved it,
+when its login was issued and when it expires. The host is the name its machine reported, so two
+logins can share it; the credential id is the one every enrollment the login made names, and it
+tells them apart. A login that has expired stays listed, marked `expired, sessions still
 running`, while a session it enrolled still runs, so revoking every row a machine has ends every
 session it started, those of its earlier logins included. Click
 **Revoke** on its row and confirm. The broker then, at once:

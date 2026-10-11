@@ -274,27 +274,8 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 	launch := lastLaunch(t, rt, token)
 
 	// State is now a durable issue record joined to live claims; the claim alone does not create an
-	// issue in the projection. The workflow will write this pair in one transaction at admission.
-	stateStore, err := store.Open(context.Background(), cfg.PostgresDSN)
-	if err != nil {
-		t.Fatalf("open state store: %v", err)
-	}
-	t.Cleanup(stateStore.Close)
-	records := recordpkg.NewStore()
-	if err := stateStore.Tx(context.Background(), func(tx pgx.Tx) error {
-		issue := recordpkg.Issue{
-			Key: spawn.Issue, Tree: spawn.Issue, Project: cfg.Project, Title: "Stream lifecycle", Phase: phase.Admitted,
-			Generation: 1, Status: "in_progress",
-		}
-		if err := records.PutIssue(context.Background(), tx, issue); err != nil {
-			return err
-		}
-		return records.PutPhase(context.Background(), tx, recordpkg.PhaseRow{
-			Issue: issue.Key, Role: claim.RoleArchitect, Claim: token,
-		})
-	}); err != nil {
-		t.Fatalf("write state record: %v", err)
-	}
+	// issue in the projection.
+	admitIssue(t, cfg, spawn.Issue, claim.RoleArchitect, token)
 
 	sh := dialShim(t, record.address, launch.BootToken)
 	testwait.Eventually(t, "the hello to reach the machine", func() bool {
@@ -1021,6 +1002,12 @@ func TestRunKnowsEverySuspendedClaimToTheOrphanSweep(t *testing.T) {
 // returns the secret the registration issued.
 func readyClaim(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token) string {
 	t.Helper()
+	return readyClaimReporting(t, d, rt, token, nil)
+}
+
+// readyClaimReporting is readyClaim with the capability report the ready carries; nil carries none.
+func readyClaimReporting(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token, report *claim.CapabilityReport) string {
+	t.Helper()
 	launch := lastLaunch(t, rt, token)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_" + string(token), OmpSessionFile: "/sessions/" + string(token) + ".jsonl",
@@ -1035,10 +1022,36 @@ func readyClaim(t *testing.T, d *daemon, rt *fake.Runtime, token claim.Token) st
 	}
 	if status, body := d.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{
 		ClaimToken: token, SessionID: "ses_" + string(token), Secret: registered.Secret, Generation: 1,
+		Capabilities: report,
 	}, false); status != http.StatusNoContent {
 		t.Fatalf("ready %s = %d; body %s", token, status, body)
 	}
 	return registered.Secret
+}
+
+// admitIssue writes the durable issue record the workflow writes at admission, in one transaction:
+// issue, admitted at generation 1, with token holding role's phase. A claim alone creates no issue
+// in the state's projection.
+func admitIssue(t *testing.T, cfg config.Config, issue string, role claim.Role, token claim.Token) {
+	t.Helper()
+	st, err := store.Open(context.Background(), cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open state store: %v", err)
+	}
+	defer st.Close()
+	records := recordpkg.NewStore()
+	if err := st.Tx(context.Background(), func(tx pgx.Tx) error {
+		record := recordpkg.Issue{
+			Key: issue, Tree: issue, Project: cfg.Project, Title: issue, Phase: phase.Admitted,
+			Generation: 1, Status: "in_progress",
+		}
+		if err := records.PutIssue(context.Background(), tx, record); err != nil {
+			return err
+		}
+		return records.PutPhase(context.Background(), tx, recordpkg.PhaseRow{Issue: issue, Role: role, Claim: token})
+	}); err != nil {
+		t.Fatalf("write state record: %v", err)
+	}
 }
 
 // The budgets and the waits a machine runs on are the configuration's, not defaults of its own.

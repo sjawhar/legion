@@ -3,19 +3,26 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
+	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
@@ -289,6 +296,130 @@ func TestReportsOfClaimsKeepsThisProjectsAlone(t *testing.T) {
 	if want := map[claim.Token]capabilities.Report{own.Token: sessionReport(own, "4242:1")}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("reportsOfClaims = %+v, want %+v", got, want)
 	}
+}
+
+// redactionBranch is one entry of packages/contracts/fixtures/capability-redaction.json's
+// branches: upstream text one of a session's checks quotes on a row, the credential in it, and that
+// text redacted.
+type redactionBranch struct {
+	Row        string `json:"row"`
+	Upstream   string `json:"upstream"`
+	Credential string `json:"credential"`
+	Redacted   string `json:"redacted"`
+}
+
+// redactionBranches is the shared fixture's branches.
+func redactionBranches(t *testing.T) []redactionBranch {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("..", "..", "..", "contracts", "fixtures", "capability-redaction.json"))
+	if err != nil {
+		t.Fatalf("read the redaction fixture: %v", err)
+	}
+	var fixture struct {
+		Branches []redactionBranch `json:"branches"`
+	}
+	if err := json.Unmarshal(raw, &fixture); err != nil {
+		t.Fatalf("decode the redaction fixture: %v", err)
+	}
+	return fixture.Branches
+}
+
+// wantStateRedacted reads GET /legion/v1/state and requires that no branch's credential is anywhere
+// in its body, and that both the issue's architect view and the deployment's live rows show each
+// branch's row open on its redacted text.
+func wantStateRedacted(t *testing.T, d *daemon, issue string, branches []redactionBranch) {
+	t.Helper()
+	status, body := d.request(http.MethodGet, "/legion/v1/state", nil, false)
+	if status != http.StatusOK {
+		t.Fatalf("GET the state = %d; body %s", status, body)
+	}
+	for _, branch := range branches {
+		if bytes.Contains(body, []byte(branch.Credential)) {
+			t.Errorf("the state carries the credential %q of the %s row: %s", branch.Credential, branch.Row, body)
+		}
+	}
+	var state api.State
+	if err := json.Unmarshal(body, &state); err != nil {
+		t.Fatalf("decode the state %s: %v", body, err)
+	}
+	view := state.Issues[issue].Architect
+	if view == nil || view.Capabilities == nil {
+		t.Fatalf("the state shows the architect as %+v, want its capability report", view)
+	}
+	for _, branch := range branches {
+		if want := (api.CapabilityGap{Name: branch.Row, Detail: branch.Redacted}); !slices.Contains(view.Capabilities.Open, want) {
+			t.Errorf("the claim's view is open on %+v, want %+v", view.Capabilities.Open, want)
+		}
+		i := slices.IndexFunc(state.Capabilities, func(row api.CapabilityState) bool { return row.Name == branch.Row })
+		if i < 0 || state.Capabilities[i].Status != capabilities.StatusOpen || !strings.HasSuffix(state.Capabilities[i].Detail, ": "+branch.Redacted) {
+			t.Errorf("the deployment's rows are %+v, want %s open on %q", state.Capabilities, branch.Row, branch.Redacted)
+		}
+	}
+}
+
+// GET /legion/v1/state answers anyone who reaches the daemon's port, a worker pod included, so a
+// session's report reaches it redacted whatever the session sent: here a ready carries each
+// upstream text a check quotes as it came, credential and all, as a plugin from before its own
+// redaction, or a pod the daemon cannot trust, would send it.
+func TestStateShowsWhatASessionReportedRedacted(t *testing.T) {
+	branches := redactionBranches(t)
+	rows := make([]claim.CapabilityRow, 0, len(branches))
+	for _, branch := range branches {
+		rows = append(rows, claim.CapabilityRow{Name: branch.Row, Detail: branch.Upstream})
+	}
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+	spawn := architect()
+	token := d.spawn(spawn)
+	admitIssue(t, cfg, spawn.Issue, claim.RoleArchitect, token)
+
+	readyClaimReporting(t, d, rt, token, &claim.CapabilityReport{
+		MeasuredAt: time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC), ElapsedMs: 900, Rows: rows,
+	})
+
+	wantStateRedacted(t, d, spawn.Issue, branches)
+}
+
+// A daemon cleans the reports it boots on as it cleans a ready's, so a report the store kept raw —
+// by a daemon from before redaction (legion-v11.5.0 and v11.5.1), or before a shape it now redacts
+// — is shown redacted once a daemon re-adopts the session that reported it.
+func TestStateShowsAStoredReportRedactedAfterARestart(t *testing.T) {
+	branches := redactionBranches(t)
+	cfg := testConfig(t)
+	rt := fake.NewRuntime()
+	d := startDaemon(t, cfg, fakeRuntime(rt, &built{}))
+	spawn := architect()
+	token := d.spawn(spawn)
+	admitIssue(t, cfg, spawn.Issue, claim.RoleArchitect, token)
+	readyClaim(t, d, rt, token)
+	ready := d.claim(token)
+	d.stop()
+	rebindHeldPorts(t, &cfg)
+
+	raw := capabilities.Report{
+		Claim: token, Generation: ready.Generation, Locator: *ready.Locator,
+		MeasuredAt: time.Date(2026, 10, 11, 9, 0, 0, 0, time.UTC), ReportedAt: time.Date(2026, 10, 11, 9, 0, 1, 0, time.UTC),
+		ElapsedMs: 900,
+	}
+	for _, branch := range branches {
+		raw.Rows = append(raw.Rows, capabilities.Row{Name: capabilities.Name(branch.Row), Detail: branch.Upstream})
+	}
+	st, err := store.Open(context.Background(), cfg.PostgresDSN)
+	if err != nil {
+		t.Fatalf("open the store: %v", err)
+	}
+	defer st.Close()
+	if err := st.PutCapabilityReport(context.Background(), raw); err != nil {
+		t.Fatalf("store the raw report: %v", err)
+	}
+
+	restarted := startDaemon(t, cfg, fakeRuntime(fake.NewRuntime(), &built{}))
+
+	if after := restarted.claim(token); after.State != string(supervise.StateReady) || !reflect.DeepEqual(after.Locator, ready.Locator) {
+		t.Fatalf("after the restart the claim is %+v, want it re-adopted as %+v", after, ready)
+	}
+	wantStateRedacted(t, restarted, spawn.Issue, branches)
 }
 
 // The task agents the registration answers are sorted, and none when the prompts dispatch none

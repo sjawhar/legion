@@ -2153,6 +2153,47 @@ dotfiles' pin is at this release and no helper has logged that line for 30 days)
 `enroll --helper` accepts agentbox's `--kind box` but refuses every other `--kind`
 (`cmd/agent-secrets/enroll.go`, `cmdEnroll`: gone once dotfiles' pin is legion-envoy 10 or later
 and `scripts/agentbox` on dotfiles' main passes no `--kind`).
+`enroll.Service.verifyPodToken` verifies a pod's projected token (issuer, audience, signature,
+expiry, a pod UID named) for both `Create` and `Renew`, before either opens a transaction. A pod's
+`POST /v1/enrollments/{id}/renew` carries its current token as `pod_token`, which must name the
+enrollment's pod UID and recorded subject (`403 POD_IDENTITY_MISMATCH`); one past its expiry is
+`403 POD_TOKEN_EXPIRED` naming that expiry, as at `Create`, which the renewer retries with the token
+its file holds next. A machine session's renewal carries none, and any token on it is the identity
+mismatch. Every pod row starts with `pod_token_renewed_at` null, whether `Create` made it or 0014
+found it, and the first renewal that carries the token sets that row's column, the record. The
+ratchet is keyed on the pod UID: a renewal without the token is `403 POD_TOKEN_REQUIRED` once any
+pod enrollment naming the same `runtime_id`, live or ended, has the column set, whichever launcher
+credential made it (`Renew`'s one lookup, `podTokenRatcheted`, on the partial index
+`enrollments_pod_token_renewed`, migration 0014), and otherwise is accepted and logged at WARN. So
+the copied-token gap closes for every pod UID a current-image pod has renewed under, a second
+login's copy among the rows it refuses, and stays open for old-image UIDs until the contract
+release. A current-image pod still leaves a copied token the time before its own first token
+renewal: seconds while the daemon holds an approved machine login, but after a daemon restart its
+pods enroll only once a person approves the new login, and a pod that ends before it enrolls never
+renews with its token, so its UID stays open as an old-image pod's does. Ended rows count: a pod
+UID names one pod for ever, so a mark refuses nothing of another pod, and it keeps refusing a copy
+between the pod's role generations and after the pod is gone.
+That release is safe once the unset-row count is 0 (rows older than a minute: a pod's row is
+unmarked until its first renewal), no token-less
+WARN appears for one full `BROKER_LEASE_SECONDS`, and no issue pod runs a worker image older than
+the one whose renewer sends the token (an old-image issue pod between role generations holds no
+enrollment, so it counts as 0 and logs nothing, yet its next phase enrolls an unmarked row). Every
+deploy order keeps every pod renewing (an older broker ignores the token, and 0014 is additive and
+nullable), but that is liveness, not exposure: a grant lasts until its session ends, so a copy
+renewing an old-image UID keeps one approval's grant while it renews. The rollout therefore
+replaces every old-image issue pod before or right after the broker deploys, then revokes the
+login that made each enrollment a remaining token-less WARN names (the line's own enrollment),
+on Dispatch's machine-login page by its **Credential** id once its code shows it is not the
+daemon's, never by its self-reported machine name (the operate page). A pod enrollment is ended
+only by the launcher credential that made it (`DELETE` by any other is
+`403 NOT_ENROLLING_CREDENTIAL`), so a Legion daemon that logs in again (a restart, or its login's
+expiry) leaves its earlier login's pods to their leases or to a revoke of that login.
+The renew route alone maps proof.ErrNotLive to `401 ENROLLMENT_NOT_LIVE` (its own `authRenewProof`
+case in `authenticate`, `sessionCaller`): a pod renewer stops only on it or `POD_TOKEN_REQUIRED`,
+and retries `POD_IDENTITY_MISMATCH`, which `verifyPodToken` also answers for a token it could not
+verify while the issuer or its key set was unreachable; a real mismatch ends with the lease, after
+which the renewal is `ENROLLMENT_NOT_LIVE`. Its iat/key/URL failures remain `PROOF_INVALID` and
+retry. Other session routes map a not-live proof to `PROOF_INVALID` as before.
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
@@ -2383,10 +2424,12 @@ next proof valid.
 
 The login that installs a credential wakes every registered session's enrollment retry, so those
 sessions reach the broker within about a second of it rather than when a backoff of up to a minute
-comes round. A session whose renew the broker refuses (its lease lapsed) stops counting as enrolled
-at once, and its enrollment becomes the session's lapsed id; so does a re-pinned session's recorded
-enrollment after a helper restart. While it is lapsed and the helper holds a credential, sign
-answers NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its
+comes round. A session whose renew the broker refuses `ENROLLMENT_NOT_LIVE` (its lease lapsed, or
+an older broker's `PROOF_INVALID` saying `not live`) stops counting as enrolled at once, and its
+enrollment becomes the session's lapsed id; so does a re-pinned session's recorded enrollment after
+a helper restart. Any other refused renew keeps the lease and retries. While it is lapsed and the
+helper holds a credential, sign answers NOT_ENROLLED naming the refused renew, and
+`register --wait N` waits for its
 re-enrollment. The helper revokes a lapsed id before the session enrolls again, and while the
 session lives its record keeps that id until the revoke lands, so a restart meanwhile, even a
 second one before any login, still revokes it. A session that ends
@@ -2493,7 +2536,8 @@ proves the caller is Dispatch, and Dispatch vouches for the approving login each
 `BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
 `BROKER_SERVICES` (optional; whitespace-separated `name=system:serviceaccount:<namespace>:<name>`
 entries, each name `record.ValidService`'s form, not `shared` and given once, and each account bound
-to one name — any other entry is refused naming it, and an account given twice names both; unset,
+to one name, never a namespace's `default` account (every pod there that names no account runs as
+it) — any other entry is refused naming it, and an account given twice names both; unset,
 `Config.ServiceAccounts` is nil and no service is registered),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
@@ -2574,9 +2618,10 @@ launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route
 proves the caller is Dispatch, so every UI handler takes its subject from the path or body: a
 decision or a revoke names the deciding human in `approver`, and a list the person it lists for in
 `?approver=`, which Dispatch filled from its own session; an empty one is `400 APPROVER_REQUIRED`),
-so a handler cannot be wired to the wrong kind of caller. A bad
-credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); a store that cannot
-answer while authenticating is a 503 naming it. Every 500 is logged with its cause
+so a handler cannot be wired to the wrong kind of caller. A bad credential is a 401
+(`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); `renewAuth` alone adds
+`ENROLLMENT_NOT_LIVE` for a valid session proof that names an ended enrollment. A store that
+cannot answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
 against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
@@ -2817,7 +2862,8 @@ listed, `expired: true`, until its last enrollment ends or its lease lapses, swe
 revoking every listed login ends every session the person's machines started.
 `POST /v1/launcher-credentials/{id}/revoke-by-approver` `{approver}` ends one, expired or not
 (`enroll.Service.RevokeCredential`). A service's credential (the Legion daemon's,
-`launcher_credentials.service` set) has no operator (`authorized` needs it null to enroll pods) and
+`launcher_credentials.service` set) has no operator (`authorized` needs it null to enroll pods, and
+`Revoke` also needs a pod enrollment's `launcher_credential_id` to be the caller's) and
 acts as no person, so both routes give it to every login but `anyone` and an empty one, whoever
 approved it. A person's own credential keys on the approver of the `launcher_credential` record it
 was minted from (`credential_requests.approver`, joined through `launcher_credentials.record_id`
@@ -2837,11 +2883,12 @@ changes nothing. It locks the credential's row before the enrollments', and `Cre
 either commits first and is ended by it, or finds the credential revoked and is
 `401 LAUNCHER_INVALID`; the credential lock also makes two concurrent revokes write one
 `launcher_credential.revoked` row, and the enrollments' `for update` makes a revoke racing a
-launcher's own `Revoke` of one enrollment end it once. Nothing tells the machine: its helper's next
-renewal of a session is refused `PROOF_INVALID`, revoking that lapsed enrollment is refused
-`LAUNCHER_INVALID`, and the helper drops the credential as for any refusal; a helper with no live
-session learns it at its next enrollment, and the Legion daemon at its next pod enrollment or
-unenrollment, after which it starts a new
+launcher's own `Revoke` of one enrollment end it once. A helper renew that gets
+`ENROLLMENT_NOT_LIVE` (or an older broker's `PROOF_INVALID` whose message says `not live`) marks
+the session lapsed and re-enrolls it; a skewed/key/URL `PROOF_INVALID` keeps the lease and retries.
+Revoking that lapsed enrollment is refused `LAUNCHER_INVALID`, and the helper drops the credential
+as for any refusal; a helper with no live session learns it at its next enrollment, and the Legion
+daemon at its next pod enrollment or unenrollment, after which it starts a new
 machine login. Dispatch's machine-login page lists and revokes, through these two routes, the
 signed-in person's own machines' logins and every service's.
 
