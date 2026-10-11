@@ -53,7 +53,7 @@ same session instead of starting fresh. You start no worker.
 | Situation | Action |
 | --- | --- |
 | Re-file a genuinely independent child, capacity, or cross-tree conflict | Message the controller with `envoy_publish` to the controller topic your `Legion addressing` line names. |
-| Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree, and requests approval again once the answer is folded in. A to-do only a human can do uses `dispatch ask`. |
+| Product, scope, or design decision, yours or a worker's | Answer from tree context, or make it a decision block. A sub-architect writes one about its child into the child's spec (never gated) and sends one about the root design to the architect above it. The root architect writes the root spec's, knowing the new version closes the design gate for the whole tree, has the fresh read-only `plan-gap-analyst` check it against the code and the human's words, resolves every finding, then requests approval again. A to-do only a human can do uses `dispatch ask`. |
 | Worker question or failure | Handle it or message the worker with `envoy_publish` to its role token. |
 
 Retro (`skill://legion-retro`) is mandatory after review passes and runs before the merger's

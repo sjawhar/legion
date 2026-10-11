@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Tests for `check-private-names.sh` and `check-pr-text.sh`: every spelling the guard refuses, the
 # identifiers and the English word it must pass, what it skips, its two modes (the repository, and
-# named paths such as the built site), file names, and a pull request's title, body, branch name
-# and commits (message, author and committer).
+# named paths such as the built site), file names, and a pull request's title, body, branch name,
+# commits (message, author and committer), issue comments, reviews and review comments.
 #
 # Each case builds a miniature git repository under a temporary directory and symlinks the real
 # script into it, so the script under test is the file CI runs: it resolves its root from its own
@@ -318,20 +318,35 @@ check "names it" "$(contains "$out" 'dist does not exist')"
 # author and committer) in the route's own JSON shape, so the real `.commits[] | .commit.message, …`
 # filter that feeds the required check runs for real, rather than a filter the stub fakes. It
 # matches that URL whole and refuses a call without --paginate, so losing either paging token
-# fails every case below instead of passing on a list GitHub cut short at 250 commits. The stub
-# also answers the pull request's own commits route, which reads whatever head the pull request
-# has by then: the same commit, until the mid-run-push case appends a later one that names a
-# private thing. A case rewrites `$work/compare` (one JSON object per page, as `gh api --paginate`
-# prints them) or `$work/pr-commits`, then calls run_pr_text, which runs the script and sets `out`
-# and `status`.
+# fails every case below instead of passing on a list GitHub cut short at 250 commits. It answers
+# the pull request's three comment routes (issue comments, reviews and review comments), which
+# report no total, one page of 100 at a time: page N of each is `$work/<route>.N` (`comments`,
+# `reviews` or `review-comments`), and a page no case wrote is an empty list, as GitHub answers past
+# the last. It answers the pulls route with the pull request the payload carries (`$work/pull`),
+# which an issue_comment payload names only by number. The stub also answers the pull request's
+# own commits route, which reads whatever head the pull request has by then: the same commit, until
+# the mid-run-push case appends a later one that names a private thing. A case rewrites
+# `$work/compare` (one JSON object per page, as `gh api --paginate` prints them), `$work/pr-commits`
+# or a comment route's pages, then calls run_pr_text, which runs the script and sets `out` and
+# `status`; the stub logs each call it answers to `$work/calls`.
 mkdir -p "$work/bin"
 cat > "$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
+printf '%s\n' "$*" >> "$PR_TEXT_TEST_DIR/calls"
+# page <route> <url>: the page of a comment route the url's `page=N` asks for.
+page() {
+  local file="$PR_TEXT_TEST_DIR/$1.${2##*&page=}"
+  if [ -e "$file" ]; then cat "$file"; else echo '[]'; fi
+}
 case "$1 $2" in
   "api repos/example/repo/compare/base-sha...event-head-sha?per_page=100")
     [[ " $* " == *" --paginate "* ]] || { echo "compare route read without --paginate: $*" >&2; exit 3; }
     cat "$PR_TEXT_TEST_DIR/compare" ;;
+  "api repos/example/repo/issues/7/comments?per_page=100&page="[1-9]*) page comments "$2" ;;
+  "api repos/example/repo/pulls/7/reviews?per_page=100&page="[1-9]*) page reviews "$2" ;;
+  "api repos/example/repo/pulls/7/comments?per_page=100&page="[1-9]*) page review-comments "$2" ;;
   "api repos/example/repo/pulls/7/commits") cat "$PR_TEXT_TEST_DIR/pr-commits" ;;
+  "api repos/example/repo/pulls/7") cat "$PR_TEXT_TEST_DIR/pull" ;;
   *) echo "unexpected gh call: $*" >&2; exit 3 ;;
 esac
 GH
@@ -354,15 +369,61 @@ write_pr_text() {
                       head: {ref: $branch, sha: "event-head-sha"}, base: {sha: "base-sha"},
                       body: (if $body == "" then null else $body end)}}' \
     > "$work/event.json"
+  jq '.pull_request' "$work/event.json" > "$work/pull"
+  rm -f "$work"/comments.* "$work"/reviews.* "$work"/review-comments.*
 }
 run_pr_text() {
   if [ $# -gt 0 ]; then write_pr_text "$@"; fi
+  : > "$work/calls"
   set +e
   out=$(GITHUB_EVENT_PATH="$work/event.json" GITHUB_REPOSITORY=example/repo \
     PR_TEXT_TEST_DIR="$work" PATH="$work/bin:$PATH" "$pr_text_script" 2>&1)
   status=$?
   set -e
 }
+# app: who posted an item a case writes, unless the case says otherwise: an App installed on the
+# repository, which posts as a Bot, with the association every Legion App's comments carry here.
+app='{"user": {"login": "dev-app[bot]", "type": "Bot"}, "author_association": "CONTRIBUTOR"}'
+# items <id> <body> [<id> <body>...]: one page of a comment route, each item its id, body and
+# author (app) in the route's own JSON shape.
+items() {
+  local list='[]'
+  while [ $# -gt 0 ]; do
+    list=$(jq -c --argjson id "$1" --arg body "$2" --argjson author "$app" \
+      '. + [{id: $id, body: $body} + $author]' <<< "$list")
+    shift 2
+  done
+  printf '%s\n' "$list"
+}
+# by <login> <type> <association> <page> [index]: rewrites a page's items (only the one at index,
+# when given) as posted by that author.
+by() {
+  local filter='map(author)'
+  if [ $# -gt 4 ]; then filter=".[$5] |= author"; fi
+  jq -c --arg login "$1" --arg type "$2" --arg association "$3" \
+    "def author: .user = {login: \$login, type: \$type} | .author_association = \$association; $filter" \
+    "$4" > "$4.next"
+  mv "$4.next" "$4"
+}
+# as_event <name>: rewrites the fixture's pull_request payload as that event's. A
+# pull_request_review or pull_request_review_comment payload carries the pull request whole beside
+# the review or comment; an issue_comment payload names it only as an issue (its number, title and
+# a pull_request link), so the script reads the rest from the pulls route.
+as_event() {
+  case $1 in
+    pull_request_review)
+      jq '. + {action: "submitted", review: {id: 201, body: "Approved."}}' "$work/event.json" ;;
+    pull_request_review_comment)
+      jq '. + {action: "created", comment: {id: 301, body: "A nit."}}' "$work/event.json" ;;
+    issue_comment)
+      jq '{action: "created", comment: {id: 101, body: "Looks good."},
+           issue: {number: .pull_request.number, title: .pull_request.title,
+                   pull_request: {url: "https://api.github.com/repos/example/repo/pulls/7"}}}' \
+        "$work/event.json" ;;
+  esac > "$work/event.next"
+  mv "$work/event.next" "$work/event.json"
+}
+
 
 echo "case: a pull request's title, body, branch name and commits, which reach main and its release notes"
 run_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"
@@ -463,6 +524,176 @@ done
 long_body=$(printf '%.0s–' {1..50000})
 run_pr_text "fix(dispatch): keep the inbox order" "$long_body" "fix: keep the order"
 check "a body larger than one environment variable may hold is read" "$(is "$status" 0)"
+
+echo "case: a pull request's issue comments, reviews and review comments, public on its page"
+clean_pr() { write_pr_text "fix(dispatch): keep the inbox order" "Refs LEGION-7" "fix: keep the order"; }
+clean_pr
+items 101 "Looks good." 102 "$(printf 'Two lines.\nThe second is clean too.')" > "$work/comments.1"
+items 201 "Approved." 202 "" > "$work/reviews.1"
+jq -c '.[1].body = null' "$work/reviews.1" > "$work/reviews.next" && mv "$work/reviews.next" "$work/reviews.1"
+items 301 "A nit on this line." > "$work/review-comments.1"
+run_pr_text
+check "a clean set of comments, reviews (one with no body) and review comments passes" "$(is "$status" 0)"
+check "reads every issue comment" "$(contains "$(< "$work/calls")" '^api repos/example/repo/issues/7/comments?per_page=100&page=1$')"
+check "reads every review" "$(contains "$(< "$work/calls")" '^api repos/example/repo/pulls/7/reviews?per_page=100&page=1$')"
+check "reads every review comment" "$(contains "$(< "$work/calls")" '^api repos/example/repo/pulls/7/comments?per_page=100&page=1$')"
+
+clean_pr
+items 101 "Looks good." 102 "$(printf 'Line one.\nAs %s Labs found.\n' "$company_proper")" > "$work/comments.1"
+run_pr_text
+check "an issue comment naming the company fails" "$(is "$status" 1)"
+check "names the comment by its id and line" "$(contains "$out" 'comment:102:2: names the company')"
+check "names no other comment" "$(is "$(contains "$out" 'comment:101')" false)"
+check "does not print the name" "$(is "$(contains "$out" "$company_proper")" false)"
+check "says how to take a comment down" "$(contains "$out" 'delete each comment')"
+
+clean_pr
+items 201 "Approved." 202 "Blocking: see $key-7." > "$work/reviews.1"
+run_pr_text
+check "a review body naming a deployment issue key fails" "$(is "$status" 1)"
+check "names the review by its id and line" "$(contains "$out" 'review:202:1: names the private deployment repository')"
+check "does not call it a review comment" "$(is "$(contains "$out" 'review-comment:202')" false)"
+check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
+
+clean_pr
+items 301 "A nit." 302 "$(printf 'Nit.\n\nSee https://listener.%s.%s/x\n' "$internal" "$private_host_suffix")" > "$work/review-comments.1"
+run_pr_text
+check "a review comment naming a private host fails" "$(is "$status" 1)"
+check "names the review comment by its id and line" "$(contains "$out" 'review-comment:302:3: names a private internal host')"
+check "does not print the host" "$(is "$(contains "$out" "$private_host_suffix")" false)"
+check "says how to take a review comment down" "$(contains "$out" 'delete each comment and review comment')"
+
+clean_pr
+printf 'A NUL here:\0 the %s repository\n' "$repo" > "$work/comment-body"
+jq -nc --rawfile body "$work/comment-body" --argjson author "$app" '[{id: 103, body: $body} + $author]' \
+  > "$work/comments.1"
+run_pr_text
+check "a comment holding a NUL byte is still read" "$(is "$status" 1)"
+check "names it" "$(contains "$out" 'comment:103:1: names the private deployment repository')"
+
+echo "case: comment lists GitHub serves over several pages"
+clean_pr
+jq -nc --argjson author "$app" '[range(1; 101) | {id: (1000 + .), body: "fine"} + $author]' > "$work/comments.1"
+items 1101 "fine" 1102 "$company_proper Labs" > "$work/comments.2"
+run_pr_text
+check "a comment on the second page naming the company fails" "$(is "$status" 1)"
+check "names it" "$(contains "$out" 'comment:1102:1: names the company')"
+check "stops at the short second page" \
+  "$(is "$(contains "$(< "$work/calls")" 'issues/7/comments?per_page=100&page=3')" false)"
+
+clean_pr
+jq -nc --argjson author "$app" '[range(1; 101) | {id: (2000 + .), body: "fine"} + $author]' > "$work/reviews.1"
+run_pr_text
+check "a full first page of reviews and an empty second pass" "$(is "$status" 0)"
+check "reads the second page after a full first" \
+  "$(contains "$(< "$work/calls")" '^api repos/example/repo/pulls/7/reviews?per_page=100&page=2$')"
+
+echo "case: a comment list the script cannot read whole"
+clean_pr
+printf '{"message": "Not Found"}\n' > "$work/review-comments.1"
+run_pr_text
+check "an answer that is not a list fails" "$(is "$status" 1)"
+check "names the route" "$(contains "$out" 'pulls/7/comments route is not a list')"
+
+clean_pr
+items 101 "fine" > "$work/comments.1"
+jq -c '.[0].id = "101"' "$work/comments.1" > "$work/comments.next" && mv "$work/comments.next" "$work/comments.1"
+run_pr_text
+check "an item whose id is not a whole number fails" "$(is "$status" 1)"
+check "names the cause" "$(contains "$out" 'whose id is not a whole number')"
+
+echo "case: the events pr-title.yaml runs on for a comment or review"
+clean_pr
+as_event pull_request_review
+items 202 "Blocking: see $key-7." > "$work/reviews.1"
+run_pr_text
+check "a pull_request_review payload is checked like a pull_request one" "$(is "$status" 1)"
+check "names the review" "$(contains "$out" 'review:202:1: names the private deployment repository')"
+check "reads the pull request from the payload" "$(is "$(contains "$(< "$work/calls")" '^api repos/example/repo/pulls/7$')" false)"
+
+clean_pr
+as_event pull_request_review_comment
+run_pr_text
+check "a clean pull_request_review_comment payload passes" "$(is "$status" 0)"
+
+clean_pr
+as_event issue_comment
+items 101 "Looks good." > "$work/comments.1"
+run_pr_text
+check "a clean issue_comment payload passes" "$(is "$status" 0)"
+check "reads the pull request from the pulls route" "$(contains "$(< "$work/calls")" '^api repos/example/repo/pulls/7$')"
+check "and its commits between that pull request's base and head" \
+  "$(contains "$(< "$work/calls")" '^api repos/example/repo/compare/base-sha...event-head-sha?per_page=100 --paginate$')"
+
+jq '.title = "fix(dispatch): keep the order (" + $key + "-7)"' --arg key "$key" "$work/pull" > "$work/pull.next"
+mv "$work/pull.next" "$work/pull"
+run_pr_text
+check "an issue_comment run still checks the title the pulls route answers" "$(is "$status" 1)"
+check "names the title" "$(contains "$out" 'title:1: names the private deployment repository')"
+
+clean_pr
+jq '{action: "created", comment: {id: 101, body: "fine"}, issue: {number: 7, title: "a plain issue"}}' \
+  "$work/event.json" > "$work/event.next"
+mv "$work/event.next" "$work/event.json"
+run_pr_text
+check "an issue_comment on an issue that is no pull request is refused" "$(is "$status" 1)"
+check "names the cause" "$(contains "$out" 'names no pull request')"
+
+echo "case: only the comments of an App installed here or of the repository's own people count"
+# On a public repository anyone signed in can comment or review, and every run reports the required
+# check, so a run that read a stranger's text would let them turn it red on anyone's head.
+# three_items: a comment, a review and a review comment, each naming something private.
+three_items() {
+  items 401 "As $company_proper Labs found." > "$work/comments.1"
+  items 402 "Blocking: see $key-7." > "$work/reviews.1"
+  items 403 "$(printf 'Nit.\n\nthe %s repository\n' "$repo")" > "$work/review-comments.1"
+}
+clean_pr
+three_items
+by drive-by User NONE "$work/comments.1"
+by drive-by User NONE "$work/reviews.1"
+by drive-by User CONTRIBUTOR "$work/review-comments.1"
+run_pr_text
+check "a stranger's comment, review and review comment naming private things pass" "$(is "$status" 0)"
+check "names the skipped comment and its author" \
+  "$(contains "$out" '^skipped comment:401: author drive-by (NONE) is not trusted$')"
+check "names the skipped review" "$(contains "$out" '^skipped review:402: author drive-by (NONE) is not trusted$')"
+check "names the skipped review comment, whose author contributed before" \
+  "$(contains "$out" '^skipped review-comment:403: author drive-by (CONTRIBUTOR) is not trusted$')"
+check "does not print the company" "$(is "$(contains "$out" "$company_proper")" false)"
+check "does not print the key" "$(is "$(contains "$out" "$key")" false)"
+check "does not print the repository" "$(is "$(contains "$out" "$repo")" false)"
+
+clean_pr
+items 404 "fine" > "$work/comments.1"
+jq -c '.[0].user = null | .[0].author_association = "NONE"' "$work/comments.1" > "$work/comments.next"
+mv "$work/comments.next" "$work/comments.1"
+run_pr_text
+check "a comment GitHub names no author for is skipped" \
+  "$(contains "$out" '^skipped comment:404: author <none> (NONE) is not trusted$')"
+
+for author in "dev-app[bot] Bot CONTRIBUTOR" "new-app[bot] Bot NONE" "owner User OWNER" \
+  "member User MEMBER" "collaborator User COLLABORATOR"; do
+  read -r login type association <<< "$author"
+  clean_pr
+  three_items
+  for page in comments.1 reviews.1 review-comments.1; do by "$login" "$type" "$association" "$work/$page"; done
+  run_pr_text
+  check "the same three from $login ($type, $association) fail" "$(is "$status" 1)"
+  check "names the comment" "$(contains "$out" 'comment:401:1: names the company')"
+  check "names the review" "$(contains "$out" 'review:402:1: names the private deployment repository')"
+  check "names the review comment" "$(contains "$out" 'review-comment:403:3: names the private deployment repository')"
+  check "skips none" "$(is "$(contains "$out" '^skipped ')" false)"
+done
+
+clean_pr
+as_event issue_comment
+items 405 "As $company_proper Labs found." 406 "All clear now." > "$work/comments.1"
+by drive-by User NONE "$work/comments.1" 1
+run_pr_text
+check "a stranger's clean comment after an App's red one still fails, so it clears nothing" "$(is "$status" 1)"
+check "names the App's comment" "$(contains "$out" 'comment:405:1: names the company')"
+check "skips the stranger's" "$(contains "$out" '^skipped comment:406: author drive-by (NONE) is not trusted$')"
 
 echo "case: the suite's own output never names a private thing"
 exec 1>&3 2>&4

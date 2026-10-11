@@ -27,7 +27,7 @@ function decidedSecretRecord(): CredentialRecord {
   return {
     approver: "sami",
     decided: { at: "2026-09-27T00:05:00Z", credential_id: null, event: "approved" },
-    enrollment: { kind: "box", operator: "sami", runtime_id: "box-1", slot: null },
+    enrollment: { kind: "session", operator: "sami", runtime_id: "box-1", slot: null },
     expires_at: "2026-09-27T12:00:00Z",
     identifiers: ["DEEL_API_KEY"],
     kind: "agent_secret",
@@ -48,6 +48,31 @@ test("a decided secret record with no credential shows no Credential line", asyn
   try {
     expect(await screen.findByText(/^approved/i)).toBeDefined();
     expect(screen.queryByText("Credential")).toBeNull();
+  } finally {
+    cleanup();
+    getRecord.mockRestore();
+  }
+});
+
+// A request that asked for no lifetime gets a grant that lasts until its session ends, which the
+// broker answers as a null lifetime; the page says so rather than "0 seconds".
+test("a record with no lifetime says its grant lasts until the session ends", async () => {
+  const { getRecord } = renderRecordPage({ ...decidedSecretRecord(), lifetime_seconds: null });
+  try {
+    const lifetime = await screen.findByText("Until the session ends");
+    expect(lifetime.previousElementSibling?.textContent).toBe("Lifetime");
+    expect(screen.queryByText(/second/)).toBeNull();
+  } finally {
+    cleanup();
+    getRecord.mockRestore();
+  }
+});
+
+test("a record with a lifetime names it in whole units", async () => {
+  const { getRecord } = renderRecordPage({ ...decidedSecretRecord(), lifetime_seconds: 120 });
+  try {
+    expect(await screen.findByText("2 minutes")).toBeDefined();
+    expect(screen.queryByText("Until the session ends")).toBeNull();
   } finally {
     cleanup();
     getRecord.mockRestore();

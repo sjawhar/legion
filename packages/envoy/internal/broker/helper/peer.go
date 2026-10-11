@@ -117,7 +117,7 @@ func statFields(pid int) ([]string, error) {
 }
 
 // StartTicks is the process start time in clock ticks since boot. Pid plus start ticks name
-// one process incarnation, which is what a host session's runtime_id must do.
+// one process incarnation, which is what a machine session's runtime_id must do.
 func StartTicks(pid int) (uint64, error) {
 	f, err := statFields(pid)
 	if err != nil {

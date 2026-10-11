@@ -234,7 +234,7 @@ func TestHelperSignerAsksTheHelper(t *testing.T) {
 		t.Fatalf("sign: %q %v", p, err)
 	}
 
-	sock2, _ := fakeHelper(t, helper.Response{Code: helper.CodeNotASession, Error: "pid 5 is not inside a registered host session"})
+	sock2, _ := fakeHelper(t, helper.Response{Code: helper.CodeNotASession, Error: "pid 5 is not inside a registered machine session"})
 	if _, err := (&helperSigner{sock: sock2}).Sign(http.MethodGet, "https://s/v1/enrollments/self"); err == nil ||
 		!strings.Contains(err.Error(), helper.CodeNotASession) {
 		t.Fatalf("the helper's code reaches the caller: %v", err)
@@ -242,27 +242,28 @@ func TestHelperSignerAsksTheHelper(t *testing.T) {
 }
 
 // TestHelperSignerSignsRequestObjects covers SignRequestObject: it must send Op "sign-request"
-// with the requested secret names and reason (never audience — the helper signs against its own
-// configured broker URL, not a value this peer supplies), return the helper's signed request
-// object verbatim, and surface the helper's error code unwrapped exactly like Sign does.
+// with the requested secret names, reason and lifetime (never audience — the helper signs against
+// its own configured broker URL, not a value this peer supplies), return the helper's signed
+// request object verbatim, and surface the helper's error code unwrapped exactly like Sign does.
 func TestHelperSignerSignsRequestObjects(t *testing.T) {
 	sock, reqs := fakeHelper(t, helper.Response{OK: true, RequestObject: "eyJ.fake.request"})
 	signer := &helperSigner{sock: sock}
-	ro, err := signer.SignRequestObject("https://secrets.test", []string{"DEEL_API_KEY", "OTHER_KEY"}, "why")
+	lifetime := 120
+	ro, err := signer.SignRequestObject("https://secrets.test", []string{"DEEL_API_KEY", "OTHER_KEY"}, "why", &lifetime)
 	if err != nil || ro != "eyJ.fake.request" {
 		t.Fatalf("sign-request: %q %v", ro, err)
 	}
 	select {
 	case req := <-reqs:
-		if req.Op != "sign-request" || !reflect.DeepEqual(req.Secrets, []string{"DEEL_API_KEY", "OTHER_KEY"}) || req.Reason != "why" {
+		if req.Op != "sign-request" || !reflect.DeepEqual(req.Secrets, []string{"DEEL_API_KEY", "OTHER_KEY"}) || req.Reason != "why" || req.LifetimeSeconds == nil || *req.LifetimeSeconds != lifetime {
 			t.Fatalf("request sent to the helper: %+v", req)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the fake never saw a request")
 	}
 
-	sock2, _ := fakeHelper(t, helper.Response{Code: helper.CodeNotASession, Error: "pid 5 is not inside a registered host session"})
-	if _, err := (&helperSigner{sock: sock2}).SignRequestObject("https://secrets.test", []string{"DEEL_API_KEY"}, "why"); err == nil ||
+	sock2, _ := fakeHelper(t, helper.Response{Code: helper.CodeNotASession, Error: "pid 5 is not inside a registered machine session"})
+	if _, err := (&helperSigner{sock: sock2}).SignRequestObject("https://secrets.test", []string{"DEEL_API_KEY"}, "why", nil); err == nil ||
 		!strings.Contains(err.Error(), helper.CodeNotASession) {
 		t.Fatalf("the helper's code reaches the caller: %v", err)
 	}
@@ -569,7 +570,7 @@ func TestIdentity(t *testing.T) {
 			fakeHelperAt(t, p.sock, helper.Response{Code: helper.CodeNotEnrolled, Error: "not enrolled yet"})
 		}, exit: 0},
 		{name: "helper NOT_A_SESSION", setup: func(t *testing.T, p paths) {
-			fakeHelperAt(t, p.sock, helper.Response{Code: helper.CodeNotASession, Error: "pid 5 is not inside a registered host session"})
+			fakeHelperAt(t, p.sock, helper.Response{Code: helper.CodeNotASession, Error: "pid 5 is not inside a registered machine session"})
 		}, exit: 1},
 		{name: "helper answers an unknown code", setup: func(t *testing.T, p paths) {
 			fakeHelperAt(t, p.sock, helper.Response{Code: "SOME_LATER_CODE", Error: "a code this client predates"})

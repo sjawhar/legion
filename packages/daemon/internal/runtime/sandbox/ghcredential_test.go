@@ -32,11 +32,11 @@ func secretUpdates(writes []action) []string {
 	return names
 }
 
-// The refresher brings a live issue pod's role Secrets to the current render of each role's
-// credential and touches nothing else: a Secret whose hosts.yml is already the render is not
-// written, one another Sandbox owns is skipped, the controller's pod is never visited, and a
-// rewrite changes the two gh keys alone — the launcher token and the annotations the binding
-// wrote stay — and is logged naming the sandbox, the role, its App and the lease's expiry.
+// The refresher brings a live pod's role Secrets to the current render of each role's credential
+// and touches nothing else, the controller's included: a Secret whose hosts.yml is already the
+// render is not written, one another Sandbox owns is skipped, and a rewrite changes the two gh keys
+// alone — the launcher token and the annotations the binding wrote stay — and is logged naming the
+// sandbox, the role, its App and the lease's expiry.
 func TestTheRefresherRewritesOnlyTheRoleSecretsWhoseGhFilesAreStale(t *testing.T) {
 	logs := &lockedLog{}
 	g := newRig(t, nil, withOptions(func(o *Options) {
@@ -76,8 +76,8 @@ func TestTheRefresherRewritesOnlyTheRoleSecretsWhoseGhFilesAreStale(t *testing.T
 	if kept := g.secret(foreign); string(kept.Data[GitHubHostsKey]) != ghconfig.Hosts("ghs_stale_lease") {
 		t.Errorf("the refresher rewrote %s, which another Sandbox owns", foreign)
 	}
-	if secret := g.secret(roleSecretName(controller, claim.RoleController)); len(secret.Data) != 1 {
-		t.Errorf("the controller's Secret holds %v, want the launcher token alone", slices.Sorted(maps.Keys(secret.Data)))
+	if secret := g.secret(roleSecretName(controller, claim.RoleController)); len(secret.Data) != 3 {
+		t.Errorf("the controller's Secret holds %v, want the launcher token and the review App's two gh files", slices.Sorted(maps.Keys(secret.Data)))
 	}
 	var refreshed []string
 	for _, line := range strings.Split(logs.String(), "\n") {
@@ -95,8 +95,8 @@ func TestTheRefresherRewritesOnlyTheRoleSecretsWhoseGhFilesAreStale(t *testing.T
 	}
 }
 
-// A lease the daemon re-minted reaches every role of every live issue pod on the next tick: each
-// role's Secret is rewritten to its own App's new token, the controller's never. A role whose
+// A lease the daemon re-minted reaches every role of every live pod on the next tick, the
+// controller's included: each role's Secret is rewritten to its own App's new token. A role whose
 // render fails keeps its last files, logged, while its siblings are refreshed.
 func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 	var lease atomic.Pointer[string]
@@ -133,8 +133,9 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 			want = append(want, roleSecretName(issue, role))
 		}
 	}
+	want = append(want, roleSecretName(SandboxName(controllerToken), claim.RoleController))
 	if updated := secretUpdates(g.writes()); !slices.Equal(slices.Sorted(slices.Values(updated)), slices.Sorted(slices.Values(want))) {
-		t.Fatalf("the refresher updated %v, want every issue role's Secret but the merger's: %v", updated, want)
+		t.Fatalf("the refresher updated %v, want every live role's Secret but the merger's: %v", updated, want)
 	}
 	for _, role := range claim.Roles {
 		token, err := ghconfig.TokenFromHosts(g.secret(roleSecretName(issue, role)).Data[GitHubHostsKey])
@@ -146,8 +147,12 @@ func TestTheRefresherFollowsAReMintedLeaseIntoEveryRolesSecret(t *testing.T) {
 			t.Errorf("%s's hosts.yml holds %q (%v), want %q", role, token, err, expected)
 		}
 	}
-	if secret := g.secret(roleSecretName(SandboxName(controllerToken), claim.RoleController)); len(secret.Data) != 1 {
-		t.Errorf("the controller's Secret holds %v, want the launcher token alone", slices.Sorted(maps.Keys(secret.Data)))
+	secret := g.secret(roleSecretName(SandboxName(controllerToken), claim.RoleController))
+	if len(secret.Data) != 3 {
+		t.Errorf("the controller's Secret holds %v, want the launcher token and the review App's two gh files", slices.Sorted(maps.Keys(secret.Data)))
+	}
+	if token, err := ghconfig.TokenFromHosts(secret.Data[GitHubHostsKey]); err != nil || token != "ghs_review_second" {
+		t.Errorf("the controller's hosts.yml holds %q (%v), want %q", token, err, "ghs_review_second")
 	}
 	if logged := logs.String(); !strings.Contains(logged, "github credential refresh failed") || !strings.Contains(logged, "role="+string(claim.RoleMerger)) {
 		t.Errorf("the runtime logged %q, want the merger's failed refresh named", logged)

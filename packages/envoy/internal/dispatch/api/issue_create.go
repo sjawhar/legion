@@ -316,7 +316,7 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	specChanges, err := refs.ReplaceCounted(r.Context(), tx, "artifact", artifactID, markdown, s.deps.ServerURL)
+	specChanges, err := s.deps.Docs.IndexDocumentReferences(documentCtx, artifactID, 1, markdown)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

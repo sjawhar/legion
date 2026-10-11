@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 
@@ -301,6 +302,48 @@ func verifyAskBlockRoundTrip(next *pmdoc.Node, blockID string, want AskBlockText
 		return &ErrAskBlockUnrepresentable{Field: "block", Reason: "the text does not survive the document's markdown"}
 	}
 	return compareAskBlockText(reparsed, want)
+}
+
+// decidedWording is writeDecidedWording for ask as it stands, for a repair to make again on
+// another tree (repairLive): a block it cannot give the wording is left as it is.
+func decidedWording(ask model.Ask) func(*pmdoc.Node) bool {
+	return func(node *pmdoc.Node) bool {
+		changed, err := writeDecidedWording(node, ask)
+		return err == nil && changed
+	}
+}
+
+// writeDecidedWording gives node, the ask block of ask, the wording ask was decided on - the
+// question, options, multiple and urgency its row holds - and reports whether that changed the
+// block. A part the block already asks keeps its nodes, marks and inner block ids
+// (askBlockChildren); a part it rewrites is what the document's own markdown pipeline makes of the
+// decided text. It changes nothing, and returns why, when the block would not read back as that
+// wording.
+func writeDecidedWording(node *pmdoc.Node, ask model.Ask) (bool, error) {
+	current, err := parseAskBlock(node)
+	if err != nil {
+		return false, err
+	}
+	decided := model.NewAskEditPrevious(ask)
+	if current.asks(decided) {
+		return false, nil
+	}
+	children, err := askBlockChildren(current, AskBlockEdit{Question: &decided.Question, Options: &decided.Options}, pmdoc.NewWriteBudget())
+	if err != nil {
+		return false, err
+	}
+	written := &pmdoc.Node{Type: node.Type, Attrs: maps.Clone(node.Attrs), Children: children}
+	written.Attrs["multiple"] = decided.Multiple
+	written.Attrs["urgency"] = decided.Urgency
+	reads, err := parseAskBlock(written)
+	if err != nil {
+		return false, err
+	}
+	if !reads.asks(decided) {
+		return false, fmt.Errorf("the block reads back as %q, not the wording its ask was decided on", reads.question)
+	}
+	node.Attrs, node.Children = written.Attrs, written.Children
+	return true, nil
 }
 
 // askBlockOf is the ask block blockID of tree, as settlement's own collector reads it.

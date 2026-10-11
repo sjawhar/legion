@@ -63,7 +63,7 @@ func signMachineLogin(t *testing.T, loginHint, identifier, service string) (comp
 	}
 	compact, err = record.Sign(key, testAudience, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: identifier, Service: service},
-	}, "", loginHint, time.Now())
+	}, "", loginHint, nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestLoginIssuesAKeyBoundCredentialOnTypedCodeApproval(t *testing.T) {
 	}
 	compact, err := record.Sign(machineKey, testAudience, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: "example-host-devbox"},
-	}, "", testApprover, time.Now())
+	}, "", testApprover, nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +268,7 @@ func TestAMachineLoginNamingAnyoneIsDecidedByNoOne(t *testing.T) {
 		Request:         signMachineLogin(t, record.AnyoneApprover, "example-host-devbox", ""),
 		Approver:        record.AnyoneApprover,
 		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-"},
-		LifetimeSeconds: int(svc.CredentialLifetime.Seconds()),
+		LifetimeSeconds: new(int(svc.CredentialLifetime.Seconds())),
 		RulesVersion:    svc.Policy.Get().Version,
 		ExpiresAt:       time.Now().Add(svc.PendingTTL).UTC().Truncate(time.Second),
 		Code:            code,
@@ -331,8 +331,8 @@ func TestServiceCredentialEnrollsOnlyPods(t *testing.T) {
 	}
 
 	cred := enroll.Credential{ID: uuid.MustParse(credentialID), Service: &service, Host: "cluster"}
-	if _, err := svc.Enroll.Create(ctx, cred, enroll.Enrollment{Kind: "box", RuntimeID: "box-1", Operator: new(testApprover), Thumbprint: "tp-1"}); !errors.Is(err, enroll.ErrOperatorMismatch) {
-		t.Fatalf("Create(service cred, kind box) = %v, want ErrOperatorMismatch", err)
+	if _, err := svc.Enroll.Create(ctx, cred, enroll.Enrollment{Kind: "session", RuntimeID: "session-1", Operator: new(testApprover), Thumbprint: "tp-1"}); !errors.Is(err, enroll.ErrOperatorMismatch) {
+		t.Fatalf("Create(service cred, kind session) = %v, want ErrOperatorMismatch", err)
 	}
 }
 
@@ -351,7 +351,7 @@ func TestAServiceLoginIsDecidedByAnyoneWhateverItsLoginHintNames(t *testing.T) {
 	}
 	compact, err := record.Sign(machineKey, testAudience, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: "cluster", Service: "legion-daemon"},
-	}, "", testApprover, time.Now())
+	}, "", testApprover, nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,7 +423,7 @@ func TestAServiceLoginPendingWithANamedApproverIsDecidedByAnyone(t *testing.T) {
 	}
 	compact, err := record.Sign(machineKey, testAudience, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: "cluster", Service: "legion-daemon"},
-	}, "", testApprover, time.Now())
+	}, "", testApprover, nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestAServiceLoginPendingWithANamedApproverIsDecidedByAnyone(t *testing.T) {
 		Request:         compact,
 		Approver:        testApprover,
 		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-"},
-		LifetimeSeconds: int(svc.CredentialLifetime.Seconds()),
+		LifetimeSeconds: new(int(svc.CredentialLifetime.Seconds())),
 		RulesVersion:    svc.Policy.Get().Version,
 		ExpiresAt:       time.Now().Add(svc.PendingTTL).UTC().Truncate(time.Second),
 		Code:            code,

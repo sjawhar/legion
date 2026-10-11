@@ -90,8 +90,10 @@ dispatch follow --ask <id> --action unfollow   # or --action follow
 those asks. A human may also remove you from the ask card; either way you are
 told with an `ask.follower_removed` notice, and a human adding you arrives as `ask.follower_added`.
 
-No write subscribes you to an issue or document. Following covers your own asks and the threads you joined; everything else on the
-owner — other sessions' asks, comments, messages, status changes — reaches you only if you subscribe to the owner topic yourself.
+No write subscribes you to an issue or document. Following covers your own asks and the threads you joined; a person's reply to
+a comment you started, and a person's new comment on a document you wrote or have a version crediting you, reach you directly as
+well; everything else on the owner — other sessions' asks, comments, messages, status changes — reaches you only if you subscribe
+to the owner topic yourself.
 Every write result names that line: `envoy_subscribe notifications.dispatch.issue.<KEY>.>` for an issue,
 `envoy_subscribe notifications.dispatch.document.<PROJECT>.<SLUG>.>` for a project document. The owner topic carries every Dispatch
 event; `notify` only controls agent wake and routed delivery. A human may unsubscribe you from the issue or document header; you

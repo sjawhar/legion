@@ -95,7 +95,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err := s.refuseDroppedAskBlocks(ctx, artifactID, tree); err != nil {
 		return RebuildReport{}, VersionResult{}, &ErrInvalidAskBlock{Reason: err}
 	}
-	canonical, err := renderTree(tree)
+	canonical, offsets, err := renderTreeWithOffsets(tree)
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
@@ -124,7 +124,7 @@ func (s *Service) RebuildDocument(ctx context.Context, artifactID string, markdo
 	if err != nil {
 		return RebuildReport{}, VersionResult{}, err
 	}
-	written, err := s.writeVersionTx(ctx, tx, artifactID, canonical, tree, actor, &versionWrite{
+	written, err := s.writeVersionTx(ctx, tx, artifactID, renderedTree{tree: tree, markdown: canonical, offsets: offsets}, actor, &versionWrite{
 		authors: actorSlice(capture.authors),
 		capture: &capture,
 	})

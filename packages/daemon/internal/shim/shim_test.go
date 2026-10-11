@@ -230,16 +230,25 @@ func (c *fakeClock) idle(t *testing.T) {
 	}
 }
 
-// syncBuffer is the shim's log: what the pane shows.
+// syncBuffer is the shim's log: what the pane shows. changed signals each write so tests wait on
+// a real event rather than polling the log on a wall clock.
 type syncBuffer struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
+	mu      sync.Mutex
+	buf     bytes.Buffer
+	changed chan struct{}
 }
+
+func newSyncBuffer() *syncBuffer { return &syncBuffer{changed: make(chan struct{}, 1)} }
 
 func (b *syncBuffer) Write(p []byte) (int, error) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.buf.Write(p)
+	n, err := b.buf.Write(p)
+	b.mu.Unlock()
+	select {
+	case b.changed <- struct{}{}:
+	default:
+	}
+	return n, err
 }
 
 func (b *syncBuffer) String() string {
@@ -261,12 +270,12 @@ func (b *syncBuffer) count(substr string) int {
 
 func (b *syncBuffer) await(t *testing.T, substr string, n int) {
 	t.Helper()
-	deadline := time.Now().Add(waitLimit)
 	for b.count(substr) < n {
-		if time.Now().After(deadline) {
+		select {
+		case <-b.changed:
+		case <-time.After(waitLimit):
 			t.Fatalf("the shim never logged %q %d time(s); log:\n%s", substr, n, b)
 		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }
 
@@ -302,7 +311,7 @@ type running struct {
 
 func run(t *testing.T, cfg shim.Config, clock *fakeClock) *running {
 	t.Helper()
-	r := &running{done: make(chan struct{}), log: &syncBuffer{}}
+	r := &running{done: make(chan struct{}), log: newSyncBuffer()}
 	cfg.Log = r.log
 	cfg.Clock = clock
 	var ctx context.Context

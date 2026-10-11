@@ -56,13 +56,22 @@ func cmdGrantList(args []string, stdout, stderr io.Writer) int {
 			session += "/" + *g.Enrollment.Slot
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n", g.GrantID, strings.Join(g.Names, ","), g.Granted, approver,
-			session, orDash(g.Enrollment.Operator), g.ExpiresAt.UTC().Format(time.RFC3339))
+			session, orDash(g.Enrollment.Operator), grantExpiry(g.ExpiresAt))
 	}
 	if err := tw.Flush(); err != nil {
 		fmt.Fprintf(stderr, "agent-secrets %s: %v\n", form, err)
 		return 1
 	}
 	return 0
+}
+
+// grantExpiry is a grant's EXPIRES cell: its expiry in RFC 3339, or session-end for a grant that
+// lasts until its session ends. One word, so the table splits on white space.
+func grantExpiry(expires *time.Time) string {
+	if expires == nil {
+		return "session-end"
+	}
+	return expires.UTC().Format(time.RFC3339)
 }
 
 // cmdGrantRevoke implements "grant revoke GRANT_ID": it ends a grant as the operator, as Dispatch's

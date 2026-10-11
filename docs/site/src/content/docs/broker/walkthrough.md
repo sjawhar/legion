@@ -61,9 +61,9 @@ The request is at the top of alice's Inbox, under **Credential requests**, and c
 ![The Inbox, with a secret request for DEMO_API_KEY under Credential requests, Needs you 1 beside Inbox in the sidebar, and Blocked on you: 1 item](/legion/media/broker/inbox-credential-request.png)
 
 Its page shows what was asked for, by which session, for how long, who may approve it, and the
-agent's stated reason.
+agent's stated reason. The request named no `--ttl`, so its grant lasts until the session ends.
 
-![A credential request for DEMO_API_KEY: the enrollment on example-host-build, a one-hour lifetime, approver alice@example.com, the agent's stated reason, and Approve and Deny buttons](/legion/media/broker/credential-request.png)
+![A credential request for DEMO_API_KEY: the enrollment, a session on example-host-build, a lifetime of Until the session ends, approver alice@example.com, the agent's stated reason, and Approve and Deny buttons](/legion/media/broker/credential-request.png)
 
 She approves it, and the page records the decision.
 
@@ -73,7 +73,7 @@ She approves it, and the page records the decision.
 
 The waiting command checks the broker every few seconds, so it carries on within a few seconds of
 the approval (10 at most): it receives `DEMO_API_KEY` in its environment and runs. The video
-shortens that wait, which took 8 seconds in the recording. The demo command prints the key's length
+shortens that wait, which took 5 seconds in the recording. The demo command prints the key's length
 and last four characters to show it arrived. `agent-secrets status <request>` names who decided the
 request.
 
@@ -81,9 +81,10 @@ request.
 
 **Settings** lists the live grants of alice's sessions, whether granted automatically or approved,
 and those she approved on anyone's session, each with its session, how it was granted and when it
-expires. **Revoke** ends a grant at once; a command already running keeps the value it was given.
+expires: this one when the session ends. **Revoke** ends a grant at once; a command already running
+keeps the value it was given.
 
-![Live grants in Settings: the example-host-build enrollment holding DEMO_API_KEY, approved by alice@example.com, with a Revoke button](/legion/media/broker/live-grants.png)
+![Live grants in Settings: the example-host-build session holding DEMO_API_KEY, approved by alice@example.com, expiring when the session ends, with a Revoke button](/legion/media/broker/live-grants.png)
 
 The rig that recorded the video and the screenshots, and the scripts that record them again, are in
 [`docs/site/media/broker/`](https://github.com/sjawhar/legion/tree/main/docs/site/media/broker).

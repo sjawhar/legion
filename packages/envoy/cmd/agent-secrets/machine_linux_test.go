@@ -108,7 +108,7 @@ func TestMachineListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := laptop.EnrollBox(context.Background(), "laptop-box", thumbprint, nil); err == nil || laptop.HasCredential() {
+	if _, _, err := laptop.EnrollSessionKey(context.Background(), "laptop-box", thumbprint, nil); err == nil || laptop.HasCredential() {
 		t.Fatalf("the laptop enrolling after its login was revoked: %v, credential held %v; want the broker's refusal", err, laptop.HasCredential())
 	}
 	if stdout, _, _ := machine("list"); strings.Contains(stdout, laptopID) || !strings.Contains(stdout, own) {
@@ -125,11 +125,11 @@ func TestMachineListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	}
 }
 
-// TestGrantListAndRevokeUnderTheMachinesLogin: a box this machine enrolled gets an agent-tier
-// secret automatically. `grant list` shows that grant, and `--json` prints exactly what Dispatch's
-// Live grants page reads for the operator. `grant revoke` ends it, as the operator's revoke on that
-// page does: the box can no longer read the value, and its next request for the secret waits for
-// approval.
+// TestGrantListAndRevokeUnderTheMachinesLogin: a session key this machine enrolled gets an
+// agent-tier secret automatically. `grant list` shows that grant, and `--json` prints exactly what
+// Dispatch's Live grants page reads for the operator. `grant revoke` ends it, as the operator's
+// revoke on that page does: the session can no longer read the value, and its next request for the
+// secret waits for approval.
 func TestGrantListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	rig := brokertest.NewRig(t)
 	binary := buildAgentSecrets(t)
@@ -150,9 +150,9 @@ func TestGrantListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtimeID := "grant-box-" + t.Name()
-	enrolled, err := helper.Call(sock, helper.Request{Op: "enroll-box", RuntimeID: runtimeID, Thumbprint: thumbprint}, 10*time.Second)
+	enrolled, err := helper.Call(sock, helper.Request{Op: "enroll-session-key", RuntimeID: runtimeID, Thumbprint: thumbprint}, 10*time.Second)
 	if err != nil || !enrolled.OK {
-		t.Fatalf("enroll-box: %+v %v", enrolled, err)
+		t.Fatalf("enroll-session-key: %+v %v", enrolled, err)
 	}
 	keyDir := writeKeyDir(t, boxKey, enrolled.EnrollmentID)
 	stdout, stderr, exit := runAgentSecrets(t, binary, rig.URL, keyDir, nil, "request", "TEST_AUTO_SECRET", "--json")
@@ -167,8 +167,8 @@ func TestGrantListAndRevokeUnderTheMachinesLogin(t *testing.T) {
 	if want := []string{"GRANT_ID", "SECRETS", "GRANTED", "APPROVER", "SESSION", "OPERATOR", "EXPIRES"}; exit != 0 || !slices.Equal(header, want) || len(rows) != 1 {
 		t.Fatalf("grant list: exit %d, stdout %q, stderr %q; want the header %v and one row", exit, stdout, stderr, want)
 	}
-	if row := rows[0]; !slices.Equal(row[:6], []string{grantID, "TEST_AUTO_SECRET", "automatic", "-", "box/" + runtimeID, rig.Operator}) {
-		t.Fatalf("grant list's row = %v, want the box's automatic grant %s", row, grantID)
+	if row := rows[0]; !slices.Equal(row[:6], []string{grantID, "TEST_AUTO_SECRET", "automatic", "-", "session/" + runtimeID, rig.Operator}) {
+		t.Fatalf("grant list's row = %v, want the session key's automatic grant %s", row, grantID)
 	}
 
 	stdout, stderr, exit = grant("list", "--json")
@@ -203,7 +203,7 @@ func TestMachineAndGrantCommandsRefusedInsideASession(t *testing.T) {
 	for _, args := range [][]string{{"machine", "list"}, {"machine", "revoke", uuid.NewString()}, {"grant", "list"}, {"grant", "revoke", uuid.NewString()}} {
 		code, stdout, stderr := runInSession(t, binary, sock, args...)
 		prefix := "agent-secrets " + args[0] + " " + args[1] + ": IN_SESSION: pid "
-		if code != 1 || stdout != "" || !strings.HasPrefix(stderr, prefix) || !strings.HasSuffix(stderr, "is inside a registered host session, which acts on itself alone; run machine and grant commands from your own shell\n") {
+		if code != 1 || stdout != "" || !strings.HasPrefix(stderr, prefix) || !strings.HasSuffix(stderr, "is inside a registered machine session, which acts on itself alone; run machine and grant commands from your own shell\n") {
 			t.Fatalf("%v inside a session: exit %d, stdout %q, stderr %q; want 1 and IN_SESSION", args, code, stdout, stderr)
 		}
 	}

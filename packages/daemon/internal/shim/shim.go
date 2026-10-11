@@ -280,12 +280,13 @@ func (s *shim) connect() (acked bool, err error) {
 	}
 }
 
-// fromDaemon routes one daemon frame: the two the shim answers itself, a delivery the dedupe
-// answers, and everything else to OMP unchanged (createShimBridge's onLine, worker-shim.ts).
+// fromDaemon routes one daemon frame: those the shim acts on or answers itself, a delivery the
+// dedupe answers, and everything else to OMP unchanged (createShimBridge's onLine, worker-shim.ts).
 func (s *shim) fromDaemon(line []byte) {
 	frame, err := shimwire.Decode(line)
 	if err != nil {
-		if typ := frameType(line); typ == shimwire.TypeAdoptWorkingCopy || typ == shimwire.TypeAgentSecretsEnrollment {
+		switch typ := frameType(line); typ {
+		case shimwire.TypeAdoptWorkingCopy, shimwire.TypeAgentSecretsEnrollment, shimwire.TypeAgentSecretsToken:
 			// The daemon is its only sender, and it is never OMP's to read.
 			s.log.Printf("[worker-shim] refusing a malformed %s frame: %v", typ, err)
 			return
@@ -302,6 +303,9 @@ func (s *shim) fromDaemon(line []byte) {
 		return
 	case shimwire.AgentSecretsEnrollment:
 		s.enroll(f)
+		return
+	case shimwire.AgentSecretsToken:
+		s.podToken(f)
 		return
 	}
 	s.order.Lock()

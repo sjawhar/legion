@@ -23,6 +23,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 var (
@@ -30,10 +31,16 @@ var (
 	ErrOperatorMismatch = errors.New("this launcher credential enrols a different operator")
 	ErrAlreadyEnrolled  = errors.New("this runtime is already enrolled and live")
 	ErrPodIdentity      = errors.New("the projected token does not identify this pod")
-	ErrNotLive          = errors.New("enrollment is not live")
-	ErrInvalidSlot      = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
-	ErrNoCredential     = errors.New("no such machine login")
-	ErrNotApprover      = errors.New("only the person who approved a person's machine login may revoke it")
+	// ErrPodTokenExpired is a pod token whose expiry has passed, wrapped with the expiry the token
+	// names: the launcher presents the pod's current token with the same key, where ErrPodIdentity
+	// is a token for another pod, or no token of this cluster at all. An expired token is reported
+	// as expired whatever else is wrong with it (oidc.Verifier reads a failed token's claims before
+	// blaming its signature), so its pod UID, which nothing verified, is never compared.
+	ErrPodTokenExpired = errors.New("the projected token has expired")
+	ErrNotLive         = errors.New("enrollment is not live")
+	ErrInvalidSlot     = errors.New("a slot is only for a pod enrollment and must match ^[a-z][a-z0-9-]{0,62}$")
+	ErrNoCredential    = errors.New("no such machine login")
+	ErrNotApprover     = errors.New("only the person who approved a person's machine login may revoke it")
 )
 
 type Credential struct {
@@ -73,10 +80,10 @@ type Enrollment struct {
 	PodToken   string
 	// Slot names one of several independent identities in one pod (record.ValidSlot): each slot
 	// of a pod is an enrollment of its own, with its own key, lease and grants. "" is the one
-	// identity of every box, host and single-identity pod enrollment.
+	// identity of every session and single-identity pod enrollment.
 	Slot string
 	// Subject is a pod enrollment's verified service-account subject, set by Create from the
-	// projected token itself and never from the caller; nil for box and host.
+	// projected token itself and never from the caller; nil for a session.
 	Subject      *string
 	LeaseExpires time.Time
 	Existing     bool // true when Create returned an already-live enrollment for the same key
@@ -208,6 +215,8 @@ func (s *Service) Credential(ctx context.Context, id string) (Credential, error)
 // back (Existing), a different key in a live slot is ErrAlreadyEnrolled, and another slot of the
 // same pod is an enrollment of its own. A slot is valid only on a pod enrollment (ErrInvalidSlot);
 // a pod's runtime id is always the pod UID its projected token proves, whichever slot it enrolls.
+// A pod token past its expiry is ErrPodTokenExpired, naming that expiry; any other token that does
+// not prove this pod is ErrPodIdentity.
 // A credential revoked (RevokeCredential: by the person who approved a person's machine login, or
 // by anyone signed in for a service's), even after the caller's launcher proof was verified, is
 // ErrUnauthenticated.
@@ -228,6 +237,9 @@ func (s *Service) Create(ctx context.Context, cred Credential, in Enrollment) (E
 			return Enrollment{}, fmt.Errorf("%w: pod enrollment needs BROKER_K8S_OIDC_ISSUER", ErrPodIdentity)
 		}
 		claims, err := s.Pod.Verify(ctx, in.PodToken)
+		if errors.Is(err, oidc.ErrExpired) {
+			return Enrollment{}, fmt.Errorf("%w (%v)", ErrPodTokenExpired, err)
+		}
 		if err != nil || claims.PodUID == "" || claims.PodUID != in.RuntimeID {
 			return Enrollment{}, ErrPodIdentity
 		}
@@ -379,7 +391,7 @@ type LapsedEnrollment struct {
 const lapsedBatch = 100
 
 // EndLapsed ends every enrollment whose lease has lapsed and that nothing has ended yet: a pod that
-// is gone, a box whose launcher stopped renewing, a host session whose helper died. Each is ended
+// is gone, a box whose launcher stopped renewing, a machine session whose helper died. Each is ended
 // as Revoke ends one (endEnrollment, actor "broker", an enrollment.expired audit row), so its
 // grants are revoked and its pending requests cancelled and dropped from the approver's list,
 // rather than waiting there for their own expiry with an approval that could grant nothing.
@@ -545,7 +557,7 @@ func (s *Service) liveCredentials(ctx context.Context, person string, services b
 
 // RevokeCredential ends launcher credential id on the word of person, expired or not: from then on
 // no launcher proof signed with it authenticates (AuthenticateLauncher), and every enrollment it
-// made that has not ended — a person's host sessions and boxes, or every pod a service's login
+// made that has not ended — a person's machine sessions and boxes, or every pod a service's login
 // enrolled, which outlive the credential's expiry — is ended as Revoke ends one (endEnrollment, an
 // enrollment.revoked audit row), revoking each one's grants and cancelling its pending requests,
 // all in one transaction with one launcher_credential.revoked audit row. person may revoke a

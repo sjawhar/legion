@@ -25,18 +25,17 @@ and URL, signed with the session's key, used once, and valid only within
 
 A **launcher** is the program that enrolls sessions: `agent-secrets-helper`, a per-user daemon on
 a machine, for that machine's sessions, or the Legion daemon for the pods it runs. An enrollment
-has one of three kinds:
+has one of two kinds:
 
 | Kind | What it is | Who holds its key | Who enrolls it |
 | --- | --- | --- | --- |
-| `host` | An agent session running directly on a machine. | The machine's helper, in memory. | The helper, when the session registers with `agent-secrets register`. |
-| `box` | An agent session running in a container on a machine, called a **box**. | The container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The machine's helper, when whoever starts the container runs `agent-secrets enroll --helper` ([run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
+| `session` | An agent session on a machine a person logged in: running directly on the machine, or in a container on it (a **box**). | For a session on the machine, the machine's helper, in memory; for a box, the container, in `key.pem` under `AGENT_SECRETS_KEY_DIR`. | The machine's helper: when the session registers with `agent-secrets register`, or, for a box, when whoever starts the container runs `agent-secrets enroll --helper` ([run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)). |
 | `pod` | A Legion worker pod in Kubernetes. | The pod, in its key directory. | The Legion daemon, which proves the pod with a projected service-account token the broker verifies against `BROKER_K8S_OIDC_ISSUER`. |
 
 An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session runs: the helper
-renews host sessions, `agent-secrets renew` renews a box, and Legion's pod shim renews a pod. An
-enrollment has **ended** once its launcher revokes it (the helper does as soon as a host session's
-process exits), whoever may revoke its machine login revokes that login
+renews the sessions it registered, `agent-secrets renew` renews a box, and Legion's pod shim renews
+a pod. An enrollment has **ended** once its launcher revokes it (the helper does as soon as a
+registered session's process exits), whoever may revoke its machine login revokes that login
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its
 lease lapses. From the moment the lease lapses, the session's calls are refused `PROOF_INVALID`; the
 broker's sweep, which runs every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run
@@ -45,7 +44,7 @@ every request it still had pending, so those leave the approver's Inbox and an a
 land on a session that is gone
 (`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).
 
-Every `host` and `box` enrollment records an **operator**: the person whose machine it runs on. The
+Every `session` enrollment records an **operator**: the person whose machine it runs on. The
 operator is the person who approved the machine login that enrolled it, never a value the launcher
 chooses. A `pod` enrollment records none, since the Legion daemon logs in as a service rather than
 as a person; it records the service account the pod's projected token proved instead.
@@ -200,17 +199,23 @@ reason of at most 400 characters. The broker evaluates every name
   `MIXED_APPROVERS`; request them separately.
 - When every name is automatic, the request is granted at once.
 - Otherwise it is **pending**, and the broker writes a credential-request record for the approver to
-  decide. An identical request from the same session while one is pending joins it rather than
-  asking twice. The broker's answer names the approver the record names, and `agent-secrets`
-  prints it, so the agent can tell that person. The record fixes its approver when the request is
-  made, and the request stays in that person's Inbox after the secret's tags change, though they
-  may then be unable to approve it ([what an owner change does](#approvals)).
+  decide. A session has at most one pending request for each secret: an identical request from the
+  same session while one is pending (the same names and the same lifetime, or none) joins it
+  rather than asking twice, and any other request naming one of its secrets, with or without
+  `--ttl`, is refused `REQUEST_PENDING`, naming the pending request. The session waits for that
+  request to be decided, or cancels it (`agent-secrets cancel`) and asks again. The broker's answer
+  names the approver the record names, and `agent-secrets` prints it, so the agent can tell that
+  person. The record fixes its approver when the request is made, and the request stays in that
+  person's Inbox after the secret's tags change, though they may then be unable to approve it
+  ([what an owner change does](#approvals)).
 
 A granted request yields a **grant**: the session's right to read those values until the grant
-expires. A grant lives `BROKER_MAX_GRANT_SECONDS`, counted from the moment it is granted, unless its
-session ends first. While it lives, a new request from the same session for exactly the same names
-gets the same grant back, without asking anyone again, as long as the current policy still allows
-it.
+ends. A grant lasts until its session ends, unless the request asks for a shorter lifetime
+(`agent-secrets NAME --ttl 2m -- command`, or `agent-secrets request NAME --ttl 2m`), which it then
+lasts counted from the moment it is granted. There is no other limit. The approver sees the
+lifetime the request asked for before deciding it. While a grant lives, a new request from the
+same session for exactly the same names and the same lifetime gets the same grant back, without
+asking anyone again, as long as the current policy still allows it.
 
 The broker never stores a value. Each time a session reads a grant, the broker checks that the
 session is still enrolled, the grant is live, its approval still verifies, and the current policy
@@ -221,10 +226,10 @@ itself never prints a value, but the command is the agent's choice, and a comman
 what its environment holds (`printenv NAME` prints it). A session holding a grant can therefore read
 the value: approve a secret only for a session you would trust with the value itself.
 
-A grant ends when it expires, when its session revokes it (`agent-secrets revoke`), when its
-approver or its enrollment's operator revokes it in Dispatch or from one of their machines
-(`agent-secrets grant revoke`), or when
-its enrollment ends. A grant the session got without asking is revoked like any other, and when its
+A grant ends when its lifetime runs out, when its session revokes it (`agent-secrets revoke`), when
+its approver or its enrollment's operator revokes it in Dispatch or from one of their machines
+(`agent-secrets grant revoke`), or when its enrollment ends. A grant the session got without asking
+is revoked like any other, and when its
 operator revokes it the session asks for approval before it gets the same secrets again (the operator
 [withholds](#owner-and-tier-who-may-have-which-secret) them, even when the grant had already
 ended); a session revoking its own grant, and anyone but the operator revoking one, withholds
@@ -285,7 +290,8 @@ server may hold it.
 Everything a person decides rests on a **credential-request record**
 (`packages/envoy/internal/broker/record/record.go`): a fixed, line-by-line text holding the
 session's signed request verbatim, the approver, the enrollment's kind, runtime id and operator,
-the lifetime, the policy version, the expiry, and, for a machine login, its confirmation code. The
+the lifetime (`-` for a grant that lasts until its session ends), the policy version, the expiry,
+and, for a machine login, its confirmation code. The
 record's id is the SHA-256 of that text, so a record cannot change without changing its id.
 Decisions are events on the record (`approved`, `denied`, `expired`, `cancelled`, `revoked`), each
 naming who made it.
