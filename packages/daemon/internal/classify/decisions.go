@@ -19,16 +19,18 @@ import (
 // head pushed on top of it until one is pushed onto a green verdict, which clears it: a push onto a
 // head CI has not judged yet, or onto a red that counts nothing, is the same attempt, not a new
 // one. Only a counted head is ever named, so ApplyPush's take-back never undoes a count it did not
-// make.
+// make. A count keeps the mark it replaces (HeadCountedBefore), which the take-back restores: a
+// head whose push has not arrived is counted, and when that push proves handoff-only or the review
+// App's, the attempt is left as it would have been had the push arrived first.
 func AdvancePullRequestHead(pr record.PullRequest, headSHA string) record.PullRequest {
 	pending := headPush(pr.Pushes, pr.HeadSHA, headSHA)
 	pr.Pushes = keptPushes(pr.Pushes, headSHA)
 	switch verdict := HeadVerdict(pr); {
 	case verdict == "red" && !pr.PlannedRed && (pending == nil || (!pending.HandoffOnly && !pending.ByReviewApp)):
 		pr.FixAttempts++
-		pr.HeadCounted = headSHA
+		pr.HeadCountedBefore, pr.HeadCounted = pr.HeadCounted, headSHA
 	case verdict == "green":
-		pr.HeadCounted = ""
+		pr.HeadCounted, pr.HeadCountedBefore = "", ""
 	}
 	if pending != nil && !pending.HandoffOnly {
 		pr.PlannedRed = pending.ByReviewApp
@@ -117,8 +119,9 @@ func carriesApproval(p record.ClassifiedPush) bool {
 }
 
 // ApplyPush records a push and, for the current head, settles its planned mark and takes back
-// exactly its counted fix attempt when the late push is handoff-only or the review App's. A push
-// replaces an earlier record of the same two heads, so a redelivered push is recorded once.
+// exactly its counted fix attempt when the late push is handoff-only or the review App's, restoring
+// the counted attempt's mark that count replaced (AdvancePullRequestHead). A push replaces an
+// earlier record of the same two heads, so a redelivered push is recorded once.
 func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullRequest {
 	pushes := make([]record.ClassifiedPush, 0, len(pr.Pushes)+1)
 	for _, p := range pr.Pushes {
@@ -138,7 +141,7 @@ func ApplyPush(pr record.PullRequest, push record.ClassifiedPush) record.PullReq
 			pr.BlockedAttempts = 0
 		}
 		pr.FixAttempts--
-		pr.HeadCounted = ""
+		pr.HeadCounted, pr.HeadCountedBefore = pr.HeadCountedBefore, ""
 	}
 	return pr
 }

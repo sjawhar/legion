@@ -109,7 +109,7 @@ func (e *Engine) mergeability(ctx context.Context, tx pgx.Tx, fact intake.PullRe
 // (classify.AdvancePullRequestHead).
 //
 // At an exhausted fix-attempt count, a red within the attempt the count last counted - the counted
-// head, or a head pushed on top of it before any push landed on a green verdict - sends nothing back
+// head, or a head pushed on top of it until a push lands on a green verdict - sends nothing back
 // from testing or reviewing (classify.FixAttemptCapHolds): the architect decides what follows. A red
 // at a head pushed onto green moves the issue as below the cap. In awaiting_merge a red always
 // withdraws the READY, whatever the count: no implementer loops there for the cap to bound, and a

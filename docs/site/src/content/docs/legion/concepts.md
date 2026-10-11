@@ -188,13 +188,14 @@ Legion uses GitHub's own review mechanisms rather than labels:
   counts a round: a tester's fail, a review's request for changes, a worker's move back, and the
   daemon's own move when CI turns red or the head starts conflicting with its base. Once
   `max_fix_attempts` runs out, CI red within the attempt that ran it out - the head whose push was
-  counted, and every head pushed on top of it before CI judged a head green - no longer sends the
-  work back from testing or review by itself: the issue stays in its phase through every red in that
-  attempt until the architect moves it, or a worker's own decision does (a tester's fail, a review's
-  request for changes). A head pushed onto green CI raises no count and leaves the attempt, so its
-  red sends the work back as usual; a head pushed before CI judged the one under it raises no count
-  either, but stays in the attempt. The next push onto a red raises the count and is told again. A
-  `READY` is withdrawn on red CI at any count (below).
+  counted, and every head pushed on top of it until a push lands on a head CI judged green - no
+  longer sends the work back from testing or review by itself: the issue stays in its phase through
+  every red in that attempt until the architect moves it, or a worker's own decision does (a
+  tester's fail, a review's request for changes). A head pushed onto green CI raises no count and
+  leaves the attempt, so its red sends the work back as usual. Every other push stays in the
+  attempt, whether it is counted or not: one onto a head CI has not judged yet, and one onto the
+  held red that counts nothing, such as the tester's red tests or its handoff. The next push onto a
+  red raises the count and is told again. A `READY` is withdrawn on red CI at any count (below).
 
 ## READY and the human merge
 

@@ -56,6 +56,30 @@ func TestTheCountedMarkStaysUntilAHeadIsPushedOntoGreen(t *testing.T) {
 	}
 }
 
+// An uncounted push onto a red inside the counted attempt - the review App's red tests, or a
+// handoff-only push - leaves the attempt's mark where it stood, whichever of the push webhook and
+// the synchronize arrives first: synchronize first counts the head until its push is classified,
+// and the push's take-back restores the mark that count replaced.
+func TestAnUncountedPushOntoAMarkedRedKeepsTheMarkInEitherOrder(t *testing.T) {
+	for _, tc := range []struct {
+		name, paths string
+		byReviewApp bool
+	}{
+		{"the review App's red tests", "src/widget_test.go", true},
+		{"a handoff-only push", ".legion/LEGION-208/test.json", false},
+	} {
+		for _, pushFirst := range []bool{true, false} {
+			marked := record.PullRequest{HeadSHA: "h2", CheckedHead: "h2", Failing: []string{"ci"}, Required: []string{"ci"},
+				CheckRuns: []record.AttemptRun{{Name: "ci", ID: 1}}, FixAttempts: 3, BlockedAttempts: 3, HeadCounted: "h2"}
+			got := arrive(marked, "h3", tc.paths, tc.byReviewApp, pushFirst)
+			if got.FixAttempts != 3 || got.BlockedAttempts != 3 || got.HeadCounted != "h2" || got.HeadCountedBefore != "" {
+				t.Errorf("%s, push first %v: fixAttempts=%d blockedAttempts=%d headCounted=%q headCountedBefore=%q, want 3, 3, \"h2\" and \"\"",
+					tc.name, pushFirst, got.FixAttempts, got.BlockedAttempts, got.HeadCounted, got.HeadCountedBefore)
+			}
+		}
+	}
+}
+
 func TestApplySettlementUsesTheExportedSettlementClassifiers(t *testing.T) {
 	prior := record.PullRequest{HeadSHA: "head", CheckRuns: []record.AttemptRun{{Name: "unit", ID: 1}}}
 	got, applied := ApplySettlement(prior, SettlementCandidate{
