@@ -2,7 +2,6 @@ package pmdoc
 
 import (
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -257,11 +256,9 @@ func TestUpdateIsLinearInTheBlockCount(t *testing.T) {
 	t.Run("replacing every other block", func(t *testing.T) {
 		for _, blocks := range alternatingBlocks {
 			fastest := func(what string, op func() time.Duration) time.Duration {
-				best := time.Duration(math.MaxInt64)
-				for range sampleCount {
-					best = min(best, timedWithDeadline(t, fmt.Sprintf("%s at %d blocks", what, blocks), perCallDeadline, op))
-				}
-				return best
+				return fastestOf(func() time.Duration {
+					return timedWithDeadline(t, fmt.Sprintf("%s at %d blocks", what, blocks), perCallDeadline, op)
+				})
 			}
 			// Headings and paragraphs alternate, and every block becomes a paragraph: every heading
 			// is a run of its own, between two paragraphs Update keeps.
@@ -506,15 +503,7 @@ func waitForLeakToClear(t *testing.T, cleared <-chan struct{}) {
 // bound it proves is provable without a real *testing.T failing, a real parse or render, or a
 // hang past some other timeout standing in for the check actually tripping.
 func growthVerdict(sizes []int, allowance int, timed func(size int) time.Duration) (failedStep int, lines []string) {
-	fastest := func(size int) time.Duration {
-		best := timed(size)
-		for i := 1; i < sampleCount; i++ {
-			if sample := timed(size); sample < best {
-				best = sample
-			}
-		}
-		return best
-	}
+	fastest := func(size int) time.Duration { return fastestOf(func() time.Duration { return timed(size) }) }
 	before := fastest(sizes[0])
 	failedStep = -1
 	for i := 1; i < len(sizes); i++ {
@@ -532,6 +521,18 @@ func growthVerdict(sizes []int, allowance int, timed func(size int) time.Duratio
 		before = took
 	}
 	return failedStep, lines
+}
+
+// fastestOf measures timed sampleCount times and keeps the fastest: growthVerdict's sampling, and
+// TestUpdateIsLinearInTheBlockCount's of a write against ygo's walks.
+func fastestOf(timed func() time.Duration) time.Duration {
+	best := timed()
+	for i := 1; i < sampleCount; i++ {
+		if sample := timed(); sample < best {
+			best = sample
+		}
+	}
+	return best
 }
 
 // perCallDeadline bounds every one of growthVerdict's measured calls: well under go test's own

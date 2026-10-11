@@ -222,6 +222,13 @@ func liveAttrs(node *Node) Attrs {
 	return attrs
 }
 
+// emptyChildren is an empty slice of ygo's unexported node type, which insertPChildren's batch must
+// be to pass to YXmlFragment.Insert. It comes from Children of a detached element, which returns
+// its buffered children, none, without walking any document; Children of the fragment being
+// written would walk every item it holds. The element is never inserted anywhere, so its type name
+// is never read. It is built once, so a batch allocates only its own nodes.
+var emptyChildren = crdt.NewYXmlElement("paragraph").Children()
+
 // insertPChildren creates the Yjs type of each of children and inserts them into frag at index in
 // one call. ygo's fragment insert walks the fragment's children to index (leftChildAt), and an
 // element no document holds yet copies the children it buffers on every insert, so inserting a
@@ -235,10 +242,7 @@ func insertPChildren(txn *crdt.Transaction, frag *crdt.YXmlFragment, index int, 
 	if len(children) == 0 {
 		return nil
 	}
-	// ygo's node interface is unexported, so the slice is typed from what Children returns on a
-	// detached element: an empty slice, from no walk. Children of frag itself would walk every item
-	// it holds.
-	nodes := slices.Grow(crdt.NewYXmlElement("paragraph").Children(), len(children))
+	nodes := slices.Grow(slices.Clip(emptyChildren), len(children))
 	for _, child := range children {
 		if child.isText() {
 			text, err := createTypeFromTextNodes(txn, child.text)
