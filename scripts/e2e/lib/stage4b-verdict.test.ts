@@ -401,3 +401,67 @@ if left=$(on_tree T2 left_planning T2); then echo "left planning ($left)"; else 
     expect(violated.stdout).not.toContain("fixture teardown");
   });
 });
+
+// carried-child judges child 3's hand-over write ridden out through a Dispatch that predates
+// labels_add (handover_ridden_out): the outbox retried it at least twice on that field's refusal and
+// never dropped it as refused for good. The checkpoint's control appends one fabricated drop to the
+// live log and needs the verdict to fail; these rows hold the verdict to that, and to counting only
+// the issue's own write.
+describe("stage 4b's hand-over verdict", () => {
+  const refused = (issue: string, row: number) => ({
+    time: "2026-10-11T12:00:00Z",
+    level: "ERROR",
+    msg: "outbox row failed",
+    row,
+    kind: "dispatch_status",
+    error: `hand Dispatch issue ${issue} to Legion as todo: INVALID_JSON: invalid JSON body: json: unknown field "labels_add"`,
+  });
+  const dropped = (issue: string) => ({
+    time: "2026-10-11T12:01:00Z",
+    level: "ERROR",
+    msg: "outbox status write refused by Dispatch and dropped; the issue's later writes go on",
+    row: 7,
+    issue,
+    status: 400,
+    code: "INVALID_JSON",
+    error: "fabricated by the driver",
+  });
+  // ridden is the verdict on a daemon log holding LINES, for issue LEGSMOKE-13.
+  const ridden = (lines: object[]) => {
+    const log = join(dir, `daemon-${++runs}.log`);
+    writeFileSync(log, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
+    const result = Bun.spawnSync([
+      "bash",
+      "-c",
+      `set -Eeuo pipefail
+${fn("handover_refusals")}
+${fn("handover_drops")}
+${fn("handover_ridden_out")}
+if handover_ridden_out ${JSON.stringify(log)} LEGSMOKE-13; then echo ridden-out; else echo not; fi
+`,
+    ]);
+    expect(result.exitCode).toBe(0);
+    return result.stdout.toString().trim();
+  };
+
+  test("passes a write refused twice for labels_add and never dropped", () => {
+    expect(ridden([refused("LEGSMOKE-13", 7), refused("LEGSMOKE-13", 7)])).toBe("ridden-out");
+  });
+
+  test("fails the same log with one fabricated drop of the write", () => {
+    expect(
+      ridden([refused("LEGSMOKE-13", 7), refused("LEGSMOKE-13", 7), dropped("LEGSMOKE-13")])
+    ).toBe("not");
+  });
+
+  test("fails a write refused only once", () => {
+    expect(ridden([refused("LEGSMOKE-13", 7)])).toBe("not");
+  });
+
+  test("counts only the issue's own write, not another issue's or a key it prefixes", () => {
+    expect(ridden([refused("LEGSMOKE-130", 8), refused("LEGSMOKE-1", 9)])).toBe("not");
+    expect(
+      ridden([refused("LEGSMOKE-13", 7), refused("LEGSMOKE-13", 7), dropped("LEGSMOKE-130")])
+    ).toBe("ridden-out");
+  });
+});
