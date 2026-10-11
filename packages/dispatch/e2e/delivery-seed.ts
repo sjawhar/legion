@@ -47,6 +47,36 @@ export async function seedDeliveryFixture(): Promise<void> {
   );
 }
 
+/** The session-groups fixture, relative to now so the window control's presets see it: two
+ *  population pull requests merged in the last seven days, first written by sessions
+ *  `e2e-planner-1` and `e2e-planner-2`, and one merged 20 days ago, first written by
+ *  `e2e-reviewer`. Each session carries the title Dispatch learns it by: an event the session
+ *  wrote with its origin's `session_title` (delivery/agents.go's ResolveSessionTitles). */
+export async function seedSessionGroupsFixture(): Promise<void> {
+  await sql(
+    SETTINGS,
+    `INSERT INTO projects (key, name) VALUES ('ACME', 'Acme') ON CONFLICT DO NOTHING`,
+    `INSERT INTO issues (key, project_key, number, title, status, priority, created_by, rank)
+     VALUES ('ACME-7', 'ACME', 7, 'Group the planners', 'todo', 1, ${SEED_ACTOR}, 'U')`,
+    `INSERT INTO delivery_pull_requests (
+       repo, number, title, url, author, created_at, merged_at, additions, deletions, rework, issue_key, sessions, partial
+     ) VALUES
+       ('acme/widgets', 11, 'feat: plan the widgets', 'https://github.com/acme/widgets/pull/11', 'octocat',
+        now() - interval '2 days 1 hour', now() - interval '2 days', 10, 2, false, null, ARRAY['e2e-planner-1'], false),
+       ('acme/widgets', 12, 'feat: plan the gadgets', 'https://github.com/acme/widgets/pull/12', 'octocat',
+        now() - interval '3 days 1 hour', now() - interval '3 days', 8, 1, false, null, ARRAY['e2e-planner-2'], false),
+       ('acme/widgets', 13, 'feat: review the widgets', 'https://github.com/acme/widgets/pull/13', 'octocat',
+        now() - interval '20 days 1 hour', now() - interval '20 days', 5, 5, false, null, ARRAY['e2e-reviewer'], false)`,
+    `INSERT INTO events (issue_key, seq, type, actor, payload, notify, created_at) VALUES
+       ('ACME-7', 1, 'message.created',
+        '{"kind":"session","id":"e2e-planner-1","origin":{"session_title":"Planner, first run"}}', '{}', false, now() - interval '4 days'),
+       ('ACME-7', 2, 'message.created',
+        '{"kind":"session","id":"e2e-planner-2","origin":{"session_title":"Planner, second run"}}', '{}', false, now() - interval '4 days'),
+       ('ACME-7', 3, 'message.created',
+        '{"kind":"session","id":"e2e-reviewer","origin":{"session_title":"Reviewer"}}', '{}', false, now() - interval '21 days')`
+  );
+}
+
 /** The measures fixture's window (packages/envoy/internal/dispatch/delivery/measures/testdata/
  *  dora-fixture.json, the prototype's own web/fixtures/dataset.json with its names replaced). */
 export const FIXTURE_WINDOW = { from: "2026-08-30T00:00:00Z", to: "2026-09-27T20:00:00Z" } as const;
