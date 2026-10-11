@@ -2232,8 +2232,13 @@ and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other com
 with the same not-logged-in notice naming `agent-secrets machine login`.
 
 `agent-secrets renew --pod-token-file FILE` is the pod renewer: it re-reads and trims the
-projected token before every broker request, refuses a blank or unreadable file without making a
-bodyless request, and sends it as `pod_token`. The worker shim passes its projected token file.
+projected token before every broker request, and sends it as `pod_token`. A blank or unreadable
+file makes no request: the renewer prints `ERROR: enrollment <id> cannot read its pod token
+(<reason>); nothing was sent, so its lease lapses unless the file becomes readable`, the only
+record naming the lapsing enrollment since the broker hears nothing, and retries rather than
+exiting 76 - at start it exits 2 and the shim starts it again, and after a renewal it waits and
+reads again. The worker shim passes its projected token file and writes the renewer's stderr to
+its own.
 The client works against a broker that predates the renewal body because that handler reads no
 body. The terminal renewal refusals are one set in `cmd/agent-secrets` (`terminalRenewal`):
 `POD_TOKEN_REQUIRED`, `ENROLLMENT_NOT_LIVE`, and an older broker's `PROOF_INVALID` whose message

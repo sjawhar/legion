@@ -23,6 +23,12 @@ generated from the code, lists every code.
 | `the launcher credential reached its expiry; run: agent-secrets machine login`, or `the broker refused the launcher credential (expired or revoked, …); run: agent-secrets machine login` (from `machine login-status`) | The credential expired or was refused: past its lifetime, [revoked by the person who approved it](/legion/broker/guides/revoke-a-session/#end-a-machines-login), a clock far off the broker's, or an `AGENT_SECRETS_URL` that is not exactly the broker's public URL. | Fix the clock or the URL if either is wrong, then log in again. |
 | `PROOF_INVALID` | The broker refused the session's signature: the session ended (its lease lapsed, its process exited, its launcher unenrolled it, or its machine's login was revoked), the clock is off by more than `BROKER_PROOF_SKEW_SECONDS`, or `AGENT_SECRETS_URL` differs from the broker's public URL. | Start a new session (a box: a new key and enrollment, [run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/)); check the clock and the URL. |
 
+## A pod's renewer cannot read its token
+
+| Message | Cause | Fix |
+| --- | --- | --- |
+| `agent-secrets renew: ERROR: enrollment … cannot read its pod token (…); nothing was sent, so its lease lapses unless the file becomes readable` | The pod's renewer (`agent-secrets renew --pod-token-file`) could not read its projected service-account token, or read it blank, so it sent the broker nothing. The broker never hears of it, so this line in the pod's container log is the only record. The renewer does not exit 76 for it: at start it exits 2 and the worker shim starts it again 5 s later, and after a renewal it waits and reads the file again. If the file stays unreadable the enrollment's lease lapses, and its grants end with it. | Check the projected-token volume is mounted read-only at `/var/run/legion/agent-secrets-token` in that role's container, with the file `token` present and non-empty, and that the container's user can read it: the volume's mode is `0440`, readable through the pod's `fsGroup`. Once the file is readable, the next renewal succeeds. |
+
 ## The request was refused
 
 | Message | Cause | Fix |
