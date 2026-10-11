@@ -2,8 +2,11 @@ package supervise
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/runtime"
@@ -46,11 +49,15 @@ const (
 	// past them the enrollment's lease, which nothing renews once the pod is gone, ends it.
 	revokeAttempts   = 3
 	revokeRetryDelay = 10 * time.Second
+	// podTokenSkew is how far the broker's clock, which judges a pod token's expiry, may run
+	// ahead of the daemon's before a token the daemon judged unexpired is refused anyway.
+	podTokenSkew = time.Minute
 )
 
 // heldIdentity is the latest hello2 identity for the claim's current incarnation, kept in memory
 // until the enrollment lands: a resume enrolls on the hello itself, a fresh launch once the agent
-// registers and the session id is known.
+// registers and the session id is known. Its token is the one the hello carried until freshToken
+// replaces it with one the shim read later.
 type heldIdentity struct {
 	incarnation string
 	AgentSecretsIdentity
@@ -73,6 +80,9 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 	}
 	if m.claim.Enrollment == nil || m.claim.Enrollment.Incarnation != incarnation {
 		if m.identity == nil || m.identity.incarnation != incarnation || m.claim.Session == "" {
+			return nil
+		}
+		if !m.freshToken(ctx, incarnation) {
 			return nil
 		}
 		enrolling, cancel := context.WithTimeout(ctx, m.deps.Timeouts.RPC)
@@ -114,6 +124,61 @@ func (m *Machine) ensureEnrolled(ctx context.Context) error {
 	}
 	m.enrollmentSent = true
 	return nil
+}
+
+// freshToken reports whether the held token can be presented, first asking the shim to read it
+// again when it cannot. The shim reads its projected token at each hello, the token lives at most
+// an hour from when the kubelet wrote it, and an enrollment can wait much longer after the hello
+// (a machine login awaiting approval, a broker outage); the broker refuses an expired token as
+// POD_IDENTITY_MISMATCH. So a token that could expire before the broker verifies it (within the
+// Enroll call's RPC bound plus podTokenSkew), or whose expiry cannot be read, is replaced by the
+// one the shim reads from its mount now. A shim that cannot read it again, one built before the
+// request among them, drops the identity to wait for its next hello, as a refused enrollment
+// does; a lost request is asked again on the next observation, and with no connection the next
+// hello carries a token read then.
+func (m *Machine) freshToken(ctx context.Context, incarnation string) bool {
+	if expires, ok := podTokenExpiry(m.identity.PodToken); ok && expires.After(m.deps.Clock.Now().Add(m.deps.Timeouts.RPC+podTokenSkew)) {
+		return true
+	}
+	conn, ok := m.deps.Conns.Conn(m.claim.Token)
+	if !ok {
+		return false
+	}
+	reading, cancel := context.WithTimeout(ctx, m.deps.Timeouts.RPC)
+	token, err := conn.AgentSecretsToken(reading)
+	cancel()
+	switch {
+	case errors.Is(err, runtime.ErrTokenRefused):
+		m.log.Error("supervise: agent-secrets: the shim did not read its projected token again; waiting for its next hello", "incarnation", incarnation, "error", err)
+		m.identity = nil
+		return false
+	case err != nil:
+		m.log.Warn("supervise: agent-secrets: the shim did not answer for its projected token; retrying on the next observation", "incarnation", incarnation, "error", err)
+		return false
+	}
+	m.identity.PodToken = token
+	return true
+}
+
+// podTokenExpiry is a JWT's exp claim, read without verifying anything: the broker verifies the
+// token, and the machine only judges whether presenting it could still succeed. false for a token
+// whose expiry cannot be read.
+func podTokenExpiry(token string) (time.Time, bool) {
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || claims.Exp == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0), true
 }
 
 // revoke ends the let-go process's enrollment at the broker: the first attempt on a goroutine of

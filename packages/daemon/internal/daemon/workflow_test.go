@@ -62,3 +62,16 @@ func TestOpenWorkflowRefusesAReviewLoginItCannotTellFromTheImplementers(t *testi
 		})
 	}
 }
+
+// The boot mint hands back the review App's bot login — the login the engine judges a push's pusher
+// against — from the lease it minted.
+func TestMintAtBootReturnsTheReviewAppLogin(t *testing.T) {
+	tokens := loginTokens{appauth.Implement: "legion-implementer[bot]", appauth.Review: "legion-reviewer[bot]"}
+	login, err := mintAtBoot(context.Background(), tokens, "acme", slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("mintAtBoot: %v", err)
+	}
+	if login != "legion-reviewer[bot]" {
+		t.Fatalf("mintAtBoot = %q, want the review App's login %q", login, "legion-reviewer[bot]")
+	}
+}

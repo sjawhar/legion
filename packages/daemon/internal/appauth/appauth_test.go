@@ -192,7 +192,8 @@ func TestTokensMintsRefreshesAndCachesIdentity(t *testing.T) {
 		t.Fatalf("cached token: %v", err)
 	}
 
-	now = now.Add(55*time.Minute + time.Second)
+	// The hour-long lease has fewer than refreshWindow's twenty minutes left: the next call mints.
+	now = now.Add(40*time.Minute + time.Second)
 	refreshed, err := tokens.Token(context.Background(), Implement, "sjawhar")
 	if err != nil {
 		t.Fatalf("refreshed token: %v", err)

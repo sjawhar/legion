@@ -1,101 +1,77 @@
 # Review threads
 
-Part of `skill://legion-worker`. Read it when you reply to, accept, or resolve a review thread,
-or run `legion threads resolve`: the implementer after every push that answers a review, the
-merger before READY, and the reviewer, who answers threads on every re-review and runs the command
-only when a review workflow the project declares is red on a bot's findings.
-Every path it cites is in sjawhar/legion.
+Part of `skill://legion-worker`. Read it when you reply on or resolve a review thread, list a pull
+request's threads, or adjudicate a bot's finding: the implementer after every push that answers a
+review, and the reviewer on every re-review. Every path it cites is in sjawhar/legion.
 
-- **Threads are dispositioned individually, never resolved in bulk.** Every open review
-  thread gets its own line naming the fixing commit or the reason it isn't a defect. The
-  reviewer answers each thread it opened, and each thread a bot opened that is none of Legion's
-  role Apps, with exactly one of `Accepted: fixed in <commit> — <one line>`,
-  `Accepted: not a defect — <reason>`, or `Still open: <what remains>`; nothing else is an
-  acceptance, and nobody replies after an `Accepted:` (any later reply that is not itself an
-  `Accepted:` — the opener's own follow-up included — leaves the thread open, because resolution
-  considers only the newest comment). The review App can reply on a thread but cannot resolve it:
-  GitHub grants resolving a review thread to the pull request's author, and the implementer opens
-  every Legion pull request (`docs/site/src/content/docs/legion/running-legion.md`, "The two
-  GitHub Apps"). In the reviewer's pane (`LEGION_ROLE=reviewer`), `legion threads resolve` asks
-  the daemon instead (`POST /legion/v1/threads/resolve`), which resolves as the implementer's App
-  only the threads a bot outside Legion's role Apps opened whose newest submitted comment is the
-  reviewer's `Accepted:`, on the pull request of the reviewer's own issue, and prints the same
-  lines; the reviewer never holds the implementer's token. A thread whose newest comment is a
-  draft in the implement App's pending review (the implementer's or the merger's: GitHub shows it
-  to that App alone, as which the daemon reads) is left open and never named: the command prints
-  only how many there are (`<n> unresolved threads hold the implement App's pending draft and
-  were left open`) and exits 1, as it does on a refusal. Report that count to the architect before
-  you spend your one re-run of the failed workflow; the architect sends the issue back so the
-  implementer submits or discards its pending review. Once the review is submitted, the
-  implementer's reply is the thread's newest comment, which leaves it open: answer the thread
-  again, then run the command again. Once the review is discarded, your `Accepted:` is the newest
-  comment again, and running the command again closes the thread.
-  When `LEGION_GRANT_FILE` or `LEGION_GRANT` is set, use `legion threads resolve --pr <number> --repo <owner>/<repo>`.
-  When neither is set, add `--gh` to that command, which applies the fallback's rule below through
-  your own `gh`; where no `legion` command is installed, use `gh api graphql` with the session's
-  GitHub credential and the fallback below.
-  In a Legion pane, the **implementer** runs the command after every push that answers a review
-  and before its `handoff_complete`, and pastes its output, stamped with the head it just pushed, into
-  the `Threads` section. The output is then recorded against the head the reviewer will read, and
-  nothing reads thread state before the implementer's completion. The command resolves each
-  unresolved thread whose newest submitted comment is the opener's own `Accepted:` reply. On a
-  thread a bot account opened that is none of Legion's role Apps (the daemon names them, keyed by
-  App role), the Legion reviewer's `Accepted:` also closes it. GitHub cannot tell a CI bot, which
-  never accepts, from a person whose `gh` is routed to an App, so the reviewer adjudicates such a
-  finding, and it may accept one an App-routed person raised. The subject of a finding never
-  closes it: the implementer's `Fixed in <commit>: …` or `Declined: …` answers a thread and closes
-  none. A thread either Legion App opened, a reviewer's finding included, still needs its opener's
-  `Accepted:`. It makes one `resolveReviewThread` per
-  thread, prints `resolved <url> — <whose acceptance>` (its opener's, or the Legion reviewer's on a
-  bot's thread, so the ledger shows which) or `left open <url> — newest reply by <login> is …`
-  naming why, and exits 1 naming the thread's URL and GitHub's message when GitHub refuses one.
+Three facts govern every thread, whoever opened it.
 
-  Without a grant, page through `reviewThreads`, skip `isResolved: true`, and compare the opener
-  with the newest comment. Query shape, inside `repository { pullRequest { … } }`:
+- **Reply on each thread you answer, one disposition reply per thread.** Every open review thread
+  gets its own reply naming the fixing commit or the reason it isn't a defect: the implementer's
+  `Fixed in <commit>: <one line>` or `Declined: <reason>`; the reviewer's reasons in its own words —
+  the commit that fixed it, why it is not a defect, or what still stands. No word in a reply
+  resolves anything, and nothing reads a reply for a magic form: a thread is resolved only by the
+  resolution below, after its reply.
+- **Resolve each thread you have answered, one thread per call, never in bulk, never a thread you
+  have not read.** GitHub grants `resolveReviewThread` to the pull request's author, and the
+  implementer opens every Legion pull request (`docs/site/src/content/docs/legion/running-legion.md`,
+  "The two GitHub Apps"), so the implementer resolves every thread, its own and the ones the
+  reviewer accepted:
+  - The **implementer**, after every push that answers a review and before its `handoff_complete`,
+    resolves each thread it answered with its own `gh`, one thread per call:
 
-  ```graphql
-  reviewThreads(first: 100, after: $after) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id isResolved
-      opener: comments(first: 1) { nodes { author { __typename login } } }
-      newest: comments(last: 1) { nodes { author { __typename login } body state } }
-    }
-  }
-  ```
+    ```bash
+    gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -F id=<thread node id>
+    ```
 
-  Resolve only when the newest comment is submitted, its `author` is the opener's account (the same
-  `__typename` and `login`: a login alone is a string anyone may register), and its `body`, after
-  removing leading spaces, tabs, CR, and LF, begins `Accepted:`. Without a
-  grant nothing names Legion's own App logins, so this route closes a bot's thread only on its
-  opener's `Accepted:`: leave one the Legion reviewer accepted for the implementer's or merger's
-  run in a pane, or report it. For each thread to resolve:
+    A thread a bot opened (a CI bot's, or an App-routed person's) it answers the same way; the
+    reviewer adjudicates the finding. The bot threads the reviewer accepted, which the reviewer
+    names to the implementer by node id (below), the implementer resolves with the same call, one
+    per thread, as soon as the message reaches it or as part of answering that review, and records
+    in the PR body's `Threads` section too; never one the reviewer did not name. When GitHub refuses
+    a resolution, report the thread and GitHub's message to the architect with `envoy_publish`,
+    which opens a `dispatch ask` for a human to resolve it by hand; never skip it silently.
+  - The **reviewer** cannot resolve a thread as its own App: GitHub refuses the review App
+    `resolveReviewThread` on the implementer's pull request, so it replies, and names the threads
+    it accepted to the implementer, who resolves them. List the pull request's threads:
 
-  ```graphql
-  mutation($threadId: ID!) {
-    resolveReviewThread(input: { threadId: $threadId }) { thread { isResolved } }
-  }
-  ```
+    ```bash
+    gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved comments(last:1){nodes{author{login} body}}}}}}}' -F o=<owner> -F r=<repo> -F n=<number>
+    ```
 
-  Re-read `reviewThreads` and confirm that thread's `isResolved` is true. In either route, report
-  a refused resolution to the architect, which opens an ask for a human to resolve the thread by
-  hand — never skip it silently. The merger runs the command once more before its READY
-  completion and does not complete while any `left open` line remains. That run is where every accepted
-  thread's resolution is guaranteed, since the merge queue's gate counts the unresolved threads at
-  the head. Acceptances posted after the implementer's last run are resolved here.
+    Reply on each thread you answer, then tell the implementer the node ids of exactly the threads
+    you accepted — a bot's findings you adjudicated — never one you have not read: an
+    `envoy_publish` to the implementer's role topic (it is live on the issue and answers while you
+    wait; `skill://legion-worker` "Asking another role" has the topic), or your review body, which
+    it reads at its next round. The implementer resolves exactly those with its own `gh`. GitHub
+    cannot tell a CI bot from a person whose `gh` is routed to an App, so such a thread may be a
+    person's finding: accept it only when the finding itself is settled (a genuine Minor is settled
+    by being judged Minor), since the resolution says you judged it.
+- **A reviewer who disagrees with a resolution replies and unresolves it.** Resolution is a
+  judgment, not a ledger entry: a thread the implementer resolved whose finding still stands gets
+  the reviewer's reply saying what stands and is unresolved, and a finding the reviewer cannot
+  accept becomes its own, with a `REQUEST_CHANGES` naming it.
 
-- **The reviewer, on a re-review.** When you re-review after a corrective push, answer every
-  thread you opened, and every thread a bot opened that is none of Legion's role Apps, in one of
-  the three forms above — `Accepted:` is the only reply `legion threads resolve` acts on. A bot's
-  finding you cannot accept becomes your own: leave it `Still open:` and request changes.
-  Approve once each of those threads has your own `Accepted:` as its newest submitted comment,
-  whether or not GitHub shows the thread resolved yet, and every other unresolved thread its
-  opener's (read the newest comments with `gh api graphql`, never from the PR body). Another
-  opener's thread that a person resolved with GitHub's button, with no `Accepted:`, gates nothing:
-  neither `legion threads resolve` nor the merge queue's gate counts a resolved thread. Resolution
-  is the pull request author's App's, so your approval never waits on it, except when a review
-  workflow the project declares (`projects.<KEY>.review_workflows`) is red on its findings: such a
-  workflow passes on a re-run only once its threads are resolved, so you run `legion threads
-  resolve` (the daemon resolves the bot threads you accepted) and re-run the failed run before you
-  approve, as your role prompt says.
-  The merger resolves accepted threads that remain open before its READY completion.
+## The PR body's `Threads` section
+
+The implementer records each thread it answered in the PR body's `Threads` section
+(`skill://legion-worker/references/pr-body.md`), stamped with the head it just pushed: the thread's
+id, its disposition (`fixed in <commit-sha> — <one line>` or `not a defect — <reason>`), and the
+head that answered it. The reviewer verifies thread state in `gh api graphql`, never from that
+section: it is the implementer's record, and GitHub is the fact.
+
+## The reviewer, on a re-review
+
+When you re-review after a corrective push, answer every thread you opened, and every thread a bot
+opened that is none of Legion's role Apps, with one reply in your own words. A bot's finding you
+cannot accept becomes your own: say what stands and request changes. Approve once each of those
+threads carries your answer and no finding stands, read in `gh api graphql` — quote those answers
+in the approval. Your approval never waits on a resolution: resolution is the pull request author's
+App's, except when a review workflow the project declares (`projects.<KEY>.review_workflows`) is
+red on its findings. Such a workflow starts again only on a push, so neither a reply nor a
+resolution re-runs it, and it passes on a re-run only once its threads are resolved: answer its
+threads, name the ones you accepted to the implementer with `envoy_publish` to its role topic, and
+read the listing above until each shows `isResolved` true before you push your handoff, so the run
+that push starts reads the threads as the implementer left them; then re-run the failed run once,
+as your role prompt says, before you approve. The merger resolves nothing: READY requires no thread
+state beyond what your approval already judged.

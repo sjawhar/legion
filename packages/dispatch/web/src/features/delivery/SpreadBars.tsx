@@ -12,7 +12,7 @@ export interface SpreadBarDay {
 }
 
 interface Props {
-  days: SpreadBarDay[];
+  days: readonly SpreadBarDay[];
   // Omitted where no target exists: no target line, and bars in one neutral colour.
   target?: number;
   noun: string; // what `n` counts, "runs"

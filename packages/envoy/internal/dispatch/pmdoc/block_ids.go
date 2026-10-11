@@ -88,10 +88,11 @@ func walkBlockIDs(tree *Node, visit func(id string) bool) {
 	})
 }
 
-// BlockIDRepairCount reports how many block IDs EnsureBlockIDs would mint.
+// BlockIDRepairCount reports how many block IDs EnsureBlockIDs would mint. Like EnsureBlockIDsCount
+// it needs no positions, so it walks the tree without sizing every node (Walk).
 func BlockIDRepairCount(tree *Node) (repairs int) {
 	seen := make(map[string]struct{})
-	walk(tree, func(node *Node, _ []int, _, _ int) bool {
+	Walk(tree, func(node *Node) bool {
 		if node.Type == "doc" || isInlineNodeType(node.Type) {
 			return true
 		}
@@ -111,7 +112,7 @@ func BlockIDRepairCount(tree *Node) (repairs int) {
 // (storedBlockID) or duplicate IDs it replaced.
 func EnsureBlockIDsCount(tree *Node) (stamped int) {
 	seen := make(map[string]struct{})
-	walk(tree, func(node *Node, _ []int, _, _ int) bool {
+	Walk(tree, func(node *Node) bool {
 		if node.Type == "doc" || isInlineNodeType(node.Type) {
 			return true
 		}
