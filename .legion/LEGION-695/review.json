@@ -2,40 +2,59 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "LEGION-695",
-  "completed": "2026-10-12T16:42:00Z",
+  "completed": "2026-10-12T19:24:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1928",
-  "round": 1,
-  "reviewedHead": "8b1af196627ec5fab8bdc79d381a77b7b5180454",
-  "codeHead": "197c0b4946068d73185312ccd1c581aa8c3fa500",
+  "round": 2,
+  "reviewedHead": "61d72a1c00ed22da09e6404a61b2c4bda8dee31b",
+  "codeHead": "fcf0ad1b1b66f45b99b62ed04a067ac42f0e4ecb",
   "verdict": "changes_requested",
   "critical": 0,
   "important": 2,
-  "minor": 1,
+  "minor": 3,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/doc/picture-view.ts:73",
-      "description": "`ignoreMutation: () => true` on a leaf node view also swallows ProseMirror's synthetic selection record (prosemirror-view 1.42.3 dist/index.js:4773-4791, consulted through CustomNodeViewDesc.ignoreMutation at :1632-1634). The leaf default, `!contentDOM && mutation.type != \"selection\"` (:1110-1111), already ignores the <img>→<a> swap the comment cites, so the override buys nothing and leaves `state.selection` stale when a DOM selection settles inside the fallback link (drag-selecting its words, or a click in a browser that keeps focus on the editing host); the next keymap command then edits at the old caret. Fix: drop the property (or `(m) => m.type !== \"selection\"`) and update picture-view.test.ts:84."
+      "file": "packages/dispatch/AGENTS.md:719",
+      "description": "Documentation correctness: the passage ends '`ignoreMutation` is always true, since the swap from `<img>` to `<a>` is the one DOM change it makes itself and is never an edit' - the view has had no `ignoreMutation` since 8af418cf (picture-view.ts returns `{ dom }` or `{ dom, stopEvent }`), removed because `() => true` swallowed ProseMirror's selection record (round 1). The sentence documents the round-1 defect as a rule a future reader would restore. Correct statement: the view sets no `ignoreMutation`; prosemirror-view's leaf default (`!contentDOM && mutation.type != \"selection\"`, dist/index.js:1110-1111) already ignores the swap and still reports selection records."
     },
     {
       "severity": "important",
-      "file": "packages/dispatch/web/src/features/doc/picture-view.ts:76-77",
-      "description": "`stopEvent` is true for every event inside the fallback <a>, so `dragstart` whose source is that anchor (an `a[href]` is draggable by default, and the browser picks the nearest draggable ancestor-or-self of the mousedown target) never reaches `handlers.dragstart` (index.js:3802-3832 via eventBelongsToView :3173-3183); `view.dragging` stays null, and on drop `handleDrop` (:3849-3903) parses the browser's own `text/html` for the link and inserts `[KEY notes-md](http://…/issues/KEY/artifacts/notes-md?v=1)` at the drop point while the picture node stays - words the view invented reach the stored markdown, and the original is not moved. No `handleDrop`/`transformPasted` prop intercepts (grep of packages/dispatch/web/src and packages/proof-editor/src). Fix: `link.draggable = false` so the wrapper (ProseMirror's draggable leaf root) is the drag source and the picture node is dragged as the <img> case is; or exclude `dragstart` from `stopEvent`. Keep `copy` stopped: PM's copy handler would serialize its own (stale) selection instead of the words the user selected."
+      "file": "packages/dispatch/AGENTS.md:719; packages/dispatch/web/src/features/doc/picture-view.ts:14-17",
+      "description": "Documentation correctness: 'the read-only version view has no click handler so there the browser follows its `href`' is not what happens. `click` is not a prosemirror-view native handler, so proof-editor's `markdownLinkClickPlugin` (`handleDOMEvents.click`, lib.ts:343) runs ungated by `stopEvent`; on a non-editable view `shouldOpenLinkForEvent` is `!event.defaultPrevented` and the plugin `preventDefault`s and opens the href in a new tab (`window.open(href, '_blank', 'noopener,noreferrer')`) - the tester observed exactly this. In the live editor the in-app navigation also depends on that plugin declining an unmodified primary click on an editable view (markdown-link-click.ts:521-527). Same passage: `RefPreviewHost` is not the only hover card - the library's link card (`handleMouseMove` -> `showCardForLink`, any `a[href]` outside `[data-mark-id]`, editable view) opens on the same element, so a fallback link shows two cards; settle (suppress one) or document."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/web/src/features/doc/picture-view.ts:46",
-      "description": "Hardening, no exploit path: `DOMSerializer.renderSpec(document, toDOM(node))` omits the `blockArraysIn` argument prosemirror-view passes as `node.attrs` (index.js:1314), the guard that makes prosemirror-model throw on an array-valued attribute used as a DOM spec. Not reachable today (Milkdown's image attrs validate as strings). `renderSpec(document, toDOM(node), null, node.attrs)` matches the library."
+      "file": "packages/dispatch/AGENTS.md:1067-1068",
+      "description": "The exhaustive list of specs the `firefox` Playwright project runs was not extended with `e2e/picture-link-click.e2e.ts`, which playwright.config.ts:151-152 now matches."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/doc/picture-view.ts:95-96",
+      "description": "Hardening: `stopEvent` is still true for `dragstart` whose target is inside the link. `link.draggable = false` removes the known path (the wrapper is the drag source), but a drag of a DOM selection made over the link's words still fires `dragstart` inside the link, leaves `view.dragging` null and sends the drop down `handleDrop`'s external-HTML branch - the round-1 shape. Returning false for `dragstart` costs nothing: `handlers.dragstart` (:3816-3819) resolves the wrapper's desc and drags the picture node. Not reproduced in a browser."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/doc/ask-block.ts:390-398",
+      "description": "Structure (Fast-follow): the Firefox caret workaround's reason lives in picture-view.ts:31-40 and its implementation (the `TextSelection` dispatch at `getPos() + node.nodeSize`) in ask-block.ts; a `pictureNodeView(view)` exported from picture-view.ts would keep them together and leave ask-block.ts to the typed blocks."
     }
   ],
+  "round1": {
+    "reviewedHead": "715590d7c6bdca589b7dec439b439230eb3752f1",
+    "verdict": "changes_requested",
+    "threads": {
+      "PRRT_kwDORFy7ds6rjBua": "fixed in 8af418cf - ignoreMutation override removed; accepted",
+      "PRRT_kwDORFy7ds6rjBud": "fixed in 8af418cf - link.draggable = false, e2e drag lock, proven in Chromium and Firefox; accepted",
+      "PRRT_kwDORFy7ds6rjBuf": "declined - published renderSpec signature has three parameters (prosemirror-model dist/index.d.ts:150), guard not engaged; accepted as not a defect"
+    }
+  },
   "thermonuclear": {
-    "head": "8b1af196627ec5fab8bdc79d381a77b7b5180454",
-    "deepReview": "3 findings (1 Important, 2 Minor incl. hardening); XSS/URL-injection traced and cleared; PR body claims traced and hold except the drag path above.",
-    "codeQuality": "1 Important (the dispatch:// gate + alt-or-slug caption now lives in three modules; it is the PR's declared Fast-follow, which the repository's No-deferrals rule allows for duplication cleanup, so it is not blocking), 4 Minor (naming/wording), none blocking."
+    "head": "61d72a1c00ed22da09e6404a61b2c4bda8dee31b",
+    "deepReview": "0 Critical/Important; 4 Minor (the two AGENTS.md inaccuracies, the double hover card, the stale PR-body Look-at-first), 2 hardening (stopEvent/dragstart; renderSpec guard, traced non-exploitable). Round-1 fixes re-traced and hold; placeCaretAfter mechanism traced end to end (position validity, selectionToDOM in each focus state, plugins inert for a selection-only transaction, read-only view, drag after the dispatch).",
+    "codeQuality": "Rated the two AGENTS.md sentences and the split caret workaround Important; the stale firefox list, getIssueArtifactText, PictureReference's `caption: \"\"` and the CHANGELOG wording Minor/hardening. pictureReference refactor output-identical in both callers."
   },
   "verified": {
-    "ci": "At the code head 197c0b49: Tests run 38271039591 (lint, typecheck, test) success; Legion Envoy and Contracts run 38271039594 success (dispatch job incl. the browser suite); PR Title runs 38271039587/38271128996/38273829611 success; Docs 38271039667 and Worker Image 38271039599 success. No run on 8b1af196 (handoff-only, skip-checks). read_record: checksVerdict green at 8b1af196.",
-    "threads": "0 review threads, 0 reviews on the pull request before this round (gh api graphql).",
-    "proofs": "E2E (implementer) at 5caee947 and E2E (tester) at 197c0b49 both present in the PR body: dispatch:local + real dispatch CLI + real Chromium, command, observation, head, negative control (the @v9 missing version -> fallback link, 0 <img>). Runtime code unchanged between 5caee947 and 197c0b49 (cdb6c16e touches picture-view.test.ts only)."
+    "ci": "At d68babb9 (the round-3 code push's head): Tests 38289216530 (lint, typecheck, test) success; Legion Envoy and Contracts 38289216494 success, its dispatch job (browser suite incl. picture-link-click.e2e.ts on chromium, iphone and firefox - `bunx playwright test --config e2e/playwright.config.ts` runs every project) success; PR Title 38289216480/38289275413/38291696154, Docs 38289216574, Worker Image 38289216485 success. No run on 61d72a1c (handoff-only, skip-checks); read_record checksVerdict green.",
+    "threads": "3 threads, all mine from round 1, each answered by the implementer with a Fixed/Declined reply and resolved by it at b1c1e709; the declined one verified (dist/index.d.ts:150).",
+    "proofs": "E2E (implementer) round 3 at fcf0ad1b (dispatch:local, real CLI, Firefox 155 and Chromium, 40-paragraph spec, negative control: with placeCaretAfter() removed the firefox row fails as the tester saw) and E2E (tester) round 3 at d68babb9 (own instance, both engines, red test 3 passed, right-click negative control) present in the PR body."
   }
 }
