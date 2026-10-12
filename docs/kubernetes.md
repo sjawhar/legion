@@ -1989,6 +1989,24 @@ runtime, in the production cluster's namespace `legion`, against production Disp
 listener and NATS, with real agents. What it holds, and what it touches in production, is in
 [`scripts/e2e/README.md`](../scripts/e2e/README.md#stage4b-sandbox-treesh).
 
+### Probing a configuration before the daemon boots on it
+
+`legion probe-boot --config <legion.yaml>` runs the part of a Kubernetes daemon's boot that the
+operator's worker pod can refuse, from that configuration, and exits: boot's reads of the
+configuration and the files it names (the loader that runs neither App's `private_key_command`,
+then `readBoot`), the cluster check (Agent Sandbox installed, no Sandbox of an older layout), and the
+image probe Sandbox a booting daemon runs, built by the same code from the operator's pod — its
+ServiceAccount, volumes, mounts and environment — and judged the same way
+(`packages/daemon/internal/daemon/probeboot.go`, `sandbox.NewProber`). It runs under the credentials
+`runtime.kubernetes` names, so in a pod it acts as that pod's ServiceAccount. It opens no store, mints
+no GitHub App token, connects to no NATS and lists no Dispatch issue: the boot stages after the probe,
+none of which reads the worker pod. On a pass it prints
+`probe-boot: OK project=<project> image=<image> model-fallback=<mark> capacity-waits=<n>` and exits
+0; a refusal is boot's own, on stderr, and exits 1. A change to the worker pod (a new projected
+token, a ConfigMap mount, a variable) is proven with it on a cluster that admits Legion's pods before
+any daemon restarts on it: a pod the cluster would not admit, mount or start fails here as it would
+fail the daemon's boot.
+
 ## Kubernetes runtime (TypeScript daemon)
 
 This section is the TypeScript daemon's runtime, which it no longer runs: it refuses `runtime:

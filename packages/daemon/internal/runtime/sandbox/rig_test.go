@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
+	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -223,6 +224,9 @@ type rig struct {
 	noController bool
 	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
 	hooks *sandboxHooks
+	// prober builds the runtime as NewProber does: the probe's configuration and the informers
+	// alone (asProber).
+	prober bool
 
 	// commands are what each role's fake launcher was sent, in order; wanted are the roles whose
 	// fake launcher connects again whenever their issue gets a new pod.
@@ -317,7 +321,15 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 		option(g, &opts)
 	}
 	g.store, _ = opts.Store.(*fakeStore)
-	r, err := configure(opts)
+	configureRuntime, startRuntime := configure, (*Runtime).start
+	if g.prober {
+		configureRuntime = configureProber
+		startRuntime = func(r *Runtime, ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
+			_, err := r.startInformers(ctx, dyn, kube)
+			return err
+		}
+	}
+	r, err := configureRuntime(opts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -325,7 +337,7 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 	if g.hooks != nil {
 		dyn = hookedDynamic{g.dyn, g.hooks}
 	}
-	if err := r.start(ctx, dyn, g.kube); err != nil {
+	if err := startRuntime(r, ctx, dyn, g.kube); err != nil {
 		t.Fatal(err)
 	}
 	g.r = r

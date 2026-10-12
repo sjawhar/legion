@@ -45,6 +45,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
+	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -120,18 +121,55 @@ func New(ctx context.Context, rc *rest.Config, opts Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
-	dyn, err := dynamic.NewForConfig(rc)
+	dyn, kube, err := clients(rc)
 	if err != nil {
-		return nil, fmt.Errorf("sandbox runtime: dynamic client: %w", err)
-	}
-	kube, err := kubernetes.NewForConfig(rc)
-	if err != nil {
-		return nil, fmt.Errorf("sandbox runtime: kubernetes client: %w", err)
+		return nil, err
 	}
 	if err := r.start(ctx, dyn, kube); err != nil {
 		return nil, err
 	}
 	return r, nil
+}
+
+// Prober is the runtime for the image probe alone: `legion probe-boot` builds it to run the probe a
+// booting daemon runs (ProbeImage) from the daemon's own configuration, under the caller's
+// credentials, with no workflow behind it.
+type Prober struct{ r *Runtime }
+
+// NewProber builds a Prober from opts, which need none of what only supervision reads
+// (configureProber), and starts its Sandbox and pod informers for ctx's lifetime as New does, and
+// nothing else: no GitHub credential refresher, since it writes no role's Secret.
+func NewProber(ctx context.Context, rc *rest.Config, opts Options) (*Prober, error) {
+	r, err := configureProber(opts)
+	if err != nil {
+		return nil, err
+	}
+	dyn, kube, err := clients(rc)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := r.startInformers(ctx, dyn, kube); err != nil {
+		return nil, err
+	}
+	return &Prober{r: r}, nil
+}
+
+// ProbeImage is Runtime.ProbeImage: the same probe Sandbox, judged the same way.
+func (p *Prober) ProbeImage(ctx context.Context, probe ImageProbe) (bootprobe.ImageReport, error) {
+	return p.r.ProbeImage(ctx, probe)
+}
+
+// clients are the dynamic and typed clients of rc.
+func clients(rc *rest.Config) (dynamic.Interface, kubernetes.Interface, error) {
+	dyn, err := dynamic.NewForConfig(rc)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sandbox runtime: dynamic client: %w", err)
+	}
+	kube, err := kubernetes.NewForConfig(rc)
+	if err != nil {
+		return nil, nil, fmt.Errorf("sandbox runtime: kubernetes client: %w", err)
+	}
+	return dyn, kube, nil
 }
 
 // CensusLegacyIssueSandboxes is the Kubernetes half of the issue-pod layout fence. Daemon boot
@@ -243,7 +281,16 @@ func legacyIssueSandbox(object unstructured.Unstructured) string {
 }
 
 // configure checks opts and fills their defaults, touching no cluster.
-func configure(opts Options) (*Runtime, error) {
+func configure(opts Options) (*Runtime, error) { return configureFor(opts, true) }
+
+// configureProber is configure for a runtime that runs the image probe and nothing else
+// (NewProber): every check of what the probe reads stands, and none of what supervision alone
+// reads is required — the provisioning token source, the roles' GitHub credential function, the
+// store, the connection directory and the worker stream's address.
+func configureProber(opts Options) (*Runtime, error) { return configureFor(opts, false) }
+
+// configureFor is configure, holding opts to supervision's own requirements when supervised.
+func configureFor(opts Options, supervised bool) (*Runtime, error) {
 	refuse := func(format string, args ...any) (*Runtime, error) {
 		return nil, fmt.Errorf("sandbox runtime: "+format, args...)
 	}
@@ -261,13 +308,13 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("no issue volume size: %s is not a positive quantity", opts.IssueVolume.String())
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
-	case opts.Tokens == nil:
+	case supervised && opts.Tokens == nil:
 		return refuse("no provisioning token source")
-	case opts.GitHubCredential == nil:
+	case supervised && opts.GitHubCredential == nil:
 		return refuse("no github credential function for the roles' gh files")
-	case opts.Store == nil:
+	case supervised && opts.Store == nil:
 		return refuse("no store")
-	case opts.Conns == nil:
+	case supervised && opts.Conns == nil:
 		return refuse("no connection directory")
 	case (opts.DispatchURL == "") != (opts.DispatchToken == ""):
 		return refuse("the Dispatch URL and its bearer are configured together (URL %q, bearer given: %t)",
@@ -280,7 +327,7 @@ func configure(opts Options) (*Runtime, error) {
 		return refuse("project %q is not a label value: %s", opts.Project, strings.Join(errs, "; "))
 	}
 	host, ok := strings.CutPrefix(opts.StreamURL, "tcp://")
-	if _, _, err := net.SplitHostPort(host); !ok || err != nil {
+	if _, _, err := net.SplitHostPort(host); supervised && (!ok || err != nil) {
 		return refuse("stream URL %q is not tcp://host:port, which a pod can dial", opts.StreamURL)
 	}
 	for _, tool := range []struct{ name, path string }{
@@ -385,10 +432,21 @@ func checkReservation(role claim.Role, resources map[claim.Role]corev1.ResourceR
 	return nil
 }
 
-// start runs both informers, selected on the project label, until ctx ends, waits for both stores
-// to sync, and then runs the GitHub credential refresher (refreshGitHubCredentials) on the same
-// lifetime, so it stops with the informers whose pod store it walks.
+// start runs both informers (startInformers) and then the GitHub credential refresher
+// (refreshGitHubCredentials) on the informers' lifetime, so it stops with the informers whose pod
+// store it walks.
 func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
+	running, err := r.startInformers(ctx, dyn, kube)
+	if err != nil {
+		return err
+	}
+	go r.refreshGitHubCredentialsEvery(running, gitHubRefreshInterval)
+	return nil
+}
+
+// startInformers runs both informers, selected on the project label, until ctx ends, and waits for
+// both stores to sync; it answers the informers' lifetime.
+func (r *Runtime) startInformers(ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) (context.Context, error) {
 	r.dyn, r.kube = dyn, kube
 	sandboxes, pods := r.sandboxClient(), kube.CoreV1().Pods(r.namespace)
 	r.sandboxFeed.resource, r.podFeed.resource = "Sandbox", "pod"
@@ -408,7 +466,7 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 			UpdateFunc: func(_, obj any) { r.notify(obj) },
 			DeleteFunc: func(obj any) { r.notify(obj) },
 		}); err != nil {
-			return fmt.Errorf("sandbox runtime: %w", err)
+			return nil, fmt.Errorf("sandbox runtime: %w", err)
 		}
 	}
 	running, stop := context.WithCancel(ctx)
@@ -425,18 +483,17 @@ func (r *Runtime) start(ctx context.Context, dyn dynamic.Interface, kube kuberne
 		select {
 		case <-ctx.Done():
 			stop()
-			return fmt.Errorf("sandbox runtime: the informers did not sync: %w", ctx.Err())
+			return nil, fmt.Errorf("sandbox runtime: the informers did not sync: %w", ctx.Err())
 		case <-tick.C:
 			if err := errors.Join(r.sandboxFeed.check(), r.podFeed.check()); err != nil {
 				stop()
-				return fmt.Errorf("sandbox runtime: listing the namespace %s's Sandboxes and pods failed before the stores synced: %w",
+				return nil, fmt.Errorf("sandbox runtime: listing the namespace %s's Sandboxes and pods failed before the stores synced: %w",
 					r.namespace, err)
 			}
 		}
 	}
 	context.AfterFunc(ctx, stop)
-	go r.refreshGitHubCredentialsEvery(running, gitHubRefreshInterval)
-	return nil
+	return running, nil
 }
 
 // informer is a shared informer of the namespace's objects of the project, listed and watched

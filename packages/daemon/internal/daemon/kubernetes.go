@@ -92,14 +92,7 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		return nil
 	}
 	p.newRuntime = sandboxRuntime(reads.client, reads.opts, githubOwner(cfg))
-	p.clusterCheck = func(ctx context.Context) error {
-		checking, cancel := context.WithTimeout(ctx, cfg.SlowCommandTimeout)
-		defer cancel()
-		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
-			return err
-		}
-		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
-	}
+	p.clusterCheck = sandboxClusterCheck(cfg, reads)
 	p.claimsCheck = func(ctx context.Context, st *store.Store) error {
 		legacy, err := st.HasLegacySandboxClaims(ctx, p.project)
 		if err != nil {
@@ -122,6 +115,20 @@ func prepareSandbox(cfg config.Config, o overrides, reads sandboxReads, p *plan)
 		return sandboxed.ProbeImage(ctx, probe)
 	}
 	return nil
+}
+
+// sandboxClusterCheck is the cluster's half of boot's refusals (plan.clusterCheck), each read-only:
+// Agent Sandbox is installed, and no Sandbox of a layout before this runtime's remains in the
+// namespace for the project.
+func sandboxClusterCheck(cfg config.Config, reads sandboxReads) func(context.Context) error {
+	return func(ctx context.Context) error {
+		checking, cancel := context.WithTimeout(ctx, cfg.SlowCommandTimeout)
+		defer cancel()
+		if err := sandbox.CheckInstalled(checking, reads.client, agentSandbox); err != nil {
+			return err
+		}
+		return sandbox.CensusLegacyIssueSandboxes(ctx, reads.client, reads.opts.Namespace, reads.opts.Project)
+	}
 }
 
 // probeReservation is the image probe pod's own reservation, fixed: `legion probe-image` starts
