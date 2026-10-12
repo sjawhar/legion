@@ -4,6 +4,15 @@
 
 ### Added
 
+- The Delivery and Pipeline pages' live frames on `GET /ws/delivery` (LEGION-690):
+  `DeliveryLiveView` and `DeliveryLiveWindow` (a preset, whose end stays at the present, or a
+  custom `from`/`to`), the page's `DeliveryLiveSubscribe` and `DeliveryLiveUnsubscribe`, and
+  Dispatch's `DeliveryLiveSnapshot` (the matching GET route's body and a revision per key),
+  `DeliveryLiveDelta` (list items by id, map entries by key, counts by facet and value, null for a
+  key that left, and the other fields whole), `DeliveryLiveFreshness` and `DeliveryLiveError`.
+  `fixtures/delivery-live/` holds a snapshot, a delta, the snapshot after it and an error frame as
+  the server's diff writes them.
+
 - `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
   `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,
   `session_titles` and `session_pr_counts`; `DeliveryPR.parent_agent` is a session group's
