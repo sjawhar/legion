@@ -69,41 +69,49 @@ dispatch_status_is() { dispatch_get "issues/$1" | jq -e --arg status "$2" '.stat
 review_cap_posted() {
   dispatch_events "$1" | jq -e 'any(.[]; .type == "message.created" and (.payload.body | contains("review_round_cap=3")))'
 }
+# proof_human_body BODY prints the JSON object BODY as a proof-human write sends it: with the proof
+# human's session as its actor when dispatch_actor names one (a bearer caller must name one, or
+# Dispatch refuses the write, ACTOR_KIND), and unchanged when dispatch_actor is empty.
+proof_human_body() {
+  if [ -n "$dispatch_actor" ]; then
+    jq -c --arg id "$dispatch_actor" '. + {actor: {kind: "session", id: $id}}' <<<"$1"
+  else
+    printf '%s' "$1"
+  fi
+}
 dispatch_human() {
   local method=$1 path=$2 body=${3:-}
-  if [ -n "$body" ] && [ -n "$dispatch_actor" ]; then
-    body=$(jq -c --arg id "$dispatch_actor" '. + {actor: {kind: "session", id: $id}}' <<<"$body")
-  fi
   if [ -n "$body" ]; then
+    body=$(proof_human_body "$body")
     curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" -H 'content-type: application/json' \
       --data "$body" "$(dispatch_url)/api/v1/$path"
   else
     curl -sS --fail-with-body --max-time 20 -X "$method" -H "@$work/dispatch-human-header" "$(dispatch_url)/api/v1/$path"
   fi
 }
-# ensure_project creates $project before the lock when production Dispatch does not already hold
-# it: an agent session may create a project like any other write now (LEGION-684), so this is a
-# proof-human write like any other, over the bearer write_dispatch_header already wrote. 201 and
-# 409 PROJECT_EXISTS both leave the project ready for the run; anything else fails loudly, naming
-# the status and the body. Unlike dispatch_human, which only needs the body, this call needs the
-# status to tell a created project from a refusal, so it writes the body to a file and reads
-# %{http_code} off curl's own stdout, the pattern every other status-checking call in this proof
-# uses (e.g. stage4b-sandbox-tree.sh's invalid-bearer control).
+# ensure_project creates $project when Dispatch does not already hold it, as a proof-human write
+# like every other (`POST /api/v1/projects` takes any signed-in person or agent session), over the
+# bearer write_dispatch_header already wrote. 201 and 409 PROJECT_EXISTS both leave the project
+# ready for the run; anything else fails loudly, naming the status and the body. Unlike
+# dispatch_human, which only needs the body, this call needs the status to tell a created project
+# from a refusal, so it writes the body to a file and reads %{http_code} off curl's own stdout, the
+# pattern every other status-checking call in this proof uses (e.g. stage4b-sandbox-tree.sh's
+# invalid-bearer control).
 ensure_project() {
-  local status body_file=$work/create-project.json
+  local status body body_file=$work/create-project.json
+  body=$(proof_human_body "$(jq -cn --arg key "$project" --arg name "$project" '{key: $key, name: $name}')")
   status=$(curl -sS --max-time 20 -o "$body_file" -w '%{http_code}' -X POST \
-    -H "@$work/dispatch-human-header" -H 'content-type: application/json' \
-    --data "$(jq -cn --arg key "$project" --arg name "$project" '{key: $key, name: $name}')" \
+    -H "@$work/dispatch-human-header" -H 'content-type: application/json' --data "$body" \
     "$(dispatch_url)/api/v1/projects" 2>&1) ||
-    fail "production Dispatch could not be reached to create $project: $(scrub <<<"$status")"
+    fail "Dispatch could not be reached to create $project: $(scrub <<<"$status")"
   case "$status" in
     201) note "[dispatch] created project $project" ;;
     409)
       jq -e '.code == "PROJECT_EXISTS"' "$body_file" >/dev/null 2>&1 ||
-        fail "production Dispatch answered 409 creating $project, not PROJECT_EXISTS: $(cat "$body_file")"
+        fail "Dispatch answered 409 creating $project, not PROJECT_EXISTS: $(cat "$body_file")"
       note "[dispatch] project $project already exists"
       ;;
-    *) fail "production Dispatch answered $status creating project $project: $(cat "$body_file")" ;;
+    *) fail "Dispatch answered $status creating project $project: $(cat "$body_file")" ;;
   esac
 }
 # new_issue TITLE [PARENT] [SPEC] creates an issue in the run's project and prints its key. A root

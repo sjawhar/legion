@@ -2461,8 +2461,7 @@ esac
 gateway_origin=$(sed -E 's#^(https://[^/]+).*#\1#' <<<"$gateway")
 service_hosts=("${dispatch_base#https://}" "${envoy_url#*://}" "$nats_host" "${gateway_origin#https://}")
 # The run's project is created before the lock when it does not already exist, so a run never
-# takes the host lock for an identity Dispatch then refuses: an agent session may create one like
-# any other write now (LEGION-684).
+# takes the host lock for an identity Dispatch then refuses.
 write_dispatch_header
 ensure_project
 require_proof_human

@@ -44,9 +44,12 @@ repo=sjawhar/legion-smoke ptoken=s3test ok=
 `;
 
 let runs = 0;
+// The proof human's session every write names as its actor, as stage4b-sandbox-tree.sh sets it.
+const proofActor = "legion-e2e4b-proof-human-4242";
 function run(
   script: string,
-  fake: { status?: string; body?: string; exit?: number; error?: string } = {}
+  fake: { status?: string; body?: string; exit?: number; error?: string } = {},
+  actor = proofActor
 ) {
   const work = join(dir, `run-${++runs}`);
   const log = join(dir, `calls-${runs}`);
@@ -59,7 +62,7 @@ function run(
       "bash",
       "-c",
       prelude +
-        `work=${JSON.stringify(work)} dispatch_token_file=${JSON.stringify(tokenFile)} project=LPROOF2\n` +
+        `work=${JSON.stringify(work)} dispatch_token_file=${JSON.stringify(tokenFile)} project=LPROOF2 dispatch_actor=${JSON.stringify(actor)}\n` +
         script,
     ],
     {
@@ -99,7 +102,9 @@ describe("write_dispatch_header", () => {
 });
 
 describe("ensure_project", () => {
-  test("201: a created project is ready, the body posts {key, name} for LPROOF2", () => {
+  // Production Dispatch answers a bearer that names no session 400 ACTOR_KIND before it reads the
+  // key, so a body without the actor would fail every run against it.
+  test("201: a created project is ready; the body posts {key, name} and the proof human's actor", () => {
     const r = run("write_dispatch_header\nensure_project", {
       status: "201",
       body: '{"key":"LPROOF2","name":"LPROOF2","created_at":"2026-10-11T00:00:00Z"}',
@@ -109,7 +114,31 @@ describe("ensure_project", () => {
     expect(r.calls).toHaveLength(1);
     expect(r.calls[0]).toContain("-X POST");
     expect(r.calls[0]).toContain("/api/v1/projects");
+    expect(r.calls[0]).toContain(
+      `{"key":"LPROOF2","name":"LPROOF2","actor":{"kind":"session","id":"${proofActor}"}}`
+    );
+  });
+
+  test("an empty dispatch_actor posts {key, name} alone, as a scratch Dispatch's human header writes", () => {
+    const r = run(
+      "write_dispatch_header\nensure_project",
+      { status: "201", body: '{"key":"LPROOF2","name":"LPROOF2"}' },
+      ""
+    );
+    expect(r.status).toBe(0);
+    expect(r.calls).toHaveLength(1);
     expect(r.calls[0]).toContain('{"key":"LPROOF2","name":"LPROOF2"}');
+    expect(r.calls[0]).not.toContain("actor");
+  });
+
+  test("a refused actor (400 ACTOR_KIND) fails loudly, naming the status and the body", () => {
+    const r = run("write_dispatch_header\nensure_project", {
+      status: "400",
+      body: '{"error":"bearer callers require actor.kind session","code":"ACTOR_KIND"}',
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toContain("answered 400");
+    expect(r.stderr).toContain('"code":"ACTOR_KIND"');
   });
 
   test("409 PROJECT_EXISTS: an existing project is also ready", () => {
