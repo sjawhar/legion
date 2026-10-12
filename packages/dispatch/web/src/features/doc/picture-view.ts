@@ -1,5 +1,6 @@
 import { DOMSerializer, type Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
-import type { NodeView } from "@milkdown/kit/prose/view";
+import { TextSelection } from "@milkdown/kit/prose/state";
+import type { EditorView, NodeView, NodeViewConstructor } from "@milkdown/kit/prose/view";
 
 import { artifactVersionPath } from "../../api/client";
 import { pictureClassName } from "../refs/DispatchPicture";
@@ -12,9 +13,11 @@ import {
 } from "../refs/routes";
 
 /** The link a picture falls back to: the reference's short form, with the real SPA path as its
- * `href` (a modifier click, a middle click and the read-only version view follow it) and
- * `data-dispatch-href` for the live editor's click handler and the hover card. The words are the
- * reference's own, never an author's caption, as `RefLink` shows them until a title resolves. */
+ * `href` (in the read-only version view the click is taken by proof-editor's
+ * `markdownLinkClickPlugin`, which opens the page in a new tab; a Ctrl/Cmd-click does the same in
+ * the live editor; a middle click uses the real `href`) and `data-dispatch-href` for the live
+ * editor's click handler and the hover card. The words are the reference's own, never an author's
+ * caption, as `RefLink` shows them until a title resolves. */
 function fallbackLink(
   route: DispatchReferenceRoute,
   document: Document,
@@ -91,8 +94,29 @@ export function pictureView(
   return {
     dom,
     // A click on the link is a click on a link, not ProseMirror's node-selection gesture; events
-    // on the picture are the editor's, so clicking it selects it.
+    // on the picture are the editor's, so clicking it selects it. A `dragstart` inside the link (a
+    // drag of a DOM selection made over its words) is left to ProseMirror, which drags the picture
+    // node, instead of the drop pasting the browser's own link HTML; `copy` and `cut` stay stopped
+    // so a native copy of the selected words works.
     stopEvent: (event) =>
-      link !== undefined && event.target instanceof Node && link.contains(event.target),
+      event.type !== "dragstart" &&
+      link !== undefined &&
+      event.target instanceof Node &&
+      link.contains(event.target),
   };
+}
+
+/** `pictureView` as the editor's `image` node view: `placeCaretAfter` dispatches a collapsed
+ * `TextSelection` just after the node, the caret a primary-button mousedown on the fallback link
+ * places first (the comment in `fallbackLink` says why). A changed `image` node is a new view (no
+ * `update`), so the `node` captured here is current. */
+export function pictureNodeView(view: EditorView): NodeViewConstructor {
+  return (node, _view, getPos) =>
+    pictureView(node, view.dom.ownerDocument, () => {
+      const pos = getPos();
+      if (pos === undefined) return;
+      view.dispatch(
+        view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + node.nodeSize))
+      );
+    });
 }

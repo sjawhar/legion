@@ -3,7 +3,7 @@ import {
   DOMSerializer,
   type Node as ProseMirrorNode,
 } from "@milkdown/kit/prose/model";
-import { type EditorState, Plugin, PluginKey, TextSelection } from "@milkdown/kit/prose/state";
+import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 
 import type { AskOption, AskUrgency, BlockSchema, BlockTypeSchema } from "../../api/types";
@@ -15,7 +15,7 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
-import { pictureView } from "./picture-view";
+import { pictureNodeView } from "./picture-view";
 
 /**
  * `blockId` is the block's own identity rather than one of its schema attributes, so it is the
@@ -356,7 +356,7 @@ export const askBlockEditingPlugin = new Plugin({
 
 /** Installs the document's typed blocks in the editor: `AskBlockView` for every `ask` node,
  * reporting the live set of hosts (in document order) whenever it changes,
- * `renderTypedBlock`'s node view for every other type in the block schema, `pictureView` for
+ * `renderTypedBlock`'s node view for every other type in the block schema, `pictureNodeView` for
  * every `image` node (a picture whose source is a Dispatch reference draws from its version's
  * bytes route), while keeping the library's other node views, and `askBlockEditingPlugin`. Call
  * once per editor, right after it is created. */
@@ -387,15 +387,7 @@ export function installTypedBlocks(
           ])
       ),
       ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
-      // A changed `image` node is a new view (no `update`), so the `node` captured here is current.
-      image: (node, _view, getPos) =>
-        pictureView(node, view.dom.ownerDocument, () => {
-          const pos = getPos();
-          if (pos === undefined) return;
-          view.dispatch(
-            view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + node.nodeSize))
-          );
-        }),
+      image: pictureNodeView(view),
     },
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],
   });
