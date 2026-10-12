@@ -162,6 +162,50 @@ func TestMyRepliesKeepsWhatTheInboxDoesNotShow(t *testing.T) {
 	}
 }
 
+// An answer is a write like a reply: when Bob answers the ask Alice asked, her row reads as his
+// answer (who answered, the chosen option and the answer's text), naming the ask. A mark through
+// the answer's own time, which carries nanoseconds, clears it, as the ask's card sends it.
+func TestMyRepliesListsAnAnswerSomeoneElseGave(t *testing.T) {
+	handler := newTestHandler(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Regions", "A spec")
+	asked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which region?",
+		"options":  []map[string]string{{"label": "eu-west-1"}, {"label": "us-east-1"}},
+	}, "alice")
+	if asked.Code != http.StatusCreated {
+		t.Fatalf("alice's ask: status=%d body=%s", asked.Code, asked.Body.String())
+	}
+	ask := decodeBody[model.Ask](t, asked)
+	if page := getMyReplies(t, handler, "alice", ""); page.Total != 0 {
+		t.Fatalf("before the answer: %#v, want nothing (an open ask the Inbox lists)", page)
+	}
+	answered := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{
+		"selected": []string{"eu-west-1"}, "text": "Closest to the users.",
+	}, "bob")
+	if answered.Code != http.StatusOK {
+		t.Fatalf("bob's answer: status=%d body=%s", answered.Code, answered.Body.String())
+	}
+	answer := decodeBody[model.Ask](t, answered).Answer
+
+	row := replyRow(t, getMyReplies(t, handler, "alice", ""), ask.ID)
+	if row.Kind != "ask" || row.Subject != "Which region?" || row.Reply.Kind != "answer" || row.Reply.ID != ask.ID {
+		t.Fatalf("row = %#v, want the ask with its answer as the reply", row)
+	}
+	if row.Reply.Author != (model.Actor{Kind: "user", ID: "bob"}) || row.Reply.FirstLine != "eu-west-1 - Closest to the users." {
+		t.Fatalf("reply = %#v, want bob's answer with its option and text", row.Reply)
+	}
+	if bob := getMyReplies(t, handler, "bob", ""); bob.Total != 0 {
+		t.Fatalf("bob's page = %#v, want his own answer read", bob)
+	}
+
+	if marked := markThreadRead(t, handler, "alice", ask.ID, answer.At); marked.Code != http.StatusNoContent {
+		t.Fatalf("mark: status=%d body=%s", marked.Code, marked.Body.String())
+	}
+	if page := getMyReplies(t, handler, "alice", ""); page.Total != 0 {
+		t.Fatalf("after a mark through the answer's own time: %#v, want it read", page)
+	}
+}
+
 // A comment on a passage of an issue's document, a comment on a project document and an issue
 // message thread each reach the page, each linking to its root; ?issue= and ?artifact= narrow the
 // rows to one owner.

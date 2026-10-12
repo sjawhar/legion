@@ -6,8 +6,8 @@ import (
 	"time"
 )
 
-// beforeUserThreads is the last migration before user_threads: the four that make and fill it
-// (0095_user_threads through 0098_user_threads_seed) apply after it.
+// beforeUserThreads is the last migration before user_threads: the five that make, fill and catch
+// it up (0095_user_threads through 0099_user_threads_catch_up) apply after it.
 const beforeUserThreads = 94
 
 // userThread is one person's row for one thread, as the Replies page reads it.
@@ -57,8 +57,9 @@ func TestUserThreadsSeedStartsReadAndTriggersKeepEachRow(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("seed issue: %v", err)
 	}
+	// A padded, mixed-case author id keys the same person as the read routes' canonicalLogin.
 	comment := insertReturningID(t, store, `
-		insert into comments (issue_key, author, body) values ('CORE-1', '{"kind":"user","id":"Alice"}', 'Ship it?')
+		insert into comments (issue_key, author, body) values ('CORE-1', '{"kind":"user","id":" Alice "}', 'Ship it?')
 		returning id::text`)
 	insertReturningID(t, store, `
 		insert into comments (issue_key, author, body, reply_to) values ('CORE-1', '{"kind":"session","id":"s1"}', 'On it.', $1)
@@ -116,7 +117,7 @@ func TestUserThreadsSeedStartsReadAndTriggersKeepEachRow(t *testing.T) {
 	}
 	// Editing it does not bring a row back once read; the person's own reply reads it.
 	insertReturningID(t, store, `
-		insert into comments (issue_key, author, body, reply_to) values ('CORE-1', '{"kind":"user","id":"ALICE"}', 'Thanks.', $1)
+		insert into comments (issue_key, author, body, reply_to) values ('CORE-1', '{"kind":"user","id":"ALICE\t"}', 'Thanks.', $1)
 		returning id::text`, comment)
 	if row, _ := readUserThread(t, store, "alice", comment); row.unread {
 		t.Fatalf("after alice's own reply: %+v, want read", row)
@@ -195,5 +196,158 @@ func TestUserThreadsSeedMergesWithRowsTheTriggerWrote(t *testing.T) {
 	row, ok := readUserThread(t, store, "alice", comment)
 	if !ok || row.unread || row.lastReplyID == nil || *row.lastReplyID != reply {
 		t.Fatalf("after the seed: %+v (found %v), want a read row naming %s", row, ok, reply)
+	}
+}
+
+// A reply that commits while 0098's seed runs, on a thread whose participant the seed is still
+// inserting, reaches no row: the trigger's update cannot see the seed's uncommitted row, and the
+// seed's snapshot cannot see the reply. 0099 catches it up, so the participant's row is unread and
+// names the reply.
+func TestUserThreadsCatchUpCountsAReplyTheSeedRaced(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, beforeUserThreads)
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'One', '{"kind":"user","id":"alice"}', 'U');
+	`); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	// Alice wrote in the thread before the deploy, so only the seed gives her a row.
+	root := insertReturningID(t, store, `
+		insert into comments (issue_key, author, body) values ('CORE-1', '{"kind":"user","id":"alice"}', 'Ship it?')
+		returning id::text`)
+	migrateThrough(t, store, beforeUserThreads+3)
+
+	seed, err := migrationFiles.ReadFile("migrations/0098_user_threads_seed.up.sql")
+	if err != nil {
+		t.Fatalf("read the seed: %v", err)
+	}
+	tx, err := store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the seed: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, string(seed)); err != nil {
+		t.Fatalf("run the seed: %v", err)
+	}
+	// Another connection commits a session's reply while the seed's row is uncommitted.
+	reply := insertReturningID(t, store, `
+		insert into comments (issue_key, author, body, reply_to) values ('CORE-1', '{"kind":"session","id":"s1"}', 'Yes.', $1)
+		returning id::text`, root)
+	if _, err := tx.Exec(ctx, `insert into schema_migrations (version) values ($1)`, beforeUserThreads+4); err != nil {
+		t.Fatalf("record the seed: %v", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatalf("commit the seed: %v", err)
+	}
+	if row, ok := readUserThread(t, store, "alice", root); !ok || row.unread || row.lastReplyID != nil {
+		t.Fatalf("after the raced seed: %+v (found %v), want the read row that missed the reply", row, ok)
+	}
+
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	row, ok := readUserThread(t, store, "alice", root)
+	if !ok || !row.unread || row.lastReplyID == nil || *row.lastReplyID != reply {
+		t.Fatalf("after the catch-up: %+v (found %v), want an unread row naming %s", row, ok, reply)
+	}
+}
+
+// An answer is a write like a reply. One given before the deploy is read, as every stored write
+// is ("Everything read"), and the catch-up leaves it read; one given after makes every other
+// participant's row unread, the asker's included, naming the ask, and leaves the answerer's read.
+func TestUserThreadsCountAnAnswerAsAWrite(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, beforeUserThreads)
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'One', '{"kind":"user","id":"alice"}', 'U');
+	`); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	ask := insertReturningID(t, store, `
+		insert into asks (issue_key, author, question, state, answer)
+		values ('CORE-1', '{"kind":"user","id":"alice"}', 'Which region?', 'answered',
+			jsonb_build_object('user', 'bob', 'selected', '["eu-west-1"]'::jsonb, 'at', now() - interval '1 hour'))
+		returning id::text`)
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	for _, login := range []string{"alice", "bob"} {
+		if row, ok := readUserThread(t, store, login, ask); !ok || row.unread {
+			t.Fatalf("%s's row after the deploy: %+v (found %v), want read", login, row, ok)
+		}
+	}
+	if row, _ := readUserThread(t, store, "alice", ask); row.lastReplyID == nil || *row.lastReplyID != ask {
+		t.Fatalf("alice's row after the deploy: %+v, want it to name the answer (the ask)", row)
+	}
+
+	if _, err := store.Pool.Exec(ctx, `
+		update asks set answer = jsonb_build_object('user', 'bob', 'selected', '["us-east-1"]'::jsonb, 'at', clock_timestamp())
+		where id = $1
+	`, ask); err != nil {
+		t.Fatalf("change the answer: %v", err)
+	}
+	if row, _ := readUserThread(t, store, "alice", ask); !row.unread || row.lastReplyID == nil || *row.lastReplyID != ask {
+		t.Fatalf("alice's row after bob's new answer: %+v, want unread naming the ask", row)
+	}
+	if row, _ := readUserThread(t, store, "bob", ask); row.unread {
+		t.Fatalf("bob's row after his own answer: %+v, want read", row)
+	}
+	insertReturningID(t, store, `
+		insert into comments (issue_key, author, body, ask_id) values ('CORE-1', '{"kind":"user","id":"alice"}', 'Thanks.', $1)
+		returning id::text`, ask)
+	if row, _ := readUserThread(t, store, "alice", ask); row.unread {
+		t.Fatalf("alice's row after her own reply: %+v, want read", row)
+	}
+}
+
+// The seed finds a message's thread where the trigger does: up in_reply_to, stopping after 64
+// steps. A message 65 deep belongs to its first reply's thread, not the root's, in both.
+func TestUserThreadsSeedStopsTheMessageWalkWhereTheTriggerDoes(t *testing.T) {
+	ctx := context.Background()
+	store := openEmptyTestStore(t)
+	migrateThrough(t, store, beforeUserThreads)
+	if _, err := store.Pool.Exec(ctx, `
+		insert into projects (key, name) values ('CORE', 'Core');
+		insert into issues (key, project_key, number, title, created_by, rank)
+			values ('CORE-1', 'CORE', 1, 'One', '{"kind":"user","id":"alice"}', 'U');
+	`); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	chain := []string{insertReturningID(t, store, `
+		insert into messages (issue_key, author, body) values ('CORE-1', '{"kind":"session","id":"s1"}', 'Root')
+		returning id::text`)}
+	for depth := 1; depth <= 64; depth++ {
+		chain = append(chain, insertReturningID(t, store, `
+			insert into messages (issue_key, author, body, in_reply_to) values ('CORE-1', '{"kind":"session","id":"s1"}', 'Deeper', $1)
+			returning id::text`, chain[depth-1]))
+	}
+	insertReturningID(t, store, `
+		insert into messages (issue_key, author, body, in_reply_to) values ('CORE-1', '{"kind":"user","id":"alice"}', 'Deepest', $1)
+		returning id::text`, chain[64])
+	if err := store.Migrate(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, ok := readUserThread(t, store, "alice", chain[0]); ok {
+		t.Fatalf("the seed walked past 64 steps to the root")
+	}
+	if _, ok := readUserThread(t, store, "alice", chain[1]); !ok {
+		t.Fatalf("the seed did not stop at the root 64 steps up")
+	}
+	// A second message of alice's at the same depth, which the trigger walks, joins that thread.
+	insertReturningID(t, store, `
+		insert into messages (issue_key, author, body, in_reply_to) values ('CORE-1', '{"kind":"user","id":"alice"}', 'Again', $1)
+		returning id::text`, chain[64])
+	var threads int
+	if err := store.Pool.QueryRow(ctx, `select count(*) from user_threads where login = 'alice'`).Scan(&threads); err != nil {
+		t.Fatalf("count alice's threads: %v", err)
+	}
+	if threads != 1 {
+		t.Fatalf("alice has %d threads, want the seed's and the trigger's to be one", threads)
 	}
 }

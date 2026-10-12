@@ -15,6 +15,7 @@ export function replyRow(threadId: string, overrides: Partial<MyReplyRow> = {}):
       created_at: "2026-10-12T00:00:00Z",
       first_line: "Done.",
       id: `${threadId}-reply`,
+      kind: "reply",
     },
     subject: "Root",
     thread_id: threadId,

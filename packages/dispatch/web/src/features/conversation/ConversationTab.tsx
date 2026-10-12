@@ -1058,6 +1058,9 @@ export function ConversationTab({
       return;
     }
     if (targetTurnId !== undefined) {
+      // The first `data-turn` in the document is the Conversation list's own turn. While the phone
+      // thread dialog is open it holds a second copy of the root, which this never scrolls to: the
+      // dialog shows its root at its top, and the list's collapsed copy renders no reply to match.
       const target = document.querySelector<HTMLElement>(`[data-turn="${targetTurnId}"]`);
       if (target !== null) {
         target.scrollIntoView({ block: "center" });

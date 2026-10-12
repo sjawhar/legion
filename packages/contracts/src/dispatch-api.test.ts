@@ -224,9 +224,24 @@ test("models the Replies page and the read mark's event", () => {
         subject: "Ship it on Friday?",
         reply: {
           id: "comment-2",
+          kind: "reply",
           author: { kind: "session", id: "session-1" },
           first_line: "Friday works.",
           created_at: "2026-10-12T00:00:00Z",
+        },
+      },
+      {
+        thread_id: "ask-1",
+        kind: "ask",
+        ref: "/issues/CORE-1/asks/ask-1",
+        issue: { key: "CORE-1", title: "Release" },
+        subject: "Which region?",
+        reply: {
+          id: "ask-1",
+          kind: "answer",
+          author: { kind: "user", id: "bob" },
+          first_line: "eu-west-1 - closest to the users",
+          created_at: "2026-10-12T00:00:30Z",
         },
       },
       {
@@ -237,13 +252,14 @@ test("models the Replies page and the read mark's event", () => {
         subject: "Is step one current?",
         reply: {
           id: "comment-4",
+          kind: "reply",
           author: { kind: "session", id: "session-1" },
           first_line: "Yes.",
           created_at: "2026-10-12T00:01:00Z",
         },
       },
     ],
-    total: 2,
+    total: 3,
     limit: 50,
     offset: 0,
   } satisfies MyRepliesResponse;
@@ -263,10 +279,10 @@ test("models the Replies page and the read mark's event", () => {
     payload: read,
   } satisfies DispatchEvent;
 
-  expect([page.rows.map((row) => row.kind), event.payload.thread_id]).toEqual([
-    ["comment", "comment"],
-    "comment-1",
-  ]);
+  expect([
+    page.rows.map((row) => `${row.kind}:${row.reply.kind}`),
+    event.payload.thread_id,
+  ]).toEqual([["comment:reply", "ask:answer", "comment:reply"], "comment-1"]);
 });
 
 test("preserves block-pinned and legacy anchors in ask event payloads", () => {

@@ -840,11 +840,14 @@ export interface MyAnswersResponse {
   readonly offset: number;
 }
 
-/** The newest reply someone else wrote in a thread on `GET /api/v1/me/replies`. */
+/** The newest write someone else made in a thread on `GET /api/v1/me/replies`: a reply (a comment
+ *  or a message), or the ask's answer, whose `id` is the ask's, whose `author` is the person who
+ *  answered and whose `first_line` is the chosen options and the answer's text. */
 export interface MyReplyReply {
   readonly id: string;
+  readonly kind: "reply" | "answer";
   readonly author: Actor;
-  /** The reply's first non-empty line, at most 160 characters. */
+  /** The reply's or the answer's first non-empty line, at most 160 characters. */
   readonly first_line: string;
   readonly created_at: string;
 }

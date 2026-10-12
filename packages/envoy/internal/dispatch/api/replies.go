@@ -44,11 +44,12 @@ const myRepliesCountQuery = `
 	select count(*) from unread`
 
 // myRepliesPageQuery reads one page of the caller's unread threads, newest reply first, and what a
-// row shows: who replied and the reply's text (last_reply_id, a comment for an ask or a comment
-// thread and a message for a message thread), what the thread is about (the ask's question, or its
-// root's text) and where it lives (the row's own owner columns). Its ref always names the thread's
-// root, never the reply: a reply carries no anchor, so a link to it would skip the document
-// redirect an anchored root takes.
+// row shows: who wrote the newest write someone else made and its text (last_reply_id: a comment
+// for an ask or a comment thread, a message for a message thread, or the ask itself when that write
+// is its answer, read as the answerer and the answer's options and text), what the thread is about
+// (the ask's question, or its root's text) and where it lives (the row's own owner columns). Its
+// ref always names the thread's root, never the reply: a reply carries no anchor, so a link to it
+// would skip the document redirect an anchored root takes.
 const myRepliesPageQuery = `
 	with page as (
 		select u.thread_id, u.kind, u.replied_at, u.last_reply_id, u.issue_key, u.artifact_id
@@ -67,7 +68,10 @@ const myRepliesPageQuery = `
 	       end,
 	       i.key, i.title, ar.project_key, ar.slug, ar.name,
 	       coalesce(a.question, root.body, mroot.body, ''),
-	       p.last_reply_id::text, coalesce(rc.author, rm.author), coalesce(rc.body, rm.body, ''),
+	       p.last_reply_id::text, answered.id is not null,
+	       coalesce(rc.author, rm.author,
+	         case when answered.id is not null then jsonb_build_object('kind', 'user', 'id', answered.answer->>'user') end),
+	       coalesce(rc.body, rm.body, answered.text, ''),
 	       coalesce(rc.created_at, rm.created_at, p.replied_at)
 	from page p
 	left join asks a on p.kind = 'ask' and a.id = p.thread_id
@@ -75,6 +79,15 @@ const myRepliesPageQuery = `
 	left join messages mroot on p.kind = 'message' and mroot.id = p.thread_id
 	left join comments rc on p.kind <> 'message' and rc.id = p.last_reply_id
 	left join messages rm on p.kind = 'message' and rm.id = p.last_reply_id
+	left join lateral (
+		select a.id, a.answer,
+		       concat_ws(' - ',
+		         nullif(array_to_string(array(select jsonb_array_elements_text(
+		           case when jsonb_typeof(a.answer->'selected') = 'array' then a.answer->'selected' else '[]'::jsonb end
+		         )), ', '), ''),
+		         nullif(a.answer->>'text', '')) as text
+		where p.last_reply_id = a.id and a.answer->>'user' is not null
+	) answered on true
 	left join issues i on i.key = p.issue_key
 	left join artifacts ar on ar.id = p.artifact_id
 	order by p.replied_at desc, p.thread_id desc`
@@ -134,13 +147,18 @@ func (s *server) listMyReplies(w http.ResponseWriter, r *http.Request) {
 		var issueKey, issueTitle, project, slug, name, replyID *string
 		var subject, body string
 		var author []byte
+		var isAnswer bool
 		if err := rows.Scan(
 			&row.ThreadID, &row.Kind, &row.Ref,
 			&issueKey, &issueTitle, &project, &slug, &name,
-			&subject, &replyID, &author, &body, &row.Reply.CreatedAt,
+			&subject, &replyID, &isAnswer, &author, &body, &row.Reply.CreatedAt,
 		); err != nil {
 			s.writeHandlerError(w, fmt.Errorf("scan my reply: %w", err))
 			return
+		}
+		row.Reply.Kind = "reply"
+		if isAnswer {
+			row.Reply.Kind = "answer"
 		}
 		if issueKey != nil {
 			row.Issue = &model.OpenAskIssue{Key: *issueKey, Title: *issueTitle}
@@ -197,8 +215,7 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		writeError(w, "INVALID_STATE", http.StatusBadRequest, "read_through is required")
 		return
 	}
-	readThrough, err := parseAgentStateCutoff("read_through", input.ReadThrough)
-	if err != nil {
+	if _, err := parseAgentStateCutoff("read_through", input.ReadThrough); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -233,10 +250,14 @@ func (s *server) putThreadRead(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	// read_through is cast by Postgres from the caller's own text rather than bound as a parsed
+	// time: an answer's time carries nanoseconds, which the trigger's cast of the answer rounds to
+	// the microsecond while pgx truncates a bound time, so a mark through the answer's own time
+	// would otherwise fall a microsecond short of the answer and leave the thread unread.
 	moved, err := tx.Exec(r.Context(), `
-		update user_threads set read_through = least($3::timestamptz, now())
-		where login = $1 and thread_id = $2 and read_through < least($3::timestamptz, now())
-	`, login, threadID, *readThrough)
+		update user_threads set read_through = least($3::text::timestamptz, now())
+		where login = $1 and thread_id = $2 and read_through < least($3::text::timestamptz, now())
+	`, login, threadID, *input.ReadThrough)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return

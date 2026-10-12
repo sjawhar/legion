@@ -632,30 +632,35 @@ function answersPageAdditions(incoming: Event): unknown[][] {
   return [];
 }
 
-/** The Replies page, its count and every owner's unread set live under `["me", "replies"]`. Any
- *  write on an issue can move a row (a comment, a session's reply, an issue message, an answer,
- *  a close that puts an open ask's thread on the page), so every issue-owned event refreshes it,
- *  as it refreshes the Inbox - except a pending unsubscribe, which refreshes nothing at all; so
- *  does a document's ask or comment event, and the signed-in viewer's own read mark from another
- *  tab. */
+/** The Replies page, its count and every owner's unread set live under `["me", "replies"]`. Only
+ *  an event that can move a row refreshes it, on an issue or a document alike: a write the
+ *  `user_threads` triggers count (a comment, a session's reply to a mention, an issue message or
+ *  a reply to one, an answer), an ask opening or being resolved, and an issue with an open ask
+ *  closing or reopening, since each decides whether the Inbox lists an ask's thread instead; so
+ *  does the signed-in viewer's own read mark from another tab. */
+const repliesWrites: Record<string, true> = {
+  "comment.created": true,
+  "comment.answered": true,
+  "message.created": true,
+  "message.answered": true,
+  "ask.opened": true,
+  "ask.answered": true,
+  "ask.resolved": true,
+};
+
 function repliesAdditions(incoming: Event): unknown[][] {
   if (incoming.type === "user_thread_state.updated") {
     return mainPayloadString(incoming, "login") === "alice" ? [["me", "replies"]] : [];
   }
-  if (incoming.type === "subscription.remove_requested") {
+  if (incoming.issue_key === null && mainIsMessageEvent(incoming)) {
     return [];
   }
-  if (incoming.issue_key !== null) {
-    return [["me", "replies"]];
-  }
-  if (
-    incoming.artifact_id !== null &&
-    incoming.artifact_id !== undefined &&
-    (incoming.type.startsWith("ask.") || mainIsCommentLikeEvent(incoming))
-  ) {
-    return [["me", "replies"]];
-  }
-  return [];
+  const openAsks: unknown = Reflect.get(incoming.payload ?? {}, "open_asks");
+  const issueWithOpenAsks =
+    (incoming.type === "issue.closed" || incoming.type === "issue.updated") &&
+    typeof openAsks === "number" &&
+    openAsks > 0;
+  return repliesWrites[incoming.type] === true || issueWithOpenAsks ? [["me", "replies"]] : [];
 }
 
 /** The targets the server named on this event; an event from before the field carries none. */
@@ -810,18 +815,33 @@ test("an ask reply keeps the ask-thread key the delayed-Inbox freshness marker r
   expect(keys).toContainEqual(["inbox"]);
 });
 
-test("the Replies page refreshes on issue writes, document threads and the viewer's own mark", () => {
-  expect(invalidatedKeys(event("comment.created", { id: "c1", anchor: null }))).toContainEqual([
-    "me",
-    "replies",
-  ]);
-  expect(invalidatedKeys(event("message.answered", { id: "m2" }))).toContainEqual([
-    "me",
-    "replies",
-  ]);
-  expect(
-    invalidatedKeys(event("comment.created", { id: "c1", anchor: null }, documentOwner))
-  ).toContainEqual(["me", "replies"]);
+test("the Replies page refreshes only on events that can move a row, and the viewer's own mark", () => {
+  for (const mover of [
+    event("comment.created", { id: "c1", anchor: null }),
+    event("message.answered", { id: "m2" }),
+    event("ask.answered", { id: "ask-1", anchor: null }),
+    event("comment.created", { id: "c1", anchor: null }, documentOwner),
+    // An issue with an open ask closing or reopening moves whether the Inbox lists that ask.
+    event("issue.closed", { open_asks: 1 }),
+    event("issue.updated", { open_asks: 2 }),
+  ]) {
+    expect(invalidatedKeys(mover)).toContainEqual(["me", "replies"]);
+  }
+  // An issue with no open ask, a claim, an edit and a delivery move no row.
+  for (const unrelated of [
+    event("issue.updated"),
+    event("issue.updated", { open_asks: 0 }),
+    event("issue.closed", { open_asks: 0 }),
+    event("issue.claimed", {
+      claim: { actor: { kind: "session", id: "session-one" }, at: "2026-09-24T06:00:00Z" },
+      reason: "claimed",
+    }),
+    event("comment.edited", { id: "c1", anchor: null }),
+    event("comment.resolved", { id: "c1", anchor: null }, documentOwner),
+    event("message.delivery", { id: "m1" }),
+  ]) {
+    expect(invalidatedKeys(unrelated)).not.toContainEqual(["me", "replies"]);
+  }
   expect(
     invalidatedKeys(
       event("user_thread_state.updated", { login: "alice", thread_id: "c1" }, { issue_key: null })

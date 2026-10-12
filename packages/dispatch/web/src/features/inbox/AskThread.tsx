@@ -24,7 +24,6 @@ import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/A
 import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
-import { askRepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
 import type { DwellRef } from "../shell/useDwell";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
 
@@ -159,9 +158,9 @@ export interface AskThreadProps {
   embedded?: boolean;
   /** Where a file pasted or dropped into the reply goes (`AskReplyComposer`). */
   uploadOwner?: ArtifactOwner;
-  /** Marks the ask's thread read on the Replies page once its newest reply has been on screen:
-   *  set on the ask's own pages (its Conversation turn, its margin card, its decision block). */
-  markRead?: boolean;
+  /** The Replies page's mark for the ask (`AskCard`, `useMarkThreadRead`), placed on the newest
+   *  reply's own element when that reply is the newest write the card shows. */
+  markNewest?: DwellRef;
 }
 
 /**
@@ -178,7 +177,7 @@ export function AskThread({
   showComposer = true,
   embedded = false,
   uploadOwner,
-  markRead = false,
+  markNewest,
 }: AskThreadProps): ReactNode {
   const olderRepliesId = useId();
   const replies = thread.data?.replies ?? [];
@@ -186,12 +185,6 @@ export function AskThread({
   const hiddenReplyCount = Math.max(replies.length - 2, 0);
   const recentReplies = replies.slice(-2).reverse();
   const newestReply = replies.at(-1);
-  const markNewest = useMarkThreadRead({
-    enabled: markRead,
-    newestShownAt: newestReply?.created_at,
-    owner: askRepliesOwner(ask),
-    threadId: ask.id,
-  });
   const olderReplies = showAllReplies ? replies.slice(0, -2).reverse() : [];
 
   return (

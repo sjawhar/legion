@@ -225,6 +225,35 @@ function isMessageEvent(event: Event): boolean {
   );
 }
 
+// The events that can move a row of the viewer's Replies page (`["me", "replies"]`, its count and
+// every owner's unread set): a write that fires a `user_threads` trigger - a comment, a session's
+// reply to a mention (`comment.answered`), an issue message or a reply to one, an answer - and an
+// ask opening (settlement restoring one) or being resolved, which decides whether the Inbox lists
+// its thread instead. An edit, a resolution of a comment, a delivery or a claim moves no row.
+const REPLIES_WRITES: Partial<Record<EventType, true>> = {
+  "comment.created": true,
+  "comment.answered": true,
+  "message.created": true,
+  "message.answered": true,
+  "ask.opened": true,
+  "ask.answered": true,
+  "ask.resolved": true,
+};
+
+// The Inbox lists an open ask only while its issue is open (`myRepliesUnread` in the server's
+// replies.go), so an issue closing (`issue.closed`) or reopening (an `issue.updated` status write)
+// moves the rows of its open asks. The payload names no changed field, so every `issue.updated` of
+// an issue with an open ask refreshes; one of an issue with none moves nothing.
+function movesReplies(event: Event): boolean {
+  if (REPLIES_WRITES[event.type] === true) return true;
+  const openAsks = payloadValue(event, "open_asks");
+  return (
+    (event.type === "issue.closed" || event.type === "issue.updated") &&
+    typeof openAsks === "number" &&
+    openAsks > 0
+  );
+}
+
 // Every event whose server path rewrites the reference index (`refs.ReplaceCounted`/`refs.Stamp`)
 // or moves a structural edge of `graph_edges`: document versions and uploads, ask creation and
 // edits (including a settled ask block), comment and message writes — an answer's reply body is
@@ -454,8 +483,9 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     if (isCommentLikeEvent(event)) {
       appendCommentDetailKeys(keys, event);
     }
-    // A reply in a document's comment or ask thread can put a row on the viewer's Replies page.
-    if (isAskEvent(event) || isCommentLikeEvent(event)) {
+    // A reply or an answer in a document's comment or ask thread can put a row on the viewer's
+    // Replies page.
+    if (movesReplies(event)) {
       keys.push(myRepliesKey);
     }
     appendAnswersPageKey(keys, event);
@@ -477,11 +507,10 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // updates this out from under any other open tab watching the same user.
     userStateQuery().queryKey,
     inboxQuery().queryKey,
-    // The Replies page and its count, by the Inbox's own rule: any write on an issue - a comment,
-    // a session's reply, an issue message, an answer, a close that puts an open ask's thread on
-    // the page - can move one of the viewer's rows.
-    myRepliesKey,
   ];
+  if (movesReplies(event)) {
+    keys.push(myRepliesKey);
+  }
 
   if (
     event.type === "issue.created" ||

@@ -3,6 +3,7 @@ import { type ReactNode, useId, useState } from "react";
 import type { ArtifactOwner } from "../../api/client";
 import type { Ask } from "../../api/types";
 import { linkHoverText, linkText } from "../../theme/classes";
+import type { DwellRef } from "../shell/useDwell";
 import { AskReplyComposer, AskThread, type AskThreadQuery, type CreateReply } from "./AskThread";
 
 interface AskThreadDisclosureProps {
@@ -12,8 +13,8 @@ interface AskThreadDisclosureProps {
   embedded?: boolean;
   /** Where a file pasted or dropped into the reply goes (`AskReplyComposer`). */
   uploadOwner?: ArtifactOwner;
-  /** Marks the thread read on the Replies page once its newest reply has been on screen. */
-  markRead?: boolean;
+  /** The Replies page's mark for the ask, placed on its newest reply (`AskThread`). */
+  markNewest?: DwellRef;
 }
 
 export function AskThreadDisclosure({
@@ -22,7 +23,7 @@ export function AskThreadDisclosure({
   createReply,
   embedded = false,
   uploadOwner,
-  markRead = false,
+  markNewest,
 }: AskThreadDisclosureProps): ReactNode {
   const [composerOpen, setComposerOpen] = useState(false);
   const composerId = useId();
@@ -57,7 +58,7 @@ export function AskThreadDisclosure({
         <AskThread
           ask={ask}
           embedded={embedded}
-          markRead={markRead}
+          markNewest={markNewest}
           showComposer={false}
           thread={thread}
         />

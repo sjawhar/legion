@@ -475,22 +475,26 @@ transaction, so an issue write waits behind it while an issue read does not, and
 view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read waits too. It touches no row; its
 census answers `0`.
 
-Migrations `0095_user_threads` through `0098_user_threads_seed` build `user_threads`, the table
-behind the Replies page (`packages/envoy/AGENTS.md`). `0095` creates the table, its partial index
-`user_threads_unread` and its `(thread_id)` index, the functions `user_threads_record`,
-`user_threads_comment` and `user_threads_message`, and the trigger on `comments`; `0096` adds the
-trigger on `asks` (`insert or update of answer`); `0097` attaches `user_threads_message` to
-`messages`. Each trigger is its own migration, so its transaction holds that one table's
-`SHARE ROW EXCLUSIVE` alone: a write to it waits behind the migration and a read does not.
-`0098` seeds a row for every person and thread they wrote in, under `ACCESS SHARE` on
+Migrations `0095_user_threads` through `0099_user_threads_catch_up` build `user_threads`, the
+table behind the Replies page (`packages/envoy/AGENTS.md`). `0095` creates the table, its partial
+index `user_threads_unread` and its `(thread_id)` index, the functions `user_threads_login`,
+`user_threads_record`, `user_threads_comment` and `user_threads_message`, and the trigger on
+`comments`; `0096` adds the trigger on `asks` (`insert or update of answer`); `0097` attaches
+`user_threads_message` to `messages`. Each trigger is its own migration, so its transaction holds
+that one table's `SHARE ROW EXCLUSIVE` alone: a write to it waits behind the migration and a read
+does not. `0098` seeds a row for every person and thread they wrote in, under `ACCESS SHARE` on
 `comments`, `asks`, `messages`, `issues` and `artifacts`, writing only `user_threads`; every row
 starts read, its read mark moved to the newest reply already stored, so the deploy turns no stored
-reply into an unread one. The triggers are live by then, so a write that lands while it runs has
-its row already, and the seed merges with it by taking the later of each time. On a copy of the
-2026-10-12 production dump (11,497 comments, 3,882 asks, 14,289 messages) the seed wrote 3,819
-rows for three logins, all of them read. All four censuses answer `0`: `0095`-`0097` create
-functions and triggers and refuse or rewrite no row, and `0098` writes only the table `0095`
-creates.
+reply into an unread one. The triggers are live by then, so a write that lands while it runs on a
+thread whose participant already has a row is caught by the trigger, and the seed merges with it
+by taking the later of each time. A participant the seed is still inserting has no row the
+trigger's update can see, and the seed's snapshot cannot see that write, so `0099` reads the same
+writes under `ACCESS SHARE` on `comments`, `asks` and `messages` and moves each row to any write by
+someone else newer than its `replied_at`, which makes it unread past its read mark; it moves
+nothing backwards, and a write the seed saw stays read. On a copy of the 2026-10-12 production
+dump (11,497 comments, 3,882 asks, 14,289 messages) the seed wrote 3,819 rows for three logins,
+all of them read. All five censuses answer `0`: `0095`-`0097` create functions and triggers and
+refuse or rewrite no row, and `0098` and `0099` write only the table `0095` creates.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a

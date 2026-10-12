@@ -282,13 +282,18 @@ function askReply(id: string, createdAt: string): Comment {
   };
 }
 
-/** An answered ask with two replies after the answer, unread for alice on CORE-1, rendered with
- *  time and the screen in the test's hands. */
-function renderUnreadAsk(props: { markRead: boolean; thread: "inline" | "collapsed" }) {
+/** An answered ask with two replies, unread for alice on CORE-1, rendered with time and the
+ *  screen in the test's hands: the replies follow the first answer, or precede `answer` when one
+ *  is given. */
+function renderUnreadAsk(props: {
+  markRead: boolean;
+  thread: "inline" | "collapsed";
+  answer?: AskAnswer;
+}) {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();
   const mark = spyOn(api, "markThreadRead").mockResolvedValue(undefined);
-  const ask = answeredAsk();
+  const ask = answeredAsk(props.answer === undefined ? {} : { answer: props.answer });
   const replies = [
     askReply("reply-1", "2026-10-08T03:00:00Z"),
     askReply("reply-2", "2026-10-08T04:00:00.5Z"),
@@ -354,3 +359,28 @@ for (const shape of ["inline", "collapsed"] as const) {
     }
   });
 }
+
+// An answer is a write like a reply: when someone answers after every reply, the answered record is
+// the newest write the card shows, so the mark watches the record and reads through the answer.
+test("an answer given after every reply is what the mark watches and reads through", async () => {
+  const answer: AskAnswer = {
+    at: "2026-10-08T05:00:00.123456789Z",
+    selected: ["Hold"],
+    text: "Wait for the fix.",
+    user: "bob@example.com",
+  };
+  const card = renderUnreadAsk({ answer, markRead: true, thread: "collapsed" });
+  try {
+    const record = await card.view.findByTestId("ask-ask-1");
+    await card.view.findByText("Reply reply-2");
+    expect(card.screen.observed()).toEqual([record]);
+    act(() => card.screen.show(record));
+    act(() => {
+      jest.advanceTimersByTime(1_000);
+    });
+    for (let flush = 0; flush < 5; flush += 1) await act(async () => {});
+    expect(card.mark.mock.calls).toEqual([["ask-1", answer.at]]);
+  } finally {
+    card.cleanup();
+  }
+});

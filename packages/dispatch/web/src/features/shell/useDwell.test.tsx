@@ -170,3 +170,61 @@ test("a dwell whose write fails dwells again while the element stays on screen",
     screen.restore();
   }
 });
+
+function Pair({
+  onDwell,
+  showSecond,
+}: {
+  onDwell: (element: Element) => unknown;
+  showSecond: boolean;
+}): ReactNode {
+  const first = useDwell({ enabled: true, onDwell, resetKey: "first" });
+  const second = useDwell({ enabled: showSecond, onDwell, resetKey: "second" });
+  return (
+    <>
+      <p data-testid="first" ref={first}>
+        First
+      </p>
+      {showSecond ? (
+        <p data-testid="second" ref={second}>
+          Second
+        </p>
+      ) : null}
+    </>
+  );
+}
+
+// Every thread on a page mounts a watch of its own; they share one IntersectionObserver, and one
+// watch ending leaves the others watched.
+test("every watch on the page shares one observer, and one ending leaves the rest", async () => {
+  jest.useFakeTimers();
+  const screen = installIntersectionObserver();
+  const Installed = globalThis.IntersectionObserver;
+  let built = 0;
+  globalThis.IntersectionObserver = class extends Installed {
+    constructor(callback: IntersectionObserverCallback, options?: IntersectionObserverInit) {
+      super(callback, options);
+      built += 1;
+    }
+  };
+  const dwelled: string[] = [];
+  const onDwell = (element: Element) => dwelled.push(element.getAttribute("data-testid") ?? "");
+  const view = render(<Pair onDwell={onDwell} showSecond />);
+  try {
+    const first = view.getByTestId("first");
+    expect(built).toBe(1);
+    expect(screen.observed()).toEqual([first, view.getByTestId("second")]);
+    view.rerender(<Pair onDwell={onDwell} showSecond={false} />);
+    expect(screen.observed()).toEqual([first]);
+    act(() => screen.show(first));
+    act(() => {
+      jest.advanceTimersByTime(1_000);
+    });
+    for (let flush = 0; flush < 5; flush += 1) await Promise.resolve();
+    expect([dwelled, built]).toEqual([["first"], 1]);
+  } finally {
+    view.unmount();
+    screen.restore();
+  }
+  expect(screen.observed()).toEqual([]);
+});

@@ -50,6 +50,9 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
         <span className={`font-semibold ${textPrimaryOnCanvas}`}>
           {actorLabel(row.reply.author)}
         </span>
+        {/* An answer someone else gave is the thread's newest write; its first line is the chosen
+            options and the answer's text. */}
+        {row.reply.kind === "answer" ? <span>answered</span> : null}
         <Timestamp at={row.reply.created_at} />
         {owner === undefined ? null : <AskOwnerLink owner={owner} />}
       </div>
@@ -108,7 +111,13 @@ export function RepliesPage(): ReactNode {
   if (replies.isError) {
     return <p className={dangerText}>Could not load your replies: {replies.error.message}</p>;
   }
-  const rows = replies.data.pages.flatMap((page) => page.rows);
+  // Pages are offsets into a list that moves as replies land, so a page fetched after a reply moved
+  // a thread up can repeat a row an earlier page holds; the event that moved it refreshes every
+  // loaded page from the top, and until then the thread shows once, where it was first listed.
+  const seen = new Set<string>();
+  const rows = replies.data.pages
+    .flatMap((page) => page.rows)
+    .filter((row) => !seen.has(row.thread_id) && seen.add(row.thread_id));
 
   return (
     <section aria-label="Replies">

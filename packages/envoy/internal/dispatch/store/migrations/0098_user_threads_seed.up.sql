@@ -3,20 +3,33 @@
 -- comment of theirs, an ask they asked, an answer they gave, or a message of theirs on an issue.
 -- Every row starts read: the cutoff is the migration's own time, so the deploy turns no reply
 -- already stored into an unread one, as 0051 did for direct messages (Sami's decision on
--- dispatch://LEGION-687/spec). replied_at and last_reply_id still record the newest reply anyone
--- else wrote, so a later reply is compared with it.
+-- dispatch://LEGION-687/spec). replied_at and last_reply_id still record the newest write anyone
+-- else made (a comment, a message, or an answer, which names its ask), so a later one is compared
+-- with it. What counts as a write, and whose, is the triggers' rule (0095, 0096), read here the
+-- same way: user_threads_login keys a person, and a message's thread is the root its in_reply_to
+-- walk reaches in at most 64 steps.
 --
--- 0095-0097's triggers are live by now, so a write that lands while this runs already has its row;
--- the upsert merges with it by taking the later of each time, and never undoes the trigger's write.
+-- 0095-0097's triggers are live by now, so a write that lands while this runs on a thread whose
+-- participant already has a row is caught by the trigger, and the upsert merges with it by taking
+-- the later of each time, never undoing the trigger's write. A participant this statement is
+-- still inserting has no row the trigger can see, so 0099 catches those writes up.
 -- Reads comments, asks, messages, issues and artifacts (ACCESS SHARE) and writes only user_threads.
 insert into user_threads (login, thread_id, kind, project_key, issue_key, artifact_id, read_through, replied_at, last_reply_id)
 with recursive cutoff(since) as (
   select now()
 ),
-message_roots as (
-  select id, id as root from messages where issue_key is not null and in_reply_to is null
+-- Each issue message's walk up in_reply_to, one row per step, as user_threads_message takes it:
+-- the step-k row holds the k-th ancestor, and the walk stops after 64 steps.
+message_walk as (
+  select id, id as ancestor, in_reply_to as parent, 0 as depth
+  from messages where issue_key is not null
   union all
-  select m.id, r.root from messages m join message_roots r on m.in_reply_to = r.id
+  select w.id, m.id, m.in_reply_to, w.depth + 1
+  from message_walk w join messages m on m.id = w.parent
+  where w.depth < 64
+),
+message_roots as (
+  select distinct on (id) id, ancestor as root from message_walk order by id, depth desc
 ),
 writes as (
   select coalesce(c.ask_id, c.reply_to, c.id) as thread_id,
@@ -28,7 +41,7 @@ writes as (
   select a.id, 'ask', null, 'user', a.author->>'id', a.created_at, false, a.issue_key, a.artifact_id
   from asks a where a.author->>'kind' = 'user'
   union all
-  select a.id, 'ask', null, 'user', a.answer->>'user', (a.answer->>'at')::timestamptz, false, a.issue_key, a.artifact_id
+  select a.id, 'ask', a.id, 'user', a.answer->>'user', (a.answer->>'at')::timestamptz, true, a.issue_key, a.artifact_id
   from asks a where a.answer->>'user' is not null
   union all
   select r.root, 'message', m.id, m.author->>'kind', m.author->>'id', m.created_at, true, m.issue_key, null
@@ -36,7 +49,7 @@ writes as (
 ),
 keyed as (
   select w.*,
-         case when w.author_kind = 'user' then lower(w.author_id) else w.author_kind || ':' || w.author_id end as writer
+         case when w.author_kind = 'user' then user_threads_login(w.author_id) else w.author_kind || ':' || w.author_id end as writer
   from writes w
 ),
 mine as (

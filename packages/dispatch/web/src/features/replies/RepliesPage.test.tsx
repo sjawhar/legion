@@ -47,6 +47,7 @@ const commentRow = replyRow("comment-root", {
     created_at: "2026-10-12T02:00:00.123456Z",
     first_line: "Fixed in **abc123**.",
     id: "comment-reply",
+    kind: "reply",
   },
   subject: "Please fix the flake",
 });
@@ -61,6 +62,7 @@ const askRow = replyRow("ask-1", {
     created_at: "2026-10-12T01:00:00Z",
     first_line: "Thanks, done.",
     id: "ask-reply",
+    kind: "reply",
   },
   subject: "Which release?",
 });
@@ -87,6 +89,34 @@ test("rows read newest first, each naming the replier, the reply, where it is an
   expect(second.getByRole("link", { name: /CORE · Notes/ }).getAttribute("href")).toBe(
     "/projects/CORE/documents/notes"
   );
+});
+
+// An answer someone else gave is a write in the thread like a reply: the row names who answered,
+// says it is an answer, and shows the chosen option and the answer's text.
+test("an answer reads as who answered, the word answered, and the option and text", async () => {
+  renderPage(() =>
+    page(
+      [
+        replyRow("ask-2", {
+          kind: "ask",
+          ref: "/issues/CORE-1/asks/ask-2",
+          reply: {
+            author: { id: "bob@example.com", kind: "user" },
+            created_at: "2026-10-12T03:00:00Z",
+            first_line: "eu-west-1 - closest to the users",
+            id: "ask-2",
+            kind: "answer",
+          },
+          subject: "Which region?",
+        }),
+      ],
+      1
+    )
+  );
+  const row = within((await screen.findAllByRole("listitem"))[0] as HTMLElement);
+  expect(row.getByText("bob@example.com")).toBeTruthy();
+  expect(row.getByText("answered")).toBeTruthy();
+  expect(row.getByText(/eu-west-1 - closest to the users/)).toBeTruthy();
 });
 
 test("Mark read marks the thread through the reply the row shows, and the list refreshes", async () => {
@@ -121,6 +151,25 @@ test("Show more reads the next page after the rows already shown", async () => {
     { limit: 50, offset: 50 },
   ]);
   expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
+});
+
+// A reply landing between two page reads moves a thread up, so the next page can repeat the last
+// row of the one before; the thread shows once, where it was first listed.
+test("a row a shifted later page repeats shows once", async () => {
+  const firstPage = Array.from({ length: 50 }, (_, index) => replyRow(`thread-${index}`));
+  renderPage((offset) =>
+    offset === 0
+      ? page(firstPage, 52)
+      : page([replyRow("thread-49"), replyRow("thread-50"), replyRow("thread-51")], 52, 50)
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Show more" }));
+  await waitFor(() =>
+    expect(screen.getAllByRole("listitem").at(-1)?.getAttribute("data-replies-row")).toBe(
+      "thread-51"
+    )
+  );
+  const ids = screen.getAllByRole("listitem").map((row) => row.getAttribute("data-replies-row"));
+  expect([ids.length, new Set(ids).size, ids.indexOf("thread-49")]).toEqual([52, 52, 49]);
 });
 
 test("with nothing unread, the page says so", async () => {

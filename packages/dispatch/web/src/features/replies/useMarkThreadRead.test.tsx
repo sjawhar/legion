@@ -10,27 +10,12 @@ import {
 import { api } from "../../api/client";
 import { myRepliesOwnerQuery, whoAmIQuery } from "../../api/queries";
 import type { MyRepliesResponse, MyReplyRow } from "../../api/types";
+import { replyRow as row } from "./replies-fixture";
 import { useMarkThreadRead } from "./useMarkThreadRead";
 
 afterEach(() => {
   jest.useRealTimers();
 });
-
-function row(threadId: string): MyReplyRow {
-  return {
-    issue: { key: "CORE-1", title: "Core" },
-    kind: "comment",
-    ref: `/issues/CORE-1/comments/${threadId}`,
-    reply: {
-      author: { id: "s1", kind: "session" },
-      created_at: "2026-10-12T00:00:00Z",
-      first_line: "Done.",
-      id: "reply-1",
-    },
-    subject: "Root",
-    thread_id: threadId,
-  };
-}
 
 function unreadSet(rows: MyReplyRow[], total = rows.length): MyRepliesResponse {
   return { limit: 200, offset: 0, rows, total };

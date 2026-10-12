@@ -36,17 +36,65 @@ export interface DwellOptions {
  *  cleanup that removes it, which React 19 calls when the element detaches. */
 export type DwellRef = (element: Element | null) => (() => void) | undefined;
 
+type EntryListener = (entry: IntersectionObserverEntry) => void;
+
+/** The one IntersectionObserver every `useDwell` on the page shares, and who listens for each
+ *  element it watches. It is dropped once it watches nothing, so the next watch builds a new one. */
+let shared:
+  | {
+      readonly listeners: Map<Element, Set<EntryListener>>;
+      readonly observer: IntersectionObserver;
+    }
+  | undefined;
+
+/** Hands `listener` every entry the shared observer reports for `element`, and returns the call
+ *  that stops it. A listener joining an element already watched re-observes it, since the browser
+ *  reports an element's current state only to a fresh observe. An observer built from another
+ *  `IntersectionObserver` than the current one (a unit test installs its own) is not reused; the
+ *  stops of the elements it still watches close over it, so they still reach it. */
+function watch(element: Element, listener: EntryListener): () => void {
+  if (shared === undefined || !(shared.observer instanceof IntersectionObserver)) {
+    const listeners = new Map<Element, Set<EntryListener>>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          for (const listen of [...(listeners.get(entry.target) ?? [])]) listen(entry);
+        }
+      },
+      { threshold: OBSERVED_SHARES }
+    );
+    shared = { listeners, observer };
+  }
+  const { listeners, observer } = shared;
+  const forElement = listeners.get(element) ?? new Set<EntryListener>();
+  if (forElement.size > 0) observer.unobserve(element);
+  forElement.add(listener);
+  listeners.set(element, forElement);
+  observer.observe(element);
+  return () => {
+    if (!forElement.delete(listener) || forElement.size > 0) return;
+    listeners.delete(element);
+    observer.unobserve(element);
+    if (listeners.size > 0) return;
+    observer.disconnect();
+    if (shared?.observer === observer) shared = undefined;
+  };
+}
+
 /**
  * The on-screen rule the Conversation's read mark and the Replies page's thread mark share: an
  * element at least 75% visible for 1,000 ms dwells, and an element taller than the screen dwells
  * once it fills 75% of the screen; dropping below that first cancels its timer.
- * One IntersectionObserver serves every element registered through the returned ref callback, and
- * an element whose ref is detached (it unmounted, or the ref moved to another element) leaves the
- * watch at once.
+ * One IntersectionObserver serves every element any `useDwell` on the page registers through its
+ * returned ref callback, and an element whose ref is detached (it unmounted, or the ref moved to
+ * another element) leaves the watch at once.
  */
 export function useDwell({ enabled, resetKey, shouldDwell, onDwell }: DwellOptions): DwellRef {
   const elements = useRef(new Set<Element>());
-  const observer = useRef<IntersectionObserver | undefined>(undefined);
+  const attach = useRef<
+    | { readonly start: (element: Element) => void; readonly stop: (element: Element) => void }
+    | undefined
+  >(undefined);
   const latest = useRef({ onDwell, shouldDwell });
   latest.current = { onDwell, shouldDwell };
 
@@ -57,7 +105,14 @@ export function useDwell({ enabled, resetKey, shouldDwell, onDwell }: DwellOptio
     }
     const visible = new Set<Element>();
     const timers = new Map<Element, number>();
+    const stops = new Map<Element, () => void>();
     let active = true;
+    const cancel = (target: Element) => {
+      const timer = timers.get(target);
+      if (timer === undefined) return;
+      window.clearTimeout(timer);
+      timers.delete(target);
+    };
     const schedule = (target: Element) => {
       if (!active || !visible.has(target) || timers.has(target)) return;
       if (!elements.current.has(target)) return;
@@ -72,46 +127,47 @@ export function useDwell({ enabled, resetKey, shouldDwell, onDwell }: DwellOptio
       }, DWELL_MS);
       timers.set(target, timer);
     };
-    const watcher = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (!readable(entry)) {
-            visible.delete(entry.target);
-            const timer = timers.get(entry.target);
-            if (timer !== undefined) {
-              window.clearTimeout(timer);
-              timers.delete(entry.target);
-            }
-            continue;
-          }
-          visible.add(entry.target);
-          schedule(entry.target);
-        }
-      },
-      { threshold: OBSERVED_SHARES }
-    );
-    observer.current = watcher;
+    const onEntry = (entry: IntersectionObserverEntry) => {
+      if (!readable(entry)) {
+        visible.delete(entry.target);
+        cancel(entry.target);
+        return;
+      }
+      visible.add(entry.target);
+      schedule(entry.target);
+    };
+    const start = (element: Element) => {
+      if (!stops.has(element)) stops.set(element, watch(element, onEntry));
+    };
+    const stop = (element: Element) => {
+      stops.get(element)?.();
+      stops.delete(element);
+      visible.delete(element);
+      cancel(element);
+    };
+    attach.current = { start, stop };
     for (const element of elements.current) {
       if (!element.isConnected) {
         elements.current.delete(element);
         continue;
       }
-      watcher.observe(element);
+      start(element);
     }
     return () => {
       active = false;
-      observer.current = undefined;
-      watcher.disconnect();
+      attach.current = undefined;
+      for (const unwatch of stops.values()) unwatch();
+      stops.clear();
       for (const timer of timers.values()) window.clearTimeout(timer);
     };
   }, [enabled, resetKey]);
   return useCallback((element: Element | null) => {
     if (element === null) return undefined;
     elements.current.add(element);
-    observer.current?.observe(element);
+    attach.current?.start(element);
     return () => {
       elements.current.delete(element);
-      observer.current?.unobserve(element);
+      attach.current?.stop(element);
     };
   }, []);
 }

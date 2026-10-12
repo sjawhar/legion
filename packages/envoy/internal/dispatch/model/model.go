@@ -906,9 +906,12 @@ type MyAnswersResponse struct {
 	Offset int           `json:"offset"`
 }
 
-// MyReplyReply is the newest reply someone else wrote in a thread on the Replies page.
+// MyReplyReply is the newest write someone else made in a thread on the Replies page: a reply (a
+// comment or a message), or the ask's answer, whose ID is the ask's, whose author is the answerer
+// and whose first line is the answer's options and text.
 type MyReplyReply struct {
 	ID        string    `json:"id"`
+	Kind      string    `json:"kind"`
 	Author    Actor     `json:"author"`
 	FirstLine string    `json:"first_line"`
 	CreatedAt time.Time `json:"created_at"`
