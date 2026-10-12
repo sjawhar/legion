@@ -2907,7 +2907,7 @@ it), so `code` is required and checked again on the decision itself, before the 
 update`, which an event insert's foreign-key check does not wait on), refuses any login the
 record's rule does not admit (`403 NOT_APPROVER`: only its person decides a person's machine login,
 and anyone signed in may deny a service's login a broker before token logins opened, which no one
-may approve, `400 REQUEST_INVALID`) whatever the record's state, answers a record that
+may approve, `400 SERVICE_LOGS_IN_WITH_TOKEN`) whatever the record's state, answers a record that
 already carries a terminal event, or is past its `expires_at` before the sweeper has recorded it
 expired, `409 RECORD_TERMINAL` before minting anything, as a decided `agent_secret` record
 answers, so a second click, a concurrent one and a late one all get it — but a record past its
