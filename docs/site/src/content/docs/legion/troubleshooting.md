@@ -387,29 +387,28 @@ The writes are retried in order; the error at the end of the line is Dispatch's 
   the `operation` and `subject`). The daemon's NATS user is missing a grant;
   [Envoy](/legion/dispatch/envoy/) lists the subjects it needs. A daemon can boot healthy and
   consume events with one grant missing, so search the log for this line after a NATS change.
-- **`agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential page, where
-  anyone signed in may approve it; pod enrollment is held until approved`.** With
-  `runtime.kubernetes.agent_secrets` set, the daemon logs in to the [Secrets Broker](/legion/broker/)
-  at boot and waits for anyone signed in to Dispatch to approve the code on its credential page;
-  pods are not enrolled until then. Denying the code does not stop new ones: while a pod needs
-  enrolling or revoking, the daemon asks again after its wait (30 s after the first denial,
-  doubling to a cap of one code every 5 minutes). To stop the codes, stop the daemon, or remove its
-  `agent_secrets` block and restart it: the daemon reads `legion.yaml` only at start.
+- **`agent-secrets: the token login failed; retrying`** (an error line with the broker's answer).
+  With `runtime.kubernetes.agent_secrets` set, the daemon logs in to the
+  [Secrets Broker](/legion/broker/) with its own ServiceAccount token, read from `token_file`, at
+  every start and again before each credential expires; pods wait to be enrolled until a login
+  succeeds. The answer says why: `ACCOUNT_NOT_LISTED` (the broker's `BROKER_SERVICE_LOGINS` does not
+  name the daemon's ServiceAccount for `legion-daemon`: add it and redeploy the broker),
+  `TOKEN_EXPIRED` or `TOKEN_INVALID` (the token file is stale, or not a token for the broker's
+  issuer and audience: check the daemon's projected-token volume), `TOKEN_TOO_LONG_LIVED` (the
+  token lives longer than an hour from its issue: set the projected token's `expirationSeconds`,
+  or `kubectl create token`'s `--duration`, to at most an hour), `TOKEN_LOGIN_OFF` (the broker
+  trusts no Kubernetes token issuer), `read the ServiceAccount token` (the file is missing), a
+  `404` from a broker too old to have the token route, or a network fault. `.agentSecretsLogin`
+  reads `"state": "failed"` until a login succeeds. Nothing needs restarting: the daemon retries
+  30 s after a failed login, doubling to at most 5 minutes, and no person is ever asked.
 
   ```sh
   legion state --config legion.yaml --json | jq .agentSecretsLogin
   ```
-- **`runtime.kubernetes.agent_secrets.operator was removed (LEGION-664)`.** The daemon's login is
-  the `legion-daemon` service's, which anyone signed in to Dispatch approves, so the block names no
-  approver. Delete the key.
-- **`agent-secrets machine login failed; a pod enrollment retries it`.** The broker refused the
-  daemon's boot login or could not be reached: a broker too old to accept a service's login with no
-  named approver, a `429` from the bucket every service's login shares, or a network fault.
-  `.agentSecretsLogin` reads `"state": "failed"` until the next login opens. Nothing needs
-  restarting. Fix the broker, and the next pod enrollment starts a fresh login whose code is on
-  `.agentSecretsLogin` and in the supervisor's `enrollment failed; retrying on the next
-  observation` warning. The daemon waits 30 s after a failed login before the next, doubling to at
-  most 5 minutes.
+- **`runtime.kubernetes.agent_secrets.token_file is required`.** The daemon logs in with its own
+  ServiceAccount token, so the block names where it is mounted.
+- **`runtime.kubernetes.agent_secrets.operator was removed (LEGION-664)`.** No person approves the
+  daemon's login, so the block names no approver. Delete the key.
 - **`supervise: agent-secrets: the broker found the pod token expired; keeping the key for a fresh
   token`** (`403 POD_TOKEN_EXPIRED: the projected token has expired (oidc: token expired at
   <time>)`). The token the daemon presented for the pod expired before the broker checked it. The

@@ -91,6 +91,7 @@ type authClass struct {
 var credentialLabels = map[string]string{
 	"public":       "None",
 	"sessionAuth":  "Session proof",
+	"renewAuth":    "Renewal session proof",
 	"launcherAuth": "Machine credential",
 	"uiAuth":       "Dispatch token",
 }

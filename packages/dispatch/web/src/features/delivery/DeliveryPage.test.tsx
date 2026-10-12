@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { ApiError, api } from "../../api/client";
 import type {
@@ -109,9 +109,17 @@ const emptyTimeline: DeliveryTimelineResponse = {
   measures: emptyMeasures,
   prs: [],
   runs: [],
+  session_groups: [],
+  session_pr_counts: {},
+  session_titles: {},
   waiting: [],
   window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
 };
+
+/** The router's query string, where a test reads what the page wrote to the URL. */
+function LocationProbe() {
+  return <output data-testid="location">{useLocation().search}</output>;
+}
 
 function renderPage(url = DELIVERY_URL) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -120,11 +128,16 @@ function renderPage(url = DELIVERY_URL) {
       <QueryClientProvider client={queryClient}>
         <KeymapProvider>
           <DeliveryPage />
+          <LocationProbe />
         </KeymapProvider>
       </QueryClientProvider>
     </MemoryRouter>
   );
   return queryClient;
+}
+
+function currentSearch(): URLSearchParams {
+  return new URLSearchParams(screen.getByTestId("location").textContent ?? "");
 }
 
 let getDeliveryMeasures: Mock<typeof api.getDeliveryMeasures>;
@@ -602,6 +615,126 @@ test("the drill-down is a dialog: focus moves into it, Escape closes it and focu
     fireEvent.keyDown(document.body, { key: "Escape" });
     expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
     expect(document.activeElement).toBe(row);
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("colouring by Parent agent offers the values to give their own colour and lane, kept in the URL", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    color_counts: {
+      ...emptyTimeline.color_counts,
+      parent_agent: { "group:g1": 3, Reviewer: 2, __no_session__: 1 },
+    },
+    session_groups: [
+      {
+        created_at: "2026-10-11T00:00:00Z",
+        created_by: { id: "alice@example.com", kind: "user" },
+        id: "g1",
+        name: "Release crew",
+        sessions: ["s1", "s2"],
+        updated_at: "2026-10-11T00:00:00Z",
+        updated_by: { id: "alice@example.com", kind: "user" },
+      },
+    ],
+  });
+  try {
+    renderPage(`${DELIVERY_URL}&colorBy=parentAgent&agents=group%3Ag1&agents=group%3Ag1`);
+    const trigger = await screen.findByRole("button", { name: "Own colour and lane: 1 chosen" });
+    fireEvent.click(trigger);
+    const listbox = within(screen.getByRole("listbox", { name: "Own colour and lane options" }));
+    expect(
+      listbox.getAllByRole("option").map((option) => option.getAttribute("aria-label"))
+    ).toEqual(["Release crew, 3 PRs", "Reviewer, 2 PRs"]);
+    fireEvent.click(listbox.getByRole("option", { name: /^Reviewer/ }));
+    await waitFor(() => expect(currentSearch().getAll("agents")).toEqual(["group:g1", "Reviewer"]));
+
+    fireEvent.change(screen.getByLabelText("Color merges by"), { target: { value: "repo" } });
+    expect(screen.queryByRole("button", { name: /^Own colour and lane/ })).toBeNull();
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("a malformed custom window falls back to the 28-day preset and removes its bad parameters", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
+  try {
+    renderPage("/delivery?mode=list&from=not-a-date&to=also-not-a-date");
+    const window = await screen.findByLabelText("Window");
+    expect((window as HTMLSelectElement).value).toBe("28d");
+    await waitFor(() => {
+      expect(currentSearch().has("from")).toBe(false);
+      expect(currentSearch().has("to")).toBe(false);
+      expect(currentSearch().has("window")).toBe(false);
+    });
+    const options = getDeliveryTimeline.mock.lastCall?.[0];
+    expect(Date.parse(options?.to ?? "") - Date.parse(options?.from ?? "")).toBe(
+      28 * 24 * 60 * 60 * 1000
+    );
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("a facet pick leaves the window rolling: it writes no from or to", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+    ...emptyTimeline,
+    facet_counts: { ...emptyCounts, priority: { P0: 1 } },
+  });
+  try {
+    renderPage("/delivery?mode=list");
+    fireEvent.click(await screen.findByRole("button", { name: /^Priority/ }));
+    fireEvent.click(
+      within(screen.getByRole("listbox", { name: "Priority options" })).getByRole("option", {
+        name: /^P0/,
+      })
+    );
+    await waitFor(() => expect(currentSearch().getAll("priority")).toEqual(["P0"]));
+    expect(currentSearch().has("from")).toBe(false);
+    expect(currentSearch().has("to")).toBe(false);
+  } finally {
+    cleanup();
+    getDeliveryTimeline.mockRestore();
+  }
+});
+
+test("the window control: a preset rolls and clears the brush, a custom range writes its days", async () => {
+  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
+  try {
+    renderPage(
+      `/delivery?mode=list&ws=${encodeURIComponent("2024-06-01T06:00:00Z")}&we=${encodeURIComponent("2024-06-01T12:00:00Z")}`
+    );
+    fireEvent.change(await screen.findByLabelText("Window"), { target: { value: "7d" } });
+    await waitFor(() => expect(currentSearch().get("window")).toBe("7d"));
+    expect(currentSearch().has("ws")).toBe(false);
+    expect(currentSearch().has("we")).toBe(false);
+    expect(currentSearch().has("from")).toBe(false);
+    await waitFor(() => {
+      const options = getDeliveryTimeline.mock.lastCall?.[0];
+      expect(Date.parse(options?.to ?? "") - Date.parse(options?.from ?? "")).toBe(
+        7 * 24 * 60 * 60 * 1000
+      );
+    });
+
+    fireEvent.change(screen.getByLabelText("Window"), { target: { value: "custom" } });
+    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-01-01" } });
+    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-01-07" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(currentSearch().get("from")).toBe("2026-01-01T00:00:00.000Z"));
+    expect(currentSearch().get("to")).toBe("2026-01-08T00:00:00.000Z");
+    expect(currentSearch().has("window")).toBe(false);
+    await waitFor(() =>
+      expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          from: "2026-01-01T00:00:00.000Z",
+          to: "2026-01-08T00:00:00.000Z",
+        })
+      )
+    );
   } finally {
     cleanup();
     getDeliveryTimeline.mockRestore();

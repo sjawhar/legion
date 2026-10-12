@@ -178,8 +178,12 @@ describe("AgentStreamPublisher", () => {
     expect(bytes).toBeLessThanOrEqual(AGENT_STREAM_LIMITS.historyBytes);
     expect(replay.frames.length).toBeGreaterThan(0);
     expect(replay.frames.length).toBeLessThan(60);
-    const times = replay.frames.map((frame) =>
-      frame.kind === "message" ? frame.message.at : frame.result.at
+    const times = replay.frames.flatMap((frame) =>
+      frame.kind === "message"
+        ? [frame.message.at]
+        : frame.kind === "tool-result"
+          ? [frame.result.at]
+          : []
     );
     expect(times).toEqual([...times].sort((left, right) => left - right));
     expect(times.at(-1)).toBe(60);
@@ -191,6 +195,165 @@ describe("AgentStreamPublisher", () => {
     expect(publisher.record(SUBJECT, { content: "hi", role: "user" }, false)).toBe(false);
     expect(publisher.record(SUBJECT, "not a message", false)).toBe(false);
     expect(published).toEqual([]);
+  });
+
+  // The composer offers what the last commands frame lists: it must reach a viewer who opens the
+  // session after the list was set, survive a full history, and change only when the list does.
+  test("the session's commands are the last frame of a replay inside its UTF-8 budget", () => {
+    const { publisher } = harness();
+    const body = "🚀".repeat(AGENT_STREAM_LIMITS.partChars);
+    for (let index = 0; index < 60; index += 1) {
+      publisher.record(SUBJECT, assistant(index + 1, [{ text: body, type: "text" }]), false);
+    }
+    publisher.setCommands(
+      SUBJECT,
+      Array.from({ length: AGENT_STREAM_LIMITS.commands }, (_, index) => ({
+        description: "界".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars),
+        name: `command-${index}`,
+        source: "extension" as const,
+      }))
+    );
+    publisher.noteViewer();
+
+    const { frames } = publisher.replay("s1");
+    const last = frames.at(-1);
+    expect(last).toMatchObject({
+      kind: "commands",
+    });
+    expect(new TextEncoder().encode(JSON.stringify(frames)).length).toBeLessThanOrEqual(
+      AGENT_STREAM_LIMITS.historyBytes
+    );
+    expect(last?.kind === "commands" && last.commands).toHaveLength(AGENT_STREAM_LIMITS.commands);
+  });
+
+  // The caps count characters, but the replay's budget is UTF-8 bytes of JSON: a control character
+  // is one character and a six-byte `\u0000` escape. A list at every cap made of escaped text must
+  // still leave the whole replay inside the budget, ending in the host-order prefix that fits.
+  test("the session's commands keep the replay inside its byte budget however their text escapes", () => {
+    const { publisher } = harness();
+    const body = "🚀".repeat(AGENT_STREAM_LIMITS.partChars);
+    for (let index = 0; index < 60; index += 1) {
+      publisher.record(SUBJECT, assistant(index + 1, [{ text: body, type: "text" }]), false);
+    }
+    const escaped = "\u0001".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars);
+    const commands = Array.from({ length: AGENT_STREAM_LIMITS.commands }, (_, index) => ({
+      description: escaped,
+      name: `c-${index}-${"\\".repeat(AGENT_STREAM_LIMITS.commandNameChars - 8)}`.slice(
+        0,
+        AGENT_STREAM_LIMITS.commandNameChars
+      ),
+      source: "extension" as const,
+    }));
+    publisher.setCommands(SUBJECT, commands);
+    publisher.noteViewer();
+
+    const { frames } = publisher.replay("s1");
+    const last = frames.at(-1);
+    expect(new TextEncoder().encode(JSON.stringify(frames)).length).toBeLessThanOrEqual(
+      AGENT_STREAM_LIMITS.historyBytes
+    );
+    expect(last?.kind).toBe("commands");
+    const listed = last?.kind === "commands" ? last.commands.map((command) => command.name) : [];
+    expect(listed.length).toBeGreaterThan(0);
+    expect(listed.length).toBeLessThan(commands.length);
+    expect(listed).toEqual(commands.slice(0, listed.length).map((command) => command.name));
+  });
+
+  test("a command name holding a control character is not offered", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.setCommands(SUBJECT, [
+      { name: "nul\u0000name", source: "extension" },
+      { name: "bell\u0007", source: "extension" },
+      { name: "del\u007f", source: "extension" },
+      { name: "compact", source: "builtin" },
+    ]);
+
+    const frame = published.at(-1);
+    expect(frame?.kind === "commands" && frame.commands).toEqual([
+      { name: "compact", source: "builtin" },
+    ]);
+  });
+
+  test("a changed command list is published at once, and an unchanged one is not", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+    publisher.setCommands(SUBJECT, [{ name: "compact", source: "builtin" }]);
+    publisher.setCommands(SUBJECT, [
+      { name: "compact", source: "builtin" },
+      { name: "skill:dispatch", source: "skill" },
+    ]);
+
+    expect(
+      published.map((frame) => (frame.kind === "commands" ? frame.commands.length : -1))
+    ).toEqual([1, 2]);
+  });
+
+  // A person types a command as one token, so a name they could not type is not offered, and a
+  // name two sources share is offered once, as the first source lists it.
+  test("a command list keeps each typable name once", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.setCommands(SUBJECT, [
+      { name: "compact", source: "builtin", terminalOnly: undefined },
+      { name: "two words", source: "prompt" },
+      { name: "", source: "extension" },
+      { name: "compact", source: "extension" },
+      { name: "new", source: "builtin", terminalOnly: true },
+    ]);
+
+    const frame = published.at(-1);
+    expect(frame?.kind === "commands" && frame.commands).toEqual([
+      { name: "compact", source: "builtin" },
+      { name: "new", source: "builtin", terminalOnly: true },
+    ]);
+  });
+
+  test("caps the command count and description, and drops a name it would change", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.setCommands(SUBJECT, [
+      {
+        description: "d".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars + 100),
+        name: "n".repeat(AGENT_STREAM_LIMITS.commandNameChars + 1),
+        source: "extension" as const,
+      },
+      ...Array.from({ length: AGENT_STREAM_LIMITS.commands }, (_, index) => ({
+        description: "d".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars + 100),
+        name: `command-${index}`,
+        source: "extension" as const,
+      })),
+      { name: "after-the-cap", source: "extension" as const },
+    ]);
+
+    const frame = published.at(-1);
+    expect(frame?.kind === "commands" && frame.commands).toHaveLength(AGENT_STREAM_LIMITS.commands);
+    expect(
+      frame?.kind === "commands" &&
+        frame.commands.every(
+          (command) => command.name.length <= AGENT_STREAM_LIMITS.commandNameChars
+        )
+    ).toBe(true);
+    expect(
+      frame?.kind === "commands" &&
+        frame.commands.every(
+          (command) =>
+            command.description === undefined ||
+            command.description.length <=
+              AGENT_STREAM_LIMITS.commandDescriptionChars + AGENT_STREAM_TRUNCATION_SUFFIX.length
+        )
+    ).toBe(true);
+    expect(
+      frame?.kind === "commands" &&
+        frame.commands.some(
+          (command) => command.name === "n".repeat(AGENT_STREAM_LIMITS.commandNameChars)
+        )
+    ).toBe(false);
+    expect(
+      frame?.kind === "commands" &&
+        frame.commands.some((command) => command.name === "after-the-cap")
+    ).toBe(false);
   });
 });
 
@@ -315,6 +478,21 @@ describe("a user turn a Dispatch message became", () => {
 
     expect(dispatchIds(published)).toEqual(["m-1", "m-1", undefined, undefined]);
     expect(dispatchIds(publisher.replay("s1").frames)).toEqual(["m-1", undefined, undefined]);
+  });
+
+  // Two Sends can be submitted in one host millisecond, so two tagged user messages can share a
+  // timestamp. Each is its own message on the page, which keys messages by their id.
+  test("keeps two tagged user messages stamped in the same millisecond apart", () => {
+    const { published, publisher } = harness();
+    publisher.noteViewer();
+    publisher.record(SUBJECT, { ...user(10, "ship it"), tag: "m-1" }, false, "m-1");
+    publisher.record(SUBJECT, { ...user(10, "ship it"), tag: "m-2" }, false, "m-2");
+
+    const frames = publisher.replay("s1").frames;
+    expect(dispatchIds(frames)).toEqual(["m-1", "m-2"]);
+    const ids = frames.map((frame) => (frame.kind === "message" ? frame.message.id : undefined));
+    expect(new Set(ids).size).toBe(2);
+    expect(dispatchIds(published)).toEqual(["m-1", "m-2"]);
   });
 
   test("goes with the conversation when the session is replaced", () => {

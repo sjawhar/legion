@@ -34,66 +34,95 @@ has one of two kinds:
 
 An enrollment is leased for `BROKER_LEASE_SECONDS` and renewed while its session runs: the helper
 renews the sessions it registered, `agent-secrets renew` renews a box, and Legion's pod shim renews
-a pod. An enrollment has **ended** once its launcher revokes it (the helper does as soon as a
-registered session's process exits), whoever may revoke its machine login revokes that login
+a pod. A pod's renewal carries the pod's current projected token, and the broker refuses it
+(`POD_IDENTITY_MISMATCH`) unless the token names the pod UID and service account the enrollment was
+made for. The token is not yet required. The broker ratchets each pod UID instead: once any
+enrollment naming a pod UID, live or ended, has renewed with that pod's token, the broker refuses a
+renewal without one (`POD_TOKEN_REQUIRED`) from every enrollment naming that pod, whichever machine
+login made it.
+So the copied-token gap closes for every pod UID a current-image pod has renewed under: no
+enrollment naming that pod renews without its token, and a token copied out of the pod stops
+renewing anything once it expires. It stays open for the UID of a pod on an older worker image,
+whose `agent-secrets renew` never sends a token: such a pod renews as it did before, the broker
+logging each such renewal, until the release that requires the token. One window is left even for a
+current-image pod: a copied token used to renew before the pod's own first renewal with its token.
+That is seconds while the Legion daemon holds an approved machine login, but after a daemon restart
+its pods enroll only once a person approves the daemon's new login, and a pod that ends before it
+enrolls never renews with its token, so its UID stays open as an old-image pod's does. A grant lasts
+until its session ends, so a copy that keeps renewing keeps the grant one approval gave it. An
+enrollment has **ended** once its launcher revokes it (the helper does
+as soon as a registered session's process exits), whoever may revoke its machine login revokes that
+login
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)), or its
-lease lapses. From the moment the lease lapses, the session's calls are refused `PROOF_INVALID`; the
-broker's sweep, which runs every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run
-after the lapse. Ending an enrollment any of these ways revokes every grant it held and cancels
-every request it still had pending, so those leave the approver's Inbox and an approval can never
+lease lapses. A `pod` enrollment's launcher is the one machine login that made it: another login,
+even another login of the same service, such as the Legion daemon's after a restart or after its
+login reached its expiry and it logged in again, is refused
+`NOT_ENROLLING_CREDENTIAL`, and that pod's enrollment ends with its lease or with that machine
+login. From the moment the lease lapses, its next renewal is refused
+`ENROLLMENT_NOT_LIVE`; other session calls remain `PROOF_INVALID`. The broker's sweep, which runs
+every `BROKER_SWEEP_SECONDS`, then ends the enrollment on its first run after the lapse. Ending an
+enrollment any of these ways revokes every grant it held and cancels every request it still had
+pending, so those leave the approver's Inbox and an approval can never
 land on a session that is gone
 (`packages/envoy/internal/broker/enroll/enroll.go`, `endEnrollment`).
 
 Every `session` enrollment records an **operator**: the person whose machine it runs on. The
 operator is the person who approved the machine login that enrolled it, never a value the launcher
-chooses. A `pod` enrollment records none, since the Legion daemon logs in as a service rather than
-as a person; it records the service account the pod's projected token proved instead.
+chooses. A `pod` enrollment records none, since the Legion daemon logs in as a service with its own
+Kubernetes token rather than as a person; it records the service account the pod's projected token
+proved instead.
 
 ## Machine login
 
-A launcher (a machine's helper, or the Legion daemon) cannot enroll anything until a person has
-approved a **machine login** for it. The login works like a device code:
+A launcher (a person's machine helper, or the Legion daemon) cannot enroll anything until the
+broker has issued it a **launcher credential**: a credential bound to a key the launcher holds, never
+a token, which the launcher uses by signing with that key. A person's machine gets one when that
+person approves a **machine login**, which works like a device code:
 
 1. The machine generates a fresh key and asks the broker to log in (`agent-secrets machine login`
-   asks the helper to). A person's machine names the
-   person who should approve it (the helper reads that person's Dispatch login from
-   `AGENT_SECRETS_OPERATOR_FILE`); a service's login, such as the Legion daemon's, names its service
-   instead.
+   asks the helper to), naming the person who should approve it (the helper reads that person's
+   Dispatch login from `AGENT_SECRETS_OPERATOR_FILE`).
 2. The broker answers with an eight-character confirmation code, `XXXX-XXXX`, which the machine
    prints.
-3. A person types the code into Dispatch, sees which machine is asking, and approves or denies it.
-   Only the typed code selects a machine login: no link can approve one.
-4. On approval the broker mints a **launcher credential** bound to the machine's key. It is never a
-   token: the machine uses it by signing with that key.
+3. The person types the code into Dispatch, sees which machine is asking, and approves or denies it.
+   Only the typed code selects a machine login: no link can approve one, and anyone else is refused
+   `NOT_APPROVER`, since the machine's sessions act as that person.
+4. On approval the broker mints the launcher credential bound to the machine's key.
 
-Who decides a machine login depends on what it logs in as. A person's machine login is decided
-only by the person it names, since its sessions act as them: anyone else is refused
-`NOT_APPROVER`. A service's login is decided by anyone signed in to Dispatch, since its credential
-enrolls the service's pods and acts as no person: the Legion daemon's login waits for whoever reads
-its code, not for one named person. The broker reads the service from the machine's signed request,
-so a login the daemon starts while still naming a person in it is anyone's to decide too.
+A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
+token instead, and no person approves it: the broker verifies the token as it verifies a pod's,
+refuses one that lives longer than an hour from its issue, and issues the credential when the
+token's account is one `BROKER_SERVICE_LOGINS` names for that service
+([Operate](/legion/broker/operate/#what-to-run)). Each such account holds one credential, which
+every login moves to the login's key and to the token's expiry, at most an hour away, so the
+service logs in again before then and at every restart; a running daemon proves the same key at
+each login, and a restart brings a new one. A device-code login that names a service is refused
+`SERVICE_LOGS_IN_WITH_TOKEN`.
 
-A launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. It may be revoked from Dispatch's
-machine-login page, or, for a person's own machine, from any of their machines under its machine
-login (`agent-secrets machine revoke`), before or after
-it expires, which also ends every session it enrolled
-([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)): a person's
-machine login by the person who approved it and no one else, a service's by anyone signed in, on
-the machine-login page. Its
+A person's launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. It may be revoked from
+Dispatch's machine-login page by the person who approved it and no one else, or from any of their
+machines under its machine login (`agent-secrets machine revoke`), before or after it expires,
+which also ends every session it enrolled
+([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)). Its
 sessions outlive its expiry: a session renews its lease with its own key, never with the machine's
 credential, so a box keeps working after the machine's credential expires, and the page lists an
-expired login, marked as expired with sessions still running, until its last session ends. On a
-person's own machine, whoever approved its login is its operator. The Legion daemon's login has no
-operator, since it enrolls pods, so it is listed for everyone signed in, with who approved it, and
-anyone's revoke ends every pod it enrolled. The helper keeps its key in memory only, so a helper
-restart, like an expired or revoked credential, means logging the machine in again. A
+expired login, marked as expired with sessions still running, until its last session ends. Whoever
+approved a person's machine login is its operator. The helper keeps its key in memory only, so a
+helper restart, like an expired or revoked credential, means logging the machine in again. A
 machine login nobody decides expires after 15 minutes, a fixed time rather than a setting
-(`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`).
+(`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A service's login has no
+operator, so the machine-login page lists it for everyone signed in, and anyone may revoke it, which
+ends every pod it enrolled at once: a service login a person approved through a code before
+services logged in with their tokens, until it expires, and a service's token login, which names no
+approver. A service whose token login was revoked logs in again with its token at its next call,
+under a new credential, which enrolls the pods it launches next; a pod the revoke ended stays
+without secrets until it is replaced. To stop it logging in, remove its account from
+`BROKER_SERVICE_LOGINS` and redeploy the broker.
 
 A credential enrolls sessions only for its own operator: an enrollment naming anyone else is refused
 `OPERATOR_MISMATCH`. The broker's rate limiter caps how often anyone can start a machine login, per
-source address and per login: per named person for a person's machine, and one limit shared by
-every service's login, whatever service it names.
+source address and per named person, and how often anyone can try a token login: per source
+address before the token is verified, and per account once it is.
 
 ## Owner and tier: who may have which secret
 
@@ -131,9 +160,9 @@ An owner may also be a service the broker is configured with. `BROKER_SERVICES` 
 service's name to the Kubernetes service account its pods run as, for example
 `legion-daemon=system:serviceaccount:legion:legion-worker`. A service's own sessions are the pods
 that a launcher logged in as that service enrolled, and whose projected token proved that service
-account: the Legion daemon's worker pods, for `legion-daemon`. A machine login's service name is
-the machine's own claim, which anyone signed in may approve, so the service account the cluster
-vouches for is what proves the service.
+account: the Legion daemon's worker pods, for `legion-daemon`. A launcher logs in as a service with
+its own token, for an account `BROKER_SERVICE_LOGINS` names; the pod's own token proving the pods'
+account is what makes a pod the service's.
 
 A service's secrets go to its own sessions and to no one else. That includes a person's own
 session, and a pod run under another service account even when a launcher logged in as the service
@@ -309,9 +338,13 @@ the secrets an operator's revoke withheld from the session, and, on each other g
 that revoke ended, the withheld secrets that grant held), `grant.withheld` (an operator's revoke of
 a grant already revoked, naming under `withheld` the secrets it withheld from the session) and
 `launcher_credential.revoked` (naming the machine login's `credential_id`, its `host`, its
-`service` for a service's login, and under `enrollments` the sessions the revoke ended). Each row
-names its actor: `human:<email>` for a change Dispatch made for its signed-in person,
-`session:<enrollment id>` for a session's own, `launcher:<credential id>` for one a machine login
-made under its own credential, a person's revoke from their machine included, or `broker`. No
+`service` for a service's login, and under `enrollments` the sessions the revoke ended) and
+`launcher_credential.token_login` (a service's token login: the `credential_id`, its `service`, the
+token's `subject`, the `pod_uid` the token is bound to when it is, the login's `key_thumbprint`,
+the credential's `expires_at` and the token's own `token_expires_at`). Each row names its actor:
+`human:<email>` for a change Dispatch made for its signed-in person, `session:<enrollment id>` for
+a session's own, `launcher:<credential id>` for one
+a machine login made under its own credential, a person's revoke from their machine and a
+service's token login included, or `broker`. No
 record, event or audit row ever holds a secret value.
 [Operating the broker](/legion/broker/operate/#the-audit-record) shows how to read them.

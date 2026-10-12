@@ -37,7 +37,7 @@ type State struct {
 	// the capability `legion controller start` fetched, or, under `controller: daemon`, with the boot
 	// token of the daemon's own controller launch.
 	ControllerLocator *ControllerLocator `json:"controllerLocator,omitempty"`
-	// AgentSecretsLogin is the daemon's own agent-secrets machine login
+	// AgentSecretsLogin is the daemon's own agent-secrets token login
 	// (runtime.kubernetes.agent_secrets), absent when the deployment configures
 	// no broker.
 	AgentSecretsLogin *AgentSecretsLoginView `json:"agentSecretsLogin,omitempty"`
@@ -95,15 +95,12 @@ func ControllerLocatorOf(runtimeName string, record controller.Record) *Controll
 	return &ControllerLocator{Runtime: runtimeName, External: true, SessionID: record.Session, RegisteredAt: record.RegisteredAt}
 }
 
-// AgentSecretsLoginView is the daemon's own agent-secrets machine login's current status
-// (agentsecrets.Client.LoginStatus): State is one of "none" (no login has ever been started),
-// "pending", "issued", "denied", "expired", or "failed" (the broker never opened the most recent
-// login: it refused it, or did not answer); Code is the confirmation code shown on the Dispatch
-// credential page for a pending login, "" otherwise. Never a key, a launcher credential, or why a
-// login failed — those live only in the daemon's process memory.
+// AgentSecretsLoginView is the daemon's own agent-secrets token login's current status
+// (agentsecrets.Client.LoginStatus): State is one of "none" (no login has finished yet), "issued",
+// or "failed" (the latest login won no credential). Never a key, a token, a launcher credential, or
+// why a login failed — those live only in the daemon's process memory and its log.
 type AgentSecretsLoginView struct {
 	State string `json:"state"`
-	Code  string `json:"code"`
 }
 
 // MarshalJSON keeps `issues` an object and `pendingStatusWrites` and `capabilities` arrays on the

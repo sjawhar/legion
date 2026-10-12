@@ -114,10 +114,9 @@ func TestSignRequestObjectHeaderAndClaims(t *testing.T) {
 		t.Fatalf("header has no embedded jwk: %+v", header)
 	}
 
-	// A service's login names no approver, since anyone signed in to Dispatch approves it, so
-	// login_hint is absent; reason is always empty for a machine login and so, mirroring envoy's
-	// omitempty requestClaims, is absent too — pinning that no extra or misnamed claim leaks onto a
-	// machine-login object.
+	// No person approves the daemon's token login, so login_hint is absent; reason is always empty
+	// and so, mirroring envoy's omitempty requestClaims, is absent too — pinning that no extra or
+	// misnamed claim leaks onto the login's request object.
 	want := []string{"aud", "authorization_details", "exp", "iat", "iss", "jti"}
 	if got := sortedKeys(payload); !reflect.DeepEqual(got, want) {
 		t.Fatalf("payload claim names = %v, want %v", got, want)

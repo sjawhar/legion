@@ -124,8 +124,7 @@
     "registeredAt": "2026-09-22T09:16:40Z"
   },
   "agentSecretsLogin": {
-    "state": "pending",
-    "code": "WXYZ-1234"
+    "state": "issued"
   },
   "capabilities": [
     {

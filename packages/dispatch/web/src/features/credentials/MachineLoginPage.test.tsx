@@ -117,3 +117,33 @@ test("code -> lookup -> Deny posts the looked-up code too, which the broker requ
     denyCredentialRecord.mockRestore();
   }
 });
+
+test("a pending service login from before token logins offers Deny alone, which the broker allows", async () => {
+  const record = machineRecord({ approver: "anyone", service: "legion-daemon" });
+  const lookupMachineCredential = spyOn(api, "lookupMachineCredential").mockResolvedValue(record);
+  const denyCredentialRecord = spyOn(api, "denyCredentialRecord").mockResolvedValue({
+    state: "denied",
+  });
+
+  try {
+    renderPage();
+
+    fireEvent.change(screen.getByLabelText("Code shown on the machine"), {
+      target: { value: "abcd1234" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Look up" }));
+
+    await waitFor(() => expect(lookupMachineCredential).toHaveBeenCalledWith("ABCD-1234"));
+    expect(await screen.findByRole("button", { name: "Deny" })).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Approve" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Deny" }));
+    await waitFor(() =>
+      expect(denyCredentialRecord).toHaveBeenCalledWith("req-2", { code: "ABCD-1234" })
+    );
+  } finally {
+    cleanup();
+    lookupMachineCredential.mockRestore();
+    denyCredentialRecord.mockRestore();
+  }
+});

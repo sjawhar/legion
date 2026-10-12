@@ -157,9 +157,9 @@ type DeliveryRunJobView struct {
 // facts plus what the server derives at read time from the stored facts: DeployedStatus, the
 // linked issue's title, priority and effective components (the nearest ancestor's attachment, as
 // the issue read resolves it), and (on DeliveryRunView) RootFailingJob. Mirrors
-// packages/contracts/src/dispatch-api.ts's DeliveryPR exactly; ParentAgent and Sessions resolve to
-// the same set of sessions today (LEGION-567: no grouping link exists between sessions) -- see
-// agents.go's comment on the pair for why both still exist.
+// packages/contracts/src/dispatch-api.ts's DeliveryPR exactly. ParentAgent is the Parent agent of
+// the first of Sessions: its session group's `group:<id>`, else that session's title or id
+// (ParentAgents, parent_agent.go).
 type DeliveryPRView struct {
 	ID                string         `json:"id"`
 	Repo              string         `json:"repo"`
@@ -262,17 +262,23 @@ type DeliveryWaitingPRView struct {
 // the window's pull requests by each colour-by facet's value with no facet applied, so a value
 // keeps its colour while facets change. Components names every component of the projects the
 // window's issues belong to, and IssueTitles every issue the window's pull requests name, so a
-// facet value a selection filtered out of PRs still has its label.
+// facet value a selection filtered out of PRs still has its label. SessionGroups is every session
+// group; SessionTitles and SessionPRCounts are, for each session first on a window pull request,
+// its title (its id when it has none) and how many window pull requests it is first on, before
+// the facets: what the page's session-groups editor lists.
 type DeliveryTimelineResponse struct {
-	Window      DeliveryWindowView               `json:"window"`
-	PRs         []DeliveryPRView                 `json:"prs"`
-	Waiting     []DeliveryWaitingPRView          `json:"waiting"`
-	Runs        []DeliveryRunView                `json:"runs"`
-	FacetCounts map[string]map[string]int        `json:"facet_counts"`
-	ColorCounts map[string]map[string]int        `json:"color_counts"`
-	Components  map[string]DeliveryComponentView `json:"components"`
-	IssueTitles map[string]string                `json:"issue_titles"`
-	Freshness   DeliveryFreshnessView            `json:"freshness"`
+	Window          DeliveryWindowView               `json:"window"`
+	PRs             []DeliveryPRView                 `json:"prs"`
+	Waiting         []DeliveryWaitingPRView          `json:"waiting"`
+	Runs            []DeliveryRunView                `json:"runs"`
+	FacetCounts     map[string]map[string]int        `json:"facet_counts"`
+	ColorCounts     map[string]map[string]int        `json:"color_counts"`
+	Components      map[string]DeliveryComponentView `json:"components"`
+	IssueTitles     map[string]string                `json:"issue_titles"`
+	Freshness       DeliveryFreshnessView            `json:"freshness"`
+	SessionGroups   []SessionGroup                   `json:"session_groups"`
+	SessionTitles   map[string]string                `json:"session_titles"`
+	SessionPRCounts map[string]int                   `json:"session_pr_counts"`
 }
 
 // DeliveryRunJobDetailView is one job of `GET /api/v1/delivery/runs/{id}`: the drill-down's job

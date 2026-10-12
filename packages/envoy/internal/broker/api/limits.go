@@ -10,13 +10,20 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 )
 
-// LauncherLimits bounds POST /v1/launcher-credentials, the one route an unauthenticated caller
-// can use to make the broker do work on their behalf. Every source address has its own token
-// bucket, and so does every person a machine login's login_hint names, while every service's login
-// spends one shared bucket, whatever service it names (launcherLoginKey): a flood from one address
-// cannot keep the broker busy verifying and recording machine-login requests, a flood naming one
-// operator cannot bury that operator's pending machine logins, and a flood of invented service
-// names cannot buy itself a bucket per name.
+// LauncherLimits bounds POST /v1/launcher-credentials and POST /v1/launcher-credentials/token, the
+// routes an unauthenticated caller can use to make the broker do work on their behalf. Every
+// source address has its own token bucket (PerAddress), and so does every person a machine login's
+// login_hint names and every account a verified token login proves (PerLogin). A token login
+// spends its address's bucket before its token is verified, since a refused token signature makes
+// the verifier fetch the issuer's keys again, and its account's only after; a machine login
+// verifies its request object locally first, to read the person its bucket is keyed on, then
+// spends both. So a flood from one address cannot keep the broker verifying tokens or writing
+// machine logins, a flood naming one operator cannot bury that operator's pending machine logins,
+// and one account cannot log in faster than its bucket allows. A daemon behind an address others
+// share is held to that address's bucket too: BROKER_TRUSTED_PROXY_HEADER keys the bucket on the
+// caller's own address behind a proxy, and the daemon renews its credential halfway through its
+// life, which carries it through brief contention for that bucket, not through a caller that keeps
+// it drained until the credential expires.
 type LauncherLimits struct {
 	PerAddress ratelimit.Limit
 	PerLogin   ratelimit.Limit
@@ -91,18 +98,41 @@ func clientAddress(r *http.Request, trustedProxyHeader string) string {
 // The per-login bucket, keyed on the request object's own claims rather than the caller's address,
 // is unaffected by trustedProxyHeader and remains a smaller, accepted risk. A person's machine
 // login spends its own person:<login> bucket, so an attacker naming a specific victim operator
-// repeatedly can lock out that operator's machine logins at a low rate. Every service's login
-// shares the one "service" bucket, so a flood under any service name, invented or not, locks out
-// every service's login, the Legion daemon's included, until the bucket refills. This is inherent
-// to a per-login limit on an unauthenticated route.
+// repeatedly can lock out that operator's machine logins at a low rate. This is inherent to a
+// per-login limit on an unauthenticated route.
 func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, login string) bool {
-	now := time.Now()
-	address := clientAddress(r, l.trustedProxyHeader)
-	if l.perAddress.AllowAt(address, now) && l.perLogin.AllowAt(login, now) {
+	if !l.addressAllows(r) || !l.perLogin.AllowAt(login, time.Now()) {
+		refuseWithRetryAfter(w, max(l.perAddress.Every(), l.perLogin.Every()), "too many launcher credential requests; try again later")
+		return true
+	}
+	return false
+}
+
+// refuseAddress writes 429 RATE_LIMITED and reports true when r's source address has no request
+// left in its bucket: POST /v1/launcher-credentials/token's first limit, spent before the token is
+// verified.
+func (l *launcherLimiter) refuseAddress(w http.ResponseWriter, r *http.Request) bool {
+	if l.addressAllows(r) {
 		return false
 	}
-	refuseWithRetryAfter(w, max(l.perAddress.Every(), l.perLogin.Every()), "too many launcher credential requests; try again later")
+	refuseWithRetryAfter(w, l.perAddress.Every(), "too many launcher credential requests; try again later")
 	return true
+}
+
+// refuseAccount writes 429 RATE_LIMITED and reports true when subject, an account a token login
+// has just verified, has no login left in its account:<subject> bucket. Only a verified token
+// spends it, after its address's bucket.
+func (l *launcherLimiter) refuseAccount(w http.ResponseWriter, subject string) bool {
+	if l.perLogin.AllowAt("account:"+subject, time.Now()) {
+		return false
+	}
+	refuseWithRetryAfter(w, l.perLogin.Every(), "too many token logins for this ServiceAccount; try again later")
+	return true
+}
+
+// addressAllows spends one request of r's source address's bucket, reporting whether it had one.
+func (l *launcherLimiter) addressAllows(r *http.Request) bool {
+	return l.perAddress.AllowAt(clientAddress(r, l.trustedProxyHeader), time.Now())
 }
 
 // refuseReread writes 429 RATE_LIMITED and reports true when r's source address, or the broker as
