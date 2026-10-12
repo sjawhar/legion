@@ -201,7 +201,7 @@ func blockTableWeight(table *model.BlockTable) int64 {
 
 // tablePositionsWeight is the bytes the distinct table positions hold, each once however many paths
 // share it (every block in a cell shares its cell's), and the storage they point into, each once
-// however many positions point at it (pmdoc.BlockPaths shares it within a table): a row's cells'
+// however many positions point at it (pmdoc.BlockPathsAndTableRows shares it within a table): a row's cells'
 // opening words, a header's text and its slot in the table's array of headers, and the slots of the
 // table's array of ordinals that Row and Column point at.
 func tablePositionsWeight(positions map[*pmdoc.TablePosition]struct{}) int64 {

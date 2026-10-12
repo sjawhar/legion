@@ -907,6 +907,22 @@ func TestBlockPathsOfTheHeaviestTablesStayWithinTheMemoryBound(t *testing.T) {
 			if allocated > requestMemoryBound {
 				t.Errorf("BlockPathsAndTableRows of %s allocated %d MiB, want at most %d MiB", shape.name, allocated>>20, requestMemoryBound>>20)
 			}
+			// A document a room holds is read from its live tree on every GET /blocks, uncached, so
+			// its tables' rows come from TableRows alone, which builds no path.
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			started = time.Now()
+			alone, err := pmdoc.TableRows(tree)
+			elapsed = time.Since(started)
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("TableRows: %v", err)
+			}
+			allocated = int64(after.TotalAlloc - before.TotalAlloc)
+			t.Logf("%s: TableRows alone, %d tables, %d MiB allocated in %s", shape.name, len(alone), allocated>>20, elapsed)
+			if allocated > requestMemoryBound {
+				t.Errorf("TableRows of %s allocated %d MiB, want at most %d MiB", shape.name, allocated>>20, requestMemoryBound>>20)
+			}
 		})
 	}
 }

@@ -178,12 +178,12 @@ func TestBlockPathOfNamesTheHeaderTheRendererDrawsOverAWideTable(t *testing.T) {
 	}
 }
 
-// BlockPaths places every block in one walk exactly as BlockPathOf places it alone: over the
-// placement documents (placementDocuments). An id no block carries is in neither.
+// BlockPathsAndTableRows places every block in one walk exactly as BlockPathOf places it alone:
+// over the placement documents (placementDocuments). An id no block carries is in neither.
 func TestBlockPathsPlacesEveryBlockAsBlockPathOfDoes(t *testing.T) {
 	for name, doc := range placementDocuments(t) {
 		t.Run(name, func(t *testing.T) {
-			paths, err := BlockPaths(doc)
+			paths, _, err := BlockPathsAndTableRows(doc)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -203,12 +203,12 @@ func TestBlockPathsPlacesEveryBlockAsBlockPathOfDoes(t *testing.T) {
 					t.Fatalf("BlockPathOf(%q): %v", id, err)
 				}
 				if got, ok := paths[id]; !ok || !reflect.DeepEqual(got, want) {
-					t.Fatalf("BlockPaths[%q] = %#v (present %t), want BlockPathOf's %#v", id, got, ok, want)
+					t.Fatalf("paths[%q] = %#v (present %t), want BlockPathOf's %#v", id, got, ok, want)
 				}
 			}
 			for id := range paths {
 				if !ids[id] {
-					t.Fatalf("BlockPaths holds %q, which no block carries", id)
+					t.Fatalf("the paths hold %q, which no block carries", id)
 				}
 			}
 			if _, err := BlockPathOf(doc, "missing"); !errors.Is(err, ErrTargetNotFound) {
@@ -284,14 +284,11 @@ func TestTableRowsPlacesEveryRowAndCellAsBlockPathOfDoes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", name, err)
 		}
-		// The cached read takes both from one walk, which must answer what each answers alone.
-		paths, rows, err := BlockPathsAndTableRows(doc)
-		if err != nil {
-			t.Fatalf("%s: %v", name, err)
-		}
-		alone, err := BlockPaths(doc)
-		if err != nil || !reflect.DeepEqual(paths, alone) || !reflect.DeepEqual(rows, listed) {
-			t.Fatalf("%s: BlockPathsAndTableRows differs from BlockPaths and TableRows alone (err=%v)", name, err)
+		// The cached read takes the rows from the walk that places blocks, which must list what
+		// TableRows lists alone.
+		_, rows, err := BlockPathsAndTableRows(doc)
+		if err != nil || !reflect.DeepEqual(rows, listed) {
+			t.Fatalf("%s: BlockPathsAndTableRows lists other rows than TableRows (err=%v)", name, err)
 		}
 		Walk(doc, func(node *Node) bool {
 			tableID, _ := node.Attrs[BlockIDAttr].(string)

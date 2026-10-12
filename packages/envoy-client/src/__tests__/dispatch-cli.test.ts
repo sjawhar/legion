@@ -34,10 +34,11 @@ const issue = {
 
 /** DSP-2's spec, whose blocks `dispatch doc-read --blocks` lists. "é" is two bytes in UTF-8, so
  *  every block after the heading starts at a byte offset past its index in the string. */
+const intro = `${"x".repeat(59)}😀 then more words past the cut.`;
 const spec = [
   "# Café plan",
   "",
-  "Intro words that run past sixty characters, so the listing cuts them short.",
+  intro,
   "",
   "- First item",
   "- Second item",
@@ -68,7 +69,7 @@ const specBlocks: ArtifactBlock[] = [
   {
     id: "p-1",
     type: "paragraph",
-    ...byteRange("Intro words that run past sixty characters, so the listing cuts them short."),
+    ...byteRange(intro),
     token: "sha256:p",
     references: { comments: 1, asks: 0 },
   },
@@ -483,7 +484,8 @@ describe("the dispatch CLI", () => {
     const listing = [
       "Blocks of spec.md, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.",
       "h-1 heading (sha256:h; 0 comments, 0 asks): # Café plan",
-      "p-1 paragraph (sha256:p; 1 comment, 0 asks): Intro words that run past sixty characters, so the listing c…",
+      // The 60th character is an emoji, two UTF-16 units: a cut by code unit would split it.
+      `p-1 paragraph (sha256:p; 1 comment, 0 asks): ${"x".repeat(59)}😀…`,
       "l-1 bullet_list (sha256:l; 0 comments, 0 asks): - First item - Second item",
       "  i-1 list_item (sha256:i1; 0 comments, 0 asks): - First item",
       "    ip-1 paragraph (sha256:ip1; 0 comments, 0 asks): First item",
@@ -545,6 +547,20 @@ describe("the dispatch CLI", () => {
         "chart.png is an uploaded image, not a document, so it has no blocks. Read it with dispatch doc-read without --blocks.\n"
       );
       expect(requests.map((request) => request.path)).toEqual(["/api/v1/issues/DSP-2"]);
+    });
+
+    test("refuses a conversation's upload, naming it, as it refuses an issue's", async () => {
+      const { code, stdout } = await run(
+        ["doc-read", "--ref", "dispatch://agent/ses-pic/artifact/shot-png@v1", "--blocks"],
+        omp
+      );
+      expect(code).toBe(1);
+      expect(stdout).toBe(
+        "shot.png is an uploaded image, not a document, so it has no blocks. Read it with dispatch doc-read without --blocks.\n"
+      );
+      expect(requests.map((request) => request.path)).toEqual([
+        "/api/v1/agents/ses-pic/artifacts/shot-png",
+      ]);
     });
 
     test("refuses a version, since only the live document's blocks are what an edit addresses", async () => {

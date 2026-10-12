@@ -16661,7 +16661,7 @@ function argumentProblems(tool, args) {
       break;
     }
     case "dispatch_doc_read": {
-      if (args.blocks === true && args.version !== undefined) {
+      if (optionalBoolean(args, "blocks") === true && optionalNumber(args, "version") !== undefined) {
         problems.push("blocks lists the live document, the one dispatch doc-edit changes; name no version");
       }
       break;
@@ -17363,7 +17363,8 @@ async function listDocumentBlocks(client, artifact) {
       holders.pop();
     const indent = "  ".repeat(holders.length);
     const flat = decoder.decode(bytes.subarray(block.from, block.to)).replace(/\s+/g, " ").trim();
-    const opening = flat.length > BLOCK_OPENING_CHARS ? `${flat.slice(0, BLOCK_OPENING_CHARS)}\u2026` : flat;
+    const points = Array.from(flat);
+    const opening = points.length > BLOCK_OPENING_CHARS ? `${points.slice(0, BLOCK_OPENING_CHARS).join("")}\u2026` : flat;
     const { comments, asks } = block.references;
     lines.push(`${indent}${block.id} ${block.type} (${block.token ?? "no token"}; ${comments} comment${comments === 1 ? "" : "s"}, ${asks} ask${asks === 1 ? "" : "s"}): ${opening}`);
     if (block.type === "table") {
@@ -18129,12 +18130,15 @@ ${followsAsk(askOwner)}`,
       const { agentArtifact } = ownerArguments;
       if (agentArtifact !== undefined) {
         const artifact = await client.getAgentArtifact(agentArtifact.session, agentArtifact.slug);
+        if (optionalBoolean(args, "blocks") === true) {
+          throw new Error(`${artifact.name} is an uploaded ${artifact.kind}, not a document, so it has no blocks. Read it with dispatch doc-read without --blocks.`);
+        }
         return readUploadedFile(client, artifact, { session: agentArtifact.session, artifact: artifact.slug }, optionalNumber(args, "version") ?? agentArtifact.version, `agent/${agentArtifact.session}`, shown);
       }
       const artifactReference = optionalString(args, "artifact") ?? (ownerArguments.ref?.kind === "spec" || ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
       const version2 = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
-      if (args.blocks === true) {
+      if (optionalBoolean(args, "blocks") === true) {
         if (resolved.artifact.kind === "file" || resolved.artifact.kind === "image") {
           throw new Error(`${resolved.artifact.name} is an uploaded ${resolved.artifact.kind}, not a document, so it has no blocks. Read it with dispatch doc-read without --blocks.`);
         }

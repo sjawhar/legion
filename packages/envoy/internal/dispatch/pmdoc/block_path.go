@@ -77,7 +77,10 @@ func tablePosition(table *Node, id string, below []int) *TablePosition {
 	}
 	column := below[1]
 	layout := layoutTable(table)
-	header := layout.header(slices.Index(layout.grid[row], table.Children[row].Children[column]))
+	header := ""
+	if h := layout.cellHeaders(table, row)[column]; h >= 0 {
+		header = layout.headers[h]
+	}
 	position.Column, position.Header = &column, &header
 	return position
 }
@@ -120,22 +123,25 @@ func layoutTable(table *Node) tableLayout {
 	return layout
 }
 
-// header is the text of the header cell covering column at of the grid, or "" where none does.
-func (layout tableLayout) header(at int) string {
-	if at < 0 || at >= len(layout.covering) || layout.covering[at] < 0 {
-		return ""
+// cellHeaders is, for each cell of the table's row at rowIndex in child order, the index among the
+// header row's cells of the header cell drawn above it, or -1 where none is: the one covering the
+// column the renderer writes the cell in. Every cell stands in its row's grid in child order, so
+// one pass over the row places them all.
+func (layout tableLayout) cellHeaders(table *Node, rowIndex int) []int {
+	row := table.Children[rowIndex].Children
+	heads := make([]int, len(row))
+	written := layout.grid[rowIndex]
+	at := 0
+	for column, cell := range row {
+		for written[at] != cell {
+			at++
+		}
+		heads[column] = -1
+		if at < len(layout.covering) {
+			heads[column] = layout.covering[at]
+		}
 	}
-	return layout.headers[layout.covering[at]]
-}
-
-// BlockPaths is the path of every block carrying a block id, keyed by that id, each as BlockPathOf
-// finds it: where two blocks carry one id, the first in document order. It walks the document once
-// and lays each table out once (tableLayout), so its cost is linear in the document's size: every
-// path of a row shares one read-only Cells slice, every block in a cell shares one read-only
-// TablePosition, and their Row, Column and Header point into storage the table's paths share.
-func BlockPaths(doc *Node) (map[string]BlockPath, error) {
-	paths, _, err := place(doc, "BlockPaths", true, false)
-	return paths, err
+	return heads
 }
 
 // TableRow is one row of a table as TableRows lists it: its block id ("" for a row the live
@@ -150,10 +156,9 @@ type TableRow struct {
 // TableCell is one cell of a table row as TableRows lists it: its block id ("" for a cell the live
 // document has not stamped yet), its Row and Column (its index in its row, the index
 // DeleteTableColumn takes, so a cell spanning columns counts once), the opening words of the header
-// cell drawn above it ("" where none is) and its own opening words: the Row and Column BlockPathOf
-// places it at, the opening words of the header cell its Header names, and the opening words its
-// row's Cells names it by. A header is listed by its opening words, as the header row lists it,
-// so a long header repeated under every row of a long table adds no more than they do to each.
+// cell drawn above it ("" where none is) and its own opening words. A header is listed by its
+// opening words, as the header row lists it, so a long header repeated under every row of a long
+// table adds no more than they do to each.
 type TableCell struct {
 	ID     string
 	Row    int
@@ -163,40 +168,74 @@ type TableCell struct {
 }
 
 // TableRows is every row of every table carrying a block id, keyed by the table's id, each row and
-// each cell placed as BlockPathOf places it, with the table laid out once (tableLayout). Where two
-// tables carry one id, the first in document order is listed under it, as BlockPathOf finds it.
+// each cell placed as BlockPathOf places it, with each table laid out once (tableLayout) and no
+// block's path built. Where two tables carry one id, the first in document order is listed under
+// it, as BlockPathOf finds it.
 func TableRows(doc *Node) (map[string][]TableRow, error) {
-	_, rows, err := place(doc, "TableRows", false, true)
-	return rows, err
+	if err := wantDocument(doc, "TableRows"); err != nil {
+		return nil, err
+	}
+	rows := map[string][]TableRow{}
+	Walk(doc, func(node *Node) bool {
+		if node.Type != "table" {
+			return true
+		}
+		layout := layoutTable(node)
+		cells, heads := make([][]string, len(node.Children)), make([][]int, len(node.Children))
+		for rowIndex, row := range node.Children {
+			cells[rowIndex], heads[rowIndex] = cellOpenings(row), layout.cellHeaders(node, rowIndex)
+		}
+		id, _ := node.Attrs[BlockIDAttr].(string)
+		listRows(rows, node, id, cells, heads)
+		return true
+	})
+	return rows, nil
 }
 
-// BlockPathsAndTableRows is BlockPaths and TableRows from one walk, which lays each table out once
-// for both: a listed cell's opening words and header are the strings its path's table position
-// holds.
+// BlockPathsAndTableRows is the path of every block carrying a block id, keyed by that id, each as
+// BlockPathOf finds it (where two blocks carry one id, the first in document order), and TableRows,
+// from one walk. It lays each table out once (tableLayout) for both, so its cost is linear in the
+// document's size: every path of a row shares one read-only Cells slice, every block in a cell
+// shares one read-only TablePosition, their Row, Column and Header point into storage the table's
+// paths share, and a listed cell's opening words and header are the strings its path holds.
 func BlockPathsAndTableRows(doc *Node) (map[string]BlockPath, map[string][]TableRow, error) {
-	return place(doc, "BlockPathsAndTableRows", true, true)
-}
-
-// place walks doc once, collecting the paths when withPaths says so and the tables' rows when
-// withRows does.
-func place(doc *Node, operation string, withPaths, withRows bool) (map[string]BlockPath, map[string][]TableRow, error) {
-	if err := wantDocument(doc, operation); err != nil {
+	if err := wantDocument(doc, "BlockPathsAndTableRows"); err != nil {
 		return nil, nil, err
 	}
-	var walker blockPathWalker
-	if withPaths {
-		walker.paths = map[string]BlockPath{}
-	}
-	if withRows {
-		walker.rows = map[string][]TableRow{}
-	}
+	walker := blockPathWalker{paths: map[string]BlockPath{}, rows: map[string][]TableRow{}}
 	walker.children(doc, nil)
 	return walker.paths, walker.rows, nil
 }
 
-// blockPathWalker collects BlockPaths' paths when paths is not nil, and TableRows' rows when rows
-// is not nil. stack is the path of the node being visited, and table the position every block
-// below it has in the table holding it, nil outside a table.
+// listRows adds table's rows to rows under id, unless id is empty or an earlier table carries it
+// (BlockPathOf finds the first): cells is each row's cells' opening words, and heads each cell's
+// header (cellHeaders), listed by the header row's opening words.
+func listRows(rows map[string][]TableRow, table *Node, id string, cells [][]string, heads [][]int) {
+	if id == "" {
+		return
+	}
+	if _, earlier := rows[id]; earlier {
+		return
+	}
+	listed := make([]TableRow, len(table.Children))
+	for rowIndex, row := range table.Children {
+		rowID, _ := row.Attrs[BlockIDAttr].(string)
+		listed[rowIndex] = TableRow{ID: rowID, Index: rowIndex, Cells: make([]TableCell, len(row.Children))}
+		for column, cell := range row.Children {
+			cellID, _ := cell.Attrs[BlockIDAttr].(string)
+			header := ""
+			if h := heads[rowIndex][column]; h >= 0 {
+				header = cells[0][h]
+			}
+			listed[rowIndex].Cells[column] = TableCell{ID: cellID, Row: rowIndex, Column: column, Header: header, Text: cells[rowIndex][column]}
+		}
+	}
+	rows[id] = listed
+}
+
+// blockPathWalker collects BlockPathsAndTableRows' paths and rows. stack is the path of the node
+// being visited, and table the position every block below it has in the table holding it, nil
+// outside a table.
 type blockPathWalker struct {
 	paths map[string]BlockPath
 	rows  map[string][]TableRow
@@ -220,10 +259,9 @@ func (w *blockPathWalker) children(parent *Node, table *TablePosition) {
 	}
 }
 
-// record keeps the path of node, which carries id when hasID, unless an earlier block carries id
-// or the walk collects no paths.
+// record keeps the path of node, which carries id when hasID, unless an earlier block carries id.
 func (w *blockPathWalker) record(node *Node, id string, hasID bool, table *TablePosition) {
-	if !hasID || w.paths == nil {
+	if !hasID {
 		return
 	}
 	if _, taken := w.paths[id]; taken {
@@ -245,54 +283,20 @@ func (w *blockPathWalker) table(table *Node, id string, hasID bool) {
 	for index := range ordinals {
 		ordinals[index] = index
 	}
-	var listed []TableRow
-	listing := false
-	if w.rows != nil && id != "" {
-		_, earlier := w.rows[id]
-		listing = !earlier
-	}
-	if listing {
-		listed = make([]TableRow, len(table.Children))
-	}
+	cells, heads := make([][]string, len(table.Children)), make([][]int, len(table.Children))
 	var noHeader string
-	// headerOpenings is the header row's Cells, each header cell's opening words, which a listed
-	// cell names its header by.
-	var headerOpenings []string
 	for rowIndex, row := range table.Children {
 		rowID, rowHasID := row.Attrs[BlockIDAttr].(string)
 		w.stack = append(w.stack, BlockPathEntry{Type: row.Type, ID: rowID, Index: rowIndex})
-		cells := cellOpenings(row)
-		if rowIndex == 0 {
-			headerOpenings = cells
-		}
-		w.record(row, rowID, rowHasID, &TablePosition{ID: id, Row: &ordinals[rowIndex], Cells: cells})
-		if listing {
-			listed[rowIndex] = TableRow{ID: rowID, Index: rowIndex, Cells: make([]TableCell, len(row.Children))}
-		}
-		// Each cell of the row stands in the grid in child order, so one pass over the row's grid
-		// places them all.
-		written := layout.grid[rowIndex]
-		at := 0
+		cells[rowIndex], heads[rowIndex] = cellOpenings(row), layout.cellHeaders(table, rowIndex)
+		w.record(row, rowID, rowHasID, &TablePosition{ID: id, Row: &ordinals[rowIndex], Cells: cells[rowIndex]})
 		for column, cell := range row.Children {
-			for written[at] != cell {
-				at++
-			}
 			header := &noHeader
-			if at < len(layout.covering) && layout.covering[at] >= 0 {
-				header = &layout.headers[layout.covering[at]]
+			if h := heads[rowIndex][column]; h >= 0 {
+				header = &layout.headers[h]
 			}
+			position := &TablePosition{ID: id, Row: &ordinals[rowIndex], Column: &ordinals[column], Header: header, Cells: cells[rowIndex]}
 			cellID, cellHasID := cell.Attrs[BlockIDAttr].(string)
-			if listing {
-				listedHeader := ""
-				if at < len(layout.covering) && layout.covering[at] >= 0 {
-					listedHeader = headerOpenings[layout.covering[at]]
-				}
-				listed[rowIndex].Cells[column] = TableCell{ID: cellID, Row: rowIndex, Column: column, Header: listedHeader, Text: cells[column]}
-			}
-			if w.paths == nil {
-				continue
-			}
-			position := &TablePosition{ID: id, Row: &ordinals[rowIndex], Column: &ordinals[column], Header: header, Cells: cells}
 			w.stack = append(w.stack, BlockPathEntry{Type: cell.Type, ID: cellID, Index: column})
 			w.record(cell, cellID, cellHasID, position)
 			w.children(cell, position)
@@ -300,9 +304,7 @@ func (w *blockPathWalker) table(table *Node, id string, hasID bool) {
 		}
 		w.stack = w.stack[:len(w.stack)-1]
 	}
-	if listing {
-		w.rows[id] = listed
-	}
+	listRows(w.rows, table, id, cells, heads)
 }
 
 // oneLineText is node's text on one line, as the renderer writes a table cell (hard breaks as
