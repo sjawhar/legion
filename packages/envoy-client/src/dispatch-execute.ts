@@ -1794,12 +1794,12 @@ async function readUploadedFile(
  * answer it. The live document's `ask` blocks are judged by the latest version, the one the
  * request would name: a block that version shows open counts as open even when its ask is already
  * answered or closed, since that answer reaches a version only when the document settles, about
- * two seconds later. An answered block already carries its own record and needs no edit to carry
- * it forward; a waiver reaches a version only with the agent's next edit writing the decision into
- * the text. A block not yet in that version counts as open too. A block removed from the document
- * is not judged here; `refuseRemovingOpenDecisionBlocks` keeps one whose ask is open in it. A
- * document already approved at its latest version is left to the server, which answers with that
- * approval.
+ * two seconds later, or with the agent's next edit, whichever is first. An answered block already
+ * carries its own record, so no edit is needed for that; a waiver carries none, so the agent's
+ * next edit is where the human's decision gets written into the text. A block not yet in that
+ * version counts as open too. A block removed from the document is not judged here;
+ * `refuseRemovingOpenDecisionBlocks` keeps one whose ask is open in it. A document already
+ * approved at its latest version is left to the server, which answers with that approval.
  */
 async function refuseOpenDecisionBlocks(
   client: DispatchClient,
