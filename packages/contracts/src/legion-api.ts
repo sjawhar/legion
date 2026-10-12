@@ -184,10 +184,13 @@ const legionPendingStatusWrite = z.strictObject({
 
 /** `api.StrandedClaim` — one claim nothing will wake (`workflow.Stranded`): a worker of its issue's
  * phase, or its tree's architect, in a tree that runs, named by its issue, its role and its state;
- * the issue's entry under `issues` carries the rest. The state is the move that brings it back:
- * `suspended`, the operator's resume; `failed`, a workflow start, since a failed claim ignores
- * resume and deliver (its architect's retry for a worker, its tree's re-admission for an
- * architect). */
+ * the issue's entry under `issues` carries the rest. The state and role are the move that brings it
+ * back: a `suspended` architect, the operator's resume; a `suspended` worker, the move its claim's
+ * `suspendedBy` calls for (`LegionOperatorClaimResponse`): the boot's start once it is marked the daemon's
+ * when it was suspended before 0038, the operator's resume when an operator suspended it and it kept
+ * its task or its phase start waits, otherwise the operator's delivery of its phase's resume task;
+ * `failed`, a workflow start, since a failed claim ignores resume and deliver (its architect's retry
+ * for a worker, its tree's re-admission for an architect). */
 const legionStrandedClaim = z.strictObject({
   issue: issueKey,
   role: z.enum(LEGION_ROLES),
@@ -406,6 +409,9 @@ export const LegionOperatorClaimResponse = z.strictObject({
   }),
   uncertainStreak: z.number().int().nonnegative(),
   pending: legionDeliveryView.optional(),
+  /** Who suspended the claim while it is suspended; absent otherwise. `unknown` is a suspension
+   * recorded before migration 0038; only an `operator` one holds against the daemon's rules. */
+  suspendedBy: z.enum(["unknown", "operator", "daemon", "exit"]).optional(),
   /** A suspension the claim's machine holds for the agent's turn to end; absent when none is. */
   suspensionHeld: z.literal(true).optional(),
 });

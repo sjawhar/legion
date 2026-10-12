@@ -398,7 +398,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			if workflow != nil {
 				log.Info("legion workflow boot stage", "stage", "api")
 			}
-			err = serve(ctx, cfg, st, startedAt, listener, s, plan, workflow)
+			err = serve(ctx, cfg, st, startedAt, bootID, listener, s, plan, workflow)
 		default:
 			failed <- err
 			s.halt(err)
@@ -1325,7 +1325,7 @@ func (s *supervision) stop() {
 // anything waits — the workflow's outbox and the controller keeper would otherwise wait on a
 // machine whose relaunch holds it, and the stop on them — and then drains the API until drainBy,
 // letting the decisions its routes asked for finish, and ends them when the drain does (endDrain).
-func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time, listener net.Listener, s *supervision, p plan, workflow *workflowRuntime) error {
+func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time, bootID int64, listener net.Listener, s *supervision, p plan, workflow *workflowRuntime) error {
 	records := record.Store(record.NewStore())
 	var handlers []intake.Handler
 	var client dispatch.Client
@@ -1428,6 +1428,13 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	})
 	if workflow != nil {
 		group.Go(func() error { return workflow.run(serving) })
+		// The boot fact runs beside the already-started API server, so a slow census of claims
+		// never delays /healthz or repeats LEGION-653's boot-time deadlock. A failure while the
+		// daemon serves is retried (runBooted); only the daemon's stop ends it unapplied.
+		group.Go(func() error {
+			workflow.runBooted(serving, bootID)
+			return nil
+		})
 	}
 	if keeper != nil {
 		group.Go(func() error {

@@ -294,8 +294,12 @@ type PendingStatusWrite struct {
 
 // StrandedClaim is one claim nothing will wake — a worker of its issue's phase, or its tree's
 // architect, in a tree that runs — named by its issue, its role and its state; the issue's own
-// entry under `issues` carries the rest. The state is the move that brings it back: `suspended`,
-// the operator's resume (`legion claims resume`); `failed`, a workflow start, since a failed claim
+// entry under `issues` carries the rest. The state and role are the move that brings it back: a
+// `suspended` architect, the operator's resume (`legion claims resume`), which a catch-up follows;
+// a `suspended` worker, the move its claim's suspendedBy calls for (the operator claim view): the
+// boot's start once it is marked the daemon's when it was suspended before 0038, the operator's
+// resume when an operator suspended it and it kept its task or its phase start waits, otherwise the
+// operator's delivery of its phase's resume task; `failed`, a workflow start, since a failed claim
 // ignores resume and deliver — its architect's retry of the held phase for a worker, its tree's
 // re-admission for an architect.
 type StrandedClaim struct {

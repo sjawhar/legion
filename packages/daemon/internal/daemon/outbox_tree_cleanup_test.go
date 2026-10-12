@@ -189,7 +189,7 @@ func TestAnOrphansClaimsLeaveTheirOldTreeAndStartInTheirOwn(t *testing.T) {
 				t.Fatal(err)
 			}
 			machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: root.Key, TreeEpoch: 1, Issue: child.Key, Role: claim.RolePlanner,
-				Generation: 1, State: supervise.StateSuspended, Session: "ses-planner", SessionFile: "/legion/sessions/planner.jsonl"}, "")
+				Generation: 1, State: supervise.StateSuspended, SuspendedBy: supervise.SuspendedByDaemon, Session: "ses-planner", SessionFile: "/legion/sessions/planner.jsonl"}, "")
 			if err != nil {
 				t.Fatal(err)
 			}

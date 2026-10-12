@@ -106,6 +106,12 @@ func previousClaim(t *testing.T, cfg config.Config, tree, issue string, role cla
 	}
 }
 
+// operatorHeld is c as the operator's suspend leaves it: suspended, recorded as the operator's.
+func operatorHeld(c supervise.Claim) supervise.Claim {
+	c.SuspendedBy = supervise.SuspendedByOperator
+	return c
+}
+
 // runningRoot is a root admitted at generation 1 and working phase p.
 func runningRoot(key string, p phase.Phase) record.Issue {
 	return record.Issue{Key: key, Tree: key, Project: projectOf(key), Title: key, Phase: p, Generation: 1, Status: "in_progress", Rank: "m", HandedOver: true}
@@ -164,13 +170,16 @@ func keysOf(state map[string]json.RawMessage) []string {
 
 // A daemon restarted after an operator suspended its fleet mid-phase names, once it has re-adopted
 // every claim, the claims nothing will wake: a suspended worker owning its issue's phase (nothing
-// but a start for that phase resumes it, and its start already ran), a suspended tree architect (a
-// notice to it is held, and only an admission starts it), a failed phase worker (its issue is held
-// from that phase) and a failed tree architect. It names none of the claims something will still
-// start: a worker whose phase is not its own, a worker whose phase start the outbox still holds,
-// and the members of a tree that lingers, which re-admission starts again. One error line names
-// them all, the suspended ones under `resume` and the failed ones, which resume does not move,
-// under `needsWorkflowStart`; the state carries the same claims, each with its state.
+// but a start for that phase resumes it, and its start already ran), one whose phase start the
+// outbox still holds (that start waits for the operator's resume, since the operator suspended the
+// claim), a suspended tree architect (a notice to it is held, and only an admission starts it), a
+// failed phase worker (its issue is held from that phase) and a failed tree architect. It names
+// none of the claims something will still start: a worker whose phase is not its own, and the
+// members of a tree that lingers, which re-admission starts again. One error line names them all,
+// the suspended architects under `resume`, which brings one back with a catch-up, the suspended
+// phase workers under `suspendedWorkers`, whose move depends on who suspended each (its
+// suspendedBy), and the failed ones, which resume does not move, under `needsWorkflowStart`; the
+// state carries the same claims, each with its state.
 func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	cfg := workflowConfig(t, workflowNATS(t))
 	key := func(n string) string { return cfg.Project + "-" + n }
@@ -179,8 +188,8 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 	parked := record.Issue{Key: lingering, Tree: lingering, Project: cfg.Project, Title: lingering, Phase: phase.Done, Generation: 1, Status: "backlog", Rank: "n", HandedOver: true, LingerUntil: &until}
 	child := runningRoot(lingeringChild, phase.ProductionCheck)
 	child.Tree, child.Parent = lingering, &parked.Key
-	// The tester's start for its phase is due in an hour: the outbox holds it, and it will resume
-	// the tester when it runs.
+	// The tester's start for its phase is due in an hour: the outbox holds it, but the operator
+	// suspended the tester, so the start waits for the operator's resume and wakes nothing.
 	queuedStart, err := record.NewOutboxRow(tested, record.SuperviseRequest{Op: "start", Tree: tested, Role: claim.RoleTester, Generation: 1, Phase: phase.Testing, Task: "Test it."}, time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
@@ -193,7 +202,7 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 			previousClaim(t, cfg, implementing, implementing, claim.RolePlanner, supervise.StateSuspended),
 			previousClaim(t, cfg, implementing, implementing, claim.RoleImplementer, supervise.StateSuspended),
 			previousClaim(t, cfg, reviewing, reviewing, claim.RoleReviewer, supervise.StateFailed),
-			previousClaim(t, cfg, tested, tested, claim.RoleTester, supervise.StateSuspended),
+			operatorHeld(previousClaim(t, cfg, tested, tested, claim.RoleTester, supervise.StateSuspended)),
 			previousClaim(t, cfg, lingering, lingeringChild, claim.RoleImplementer, supervise.StateSuspended),
 			previousClaim(t, cfg, planning, planning, claim.RoleArchitect, supervise.StateFailed),
 		},
@@ -220,16 +229,18 @@ func TestABootNamesTheClaimsNothingWillWake(t *testing.T) {
 		}
 		return named
 	}
-	resume := []string{implementing + " architect", implementing + " implementer"}
+	resume := []string{implementing + " architect"}
+	workers := []string{implementing + " implementer", tested + " tester"}
 	workflowStart := []string{reviewing + " reviewer", planning + " architect"}
-	if line["level"] != "ERROR" || line["project"] != cfg.Project || line["count"] != float64(len(resume)+len(workflowStart)) ||
-		!reflect.DeepEqual(listed("resume"), resume) || !reflect.DeepEqual(listed("needsWorkflowStart"), workflowStart) {
-		t.Fatalf("the boot's line = %v, want an error for project %s naming %q to resume and %q needing a workflow start", line, cfg.Project, resume, workflowStart)
+	if line["level"] != "ERROR" || line["project"] != cfg.Project || line["count"] != float64(len(resume)+len(workers)+len(workflowStart)) ||
+		!reflect.DeepEqual(listed("resume"), resume) || !reflect.DeepEqual(listed("suspendedWorkers"), workers) || !reflect.DeepEqual(listed("needsWorkflowStart"), workflowStart) {
+		t.Fatalf("the boot's line = %v, want an error for project %s naming %q to resume, %q as suspended workers and %q needing a workflow start", line, cfg.Project, resume, workers, workflowStart)
 	}
 	wantWire := []map[string]string{
 		{"issue": implementing, "role": "architect", "state": "suspended"},
 		{"issue": implementing, "role": "implementer", "state": "suspended"},
 		{"issue": reviewing, "role": "reviewer", "state": "failed"},
+		{"issue": tested, "role": "tester", "state": "suspended"},
 		{"issue": planning, "role": "architect", "state": "failed"},
 	}
 	if got := strandedOnTheWire(t, bootState(t, d)); !reflect.DeepEqual(got, wantWire) {

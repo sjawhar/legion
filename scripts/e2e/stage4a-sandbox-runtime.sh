@@ -17,8 +17,8 @@
 # Everything the run creates carries its own project label, s4a-<run id>, and lib/namespace-rig.sh
 # owns it: on any exit the teardown deletes by exact name every Sandbox the harness recorded, then
 # everything labelled with that exact project — never by label existence — and namespace-clean
-# compares the namespace with the snapshot taken before the run, restricted to objects of this run
-# or of no project, so another tree's objects cannot fail it. Nothing outside `legion` is touched.
+# compares the run's own objects with the snapshot taken before the run (lib/namespace-rig.sh), so
+# another system's objects cannot fail it. Nothing outside `legion` is touched.
 #
 # Inputs: LEGION_E2E_RUNTIME_CONTEXT (required) and LEGION_E2E_RUNTIME_KUBECONFIG (default
 # ~/.kube/legion-daemon-production) name the restricted identity; LEGION_E2E_OPERATOR_CONTEXT
@@ -208,7 +208,7 @@ fi
 begin snapshot
 snapshot "$evidence/namespace-before.txt" || fail "the operator could not list namespace $namespace"
 snapshotted=1
-note "[operator] $(wc -l <"$evidence/namespace-before.txt") objects in $namespace carry no project label or project $project"
+note "[operator] $(wc -l <"$evidence/namespace-before.txt") of the run's objects in $namespace before it starts (labelled with project $project, or unlabelled and named for it)"
 
 begin session-db
 # postgres-resume's session database: a throwaway Postgres on the devbox's private address, which

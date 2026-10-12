@@ -2,9 +2,10 @@
 -- any role of the issue starts (issue_branch), beside every kind 0021 admits.
 --
 -- The check is one list, so the migration that sets it names every kind. It names issue_suspend
--- too: the migration that adds that kind names issue_branch, so whichever of the two runs last
--- admits both.
+-- and auto_merge_disable too: the migrations that add them (0034, 0039) name issue_branch, so
+-- whichever of them runs last admits every kind, in whatever order a database applied them.
 alter table outbox drop constraint outbox_kind_check;
 alter table outbox add constraint outbox_kind_check check (kind in (
   'dispatch_status', 'dispatch_message', 'notice', 'controller_notice', 'supervise', 'gate_seed',
-  'linger_close', 'workspace_remove', 'merge_queue_publish', 'issue_branch', 'issue_suspend'));
+  'linger_close', 'workspace_remove', 'merge_queue_publish', 'issue_branch', 'issue_suspend',
+  'auto_merge_disable'));

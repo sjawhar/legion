@@ -23,7 +23,7 @@ func TestASuspensionArrivingMidTurnWaitsForTheTurnToEnd(t *testing.T) {
 	loc := h.locator()
 
 	for range 2 {
-		if err := h.handle(RequestSuspend{Claim: testToken, Reason: "LEGION-209 left implementing"}); !errors.Is(err, ErrSuspendHeld) {
+		if err := h.handle(RequestSuspend{Claim: testToken, Reason: "LEGION-209 left implementing", By: SuspendedByDaemon}); !errors.Is(err, ErrSuspendHeld) {
 			t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 		}
 		h.wantState(StateWorking)
@@ -46,22 +46,22 @@ func TestASuspensionArrivingMidTurnWaitsForTheTurnToEnd(t *testing.T) {
 		t.Errorf("stored %+v, want the suspension persisted and the turn's task retired", stored)
 	}
 	h.wantPrompts(1)
-	h.must(RequestSuspend{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken, By: SuspendedByDaemon})
 	h.wantCalls("Suspend", 1)
 }
 
-// A turn that never ends does not hold the suspension for ever: the process is stopped once the
-// stop timeout has run from the first request, and a request repeated meanwhile does not start the
-// wait over.
-func TestASuspensionWhoseTurnNeverEndsStopsTheProcessAtTheStopTimeout(t *testing.T) {
+// An operator's suspension whose turn never ends does not hold for ever: the process is stopped
+// once the stop timeout has run from the first request, and a request repeated meanwhile does not
+// start the wait over.
+func TestAnOperatorsSuspensionWhoseTurnNeverEndsStopsTheProcessAtTheStopTimeout(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 
 	h.advance(testStop - time.Second)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("the repeated suspend returned %v, want ErrSuspendHeld", err)
 	}
 	h.wantState(StateWorking)
@@ -70,11 +70,47 @@ func TestASuspensionWhoseTurnNeverEndsStopsTheProcessAtTheStopTimeout(t *testing
 	h.advance(time.Second)
 	h.wantState(StateSuspended)
 	h.wantCalls("Suspend", 1)
+	if c := h.claim(); c.SuspendedBy != SuspendedByOperator {
+		t.Errorf("the claim records %q as who suspended it, want the operator", c.SuspendedBy)
+	}
 
 	// The turn's end, when it comes, is a suspended process's, and changes nothing.
 	h.must(StreamTurnEnd{Claim: testToken})
 	h.wantState(StateSuspended)
 	h.wantCalls("Suspend", 1)
+}
+
+// The daemon's own suspension (its issue left the workflow, its tree lingers) waits for the turn
+// however long it takes: an architect's sign-off moves its tree into linger from inside a turn that
+// goes on after it, and the linger must not cut that turn off. What bounds the wait is what ends
+// the process anyway, the tree's close. An operator's suspend arriving meanwhile takes the held
+// suspension over, and its stop timeout runs from then.
+func TestTheDaemonsSuspensionWaitsForTheTurnPastTheStopTimeout(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateWorking)
+	if err := h.handle(RequestSuspend{Claim: testToken, Reason: "the tree of LEGION-208 lingers", By: SuspendedByDaemon}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
+	}
+	h.advance(10 * testStop)
+	h.wantState(StateWorking)
+	h.wantCalls("Suspend", 0)
+	if c := h.claim(); !c.SuspensionHeld || c.SuspensionHeldBy != SuspendedByDaemon {
+		t.Fatalf("the claim reports %+v, want the daemon's suspension held", c)
+	}
+
+	if err := h.handle(RequestSuspend{Claim: testToken, Reason: "the operator suspended it", By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("the operator's suspend mid-turn returned %v, want ErrSuspendHeld", err)
+	}
+	if c := h.claim(); c.SuspensionHeldBy != SuspendedByOperator || !c.RuleHolds() {
+		t.Fatalf("the claim reports %+v, want the operator's suspension held", c)
+	}
+	h.advance(testStop - time.Second)
+	h.wantState(StateWorking)
+	h.advance(time.Second)
+	h.wantState(StateSuspended)
+	if c := h.claim(); c.SuspendedBy != SuspendedByOperator {
+		t.Errorf("the claim records %q as who suspended it, want the operator", c.SuspendedBy)
+	}
 }
 
 // A held suspension whose stop the runtime refuses stays held and is tried again at the probe
@@ -96,7 +132,7 @@ func TestAHeldSuspensionWhoseStopFailsIsTriedAgainUntilItLands(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newHarness(t)
 			h.reach(StateWorking)
-			if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+			if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 				t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 			}
 			h.rt.FailSuspend(errBoom)
@@ -123,7 +159,7 @@ func TestAHeldSuspensionWhoseStopFailsIsTriedAgainUntilItLands(t *testing.T) {
 func TestAHeldSuspensionWhoseStopLandsButWhoseWriteFailsStaysSuspended(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 	h.store.fail("PutClaim", errBoom)
@@ -139,13 +175,13 @@ func TestAHeldSuspensionWhoseStopLandsButWhoseWriteFailsStaysSuspended(t *testin
 	h.wantCalls("Probe", 0)
 }
 
-// A start run against the claim while its suspension is held hands it work again: the suspension it
-// supersedes neither runs at the turn's end nor at the stop timeout, as the outbox finishes a
-// suspend older than the newest start without acting (workflow.StopActs).
+// A start run against the claim while the daemon's suspension is held hands it work again: the
+// suspension it supersedes never runs at the turn's end, as the outbox finishes a suspend older than
+// the newest start without acting (workflow.StopActs).
 func TestAStartRunAgainstTheClaimDropsTheSuspensionWaitingForItsTurn(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByDaemon}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 
@@ -159,6 +195,33 @@ func TestAStartRunAgainstTheClaimDropsTheSuspensionWaitingForItsTurn(t *testing.
 	h.wantCalls("Suspend", 0)
 }
 
+// An operator's suspension holds until the operator resumes the claim: a start meeting it, held for
+// the turn or run, records nothing and waits (ErrHeldByOperator), and the suspension runs at the
+// turn's end.
+func TestAStartWaitsOutTheOperatorsSuspension(t *testing.T) {
+	h := newHarness(t)
+	h.reach(StateWorking)
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
+		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
+	}
+
+	if err := h.m.StartedBy(h.ctx, 42); !errors.Is(err, ErrHeldByOperator) {
+		t.Fatalf("a start against the held operator's suspension returned %v, want ErrHeldByOperator", err)
+	}
+	h.must(StreamTurnEnd{Claim: testToken})
+	h.wantState(StateSuspended)
+	if err := h.m.StartedBy(h.ctx, 42); !errors.Is(err, ErrHeldByOperator) {
+		t.Fatalf("a start against the operator's suspension returned %v, want ErrHeldByOperator", err)
+	}
+	if got := h.claim().LastStartRow; got != 0 {
+		t.Fatalf("the claim recorded start row %d, want none while the operator's suspension holds", got)
+	}
+	h.must(RequestResume{Claim: testToken})
+	if err := h.m.StartedBy(h.ctx, 42); err != nil {
+		t.Fatalf("the start after the operator's resume: %v", err)
+	}
+}
+
 // A process that dies while its suspension is held has nothing left to wait for: the claim is
 // suspended, not relaunched, and the death is charged nowhere. The turn's task goes back to waiting
 // as a death leaves it, so a task of no phase goes on the resume.
@@ -166,7 +229,7 @@ func TestAProcessThatDiesWhileItsSuspensionWaitsIsSuspendedNotRelaunched(t *test
 	h := newHarness(t)
 	h.reach(StateWorking)
 	loc := h.locator()
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 
@@ -209,7 +272,7 @@ func TestAPromptRetirementWhileASuspensionIsHeldRunsTheHeldStop(t *testing.T) {
 	if err := h.m.Handle(h.ctx, StreamTurnStart{Claim: testToken}); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.m.Handle(h.ctx, RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.m.Handle(h.ctx, RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 	h.rt.FailSuspend(errBoom)
@@ -246,7 +309,7 @@ func TestOnlyAHeldSuspensionLetsARowEndSuspendedWithoutNamingIt(t *testing.T) {
 		}, true},
 		{"a ready claim", StateReady, func(*harness) {}, true},
 		{"a working claim holding one", StateWorking, func(h *harness) {
-			if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+			if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 				h.t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 			}
 		}, false},
@@ -259,7 +322,7 @@ func TestOnlyAHeldSuspensionLetsARowEndSuspendedWithoutNamingIt(t *testing.T) {
 			saved := table[k]
 			t.Cleanup(func() { table[k] = saved })
 			table[k] = rule{name: "a rogue row", to: saved.to, act: func(m *Machine, ctx context.Context, _ Event) error {
-				return m.suspendNow(ctx, RequestSuspend{Claim: testToken})
+				return m.suspendNow(ctx, RequestSuspend{Claim: testToken, By: SuspendedByOperator})
 			}}
 
 			err := h.handle(RuntimeObservation{Observation: runtime.Observation{Locator: h.locator(), Kind: runtime.Alive, At: h.clock.Now()}})
@@ -278,12 +341,12 @@ func TestOnlyAHeldSuspensionLetsARowEndSuspendedWithoutNamingIt(t *testing.T) {
 func TestASuspensionAskedAgainAfterARestartRunsWhenTheShimFindsTheTurnOver(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateWorking)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
 	h.restart()
 	h.wantState(StateWorking)
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend after the restart returned %v, want ErrSuspendHeld", err)
 	}
 

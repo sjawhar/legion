@@ -126,6 +126,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.closeRoot(ctx, tx, fact)
 	case intake.LingerExpired:
 		return e.lingerExpired(ctx, tx, fact)
+	case intake.DaemonBooted:
+		return e.booted(ctx, tx, fact)
 	default:
 		return intake.Result{}, nil
 	}

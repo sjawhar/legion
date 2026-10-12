@@ -373,8 +373,54 @@ Closing the terminal leaves the project without one, and the daemon logs
    legion claims resume  --config legion.yaml --operator-token-file operator-token --claim <token>
    ```
 
-   A suspension waits for the agent's current turn to land; the resumed agent continues the same
-   conversation in a new pod.
+   An operator's suspension of an agent in a turn waits for that turn to land, at most
+   `worker_stop_timeout_seconds`, and the cut-off task is re-sent on the resume. One that reaches a
+   claim while it is still launching waits until the agent is ready, or until its registration
+   deadline. Until the stop lands the hold lives only in the daemon's memory, so before restarting
+   the daemon wait until `legion claims list` shows the claim `suspended`, not merely
+   `suspensionHeld`. The resumed agent continues the same conversation in a new pod.
+
+   **An operator's suspension holds until the operator resumes the claim.** The daemon resumes a
+   suspended claim on its own when its issue's phase moves to the claim's role (a phase start,
+   re-admission, a child's return to `todo`), and keeps its own controller running, unless an
+   operator suspended it; a phase start for a claim an operator suspended waits instead. At boot
+   it also resumes a claim that owns its issue's current phase, but only one the daemon or the
+   agent's own exit suspended. A notice for a suspended architect resumes nothing: it waits until
+   the architect holds its role again, so an operator-suspended architect receives it when the
+   operator resumes it. A drain therefore ends with the operator resuming every claim they
+   suspended, one `legion claims resume` each; `legion claims list --json` names each one's
+   `suspendedBy` (`operator`, `daemon`, `exit`, or `unknown` for one suspended before this
+   release). The daemon's own suspension of a claim in a turn waits for the turn however long it
+   takes, with no stop timeout: a child parked in Dispatch (`backlog` or `icebox`) stops its worker
+   only once the worker's current turn ends, and a lingering tree's claims stay suspended until the
+   tree is re-admitted.
+
+   **After the first upgrade to a release that records `suspendedBy`,** every claim already
+   suspended reads `unknown`. The next phase start, re-admission and the controller keeper resume
+   those as before. The boot's own sweep does not, but a start already queued before the upgrade
+   still resumes one at the first boot, as the earlier release would have. To keep a claim you
+   drained before the upgrade held against every trigger, run `legion claims suspend` on it once
+   the new daemon is up: that records the suspension as yours. Act only on the claims the state
+   names as nothing will wake (`legion state`'s `claims nothing will wake` line, or
+   `strandedClaims` in `--json`), and skip those you drained on purpose: resume a suspended
+   architect, and bring a suspended phase worker back as
+   [A tree does not move after a restart](/legion/legion/troubleshooting/#a-tree-does-not-move-after-a-restart)
+   shows for its `suspendedBy`. Never resume by hand a claim of a lingering tree or of an issue
+   parked out of the workflow: re-admission or the issue's return to `todo` starts it.
+
+   **Rolling back across this release.** The earlier daemon boots on this schema but never writes
+   `suspendedBy`, so a value this release wrote survives the earlier daemon's own suspends and
+   resumes, an operator's included. Before starting this release again, run against the daemon's
+   database, with no daemon of the project running, where `<project>` is your `project` lowercased
+   with every character outside `a-z0-9` dropped (`project: LEGION` gives `legion`). Never run it
+   without the project filter: other projects' daemons may share the database, and their own
+   operator holds would turn `unknown`.
+
+   ```sql
+   update claims set suspended_by = 'unknown' where state = 'suspended' and project = '<project>';
+   ```
+
+   The boot sweep then resumes none of the claims the earlier daemon left suspended.
 5. **Restart the controller** with the new binary and plugins.
 
 ## Observe

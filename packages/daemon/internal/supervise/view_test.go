@@ -66,7 +66,7 @@ func TestViewSaysAProcessIsStoppingOnlyWhenItsClaimDoesNotRunAgain(t *testing.T)
 		stopping bool
 	}{
 		{name: "the operator's suspension", reach: StateIdle, stopping: true,
-			stop: func(h *harness) { _ = h.m.Handle(h.ctx, RequestSuspend{Claim: testToken}) }},
+			stop: func(h *harness) { _ = h.m.Handle(h.ctx, RequestSuspend{Claim: testToken, By: SuspendedByOperator}) }},
 		{name: "the registration deadline's retirement and relaunch", reach: StateLaunching,
 			stop: func(h *harness) { h.clock.Advance(deadline) }},
 	} {

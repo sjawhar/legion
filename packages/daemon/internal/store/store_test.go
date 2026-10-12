@@ -687,7 +687,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 	}{
 		{"a fresh database", func(migrations.Migration) bool { return false }},
 		{"a database that ran 0020 before 0016", func(m migrations.Migration) bool { return m.Version <= 20 && m.Version != 16 }},
-		{"a database that ran 0031 through 0037 before 0029 and 0030", func(m migrations.Migration) bool { return m.Version <= 28 || (m.Version >= 31 && m.Version <= 37) }},
+		{"a database that ran 0031 onwards before 0029 and 0030", func(m migrations.Migration) bool { return m.Version <= 28 || m.Version >= 31 }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

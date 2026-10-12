@@ -243,15 +243,17 @@ kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 A restart re-adopts every process still running, but a claim with no process runs again only when
 something starts it. A worker is started by the workflow when its phase begins, and a tree's
 architect by its admission; a notice to an architect with no process waits for it rather than
-starting it. So a worker of its issue's current phase, or a tree's architect, that an operator
-suspended (`legion claims suspend`, one claim at a time or a whole fleet before a restart) or whose
-launches ran out is woken by nothing: the daemon looks healthy and the state shows the tree active,
-but the tree stops for good at the worker's phase, or at the first decision that needs its
-architect. Once a boot has re-adopted its claims, the daemon names every such claim in one error
-line, under the move that brings it back:
+starting it. A suspended worker of its issue's current phase that the daemon suspended is resumed
+by the daemon at boot. One an operator suspended (`legion claims suspend`, one claim at a time or a
+whole fleet before a restart), or whose suspension predates the release that records who suspended
+it (`suspendedBy: unknown`), is not; neither is a tree's architect, whoever suspended it, nor a
+claim whose launches ran out. Each of those is woken by nothing: the daemon looks healthy and the
+state shows the tree active, but the tree stops for good at the worker's phase, or at the first
+decision that needs its architect. Once a boot has re-adopted its claims, the daemon names every
+such claim in one error line, under the move that brings it back:
 
 ```text
-{"level":"ERROR","msg":"legion daemon started with claims nothing will wake","project":"WIDGETS","count":3,"resume":["WIDGETS-12 architect","WIDGETS-12 implementer"],"needsWorkflowStart":["WIDGETS-14 architect"]}
+{"level":"ERROR","msg":"legion daemon started with claims nothing will wake","project":"WIDGETS","count":3,"resume":["WIDGETS-12 architect"],"suspendedWorkers":["WIDGETS-12 implementer"],"needsWorkflowStart":["WIDGETS-14 architect"]}
 ```
 
 The state names the same claims on every read, after a restart or not, each with its `state`, and
@@ -261,12 +263,51 @@ The state names the same claims on every read, after a restart or not, each with
 legion state --config legion.yaml --json | jq '.strandedClaims'
 ```
 
-- **`resume`** (`state` is `suspended`): resume each. Its token is
-  `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows:
+Act only on the claims this list names, and leave out any you suspended on purpose. A claim's token
+is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
+
+- **`resume`** (a suspended architect): resume it. Once it is ready the daemon sends it a catch-up
+  of what changed while it was away:
 
   ```sh
-  legion claims resume --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-implementer
+  legion claims resume --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-architect
   ```
+
+- **`suspendedWorkers`** (a suspended phase worker): the move depends on who suspended it, which
+  `legion claims list --json` shows as `suspendedBy`, and `legion state` points there too.
+  Only an architect is sent a catch-up, so a worker resumed with no task relaunches with nothing to
+  do, and once it runs the list stops naming it.
+
+  - **`suspendedBy: unknown`** (suspended before this release recorded who did): let the
+    workflow start it. Stop the project's daemon, mark the claim as the daemon's, and start the
+    daemon again; at boot it queues the workflow's own start for the worker's phase, with the
+    right run, phase and, for a merger, approved head:
+
+    ```sql
+    update claims set suspended_by = 'daemon' where token = 'legion-widgets-widgets-12-implementer' and state = 'suspended';
+    ```
+
+    A task you deliver yourself belongs to no run of the workflow, so such a worker's completion
+    can be refused (`HANDOFF_NO_RUN`, or a stale generation) when it never confirmed a task of the
+    current run. The boot starts the worker only while its issue is in that phase: when
+    `legion state` shows the issue `held`, leave the claim as it is, and its architect's retry of
+    the phase starts it ([An issue is held](#an-issue-is-held)).
+  - **`suspendedBy: operator`, with a task or a waiting start:** resume it. A worker suspended
+    mid-task keeps that task (`legion claims list --json` shows it as the claim's `pending`, and
+    the daemon refuses a second delivery), and its task is sent again once it is ready. A worker
+    whose phase start reached it while it was suspended has that start waiting for your resume
+    (the daemon logged `outbox row waits` for `start <role> of <issue>`, naming the operator's
+    suspension); the start gives it the phase's task once it runs, so a delivery would hand it the
+    phase twice.
+  - **`suspendedBy: operator`, otherwise:** deliver its phase's resume task. An operator's
+    delivery resumes the claim and hands it the task. The task is the one the workflow gives a
+    worker resuming its phase, with the issue's title, key and phase as `legion state` shows them
+    (a merger told no approved head sends the round back for review):
+
+    ```sh
+    legion claims deliver --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-implementer \
+      --task "Continue <title>. Issue: WIDGETS-12. Phase: implementing. Resume the existing phase work."
+    ```
 
 - **`needsWorkflowStart`** (`state` is `failed`): a failed claim ignores `legion claims resume` and
   `legion claims deliver`, and runs again only when the workflow starts it. A failed worker's issue
@@ -277,8 +318,12 @@ legion state --config legion.yaml --json | jq '.strandedClaims'
 The list names only claims of trees that hold an admission slot, and leaves out claims that
 something will still start: a worker whose phase is not its own is started again when its phase
 comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
-while every slot was taken waits for admission to start it once one frees. Do not resume that
-architect by hand: it would run outside the admission cap.
+while every slot was taken waits for admission to start it once one frees. Never resume by hand a
+claim of a lingering tree or of an issue parked out of the workflow, nor that waiting architect:
+it would run outside the admission cap, and re-admission or the issue's return to `todo` starts it.
+A claim an operator suspended is listed even when a workflow start is queued for it: that start
+waits for the operator's resume. One whose `suspendedBy` is `unknown` is listed only while no start
+is queued for it, since the next phase start or re-admission resumes it as before.
 
 ## A pod does not come up
 

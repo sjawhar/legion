@@ -287,7 +287,7 @@ func TestARegisteredRootCanBeSuspendedAndResumed(t *testing.T) {
 	h.reach(StateRegistered)
 	loc := h.locator()
 
-	h.must(RequestSuspend{Claim: rootToken})
+	h.must(RequestSuspend{Claim: rootToken, By: SuspendedByOperator})
 
 	if suspend := h.wantCalls("Suspend", 1)[0]; suspend.Locator != loc {
 		t.Errorf("suspended %+v, want the registered process %+v", suspend.Locator, loc)
