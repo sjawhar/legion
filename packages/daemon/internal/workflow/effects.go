@@ -39,6 +39,18 @@ func RoleFor(p phase.Phase) claim.Role {
 	}
 }
 
+// ResumePhase is the phase a re-admitted tree resumes its mid-phase child in: the child's own,
+// except that a child left awaiting its merge resumes in merging. The tree's linger disarmed its
+// pull request (beginLinger), and re-admission clears its merger's READY with the rest of the old
+// generation's handoffs (record.Store.ClearTreeGeneration), so nothing is armed and no READY is left
+// to arm it again: only a new READY from its merger moves it.
+func ResumePhase(child record.Issue) phase.Phase {
+	if child.Phase == phase.AwaitingMerge {
+		return phase.Merging
+	}
+	return child.Phase
+}
+
 // StopActs is whether a queued stop, row id, still acts on its claim when the outbox runs it, with
 // lastStart the newest start the outbox ran against the claim (its last_start_row), and root the
 // issue's tree root as recorded, read only for a tree close. The outbox executor asks it of every

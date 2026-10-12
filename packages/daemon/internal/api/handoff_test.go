@@ -58,12 +58,13 @@ type handoffGitHub struct {
 	// fail is the status GitHub answers every route under the given path prefix with instead of
 	// its answer: GitHub's trouble.
 	fail map[string]int
-	// pull request #42: its head, its base's repository id, its mergeable_state, whether it is
-	// merged, and its updated_at. merge is the project's merge policy, and pullFiles the JSON array
-	// GitHub answers for the pull request's changed files.
+	// pull request #42: its head, its base's repository id, its mergeable_state, its state,
+	// whether it is merged, and its updated_at. merge is the project's merge policy, and pullFiles
+	// the JSON array GitHub answers for the pull request's changed files.
 	pullHead       string
 	baseRepo       int64
 	mergeableState string
+	pullState      string
 	merged         bool
 	pullUpdatedAt  time.Time
 	merge          config.MergeRules
@@ -87,7 +88,7 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	g := &handoffGitHub{
 		files: map[string]map[string]string{}, fail: map[string]int{},
 		pullFiles: `[{"filename":"src/main.go"}]`,
-		pullHead:  headSHA, baseRepo: 4242, mergeableState: "clean", pullUpdatedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC),
+		pullHead:  headSHA, baseRepo: 4242, mergeableState: "clean", pullState: "open", pullUpdatedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC),
 		rules:        `[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
 		mainBranch:   `{"name":"main","protection":{"required_status_checks":{"contexts":["legacy"],"checks":[{"context":"legacy"}]}}}`,
 		checkRuns:    `[{"id":1,"name":"ci","status":"completed","conclusion":"success"}]`,
@@ -120,8 +121,8 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 		case path == "branches/main":
 			_, _ = io.WriteString(w, g.mainBranch)
 		case path == "pulls/42":
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"base":{"ref":"main","repo":{"id":%d}},"mergeable_state":%q,"merged":%t,"updated_at":%q}`,
-				g.pullHead, g.baseRepo, g.mergeableState, g.merged, g.pullUpdatedAt.Format(time.RFC3339))
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"base":{"ref":"main","repo":{"id":%d}},"mergeable_state":%q,"state":%q,"merged":%t,"updated_at":%q}`,
+				g.pullHead, g.baseRepo, g.mergeableState, g.pullState, g.merged, g.pullUpdatedAt.Format(time.RFC3339))
 		case path == "rules/branches/main":
 			if g.rulesStatus != 0 {
 				w.WriteHeader(g.rulesStatus)
@@ -1120,17 +1121,46 @@ func TestHandoffCompleteReadyPassesTheRecordedHeadItRead(t *testing.T) {
 // GitHub can answer a read from a replica that has not seen the newest push, while the daemon's
 // record already holds it from that push's webhook: the record is then ahead of GitHub's answer,
 // and a READY at the head GitHub showed names a head the pull request has left. Both clocks are the
-// pull request's updated_at, so a record at another head with a later clock than GitHub's answer is
-// ahead of it, and READY is refused, naming the recorded head, with nothing recorded.
+// pull request's updated_at, to the second, so a record at another head whose clock is not before
+// GitHub's answer, a same-second tie included, may be ahead of it, and READY is refused, naming the
+// recorded head, with nothing recorded. A tie costs one retry, until the head's own webhook lands.
 func TestHandoffCompleteReadyRefusesWhenTheRecordIsAheadOfGitHubsAnswer(t *testing.T) {
 	const newer = "beef00000000000000000000000000000000ff"
+	githubAt := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		recordedAt time.Time
+	}{
+		{"a record later than GitHub's answer", githubAt.Add(5 * time.Minute)},
+		{"a record in the same second as GitHub's answer", githubAt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := newHandoffGitHub(t)
+			github.set(func(g *handoffGitHub) { g.pullUpdatedAt = githubAt })
+			h, facts, merger := newReadyHarness(t, github)
+			seedPullRequestAt(t, h, "LEGION-208", newer, tc.recordedAt)
+			recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at the head GitHub showed", Ready: true, Commit: headSHA})
+			if message := refused(t, recorder, http.StatusConflict, "READY_HEAD_MOVED"); !strings.Contains(message, newer) {
+				t.Fatalf("READY with the record ahead of GitHub = %q, want it to name the recorded head %s", message, newer)
+			}
+			if got := facts.recorded(); len(got) != 0 {
+				t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
+			}
+		})
+	}
+}
+
+// A pull request closed without merging has no merge left to arm, so READY is refused there by
+// GitHub's own state, rather than accepted and left waiting on whether the close's webhook arrives
+// in time to tell the architect: the READY's advance of the record can make that webhook look
+// older than the record, and drop it.
+func TestHandoffCompleteReadyRefusesAPullRequestClosedWithoutMerging(t *testing.T) {
 	github := newHandoffGitHub(t)
-	github.set(func(g *handoffGitHub) { g.pullUpdatedAt = time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC) })
+	github.set(func(g *handoffGitHub) { g.pullState = "closed" })
 	h, facts, merger := newReadyHarness(t, github)
-	seedPullRequestAt(t, h, "LEGION-208", newer, time.Date(2026, 10, 12, 10, 5, 0, 0, time.UTC))
-	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at the head GitHub showed", Ready: true, Commit: headSHA})
-	if message := refused(t, recorder, http.StatusConflict, "READY_HEAD_MOVED"); !strings.Contains(message, newer) {
-		t.Fatalf("READY with the record ahead of GitHub = %q, want it to name the recorded head %s", message, newer)
+	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY on a closed pull request", Ready: true, Commit: headSHA})
+	if message := refused(t, recorder, http.StatusConflict, "READY_PULL_REQUEST_CLOSED"); !strings.Contains(message, "#42") {
+		t.Fatalf("READY on a closed pull request = %q, want it to name pull request #42", message)
 	}
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)

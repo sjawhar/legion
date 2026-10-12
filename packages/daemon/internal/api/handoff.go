@@ -174,9 +174,9 @@ func byHandShare(mergeNote string) string {
 //
 //   - NO_REPOSITORY: the issue's project has no repository configured (a guard; configuration
 //     requires one).
-//   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_DISARM_PENDING,
-//     READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED,
-//     READY_CHECKS_NOT_GREEN.
+//   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
+//     READY_DISARM_PENDING, READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_HEAD_CONFLICTS,
+//     READY_FILES_TRUNCATED, READY_CHECKS_NOT_GREEN.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
 // The reads are made as the implement App, whose token never leaves the daemon; a runtime that

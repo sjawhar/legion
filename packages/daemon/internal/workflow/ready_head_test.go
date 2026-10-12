@@ -140,3 +140,45 @@ func TestAREADYIsRefusedWhenTheRecordLeftAndCameBackToTheHeadTheRouteRead(t *tes
 		})
 	}
 }
+
+// The route reads the record, then GitHub, then runs READY's other checks, which take seconds, and
+// the webhook of a push between the record's head and the READY's can apply in that window. A
+// record whose clock is still before GitHub's read applied only events that read had passed, so
+// it is behind, not moved: READY is accepted, and the record advances to the READY's head. Refused,
+// the merger's retry at the same commit would be answered HANDOFF_ALREADY_RECORDED, stranding the
+// issue in merging. A push whose clock is at or after GitHub's read moved the head past it, and
+// READY is refused.
+func TestAPushAppliedInsideTheREADYWindowIsJudgedByGitHubsClock(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		pushAt  time.Time
+		refused bool
+	}{
+		{"a push GitHub's read had passed", atV, false},
+		{"a push after GitHub's read", atX.Add(time.Minute), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedLaggingRecord(t, pool, true)
+			apply := applyFacts(t, pool, readyEngine(""))
+			// The route read the record at W, then GitHub at X; V's webhook applies before the
+			// READY commits.
+			apply("sync-v", intake.PullRequestSynchronized{Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "V", UpdatedAt: tc.pushAt})
+			result := apply("ready", readyAtX)
+			if tc.refused {
+				if refusalCode(result) != "READY_HEAD_MOVED" {
+					t.Fatalf("READY after a push past GitHub's read = %#v, want READY_HEAD_MOVED", result)
+				}
+				assertPhase(t, pool, phase.Merging)
+				return
+			}
+			if result.Refusal != nil {
+				t.Fatalf("READY after a push GitHub's read had passed = %#v, want it accepted", result.Refusal)
+			}
+			assertPhase(t, pool, phase.AwaitingMerge)
+			if head, at := recordedHead(t, pool); head != "X" || !at.Equal(atX) {
+				t.Fatalf("record after the READY = %s at %s, want X at %s", head, at, atX)
+			}
+		})
+	}
+}

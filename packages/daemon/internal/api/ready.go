@@ -64,11 +64,14 @@ func githubReadFailed(err error) *refusal {
 // which the workflow holds the READY to (readyAnswer).
 //
 // GitHub can answer a read from a replica that has not seen the newest push, while the record holds
-// it from that push's webhook. Both clocks are the pull request's updated_at, so a record at another
-// head with a later clock than GitHub's answer is ahead of it, and READY is refused as a moved head.
-// The clocks are compared rather than asking GitHub whether the READY's head descends from the
-// recorded one: that answers ancestry, not freshness, and after a force push it would refuse a
-// lagging record's READY until the webhook arrived.
+// it from that push's webhook. Both clocks are the pull request's updated_at, to the second, so a
+// record at another head whose clock is not before GitHub's answer, a same-second tie included, may
+// be ahead of it, and READY is refused as a moved head; a tie costs one retry, until the head's own
+// webhook lands. The clocks are compared rather than asking GitHub whether the READY's head
+// descends from the recorded one: that answers ancestry, not freshness, and after a force push it
+// would refuse a lagging record's READY until the webhook arrived. A pull request closed without
+// merging is refused by GitHub's own state, since its close's webhook can arrive after the READY's
+// advance of the record, which would then drop it as older (READY_PULL_REQUEST_CLOSED).
 func readyChecks(ctx context.Context, github githubrest.Client, repository ghrepo.Repository, rules config.MergeRules, issue, readyHead string, pr *record.PullRequest, disarmPending bool) (readyAnswer, *refusal) {
 	if pr == nil || pr.Number <= 0 {
 		return readyAnswer{}, &refusal{http.StatusConflict, "NO_PULL_REQUEST", fmt.Sprintf("%s has no pull request recorded", issue)}
@@ -85,6 +88,7 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 		} `json:"base"`
 		// MergeableState is "dirty" while the pull request conflicts with its base.
 		MergeableState string    `json:"mergeable_state"`
+		State          string    `json:"state"`
 		Merged         bool      `json:"merged"`
 		UpdatedAt      time.Time `json:"updated_at"`
 	}
@@ -98,6 +102,9 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 		answer.note = fmt.Sprintf("pull request #%d is already merged, so READY was published without reading its head's checks or handoffs", number)
 		return answer, nil
 	}
+	if pull.State == "closed" {
+		return readyAnswer{}, &refusal{http.StatusConflict, "READY_PULL_REQUEST_CLOSED", fmt.Sprintf("pull request #%d is closed without merging, so there is no merge to arm: tell the architect, whose decision it is whether the work is reopened", number)}
+	}
 	// A disarm queued by an earlier withdrawal decides by state when it runs: still unfinished as
 	// this READY is accepted, it would keep a stale arm that stands at this head, or disable the arm
 	// this READY's merger is about to make. READY waits for it.
@@ -107,8 +114,8 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 	if pull.Head.SHA != readyHead {
 		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_MOVED", fmt.Sprintf("pull request #%d now heads at %s, not READY's %s; GitHub will not arm a different head: build a new packet and complete again", number, pull.Head.SHA, readyHead)}
 	}
-	if pr.HeadSHA != pull.Head.SHA && classify.LateLifecycle(pull.UpdatedAt, pr.HeadUpdatedAt) {
-		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_MOVED", fmt.Sprintf("the daemon recorded pull request #%d at head %s, at %s, later than GitHub's answer of %s, at %s, which has not caught up with that push: build a new packet once GitHub shows the new head, and complete again",
+	if pr.HeadSHA != pull.Head.SHA && !pr.HeadUpdatedAt.IsZero() && !pull.UpdatedAt.After(pr.HeadUpdatedAt) {
+		return readyAnswer{}, &refusal{http.StatusConflict, "READY_HEAD_MOVED", fmt.Sprintf("the daemon recorded pull request #%d at head %s, at %s, no earlier than GitHub's answer of %s, at %s, which may not have caught up with that push: build a new packet once GitHub shows the new head, and complete again",
 			number, pr.HeadSHA, pr.HeadUpdatedAt.UTC().Format(time.RFC3339), pull.Head.SHA, pull.UpdatedAt.UTC().Format(time.RFC3339))}
 	}
 	dir := handoffDir(issue)
