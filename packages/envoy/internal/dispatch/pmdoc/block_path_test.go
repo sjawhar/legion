@@ -179,56 +179,9 @@ func TestBlockPathOfNamesTheHeaderTheRendererDrawsOverAWideTable(t *testing.T) {
 }
 
 // BlockPaths places every block in one walk exactly as BlockPathOf places it alone: over the
-// pmdoc fixtures, a list whose ancestors carry no block id, an id two blocks carry (the first in
-// document order keeps it, as BlockPathOf finds it), tables with column and row spans, and a body
-// row of more than 1,000 cells. An id no block carries is in neither.
+// placement documents (placementDocuments). An id no block carries is in neither.
 func TestBlockPathsPlacesEveryBlockAsBlockPathOfDoes(t *testing.T) {
-	documents := map[string]*Node{}
-	for _, fx := range loadFixtures(t) {
-		doc, err := FromJSON(fx.PMJSON)
-		if err != nil {
-			t.Fatalf("fixture %s: %v", fx.Name, err)
-		}
-		documents["fixture "+fx.Name] = doc
-	}
-	text := func(value string) []*Node { return []*Node{{Type: "text", Text: value}} }
-	paragraph := func(id, value string) *Node {
-		return &Node{Type: "paragraph", Attrs: Attrs{BlockIDAttr: id}, Children: text(value)}
-	}
-	documents["unstamped ancestors"] = &Node{Type: "doc", Children: []*Node{{Type: "bullet_list", Children: []*Node{
-		{Type: "list_item", Children: []*Node{paragraph("item", "item"), {Type: "blockquote", Children: []*Node{paragraph("quoted", "quoted")}}}},
-	}}}}
-	documents["a repeated id"] = &Node{Type: "doc", Children: []*Node{
-		paragraph("same", "first"),
-		{Type: "blockquote", Attrs: Attrs{BlockIDAttr: "quote"}, Children: []*Node{paragraph("same", "second")}},
-		paragraph("other", "third"),
-	}}
-	cell := func(kind, value string, colspan, rowspan int) *Node {
-		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: text(value)}}}
-	}
-	spans := &Node{Type: "doc", Children: []*Node{{Type: "table", Children: []*Node{
-		{Type: "table_header_row", Children: []*Node{cell("table_header", "Owner", 2, 1), cell("table_header", "Due", 1, 1), cell("table_header", "Notes", 3, 1)}},
-		{Type: "table_row", Children: []*Node{cell("table_cell", "Backfill", 1, 3), cell("table_cell", "Sami", 2, 1), cell("table_cell", "Oct 1", 1, 2), cell("table_cell", "x", 1, 1)}},
-		{Type: "table_row", Children: []*Node{cell("table_cell", "Lucas", 1, 1), cell("table_cell", "Oct 2", 1, 1)}},
-		{Type: "table_row", Children: []*Node{cell("table_cell", "Wide", 4, 1), cell("table_cell", "past", 1, 1), cell("table_cell", "more", 1, 1)}},
-		{Type: "table_row", Children: nil},
-		{Type: "table_row", Children: []*Node{cell("table_cell", "last", 1, 9)}},
-	}}}}
-	EnsureBlockIDs(spans)
-	documents["column and row spans"] = spans
-	wideRow := make([]*Node, 1_200)
-	for index := range wideRow {
-		wideRow[index] = cell("table_cell", fmt.Sprint(index), 1, 1)
-	}
-	wide := &Node{Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{{Type: "table", Children: []*Node{
-		{Type: "table_header_row", Children: []*Node{cell("table_header", "Spans", 1_000, 1), cell("table_header", "Tail", 1, 1)}},
-		{Type: "table_row", Children: wideRow},
-		{Type: "table_row", Children: []*Node{cell("table_cell", "short", 1, 1)}},
-	}}}}}}
-	EnsureBlockIDs(wide)
-	documents["a row of more than 1,000 cells"] = wide
-
-	for name, doc := range documents {
+	for name, doc := range placementDocuments(t) {
 		t.Run(name, func(t *testing.T) {
 			paths, err := BlockPaths(doc)
 			if err != nil {
@@ -262,6 +215,173 @@ func TestBlockPathsPlacesEveryBlockAsBlockPathOfDoes(t *testing.T) {
 				t.Fatalf("BlockPathOf of an id no block carries: %v, want ErrTargetNotFound", err)
 			}
 		})
+	}
+}
+
+// placementDocuments are the documents the placement tests read: the pmdoc fixtures, a list whose
+// ancestors carry no block id, an id two blocks carry (the first in document order keeps it, as
+// BlockPathOf finds it), tables with column and row spans, and a body row of more than 1,000 cells.
+func placementDocuments(t *testing.T) map[string]*Node {
+	t.Helper()
+	documents := map[string]*Node{}
+	for _, fx := range loadFixtures(t) {
+		doc, err := FromJSON(fx.PMJSON)
+		if err != nil {
+			t.Fatalf("fixture %s: %v", fx.Name, err)
+		}
+		documents["fixture "+fx.Name] = doc
+	}
+	text := func(value string) []*Node { return []*Node{{Type: "text", Text: value}} }
+	paragraph := func(id, value string) *Node {
+		return &Node{Type: "paragraph", Attrs: Attrs{BlockIDAttr: id}, Children: text(value)}
+	}
+	documents["unstamped ancestors"] = &Node{Type: "doc", Children: []*Node{{Type: "bullet_list", Children: []*Node{
+		{Type: "list_item", Children: []*Node{paragraph("item", "item"), {Type: "blockquote", Children: []*Node{paragraph("quoted", "quoted")}}}},
+	}}}}
+	documents["a repeated id"] = &Node{Type: "doc", Children: []*Node{
+		paragraph("same", "first"),
+		{Type: "blockquote", Attrs: Attrs{BlockIDAttr: "quote"}, Children: []*Node{paragraph("same", "second")}},
+		paragraph("other", "third"),
+	}}
+	cell := func(kind, value string, colspan, rowspan int) *Node {
+		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: text(value)}}}
+	}
+	spans := &Node{Type: "doc", Children: []*Node{{Type: "table", Children: []*Node{
+		{Type: "table_header_row", Children: []*Node{cell("table_header", "Owner", 2, 1), cell("table_header", "Due", 1, 1), cell("table_header", "Notes on what each owner still owes this week", 3, 1)}},
+		{Type: "table_row", Children: []*Node{cell("table_cell", "Backfill", 1, 3), cell("table_cell", "Sami", 2, 1), cell("table_cell", "Oct 1", 1, 2), cell("table_cell", "x", 1, 1)}},
+		{Type: "table_row", Children: []*Node{cell("table_cell", "Lucas", 1, 1), cell("table_cell", "Oct 2", 1, 1)}},
+		{Type: "table_row", Children: []*Node{cell("table_cell", "Wide", 4, 1), cell("table_cell", "past", 1, 1), cell("table_cell", "more", 1, 1)}},
+		{Type: "table_row", Children: nil},
+		{Type: "table_row", Children: []*Node{cell("table_cell", "last", 1, 9)}},
+	}}}}
+	EnsureBlockIDs(spans)
+	documents["column and row spans"] = spans
+	wideRow := make([]*Node, 1_200)
+	for index := range wideRow {
+		wideRow[index] = cell("table_cell", fmt.Sprint(index), 1, 1)
+	}
+	wide := &Node{Type: "doc", Children: []*Node{{Type: "blockquote", Children: []*Node{{Type: "table", Children: []*Node{
+		{Type: "table_header_row", Children: []*Node{cell("table_header", "Spans", 1_000, 1), cell("table_header", "Tail", 1, 1)}},
+		{Type: "table_row", Children: wideRow},
+		{Type: "table_row", Children: []*Node{cell("table_cell", "short", 1, 1)}},
+	}}}}}}
+	EnsureBlockIDs(wide)
+	documents["a row of more than 1,000 cells"] = wide
+	return documents
+}
+
+// TableRows lists every row and cell of every table carrying a block id, each stamped one placed
+// exactly as BlockPathOf places it alone: a row's index is its Row, and a cell's row and column are
+// its Row and Column (the child indexes delete_row and delete_column take, a spanning cell counted
+// once) and its header the opening words of its Header, over the placement documents, the tables
+// with column and row spans among them, one of whose headers runs past the opening words. Every row
+// and cell is listed in child order with its opening words, one the live document has not stamped
+// yet with no id, since its indexes still address it.
+func TestTableRowsPlacesEveryRowAndCellAsBlockPathOfDoes(t *testing.T) {
+	tables := 0
+	for name, doc := range placementDocuments(t) {
+		listed, err := TableRows(doc)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		// The cached read takes both from one walk, which must answer what each answers alone.
+		paths, rows, err := BlockPathsAndTableRows(doc)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		alone, err := BlockPaths(doc)
+		if err != nil || !reflect.DeepEqual(paths, alone) || !reflect.DeepEqual(rows, listed) {
+			t.Fatalf("%s: BlockPathsAndTableRows differs from BlockPaths and TableRows alone (err=%v)", name, err)
+		}
+		Walk(doc, func(node *Node) bool {
+			tableID, _ := node.Attrs[BlockIDAttr].(string)
+			if node.Type != "table" || tableID == "" {
+				return true
+			}
+			tables++
+			want := make([]TableRow, len(node.Children))
+			for rowIndex, row := range node.Children {
+				rowID, _ := row.Attrs[BlockIDAttr].(string)
+				if rowID != "" {
+					path, err := BlockPathOf(doc, rowID)
+					if err != nil || *path.Table.Row != rowIndex {
+						t.Fatalf("%s: BlockPathOf(row %q) = %#v err=%v, want row %d", name, rowID, path.Table, err, rowIndex)
+					}
+				}
+				want[rowIndex] = TableRow{ID: rowID, Index: rowIndex, Cells: make([]TableCell, len(row.Children))}
+				for column, cell := range row.Children {
+					cellID, _ := cell.Attrs[BlockIDAttr].(string)
+					entry := TableCell{ID: cellID, Row: rowIndex, Column: column, Text: openingWords(oneLineText(cell))}
+					if cellID != "" {
+						place, err := BlockPathOf(doc, cellID)
+						if err != nil {
+							t.Fatalf("%s: BlockPathOf(cell %q): %v", name, cellID, err)
+						}
+						entry.Row, entry.Column, entry.Header = *place.Table.Row, *place.Table.Column, openingWords(*place.Table.Header)
+					} else {
+						// BlockPathOf's own placement (tablePosition) of a cell no id reaches.
+						entry.Header = openingWords(*tablePosition(node, tableID, []int{rowIndex, column}).Header)
+					}
+					want[rowIndex].Cells[column] = entry
+				}
+			}
+			if got := listed[tableID]; !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: TableRows[%q] = %#v, want BlockPathOf's %#v", name, tableID, got, want)
+			}
+			return true
+		})
+		for id := range listed {
+			if path, err := BlockPathOf(doc, id); err != nil || path.Type != "table" {
+				t.Fatalf("%s: TableRows lists %q, which no table carries (%v)", name, id, err)
+			}
+		}
+	}
+	if tables < 3 {
+		t.Fatalf("the placement documents hold %d tables with a block id, want the spanned and the wide ones at least", tables)
+	}
+}
+
+// A cell is counted once in its row however many columns it spans, so its listed column is its
+// child index, the index delete_column takes: deleting it removes that cell and no other. Negative
+// control: the markdown the table is written as places that cell at another column, so a column
+// read from the markdown would delete a different one.
+func TestTableRowsColumnIsTheIndexDeleteTableColumnTakes(t *testing.T) {
+	cell := func(kind, value string, colspan, rowspan int) *Node {
+		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}}}
+	}
+	doc := &Node{Type: "doc", Children: []*Node{{Type: "table", Children: []*Node{
+		{Type: "table_header_row", Children: []*Node{cell("table_header", "Owner", 2, 1), cell("table_header", "Due", 1, 1), cell("table_header", "Notes", 1, 1)}},
+		{Type: "table_row", Children: []*Node{cell("table_cell", "Sami", 1, 1), cell("table_cell", "Oct 1", 1, 1), cell("table_cell", "late", 1, 1)}},
+		{Type: "table_row", Children: []*Node{cell("table_cell", "Lucas", 1, 1), cell("table_cell", "Oct 2", 1, 1), cell("table_cell", "soon", 1, 1)}},
+	}}}}
+	EnsureBlockIDs(doc)
+	table := doc.Children[0]
+	tableID := table.Attrs[BlockIDAttr].(string)
+	listed, err := TableRows(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var due TableCell
+	for _, row := range listed[tableID] {
+		for _, listedCell := range row.Cells {
+			if listedCell.Text == "Due" {
+				due = listedCell
+			}
+		}
+	}
+	if due.ID == "" || due.Row != 0 || due.Column != 1 || due.Header != "Due" {
+		t.Fatalf("Due = %#v, want row 0, column 1 headed Due", due)
+	}
+	grid, _ := (&renderer{spanBudget: maxSpanCells}).tableGrid(table)
+	if written := slices.Index(grid[0], table.Children[0].Children[1]); written == due.Column {
+		t.Fatalf("control: the markdown writes Due at column %d too, so this table cannot tell the two indexes apart", written)
+	}
+	deleted, err := DeleteTableColumn(doc, tableID, due.Column)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header := cellOpenings(deleted.Children[0].Children[0]); !reflect.DeepEqual(header, []string{"Owner", "Notes"}) {
+		t.Fatalf("after delete_column %d the header row is %q, want Owner · Notes: the Due cell alone removed", due.Column, header)
 	}
 }
 

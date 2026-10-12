@@ -852,12 +852,13 @@ func TestASpecOfFrontMatterAndTheMostHeadingsIsStored(t *testing.T) {
 	}
 }
 
-// Every block's path in one walk (pmdoc.BlockPaths, which a cold read caches beside the document's
-// text and blocks) allocates at most the bound for the heaviest tables the element limit admits:
-// the two- and four-column tables of the most rows, and the widest table, one header and one body
-// row of the most cells. Every row, cell and cell paragraph carries a block id, so a walk that
-// copied a row's cells for every id or laid the rows above out for every cell would cost the
-// square of the width in strings, and its cube in grid steps.
+// Every block's path and every table's rows in one walk (pmdoc.BlockPathsAndTableRows, which a
+// cold read caches beside the document's text and blocks) allocates at most the bound for the
+// heaviest tables the element limit admits: the two- and four-column tables of the most rows, and
+// the widest table, one header and one body row of the most cells. Every row, cell and cell
+// paragraph carries a block id, so a walk that copied a row's cells for every id or laid the rows
+// above out for every cell would cost the square of the width in strings, and its cube in grid
+// steps.
 func TestBlockPathsOfTheHeaviestTablesStayWithinTheMemoryBound(t *testing.T) {
 	shapes := []admittedShape{{
 		name: "the widest table",
@@ -883,19 +884,28 @@ func TestBlockPathsOfTheHeaviestTablesStayWithinTheMemoryBound(t *testing.T) {
 			runtime.GC()
 			runtime.ReadMemStats(&before)
 			started := time.Now()
-			paths, err := pmdoc.BlockPaths(tree)
+			paths, rows, err := pmdoc.BlockPathsAndTableRows(tree)
 			elapsed := time.Since(started)
 			runtime.ReadMemStats(&after)
 			if err != nil {
-				t.Fatalf("BlockPaths: %v", err)
+				t.Fatalf("BlockPathsAndTableRows: %v", err)
 			}
 			allocated := int64(after.TotalAlloc - before.TotalAlloc)
-			t.Logf("%s: %d paths, %d MiB allocated in %s", shape.name, len(paths), allocated>>20, elapsed)
+			cells := 0
+			for _, table := range rows {
+				for _, row := range table {
+					cells += len(row.Cells)
+				}
+			}
+			t.Logf("%s: %d paths, %d cells listed, %d MiB allocated in %s", shape.name, len(paths), cells, allocated>>20, elapsed)
 			if len(paths) < 3*pmdoc.MaxDocumentElements/16 {
 				t.Errorf("%s: %d paths, want the table's every row, cell and paragraph", shape.name, len(paths))
 			}
+			if cells < pmdoc.MaxDocumentElements/16 {
+				t.Errorf("%s: %d cells listed, want the table's every cell", shape.name, cells)
+			}
 			if allocated > requestMemoryBound {
-				t.Errorf("BlockPaths of %s allocated %d MiB, want at most %d MiB", shape.name, allocated>>20, requestMemoryBound>>20)
+				t.Errorf("BlockPathsAndTableRows of %s allocated %d MiB, want at most %d MiB", shape.name, allocated>>20, requestMemoryBound>>20)
 			}
 		})
 	}

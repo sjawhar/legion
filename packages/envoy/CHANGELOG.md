@@ -4,6 +4,14 @@
 
 ### Added
 
+- A table's entry in `GET /api/v1/artifacts/{id}/blocks` (and the issue- and project-slug forms)
+  lists its rows and cells as `table.rows`: each row's block id and index (the index `delete_row`
+  takes, 0 the header) and each cell's block id, row, column (its index in its row, the index
+  `delete_column` takes, so a cell spanning columns or rows counts once), the opening words of the
+  header drawn above it, and its own. They are placed by the same walk of the same live tree as
+  `GET /api/v1/artifacts/{id}/blocks/{block_id}`, so the two routes agree for every row and cell,
+  and the list still holds one entry per table (LEGION-693).
+
 - The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
   (migration 0093), is a stable id, a name and the sessions it holds; a pull request whose first
   session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,

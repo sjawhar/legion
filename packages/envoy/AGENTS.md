@@ -400,7 +400,10 @@ Quote-anchored asks and comments retain their inline mark and quote cache, plus 
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays
 unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range,
 SHA-256 token over its complete Proof state (including inline marks), and `{comments, asks}`
-reference counts; `GET .../text` returns the full-document Proof-state token and the document's
+reference counts, and a table block's `table.rows`: each row's id and index and each cell's id,
+row, column, the opening words of the header drawn above it and its own, every one placed by the
+walk that places blocks for the block route (`pmdoc.BlockPathsAndTableRows`, one layout per table),
+so the two routes cannot disagree and the list stays one entry per table; `GET .../text` returns the full-document Proof-state token and the document's
 latest version number, or `null` when it has none (the live markdown beside it and that version
 are two unsynchronised reads, in both directions; `token` is the concurrency primitive). The server resolves
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
