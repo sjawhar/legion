@@ -2,12 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "LEGION-695",
-  "completed": "2026-10-12T16:12:00Z",
+  "completed": "2026-10-12T16:19:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1928",
   "headSha": "197c0b4946068d73185312ccd1c581aa8c3fa500",
+  "ci": "Read, not rerun: at 197c0b4946068d73185312ccd1c581aa8c3fa500 `Tests` run 38271039591 (lint, typecheck, test) success; `Legion Envoy and Contracts` run 38271039594 completed success at 16:18Z, its `dispatch` job (build, unit tests, the browser suite on Desktop Chrome and the iPhone 13 project, pictures.e2e.ts included) success; `PR Title` runs 38271039587 and 38273829611 success. The handoff push efcffe7f (skip-checks trailer) started no run.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently: my own `bun run dispatch:local` (a Postgres 17 + pgvector built under /tmp from Debian packages on port 55433, database dispatch_tester, the web bundle built from head 197c0b49), the real `dispatch` CLI pointed at it, and a real headless Chromium through the session's browser tool. Created CORE-8, uploaded PNGs, a markdown document, a binary and a project picture with `dispatch artifact`, wrote 19 picture lines with `dispatch doc-edit`, and observed in the live editor and in the past-version view what the implementer's proof claims: the `<img>` from the version's bytes route with real pixels, `loading=\"lazy\"`, the alt-or-slug caption, the pictureClassName shape, the fallback link for a version that does not exist, and `GET /api/v1/issues/CORE-8/artifacts/spec/text` keeping every line. Also re-read its screenshots dispatch://LEGION-695/artifact/legion-695-live-spec-png@v1 and dispatch://LEGION-695/artifact/legion-695-version-3-png@v1. Its browser-suite run is CI's `dispatch` job of run 38271039594 (not rerun here)."
+    "how": "Drove the same surface independently: my own `bun run dispatch:local` (a Postgres 17 + pgvector built under /tmp from Debian packages on port 55433, database dispatch_tester, the web bundle built from head 197c0b49), the real `dispatch` CLI pointed at it, and a real headless Chromium through the session's browser tool. Created CORE-8, uploaded PNGs, a markdown document, a binary and a project picture with `dispatch artifact`, wrote 19 picture lines with `dispatch doc-edit`, and observed in the live editor and in the past-version view what the implementer's proof claims: the `<img>` from the version's bytes route with real pixels, `loading=\"lazy\"`, the alt-or-slug caption, the pictureClassName shape, the fallback link for a version that does not exist, and `GET /api/v1/issues/CORE-8/artifacts/spec/text` keeping every line. Also re-read its screenshots dispatch://LEGION-695/artifact/legion-695-live-spec-png@v1 and dispatch://LEGION-695/artifact/legion-695-version-3-png@v1. Its browser-suite run is CI's `dispatch` job of run 38271039594, which settled success at 16:18Z (not rerun here)."
   },
   "failed": 0,
   "failures": [],
