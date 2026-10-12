@@ -1,0 +1,87 @@
+package supervise
+
+import (
+	"context"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+)
+
+// refreshPlugin is the claim's process found to speak a plugin contract this daemon does not: at
+// boot, re-adopting a claim whose recorded contract is an earlier daemon's, or none at all (the
+// first boot on this release); or, uncharged, a registration that still differs from the daemon's
+// but was not itself the registration a relaunch was already made for (staleRegistration, which
+// charges that case instead). It is never reached for a claim whose plugin is current — a claim
+// still launching is left to its own registration to decide — but it re-checks the comparison
+// before doing anything, because the boot's own decision runs later than the post that queued it:
+// a registration may have landed, recording the daemon's contract, in between, and such a claim is
+// left alone rather than relaunched for a fact already fixed.
+//
+// What it does once it decides the claim is still stale is exactly repoint: the turn in flight is
+// interrupted and its task kept waiting for the relaunch to send again, a held suspension ends in a
+// suspension rather than a relaunch (endHeld), and otherwise the recorded session is resumed on a
+// new process (launch). Nothing here is charged — the process did nothing wrong; it simply
+// predates this daemon's plugin — and the loop this could otherwise become is closed by the budget
+// ready alone resets: a claim whose new process never reaches ready at the generation this starts
+// keeps whatever LaunchFailures a true launch failure already charged it, and a registration that
+// arrives at that generation still speaking the old contract is not this path's to decide again —
+// it is staleRegistration's, which charges it.
+func (m *Machine) refreshPlugin(ctx context.Context, trigger string) error {
+	if m.claim.PluginContract == m.deps.PluginContract {
+		return nil
+	}
+	m.log.Warn("supervise: the process speaks another plugin contract; relaunching it onto the current plugin",
+		"incarnation", m.claim.Locator.Incarnation, "pluginContract", m.claim.PluginContract,
+		"daemonApiVersion", m.deps.PluginContract, "trigger", trigger)
+	m.claim.PluginRelaunchFor = m.deps.PluginContract
+	if err := m.interrupted(ctx, "the process on another plugin contract is replaced mid-turn"); err != nil {
+		return err
+	}
+	if m.held != nil {
+		return m.endHeld(ctx)
+	}
+	return m.launch(ctx)
+}
+
+// refreshStalePlugin is the StalePlugin event's row: the boot's own trigger, for the four states a
+// claim's relaunched process can run in.
+func refreshStalePlugin(m *Machine, ctx context.Context, _ Event) error {
+	return m.refreshPlugin(ctx, "boot")
+}
+
+// staleRegistration is what register and reregister run once they have recorded the plugin
+// contract the request declared, whatever it is: a registration whose contract still differs from
+// the daemon's is relaunched onto the current one, and the registration itself is refused with the
+// sentence that tells the plugin why (claim.StalePluginContract) — the agent that just registered
+// is not the one the relaunch starts, and pi-legion exits on the 4xx, so its own log then says why.
+// The relaunch runs first and is charged only when it is the second relaunch in a row still to find
+// the daemon's contract: the claim remembers, in PluginRelaunchFor, the contract its last relaunch
+// was made for, so a registration that still differs while PluginRelaunchFor already names this
+// daemon's contract means the plugin or the image the relaunch put the process on is itself behind
+// this daemon, and relaunching it again for free would loop; relaunchAfterFailure charges it
+// instead and ends it in a worker-died once the launch budget runs out. Every other stale
+// registration — PluginRelaunchFor unset, or made for a contract this daemon has since moved past —
+// is refreshPlugin's uncharged relaunch.
+//
+// A daemon with nothing to relaunch onto (PluginRelaunchable false, LEGION-164's degraded
+// Kubernetes mode) relaunches nothing and refuses nothing: the registration stands, accepted, and
+// one Error line records the gap for the operator to close with runtime.kubernetes.plugins.
+func (m *Machine) staleRegistration(ctx context.Context, got int) error {
+	if got == m.deps.PluginContract {
+		return nil
+	}
+	if !m.deps.PluginRelaunchable {
+		m.log.Error("supervise: the process speaks another plugin contract, and this daemon knows no plugin versions to relaunch it onto; set runtime.kubernetes.plugins",
+			"incarnation", m.claim.Locator.Incarnation, "pluginContract", got, "daemonApiVersion", m.deps.PluginContract)
+		return nil
+	}
+	var err error
+	if m.claim.PluginRelaunchFor == m.deps.PluginContract {
+		err = m.relaunchAfterFailure(ctx)
+	} else {
+		err = m.refreshPlugin(ctx, "registration")
+	}
+	if err != nil {
+		return err
+	}
+	return claim.StalePluginContract(got, m.deps.PluginContract)
+}

@@ -1,6 +1,7 @@
 package claim
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 )
@@ -107,3 +108,20 @@ var (
 	// was issued — or names a claim the daemon does not hold.
 	InvalidSecret = Refusal{Status: http.StatusForbidden, Message: "Invalid session secret"}
 )
+
+// StalePluginContract refuses a registration whose plugin speaks a contract this daemon does not:
+// the daemon has already recorded it and is relaunching the process onto the current plugin
+// (LEGION-164), so the plugin's exit on this 409 costs the claim nothing when the relaunch is its
+// first for this contract, and is the charge itself when it is not (a plugin or an image the
+// relaunch put the process on is itself behind this daemon). got is the contract the plugin
+// declared, 0 when it declared none; want is the daemon's own (api.DaemonAPIVersion, which this
+// package cannot import, so the caller names it). The sentence is a contract item — quoted in
+// pi-legion's changelog and its docs — and may not be reworded here alone.
+func StalePluginContract(got, want int) Refusal {
+	if got == 0 {
+		return Refusal{Status: http.StatusConflict, Message: fmt.Sprintf(
+			"pi-legion registered no daemon API contract; this daemon requires %d: the daemon is relaunching this process onto the current plugin", want)}
+	}
+	return Refusal{Status: http.StatusConflict, Message: fmt.Sprintf(
+		"pi-legion speaks daemon API contract %d; this daemon requires %d: the daemon is relaunching this process onto the current plugin", got, want)}
+}

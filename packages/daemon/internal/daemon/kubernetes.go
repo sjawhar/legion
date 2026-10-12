@@ -82,6 +82,16 @@ func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string,
 	return sandboxReads{client: rc, opts: opts}, nil
 }
 
+// kubernetesPluginSourceKnown is whether this Kubernetes daemon can name the plugin pair a
+// stale-plugin relaunch installs (LEGION-164): always false for now — runtime.kubernetes.plugins
+// does not exist in the configuration yet, and the release workflow does not yet link a published
+// pair into the daemon binary. Until both land (a later LEGION-164 work item), every Kubernetes
+// daemon runs the degraded mode: a stale claim is recorded and reported, never relaunched or
+// refused (supervise.Deps.PluginRelaunchable false).
+func kubernetesPluginSourceKnown(cfg config.Config) bool {
+	return false
+}
+
 // prepareSandbox is the runtime over readSandbox's client and Options, and the image probe. The
 // worker stream listens on tcp://<bind>:<worker_stream_port>; openSupervision hands the factory the
 // address every pod dials (shimAddress).

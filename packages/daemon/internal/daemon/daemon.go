@@ -132,6 +132,11 @@ type overrides struct {
 	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
 	// beside the API, so a test that asserts on its line waits for this rather than for /healthz.
 	strandedReported func()
+	// pluginRelaunchable overrides whether a stale-plugin claim can be relaunched onto a plugin
+	// (supervise.Deps.PluginRelaunchable), bypassing the configuration-derived default: nil keeps
+	// that default, which a kubernetes-runtime test without a real cluster has no other way to
+	// drive, since the daemon knows no plugin source until runtime.kubernetes.plugins exists (T4).
+	pluginRelaunchable *bool
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
@@ -523,6 +528,11 @@ type plan struct {
 	// secretsEnroller is the daemon's agent-secrets token login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
+	// pluginRelaunchable is supervise.Deps.PluginRelaunchable: whether this daemon can relaunch a
+	// stale-plugin claim onto a plugin at all. True under tmux always; under Kubernetes, true iff a
+	// plugin pair to install is known (kubernetesPluginSourceKnown), which is nowhere yet — T4
+	// wires runtime.kubernetes.plugins and the release's linked pair into this.
+	pluginRelaunchable bool
 	// secretsLogin is the same login's client, read-only, for the state route to show its
 	// current status (source.State, agentsecrets.Client.LoginStatus); nil when the deployment
 	// enrolls no pod.
@@ -582,11 +592,16 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		stop = stopBudget
 	}
 	secretsEnroller, secretsLogin := newSecretsLogin(cfg, log)
+	pluginRelaunchable := cfg.Runtime.Name == "tmux" || kubernetesPluginSourceKnown(cfg)
+	if o.pluginRelaunchable != nil {
+		pluginRelaunchable = *o.pluginRelaunchable
+	}
 	p := plan{
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
+		pluginRelaunchable: pluginRelaunchable,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
@@ -1023,7 +1038,8 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,
 		},
-		PluginContract: api.DaemonAPIVersion,
+		PluginContract:     api.DaemonAPIVersion,
+		PluginRelaunchable: p.pluginRelaunchable,
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{
@@ -1041,9 +1057,11 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 // only after that reconciliation proves any pre-crash pane absent or reaped; a failed listing
 // leaves it launch_uncertain until the bounded retry succeeds. The relaunches run after hellos are
 // resolved, on a goroutine of their own, so start returns, and the API serves, without waiting for
-// any (relaunchUnfinished). A daemon that leaves the controller to its operator first stops the
-// controller's claim an earlier boot under `controller: daemon` left (stopLaunchedController),
-// which leaves it absent or retired. The only controller claim among the unrecorded launches is a
+// any (relaunchUnfinished): every re-adopted claim on another plugin contract is posted a stale-
+// plugin relaunch first (refreshStalePlugins), over every one before any of them is relaunched. A
+// daemon that leaves the controller to its operator first stops the controller's claim an earlier
+// boot under `controller: daemon` left (stopLaunchedController), which leaves it absent or
+// retired. The only controller claim among the unrecorded launches is a
 // launch a crash cut short, and by then the stop has retired it, so launchUnfinished would not
 // relaunch it: its ReleaseUncertainLaunch acts only on a launch-uncertain claim. Dropping that token
 // is a second guard beside that check, so boot does not report the retired claim as an unrecorded
@@ -1096,10 +1114,34 @@ func (s *supervision) start(boot context.Context) error {
 		defer s.wg.Done()
 		s.reconcileOrphans(s.supervisor.ctx)
 	}()
+	s.refreshStalePlugins()
 	if len(unfinished) > 0 {
 		s.relaunchUnfinished(unfinished, reconciled)
 	}
 	return nil
+}
+
+// refreshStalePlugins posts StalePlugin to every re-adopted claim whose recorded plugin contract is
+// not this daemon's — an earlier daemon's, or none at all, at the first boot on this release —
+// before any of them is relaunched (relaunchUnfinished runs after this). A claim still launching is
+// left to its own registration, which decides the comparison the moment it arrives, so only the
+// four states whose process has registered are read. A daemon that cannot relaunch onto a plugin
+// (PluginRelaunchable false, LEGION-164's degraded Kubernetes mode) posts nothing and instead logs
+// one Error line per stale claim: the fleet runs on, unrelaunched, until an operator names a plugin
+// source.
+func (s *supervision) refreshStalePlugins() {
+	stalePluginStates := []supervise.ClaimState{supervise.StateRegistered, supervise.StateReady, supervise.StateWorking, supervise.StateIdle}
+	for _, c := range s.claims {
+		if c.Session == "" || c.PluginContract == api.DaemonAPIVersion || !slices.Contains(stalePluginStates, c.State) {
+			continue
+		}
+		if !s.plan.pluginRelaunchable {
+			s.log.Error("supervise: the process speaks another plugin contract, and this daemon knows no plugin versions to relaunch it onto; set runtime.kubernetes.plugins",
+				"claim", c.Token, "incarnation", c.Locator.Incarnation, "pluginContract", c.PluginContract, "daemonApiVersion", api.DaemonAPIVersion)
+			continue
+		}
+		s.supervisor.post(c.Token, supervise.StalePlugin{Claim: c.Token})
+	}
 }
 
 // reconcileBootOrphans retries only the boot reconciliation, boundedly. A listing error does not

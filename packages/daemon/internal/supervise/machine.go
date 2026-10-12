@@ -299,6 +299,12 @@ type Deps struct {
 	// cannot import api), compared against each claim's recorded PluginContract to decide whether a
 	// registration or a restored claim is stale.
 	PluginContract int
+	// PluginRelaunchable is whether this daemon can relaunch a stale process onto a plugin at all:
+	// true under tmux always (the pane resumes on the host's own plugin, which the boot gate holds
+	// to this daemon's contract), and under Kubernetes iff a plugin pair to install is known. False
+	// means a stale claim is recorded and reported, never relaunched or refused — relaunching
+	// nothing it cannot build, and refusing nothing a relaunch is not already under way to fix.
+	PluginRelaunchable bool
 }
 
 func (d Deps) check() error {
@@ -1186,6 +1192,8 @@ func claimOf(ev Event) claim.Token {
 	case Timer:
 		return ev.Claim
 	case IssueVolumeLost:
+		return ev.Claim
+	case StalePlugin:
 		return ev.Claim
 	case RequestSpawn:
 		return ev.Claim

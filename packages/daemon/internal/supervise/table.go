@@ -108,6 +108,13 @@ type Timer struct {
 // was on that volume, and is gone with it. The daemon sends it to the issue's other claims.
 type IssueVolumeLost struct{ Claim claim.Token }
 
+// StalePlugin is the boot's own finding that a re-adopted claim's recorded plugin contract is not
+// this daemon's — an earlier daemon's, or none at all, at the first boot on this release
+// (refreshStalePlugins in internal/daemon). It is posted once per restored claim, before any of
+// them is relaunched, for a claim in a state whose process has registered; one still launching is
+// left to its own registration, which decides the comparison the moment it arrives.
+type StalePlugin struct{ Claim claim.Token }
+
 // RequestSpawn launches a queued claim.
 type RequestSpawn struct{ Claim claim.Token }
 
@@ -227,6 +234,7 @@ func (PromptAcked) isEvent()          {}
 func (PromptRefused) isEvent()        {}
 func (Timer) isEvent()                {}
 func (IssueVolumeLost) isEvent()      {}
+func (StalePlugin) isEvent()          {}
 func (RequestSpawn) isEvent()         {}
 func (RequestRegister) isEvent()      {}
 func (RequestReady) isEvent()         {}
@@ -273,7 +281,8 @@ const (
 	onDeliver       eventKind = "request_deliver"
 	onExit          eventKind = "request_exit"
 
-	onVolumeLost eventKind = "issue_volume_lost"
+	onVolumeLost  eventKind = "issue_volume_lost"
+	onStalePlugin eventKind = "stale_plugin"
 
 	timerPrefix eventKind = "timer:"
 )
@@ -300,6 +309,8 @@ func kindOf(ev Event) eventKind {
 		return timerPrefix + eventKind(ev.Kind)
 	case IssueVolumeLost:
 		return onVolumeLost
+	case StalePlugin:
+		return onStalePlugin
 	case RequestSpawn:
 		return onSpawn
 	case RequestRegister:
@@ -481,6 +492,12 @@ func fillTable(t *builder) {
 	t.ignore(onVolumeLost, "the agent registered, so its session is on the volume its process runs on",
 		StateRegistered, StateReady, StateWorking, StateIdle)
 
+	// The boot's own finding that a re-adopted claim speaks another plugin contract.
+	t.row(onStalePlugin, "the process speaks another plugin contract: relaunch it onto the current one", refreshStalePlugin,
+		[]ClaimState{StateLaunching, StateFailed}, StateRegistered, StateReady, StateWorking, StateIdle)
+	t.ignore(onStalePlugin, "a claim still launching is left to its registration, which decides it the moment it arrives",
+		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateSuspended, StateFailed, StateRetired)
+
 	// Requests.
 	t.row(onSpawn, "launch", spawn, []ClaimState{StateLaunching, StateFailed}, StateQueued)
 	t.ignore(onSpawn, "the previous launch's pane is still uncertain", StateLaunchUncertain)
@@ -489,8 +506,8 @@ func fillTable(t *builder) {
 	t.ignore(onSpawn, failedClaim, StateFailed)
 	t.ignore(onSpawn, retiredClaim, StateRetired)
 
-	t.row(onRegister, "the agent registered", register, []ClaimState{StateRegistered}, booting...)
-	t.row(onRegister, "the recorded session registered again", reregister, nil,
+	t.row(onRegister, "the agent registered", register, []ClaimState{StateRegistered, StateLaunching, StateFailed}, booting...)
+	t.row(onRegister, "the recorded session registered again", reregister, []ClaimState{StateLaunching, StateFailed},
 		StateRegistered, StateReady, StateWorking, StateIdle)
 	t.ignore(onRegister, "no launch has minted a boot token", StateQueued)
 	t.ignore(onRegister, "the previous launch's pane is still uncertain", StateLaunchUncertain)
@@ -923,7 +940,9 @@ func sessionLost(m *Machine, ctx context.Context, _ Event) error {
 // agent now, whose session is on the recreated volume, so the loss is over. The boot intervals end
 // with the registration, but not the deadline: it is armed again at its base bound, and only the
 // agent's ready ends it. A registration whose answer never reached its agent leaves a claim no
-// ready will ever come for, and from here that looks exactly like an agent slow to boot.
+// ready will ever come for, and from here that looks exactly like an agent slow to boot. A
+// registration whose plugin still differs from the daemon's is relaunched at once and refused
+// (staleRegistration): the agent that just registered is not the one that relaunch starts.
 func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = r.Session, r.SessionFile, false
@@ -938,12 +957,18 @@ func register(m *Machine, ctx context.Context, ev Event) error {
 	if err := m.persist(ctx); err != nil {
 		return err
 	}
+	// A stale registration's process is let go by its relaunch, so it is never enrolled: the
+	// refusal returns before the enrollment a current registration gets.
+	if err := m.staleRegistration(ctx, r.PluginContract); err != nil {
+		return err
+	}
 	return m.ensureEnrolled(ctx)
 }
 
 // reregister is the recorded session registering again: it is issued a new secret, and the
 // deadline stays where the first registration set it, so an agent that keeps registering and never
-// says it is ready is still relaunched.
+// says it is ready is still relaunched. A registration whose plugin still differs from the
+// daemon's is relaunched at once and refused the same way register's is (staleRegistration).
 func reregister(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.SessionFile = r.SessionFile
@@ -952,7 +977,10 @@ func reregister(m *Machine, ctx context.Context, ev Event) error {
 	if r.PluginContract == m.deps.PluginContract {
 		m.claim.PluginRelaunchFor = 0
 	}
-	return m.persist(ctx)
+	if err := m.persist(ctx); err != nil {
+		return err
+	}
+	return m.staleRegistration(ctx, r.PluginContract)
 }
 
 func ready(m *Machine, ctx context.Context, _ Event) error {
