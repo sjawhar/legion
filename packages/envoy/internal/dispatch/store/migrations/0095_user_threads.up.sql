@@ -1,4 +1,4 @@
--- 0094_user_threads.up.sql
+-- 0095_user_threads.up.sql
 -- LEGION-687: the Replies page. One row per person per thread they wrote in (an ask's thread, a
 -- comment thread by its root, or an issue message thread by its root), holding how far they have
 -- read it (read_through) and the newest write anyone else made there (replied_at, last_reply_id).
@@ -13,7 +13,7 @@
 -- row, since it has no page to open.
 --
 -- This migration creates the table and the comment trigger, and defines the message trigger's
--- function, which 0096 attaches; 0095 adds the asks trigger and 0097 seeds the rows from history.
+-- function, which 0097 attaches; 0096 adds the asks trigger and 0098 seeds the rows from history.
 -- Each trigger is its own migration so its transaction holds that table's lock alone, for
 -- milliseconds (0075's precedent); this one locks comments alone.
 create table user_threads (

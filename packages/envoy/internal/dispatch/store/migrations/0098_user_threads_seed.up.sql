@@ -1,4 +1,4 @@
--- 0097_user_threads_seed.up.sql
+-- 0098_user_threads_seed.up.sql
 -- LEGION-687: fills user_threads from history, one row per person per thread they wrote in: a
 -- comment of theirs, an ask they asked, an answer they gave, or a message of theirs on an issue.
 -- Every row starts read: the cutoff is the migration's own time, so the deploy turns no reply
@@ -6,7 +6,7 @@
 -- dispatch://LEGION-687/spec). replied_at and last_reply_id still record the newest reply anyone
 -- else wrote, so a later reply is compared with it.
 --
--- 0094-0096's triggers are live by now, so a write that lands while this runs already has its row;
+-- 0095-0097's triggers are live by now, so a write that lands while this runs already has its row;
 -- the upsert merges with it by taking the later of each time, and never undoes the trigger's write.
 -- Reads comments, asks, messages, issues and artifacts (ACCESS SHARE) and writes only user_threads.
 insert into user_threads (login, thread_id, kind, project_key, issue_key, artifact_id, read_through, replied_at, last_reply_id)

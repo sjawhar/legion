@@ -1,4 +1,4 @@
--- 0095_user_threads_asks_trigger.up.sql
+-- 0096_user_threads_asks_trigger.up.sql
 -- LEGION-687: an ask a person asked, and one they answered, are threads they wrote in. Asking
 -- gives the asker a row read through the ask; answering (the answer route, and settlement's
 -- restoration of a retracted ask) moves the answerer's read mark to the answer's own time. An

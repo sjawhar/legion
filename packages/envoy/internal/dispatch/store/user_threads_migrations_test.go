@@ -7,8 +7,8 @@ import (
 )
 
 // beforeUserThreads is the last migration before user_threads: the four that make and fill it
-// (0094_user_threads through 0097_user_threads_seed) apply after it.
-const beforeUserThreads = 93
+// (0095_user_threads through 0098_user_threads_seed) apply after it.
+const beforeUserThreads = 94
 
 // userThread is one person's row for one thread, as the Replies page reads it.
 type userThread struct {
