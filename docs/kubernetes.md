@@ -1992,20 +1992,44 @@ listener and NATS, with real agents. What it holds, and what it touches in produ
 ### Probing a configuration before the daemon boots on it
 
 `legion probe-boot --config <legion.yaml>` runs the part of a Kubernetes daemon's boot that the
-operator's worker pod can refuse, from that configuration, and exits: boot's reads of the
-configuration and the files it names (the loader that runs neither App's `private_key_command`,
-then `readBoot`), the cluster check (Agent Sandbox installed, no Sandbox of an older layout), and the
-image probe Sandbox a booting daemon runs, built by the same code from the operator's pod — its
-ServiceAccount, volumes, mounts and environment — and judged the same way
-(`packages/daemon/internal/daemon/probeboot.go`, `sandbox.NewProber`). It runs under the credentials
-`runtime.kubernetes` names, so in a pod it acts as that pod's ServiceAccount. It opens no store, mints
-no GitHub App token, connects to no NATS and lists no Dispatch issue: the boot stages after the probe,
-none of which reads the worker pod. On a pass it prints
-`probe-boot: OK project=<project> image=<image> model-fallback=<mark> capacity-waits=<n>` and exits
-0; a refusal is boot's own, on stderr, and exits 1. A change to the worker pod (a new projected
-token, a ConfigMap mount, a variable) is proven with it on a cluster that admits Legion's pods before
-any daemon restarts on it: a pod the cluster would not admit, mount or start fails here as it would
-fail the daemon's boot.
+operator's worker pod can refuse, from that configuration (`packages/daemon/internal/daemon/probeboot.go`):
+boot's reads of the configuration, the caller's environment and the files they name (the loader
+that runs neither App's `private_key_command`, then `readBoot`), then the cluster check (Agent
+Sandbox installed, no Sandbox of an older layout) and the image probe a booting daemon runs, one
+value for both (`sandboxBootOf`). The probe Sandbox is built by the same code from the operator's
+pod — its ServiceAccount, volumes, mounts and environment — and judged the same way
+(`sandbox.NewProber`). It skips every boot stage that reads nothing of the worker pod: the store,
+its legacy-claims fence, the migration and the GitHub App mint, which a booting daemon runs before
+the probe, and the NATS connection and the Dispatch listing, which it runs after. On a pass it
+prints `probe-boot: OK project=<project> image=<image> model-fallback=<mark> capacity-waits=<n>` and
+exits 0; a refusal is boot's own, on stderr, and exits 1.
+
+- **Identity.** It acts as whoever `runtime.kubernetes` resolves to in its own process: the daemon's
+  identity only with the daemon's kubeconfig and context, or in a pod under the daemon's
+  ServiceAccount. It uses a subset of the daemon's grants above: `sandboxes` create, get, list,
+  watch and delete; `pods` list and watch; `pods/log` get; `events` list; the get on the CRD and on
+  the controller's Deployment. It reads no `secrets` and patches no Sandbox. The probe pod itself is
+  created by the agent-sandbox controller with the operator's ServiceAccount, so its result is the
+  daemon's boot's own when it runs as the daemon's identity; under another, an RBAC or admission
+  rule that depends on who creates the Sandbox can answer differently.
+- **Environment.** Run it with the daemon's environment. With `nats_nkey_seed_file` unset, whether
+  the caller's environment holds `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED` decides both the probe
+  container's providers pointer to the seed and the probe's check of the providers Secret's seed
+  against the pane NATS user, so a caller without them runs another probe than the daemon would.
+  It also reads every secret file the configuration names, as `legion start --check-config` does,
+  so the host it runs on holds all of them.
+- **Its own probe Sandbox.** A booting daemon names its probe Sandbox for the project and the image;
+  probe-boot names its own for its run as well (`legion-probe-<project>-<digest>-<run>`). So it may
+  run while that project's daemon boots, or beside another probe-boot, and none takes another's
+  Sandbox for a leftover. It deletes its Sandbox when it ends, a SIGTERM or SIGINT included; after a
+  SIGKILL the Sandbox ends at its `shutdownTime`.
+- **Capacity.** It waits on room in the Legion pool without limit, as the daemon's probe does (a
+  waiting attempt counts against no retry), so the caller bounds it: a CI job's timeout, or
+  `timeout <duration> legion probe-boot …`.
+
+A change to the worker pod (a new projected token, a ConfigMap mount, a variable) is proven with it,
+run as the daemon's identity, on a cluster that admits Legion's pods before any daemon restarts on
+it: a pod the cluster would not admit, mount or start fails here as it would fail the daemon's boot.
 
 ## Kubernetes runtime (TypeScript daemon)
 

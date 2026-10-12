@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 	dynamicfake "k8s.io/client-go/dynamic/fake"
-	"k8s.io/client-go/kubernetes"
 	kubefake "k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 
@@ -224,9 +223,12 @@ type rig struct {
 	noController bool
 	// hooks, when set, sees the runtime's Sandbox gets and deletes (withSandboxHooks).
 	hooks *sandboxHooks
-	// prober builds the runtime as NewProber does: the probe's configuration and the informers
-	// alone (asProber).
+	// prober builds the runtime with newProber, the probe's configuration and the informers alone
+	// (asProber); p is that Prober, whose runtime r also is.
 	prober bool
+	p      *Prober
+	// opts are the Options the runtime was built from, for a second runtime over the same fakes.
+	opts Options
 
 	// commands are what each role's fake launcher was sent, in order; wanted are the roles whose
 	// fake launcher connects again whenever their issue gets a new pod.
@@ -321,26 +323,27 @@ func newRig(t *testing.T, objects []k8sruntime.Object, options ...rigOption) *ri
 		option(g, &opts)
 	}
 	g.store, _ = opts.Store.(*fakeStore)
-	configureRuntime, startRuntime := configure, (*Runtime).start
-	if g.prober {
-		configureRuntime = configureProber
-		startRuntime = func(r *Runtime, ctx context.Context, dyn dynamic.Interface, kube kubernetes.Interface) error {
-			_, err := r.startInformers(ctx, dyn, kube)
-			return err
-		}
-	}
-	r, err := configureRuntime(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
+	g.opts = opts
 	var dyn dynamic.Interface = g.dyn
 	if g.hooks != nil {
 		dyn = hookedDynamic{g.dyn, g.hooks}
 	}
-	if err := startRuntime(r, ctx, dyn, g.kube); err != nil {
-		t.Fatal(err)
+	if g.prober {
+		p, err := newProber(ctx, dyn, g.kube, opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		g.p, g.r = p, p.r
+	} else {
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := r.start(ctx, dyn, g.kube); err != nil {
+			t.Fatal(err)
+		}
+		g.r = r
 	}
-	g.r = r
 	if !g.noController {
 		go g.control()
 	}

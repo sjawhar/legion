@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -19,7 +19,6 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
-	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 )
 
@@ -149,11 +148,11 @@ func TestProbeBootRefusesAClusterWithoutAgentSandboxBeforeAnyProbe(t *testing.T)
 	}
 }
 
-// On a cluster boot's check passes, probe-boot runs the probe a booting daemon runs: the daemon's
-// own image probe (imageProbe over the role prompts' references), on a runtime built from the
-// Options boot reads, after the cluster check, holding no token source, store or connections, and
-// it answers the probe's report. It opens no store (its Postgres cannot be reached), connects to no
-// NATS and asks Dispatch nothing.
+// On a cluster boot's check passes, probe-boot runs the cluster check and then the image probe a
+// booting daemon runs (sandboxBootOf, one value for both), on a runtime built from the Options boot
+// reads and holding no token source, store or connections, and it answers the probe's report. The
+// prober is built only once the check's last read, the census's Sandbox list, has been made. It
+// opens no store (its Postgres cannot be reached), connects to no NATS and asks Dispatch nothing.
 func TestProbeBootRunsTheDaemonsImageProbeAfterTheClusterCheck(t *testing.T) {
 	var mu sync.Mutex
 	var requested []string
@@ -162,13 +161,14 @@ func TestProbeBootRunsTheDaemonsImageProbeAfterTheClusterCheck(t *testing.T) {
 	prober := &recordedProber{report: bootprobe.ImageReport{ModelFallback: "off"}}
 	var built []sandbox.Options
 	var checkedFirst bool
+	census := "GET /apis/agents.x-k8s.io/v1beta1/namespaces/" + cfg.Runtime.Kubernetes.Namespace + "/sandboxes"
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	report, err := probeBoot(ctx, cfg, lookup(nil), quietLogger(),
 		func(_ context.Context, _ *rest.Config, opts sandbox.Options) (imageProber, error) {
 			mu.Lock()
-			checkedFirst = len(requested) >= 3
+			checkedFirst = slices.Contains(requested, census)
 			mu.Unlock()
 			built = append(built, opts)
 			return prober, nil
@@ -185,13 +185,6 @@ func TestProbeBootRunsTheDaemonsImageProbeAfterTheClusterCheck(t *testing.T) {
 	}
 	if len(built) != 1 || len(prober.probed) != 1 {
 		t.Fatalf("built %d probers and probed %d times, want 1 and 1", len(built), len(prober.probed))
-	}
-	wantProbe, err := imageProbe(cfg, prompts.RoleReferences())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := prober.probed[0]; !reflect.DeepEqual(got, wantProbe) {
-		t.Errorf("probed with %+v, want the daemon's image probe %+v", got, wantProbe)
 	}
 	opts := built[0]
 	k := cfg.Runtime.Kubernetes

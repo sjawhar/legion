@@ -273,7 +273,7 @@ func (r *liveRig) checkImageProbe() error {
 		return err
 	}
 	_, digest, _ := strings.Cut(r.env.image, "@sha256:")
-	name := probeName(r.env.project, digest)
+	name := probeName(r.env.project, digest, "")
 	if err := r.recordSandbox(name); err != nil {
 		return err
 	}
@@ -401,7 +401,7 @@ func (r *liveRig) checkImageProbeRefusal() error {
 	}
 	note("runtime", "refused: %s", firstLine(refusal.Error()))
 	_, digest, _ := strings.Cut(r.env.image, "@sha256:")
-	probe := probeName(r.env.project, digest)
+	probe := probeName(r.env.project, digest, "")
 	if err := r.poll(liveGoneLimit, "probe Sandbox "+probe+" to be deleted", func() (bool, error) {
 		_, err := r.getSandbox(probe)
 		return apierrors.IsNotFound(err), ignoreNotFound(err)
@@ -447,7 +447,7 @@ func (r *liveRig) checkImageProbeCapabilityRefusal() error {
 	}
 	note("runtime", "refused: %s", firstLine(refusal.Error()))
 	_, digest, _ := strings.Cut(r.env.image, "@sha256:")
-	probe := probeName(r.env.project, digest)
+	probe := probeName(r.env.project, digest, "")
 	if err := r.poll(liveGoneLimit, "probe Sandbox "+probe+" to be deleted", func() (bool, error) {
 		_, err := r.getSandbox(probe)
 		return apierrors.IsNotFound(err), ignoreNotFound(err)

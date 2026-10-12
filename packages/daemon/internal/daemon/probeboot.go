@@ -10,7 +10,6 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/bootprobe"
 	"github.com/sjawhar/legion/daemon/internal/config"
-	"github.com/sjawhar/legion/daemon/internal/prompts"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 )
 
@@ -21,14 +20,15 @@ type imageProber interface {
 
 // ProbeBoot is `legion probe-boot`: the part of a Kubernetes daemon's boot its worker pod can refuse,
 // run from the daemon's own configuration with nothing the workflow needs. It makes boot's reads of
-// the configuration, the environment and the files they name (readBoot), then the cluster's
-// refusals (sandboxClusterCheck), then the daemon's own image probe (imageProbe over the role
-// prompts' references) on a runtime built from the Options boot reads (sandbox.NewProber), under the
-// credentials runtime.kubernetes names. The probe Sandbox it creates is the one a booting daemon
-// creates: built from the operator pod's ServiceAccount, volumes, mounts and environment, so a pod
-// the cluster would not admit, mount or start fails here. It opens no store, mints no GitHub App
-// token, connects to no NATS and lists no Dispatch issue — the boot stages after the probe, which
-// read nothing of the worker pod — and writes nothing but the probe Sandbox, which it deletes.
+// the configuration, the caller's environment and the files they name (readBoot), then runs the
+// cluster check and the image probe a booting daemon runs (sandboxBootOf: one value for both), the
+// probe on a runtime built from the Options boot reads (sandbox.NewProber), under the credentials
+// runtime.kubernetes names. The probe Sandbox it creates is the one a booting daemon creates, under
+// a name of its own run: built from the operator pod's ServiceAccount, volumes, mounts and
+// environment, so a pod the cluster would not admit, mount or start fails here. It skips every boot
+// stage that reads nothing of the worker pod — the store and its claims fence and migration and the
+// GitHub App mint, which a booting daemon runs before the probe, and the NATS connection and the
+// Dispatch listing it runs after — and writes nothing but its probe Sandbox, which it deletes.
 func ProbeBoot(ctx context.Context, cfg config.Config, lookup func(string) (string, bool), log *slog.Logger) (bootprobe.ImageReport, error) {
 	return probeBoot(ctx, cfg, lookup, log, func(ctx context.Context, rc *rest.Config, opts sandbox.Options) (imageProber, error) {
 		return sandbox.NewProber(ctx, rc, opts)
@@ -46,13 +46,13 @@ func probeBoot(ctx context.Context, cfg config.Config, lookup func(string) (stri
 	if err != nil {
 		return bootprobe.ImageReport{}, err
 	}
-	boot, cancel := context.WithTimeout(ctx, bootTimeout)
-	defer cancel()
-	if err := sandboxClusterCheck(cfg, reads.sandbox)(boot); err != nil {
+	boot, err := sandboxBootOf(cfg, reads.sandbox)
+	if err != nil {
 		return bootprobe.ImageReport{}, err
 	}
-	probe, err := imageProbe(cfg, prompts.RoleReferences())
-	if err != nil {
+	checking, cancel := context.WithTimeout(ctx, bootTimeout)
+	defer cancel()
+	if err := boot.clusterCheck(checking); err != nil {
 		return bootprobe.ImageReport{}, err
 	}
 	// The prober's informers run until this context ends, so they stop when the probe returns.
@@ -62,5 +62,5 @@ func probeBoot(ctx context.Context, cfg config.Config, lookup func(string) (stri
 	if err != nil {
 		return bootprobe.ImageReport{}, err
 	}
-	return prober.ProbeImage(probing, probe)
+	return prober.ProbeImage(probing, boot.probe)
 }
