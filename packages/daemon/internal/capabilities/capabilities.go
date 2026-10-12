@@ -224,12 +224,13 @@ func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 // Every space rune (unicode.IsSpace: a newline, a tab, a next line, a Unicode space) is a space,
 // U+009B, the C1 form of a control sequence's introducer, is held as c1Introducer, and every other
 // control rune (an escape, another C1 control, and either marker itself) is held. A value class
-// runs across either, and across a held escape with the `[`, parameters and letter that complete a
-// control sequence after it, so neither a control rune nor a colour sequence inside a credential
-// leaves part of it unredacted; what follows c1Introducer counts as the credential's own
-// characters, as it may be. Outside a credential, a sequence's final byte may close it or may be a
-// credential's first letter. So when anything was held, the rules run on four readings in turn
-// (heldReadings), each pass after the last:
+// runs across either, and across a held escape with the `[`, parameters and final byte that
+// complete a control sequence after it, so neither a control rune nor a control sequence inside a
+// credential's value leaves part of it unredacted; what follows c1Introducer counts as the
+// credential's own characters, as it may be. One inside a rule's label or prefix (`gh`, `Bearer`,
+// `?token=`) still keeps that rule from matching. Outside a credential, a sequence's final byte may
+// close it or may be a credential's first letter. So when anything was held, the rules run on four
+// readings in turn (heldReadings), each pass after the last:
 //  1. Each control rune held on its own, a `[` and what follows it plain text: a credential right
 //     after an unterminated `ESC [` (`ESC [ghp_…`, `ESC [?token=…`).
 //  2. Each introducer (held `[`, or c1Introducer), its parameters and intermediates as opener, the
@@ -309,10 +310,10 @@ var heldReadings = []struct {
 }
 
 // heldSequence, in a value class, is c1Introducer, held alone, or a held escape followed by the
-// `[`, parameters and letter that complete a control sequence, a colour sequence such as
-// `ESC [ 1 m` among them. Parameters and the letter share no character, so a class reads it one
-// way only.
-const heldSequence = `\x{FFFE}|\x{FFFF}(?:\[[0-?]*[A-Za-z])?`
+// `[`, parameters and final byte that complete a control sequence, a colour sequence such as
+// `ESC [ 1 m` among them. Parameters (`0`–`?`) and the final byte (`@`–`~`) share no character, so
+// a class reads it one way only.
+const heldSequence = `\x{FFFE}|\x{FFFF}(?:\[[0-?]*[@-~])?`
 
 // credentialRules are the credential shapes redactCredentials replaces, each keeping what names
 // the credential and replacing the secret with `***`; the shared fixture names each with an
@@ -351,7 +352,7 @@ var credentialRules = []struct {
 	{pattern: regexp.MustCompile(`\x{FFFF}\[[0-?]*eyJ|(?:^|[^A-Za-z0-9_\x{FFFE}\x{FFFF}-]|%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4})eyJ(?:[A-Za-z0-9_-]|` + heldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `)*`), replace: redactJWT},
 	{pattern: regexp.MustCompile(`\b(sk-|dsp_|ya29\.|xox[a-z]-|glpat-|npm_)(?:[A-Za-z0-9_-]|` + heldSequence + `){20,}`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`\b(AIza)(?:[A-Za-z0-9_-]|` + heldSequence + `){35,}`), replacement: "${1}***"},
-	{pattern: regexp.MustCompile(`\b(AKIA|ASIA)[A-Z0-9]{16}\b`), replacement: "${1}***"},
+	{pattern: regexp.MustCompile(`\b(AKIA|ASIA)(?:[A-Z0-9](?:` + heldSequence + `)?){16}\b`), replacement: "${1}***"},
 }
 
 // redactJWT is a JWT rule match redacted. One that opens on held is a held `[` and its parameters

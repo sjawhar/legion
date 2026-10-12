@@ -393,6 +393,18 @@
     },
     {
       "pattern": "cleanup",
+      "name": "a colour reset inside an AWS key id",
+      "detail": "AccessDenied: AKIAIOSFOD\u001b[0mNN7EXAMPLE is not authorized",
+      "want": "AccessDenied: AKIA*** is not authorized"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside an AWS key id",
+      "detail": "session ASIAIOSFOD\u009bNN7EXAMPLE expired",
+      "want": "session ASIA*** expired"
+    },
+    {
+      "pattern": "cleanup",
       "name": "a GitHub token in the C1 form of a colour sequence",
       "detail": "token \u009b1mghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
       "want": "token ghp_*** expired"
@@ -516,6 +528,18 @@
       "name": "a colour sequence with several parameters inside a GitHub token",
       "detail": "token ghp_EXAMPLEtoken0123456789abcdef\u001b[38;5;196mghijklmn\u001b[0m expired",
       "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a control sequence ending in a non-letter inside a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123456789\u001b[5@abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a control sequence ending in a tilde inside a bearer credential",
+      "detail": "401: Bearer abc123\u001b[1~secretTail rejected",
+      "want": "401: Bearer *** rejected"
     },
     {
       "pattern": "cleanup",

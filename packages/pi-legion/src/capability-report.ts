@@ -423,9 +423,9 @@ const HELD_READINGS: readonly (readonly [RegExp, string])[] = [
   [/\uffff/g, " "],
 ];
 
-/** `C1_INTRODUCER`, held alone, or a held escape with the `[`, parameters and letter that complete a
- * control sequence: the daemon's `heldSequence`, as regular-expression source. */
-const HELD_SEQUENCE = String.raw`\ufffe|\uffff(?:\[[0-?]*[A-Za-z])?`;
+/** `C1_INTRODUCER`, held alone, or a held escape with the `[`, parameters and final byte that
+ * complete a control sequence: the daemon's `heldSequence`, as regular-expression source. */
+const HELD_SEQUENCE = String.raw`\ufffe|\uffff(?:\[[0-?]*[@-~])?`;
 
 /** Go's `unicode.IsSpace`, the space runes the daemon's cleanup splits on. */
 function isSpace(code: number): boolean {
@@ -519,7 +519,7 @@ const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
     "$1***",
   ],
   [new RegExp(String.raw`\b(AIza)(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){35,}`, "g"), "$1***"],
-  [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, "$1***"],
+  [new RegExp(String.raw`\b(AKIA|ASIA)(?:[A-Z0-9](?:${HELD_SEQUENCE})?){16}\b`, "g"), "$1***"],
 ];
 
 /** The most passes `redactCredentials` makes: the daemon's `maxRedactionPasses`. */
