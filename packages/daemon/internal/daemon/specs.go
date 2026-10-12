@@ -38,6 +38,8 @@ type specs struct {
 	// reviewWorkflows is the project's review_workflows, which a reviewer is told after its
 	// addressing (ReviewWorkflowsFragment).
 	reviewWorkflows []string
+	// mergeRules is the project's merge policy, which a merger is told after its addressing.
+	mergeRules config.MergeRules
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
@@ -70,6 +72,9 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 	}
 	if c.Role == claim.RoleReviewer {
 		addressing += " " + ReviewWorkflowsFragment(s.reviewWorkflows)
+	}
+	if c.Role == claim.RoleMerger {
+		addressing += " " + MergeRulesFragment(s.mergeRules)
 	}
 	env := map[string]string{}
 	if s.identity != nil {
@@ -140,10 +145,9 @@ func (s specs) rolePromptPaths(c supervise.Claim) ([]string, error) {
 
 // AddressingFragment is the sentence that tells an agent where it and its peers are reached: its
 // own role topic, the tree architect's, and the project controller's, spelled from the tokens so
-// the model never hand-encodes one. It names no merge queue: the merger publishes nothing — the
-// daemon posts the READY packet and publishes it to `projects.<KEY>.merge_queue_role` itself
-// (workflow.Engine.ready, prompts/go/merger.md). It is exported for the rigs under
-// packages/pi-legion/scripts, which tell a worker what a pane is told.
+// the model never hand-encodes one. The daemon posts every READY packet and publishes it to
+// `projects.<KEY>.merge_queue_role` itself (workflow.Engine.ready). It is exported for the rigs
+// under packages/pi-legion/scripts, which tell a worker what a pane is told.
 func AddressingFragment(project string, c supervise.Claim) (string, error) {
 	architect, err := claim.NewToken(project, c.Tree, claim.RoleArchitect)
 	if err != nil {
@@ -171,4 +175,19 @@ func ReviewWorkflowsFragment(workflows []string) string {
 		return "Review workflows: this project declares none (`review_workflows`)."
 	}
 	return "Review workflows: this project declares `" + strings.Join(workflows, "`, `") + "` (`review_workflows`)."
+}
+
+// MergeRulesFragment is the merger's project policy. The daemon checks these rules again at READY.
+func MergeRulesFragment(rules config.MergeRules) string {
+	render := func(patterns []config.PathPattern) string {
+		expressions := make([]string, 0, len(patterns))
+		for _, pattern := range patterns {
+			expressions = append(expressions, "`"+pattern.Expression+"`")
+		}
+		if len(expressions) == 0 {
+			return "none"
+		}
+		return strings.Join(expressions, ", ")
+	}
+	return "Merge policy: by_hand " + render(rules.ByHand) + "."
 }

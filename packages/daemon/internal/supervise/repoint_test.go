@@ -59,7 +59,7 @@ func TestAStaleAddressRelaunchesTheClaimChargingNothing(t *testing.T) {
 func TestAStaleAddressWhileLaunchingRelaunchesAgainChargingNothing(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
-	h.must(RequestSuspend{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken, By: SuspendedByOperator})
 	h.wantState(StateSuspended)
 	h.must(RequestResume{Claim: testToken})
 	h.wantState(StateLaunching)
@@ -131,7 +131,7 @@ func TestAStaleAddressWithAHeldSuspensionSuspendsTheClaimChargingNothing(t *test
 	h.must(RequestDeliver{Claim: testToken, Task: "implement the plan"})
 	h.must(StreamTurnStart{Claim: testToken})
 	loc := h.locator()
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn = %v, want ErrSuspendHeld", err)
 	}
 	if claim := h.claim(); !claim.SuspensionHeld {

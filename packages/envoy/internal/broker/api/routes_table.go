@@ -90,8 +90,11 @@ func routes() []apiRoute {
 		// Revoke an enrollment made under the caller's machine credential's operator, or a pod
 		// enrollment the caller's own machine credential made.
 		{http.MethodDelete, "/v1/enrollments/{id}", launcherAuth((*server).deleteEnrollment)},
-		// Start a machine login: answers the confirmation code a person types and a pending id.
+		// Start a person's machine login: answers the confirmation code they type and a pending id.
 		{http.MethodPost, "/v1/launcher-credentials", public((*server).machineLogin)},
+		// Log a service in with its own Kubernetes ServiceAccount token, which no person approves:
+		// answers its launcher credential's id and expiry.
+		{http.MethodPost, "/v1/launcher-credentials/token", public((*server).tokenLogin)},
 		// Poll a machine login by its pending id; once approved, answers its credential's id.
 		{http.MethodGet, "/v1/launcher-credentials/{pending}", public((*server).readMachineLogin)},
 		// Extend the calling session's lease.
@@ -122,9 +125,10 @@ func routes() []apiRoute {
 		// daemon's, whoever approved it, and the person's own machines', that are not revoked and
 		// are unexpired or expired with a session still running, each naming who approved it.
 		{http.MethodGet, "/v1/launcher-credentials", uiAuth((*server).listLauncherCredentials)},
-		// End a machine login, expired or not: a service's as anyone signed in, a person's machine's
-		// as the person who approved it. Its launcher proofs stop authenticating and every session
-		// it enrolled, pods included, ends with its grants and pending requests.
+		// End a machine login, expired or not: a service's (its token login, or one a person approved
+		// before token logins) as anyone signed in, a person's machine's as the person who approved
+		// it. Its launcher proofs stop authenticating and every session it enrolled, pods included,
+		// ends with its grants and pending requests.
 		{http.MethodPost, "/v1/launcher-credentials/{id}/revoke-by-approver", uiAuth((*server).revokeLauncherCredential)},
 		// List the live grants of the named person's sessions, automatic or approved, and those the
 		// person approved.

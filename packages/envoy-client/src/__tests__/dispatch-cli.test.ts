@@ -3,6 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ArtifactBlock } from "@legion/contracts";
+import { PROJECT_KEY_RULE } from "@legion/contracts";
 import { fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures } from "../dispatch-picture-tools";
@@ -202,6 +203,24 @@ const server = Bun.serve({
     }
     if (pathname === "/api/v1/issues/DSP-1" && request.method === "GET") {
       return Response.json(issue);
+    }
+    if (pathname === "/api/v1/projects" && request.method === "POST") {
+      if (body.key === "TAKEN") {
+        return Response.json(
+          { code: "PROJECT_EXISTS", error: "a project with this key already exists" },
+          { status: 409 }
+        );
+      }
+      return Response.json(
+        { key: body.key, name: body.name, open_asks: 0, created_at: "2026-10-11T00:00:00Z" },
+        { status: 201 }
+      );
+    }
+    if (pathname === "/api/v1/projects" && request.method === "GET") {
+      return Response.json([
+        { key: "CORE", name: "Core", open_asks: 0, created_at: "2026-09-01T00:00:00Z" },
+        { key: "SMOKE684", name: "Smoke", open_asks: 0, created_at: "2026-10-11T00:00:00Z" },
+      ]);
     }
     if (pathname === "/api/v1/agents/ses-pic/artifacts/shot-png") {
       return Response.json({
@@ -583,6 +602,41 @@ describe("the dispatch CLI", () => {
         "spec.md changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.\n"
       );
     });
+  });
+
+  test("dispatch project prints the created project, and a taken key exits 1 naming PROJECT_EXISTS", async () => {
+    const created = await run(["project", "--key", "SMOKE684", "--name", "Smoke"], omp);
+    expect(created.code).toBe(0);
+    expect(created.stdout).toContain("Created project SMOKE684 (Smoke)");
+    expect(requests).toEqual([
+      {
+        method: "POST",
+        path: "/api/v1/projects",
+        body: expect.objectContaining({
+          key: "SMOKE684",
+          name: "Smoke",
+          actor: expect.objectContaining({ kind: "session", id: "ses-1" }),
+        }),
+      },
+    ]);
+
+    const taken = await run(["project", "--key", "TAKEN", "--name", "Smoke"], omp);
+    expect(taken.code).toBe(1);
+    expect(taken.stdout).toContain("PROJECT_EXISTS: a project with this key already exists");
+  });
+
+  test("dispatch search refuses a project that is not a key in the server's wording, sending nothing", async () => {
+    const { code, stdout } = await run(["search", "--query", "ok", "--project", "lower"], omp);
+    expect(code).toBe(1);
+    expect(stdout).toContain(`project is not a project key: ${PROJECT_KEY_RULE}`);
+    expect(requests).toEqual([]);
+  });
+
+  test("dispatch projects prints each project's key and name, keys first", async () => {
+    const { code, stdout } = await run(["projects"], omp);
+    expect(code).toBe(0);
+    expect(stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+    expect(requests).toEqual([{ method: "GET", path: "/api/v1/projects", body: undefined }]);
   });
 });
 

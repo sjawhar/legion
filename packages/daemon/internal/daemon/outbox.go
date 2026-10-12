@@ -15,11 +15,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
+	"github.com/sjawhar/legion/daemon/internal/ghautomerge"
 	"github.com/sjawhar/legion/daemon/internal/ghbranch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/githubrest"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/notify"
+	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -50,6 +52,9 @@ const (
 	// the runner executes its rows one at a time, so a call GitHub never answers would stall every
 	// effect behind it.
 	issueBranchTimeout = 30 * time.Second
+	// autoMergeDisableTimeout bounds one auto_merge_disable row's GitHub calls, its token's mint
+	// with them, for the same reason: one unanswered call would stall every effect behind it.
+	autoMergeDisableTimeout = 30 * time.Second
 )
 
 // outbox runs each effect that the workflow transaction committed. Claiming and finishing have
@@ -273,6 +278,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 		return r.mergeQueue(ctx, row, value)
 	case record.IssueBranch:
 		return r.issueBranch(ctx, row, value)
+	case record.AutoMergeDisable:
+		return r.autoMergeDisable(ctx, row, value)
 	default:
 		return fmt.Errorf("outbox row %d: no executor for %T", row.ID, payload)
 	}
@@ -485,6 +492,15 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"tree", issue.Tree, "role", payload.Role)
 			return nil
 		}
+		// An operator's suspension holds its claim until the operator resumes
+		// it: the start, and the task it gives, wait on the row's backoff, before a quiesce
+		// interrupts the role whose phase it would take over. StartedBy refuses the same in the
+		// claim's own decision.
+		if found {
+			if held := machine.Claim(); held.RuleHolds() {
+				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
+			}
+		}
 		// A start that takes the phase over from a role still at work in it (CI settled red before
 		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
 		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
@@ -529,12 +545,20 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("start claim %s: %w", token, err)
 			}
 		case supervise.StateSuspended:
-			if err := machine.Handle(ctx, supervise.RequestResume{Claim: token}); err != nil {
+			// The role owns the issue's phase this start is for: the rule resumes it, unless an
+			// operator suspended it meanwhile, when the task's delivery below waits instead.
+			if err := machine.Handle(ctx, supervise.RequestRuleResume{Claim: token,
+				Reason: fmt.Sprintf("start row %d of %s (phase %q)", row.ID, issue.Key, payload.Phase)}); err != nil {
 				return fmt.Errorf("resume claim %s: %w", token, err)
 			}
 		case supervise.StateFailed:
-			// Only the workflow starts a role whose claim failed: the architect retrying the
-			// held phase, or a later transition that needs the role again.
+			// A boot rule-resume that spent its launch budget is terminal for this row: retrying it
+			// with RequestRetry would reset that budget and launch forever. The failure's workflow
+			// fact and boot report name it. Other workflow starts retain their existing retry rule.
+			if payload.RuleResume {
+				r.log.Info("outbox boot rule-resume finished: its claim spent the launch budget", "row", row.ID, "issue", issue.Key, "role", payload.Role)
+				return nil
+			}
 			if err := machine.Handle(ctx, supervise.RequestRetry{Claim: token}); err != nil {
 				return fmt.Errorf("retry claim %s: %w", token, err)
 			}
@@ -601,7 +625,7 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				"row", row.ID, "issue", issue.Key, "role", payload.Role, "phase", issue.Phase, "start-row", last)
 			return nil
 		}
-		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason}); err != nil {
+		if err := machine.Handle(ctx, supervise.RequestSuspend{Claim: token, Reason: payload.Reason, By: supervise.SuspendedByDaemon}); err != nil {
 			return fmt.Errorf("suspend claim %s: %w", token, err)
 		}
 		return nil
@@ -838,6 +862,60 @@ func (r *outbox) createBranch(ctx context.Context, issue string) error {
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, r.repo)}
 	return ghbranch.Create(ctx, github, r.repo, workspace.Bookmark(issue))
+}
+
+// autoMergeDisable disarms pull request payload.Number as the implement App, which armed it
+// (ghautomerge.Disarm), deciding by the record when it runs, never by when the row was queued:
+// while the issue awaits its merge, the merger's READY commit is the head whose arm is kept, and
+// any other head is disarmed. A row queued by a withdrawal the issue has since come back from so
+// leaves the READY that followed armed. The record is read after GitHub, so a READY recorded while
+// the row runs keeps the arm its merger made.
+func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, payload record.AutoMergeDisable) error {
+	ctx, cancel := context.WithTimeout(ctx, autoMergeDisableTimeout)
+	defer cancel()
+	lease, err := r.tokens.Token(ctx, appauth.Implement, r.repo.Owner())
+	if err != nil {
+		return fmt.Errorf("mint implement App token: %w", err)
+	}
+	github := githubrest.Client{Token: lease.Token, API: githubrest.GraphQLAPI(r.githubAPI)}
+	keep := func(ctx context.Context) (string, error) { return r.readyHeadToKeep(ctx, row.Issue) }
+	disarmed, err := ghautomerge.Disarm(ctx, github, r.repo, payload.Number, keep)
+	if err != nil {
+		return err
+	}
+	r.log.Info("outbox disarmed a pull request", "row", row.ID, "issue", row.Issue, "number", payload.Number,
+		"missing", disarmed.Missing, "kept", disarmed.Kept, "autoMergeDisabled", disarmed.AutoMerge, "dequeued", disarmed.Queue)
+	return nil
+}
+
+// readyHeadToKeep is the head whose arm issue's READY covers: the merger's READY commit while the
+// issue awaits its merge, and none in any other phase, where no arm is legitimate, nor for a READY
+// a person merges (its by-hand note, record.PhaseRow.MergeNote), which covers no arm, nor in a tree
+// that lingers after its root left the workflow, whose members beginLinger disarms.
+func (r *outbox) readyHeadToKeep(ctx context.Context, issue string) (string, error) {
+	var keep string
+	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
+		current, err := r.records.Issue(ctx, tx, issue)
+		if err != nil || current == nil || current.Phase != phase.AwaitingMerge {
+			return err
+		}
+		if lingers, err := record.TreeLingers(ctx, r.records, tx, current.Tree); err != nil || lingers {
+			return err
+		}
+		phases, err := r.records.Phases(ctx, tx, issue)
+		if err != nil {
+			return err
+		}
+		for _, row := range phases {
+			if row.Role == claim.RoleMerger && row.MergeNote == "" {
+				keep = row.HandoffCommit
+			}
+		}
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("read the READY head %s awaits: %w", issue, err)
+	}
+	return keep, nil
 }
 
 func (r *outbox) removeWorkspace(ctx context.Context, row record.OutboxRow, payload record.WorkspaceRemove) error {

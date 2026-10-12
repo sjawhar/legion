@@ -135,20 +135,20 @@ in one step, and the approver's Inbox drops them. A session ends in one of three
 
 ## End a machine's login
 
-A machine login lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval, but its sessions
-outlive it: a session renews its lease with its own key, never with the machine's credential, so a
-box keeps working after the machine's credential expires, and so does a machine session while the
-helper that renews it runs. A login can be ended, with every session it enrolled, at any time: for
-a machine that is lost, compromised or no longer used, or a Legion daemon whose pods must lose
-their secrets now. Dispatch's machine-login page (`/credentials/machine`) lists **Machine logins**:
-every machine logged in as you, and every service's login, such as the Legion daemon's, shown as
-`legion-daemon on <host>` whoever approved it, each with its **Credential** id, who approved it,
-when its login was issued and when it expires. The host is the name its machine reported, so two
-logins can share it; the credential id is the one every enrollment the login made names, and it
-tells them apart. A login that has expired stays listed, marked `expired, sessions still
-running`, while a session it enrolled still runs, so revoking every row a machine has ends every
-session it started, those of its earlier logins included. Click
-**Revoke** on its row and confirm. The broker then, at once:
+A person's machine login lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from its approval, but its
+sessions outlive it: a session renews its lease with its own key, never with the machine's
+credential, so a box keeps working after the machine's credential expires, and so does a machine
+session while the helper that renews it runs. A login can be ended, with every session it enrolled,
+at any time: for a machine that is lost, compromised or no longer used, or a Legion daemon whose pods
+must lose their secrets now. Dispatch's machine-login page (`/credentials/machine`) lists **Machine
+logins**: every machine logged in as you, and every service's login, such as the Legion daemon's,
+shown as `legion-daemon on <host>`, each with its **Credential** id, who approved it (`No one:`
+and the ServiceAccount that logged in, for a daemon's token login), when its login was issued and
+when it expires. The host is the name its machine reported, so two logins can share it; the
+credential id is the one every enrollment the login made names, and it tells them apart. A login
+that has expired stays listed, marked `expired, sessions still running`, while a session it
+enrolled still runs, so revoking every row a machine has ends every session it started, those of
+its earlier logins included. Click **Revoke** on its row and confirm. The broker then, at once:
 
 - refuses the login's credential, so it enrolls no more sessions; and
 - ends every session it enrolled (machine sessions and boxes, or every worker pod of the Legion
@@ -157,8 +157,12 @@ session it started, those of its earlier logins included. Click
 
 Only the person who approved a person's machine login may revoke it; the broker refuses anyone else
 `NOT_APPROVER`. Anyone signed in may revoke a service's login. A revoked login stays revoked: the
-machine runs `agent-secrets machine login` again and its person approves the new code, or the
-Legion daemon starts a new login and anyone signed in approves its code.
+machine runs `agent-secrets machine login` again and its person approves the new code, while the
+Legion daemon logs in again with its own Kubernetes token, which no person approves, and enrolls
+the pods it launches from then on. A worker pod already running when its login was revoked stays
+without secrets until the daemon replaces it. To keep a daemon from logging in again, remove its
+account from the broker's `BROKER_SERVICE_LOGINS` and redeploy the broker
+([Operate](/legion/broker/operate/#what-to-run)).
 
 From your own shell on a logged-in machine, `agent-secrets machine list` lists your own machines'
 logins, row for row as the machine-login page lists them, and `agent-secrets machine revoke` ends
@@ -178,12 +182,14 @@ $ agent-secrets machine revoke a2df6d16-adc1-434e-b479-496defb3a5c8
 revoked a2df6d16-adc1-434e-b479-496defb3a5c8
 ```
 
-The machine-login page lists that service's login, the Legion daemon's, beside them, and revokes
-it:
+The machine-login page lists the services' logins, the Legion daemon's, beside them, and revokes
+them. This one a person approved before services logged in with their own Kubernetes token; a
+daemon's token login is listed the same way with `approved_by` empty and `subject` naming its
+ServiceAccount:
 
 ```console
 $ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL/v1/launcher-credentials?approver=ada@example.com"
-{"credentials":[{"credential_id":"d4187389-953c-4156-90c1-1dd937e9bf0b","host":"example-host-devbox","service":null,"approved_by":"ada@example.com","issued_at":"2026-10-10T14:56:01.121955Z","expires_at":"2026-10-17T14:56:01.122701Z","expired":false},{"credential_id":"8f4c8ae4-b73e-4a60-a591-725667480f1a","host":"example-host-cluster","service":"legion-daemon","approved_by":"bob@example.com","issued_at":"2026-10-10T14:55:59.906427Z","expires_at":"2026-10-17T14:55:59.9071Z","expired":false}]}
+{"credentials":[{"credential_id":"d4187389-953c-4156-90c1-1dd937e9bf0b","host":"example-host-devbox","service":null,"subject":null,"approved_by":"ada@example.com","issued_at":"2026-10-10T14:56:01.121955Z","expires_at":"2026-10-17T14:56:01.122701Z","expired":false},{"credential_id":"8f4c8ae4-b73e-4a60-a591-725667480f1a","host":"example-host-cluster","service":"legion-daemon","subject":null,"approved_by":"bob@example.com","issued_at":"2026-10-10T14:55:59.906427Z","expires_at":"2026-10-17T14:55:59.9071Z","expired":false}]}
 $ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/8f4c8ae4-b73e-4a60-a591-725667480f1a/revoke-by-approver"
 {"state":"revoked"}
 ```
@@ -213,9 +219,11 @@ agent-secrets machine login-status: the broker refused the launcher credential (
 
 A helper with no session running finds out when it next enrolls one. The Legion daemon finds out
 when it next enrolls or ends a pod: the broker refuses its credential `LAUNCHER_INVALID`, and the
-daemon drops it and starts a new machine login, whose code it logs, as when it first logged in. The
-pods it had enrolled do not wait for that: their sessions ended with the revoke, so their agents'
-`agent-secrets` calls are refused `PROOF_INVALID` from then on.
+daemon logs in again with its Kubernetes token, under a new credential, unless its account is no
+longer in the broker's `BROKER_SERVICE_LOGINS`. The pods it had enrolled do not wait for that:
+their sessions ended with the revoke, so their agents' `agent-secrets` calls are refused
+`PROOF_INVALID` from then on. The daemon does not enroll a running pod again: each stays without
+secrets until the daemon replaces it, and only the pods launched after its new login are enrolled.
 
 Stopping the helper also stops the machine from enrolling sessions, since its credential lives only
 in the helper's memory, but it ends none. A machine session lapses within `BROKER_LEASE_SECONDS` once

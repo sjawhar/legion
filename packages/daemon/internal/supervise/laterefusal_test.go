@@ -282,14 +282,14 @@ func TestARefusalOfATaskRetiredUnderItHasNothingToDo(t *testing.T) {
 			h.must(RequestDeliver{Claim: testToken, Task: "the task", Phase: phase.Implementing, Generation: 7})
 			id := h.pending().ID
 			h.store.fail("RetireDelivery", errBoom)
-			_ = h.handle(RequestSuspend{Claim: testToken})
+			_ = h.handle(RequestSuspend{Claim: testToken, By: SuspendedByDaemon})
 			return id
 		}},
 		{name: "suspended, replayed", replayed: true, hold: func(h *harness) string {
 			h.must(RequestDeliver{Claim: testToken, Task: "the task", Phase: phase.Implementing, Generation: 7})
 			id := h.pending().ID
 			h.store.fail("RetireDelivery", errBoom)
-			_ = h.handle(RequestSuspend{Claim: testToken})
+			_ = h.handle(RequestSuspend{Claim: testToken, By: SuspendedByDaemon})
 			return id
 		}},
 		{name: "idle", hold: func(h *harness) string {

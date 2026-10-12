@@ -24,7 +24,7 @@ import (
 func (m *Machine) repoint(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: the process is alive at a stale address; replacing it with one at the current address",
 		"incarnation", m.claim.Locator.Incarnation, "detail", observation.Detail)
-	if err := m.interrupted(ctx); err != nil {
+	if err := m.interrupted(ctx, "the process at a stale address is replaced mid-turn"); err != nil {
 		return err
 	}
 	if m.held != nil {

@@ -98,7 +98,9 @@ func (k *controllerKeeper) keep() error {
 	case supervise.StateQueued:
 		request = supervise.RequestSpawn{Claim: token}
 	case supervise.StateSuspended:
-		request = supervise.RequestResume{Claim: token}
+		// The daemon keeps its controller running by rule, which holds an operator's suspension:
+		// only the operator's resume runs a controller the operator suspended.
+		request = supervise.RequestRuleResume{Claim: token, Reason: "the daemon keeps its controller running"}
 	case supervise.StateFailed, supervise.StateRetired:
 		now := k.now()
 		if k.retryAt.IsZero() {

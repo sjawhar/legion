@@ -262,6 +262,8 @@ export interface Issue {
   readonly rank: string;
   readonly labels: string[];
   readonly parent: string | null;
+  /** Issue keys in the same project this issue waits on, sorted. */
+  readonly blocked_by: string[];
   /** Lowercase email of the person who answers this issue's asks; null when unassigned. */
   readonly assignee: string | null;
   /** The session or human working this issue, or null when nobody has claimed it. */
@@ -306,18 +308,23 @@ export interface IssueSummary
       | "priority"
       | "rank"
       | "parent"
+      | "blocked_by"
       | "assignee"
       | "claim"
       | "components"
       | "route"
       | "updated_at"
       | "last_seq"
+      | "primary_artifact_id"
     >,
     IssueRouteReach {
   readonly labels?: string[];
   readonly open_asks: number;
   readonly progress: IssueProgress;
 }
+
+/** Maximum entries in an issue's blocked_by input, before duplicate keys are removed. */
+export const MAX_ISSUE_BLOCKERS = 20;
 
 /**
  * The longest issue title, in UTF-16 units, counted after the trim `POST /api/v1/issues` and
@@ -329,6 +336,16 @@ export interface IssueSummary
  * their `maxLength`, so the two agree.
  */
 export const ISSUE_TITLE_MAX = 1000;
+
+/**
+ * The longest project name, in UTF-16 units, counted after the trim `POST /api/v1/projects`
+ * applies; a longer one is `400 CAP_EXCEEDED`. A name shows beside its key in the sidebar's
+ * 20rem rail and in every project picker's `KEY · Name` option, any bearer may write one, and no
+ * route renames a project, so it is held to about two lines of that rail; production's longest name
+ * was 25 characters when this was set. Generated into Go as `contracts.ProjectNameMax`, which the
+ * server enforces, and the Settings name field and `dispatch project` take it as their maximum.
+ */
+export const PROJECT_NAME_MAX = 80;
 
 /**
  * The most issues one page of `GET /api/v1/issues` holds: `limit` is 1 to this. Generated into Go
@@ -1426,6 +1443,7 @@ export interface ArtifactReferences {
 export type GraphEdgeKind =
   | "mentions"
   | "child_of"
+  | "blocked_by"
   | "attached_to"
   | "anchored_to"
   | "owned_by"
@@ -1857,6 +1875,8 @@ export interface CreateIssueInput {
   readonly project: string;
   readonly title: string;
   readonly parent?: string;
+  /** Issue keys in the same project this issue waits on. */
+  readonly blocked_by?: string[];
   readonly external?: string;
   readonly spec?: string;
   readonly force?: boolean;
@@ -1889,6 +1909,8 @@ export interface UpdateIssueInput {
   readonly assignee?: string | null;
   /** A parent issue key in the same project, or null to clear; omitted leaves it alone. */
   readonly parent?: string | null;
+  /** Replaces every issue key this issue waits on; [] clears it. Omitted leaves it alone. */
+  readonly blocked_by?: string[];
   /** The issue's own component attachment; null (or mode `inherit`) deletes it so the issue
    *  inherits again; omitted leaves it alone. Allowed on a closed issue. */
   readonly components?: IssueComponentsInput | null;

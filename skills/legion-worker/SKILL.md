@@ -305,11 +305,11 @@ line), the full definition of a proof, what the tester verifies, and the simplif
 - **The merge gate**, in order: the tester's evidence green → the reviewer's approval of the head
   → retro → the merger's READY → the merge → the implementer's production check. On READY's
   acceptance the merger submits the pull request with
-  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`, and the
-  repository's required reviews and checks decide when it lands
+  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`, unless the
+  answer's note begins `MANUAL_MERGE_REQUIRED:`, where a person merges it; the repository's
+  required reviews and checks decide when it lands
   (`skill://legion-worker/references/merge-gate.md`). The reviewer's submissions, retro's commit,
-  the merger's READY and its submission, the implementer's disarming of a withdrawn READY, and the
-  production check follow the same reference.
+  the merger's READY and its submission, and the production check follow the same reference.
 - **No surface reaches the changed path** is a report to the architect, never a reason to
   complete the phase: `skill://legion-worker/references/pr-body.md`.
 
@@ -360,13 +360,13 @@ The daemon reads no handoff file and no branch head; it refuses, before recordin
 
 - `HANDOFF_NOT_NEW` — the commit is the one you reported for your previous phase: write and
   commit this phase's handoff before completing.
-- `READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS` and `READY_CHECKS_NOT_GREEN` — the
-  merger's READY, in `skill://legion-worker/references/merge-gate.md`.
+- each `READY_…` refusal of the merger's READY — named, with its remedy, in the merger's role
+  prompt (`skill://legion-worker/references/merge-gate.md` says how READY is checked).
 - `GITHUB_READ_FAILED` — GitHub's failure, not the head's, reading READY's checks: complete again.
 
 Such a refusal records nothing, so the corrected call at the same commit is applied. The answer
 may carry a `note` (READY published on an already-merged pull request, or a base requiring no
-check).
+check, or the `MANUAL_MERGE_REQUIRED:` note of a pull request a person merges).
 
 Retro's last commit removes `.legion/<issue>/` from the head that merges (`skill://legion-retro`);
 a round after it, such as one a withdrawn READY sends back, writes and commits its own handoff

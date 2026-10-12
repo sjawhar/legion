@@ -28,6 +28,10 @@ func TestUnreachableClassifiesEachErrorShape(t *testing.T) {
 		{"401, a credential answer PermanentRefusal rides out for a queued write and Unreachable rides out here too",
 			&Error{Status: 401, Code: "UNAUTHORIZED", Message: "bad token"}, true},
 		{"403, the same as 401", &Error{Status: 403, Code: "FORBIDDEN", Message: "denied"}, true},
+		{"409 PARENT_CONTENDED: a concurrent reparent moved the parent at every attempt and nothing was applied",
+			&Error{Status: 409, Code: ParentContended, Message: "read the issue and retry"}, true},
+		{"a genuine coded 409: any conflict but PARENT_CONTENDED is Dispatch refusing the write",
+			&Error{Status: 409, Code: "ISSUE_CLOSED", Message: "issue is closed"}, false},
 		{"a genuine coded 404: the project or route named is not there, no wait fixes that",
 			&Error{Status: 404, Code: "NOT_FOUND", Message: "no such project"}, false},
 		{"a genuine coded 400", &Error{Status: 400, Code: "BAD_REQUEST", Message: "malformed"}, false},
@@ -110,5 +114,17 @@ func TestTransportFailureClassifiesEachRealServerShape(t *testing.T) {
 				t.Fatalf("Unreachable(%v) = %t, want %t", err, got, testCase.wantTransient)
 			}
 		})
+	}
+}
+
+// PermanentRefusal reads a 409 by its code: PARENT_CONTENDED applied nothing and is taken on a
+// retry, while any other 409 is Dispatch refusing the write itself, so dropping the code half of
+// the rule fails here.
+func TestPermanentRefusalTellsAConflictByItsCode(t *testing.T) {
+	if _, permanent := PermanentRefusal(&Error{Status: 409, Code: ParentContended, Message: "retry"}); permanent {
+		t.Fatal("409 PARENT_CONTENDED read as permanent")
+	}
+	if _, permanent := PermanentRefusal(&Error{Status: 409, Code: "ISSUE_CLOSED", Message: "issue is closed"}); !permanent {
+		t.Fatal("409 ISSUE_CLOSED read as an outage to ride out")
 	}
 }

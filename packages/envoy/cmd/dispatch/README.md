@@ -468,6 +468,13 @@ fills and the reference-excerpt reconciliation fills for every row stored before
 (`packages/envoy/AGENTS.md`). On the 2026-10-10 production dump the reconciliation's first pass
 filled 7,498 mentions of 2,150 documents in 248 s at `GOMAXPROCS=2`. Its census answers `0`.
 
+Migration `0094_issue_links` creates `issue_links`, the issues each issue waits on through
+`blocked_by`, and its target index, and re-states the `graph_edges` view with the `blocked_by` arm.
+The table's two foreign keys take `SHARE ROW EXCLUSIVE` on `issues` for the migration's short
+transaction, so an issue write waits behind it while an issue read does not, and re-stating the
+view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read waits too. It touches no row; its
+census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -761,7 +768,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/me/answers?limit=&offset=` | GET | cookie or trusted header (human only) | List the caller's answers and replies on asks, newest first. A row is either an answer with `current`, or a reply, and carries the ask's question, kind, state, owner and deep link. Answers come from user-authored `ask.answered` events whose actor is the answer's user; a restored answered block adds no row. `limit` is 1–200 (default 50), `offset` is 0 or more, and an invalid value is `400 INVALID_QUERY`. |
 | `/api/v1/agents` | GET | cookie, trusted header, or bearer | List live Envoy sessions (`session_id`, `title`, `dir`, `machine_id`, `roles`, `capabilities`, `last_seen`), newest first; `503 ENVOY_UNAVAILABLE` when the listener cannot be reached. |
 | `/api/v1/projects` | GET | cookie, trusted header, or bearer | List projects (`key`, `name`, `open_asks`, `created_at`), ordered by key. |
-| `/api/v1/projects` | POST | cookie or trusted header | Create a project from `key` and `name`; rejects a duplicate key with `409 PROJECT_EXISTS`. |
+| `/api/v1/projects` | POST | cookie, trusted header, or bearer | Create a project from `key` and `name`, for a person or an agent session alike; rejects a key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), and a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800; combining marks, format characters and whitespace don't count) with `400 INVALID_PROJECT`, a name over 80 characters (`contracts.ProjectNameMax`, UTF-16 units after the trim) with `400 CAP_EXCEEDED`, and a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie or trusted header | List external repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie or trusted header | Create or replace, or remove, an external repository mapping. |
 | `/api/v1/delivery/session-groups` | POST | cookie, trusted header, or bearer | Create a Delivery session group `{name, sessions}`: its sessions' pull requests take it as their Parent agent, `group:<id>`. `409 SESSION_IN_GROUP` for a session another group holds, `409 SESSION_GROUP_NAME_TAKEN` for a name another group has (ignoring case), `409 SESSION_GROUP_NAME_IS_SESSION_TITLE` for a name that is the latest title of a session outside the group, `400 SESSION_GROUP_INPUT` for a blank name or no sessions. The timeline lists every group (`session_groups`). |

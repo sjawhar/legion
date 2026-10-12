@@ -55,8 +55,8 @@ describe("the dispatch command surface", () => {
     }
   });
 
-  test("names map both ways for all 21 tools, and no two flags of one command collide", () => {
-    expect(dispatchToolSpecs).toHaveLength(21);
+  test("names map both ways for all 23 tools, and no two flags of one command collide", () => {
+    expect(dispatchToolSpecs).toHaveLength(23);
     for (const spec of dispatchToolSpecs) {
       expect(toolForCommand(commandName(spec.name))).toBe(spec.name);
       const flags = commandFlags(spec.name);
@@ -64,6 +64,17 @@ describe("the dispatch command surface", () => {
     }
     expect(commandName("dispatch_issue_update")).toBe("issue-update");
     expect(flagName("reply_to_ask")).toBe("reply-to-ask");
+  });
+
+  test("dispatch project takes its key and name as one flag each", () => {
+    expect(commandName("dispatch_project")).toBe("project");
+    expect(commandFlags("dispatch_project")).toEqual(expect.arrayContaining(["--key", "--name"]));
+    expect(parseCommand(["project", "--key", "SMOKE684", "--name", "Smoke"], noFiles)).toEqual({
+      kind: "call",
+      tool: "dispatch_project",
+      args: { key: "SMOKE684", name: "Smoke" },
+      dryRun: false,
+    });
   });
 
   test("clearing, booleans, repeats, options and stdin", () => {

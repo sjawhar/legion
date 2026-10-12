@@ -10,6 +10,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -66,20 +67,6 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		writeFailure(w, http.StatusBadRequest, "READY_ROLE_FORBIDDEN", "only a merger may report ready")
 		return
 	}
-	// The daemon posts the READY packet as one Dispatch message, the outbox's marker appended, and
-	// Dispatch refuses a longer body on every attempt, so a packet over record.MessagePostLimit
-	// would never reach the human. It is refused here, before the fact is applied: a refusal the
-	// workflow committed is recorded as processed under this completion's key, which leaves the
-	// summary out, so the shortened packet at the same commit would be answered
-	// HANDOFF_ALREADY_RECORDED and the issue would stay in merging.
-	if req.Ready {
-		if length := dispatch.MessageBodyLength(req.Summary); length > record.MessagePostLimit {
-			writeFailure(w, http.StatusBadRequest, "READY_PACKET_TOO_LONG", fmt.Sprintf(
-				"the READY packet is %d characters over the %d the daemon can post as one Dispatch message (%d/%d): link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
-				length-record.MessagePostLimit, record.MessagePostLimit, length, record.MessagePostLimit))
-			return
-		}
-	}
 	if s.pool == nil || s.records == nil {
 		writeFailure(w, http.StatusInternalServerError, "FACTS_UNAVAILABLE", "fact intake is unavailable")
 		return
@@ -107,12 +94,23 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// READY is held to the pull request's head on GitHub before the fact is applied: a refusal the
-	// workflow committed would be recorded as processed under this completion's key (the READY
-	// packet's hazard above), while a refusal here records nothing, and the corrected retry at the
-	// same commit is applied.
-	var note string
+	// workflow committed would be recorded as processed under this completion's key, which leaves
+	// the summary out, while a refusal here records nothing, and the corrected retry at the same
+	// commit is applied. That holds for the packet's length too. The daemon posts the packet it tells
+	// (record.ReadyPacket: the merger's packet, with a by-hand READY's note above it) as one Dispatch
+	// message, the outbox's marker appended, and Dispatch refuses a longer body on every attempt, so
+	// a packet over record.MessagePostLimit would never reach the human; refused only by the
+	// workflow, the shortened packet at the same commit would be answered HANDOFF_ALREADY_RECORDED
+	// and the issue would stay in merging.
+	var answer readyAnswer
 	if req.Ready {
-		if note, ok = s.readyNote(w, r, grant, issue); !ok {
+		if answer, ok = s.readyNote(w, r, grant, issue, req.Commit); !ok {
+			return
+		}
+		if length := dispatch.MessageBodyLength(record.ReadyPacket(req.Summary, answer.mergeNote)); length > record.MessagePostLimit {
+			writeFailure(w, http.StatusBadRequest, "READY_PACKET_TOO_LONG", fmt.Sprintf(
+				"the READY packet%s is %d characters over the %d the daemon can post as one Dispatch message (%d/%d): link the pull request body's ## Verification section instead of quoting it, then call handoff_complete again; this completion changed nothing",
+				byHandShare(answer.mergeNote), length-record.MessagePostLimit, record.MessagePostLimit, length, record.MessagePostLimit))
 			return
 		}
 	}
@@ -134,7 +132,9 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// (while the tree lingered, or while the old gate was closed) would otherwise take the new
 	// generation's key.
 	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
-	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim, Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit}, s.handlers...)
+	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim,
+		Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit, MergeNote: answer.mergeNote,
+		RecordedHead: answer.recordedHead, RecordedHeadAt: answer.recordedHeadAt, HeadAt: answer.headAt}, s.handlers...)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply handoff fact")
 		return
@@ -146,65 +146,91 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result.Refusal != nil {
-		writeFailure(w, result.Refusal.Status, result.Refusal.Code, result.Refusal.Message)
+		// A refused READY, the design gate's among them, keeps its by-hand note in the refusal: the
+		// merger submits a gate-refused READY later, on the architect's word, and must not arm it.
+		message := result.Refusal.Message
+		if answer.mergeNote != "" {
+			message += " " + answer.mergeNote
+		}
+		writeFailure(w, result.Refusal.Status, result.Refusal.Code, message)
 		return
 	}
-	writeJSON(w, http.StatusOK, HandoffCompleteResponse{Note: note})
+	writeJSON(w, http.StatusOK, HandoffCompleteResponse{Note: answer.note})
+}
+
+// byHandShare is the clause READY_PACKET_TOO_LONG names a by-hand note's share of the packet with,
+// empty when READY carries none.
+func byHandShare(mergeNote string) string {
+	if mergeNote == "" {
+		return ""
+	}
+	return ", with the by-hand note the daemon tells above it,"
 }
 
 // readyNote runs READY's checks (readyChecks) against issue's recorded pull request on GitHub for a
-// merger's ready: true, and is the note they leave. Every refusal is written before the fact is
-// applied, so nothing is recorded under the completion's key and the corrected retry at the same
-// commit is applied:
+// merger's ready: true, and is what they leave (readyAnswer). Every refusal is written before the
+// fact is applied, so nothing is recorded under the completion's key and the corrected retry at the
+// same commit is applied:
 //
 //   - NO_REPOSITORY: the issue's project has no repository configured (a guard; configuration
 //     requires one).
-//   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_HEAD_CARRIES_HANDOFFS,
-//     READY_CHECKS_NOT_GREEN.
+//   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
+//     READY_DISARM_PENDING, READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_HEAD_CONFLICTS,
+//     READY_FILES_TRUNCATED, READY_CHECKS_NOT_GREEN.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
 // The reads are made as the implement App, whose token never leaves the daemon; a runtime that
 // boots without Apps publishes no READY (leaseForGrant).
-func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue) (note string, ok bool) {
+func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credential.Grant, issue *record.Issue, readyHead string) (answer readyAnswer, ok bool) {
 	var repository ghrepo.Repository
 	if s.repository != nil {
 		repository, ok = s.repository(issue.Project)
 	}
 	if !ok || repository.IsZero() {
 		writeFailure(w, http.StatusConflict, "NO_REPOSITORY", fmt.Sprintf("the project %s of %s has no repository configured, so its pull request cannot be read", issue.Project, issue.Key))
-		return "", false
+		return readyAnswer{}, false
 	}
 	lease, ok := s.leaseForGrant(w, r, grant, appauth.Implement)
 	if !ok {
-		return "", false
+		return readyAnswer{}, false
 	}
 	ctx := r.Context()
-	pr, err := s.issuePullRequest(ctx, issue.Key)
+	pr, disarmPending, err := s.readyRecord(ctx, issue.Key)
 	if err != nil {
 		s.log.Error("api: read the pull request of a completing issue", "issue", issue.Key, "error", err)
 		writeFailure(w, http.StatusInternalServerError, "RECORD_READ_FAILED", "could not read the issue's pull request")
-		return "", false
+		return readyAnswer{}, false
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(s.githubAPI, repository)}
-	note, refused := readyChecks(ctx, github, repository, issue.Key, pr)
+	var rules config.MergeRules
+	if s.mergeRules != nil {
+		rules = s.mergeRules(issue.Project)
+	}
+	answer, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, pr, disarmPending)
 	if refused != nil {
 		refused.write(w)
-		return "", false
+		return readyAnswer{}, false
 	}
-	return note, true
+	return answer, true
 }
 
-// issuePullRequest is the pull request recorded for issue, nil when it has none.
-func (s *server) issuePullRequest(ctx context.Context, issue string) (*record.PullRequest, error) {
+// readyRecord is what READY reads of issue's record, in one read: its recorded pull request, nil
+// when it has none, and whether a disarm of it is still unfinished (record.Store.DisarmPending).
+func (s *server) readyRecord(ctx context.Context, issue string) (*record.PullRequest, bool, error) {
 	if s.pool == nil || s.records == nil {
-		return nil, errors.New("record dependencies are unavailable")
+		return nil, false, errors.New("record dependencies are unavailable")
 	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	return s.records.PullRequest(ctx, tx, issue)
+	pr, err := s.records.PullRequest(ctx, tx, issue)
+	if err != nil {
+		return nil, false, err
+	}
+	pending, err := s.records.DisarmPending(ctx, tx, issue)
+	return pr, pending, err
 }
 
 // handoffPosition reads the issue record, its tree's generation (the root's), and its review round:

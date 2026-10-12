@@ -52,7 +52,7 @@ func (s *server) routes() []apiRoute {
 		{http.MethodGet, "/api/v1", authPublic, "This index: every route with its method, auth, and purpose.", s.getRouteIndex},
 		{http.MethodGet, "/api/v1/schema/blocks", authPublic, "The typed document block schema as JSON.", s.getBlockSchema},
 		{http.MethodGet, "/api/v1/projects", authAny, "List projects.", s.listProjects},
-		{http.MethodPost, "/api/v1/projects", authHuman, "Create a project {key, name}.", s.createProject},
+		{http.MethodPost, "/api/v1/projects", authAny, fmt.Sprintf("Create a project {key, name}: any signed-in person or agent session; a bearer names its session in actor. A key that is not a project key, an empty name, a name holding a control character or a bidi embedding, override or isolate, or a name with no visible character (a letter, number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and U+2800; combining marks, format characters and whitespace don't count) is 400 INVALID_PROJECT; a name over %d characters is 400 CAP_EXCEEDED; a key that already exists is 409 PROJECT_EXISTS.", contracts.ProjectNameMax), s.createProject},
 		{http.MethodGet, "/api/v1/projects/{key}/artifacts", authAny, "List a project's documents.", s.listProjectArtifacts},
 		{http.MethodPost, "/api/v1/projects/{key}/artifacts", authAny, "Upload a project document or file (JSON or multipart); a file's kind is read from its bytes, as an issue upload's is.", s.uploadProjectArtifact},
 		{http.MethodGet, "/api/v1/settings/repo-projects", authAny, "List GitHub repository to project mappings.", s.listRepoProjects},

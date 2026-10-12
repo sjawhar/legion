@@ -980,8 +980,8 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
   `runtime.kubernetes.resources.<role>.ephemeral_storage_request <request> exceeds ephemeral_storage
   <limit>`;
 - `gateway`, removed with LEGION-270: a pod's model route is the operator's `pod`;
-- `agent_secrets.operator`, removed with LEGION-664: the daemon's machine login is the
-  `legion-daemon` service's, which anyone signed in to Dispatch approves, so it names no approver;
+- `agent_secrets.operator`, removed with LEGION-664: the daemon logs in with its own ServiceAccount
+  token (`token_file`), which no person approves, so it names no approver;
 - an image that is not pinned by digest;
 - `session_store` other than `pvc` or `postgres`; `postgres` without `session_dsn_secret`, or with
   one that is empty or not a Secret data key (`[-._a-zA-Z0-9]+`); and a `session_dsn_secret` under
@@ -1208,8 +1208,8 @@ dispatch://LEGION-200, Legion owns its dependencies; `production-identities`: di
 and dispatch://LEGION-205); and the four deployment rows are the daemon's to measure from its own
 configuration and its own boot, since no image or pod can show them:
 
-- `secrets`: `runtime.kubernetes.agent_secrets` is configured and the daemon's broker login is
-  `issued`. Under tmux it is open unless decided: no process is enrolled with the broker.
+- `secrets`: `runtime.kubernetes.agent_secrets` is configured and the daemon's broker token login
+  is `issued`. Under tmux it is open unless decided: no process is enrolled with the broker.
 - `model-fallback`: the pod's Oh My Pi has `retry.modelFallback` true, as the probe's OK line's
   `model-fallback` mark reports it; under tmux the plugin gate reads the host's Oh My Pi once the gate
   has passed. The example overlay turns it on ([Operator configuration](#operator-configuration)).
@@ -2162,22 +2162,32 @@ issue's pod (every role container of it alike) and the image probe's.
   (the broker design's pod-enrollment plan), so an agent in a pod runs
   `agent-secrets <SECRET> -- <command>` and gets only
   that pod generation's grants. `url` is the broker's base URL (https, or http to a loopback
-  address). The block names no approver: the daemon's login is the `legion-daemon` service's, which
-  anyone signed in to Dispatch approves on the Dispatch credential page, and a file that sets
-  `operator` is refused at load naming the key — there is no launcher-token file and no manual CLI
-  step. The daemon runs its own login at boot, on a background context, and logs the confirmation
-  code exactly once: `agent-secrets machine login: enter code XXXX-XXXX on the Dispatch credential
-  page, where anyone signed in may approve it; pod enrollment is held until approved`. The same code and the login's current status
-  ("none", "pending", "issued", "denied", "expired", or "failed" when the broker never opened the
-  login) are on `GET /legion/v1/state`'s
-  `agentSecretsLogin` (daemon API contract 9); pod enrollment fails closed and retries until a
-  person signed in to Dispatch approves the code there. When a login ends without a credential
-  (the broker refused it or could not be reached, its code expired undecided, or someone denied
-  it), or the broker revokes or expires the credential, the next pod enrollment starts a fresh
-  login, with no restart. The new code is on `agentSecretsLogin` and in the supervisor's
-  `enrollment failed; retrying on the next observation` warning. After a login that ends without a
-  credential the daemon waits 30 s before the next, doubling each time to at most 5 minutes, and an
-  approved login resets the wait. It never starts a login while one is pending.
+  address), and `token_file` (required, absolute) is where the daemon's own pod mounts its projected
+  ServiceAccount token for the broker's audience, `agent-secrets`, with an `expirationSeconds` of
+  at most 3600: the broker refuses a token that lives longer than an hour from its issue
+  (`TOKEN_TOO_LONG_LIVED`). The daemon logs in with that token at boot, on a background context,
+  and again halfway through each credential's life and whenever the broker refuses it, reading the
+  file each time so it presents the kubelet's current token; no person approves any of it, a
+  restart included, so the block names no approver and a file that sets `operator` is refused at
+  load naming the key. The broker logs the daemon in only while its `BROKER_SERVICE_LOGINS` names
+  the daemon's ServiceAccount for `legion-daemon` (the broker's operate page, "What to run"), and
+  keeps each account's one launcher credential across logins. The daemon keeps one key for its
+  process's life, in memory only, and proves it again at each renewal, so a renewal changes only the
+  credential's expiry and an enrollment in flight never waits for one; a restart brings a new key,
+  which the next login moves the credential to, so the pods the daemon enrolled before the restart
+  stay its own. Each login is logged (`agent-secrets: logged in with the daemon's ServiceAccount
+  token`, or `agent-secrets: the token login failed; retrying` with the broker's answer), and
+  `GET /legion/v1/state`'s `agentSecretsLogin` reads its `state`: `none` before the first login
+  finishes, `issued` while a credential that has not expired is held (a renewal that failed beside
+  it included), or `failed` (daemon API contract 22). Pod enrollment fails closed and retries until
+  a login succeeds. After a failed login the daemon waits 30 s before the next, doubling each time
+  to at most 5 minutes, whether or not it still holds a credential, and a successful login resets
+  the wait. Running the daemon off the cluster (the Stage 4a live proof), `token_file` holds a
+  token the operator mints, at most an hour long, for a ServiceAccount of the proof's own that
+  `BROKER_SERVICE_LOGINS` lists for `legion-daemon` and no running daemon uses, with
+  `kubectl create token <account> -n <namespace> --audience agent-secrets --duration 1h`: each
+  account holds one credential, so a proof logging in as a running daemon's account would take
+  that daemon's credential.
   A held enrollment can come long after the shim's hello, which carries the pod's projected token
   as the shim read it then, and that token lives `token_expiry_seconds` from when the kubelet wrote
   it; the broker refuses an expired one as `POD_TOKEN_EXPIRED`, naming its expiry. So when the
@@ -2221,22 +2231,26 @@ issue's pod (every role container of it alike) and the image probe's.
   renewal without it from a pod no enrollment of which has sent one. That is liveness, not
   exposure: a grant lasts until its session ends, so replace every old-image issue pod before or
   right after the broker deploys (the operate page names the steps). The broker ends a pod
-  enrollment only for the machine login that made it, so a daemon that logs in again with a new key
-  (after a restart, or once its login reaches its expiry, `BROKER_LAUNCHER_CREDENTIAL_SECONDS`)
-  cannot revoke the enrollments its earlier login made (the broker answers
-  `NOT_ENROLLING_CREDENTIAL`, and the daemon logs
-  `supervise: agent-secrets: enrollment revocation refused; its lease ends it once its pod stops renewing`):
-  each ends one lease after its pod's renewer stops, or at once when someone revokes that earlier
-  login on Dispatch's machine-login page by its **Credential** id (the broker's operate page, "The
-  renew token check", gives the query that finds it), never by its machine name, which every login
-  of the daemon shares. The daemon's login is the service `legion-daemon`'s, and
-  its pods run as the ServiceAccount `runtime.kubernetes.pod.service_account` names (`default` when
-  unset, above). A broker configured with that account for `legion-daemon`, such as
+  enrollment only for the launcher credential that made it. The daemon's token login keeps its
+  account's one credential across restarts, so it ends every pod it enrolled; an enrollment another
+  credential made (a service login a person approved through a code before token logins) is
+  refused `NOT_ENROLLING_CREDENTIAL`, and the daemon logs
+  `supervise: agent-secrets: enrollment revocation refused; its lease ends it once its pod stops renewing`:
+  it ends one lease after its pod's renewer stops, or at once when someone revokes that login on
+  Dispatch's machine-login page by its **Credential** id (the broker's operate page, "The renew
+  token check", gives the query that finds it), never by its machine name. The daemon logs in as the
+  service `legion-daemon`, and its pods run as the ServiceAccount
+  `runtime.kubernetes.pod.service_account` names (`default` when unset, above). A broker configured
+  with that account for `legion-daemon`, such as
   `BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:legion-worker` for pods running as
   `legion-worker`, gives a secret tagged `owner=legion-daemon` to every such pod at once and to no
   other session (the broker's concepts page, "Owner and tier"). The broker refuses to start with a
   namespace's `default` account in `BROKER_SERVICES`, since every pod there that names no account
-  runs as it, so pods that receive service-owned secrets name a dedicated account.
+  runs as it, so pods that receive service-owned secrets name a dedicated account. The daemon's own
+  ServiceAccount, which logs in, is a different account from its pods', and it is named in
+  `BROKER_SERVICE_LOGINS`, not `BROKER_SERVICES`; the broker refuses to start with an account in
+  `BROKER_SERVICE_LOGINS` that is a namespace's `default` or one `BROKER_SERVICES` binds, since
+  every pod running as it could then log in as the daemon.
   Without the block, pods carry none of this. An older worker image is refused at
   the image probe: the block's pod variables are daemon API contract 8. A pod's agent-secrets
   volumes are fixed when it is created, so turning the block on, or changing its `audience` or
@@ -2256,10 +2270,11 @@ issue's pod (every role container of it alike) and the image probe's.
   `agent-secrets renew`, which the image ships, needs only that URL, the key directory and the
   token file. So the enrollment can stay live until the pod is replaced, at the latest when its
   issue closes, plus one lease (`BROKER_LEASE_SECONDS`). To end it at once, anyone signed in to
-  Dispatch revokes the daemon's machine login on Dispatch's machine-login page
-  (`/credentials/machine`), which ends every session it enrolled: the row whose **Credential** is
-  the id the broker's operate page, "The renew token check", finds from the daemon's logged code,
-  never a row picked by its machine name
+  Dispatch revokes the daemon's login on Dispatch's machine-login page (`/credentials/machine`),
+  the row `legion-daemon on <namespace>/<account>` whose **Approved by** reads `No one:` and the
+  daemon's ServiceAccount, which ends every session it enrolled; the daemon logs in again with its
+  token under a new credential, which enrolls the pods it launches next, and a pod already running
+  stays without secrets until it is replaced
   (`docs/site/src/content/docs/broker/guides/revoke-a-session.md`, "End a machine's login").
 - **`provider_keys`** (top-level) maps each variable Oh My Pi reads to a key of the providers
   Secret, `legion-<project>-providers`, which the operator creates. Every pod mounts the keys

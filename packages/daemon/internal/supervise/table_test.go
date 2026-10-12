@@ -154,6 +154,7 @@ func samples(t *testing.T) map[string][]Event {
 		"RequestReady":         {RequestReady{}},
 		"RequestSuspend":       {RequestSuspend{}},
 		"RequestResume":        {RequestResume{}},
+		"RequestRuleResume":    {RequestRuleResume{}},
 		"RequestStop":          {RequestStop{}},
 		"RequestTreeClose":     {RequestTreeClose{}},
 		"RequestIssueClose":    {RequestIssueClose{}},
@@ -293,9 +294,11 @@ func fenced(ev Event, c Claim) Event {
 	case RequestReady:
 		return RequestReady{Claim: c.Token, Generation: c.Generation, Session: session}
 	case RequestSuspend:
-		return RequestSuspend{Claim: c.Token}
+		return RequestSuspend{Claim: c.Token, By: SuspendedByOperator}
 	case RequestResume:
 		return RequestResume{Claim: c.Token}
+	case RequestRuleResume:
+		return RequestRuleResume{Claim: c.Token, Reason: "it owns its issue's phase"}
 	case RequestStop:
 		return RequestStop{Claim: c.Token}
 	case RequestRetry:

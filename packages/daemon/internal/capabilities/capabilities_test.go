@@ -2,6 +2,7 @@ package capabilities
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -131,11 +132,11 @@ func unreported(sent ...Row) []Row {
 }
 
 // Normalize turns what a session sent into the rows the daemon keeps: a name Table has no live
-// row for is dropped and returned, a detail is one line (newlines, tabs and control characters
-// out, whitespace runs collapsed) cut on a rune boundary when longer than MaxReportDetail, a
-// failing row with no detail left reads "no detail reported" while a passing row's empty detail
-// stays empty, a live row the wire lacks is filled in as not reported, the rows come out in Table
-// order whatever order the wire sent them, and a name sent twice keeps the first.
+// row for is dropped and returned, a detail is one line (newlines, tabs, control characters and
+// ANSI control sequences out, whitespace runs collapsed) cut on a rune boundary when longer than
+// MaxReportDetail, a failing row with no detail left reads "no detail reported" while a passing
+// row's empty detail stays empty, a live row the wire lacks is filled in as not reported, the rows
+// come out in Table order whatever order the wire sent them, and a name sent twice keeps the first.
 func TestNormalizeKeepsTheLiveRowsInTableOrder(t *testing.T) {
 	long := strings.Repeat("€", 400)
 	for _, testCase := range []struct {
@@ -157,6 +158,12 @@ func TestNormalizeKeepsTheLiveRowsInTableOrder(t *testing.T) {
 			},
 			wantKept:    unreported(Row{Name: Subagents, OK: true, Detail: "4 agents"}),
 			wantDropped: []string{"teleport", "eval-js"},
+		},
+		{
+			name:        "drops an unknown name cleaned, since the log quotes it",
+			rows:        []claim.CapabilityRow{{Name: "teleport\nghp_EXAMPLEtoken0123456789abcdefghijklmn", OK: false, Detail: "no such row"}},
+			wantKept:    unreported(),
+			wantDropped: []string{"teleport ghp_***"},
 		},
 		{
 			name:     "cuts a long detail on a rune boundary",
@@ -184,9 +191,9 @@ func TestNormalizeKeepsTheLiveRowsInTableOrder(t *testing.T) {
 			wantKept: unreported(Row{Name: GitHub, OK: true, Detail: ""}),
 		},
 		{
-			name:     "puts a detail on one line with its control characters out",
-			rows:     []claim.CapabilityRow{{Name: "mcp", OK: false, Detail: "not connected: evil\nserver\x1b[31m (boom)"}},
-			wantKept: unreported(Row{Name: MCP, Detail: "not connected: evil server [31m (boom)"}),
+			name:     "puts a detail on one line with its control characters and sequences out",
+			rows:     []claim.CapabilityRow{{Name: "mcp", OK: false, Detail: "not connected: evil\nserver\x1b[31m (boom)\x1b"}},
+			wantKept: unreported(Row{Name: MCP, Detail: "not connected: evil server (boom)"}),
 		},
 		{
 			name: "orders the rows as Table does",
@@ -280,6 +287,63 @@ func TestNormalizeCleansEachDetailAsTheSharedFixtureSays(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// redactCredentials stops because its passes reach a fixed point, not because it ran out of them:
+// every detail and want of the shared fixture settles in fewer than maxRedactionPasses passes, the
+// userinfo an Authorization value opens among them, which takes a second pass to redact.
+func TestRedactCredentialsReachesAFixedPointWithinItsBound(t *testing.T) {
+	var fixture struct {
+		Patterns []redactionCase `json:"patterns"`
+	}
+	readFixture(t, "capability-redaction.json", &fixture)
+	most := 0
+	for _, testCase := range fixture.Patterns {
+		for _, text := range []string{testCase.Detail, testCase.Want} {
+			passes := 0
+			for next := redactOnce(text); next != text; next = redactOnce(text) {
+				text = next
+				passes++
+			}
+			if passes >= maxRedactionPasses {
+				t.Errorf("%s: %s: %q takes %d changing passes, the bound is %d", testCase.Pattern, testCase.Name, text, passes, maxRedactionPasses)
+			}
+			most = max(most, passes)
+		}
+	}
+	if most < 2 {
+		t.Errorf("no case took a second changing pass (most %d), so nothing shows the passes repeat", most)
+	}
+}
+
+// At the cut, cleaning keeps what came before it and is idempotent: every case of the shared
+// fixture, pushed by a run of letters so that each byte of its cleaned text in turn straddles
+// MaxReportDetail, still starts with those letters (as many as fit), is — for a case with no pad of
+// its own — a prefix of the letters and the case cleaned whole, and comes back from a second
+// cleaning as the first left it. A label the cut parts from its value is dropped, not redacted only
+// by the daemon's pass, and nothing before it goes with it.
+func TestCleanDetailKeepsWhatCameBeforeTheCutAndIsIdempotent(t *testing.T) {
+	var fixture struct {
+		Patterns []redactionCase `json:"patterns"`
+	}
+	readFixture(t, "capability-redaction.json", &fixture)
+	for _, testCase := range fixture.Patterns {
+		whole := cleanDetail(testCase.Detail)
+		for letters := max(0, MaxReportDetail-len(testCase.Detail)-16); letters <= MaxReportDetail+8; letters++ {
+			padding := strings.Repeat("a", letters)
+			once := cleanDetail(padding + " " + testCase.Detail)
+			label := fmt.Sprintf("%s: %s, pushed by %d letters", testCase.Pattern, testCase.Name, letters)
+			if twice := cleanDetail(once); twice != once {
+				t.Errorf("%s: cleaned again\n %q\nwant\n %q", label, twice, once)
+			}
+			if !strings.HasPrefix(once, padding[:min(letters, MaxReportDetail)]) {
+				t.Errorf("%s: lost its padding: %q", label, once)
+			}
+			if testCase.Pad == 0 && !strings.HasPrefix(padding+" "+whole, once) {
+				t.Errorf("%s: %q is not a prefix of the case cleaned whole, %q", label, once, whole)
+			}
+		}
 	}
 }
 

@@ -79,7 +79,7 @@ func TestAClaimLeavingItsRunningStatesRevokesItsSecretAndGrants(t *testing.T) {
 			case "died":
 				h.relaunch(token)
 			case "suspended":
-				if err := machine.Handle(h.ctx, supervise.RequestSuspend{Claim: token}); err != nil {
+				if err := machine.Handle(h.ctx, supervise.RequestSuspend{Claim: token, By: supervise.SuspendedByOperator}); err != nil {
 					t.Fatalf("suspend: %v", err)
 				}
 			case "stopped":

@@ -54,6 +54,9 @@ type OperatorClaim struct {
 	UncertainStreak int              `json:"uncertainStreak"`
 	// Pending is the task the claim holds, until the turn it started ends.
 	Pending *DeliveryView `json:"pending,omitempty"`
+	// SuspendedBy is who suspended the claim while it is suspended: operator, daemon, exit, or
+	// unknown (a suspension recorded before migration 0038); absent otherwise.
+	SuspendedBy string `json:"suspendedBy,omitempty"`
 	// SuspensionHeld is a suspension the machine holds for the agent's turn (supervise's
 	// holdSuspension); absent when none is.
 	SuspensionHeld bool `json:"suspensionHeld,omitempty"`
@@ -118,6 +121,7 @@ func operatorView(c supervise.Claim) OperatorClaim {
 			PromptRetires:  c.Budgets.PromptRetires,
 		},
 		UncertainStreak: c.UncertainStreak,
+		SuspendedBy:     string(c.SuspendedBy),
 		SuspensionHeld:  c.SuspensionHeld,
 	}
 	if p := c.Pending; p != nil {
@@ -215,6 +219,7 @@ func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 	if created {
 		status = http.StatusCreated
 	}
+	s.operatorDone(r, token)
 	writeJSON(w, status, operatorView(m.Claim()))
 }
 
@@ -246,6 +251,7 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 			s.operatorFailure(w, request, token, err)
 			return
 		}
+		s.operatorDone(r, token)
 		writeJSON(w, status, operatorView(m.Claim()))
 	}
 }
@@ -259,7 +265,7 @@ func deliverEvent(w http.ResponseWriter, r *http.Request, c supervise.Claim) (su
 }
 
 func suspendEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
-	return supervise.RequestSuspend{Claim: c.Token, Reason: "the operator suspended it"}, true
+	return supervise.RequestSuspend{Claim: c.Token, Reason: "the operator suspended it", By: supervise.SuspendedByOperator}, true
 }
 
 func resumeEvent(_ http.ResponseWriter, _ *http.Request, c supervise.Claim) (supervise.Event, bool) {
@@ -364,7 +370,16 @@ func (s *server) closeTree(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.operatorDone(r, token)
 	writeJSON(w, http.StatusOK, operatorView(root.Claim()))
+}
+
+// operatorDone logs the one Info line every operator request on a claim that succeeded writes: its
+// route, the claim and the caller's address. The operator's bearer names nobody, so the address is
+// what the line can say of the caller; with it, a day's operator requests are counted from the log
+// alone. A request that fails logs its failure instead (operatorFailure).
+func (s *server) operatorDone(r *http.Request, token claim.Token) {
+	s.log.Info("api: operator request", "route", r.Pattern, "claim", token, "caller", r.RemoteAddr)
 }
 
 // treeOthers is every claim of tree in claims, but root and those already retired.

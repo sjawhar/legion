@@ -39,6 +39,29 @@ func RoleFor(p phase.Phase) claim.Role {
 	}
 }
 
+// ResumePhase is the phase a re-admitted tree resumes its mid-phase child in: the child's own,
+// except that a child left awaiting its merge resumes in merging. The tree's linger disarmed its
+// pull request (beginLinger), and re-admission clears its merger's READY with the rest of the old
+// generation's handoffs (record.Store.ClearTreeGeneration), so nothing is armed and no READY is left
+// to arm it again: only a new READY from its merger moves it.
+func ResumePhase(child record.Issue) phase.Phase {
+	if child.Phase == phase.AwaitingMerge {
+		return phase.Merging
+	}
+	return child.Phase
+}
+
+// workingPhase is the phase issue's worker works: its phase, or, while it is held, the phase its
+// hold left, the one whose worker's claim failed. RoleFor(workingPhase(issue)) is the role whose
+// failure holds the issue (claimFailed), and the one whose claim Stranded names when nothing will
+// wake it.
+func workingPhase(issue record.Issue) phase.Phase {
+	if issue.Hold != nil {
+		return issue.Hold.From
+	}
+	return issue.Phase
+}
+
 // StopActs is whether a queued stop, row id, still acts on its claim when the outbox runs it, with
 // lastStart the newest start the outbox ran against the claim (its last_start_row), and root the
 // issue's tree root as recorded, read only for a tree close. The outbox executor asks it of every
@@ -75,6 +98,12 @@ func StopActs(id int64, stop record.SuperviseRequest, lastStart int64, root *rec
 // resume task is delivered is the outbox executor's decision when the start runs: not to a claim
 // that holds a task for the same generation and phase by then (record.SuperviseRequest's
 // ResumeTask).
+//
+// Stranded reads the same rule for a failed claim, and for a suspended one no operator suspended: a
+// claim for which StartFor is true has no queued start that will wake it. A
+// suspension that holds for the operator (supervise's RuleHolds) is woken by no start, queued or
+// not, since each waits for the operator's resume, so Stranded lists it without asking. The
+// architect's start names no phase, so its current is "".
 func StartFor(run record.RoleRun, root record.Issue, generation uint64, current phase.Phase) bool {
 	held := run.Claim
 	var lastStart int64
@@ -154,11 +183,12 @@ func refusedLingering(issue record.Issue, request string) intake.Result {
 }
 
 // clearHandoff empties the handoff a role reported for its previous phase — its commit, verdict,
-// summary, and the review round's decision, which ends with the round — keeping its claim and the
-// review rounds, when a transition starts it on a new phase. A role's recorded handoff is then
-// always its current phase's: the implementer's round-1 commit cannot advance round 2, the
-// production check is recorded only by the production check's own completion, a merger sent back to
-// verify again has no READY packet until its next one, and no round inherits an earlier decision.
+// summary and by-hand note, and the review round's decision, which ends with the round — keeping
+// its claim and the review rounds, when a transition starts it on a new phase. A role's recorded
+// handoff is then always its current phase's: the implementer's round-1 commit cannot advance
+// round 2, the production check is recorded only by the production check's own completion, a
+// merger sent back to verify again has no READY packet until its next one, and no round inherits
+// an earlier decision.
 func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) error {
 	if role == "" {
 		return nil
@@ -168,7 +198,7 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 		return err
 	}
 	cleared := row
-	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt = "", "", "", nil, time.Time{}
+	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt, cleared.MergeNote = "", "", "", nil, time.Time{}, ""
 	if cleared == row {
 		return nil
 	}

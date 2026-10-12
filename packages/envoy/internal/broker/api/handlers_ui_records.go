@@ -3,7 +3,9 @@
 // relays to on behalf of the browser: the UI bearer proves Dispatch's server is the caller, and
 // Dispatch names the deciding human in the body's approver field from its own session, so a
 // decision is authorized by the record's rule admitting that login (record.MayDecide): its
-// approver, or anyone signed in for a shared secret's request or a service's machine login.
+// approver, or anyone signed in for a shared secret's request or a service's machine login. A
+// service's machine login, which only a broker before token logins opened, may only be denied:
+// approving it is 400 SERVICE_LOGS_IN_WITH_TOKEN.
 package api
 
 import (
@@ -77,8 +79,8 @@ type recordResponse struct {
 	// "pending", or how it ended: "approved", "denied", "expired", "cancelled" or "revoked".
 	State string `json:"state"`
 	// The one login that may decide it, or "anyone": any signed-in person may decide a request
-	// for a shared human-tier secret, and a service's machine login. A service's machine login a
-	// broker before that rule opened still names a person here, and anyone signed in decides it too.
+	// for a shared human-tier secret, and may deny a service's machine login (which only a broker
+	// before token logins opened, and which nobody approves any more), whatever person it names.
 	Approver string `json:"approver"`
 	// The session asking; null for a machine login.
 	Enrollment *recordEnrollmentResp `json:"enrollment"`
@@ -150,7 +152,7 @@ func (s *server) readRecord(w http.ResponseWriter, r *http.Request) {
 // which requests.Machine.ApplyDecision never asks for.
 type decideBody struct {
 	// The Dispatch login of the person deciding, which the record's rule must admit: its approver,
-	// or anyone signed in for a shared secret's request or a service's machine login.
+	// or anyone signed in for a shared secret's request or the denial of a service's machine login.
 	Approver string `json:"approver"`
 	// A machine login only: its confirmation code, typed again; ignored for a secret request.
 	Code *string `json:"code"`
@@ -222,6 +224,9 @@ func (s *server) decideMachineLogin(w http.ResponseWriter, r *http.Request, reco
 		return
 	case errors.Is(err, machine.ErrKeyHoldsLiveCredential):
 		writeError(w, http.StatusConflict, "KEY_HOLDS_LIVE_CREDENTIAL", err.Error())
+		return
+	case errors.Is(err, machine.ErrServiceLogsInWithToken):
+		writeError(w, http.StatusBadRequest, "SERVICE_LOGS_IN_WITH_TOKEN", err.Error())
 		return
 	case err != nil:
 		writeInternal(w, "decide machine login", err)

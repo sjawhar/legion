@@ -178,6 +178,7 @@ type Issue struct {
 	Rank              string          `json:"rank"`
 	Labels            []string        `json:"labels"`
 	Parent            *string         `json:"parent"`
+	BlockedBy         []string        `json:"blocked_by"`
 	Assignee          *string         `json:"assignee"`
 	Claim             *IssueClaim     `json:"claim"`
 	Components        IssueComponents `json:"components"`
@@ -220,15 +221,17 @@ type IssueSummary struct {
 	Rank       string          `json:"rank"`
 	Labels     []string        `json:"labels"`
 	Parent     *string         `json:"parent"`
+	BlockedBy  []string        `json:"blocked_by"`
 	Assignee   *string         `json:"assignee"`
 	Claim      *IssueClaim     `json:"claim"`
 	Components IssueComponents `json:"components"`
 	Route      *string         `json:"route"`
 	IssueRouteReach
-	UpdatedAt time.Time     `json:"updated_at"`
-	LastSeq   int           `json:"last_seq"`
-	OpenAsks  int           `json:"open_asks"`
-	Progress  IssueProgress `json:"progress"`
+	UpdatedAt         time.Time     `json:"updated_at"`
+	LastSeq           int           `json:"last_seq"`
+	PrimaryArtifactID string        `json:"primary_artifact_id"`
+	OpenAsks          int           `json:"open_asks"`
+	Progress          IssueProgress `json:"progress"`
 }
 
 // IssueSummaryPage is one page of GET /api/v1/issues?limit=&offset=: the issues at [offset,

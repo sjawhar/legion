@@ -21,6 +21,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/agentsecrets"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -40,10 +41,17 @@ import (
 )
 
 var (
-	projectKeyPattern  = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}$`)
+	projectKeyPattern  = regexp.MustCompile(contracts.ProjectKeyPattern)
 	issueKeyPattern    = regexp.MustCompile(`^[A-Z][A-Z0-9]{1,9}-[0-9]+$`)
 	externalRefPattern = regexp.MustCompile(`^([^/\s]+)/([^/\s#]+)#([1-9][0-9]*)$`)
 )
+
+// projectKeyProblem is every route's refusal of a value that is not a project key: the field it
+// came in and the rule, worded once in contracts (PROJECT_KEY_RULE) so the dispatch command and
+// the server say the same thing.
+func projectKeyProblem(field, value string) string {
+	return fmt.Sprintf("%s %q is not a project key: %s", field, value, contracts.ProjectKeyRule)
+}
 
 // repoLabelPrefix marks an issue created through DISPATCH_DEFAULT_PROJECT
 // with the external repository it came from, so the repository stays

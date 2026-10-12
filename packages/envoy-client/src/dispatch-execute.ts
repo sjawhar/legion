@@ -34,6 +34,7 @@ import type {
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
+  Project,
   Suggestions,
   WriteAdvice,
   WriteSuggestion,
@@ -50,6 +51,7 @@ import {
   itemFromSearch,
   overCapMessage,
   PROJECT_KEY_PATTERN,
+  PROJECT_KEY_RULE,
   serviceSubjectLabel,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -126,6 +128,7 @@ type ToolArguments = {
   readonly anchor?: unknown;
   readonly options?: unknown;
   readonly labels?: unknown;
+  readonly blocked_by?: unknown;
   readonly external_links?: unknown;
   readonly ops?: unknown;
   readonly in_reply_to?: unknown;
@@ -398,6 +401,8 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_follow: true,
   dispatch_search: true,
   dispatch_issues: true,
+  dispatch_project: true,
+  dispatch_projects: true,
   dispatch_open_asks: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true,
@@ -921,7 +926,7 @@ async function resolveOwnerArguments(
   }
   if (typeof projectArgument === "string") {
     if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
-      problems.push("project must be a project key such as CORE");
+      problems.push(`project is not a project key: ${PROJECT_KEY_RULE}`);
     }
     const refDocument = ref?.owner.kind === "project" ? (ref.artifact ?? ref.id) : undefined;
     if (
@@ -1878,9 +1883,11 @@ async function listDocumentBlocks(
  * answer it. The live document's `ask` blocks are judged by the latest version, the one the
  * request would name: a block that version shows open counts as open even when its ask is already
  * answered or closed, since that answer reaches a version only when the document settles, about
- * two seconds later, or with the next edit (the agent's fold of the answer into the text). A block
- * not yet in that version counts as open too. A block removed from the document is not judged
- * here; `refuseRemovingOpenDecisionBlocks` keeps one whose ask is open in it. A document already
+ * two seconds later, or with the agent's next edit, whichever is first. An answered block already
+ * carries its own record, so no edit is needed for that; a waiver carries none, so the agent's
+ * next edit is where the human's decision gets written into the text. A block not yet in that
+ * version counts as open too. A block removed from the document is not judged here;
+ * `refuseRemovingOpenDecisionBlocks` keeps one whose ask is open in it. A document already
  * approved at its latest version is left to the server, which answers with that approval.
  */
 async function refuseOpenDecisionBlocks(
@@ -1900,12 +1907,12 @@ async function refuseOpenDecisionBlocks(
   ]);
   const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version.markdown.split("\n");
-  // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
-  const stillOpen = (named: string, state: string): string => {
-    const next =
-      state === "answered" ? "fold the answer into the text" : "write the decision into the text";
-    return `${named}, ${state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`;
-  };
+  // An answered block already carries its own record and settles into a version on its own; a
+  // waived one (resolved) gets the decision written in.
+  const stillOpen = (named: string, state: string): string =>
+    state === "answered"
+      ? `${named}, answered but still open in version ${latest}: it settles into a version on its own in about two seconds; wait, then request again`
+      : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block): string[] => {
     const ask = asks.get(block.id);
     // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
@@ -1955,7 +1962,7 @@ async function refuseOpenDecisionBlocks(
     [
       `dispatch ${commandName(tool)} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
       ...open.map((line) => `- ${line}`),
-      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch doc-edit. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
+      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, it settles into a version on its own in about two seconds; wait, then request again. Edit the document only where the answer changes design text outside the block, never to restate it. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
     ].join("\n")
   );
 }
@@ -2269,11 +2276,13 @@ export async function executeDispatchTool(
       const assignee = optionalString(args, "assignee");
       const components = optionalComponents(args, "components");
       const labels = args.labels;
+      const blockedBy = args.blocked_by;
       try {
         const created = await client.issue({
           project,
           title,
           ...(parent === undefined ? {} : { parent }),
+          ...(Array.isArray(blockedBy) ? { blocked_by: blockedBy as string[] } : {}),
           ...(external === undefined ? {} : { external }),
           ...(force === undefined ? {} : { force }),
           ...(spec === undefined ? {} : { spec }),
@@ -2333,6 +2342,7 @@ export async function executeDispatchTool(
       const components = optionalComponents(args, "components");
       const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? (args.labels as string[]) : undefined;
+      const blockedBy = Array.isArray(args.blocked_by) ? (args.blocked_by as string[]) : undefined;
       const requestedLinks = Array.isArray(args.external_links)
         ? [...new Set(args.external_links as string[])]
         : undefined;
@@ -2375,6 +2385,7 @@ export async function executeDispatchTool(
           ...(priority === undefined ? {} : { priority }),
           ...(route === undefined ? {} : { route }),
           ...(parent === undefined ? {} : { parent: parent === "" ? null : parent }),
+          ...(blockedBy === undefined ? {} : { blocked_by: blockedBy }),
           ...(components === undefined ? {} : { components }),
           ...(requestedLinks === undefined
             ? {}
@@ -2430,6 +2441,13 @@ export async function executeDispatchTool(
         ...(parent === undefined
           ? []
           : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`]),
+        ...(blockedBy === undefined
+          ? []
+          : [
+              after.blocked_by.length === 0
+                ? "blocked_by cleared"
+                : `blocked by ${after.blocked_by.join(", ")}`,
+            ]),
         ...(components === undefined ? [] : [componentsChange(components, after.components)]),
       ];
       const adviceLines = renderAdvice(input.tool, after.key, after.advice, {
@@ -2572,6 +2590,35 @@ export async function executeDispatchTool(
                 }),
               ].join("\n"),
         details: { issues: rows, total, offset, limit },
+      };
+    }
+    case "dispatch_project": {
+      let project: Project;
+      try {
+        project = await client.createProject({
+          key: stringArg(args, "key"),
+          name: stringArg(args, "name"),
+          actor,
+        });
+      } catch (error) {
+        // PROJECT_EXISTS and INVALID_PROJECT ask for different things, and the description names
+        // both by code.
+        throw refusalWithCode(error);
+      }
+      const href = new URL(`/projects/${encodeURIComponent(project.key)}`, configUrl).toString();
+      return {
+        text: `Created project ${project.key} (${project.name}) at ${project.created_at}: ${href}`,
+        details: { project: project.key, name: project.name, created_at: project.created_at },
+      };
+    }
+    case "dispatch_projects": {
+      const projects = (await client.listProjects()).map(({ key, name }) => ({ key, name }));
+      return {
+        text:
+          projects.length === 0
+            ? "No projects."
+            : projects.map(({ key, name }) => `${key} ${name}`).join("\n"),
+        details: { projects },
       };
     }
     case "dispatch_architecture_sync": {

@@ -130,14 +130,30 @@ type RequestReady struct {
 }
 
 // RequestSuspend stops the claim's process and keeps its session. Reason is why, for the line the
-// suspension logs.
+// suspension logs; By is who asks, which the suspended claim records (Claim.SuspendedBy) and every
+// suspension must name.
 type RequestSuspend struct {
 	Claim  claim.Token
 	Reason string
+	By     SuspendSource
 }
 
-// RequestResume relaunches a suspended claim's session.
+// RequestResume is the operator's resume: it relaunches a suspended claim's session, whoever
+// suspended it.
 type RequestResume struct{ Claim claim.Token }
+
+// RequestRuleResume is the daemon's own resume, by rule: it relaunches a suspended claim's session
+// unless an operator suspended it (Claim.RuleMayResume): that suspension holds until the operator
+// resumes the claim. The daemon asks it of
+// a claim that owns its issue's current phase (the outbox's start of that phase, the boot's
+// included) and of its own controller. It resumes nothing that is not suspended — a failed claim's
+// launch budget is spent, and only the workflow's retry relaunches it — so it is asked again as
+// often as the rule meets the claim without ever relaunching one that is running. Reason is the
+// rule, for the line it logs.
+type RequestRuleResume struct {
+	Claim  claim.Token
+	Reason string
+}
 
 // RequestStop ends one claim. The tree's root claim is not one it can end: a root ends only with
 // its tree, so any other stop of it is refused, and suspending it is how its process is stopped.
@@ -213,6 +229,7 @@ func (RequestRegister) isEvent()      {}
 func (RequestReady) isEvent()         {}
 func (RequestSuspend) isEvent()       {}
 func (RequestResume) isEvent()        {}
+func (RequestRuleResume) isEvent()    {}
 func (RequestStop) isEvent()          {}
 func (RequestTreeClose) isEvent()     {}
 func (RequestIssueClose) isEvent()    {}
@@ -244,6 +261,7 @@ const (
 	onReady         eventKind = "request_ready"
 	onSuspend       eventKind = "request_suspend"
 	onResume        eventKind = "request_resume"
+	onRuleResume    eventKind = "request_rule_resume"
 	onStop          eventKind = "request_stop"
 	onTreeClose     eventKind = "request_tree_close"
 	onIssueClose    eventKind = "request_issue_close"
@@ -289,6 +307,8 @@ func kindOf(ev Event) eventKind {
 		return onSuspend
 	case RequestResume:
 		return onResume
+	case RequestRuleResume:
+		return onRuleResume
 	case RequestStop:
 		return onStop
 	case RequestTreeClose:
@@ -318,7 +338,7 @@ func requestName(ev Event) (string, bool) {
 		return "ready", true
 	case RequestSuspend:
 		return "suspend", true
-	case RequestResume:
+	case RequestResume, RequestRuleResume:
 		return "resume", true
 	case RequestStop:
 		return "stop", true
@@ -436,7 +456,7 @@ func fillTable(t *builder) {
 	t.ignore(onBootTimer, "no boot is being watched", processless...)
 
 	t.row(onDeadline, "the registration deadline: the agent never registered, or never said it was ready", registrationDeadline,
-		[]ClaimState{StateLaunching, StateFailed}, StateLaunching, StateShimConnected, StateRegistered)
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateLaunching, StateShimConnected, StateRegistered)
 	t.ignore(onDeadline, "the agent is ready, so the boot watch is over", StateReady, StateWorking, StateIdle)
 	t.ignore(onDeadline, "no boot is being watched", processless...)
 
@@ -448,9 +468,9 @@ func fillTable(t *builder) {
 	t.row(onProbeTimer, "probe the uncertain process again", reprobe, []ClaimState{StateLaunching, StateFailed}, live...)
 	t.ignore(onProbeTimer, noProcess, processless...)
 
-	t.row(onSuspendTimer, "the held suspension's timer: its turn has not ended, or its stop failed; stop the process", suspendAtTimeout,
-		[]ClaimState{StateSuspended}, StateWorking, StateIdle)
-	t.ignore(onSuspendTimer, "no suspension is held", slices.Concat(unready, []ClaimState{StateReady}, gone)...)
+	t.row(onSuspendTimer, "the held operator suspension retries its stop", suspendAtTimeout,
+		[]ClaimState{StateSuspended}, StateWorking, StateIdle, StateReady, StateLaunching, StateShimConnected, StateRegistered)
+	t.ignore(onSuspendTimer, "no operator suspension is held", StateQueued, StateLaunchUncertain, StateSuspended, StateRetired, StateFailed)
 
 	// The issue's volume, found lost by another claim of the issue.
 	t.row(onVolumeLost, "the issue's volume was lost: drop the session it held", sessionLost, nil,
@@ -475,7 +495,7 @@ func fillTable(t *builder) {
 	t.ignore(onRegister, failedClaim, StateFailed)
 	t.ignore(onRegister, retiredClaim, StateRetired)
 
-	t.row(onReady, "the agent is ready", ready, []ClaimState{StateReady, StateWorking}, StateRegistered)
+	t.row(onReady, "the agent is ready", ready, []ClaimState{StateReady, StateWorking, StateSuspended}, StateRegistered)
 	t.row(onReady, "the agent said ready again", reready, []ClaimState{StateWorking}, StateReady, StateIdle, StateWorking)
 	t.ignore(onReady, notRegistered, booting...)
 	t.ignore(onReady, "no launch has minted a boot token", StateQueued)
@@ -488,9 +508,11 @@ func fillTable(t *builder) {
 		StateRegistered, StateReady, StateIdle)
 	t.row(onSuspend, "hold the suspension for the turn's end: stopping the agent now would cut its turn off", holdSuspension,
 		nil, StateWorking)
-	t.row(onSuspend, "already suspended", nothingToDo, nil, StateSuspended)
+	t.row(onSuspend, "a suspension of a rule-resuming launch is held until the agent is ready", holdSuspendUntilReady,
+		nil, StateLaunching, StateShimConnected)
+	t.row(onSuspend, "already suspended: an operator's suspend takes the suspension over", suspendedAgain, nil, StateSuspended)
 	t.ignore(onSuspend, notRegistered,
-		StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected)
+		StateQueued, StateLaunchUncertain)
 	t.ignore(onSuspend, failedClaim, StateFailed)
 	t.ignore(onSuspend, retiredClaim, StateRetired)
 
@@ -500,6 +522,14 @@ func fillTable(t *builder) {
 	t.ignore(onResume, "the previous launch's pane is still uncertain", StateLaunchUncertain)
 	t.ignore(onResume, failedClaim, StateFailed)
 	t.ignore(onResume, retiredClaim, StateRetired)
+
+	t.row(onRuleResume, "resume the same session by rule, unless the operator suspended it", resumeByRule,
+		[]ClaimState{StateLaunching, StateFailed}, StateSuspended)
+	t.row(onRuleResume, "the claim runs: nothing to resume", nothingToDo, nil, live...)
+	t.row(onRuleResume, "a queued claim is spawned by its start, not resumed", nothingToDo, nil, StateQueued)
+	t.row(onRuleResume, "the previous launch's pane is still uncertain: the boot's reconciliation decides it", nothingToDo, nil, StateLaunchUncertain)
+	t.row(onRuleResume, "a failed claim spent its launch budget: only the workflow's retry relaunches it", nothingToDo, nil, StateFailed)
+	t.row(onRuleResume, "the claim is retired", nothingToDo, nil, StateRetired)
 
 	stoppable := []ClaimState{StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered,
 		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed}
@@ -841,11 +871,14 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // registrationDeadline is a process that has had its boot intervals and whose agent never became
-// ready — it never registered, or registered and never said it was ready: alive, it is retired —
-// suspended, since the claim is relaunched — and counted, the third meaning of a missing worker;
-// dead, it is counted. A suspension that fails leaves everything and tries again at the next probe
-// interval.
+// ready — it never registered, or registered and never said it was ready. Without a held
+// suspension, it is retired, counted and relaunched. An operator suspension retained through a
+// rule-resuming launch instead completes here: no ready will arrive to run it, and relaunching
+// would drop the operator's hold.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
+	if m.held != nil && m.held.By == SuspendedByOperator {
+		return m.suspendHeld(ctx)
+	}
 	never := "never registered"
 	if m.claim.State == StateRegistered {
 		never = "registered and never said it was ready"
@@ -915,6 +948,9 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 	m.claim.State = StateReady
 	m.claim.Budgets.LaunchFailures = 0
 	m.disarm(TimerRegistration)
+	if m.held != nil {
+		return m.suspendHeld(ctx)
+	}
 	return finishReady(m, ctx)
 }
 
@@ -929,11 +965,33 @@ func finishReady(m *Machine, ctx context.Context) error {
 }
 
 // reready persists the in-memory ready state before answering an agent retry: a prior ready's
-// claim write may have failed after the machine made the transition, and a restart must not restore
-// the older registered row and treat a ready agent as one that never became ready.
-func reready(m *Machine, ctx context.Context, _ Event) error { return finishReady(m, ctx) }
+// claim write may have failed after the machine made the transition. A retained launch-time
+// suspension still wins: the retry completes that suspension instead of publishing ready and
+// releasing notices to a claim the operator or workflow is stopping.
+func reready(m *Machine, ctx context.Context, _ Event) error {
+	if m.held != nil {
+		return m.suspendHeld(ctx)
+	}
+	return finishReady(m, ctx)
+}
 
 func resume(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
+
+// resumeByRule is the daemon's own resume of a suspended claim (RequestRuleResume): the same
+// session relaunched, as the operator's resume relaunches it, unless an operator suspended the
+// claim: that suspension holds until
+// the operator resumes the claim. A launch that fails is charged to the claim's launch budget like
+// any other, so a claim the rule resumes that keeps failing fails once the budget is spent, and a
+// failed claim is never resumed by rule.
+func resumeByRule(m *Machine, ctx context.Context, ev Event) error {
+	rule := ev.(RequestRuleResume).Reason
+	if !m.claim.RuleMayResume() {
+		m.log.Info("supervise: not resumed by rule: its suspension holds until the operator resumes it", "rule", rule, "suspendedBy", m.claim.SuspendedBy)
+		return nil
+	}
+	m.log.Info("supervise: resuming by rule", "rule", rule, "suspendedBy", m.claim.SuspendedBy)
+	return m.revive(ctx)
+}
 
 // retry is a failed or retired claim given another run: its budgets start over, and its session,
 // when it has one, is relaunched after the process the claim last ran is gone. A pending delivery
@@ -1079,8 +1137,17 @@ func deliverNow(m *Machine, ctx context.Context, ev Event) error {
 	return m.sendPending(ctx)
 }
 
+// deliverResuming queues a task on a suspended claim and resumes it for that task. The workflow's
+// task (an outbox delivery, which carries a durable id) resumes a claim unless an operator
+// suspended it: an operator's suspension answers ErrHeldByOperator, queuing
+// nothing, and its start waits for the operator's resume. The operator's own delivery resumes the
+// claim whoever suspended it.
 func deliverResuming(m *Machine, ctx context.Context, ev Event) error {
-	if err := m.queue(ctx, ev.(RequestDeliver)); err != nil {
+	d := ev.(RequestDeliver)
+	if d.ID != "" && !m.claim.RuleMayResume() {
+		return fmt.Errorf("deliver %s to %s: %w", d.ID, m.claim.Token, m.current().RuleHoldError())
+	}
+	if err := m.queue(ctx, d); err != nil {
 		return err
 	}
 	return m.revive(ctx)
@@ -1100,7 +1167,7 @@ func exit(m *Machine, ctx context.Context, ev Event) error {
 			m.log.Error("supervise: could not suspend the exited root's process; suspending its claim anyway",
 				"incarnation", incarnation, "error", err)
 		}
-		return m.suspended(ctx)
+		return m.suspended(ctx, SuspendedByExit)
 	}
 	if err := m.release(ctx); err != nil {
 		m.log.Error("supervise: could not release the exited agent's process; retiring its claim anyway", "error", err)

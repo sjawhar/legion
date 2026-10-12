@@ -117,9 +117,10 @@ default) in case the work resumes.
 ## Stop, park or rerun
 
 - **To stop Legion working an issue**, move it to `backlog` (or `icebox`) from the Dispatch
-  dashboard. A person's move takes the tree out at once: its agents stop and its slot goes to the
-  next issue. To keep Legion off it for good, also take the `legion` label off; taking the label off
-  alone does not stop a tree that has started.
+  dashboard. A person's move takes the tree out at once and its slot goes to the next issue; its
+  agents stop, each once the turn it is in ends, however long that takes, so a turn already under
+  way finishes what it was doing. To keep Legion off it for good, also take the `legion` label off;
+  taking the label off alone does not stop a tree that has started.
 - **To run it again**, set it back to `todo` with the label on. The tree starts over as a new
   generation, from its architect.
 - **To close it without a change**, tell the architect at the design gate that no change is needed;

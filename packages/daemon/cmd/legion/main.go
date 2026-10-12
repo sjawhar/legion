@@ -22,9 +22,11 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	legionclaim "github.com/sjawhar/legion/daemon/internal/claim" // main_test.go's `claim` helper holds the bare name
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/registry"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 const (
@@ -61,7 +63,7 @@ var commands = map[string]commandEntry{
 	"version":        {runVersion, "print the version and the commit the binary was built from"},
 	"start":          {runStart, "run the Legion daemon from legion.yaml in the foreground; --check-config validates the file and exits"},
 	"stop":           {runStop, "stop the daemon registered for legion.yaml's project"},
-	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes (--json for all of it)"},
+	"state":          {runState, "print the daemon's state: admission, issues, pending Dispatch status writes, claims nothing will wake (--json for all of it)"},
 	"legions":        {runLegions, "list the daemons registered on this machine"},
 	"status":         {runStatus, "say whether a team's daemon is running, or set an issue's Dispatch status"},
 	"restart":        {runRestart, "stop a registered daemon and start it again from the configuration it recorded"},
@@ -370,6 +372,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintf(stdout, "admission: %d active, %d waiting, cap %d; %d issues\n",
 		len(state.Admission.Active), len(state.Admission.Waiting), state.Admission.Cap, len(state.Issues))
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
+	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
 	// In a pane, the issue record is what a relaunched worker re-reads.
 	if key := os.Getenv("LEGION_ISSUE"); key != "" {
 		issue, ok := state.Issues[key]
@@ -401,6 +404,41 @@ func pendingSummary(pending []api.PendingStatusWrite) string {
 	}
 	return fmt.Sprintf("pending Dispatch status writes: %d; the oldest, for %s, has failed %d attempts, next at %s: %s",
 		len(pending), oldest.Issue, oldest.Attempts, next, oldest.LastError)
+}
+
+// strandedSummary is the one line an operator reads for the claims nothing will wake: how many,
+// and each by issue and role under the move that brings it back. `legion claims resume` brings back
+// a suspended architect, which is sent a catch-up once it is ready; a suspended phase worker's move
+// depends on who suspended it, which `legion claims list --json` shows as its suspendedBy and the
+// troubleshooting page's "A tree does not move after a restart" turns into a move; a failed one
+// ignores resume and deliver, and runs again only on a workflow start.
+func strandedSummary(stranded []api.StrandedClaim) string {
+	if len(stranded) == 0 {
+		return "claims nothing will wake: none"
+	}
+	var resume, workers, workflowStart []string
+	for _, c := range stranded {
+		named := c.Issue + " " + string(c.Role)
+		switch {
+		case c.State == string(supervise.StateFailed):
+			workflowStart = append(workflowStart, named)
+		case c.Role == legionclaim.RoleArchitect:
+			resume = append(resume, named)
+		default:
+			workers = append(workers, named)
+		}
+	}
+	var groups []string
+	if len(resume) > 0 {
+		groups = append(groups, "resume "+strings.Join(resume, ", "))
+	}
+	if len(workers) > 0 {
+		groups = append(groups, "suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) "+strings.Join(workers, ", "))
+	}
+	if len(workflowStart) > 0 {
+		groups = append(groups, "failed, needs a workflow start "+strings.Join(workflowStart, ", "))
+	}
+	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
 }
 
 // stateAddress is where a daemon answers: the configured bind and port, with --port overriding

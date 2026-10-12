@@ -87,10 +87,14 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 21 for contract 21's capability report (LEGION-663: `claims/register` answers
-`promptAgents`, `claims/ready` takes an optional `capabilities` report, each claim view on
-`GET /legion/v1/state` carries its session's latest report as `capabilities`, and `live` is gone
-from the capability status enum), after contract 20's controller credential (LEGION-668: the
+number is 23 for contract 23's `strandedClaims` list on `GET /legion/v1/state` (LEGION-670: every
+claim nothing will wake, by issue, role and state), after contract 22's token login (LEGION-618: the
+daemon logs in to the secrets broker with its own ServiceAccount token, so `agentSecretsLogin` on
+`GET /legion/v1/state` loses `code` and its `state` is `none`, `issued` or `failed`), after contract
+21's capability report (LEGION-663:
+`claims/register` answers `promptAgents`, `claims/ready` takes an optional `capabilities` report,
+each claim view on `GET /legion/v1/state` carries its session's latest report as `capabilities`,
+and `live` is gone from the capability status enum), after contract 20's controller credential (LEGION-668: the
 controller holds the review App's GitHub token like every role — `POST
 /legion/v1/controller/github-credential` answers the operator-launched controller's `legion
 controller start` the review App's gh files for the current controller capability, and the
@@ -298,9 +302,11 @@ or is not yet on `legion/<issue>@origin` (push the issue branch, then complete a
 other phase the commit the workspace stands on, `@-`. It then posts
 `POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`). The daemon reads no
 handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
-reported for its previous phase) and, for the merger's `ready: true`, runs READY's three refusals on
-the pull request's head (`READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS`, `READY_CHECKS_NOT_GREEN`); a refusal changed
-nothing, and the answer's `note` is what READY's checks said when they read no head. The
+reported for its previous phase) and, for the merger's `ready: true`, runs READY's checks on the
+pull request's head, each refusal named in the merger's role prompt
+(`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's
+`note` is what READY's checks said when they read no head, or the by-hand note
+(`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
 pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's
 plain `gh` and `git`, which read the role's App token from the gh files under `GH_CONFIG_DIR`; no
