@@ -2004,15 +2004,16 @@ the probe, and the NATS connection and the Dispatch listing, which it runs after
 prints `probe-boot: OK project=<project> image=<image> model-fallback=<mark> capacity-waits=<n>` and
 exits 0; a refusal is boot's own, on stderr, and exits 1.
 
-- **Release.** Run the `legion` of the daemon's release. The probe's daemon API contract, the role
-  prompts' references, the probe command, its reservation and its verdicts are compiled into the
-  binary, so a CLI older than the daemon can pass a probe the daemon refuses.
-- **Where to run it.** As a one-shot pod of the daemon's image, under the daemon's ServiceAccount,
-  with the daemon pod's environment and mounts: that matches the release above and the identity,
-  the environment and the files below at once, and no credential leaves the cluster. Minting a
-  token for the daemon's ServiceAccount onto a CI runner or any other host hands that host every
-  grant the daemon holds, Secret writes and Sandbox patches included, not only the subset
-  probe-boot uses, and the host must also hold every bearer file the configuration names.
+- **Release.** Run the `legion` of the release the daemon will restart on. The probe's daemon API
+  contract, the role prompts' references, the probe command, its reservation and its verdicts are
+  compiled into the binary, so a CLI older than the daemon can pass a probe the daemon refuses.
+- **Where to run it.** As a one-shot pod of the image of the release the daemon will restart on,
+  under the daemon's ServiceAccount, with the daemon pod's environment and mounts: that matches the
+  release above and the identity, the environment and the files below at once, and no credential
+  leaves the cluster. Minting a token for the daemon's ServiceAccount onto a CI runner or any other
+  host hands that host every grant the daemon holds, Secret writes and Sandbox patches included, not
+  only the subset probe-boot uses, and the host must also hold every bearer file the configuration
+  names.
 - **Identity.** It acts as whoever `runtime.kubernetes` resolves to in its own process: the daemon's
   identity only with the daemon's kubeconfig and context, or in a pod under the daemon's
   ServiceAccount. It uses a subset of the daemon's grants above: `sandboxes` create, get, list,
