@@ -246,8 +246,12 @@ RUN mkdir -p /out && CGO_ENABLED=0 go-third-party-notices.sh /out/go-notices \
     ./cmd/legion github.com/sjawhar/envoy/cmd/agent-secrets
 # Declared here, after the dependency layers, so a new commit re-runs only the compile.
 ARG LEGION_REVISION
+ARG PI_LEGION_VERSION
+ARG PI_ENVOY_VERSION
 RUN test -n "$LEGION_REVISION" \
-    && CGO_ENABLED=0 go build -ldflags "-X main.revision=${LEGION_REVISION}" -o /out/legion ./cmd/legion \
+    && ldflags="-X main.revision=${LEGION_REVISION}" \
+    && if [ -n "$PI_LEGION_VERSION" ] && [ -n "$PI_ENVOY_VERSION" ]; then ldflags="$ldflags -X main.piLegionVersion=${PI_LEGION_VERSION} -X main.piEnvoyVersion=${PI_ENVOY_VERSION}"; fi \
+    && CGO_ENABLED=0 go build -ldflags "$ldflags" -o /out/legion ./cmd/legion \
     && CGO_ENABLED=0 go -C /src/packages/envoy build -o /out/agent-secrets ./cmd/agent-secrets
 
 # ------------------------------------------------------------------------------------------------
@@ -626,6 +630,8 @@ COPY --from=go /out/agent-secrets /opt/legion/bin/agent-secrets
 # residue: Oh My Pi's logs, and the Go telemetry counters the capability check's `go version` writes
 # under HOME (the toolchain step's XDG_CONFIG_HOME does not reach a probe that runs as a pod would).
 ARG LEGION_REVISION
+ARG PI_LEGION_VERSION
+ARG PI_ENVOY_VERSION
 RUN set -eu; \
     for dir in /opt/legion /opt/legion/bin; do \
       owner="$(stat -c '%u:%g %a' "$dir")"; echo "$dir: $owner"; test "$owner" = "0:0 755"; \
@@ -638,7 +644,11 @@ RUN set -eu; \
     rm /tmp/dispatch-help; \
     agent_secrets="$(command -v agent-secrets)"; test "$agent_secrets" = /opt/legion/bin/agent-secrets; \
     version="$(legion version)"; echo "$version"; \
-    test "$version" = "legion (devel) commit ${LEGION_REVISION}"; \
+    expected="legion (devel) commit ${LEGION_REVISION}"; \
+    if [ -n "$PI_LEGION_VERSION" ] && [ -n "$PI_ENVOY_VERSION" ]; then \
+      expected="$(printf '%s\nplugins @sjawhar/pi-legion %s @sjawhar/pi-envoy %s' "$expected" "$PI_LEGION_VERSION" "$PI_ENVOY_VERSION")"; \
+    fi; \
+    test "$version" = "$expected"; \
     legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models; \
     agent-secrets --help >/dev/null; \
     rm -rf /home/legion/.omp/profiles/legion/logs /home/legion/.config/go

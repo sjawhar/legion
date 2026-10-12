@@ -8,6 +8,16 @@ on:
         type: string
         required: false
         default: ""
+      pi_legion_version:
+        description: Resolved @sjawhar/pi-legion version for this build (empty when neither published nor known)
+        type: string
+        required: false
+        default: ""
+      pi_envoy_version:
+        description: Resolved @sjawhar/pi-envoy version for this build (empty when neither published nor known)
+        type: string
+        required: false
+        default: ""
     outputs:
       ref:
         description: The pushed image, pinned by digest (ghcr.io/sjawhar/legion-worker@sha256:…)
@@ -17,6 +27,16 @@ on:
     inputs:
       legion_version:
         description: Optional legion version to also tag the image with (main only)
+        type: string
+        required: false
+        default: ""
+      pi_legion_version:
+        description: Optional resolved @sjawhar/pi-legion version to link into the smoke-tested binary
+        type: string
+        required: false
+        default: ""
+      pi_envoy_version:
+        description: Optional resolved @sjawhar/pi-envoy version to link into the smoke-tested binary
         type: string
         required: false
         default: ""
@@ -175,6 +195,8 @@ jobs:
           # The Go `legion` links the built commit (`legion version` names it); the build refuses without it.
           build-args: |
             LEGION_REVISION=${{ steps.meta.outputs.built_sha }}
+            PI_LEGION_VERSION=${{ inputs.pi_legion_version }}
+            PI_ENVOY_VERSION=${{ inputs.pi_envoy_version }}
           secrets: |
             github_token=${{ secrets.GITHUB_TOKEN }}
 
