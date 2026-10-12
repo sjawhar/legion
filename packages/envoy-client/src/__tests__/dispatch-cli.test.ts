@@ -74,6 +74,12 @@ const server = Bun.serve({
         { status: 201 }
       );
     }
+    if (pathname === "/api/v1/projects" && request.method === "GET") {
+      return Response.json([
+        { key: "CORE", name: "Core", open_asks: 0, created_at: "2026-09-01T00:00:00Z" },
+        { key: "SMOKE684", name: "Smoke", open_asks: 0, created_at: "2026-10-11T00:00:00Z" },
+      ]);
+    }
     if (pathname === "/api/v1/agents/ses-pic/artifacts/shot-png") {
       return Response.json({
         id: "pic-1",
@@ -375,6 +381,13 @@ describe("the dispatch CLI", () => {
     expect(code).toBe(1);
     expect(stdout).toContain(`project is not a project key: ${PROJECT_KEY_RULE}`);
     expect(requests).toEqual([]);
+  });
+
+  test("dispatch projects prints each project's key and name, keys first", async () => {
+    const { code, stdout } = await run(["projects"], omp);
+    expect(code).toBe(0);
+    expect(stdout).toBe("CORE Core\nSMOKE684 Smoke\n");
+    expect(requests).toEqual([{ method: "GET", path: "/api/v1/projects", body: undefined }]);
   });
 });
 

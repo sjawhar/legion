@@ -489,6 +489,11 @@ export class DispatchClient {
     return this.#json("POST", ["api", "v1", "projects"], input);
   }
 
+  /** `GET /api/v1/projects`: every project, ordered by key. */
+  async listProjects(): Promise<Project[]> {
+    return this.#json("GET", ["api", "v1", "projects"]);
+  }
+
   /** `POST /api/v1/projects/{key}/architecture-source/sync`: import the
    *  project's architecture model now; the row's `last_error` says whether the
    *  import replaced the model or the previous one stays up. */

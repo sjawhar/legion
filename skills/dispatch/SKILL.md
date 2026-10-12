@@ -157,7 +157,7 @@ Labels are optional: Dispatch trims them, preserves their case, and removes case
 the new key; creating an issue does not subscribe you to it (see [Following](#following)). Use `dispatch issue` only to create an issue; never use it to park a question. When you pass a spec,
 follow [Writing a spec](#writing-a-spec).
 
-When the work needs a project that does not exist yet, create it yourself with `dispatch project --key <KEY> --name '<name>'`; nobody has to make it by hand. Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first, reading the keys alone (`curl -sH "Authorization: Bearer $DISPATCH_TOKEN" "$DISPATCH_URL/api/v1/projects" | jq -r '.[].key'`; [Authentication and the HTTP API](skill://dispatch/references/api.md)), since no `dispatch` command lists projects and any bearer writes the names beside them. A key that already exists is refused with `PROJECT_EXISTS`.
+When the work needs a project that does not exist yet, create it yourself with `dispatch project --key <KEY> --name '<name>'`; nobody has to make it by hand. Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first with `dispatch projects`. A key that already exists is refused with `PROJECT_EXISTS`.
 
 ## Search first
 

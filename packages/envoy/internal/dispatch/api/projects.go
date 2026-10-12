@@ -73,16 +73,14 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Any bearer writes a name into the project list every dashboard reads, and no route renames a
-	// project, so a name is capped as an issue title is and holds nothing a reader cannot see.
+	// project, so a name is capped as an issue title is and shows a reader what it says.
 	if length := len16(input.Name); length > contracts.ProjectNameMax {
 		capExceeded(w, "name", length, contracts.ProjectNameMax)
 		return
 	}
-	for _, character := range input.Name {
-		if unicode.In(character, unicode.Cc, unicode.Cf) {
-			writeError(w, "INVALID_PROJECT", http.StatusBadRequest, fmt.Sprintf("name holds U+%04X, a control or format character (a bidi override, a zero-width character), which a reader cannot see", character))
-			return
-		}
+	if problem := projectNameProblem(input.Name); problem != "" {
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, problem)
+		return
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
@@ -112,4 +110,28 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 	}
 	s.publish(event)
 	WriteJSON(w, http.StatusCreated, project)
+}
+
+// projectNameProblem refuses a project name that would mislead its reader: one holding a control
+// character, one holding a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), the
+// controls a Trojan Source spoof reorders text with, and one with no visible character once its
+// format characters and whitespace are set aside. Every other format character does visible work
+// in real names and stays: the joiner inside an emoji, a flag's tag characters, a direction mark
+// (U+200E, U+200F, U+061C) in mixed-direction text, a soft hyphen. It answers "" for a name it takes.
+func projectNameProblem(name string) string {
+	visible := false
+	for _, character := range name {
+		switch {
+		case unicode.Is(unicode.Cc, character):
+			return fmt.Sprintf("name holds U+%04X, a control character", character)
+		case (character >= 0x202A && character <= 0x202E) || (character >= 0x2066 && character <= 0x2069):
+			return fmt.Sprintf("name holds U+%04X, a bidi control that reorders the text a reader sees", character)
+		case !unicode.Is(unicode.Cf, character) && !unicode.IsSpace(character):
+			visible = true
+		}
+	}
+	if !visible {
+		return "name has no visible character"
+	}
+	return ""
 }

@@ -1543,6 +1543,38 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow("PROJECT_EXISTS: a project with this key already exists");
   });
 
+  test("dispatch_projects lists every project's key and name, one per line, keys first", async () => {
+    const requests: string[] = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push(`${init?.method ?? "GET"} ${new URL(String(url)).pathname}`);
+      return response([
+        { key: "CORE", name: "Core", open_asks: 2, created_at: "2026-09-01T00:00:00Z" },
+        { key: "OPS", name: "Ops", open_asks: 0, created_at: "2026-09-02T00:00:00Z" },
+      ]);
+    }) as typeof fetch;
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_projects",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+    expect(requests).toEqual(["GET /api/v1/projects"]);
+    expect(result.text).toBe("CORE Core\nOPS Ops");
+    expect(result.details).toEqual({
+      projects: [
+        { key: "CORE", name: "Core" },
+        { key: "OPS", name: "Ops" },
+      ],
+    });
+  });
+
   test("dispatch_open_asks renders active asks by whose reply is due", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {

@@ -401,6 +401,7 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_search: true,
   dispatch_issues: true,
   dispatch_project: true,
+  dispatch_projects: true,
   dispatch_open_asks: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true,
@@ -2524,6 +2525,13 @@ export async function executeDispatchTool(
       return {
         text: `Created project ${project.key} (${project.name}) at ${project.created_at}: ${href}`,
         details: { project: project.key, name: project.name, created_at: project.created_at },
+      };
+    }
+    case "dispatch_projects": {
+      const projects = (await client.listProjects()).map(({ key, name }) => ({ key, name }));
+      return {
+        text: projects.map(({ key, name }) => `${key} ${name}`).join("\n"),
+        details: { projects },
       };
     }
     case "dispatch_architecture_sync": {

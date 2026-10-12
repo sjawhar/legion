@@ -5,9 +5,10 @@
 ### Added
 
 - Added the `dispatch_project` spec, `{ key, name }` (strict), behind the `dispatch project`
-  command: the twenty-second Dispatch spec. Its `name` is at most `PROJECT_NAME_MAX` (80) characters,
-  generated into Go as `contracts.ProjectNameMax`, which the server enforces and the Settings name
-  field takes as its `maxLength` (LEGION-684).
+  command, and `dispatch_projects`, no arguments, behind `dispatch projects`, which lists every
+  project's key and name: twenty-three Dispatch specs. A project's `name` is at most
+  `PROJECT_NAME_MAX` (80) characters, generated into Go as `contracts.ProjectNameMax`, which the
+  server enforces and the Settings name field takes as its `maxLength` (LEGION-684).
 - Added `PROJECT_KEY_RULE`, the one wording of a project key's rule, generated into Go as
   `contracts.ProjectKeyRule`, and `PROJECT_KEY_PATTERN` is generated as `contracts.ProjectKeyPattern`.
   `dispatch search --project` and every owner check refuse a key that is not one with

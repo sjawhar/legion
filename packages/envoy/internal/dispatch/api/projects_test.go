@@ -149,9 +149,11 @@ func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
 		{"key over ten characters", "ABCDEFGHIJK", "Agent project", badKey("ABCDEFGHIJK")},
 		{"empty name", "AGENT", "", "project name is required"},
 		{"blank name", "AGENT", "   ", "project name is required"},
-		{"a bidi override", "AGENT", "Agent \u202eproject", `name holds U+202E, a control or format character`},
-		{"zero-width characters only", "AGENT", "\u200b\u200d", `name holds U+200B, a control or format character`},
-		{"a control character", "AGENT", "Agent\u0007project", `name holds U+0007, a control or format character`},
+		{"a bidi override", "AGENT", "Agent \u202eproject", `name holds U+202E, a bidi control that reorders the text a reader sees`},
+		{"a bidi isolate", "AGENT", "Agent \u2066project", `name holds U+2066, a bidi control that reorders the text a reader sees`},
+		{"zero-width characters only", "AGENT", "\u200b\u200d", "name has no visible character"},
+		{"zero-width characters and a space only", "AGENT", "\u200b \u2060", "name has no visible character"},
+		{"a control character", "AGENT", "Agent\u0007project", "name holds U+0007, a control character"},
 	} {
 		t.Run(input.name, func(t *testing.T) {
 			for _, attempt := range []struct {
@@ -174,32 +176,56 @@ func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
 	}
 }
 
+// A name a reader sees whole is accepted even where it holds a format character doing visible
+// work: a joiner building an emoji, a flag's tag characters, a direction mark in mixed text, a soft
+// hyphen. No route renames a project, so refusing one leaves its maker no way to the name they meant.
+func TestAVisibleNameWithFormatCharactersIsAcceptedForABearerAndAPerson(t *testing.T) {
+	handler := newTestHandler(t)
+	for index, name := range []string{
+		"Team 👨\u200d👩\u200d👧\u200d👦",
+		"👩\u200d💻 Squad",
+		"🏴\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F Team",
+		"Project שלום\u200f",
+		"Super\u00adcalifragilistic",
+	} {
+		bearer := sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
+			"key": fmt.Sprintf("VISB%d", index), "name": name, "actor": sessionActor(),
+		})
+		if bearer.Code != http.StatusCreated {
+			t.Errorf("a bearer creating name %q: status=%d body=%s, want 201", name, bearer.Code, bearer.Body.String())
+		}
+		person := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+			"key": fmt.Sprintf("VISP%d", index), "name": name,
+		}, "alice")
+		if person.Code != http.StatusCreated {
+			t.Errorf("a person creating name %q: status=%d body=%s, want 201", name, person.Code, person.Body.String())
+		}
+	}
+}
+
 // A project name is capped as an issue title is: any bearer can write one into the project list
 // every dashboard reads, and no route renames a project. The cap counts UTF-16 units after the
 // trim, so a name at it is created and one unit over is CAP_EXCEEDED, for a session as for a person.
 func TestAProjectNameOverTheCapIsCapExceededForABearerAndAPerson(t *testing.T) {
 	handler := newTestHandler(t)
-	atCap := strings.Repeat("n", contracts.ProjectNameMax)
-	over := strings.Repeat("😀", contracts.ProjectNameMax/2) + "n"
 	for _, caller := range []struct {
-		name string
-		send func(body map[string]any) *httptest.ResponseRecorder
+		name, key string
+		send      func(body map[string]any) *httptest.ResponseRecorder
 	}{
-		{"bearer", func(body map[string]any) *httptest.ResponseRecorder {
+		{"bearer", "CAPB", func(body map[string]any) *httptest.ResponseRecorder {
 			body["actor"] = sessionActor()
 			return sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", body)
 		}},
-		{"person", func(body map[string]any) *httptest.ResponseRecorder {
+		{"person", "CAPP", func(body map[string]any) *httptest.ResponseRecorder {
 			return dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", body, "alice")
 		}},
 	} {
-		key := map[string]string{"bearer": "CAPB", "person": "CAPP"}[caller.name]
-		refused := caller.send(map[string]any{"key": key, "name": "  " + over + "  "})
-		want := fmt.Sprintf("name is 1 characters over the %d-character limit (%d/%d)", contracts.ProjectNameMax, contracts.ProjectNameMax+1, contracts.ProjectNameMax)
-		if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), want) {
-			t.Fatalf("a %s's name one unit over the cap: status=%d body=%s, want 400 CAP_EXCEEDED saying %q", caller.name, refused.Code, refused.Body.String(), want)
+		for name, test := range overCapCases(contracts.ProjectNameMax) {
+			refused := caller.send(map[string]any{"key": caller.key, "name": "  " + test.text + "  "})
+			assertCapExceeded(t, caller.name+" "+name, refused, "name", test.length, contracts.ProjectNameMax, "")
 		}
-		if created := caller.send(map[string]any{"key": key, "name": "  " + atCap + "  "}); created.Code != http.StatusCreated {
+		atCap := "  " + strings.Repeat("n", contracts.ProjectNameMax) + "  "
+		if created := caller.send(map[string]any{"key": caller.key, "name": atCap}); created.Code != http.StatusCreated {
 			t.Fatalf("a %s's name at the cap: status=%d body=%s, want 201", caller.name, created.Code, created.Body.String())
 		}
 	}
