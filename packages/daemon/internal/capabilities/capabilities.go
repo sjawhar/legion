@@ -333,22 +333,26 @@ const jwtFirstHeldSequence = `\x{FFFE}|\x{FFFF}(?:\[[0-?]*[@-~])?`
 // `ghs_***`. The JWT rule starts nowhere its first segment's class could have run on from: not
 // after held, a C1 introducer or a value character, and not after a held `[` and its parameters,
 // followed by any final byte or by a `\uXXXX` escape whose backslash is that final byte. The plugin
-// says so with a lookbehind; here the rule's first alternative matches that held prefix with `eyJ`
+// says so with a lookbehind; here the rule's last alternative matches that held prefix with `eyJ`
 // and redactJWT gives it back unchanged. It may start after an opener, which its first segment does
 // not run across, and right after a percent or `\u` escape that no held sequence closes. A JWT may
-// also start right after held when its first segment crosses neither held nor an opener (the third
-// alternative), so a JWT right after a replacement character is masked in the first pass, before
-// the fourth reading would split it at a control inside it. That segment stops at the next held
-// character, and a first segment ends at its one dot, so no start reads another's run. So in the
-// plugin's JavaScriptCore, which backtracks, a start that fails reads at most to the next held
-// character or opener, where one inside a run the first segment reads through would read that run
-// once per start. An Authorization value opened by an escaped quote ends at the next backslash or
-// quote; one opened by a quote runs over escaped characters to an unescaped quote; one with neither
-// runs to a closing bracket or the end of the line, since an AWS signature or a Digest credential
-// carries commas, semicolons and quotes of its own. The API-key rule has no left anchor, so
-// `api-key` also covers `x-api-key` and `x-goog-api-key`. A rule whose value may be short takes `*`
-// in its value class, and a quoted connection-string password keeps its quotes, so a value already
-// redacted is matched whole and left as it is; the others need more than `***` to match at all.
+// also start right after held when its first segment crosses no held character and no opener, only
+// a C1 introducer, so a JWT right after a replacement character is masked in the first pass, before
+// the fourth reading would split it at a control inside it. And it may start right after a held
+// `[`, its parameters and an optional final byte or `\uXXXX` when its first segment holds a C1
+// introducer and crosses nothing else held, since reading 2 would turn that introducer into an
+// opener its first segment can't cross. A JWT with no C1 introducer in its first segment is left to
+// the later readings there, where its later segments cross what the first pass would stop at. These
+// segments stop at the next held character, and a first segment ends at its one dot, so no start
+// reads another's run: in the plugin's JavaScriptCore, which backtracks, a start inside a run its
+// first segment reads through would read that run once per start. An Authorization value opened by
+// an escaped quote ends at the next backslash or quote; one opened by a quote runs over escaped
+// characters to an unescaped quote; one with neither runs to a closing bracket or the end of the
+// line, since an AWS signature or a Digest credential carries commas, semicolons and quotes of its
+// own. The API-key rule has no left anchor, so `api-key` also covers `x-api-key` and
+// `x-goog-api-key`. A rule whose value may be short takes `*` in its value class, and a quoted
+// connection-string password keeps its quotes, so a value already redacted is matched whole and
+// left as it is; the others need more than `***` to match at all.
 var credentialRules = []struct {
 	pattern *regexp.Regexp
 	// replacement expands the match; replace, when set, computes it instead.
@@ -363,18 +367,19 @@ var credentialRules = []struct {
 	{pattern: regexp.MustCompile(`(?i)(\\?["'](?:api_key|access_token)\\?["'][ \x{FFFE}\x{FFFF}]*:[ \x{FFFE}\x{FFFF}]*\\?["'])[^"'\\]+`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`(?i)\b(bearer[ \x{FFFE}\x{FFFF}]+)(?:[A-Za-z0-9._~+/=*-]|` + heldSequence + `)+`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`\b(gh[pousr]_|github_pat_)(?:[A-Za-z0-9._-]|` + heldSequence + `){20,}`), replacement: "${1}***"},
-	{pattern: regexp.MustCompile(`\x{FFFF}\[[0-?]*(?:[@-~]?|\\u[0-9A-Fa-f]{4})eyJ|(?:^|[^A-Za-z0-9_\x{FFFE}\x{FFFF}-]|%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4})eyJ(?:[A-Za-z0-9_-]|` + jwtFirstHeldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `)*|\x{FFFF}eyJ(?:[A-Za-z0-9_-]|\x{FFFE}){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `)*`), replace: redactJWT},
+	{pattern: regexp.MustCompile(`(?:\x{FFFF}eyJ(?:[A-Za-z0-9_-]|\x{FFFE}){8,}|\x{FFFF}\[[0-?]*(?:[@-~]|\\u[0-9A-Fa-f]{4})?eyJ[A-Za-z0-9_-]*\x{FFFE}(?:[A-Za-z0-9_-]|\x{FFFE})*|(?:^|[^A-Za-z0-9_\x{FFFE}\x{FFFF}-]|%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4})eyJ(?:[A-Za-z0-9_-]|` + jwtFirstHeldSequence + `){8,})\.(?:[A-Za-z0-9_-]|` + heldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `)*|\x{FFFF}\[[0-?]*(?:[@-~]?|\\u[0-9A-Fa-f]{4})eyJ`), replace: redactJWT},
 	{pattern: regexp.MustCompile(`\b(sk-|dsp_|ya29\.|xox[a-z]-|glpat-|npm_)(?:[A-Za-z0-9_-]|` + heldSequence + `){20,}`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`\b(AIza)(?:[A-Za-z0-9_-]|` + heldSequence + `){35,}`), replacement: "${1}***"},
-	{pattern: regexp.MustCompile(`\b(AKIA|ASIA)(?:[A-Z0-9](?:` + heldSequence + `)?){16}\b`), replacement: "${1}***"},
+	{pattern: regexp.MustCompile(`\b(AKIA|ASIA)(?:(?:` + heldSequence + `)*[A-Z0-9]){16}\b`), replacement: "${1}***"},
 }
 
-// redactJWT is a JWT rule match redacted. One that opens on a held `[` is that `[` and its
-// parameters, followed by any final byte or by a `\uXXXX` escape whose backslash is that final
-// byte, and then `eyJ`, which no JWT starts after, so it is given back unchanged; any other keeps
-// what came before `eyJ` (held, for the rule's third alternative) and replaces the JWT.
+// redactJWT is a JWT rule match redacted. One with no `.` is the rule's last alternative: a held
+// `[` and its parameters, followed by any final byte or by a `\uXXXX` escape whose backslash is that
+// final byte, and then `eyJ`, which no JWT starts after, so it is given back unchanged. Any other is
+// a JWT, so it keeps what came before `eyJ` (held, and any sequence after it, for a JWT that starts
+// right after held) and replaces the JWT.
 func redactJWT(match string) string {
-	if strings.HasPrefix(match, string(held)+"[") {
+	if !strings.Contains(match, ".") {
 		return match
 	}
 	return match[:strings.Index(match, "eyJ")] + "***"

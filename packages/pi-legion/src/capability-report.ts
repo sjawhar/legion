@@ -473,11 +473,12 @@ function truncateUtf8(text: string, max: number): string {
  * held prefix reads like the daemon's rule, which matches that prefix with `eyJ` and gives it back.
  * It may start after an opener, which its first segment does not run across, and right after a
  * percent or `\u` escape that no held sequence closes. It may also start right after held when its
- * first segment crosses neither held nor an opener, so a JWT right after a replacement character is
- * masked in the first pass, before the fourth reading would split it at a control inside it. So a
- * start that fails reads at most to the next held character or opener: JavaScriptCore backtracks,
- * where the daemon's RE2 does not, and a start inside a run the first segment reads through would
- * read that run once per start.
+ * first segment crosses no held character and no opener, only a C1 introducer, and right after a
+ * held `[`, its parameters and an optional final byte or `\uXXXX` when its first segment holds a C1
+ * introducer and crosses nothing else held, as the daemon's comment explains. These segments stop
+ * at the next held character, and a first segment ends at its one dot, so no start reads another's
+ * run: JavaScriptCore backtracks, where the daemon's RE2 does not, and a start inside a run its
+ * first segment reads through would read that run once per start.
  */
 const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   [/(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^ /?#]+@/gi, "$1***@"],
@@ -517,7 +518,7 @@ const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   ],
   [
     new RegExp(
-      String.raw`(?:(?=eyJ)(?<!\uffff\[[0-?]*(?:[@-~]?|\\u[0-9A-Fa-f]{4}))(?:(?<![A-Za-z0-9_\ufffe\uffff-])|(?<=%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}))eyJ(?:[A-Za-z0-9_-]|${JWT_FIRST_HELD_SEQUENCE}){8,}|(?<=\uffff)eyJ(?:[A-Za-z0-9_-]|\ufffe){8,})\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE})*`,
+      String.raw`(?:(?=eyJ)(?<!\uffff\[[0-?]*(?:[@-~]?|\\u[0-9A-Fa-f]{4}))(?:(?<![A-Za-z0-9_\ufffe\uffff-])|(?<=%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}))eyJ(?:[A-Za-z0-9_-]|${JWT_FIRST_HELD_SEQUENCE}){8,}|(?<=\uffff)eyJ(?:[A-Za-z0-9_-]|\ufffe){8,}|(?=eyJ)(?<=\uffff\[[0-?]*(?:[@-~]|\\u[0-9A-Fa-f]{4})?)eyJ[A-Za-z0-9_-]*\ufffe(?:[A-Za-z0-9_-]|\ufffe)*)\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE})*`,
       "g"
     ),
     "***",
@@ -530,7 +531,7 @@ const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
     "$1***",
   ],
   [new RegExp(String.raw`\b(AIza)(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){35,}`, "g"), "$1***"],
-  [new RegExp(String.raw`\b(AKIA|ASIA)(?:[A-Z0-9](?:${HELD_SEQUENCE})?){16}\b`, "g"), "$1***"],
+  [new RegExp(String.raw`\b(AKIA|ASIA)(?:(?:${HELD_SEQUENCE})*[A-Z0-9]){16}\b`, "g"), "$1***"],
 ];
 
 /** The most passes `redactCredentials` makes: the daemon's `maxRedactionPasses`. */

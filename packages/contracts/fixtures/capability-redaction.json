@@ -465,6 +465,18 @@
     },
     {
       "pattern": "cleanup",
+      "name": "a JWT right after an unterminated ESC [, with a C1 sequence introducer in its first segment",
+      "detail": "token \u001b[eyJhbGci\u009bOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT right after ESC [5@, with a C1 sequence introducer in its first segment",
+      "detail": "token \u001b[5@eyJhbGci\u009bOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
       "name": "an AWS key id right after an unterminated ESC [",
       "detail": "AccessDenied: \u001b[AKIAIOSFODNN7EXAMPLE is not authorized",
       "want": "AccessDenied: KIA*** is not authorized"
@@ -534,6 +546,18 @@
       "name": "a GitHub token grep coloured in the middle",
       "detail": "token ghp_EXAMPLEtoken0123456789\u001b[01;31m\u001b[Kabcdefghijklmn\u001b[m\u001b[K expired",
       "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "an AWS key id grep coloured on its prefix",
+      "detail": "id \u001b[01;31m\u001b[KAKIA\u001b[m\u001b[KIOSFODNN7EXAMPLE x",
+      "want": "id AKIA*** x"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "an AWS key id grep coloured in the middle",
+      "detail": "AccessDenied: AKIAIOSF\u001b[01;31m\u001b[KODNN7\u001b[m\u001b[KEXAMPLE is not authorized",
+      "want": "AccessDenied: AKIA*** is not authorized"
     },
     {
       "pattern": "cleanup",
@@ -786,6 +810,10 @@
     {
       "name": "a JWT start after each held character, its first segment ended by a dot and its second by a non-value byte",
       "unit": "\u0007eyJabcdefgh.abcdefghijklmnopqrstuvwxyzabcd!"
+    },
+    {
+      "name": "a JWT start after each unterminated ESC [, its first segment crossing a C1 sequence introducer",
+      "unit": "\u001b[eyJab\u009bcdefgh"
     }
   ]
 }
