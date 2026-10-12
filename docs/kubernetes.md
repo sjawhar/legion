@@ -2022,7 +2022,7 @@ exits 0; a refusal is boot's own, on stderr, and exits 1.
   probe-boot names its own for its run as well (`legion-probe-<project>-<digest>-<run>`). So it may
   run while that project's daemon boots, or beside another probe-boot, and none takes another's
   Sandbox for a leftover. It deletes its Sandbox when it ends, a SIGTERM or SIGINT included; after a
-  SIGKILL the Sandbox ends at its `shutdownTime`.
+  SIGKILL, or one cut off mid-create, the Sandbox ends at its `shutdownTime`.
 - **Capacity.** It waits on room in the Legion pool without limit, as the daemon's probe does (a
   waiting attempt counts against no retry), so the caller bounds it: a CI job's timeout, or
   `timeout <duration> legion probe-boot …`.
