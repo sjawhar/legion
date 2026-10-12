@@ -5088,11 +5088,11 @@ begin carried-child
 # re-pointed to the new tree (retree_msg). Its new architect runs in child 3's own issue pod, under
 # the new tree's label, and is told the tree is carried. Once both have registered, the planner has
 # come back one of two ways (carried_child_sessions): fresh, on a new volume, after tree 1's
-# cleanup deleted the old one, and then given its phase's resume task; or on its kept session and
-# volume, when the child's launch relabelled its Sandbox before the cleanup took it. On the fresh
-# way, any of child 3's roles may be the one that finds the volume lost (store/claims.go:128-132):
-# the lost-volume lines may name the architect, the planner, or both, in either order, each at
-# most once. Tree 1's lifecycle row says its cleanup confirmed.
+# cleanup deleted the old one; or on its kept session and volume, when the child's launch
+# relabelled its Sandbox before the cleanup took it. Either way its session is given its phase's
+# resume task. On the fresh way, any of child 3's roles may be the one that finds the volume lost
+# (store/claims.go:128-132): the lost-volume lines may name the architect, the planner, or both, in
+# either order, each at most once. Tree 1's lifecycle row says its cleanup confirmed.
 # (c) Child 3 is taken out, so its pods go and re-admission finds a free slot.
 child3_planner=$(claim_token "$child3" planner)
 handed=$(log_lines "$handed_msg" | jq -c --arg issue "$child3" 'select(.issue == $issue)')
@@ -5201,8 +5201,7 @@ case $came_back in
   fresh)
     [ "$child3_volume" != "$child3_tree1_volume" ] ||
       fail "$child3's planner came back as a fresh session, yet its PVC ${found%% *} is still uid $child3_volume, the volume it had in $tree1"
-    until_true 300 "$child3's fresh planner session to be given its phase's resume task" child3_resume_given
-    came_back_note="came back as a fresh session on a new volume (uid $child3_volume; the lost-volume lines of $child3's claims: $lost3) and was given \"$resume\""
+    came_back_note="came back as a fresh session on a new volume (uid $child3_volume; the lost-volume lines of $child3's claims: $lost3)"
     ;;
   kept)
     [ "$child3_volume" = "$child3_tree1_volume" ] ||
@@ -5210,6 +5209,10 @@ case $came_back in
     came_back_note="came back on its kept session and volume (uid $child3_volume), its Sandbox relabelled for $child3 before tree 1's cleanup took it"
     ;;
 esac
+# Either way admission starts the planner in its new tree with its phase's resume task (admit's
+# startMidPhaseMembers, workflow.ResumeTask), so both ways must show it.
+until_true 300 "$child3's planner session to be given its phase's resume task" child3_resume_given
+came_back_note+=" and was given \"$resume\""
 catchup_carried() { notice_line "$child3" architect "$(notice_needle catch-up "$child3")" | grep -qE 'carried[^A-Za-z0-9]{0,4}true'; }
 until_true 300 "$child3's architect to be given a catch-up that says carried" catchup_carried
 confirmed=$(db_value "select cleanup_confirmed_at is not null from tree_lifecycles where project = '$run_label' and tree = '$tree1'") ||
