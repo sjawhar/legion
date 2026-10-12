@@ -85,7 +85,7 @@ issues you own as well as the root. An issue left at `triage` while work is unde
 Waiting for the deploy lane is not a status and is never announced.
 
 ```bash
-# PATCH /api/v1/issues/{key} — status, title, labels, priority, external links (merged by URL), route, parent
+# PATCH /api/v1/issues/{key} — status, title, labels, priority, external links (merged by URL), route, parent, blocked_by
 dispatch issue-update --issue PROJ-175 --status testing
 dispatch issue-update --issue PROJ-175 --status done --reason 'Shipped in owner/repo#7; verified on the production dashboard.'
 dispatch issue-update --issue PROJ-175 --priority 1   # 0–3; see Priority is yours to set

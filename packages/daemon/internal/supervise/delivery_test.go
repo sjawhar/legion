@@ -812,7 +812,7 @@ func TestAnOperatorsTaskSurvivesASuspensionAndGoesOnResume(t *testing.T) {
 	h.must(RequestDeliver{Claim: testToken, Task: "look at the tree"})
 	h.wantPrompts(0)
 
-	h.must(RequestSuspend{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken, By: SuspendedByOperator})
 	h.wantState(StateSuspended)
 
 	if pending := h.pending(); pending.Task != "look at the tree" {

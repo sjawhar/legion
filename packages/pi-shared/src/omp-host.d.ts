@@ -6,10 +6,16 @@ declare module "@oh-my-pi/pi-coding-agent" {
   export interface AgentRef {
     readonly id: string;
     readonly kind: AgentKind;
-    /** Null exactly when parked or aborted. */
-    readonly session: { readonly sessionManager: { getSessionId(): string } } | null;
+    /** Null exactly when parked or aborted. These are `AgentSession` getters, absent on a build
+     *  older than them. The pin's file commands and prompt templates both require descriptions. */
+    readonly session: {
+      readonly sessionManager: { getSessionId(): string };
+      readonly slashCommands?: readonly { readonly name: string; readonly description: string }[];
+      readonly promptTemplates?: readonly { readonly name: string; readonly description: string }[];
+    } | null;
     readonly sessionFile: string | null;
   }
+
   export class AgentRegistry {
     static global(): AgentRegistry;
     list(): AgentRef[];
@@ -94,4 +100,17 @@ declare module "@oh-my-pi/pi-coding-agent/mcp/config" {
 declare module "@oh-my-pi/pi-coding-agent/task/settings" {
   import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
   export const cfgTaskDisabledAgents: { get(settings: Settings): string[] };
+}
+
+/** Our fork's typed-input module (can1357/oh-my-pi#14323); a host without it fails the import. */
+declare module "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler" {
+  export interface UserInputBuiltinCommand {
+    readonly name: string;
+    /** The other names the host runs it by (`/models` for `/model`). */
+    readonly aliases: readonly string[];
+    readonly description: string;
+    /** True when only the interactive terminal runs it, so `sendUserInput` answers `terminal-only`. */
+    readonly terminalOnly: boolean;
+  }
+  export function listUserInputBuiltinCommands(): UserInputBuiltinCommand[];
 }

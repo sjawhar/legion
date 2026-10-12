@@ -1,42 +1,31 @@
 // contract_test.go drives Client against the real broker (packages/envoy's own httptest server,
 // mounted through its brokertest.NewRig) instead of client_test.go's fakeBroker: this is the
-// byte-compatibility proof for jws.go, judged by the broker's own real record.VerifyRequestObject
-// and proof.Verifier, not by a reimplementation of the wire contract by inspection. It skips
-// without BROKER_TEST_DATABASE_URL (brokertest.NewRig's own skip), except on GitHub Actions, where
-// the Tests workflow's test job sets it and a skip would hide that it stopped (newBrokerRig).
+// byte-compatibility proof for jws.go and the token login, judged by the broker's own
+// record.VerifyRequestObject, its Kubernetes token verifier against the rig's local OIDC issuer, and
+// its proof.Verifier, not by a reimplementation of the wire contract by inspection. It skips without
+// BROKER_TEST_DATABASE_URL (brokertest.NewRig's own skip), except on GitHub Actions, where the Tests
+// workflow's test job sets it and a skip would hide that it stopped (newBrokerRig).
 //
 // This is the only file in this module that imports anything under github.com/sjawhar/envoy/...:
-// that import is test-only, never leaking into the daemon's production build.
-//
-// The rig itself lives at packages/envoy/internal/broker/brokertest, duplicated verbatim from
-// Plan B's Task 4 (a sibling branch stacked on the same Plan A rig, not yet merged) — a
-// deliberate, coordinated duplication rather than an accident, since Plan B and Plan C are
-// independent siblings and neither should block on the other landing first. Whichever of the two
-// PRs merges into main second must drop its own copy of that internal package in favor of the
-// one main already carries.
-//
-// This file imports packages/envoy/brokertest instead of that internal package directly: Go's
-// internal-package rule refuses to let github.com/sjawhar/legion/daemon (this module) import
-// anything under github.com/sjawhar/envoy/internal/..., workspace-linked or not, so
-// packages/envoy/brokertest is a thin public facade added specifically to cross that boundary
-// (see its own doc comment). That facade is new, not part of Plan B's duplicated rig, and stays
-// regardless of which plan's copy of the internal rig ultimately wins.
+// that import is test-only, never leaking into the daemon's production build. It imports
+// packages/envoy/brokertest, a thin public facade over the internal rig, because Go's
+// internal-package rule refuses this module an import under github.com/sjawhar/envoy/internal/...
 package agentsecrets
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
 	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/brokertest"
 )
 
 // newBrokerRig is brokertest.NewRig, failing rather than skipping on GitHub Actions when
 // BROKER_TEST_DATABASE_URL is unset: the Tests workflow's test job names its Postgres service
-// there, and a silent skip would let both contract tests stop running unnoticed.
+// there, and a silent skip would let the contract tests stop running unnoticed.
 func newBrokerRig(t *testing.T) *brokertest.Rig {
 	t.Helper()
 	if os.Getenv("BROKER_TEST_DATABASE_URL") == "" && os.Getenv("GITHUB_ACTIONS") == "true" {
@@ -45,152 +34,174 @@ func newBrokerRig(t *testing.T) *brokertest.Rig {
 	return brokertest.NewRig(t)
 }
 
-// wireMachineLoginRecord is the small slice of POST /v1/machine-logins/lookup's response this
-// test actually reads.
-type wireMachineLoginRecord struct {
-	RecordID string `json:"record_id"`
-}
-
-// approveMachineLogin drives the human-approval half of a machine login through the real UI
-// routes exactly as packages/envoy/internal/broker/api/api_test.go's own
-// TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment does: look up the pending
-// record by its confirmation code, then approve it with the same code and the operator's login,
-// the body Dispatch's server sends.
-func approveMachineLogin(t *testing.T, rig *brokertest.Rig, code string) {
+// daemonTokenFile writes a fresh ServiceAccount token for account, living lifetime, where the
+// kubelet would project it, and returns its path.
+func daemonTokenFile(t *testing.T, rig *brokertest.Rig, account string, lifetime time.Duration) string {
 	t.Helper()
-	status, body := rig.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
-	if status != http.StatusOK {
-		t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(rig.MintAccountToken(t, account, lifetime)), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	var looked wireMachineLoginRecord
-	if err := json.Unmarshal(body, &looked); err != nil || looked.RecordID == "" {
-		t.Fatalf("decode machine-login lookup: %v (body: %s)", err, body)
-	}
-	status, body = rig.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
-		map[string]any{"approver": rig.Operator, "code": code})
-	if status != http.StatusOK {
-		t.Fatalf("approve machine login = %d: %s", status, body)
-	}
+	return path
 }
 
-// expireLauncherCredential SQL-expires the one launcher credential this test's single Login
-// minted — a fresh Rig never carries another launcher_credentials row, so this is the row's own
-// identity check rather than a lookup by key_thumbprint.
-func expireLauncherCredential(t *testing.T, rig *brokertest.Rig) {
+// count answers one count(*) query against the rig's broker database.
+func count(t *testing.T, rig *brokertest.Rig, query string) int {
 	t.Helper()
-	tag, err := rig.Store.Pool.Exec(context.Background(),
-		`update launcher_credentials set expires_at = now() - interval '1 hour'`)
-	if err != nil {
-		t.Fatalf("expire launcher credential: %v", err)
+	var n int
+	if err := rig.Store.Pool.QueryRow(context.Background(), query).Scan(&n); err != nil {
+		t.Fatalf("%s: %v", query, err)
 	}
-	if tag.RowsAffected() != 1 {
-		t.Fatalf("expire launcher credential: affected %d rows, want exactly 1 (a fresh rig mints exactly one)", tag.RowsAffected())
+	return n
+}
+
+// enrollPod enrolls a fresh pod under c, answering its enrollment.
+func enrollPod(t *testing.T, rig *brokertest.Rig, c *Client, podUID string) Enrollment {
+	t.Helper()
+	e, err := c.Enroll(context.Background(), PodEnrollment{PodUID: podUID, Thumbprint: "tp-" + podUID, PodToken: rig.MintPodToken(t, podUID)})
+	if err != nil || e.ID == "" {
+		t.Fatalf("Enroll %s = %+v, %v", podUID, e, err)
+	}
+	return e
+}
+
+// TestContractARestartedDaemonLogsInWithItsTokenAndAsksNoOne is a daemon's restart against the real
+// broker: the first boot logs in with its ServiceAccount token and enrolls a pod; the restart (a
+// new Client, as a new process, with the kubelet's next token) logs in again and enrolls a pod with
+// no machine login opened at any point, so nothing waits for a person. The broker holds the
+// account's one credential, which the restart's key now signs for: it ends the pod the first boot
+// enrolled, and the first boot's key is refused.
+func TestContractARestartedDaemonLogsInWithItsTokenAndAsksNoOne(t *testing.T) {
+	rig := newBrokerRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	first := &Client{URL: rig.URL, TokenFile: daemonTokenFile(t, rig, brokertest.DaemonAccount, time.Hour)}
+	if err := first.Start(ctx); err != nil {
+		t.Fatalf("first boot's Start: %v", err)
+	}
+	earlier := enrollPod(t, rig, first, "pod-uid-1")
+	cancel()
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	t.Cleanup(cancel2)
+	restarted := &Client{URL: rig.URL, TokenFile: daemonTokenFile(t, rig, brokertest.DaemonAccount, time.Hour)}
+	if err := restarted.Start(ctx2); err != nil {
+		t.Fatalf("restart's Start: %v", err)
+	}
+	if got := restarted.LoginStatus().State; got != "issued" {
+		t.Fatalf("after the restart: LoginStatus = %q, want issued", got)
+	}
+	enrollPod(t, rig, restarted, "pod-uid-2")
+	if err := restarted.Revoke(ctx2, earlier.ID); err != nil {
+		t.Fatalf("the restart ends the pod the first boot enrolled: %v", err)
+	}
+	if _, err := first.Enroll(ctx2, PodEnrollment{PodUID: "pod-uid-3", Thumbprint: "tp-pod-uid-3", PodToken: rig.MintPodToken(t, "pod-uid-3")}); !isNoCredential(err, "") {
+		t.Fatalf("the first boot's key after the restart = %v, want the broker's refusal", err)
+	}
+	if n := count(t, rig, `select count(*) from credential_requests`); n != 0 {
+		t.Fatalf("the broker holds %d machine-login records, want none: no person approves a token login", n)
+	}
+	if n := count(t, rig, `select count(*) from launcher_credentials`); n != 1 {
+		t.Fatalf("the broker holds %d launcher credentials, want the account's one", n)
 	}
 }
 
-// TestContractMachineLoginEnrollRevokeExpireReenroll is Task 3's whole flow, driven against a
-// real broker: Login mints a key and asks for a launcher credential; approving it through the
-// real UI routes (the operator's login and the typed code, real record.VerifyRequestObject
-// verification) moves LoginStatus to issued; Enroll registers a pod authenticated by a real k8s pod
-// token against a real local OIDC issuer (brokertest.Rig's own PodVerifier, wired in NewRig);
-// Revoke ends it and is idempotent; SQL-expiring the launcher credential and enrolling again proves
-// doProof's automatic re-login: the broker answers 401 LAUNCHER_INVALID, the client starts a fresh
-// Login, and Enroll surfaces NO_MACHINE_CREDENTIAL naming that fresh code. That second login is
-// also approved and driven to issued before the test returns, so no poll goroutine outlives it.
-func TestContractMachineLoginEnrollRevokeExpireReenroll(t *testing.T) {
-	withFastPolling(t)
+// TestContractARefusedCredentialLogsInAgain: once the broker refuses the daemon's credential (here
+// SQL-expired, as a credential the daemon could not renew in time), the next enrollment answers
+// NO_MACHINE_CREDENTIAL and the login loop logs in again with the token, after which a pod enrolls,
+// with no restart and no person.
+func TestContractARefusedCredentialLogsInAgain(t *testing.T) {
+	rig := newBrokerRig(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	c := &Client{URL: rig.URL, TokenFile: daemonTokenFile(t, rig, brokertest.DaemonAccount, time.Hour)}
+	if err := c.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rig.Store.Pool.Exec(ctx, `update launcher_credentials set expires_at = now() - interval '1 second'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Enroll(ctx, PodEnrollment{PodUID: "pod-uid-1", Thumbprint: "tp-1", PodToken: rig.MintPodToken(t, "pod-uid-1")}); !isNoCredential(err, "") {
+		t.Fatalf("Enroll with an expired credential = %v, want NO_MACHINE_CREDENTIAL", err)
+	}
+	eventually(t, func() bool {
+		_, err := c.Enroll(ctx, PodEnrollment{PodUID: "pod-uid-2", Thumbprint: "tp-2", PodToken: rig.MintPodToken(t, "pod-uid-2")})
+		return err == nil
+	}, "the login loop to log in again and a pod to enroll")
+	if n := count(t, rig, `select count(*) from credential_requests`); n != 0 {
+		t.Fatalf("the broker holds %d machine-login records, want none", n)
+	}
+}
+
+// TestContractARenewalKeepsTheCredentialAndItsPods: a renewal proves the key the credential is
+// already bound to, so the real broker keeps the credential's id and key: a pod enrolled before the
+// renewal is still the daemon's to end after it, a proof signed before the renewal still
+// authenticates, and the broker holds one credential throughout.
+func TestContractARenewalKeepsTheCredentialAndItsPods(t *testing.T) {
 	rig := newBrokerRig(t)
 	ctx := context.Background()
-	client := &Client{URL: rig.URL}
-
-	code, err := client.Login(ctx)
+	c := &Client{URL: rig.URL, TokenFile: daemonTokenFile(t, rig, brokertest.DaemonAccount, time.Hour)}
+	first, err := c.Login(ctx)
 	if err != nil {
-		t.Fatalf("Login: %v", err)
+		t.Fatal(err)
 	}
-	approveMachineLogin(t, rig, code)
-	eventually(t, func() bool { return client.LoginStatus().State == "issued" },
-		"LoginStatus reaches issued after approval")
-
-	podToken := rig.MintPodToken(t, "pod-uid-1")
-	enr, err := client.Enroll(ctx, PodEnrollment{PodUID: "pod-uid-1", Thumbprint: "tp-pod-1", PodToken: podToken})
+	before := c.cred.Load()
+	enrolled := enrollPod(t, rig, c, "pod-uid-1")
+	time.Sleep(10 * time.Millisecond)
+	// The kubelet's next token, which outlives the first, so the renewed credential expires later.
+	c.TokenFile = daemonTokenFile(t, rig, brokertest.DaemonAccount, time.Hour+30*time.Second)
+	renewed, err := c.Login(ctx)
 	if err != nil {
-		t.Fatalf("Enroll: %v", err)
+		t.Fatal(err)
 	}
-	if enr.ID == "" {
-		t.Fatalf("Enroll returned an empty enrollment id")
+	after := c.cred.Load()
+	if after.id != before.id || after.key != before.key || !renewed.After(first) {
+		t.Fatalf("renewal moved the credential from %s to %s (same key %v), expiry %v to %v; want the same credential, later", before.id, after.id, after.key == before.key, first, renewed)
 	}
-
-	if err := client.Revoke(ctx, enr.ID); err != nil {
-		t.Fatalf("Revoke: %v", err)
+	c.cred.Store(before)
+	if err := c.Revoke(ctx, enrolled.ID); err != nil {
+		t.Fatalf("a proof under the credential as it was before the renewal: %v", err)
 	}
-	if err := client.Revoke(ctx, enr.ID); err != nil {
-		t.Fatalf("Revoke (idempotent retry of an already-revoked enrollment): %v", err)
+	if n := count(t, rig, `select count(*) from launcher_credentials`); n != 1 {
+		t.Fatalf("the broker holds %d launcher credentials, want the account's one", n)
 	}
-
-	expireLauncherCredential(t, rig)
-
-	podToken2 := rig.MintPodToken(t, "pod-uid-2")
-	_, err = client.Enroll(ctx, PodEnrollment{PodUID: "pod-uid-2", Thumbprint: "tp-pod-2", PodToken: podToken2})
-	var apiErr *APIError
-	if !errors.As(err, &apiErr) || apiErr.Code != "NO_MACHINE_CREDENTIAL" {
-		t.Fatalf("Enroll (after the launcher credential expired) = %v, want *APIError{Code: NO_MACHINE_CREDENTIAL}", err)
-	}
-	newState := client.LoginStatus()
-	if newState.State != "pending" {
-		t.Fatalf("LoginStatus (after the automatic re-login) = %+v, want State=pending", newState)
-	}
-	if newState.Code == code {
-		t.Fatalf("LoginStatus (after the automatic re-login) reused the original code %q, want a fresh one", code)
-	}
-
-	// Resolve the second login before returning: an unresolved pending login's poll goroutine
-	// would otherwise keep running past this test (context.Background(), no terminal state),
-	// racing withFastPolling's own t.Cleanup restore of the shared backoff variables — the exact
-	// hazard client_test.go's TestExpiredCredentialTriggersAFreshLoginWithANewKey documents and
-	// guards against the same way.
-	approveMachineLogin(t, rig, newState.Code)
-	eventually(t, func() bool { return client.LoginStatus().State == "issued" },
-		"LoginStatus reaches issued after the second approval")
 }
 
-// TestContractADeniedBootLoginIsRetriedByTheNextEnrollment drives the retry against the real
-// broker: the boot login is denied through the real UI deny route, the next Enroll starts a fresh
-// login with a new code (answering NO_MACHINE_CREDENTIAL that names it), and once that code is
-// approved the pod enrolls, with no restart.
-func TestContractADeniedBootLoginIsRetriedByTheNextEnrollment(t *testing.T) {
-	withFastPolling(t)
-	withLoginRetry(t, 0, 0)
+// TestContractOnlyTheListedAccountWithALiveTokenLogsIn: a token for an account the broker does not
+// list is refused ACCOUNT_NOT_LISTED and an expired token TOKEN_EXPIRED, each a failed login and no
+// credential; once BROKER_SERVICE_LOGINS drops the daemon's own account, its live credential stops
+// authenticating and its next login is refused.
+func TestContractOnlyTheListedAccountWithALiveTokenLogsIn(t *testing.T) {
 	rig := newBrokerRig(t)
 	ctx := context.Background()
-	client := &Client{URL: rig.URL}
+	for _, c := range []struct {
+		name, account string
+		lifetime      time.Duration
+		code          string
+	}{
+		{"an unlisted account", "system:serviceaccount:legion-system:someone-else", time.Hour, "ACCOUNT_NOT_LISTED"},
+		{"an expired token", brokertest.DaemonAccount, -time.Minute, "TOKEN_EXPIRED"},
+	} {
+		client := &Client{URL: rig.URL, TokenFile: daemonTokenFile(t, rig, c.account, c.lifetime)}
+		_, err := client.Login(ctx)
+		var api *APIError
+		if !errors.As(err, &api) || api.Code != c.code || client.LoginStatus().State != "failed" {
+			t.Fatalf("%s: Login = %v, state %q; want %s and failed", c.name, err, client.LoginStatus().State, c.code)
+		}
+	}
 
-	code, err := client.Login(ctx)
-	if err != nil {
-		t.Fatalf("Login: %v", err)
+	c := &Client{URL: rig.URL, TokenFile: daemonTokenFile(t, rig, brokertest.DaemonAccount, time.Hour)}
+	if _, err := c.Login(ctx); err != nil {
+		t.Fatal(err)
 	}
-	status, body := rig.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
-	var looked wireMachineLoginRecord
-	if err := json.Unmarshal(body, &looked); status != http.StatusOK || err != nil || looked.RecordID == "" {
-		t.Fatalf("POST /v1/machine-logins/lookup = %d %s (%v)", status, body, err)
+	enrollPod(t, rig, c, "pod-uid-1")
+	rig.DropServiceLogin(brokertest.DaemonAccount)
+	if _, err := c.Enroll(ctx, PodEnrollment{PodUID: "pod-uid-2", Thumbprint: "tp-2", PodToken: rig.MintPodToken(t, "pod-uid-2")}); !isNoCredential(err, "") {
+		t.Fatalf("Enroll once the account is unlisted = %v, want the broker's refusal", err)
 	}
-	if status, body := rig.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/deny",
-		map[string]any{"approver": rig.Operator, "code": code}); status != http.StatusOK {
-		t.Fatalf("deny the boot login = %d: %s", status, body)
-	}
-	eventually(t, func() bool { return client.LoginStatus().State == "denied" }, "the boot login to read denied")
-
-	podToken := rig.MintPodToken(t, "pod-uid-1")
-	pod := PodEnrollment{PodUID: "pod-uid-1", Thumbprint: "tp-pod-1", PodToken: podToken}
-	_, err = client.Enroll(ctx, pod)
-	var apiErr *APIError
-	retried := client.LoginStatus()
-	if !errors.As(err, &apiErr) || apiErr.Code != "NO_MACHINE_CREDENTIAL" || retried.State != "pending" || retried.Code == code {
-		t.Fatalf("Enroll after the denial = %v, login %+v; want NO_MACHINE_CREDENTIAL and a fresh pending code, not %q", err, retried, code)
-	}
-	approveMachineLogin(t, rig, retried.Code)
-	eventually(t, func() bool { return client.LoginStatus().State == "issued" }, "the retried login to read issued")
-	enr, err := client.Enroll(ctx, pod)
-	if err != nil || enr.ID == "" {
-		t.Fatalf("Enroll after the retried login was approved = %+v, %v; want an enrollment", enr, err)
+	_, err := c.Login(ctx)
+	var api *APIError
+	if !errors.As(err, &api) || api.Code != "ACCOUNT_NOT_LISTED" {
+		t.Fatalf("Login once the account is unlisted = %v, want ACCOUNT_NOT_LISTED", err)
 	}
 }

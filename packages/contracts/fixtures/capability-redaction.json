@@ -1,4 +1,5 @@
 {
+  "note": "Go's (?i) folds U+212A (Kelvin sign) and U+017F (long s) to k and s, where JavaScript's /i does not, so on a detail holding either the daemon masks more than the plugin, by design: the daemon's cleaning is the one the store and the state keep. No case here holds either.",
   "patterns": [
     {
       "pattern": "url-userinfo",
@@ -32,9 +33,45 @@
     },
     {
       "pattern": "query-credential",
+      "name": "more credential parameters, camelCase among them",
+      "detail": "GET https://git.example/api/v4/projects?private_token=pt&auth_token=at2&accessToken=ct&Signature=sg&X-Goog-Signature=gs&page=2: 401",
+      "want": "GET https://git.example/api/v4/projects?private_token=***&auth_token=***&accessToken=***&Signature=***&X-Goog-Signature=***&page=2: 401"
+    },
+    {
+      "pattern": "query-credential",
       "name": "a value up to the quote that closes its URL",
       "detail": "connect \"https://mcp.example/sse?token=abc123\" failed",
       "want": "connect \"https://mcp.example/sse?token=***\" failed"
+    },
+    {
+      "pattern": "connection-string-password",
+      "name": "an unquoted password",
+      "detail": "connect host=db.example user=legion password=pgSecret123 dbname=legion: refused",
+      "want": "connect host=db.example user=legion password=*** dbname=legion: refused"
+    },
+    {
+      "pattern": "connection-string-password",
+      "name": "a quoted password, its quotes kept",
+      "detail": "connect host=db.example password='pg secret' dbname=legion: refused",
+      "want": "connect host=db.example password='***' dbname=legion: refused"
+    },
+    {
+      "pattern": "connection-string-password",
+      "name": "a quoted password with a comma glued to its closing quote",
+      "detail": "connect(host='db', password='hunter2', port=5432)",
+      "want": "connect(host='db', password='***', port=5432)"
+    },
+    {
+      "pattern": "connection-string-password",
+      "name": "a quoted password holding an escaped quote",
+      "detail": "connect host=db password='pg\\'secret' dbname=legion",
+      "want": "connect host=db password='***' dbname=legion"
+    },
+    {
+      "pattern": "connection-string-password",
+      "name": "a quoted password never closed, to the end of the detail",
+      "detail": "connect host=db password='pgsecret dbname=legion",
+      "want": "connect host=db password='***"
     },
     {
       "pattern": "authorization-header",
@@ -97,10 +134,70 @@
       "want": "map[Accept:[*/*] Authorization:[Basic ***]]"
     },
     {
+      "pattern": "authorization-header",
+      "name": "an escaped JSON header",
+      "detail": "body {\\\"Authorization\\\":\\\"Basic dXNlcjpwYXNz\\\"}",
+      "want": "body {\\\"Authorization\\\":\\\"Basic ***\\\"}"
+    },
+    {
+      "pattern": "authorization-header",
+      "name": "an escaped quote inside a quoted value",
+      "detail": "{\"Authorization\":\"Digest username=\\\"bob\\\", response=\\\"6629fae49393a05397450978507c4ef1\\\"\"}",
+      "want": "{\"Authorization\":\"Digest ***\"}"
+    },
+    {
       "pattern": "api-key-header",
       "name": "an x-api-key header",
       "detail": "x-api-key: abc123secret rejected",
       "want": "x-api-key: *** rejected"
+    },
+    {
+      "pattern": "api-key-header",
+      "name": "an x-goog-api-key header",
+      "detail": "x-goog-api-key: gkSecret123 rejected",
+      "want": "x-goog-api-key: *** rejected"
+    },
+    {
+      "pattern": "api-key-header",
+      "name": "an api-key header",
+      "detail": "api-key: azureSecret123 rejected",
+      "want": "api-key: *** rejected"
+    },
+    {
+      "pattern": "api-key-header",
+      "name": "an Ocp-Apim-Subscription-Key header",
+      "detail": "Ocp-Apim-Subscription-Key: 0123abcdSecret rejected",
+      "want": "Ocp-Apim-Subscription-Key: *** rejected"
+    },
+    {
+      "pattern": "api-key-header",
+      "name": "an X-Subscription-Token header",
+      "detail": "X-Subscription-Token: braveSecret123 rejected",
+      "want": "X-Subscription-Token: *** rejected"
+    },
+    {
+      "pattern": "api-key-header",
+      "name": "an escaped JSON x-api-key header",
+      "detail": "{\\\"x-api-key\\\":\\\"jsonSecret123\\\"}",
+      "want": "{\\\"x-api-key\\\":\\\"***\\\"}"
+    },
+    {
+      "pattern": "json-member",
+      "name": "an api_key member",
+      "detail": "{\"api_key\":\"jsonSecret123\",\"model\":\"x\"}",
+      "want": "{\"api_key\":\"***\",\"model\":\"x\"}"
+    },
+    {
+      "pattern": "json-member",
+      "name": "an access_token member",
+      "detail": "{\"access_token\":\"atSecret123\",\"token_type\":\"bearer\"}",
+      "want": "{\"access_token\":\"***\",\"token_type\":\"bearer\"}"
+    },
+    {
+      "pattern": "json-member",
+      "name": "an escaped JSON member",
+      "detail": "{\\\"api_key\\\":\\\"jsonSecret123\\\"}",
+      "want": "{\\\"api_key\\\":\\\"***\\\"}"
     },
     {
       "pattern": "bearer",
@@ -157,22 +254,76 @@
       "want": "token *** expired"
     },
     {
-      "pattern": "provider-key",
-      "name": "a model provider key (sk-)",
-      "detail": "401 invalid api key sk-proj-EXAMPLEkey0123456789abcdefgh",
-      "want": "401 invalid api key sk-***"
-    },
-    {
       "pattern": "jwt",
       "name": "a JWT right after a colon",
       "detail": "kubectl: invalid token:eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl",
       "want": "kubectl: invalid token:***"
     },
     {
-      "pattern": "dispatch-token",
+      "pattern": "jwt",
+      "name": "a JWT after a percent-encoded quote",
+      "detail": "redirect=%22eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl%22 refused",
+      "want": "redirect=%22***%22 refused"
+    },
+    {
+      "pattern": "jwt",
+      "name": "a JWT in a percent-encoded query",
+      "detail": "next=https%3A%2F%2Fapp.example%2Fcb%3Ftoken%3DeyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl failed",
+      "want": "next=https%3A%2F%2Fapp.example%2Fcb%3Ftoken%3D*** failed"
+    },
+    {
+      "pattern": "jwt",
+      "name": "a JWT in a percent-encoded Authorization header",
+      "detail": "header=Authorization%3A%20Bearer%20eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl",
+      "want": "header=Authorization%3A%20Bearer%20***"
+    },
+    {
+      "pattern": "jwt",
+      "name": "a JWT after a JSON-escaped quote",
+      "detail": "{\\u0022token\\u0022:\\u0022eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl\\u0022}",
+      "want": "{\\u0022token\\u0022:\\u0022***\\u0022}"
+    },
+    {
+      "pattern": "prefixed-token",
+      "name": "a model provider key (sk-)",
+      "detail": "401 invalid api key sk-proj-EXAMPLEkey0123456789abcdefgh",
+      "want": "401 invalid api key sk-***"
+    },
+    {
+      "pattern": "prefixed-token",
       "name": "a Dispatch agent token (dsp_)",
       "detail": "dispatch: token dsp_EXAMPLEtoken0123456789abcdefghijklmnopqrstu revoked",
       "want": "dispatch: token dsp_*** revoked"
+    },
+    {
+      "pattern": "prefixed-token",
+      "name": "a Google OAuth access token (ya29.)",
+      "detail": "google: 401 for ya29.a0AfH6SMBexampleToken0123456789abc",
+      "want": "google: 401 for ya29.***"
+    },
+    {
+      "pattern": "prefixed-token",
+      "name": "a Slack token (xoxb-)",
+      "detail": "slack: invalid_auth (xoxb-EXAMPLE-not-a-real-token-0000)",
+      "want": "slack: invalid_auth (xoxb-***)"
+    },
+    {
+      "pattern": "prefixed-token",
+      "name": "a GitLab personal access token (glpat-)",
+      "detail": "gitlab: 401 for glpat-EXAMPLEtoken0123456789ab",
+      "want": "gitlab: 401 for glpat-***"
+    },
+    {
+      "pattern": "prefixed-token",
+      "name": "an npm token (npm_)",
+      "detail": "npm ERR! 401 token npm_EXAMPLEtoken0123456789abcdefghijklmnop",
+      "want": "npm ERR! 401 token npm_***"
+    },
+    {
+      "pattern": "google-api-key",
+      "name": "a Google API key (AIza)",
+      "detail": "maps: key AIzaSyEXAMPLEkey0123456789abcdefghijklm is invalid",
+      "want": "maps: key AIza*** is invalid"
     },
     {
       "pattern": "aws-access-key-id",
@@ -201,6 +352,12 @@
     {
       "pattern": "cleanup",
       "name": "a C1 control character inside a credential",
+      "detail": "GET https://api.example/v1?key=ab\u009ccd&q=1 failed",
+      "want": "GET https://api.example/v1?key=***&q=1 failed"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside a credential",
       "detail": "GET https://api.example/v1?key=ab\u009bcd&q=1 failed",
       "want": "GET https://api.example/v1?key=***&q=1 failed"
     },
@@ -209,6 +366,318 @@
       "name": "a Unicode space and a next line, each a delimiter",
       "detail": "401:\u0085invalid Bearer\u2003abc123 for mcp.example",
       "want": "401: invalid Bearer *** for mcp.example"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT right after a control character, which the second pass finds",
+      "detail": "token\u001beyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token in an ANSI colour sequence",
+      "detail": "token \u001b[1mghp_EXAMPLEtoken0123456789abcdefghijklmn\u001b[0m expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT in an ANSI colour sequence",
+      "detail": "token \u001b[31meyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl\u001b[0m expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "an AWS key id in an ANSI colour sequence",
+      "detail": "AccessDenied: \u001b[33mAKIAIOSFODNN7EXAMPLE\u001b[0m is not authorized",
+      "want": "AccessDenied: AKIA*** is not authorized"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour reset inside an AWS key id",
+      "detail": "AccessDenied: AKIAIOSFOD\u001b[0mNN7EXAMPLE is not authorized",
+      "want": "AccessDenied: AKIA*** is not authorized"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside an AWS key id",
+      "detail": "session ASIAIOSFOD\u009bNN7EXAMPLE expired",
+      "want": "session ASIA*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token in the C1 form of a colour sequence",
+      "detail": "token \u009b1mghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a bearer credential after a colour sequence",
+      "detail": "401: Bearer \u001b[1mabc123secret\u001b[0m",
+      "want": "401: Bearer ***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "an x-api-key value after a colour sequence",
+      "detail": "x-api-key: \u001b[33mabc123secret\u001b[0m rejected",
+      "want": "x-api-key: *** rejected"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token right after an unterminated ESC [, which reads as a sequence ending in its first letter",
+      "detail": "token \u001b[ghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token hp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token right after an unterminated C1 sequence",
+      "detail": "token \u009bghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token hp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT right after an unterminated ESC [",
+      "detail": "token \u001b[eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT right after an unterminated ESC [, with a C1 sequence introducer inside it",
+      "detail": "token \u001b[eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0\u009bZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT right after an unterminated ESC [, with a C1 sequence introducer right before a dot",
+      "detail": "token \u001b[eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ\u009b.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT right after a replacement character, with a C1 control in its second segment",
+      "detail": "token \ufffdeyJhbGciOiJSUzI1NiJ9.eyJzdWIiOi\u0090JzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT right after a replacement character, with a BEL in its third segment",
+      "detail": "token \ufffdeyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbm\u0007F0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT right after an unterminated ESC [, with a C1 sequence introducer in its first segment",
+      "detail": "token \u001b[eyJhbGci\u009bOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT right after ESC [5@, with a C1 sequence introducer in its first segment",
+      "detail": "token \u001b[5@eyJhbGci\u009bOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "an AWS key id right after an unterminated ESC [",
+      "detail": "AccessDenied: \u001b[AKIAIOSFODNN7EXAMPLE is not authorized",
+      "want": "AccessDenied: KIA*** is not authorized"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a provider key right after an unterminated ESC [",
+      "detail": "401 invalid api key \u001b[sk-proj-EXAMPLEkey0123456789abcdefgh",
+      "want": "401 invalid api key k-***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token after an unterminated ESC [ with a parameter and a space",
+      "detail": "token \u001b[0 ghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "an Authorization header right after an unterminated ESC [",
+      "detail": "req \u001b[ Authorization: Basic dXNlcjpwYXNz",
+      "want": "req Authorization: Basic ***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a quoted bearer credential right after an unterminated ESC [",
+      "detail": "\u001b[\"Bearer abcdefSecret\"]",
+      "want": "earer ***\"]"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a query credential right after an unterminated ESC [",
+      "detail": "GET /x\u001b[?token=qSecret123 401",
+      "want": "GET /x oken=*** 401"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token glued to an ESC [ parameter",
+      "detail": "token \u001b[1ghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token hp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a bearer credential glued to an ESC [ parameter",
+      "detail": "401: \u001b[0Bearer abc123secret",
+      "want": "401: earer ***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT glued to an ESC [ parameter",
+      "detail": "token \u001b[1eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token right after an erase-line sequence",
+      "detail": "token \u001b[Kghp_EXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token as grep --color=always prints it",
+      "detail": "token \u001b[01;31m\u001b[Kghp_\u001b[m\u001b[KEXAMPLEtoken0123456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a GitHub token grep coloured in the middle",
+      "detail": "token ghp_EXAMPLEtoken0123456789\u001b[01;31m\u001b[Kabcdefghijklmn\u001b[m\u001b[K expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "an AWS key id grep coloured on its prefix",
+      "detail": "id \u001b[01;31m\u001b[KAKIA\u001b[m\u001b[KIOSFODNN7EXAMPLE x",
+      "want": "id AKIA*** x"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "an AWS key id grep coloured in the middle",
+      "detail": "AccessDenied: AKIAIOSF\u001b[01;31m\u001b[KODNN7\u001b[m\u001b[KEXAMPLE is not authorized",
+      "want": "AccessDenied: AKIA*** is not authorized"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour sequence inside a GitHub token, early",
+      "detail": "ghp_EXAMPLEtok\u001b[1men0123456789abcdefghijk",
+      "want": "ghp_***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour reset inside a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123456789abcd\u001b[0mefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour sequence with several parameters inside a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123456789abcdef\u001b[38;5;196mghijklmn\u001b[0m expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a control sequence ending in a non-letter inside a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123456789\u001b[5@abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a control sequence ending in a tilde inside a bearer credential",
+      "detail": "401: Bearer abc123\u001b[1~secretTail rejected",
+      "want": "401: Bearer *** rejected"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour reset right after a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123456789abcdefghijklmn\u001b[0m expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour reset inside a JWT's signature",
+      "detail": "token eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbm\u001b[0mF0dXJlSECRET expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour sequence inside a bearer credential",
+      "detail": "401: Bearer abc123\u001b[1msecretTail rejected",
+      "want": "401: Bearer *** rejected"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour sequence inside an x-api-key value",
+      "detail": "x-api-key: abc123\u001b[1msecretTail rejected",
+      "want": "x-api-key: *** rejected"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a colour reset inside a provider key",
+      "detail": "key sk-proj-EXAMPLEkey0123456789ab\u001b[0mcdefghSECRET",
+      "want": "key sk-***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside a bearer credential",
+      "detail": "401 invalid Bearer abc123\u009bsecret456",
+      "want": "401 invalid Bearer ***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123456789abcdef\u009bghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a replacement character, as an invalid UTF-8 byte decodes, inside a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123\ufffd456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside a JWT",
+      "detail": "token eyJhbGciOiJSUzI1NiJ9.eyJzdWIi\u009bOiJzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer early in a GitHub token",
+      "detail": "token ghp_EXAMPLEtok\u009ben0123456789abcdefghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer before digits inside a provider key, each digit counted",
+      "detail": "key sk-EXAMPLEkey01\u009b23456789abcdef end",
+      "want": "key sk-*** end"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer early in a bearer credential",
+      "detail": "Bearer abc\u009bdefSecret0123 end",
+      "want": "Bearer *** end"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 sequence introducer inside a Google API key",
+      "detail": "maps AIzaSyEXAMPLEkey01\u009b23456789abcdefghijklm x",
+      "want": "maps AIza*** x"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a C1 colour sequence between an Authorization label and its value",
+      "detail": "Authorization:\u009b1mBearer abcSecret",
+      "want": "Authorization:***"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "rules that run until nothing changes: a userinfo the Authorization rule opens",
+      "detail": "http://Authorization:a/b)@h",
+      "want": "http://***@h"
     },
     {
       "pattern": "cleanup",
@@ -223,6 +692,48 @@
       "pad": 1022,
       "detail": "€",
       "want": ""
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a header label the cut leaves without its value, dropped back to the label",
+      "pad": 1000,
+      "detail": " Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789",
+      "want": " Authorization:"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a redacted query value the cut leaves partial, dropped",
+      "pad": 1014,
+      "detail": " ?token=abcdef",
+      "want": ""
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a cut right after a space, without the space",
+      "pad": 1023,
+      "detail": " bbbb",
+      "want": ""
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a quoted password before the cut, kept with the text after it",
+      "pad": 980,
+      "detail": " connect(password='x') bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "want": " connect(password='***') bbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a userinfo the Authorization rule opens, before the cut, kept with the words after it",
+      "pad": 1000,
+      "detail": " http://Authorization:a/b)@h word word word word word",
+      "want": " http://***@h word word"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "one word the cut leaves partial, trimmed by characters, never to nothing",
+      "pad": 1015,
+      "detail": "?token=abcdef",
+      "want": "?token="
     },
     {
       "pattern": "none",
@@ -266,6 +777,43 @@
       "upstream": "failed: AKIAIOSFODNN7EXAMPLE is not authorized to invoke the server",
       "credential": "IOSFODNN7EXAMPLE",
       "redacted": "failed: AKIA*** is not authorized to invoke the server"
+    }
+  ],
+  "linear": [
+    {
+      "name": "a value run, then a JWT start after a replacement character",
+      "unit": "abcdefgh\ufffdeyJ"
+    },
+    {
+      "name": "a value run, then a JWT start after an unterminated ESC [",
+      "unit": "abcdefgh\u001b[eyJ"
+    },
+    {
+      "name": "a value run, then a JWT start after a C1 sequence introducer",
+      "unit": "abcdefgh\u009beyJ"
+    },
+    {
+      "name": "a value run, then a JWT start after an ESC [ parameter",
+      "unit": "abcdefgh\u001b[1eyJ"
+    },
+    { "name": "a JWT start before each replacement character", "unit": "eyJ\ufffd" },
+    { "name": "a JWT start before each C1 sequence introducer", "unit": "eyJ\u009b" },
+    {
+      "name": "a JWT start after each complete sequence ending in a non-word byte",
+      "unit": "eyJ\u001b[~"
+    },
+    { "name": "a JWT start after each unterminated ESC [", "unit": "eyJ\u001b[" },
+    {
+      "name": "a JWT start after each \\uXXXX escape whose backslash closes an ESC [",
+      "unit": "\u001b[\\u0022eyJ"
+    },
+    {
+      "name": "a JWT start after each held character, its first segment ended by a dot and its second by a non-value byte",
+      "unit": "\u0007eyJabcdefgh.abcdefghijklmnopqrstuvwxyzabcd!"
+    },
+    {
+      "name": "a JWT start after each unterminated ESC [, its first segment crossing a C1 sequence introducer",
+      "unit": "\u001b[eyJab\u009bcdefgh"
     }
   ]
 }

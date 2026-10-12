@@ -56,6 +56,11 @@
   such a document from the list alone (LEGION-481). The dashboard's issue Artifacts tab and project
   Documents tab show each document's latest size beside its kind, and a document's version list
   shows every version's.
+- The conversation view (`/agents/<id>/live`) completes `/` from the session's commands in Send
+  and Aside: built-ins, extension/custom/skill commands, file commands and prompt templates. It
+  ranks prefix matches first, puts terminal-only rows last and never offers a list in BTW or when
+  the session sent none. Picking runs the command as if typed at the session's terminal; output,
+  or why a terminal-only command did not run, is the session's Reply via Dispatch (LEGION-394).
 - A person lists and ends their own machines' logins and their live grants from their own shell.
   `agent-secrets machine list` and `machine revoke ID`, and `agent-secrets grant list` and
   `grant revoke ID`, call four new broker routes, `GET /v1/operator/machines`,
@@ -543,9 +548,9 @@
   session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
   person's message that an Oh My Pi session took as its own user turn shows once, where the
   session took it, still naming its author, and only when the streamed text is the stored one;
-  one the session took between a run's last queue or aside poll and its `agent_end` reaches the
-  stream untagged and shows twice (`packages/pi-envoy/AGENTS.md`). The Agents page shows an
-  attempt the session accepted as delivered to the session's
+  on a host without `pi.sendUserInput`, one the session took between a run's last queue or aside
+  poll and its `agent_end` reaches the stream untagged and shows twice
+  (`packages/pi-envoy/AGENTS.md`). The Agents page shows an attempt the session accepted as
   conversation, with no retry, even after a later `failed`; every other attempt keeps its states
   (LEGION-394). Every label the dashboard composes for a mode now uses the composer's names (Send,
   Aside, BTW), the card's mode-change buttons included ("Use BTW instead", "Use Send instead",

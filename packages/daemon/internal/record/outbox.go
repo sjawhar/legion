@@ -220,6 +220,10 @@ type SuperviseRequest struct {
 	// re-admitted tree's promotion gives a mid-phase child: a claim that already holds a task for
 	// the same generation and phase is given it once it is ready, so the start delivers none.
 	ResumeTask bool `json:"resumeTask,omitempty"`
+	// RuleResume marks the boot's resume-by-rule start. If its resumed claim spends its launch
+	// budget, the runner finishes this row rather than retrying it as RequestRetry with fresh
+	// budgets: the failed claim stays failed for the boot report to name.
+	RuleResume bool `json:"ruleResume,omitempty"`
 	// Quiesce is the role whose phase a start takes over without that role's completion: CI settled
 	// red while it tested, or reviewed a round it had not completed (workflow's TriggerChecksRed). The
 	// start acts only once that role's claim is out of its turn (supervise.Machine.Quiesce), so the

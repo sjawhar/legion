@@ -441,7 +441,7 @@ func TestAStartOnALingeringTreeResumesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	machine, _, err := sup.Create(ctx, supervise.Claim{Token: token, Project: "legion", Tree: root.Key, Issue: child.Key, Role: claim.RoleTester, Generation: 1,
-		State: supervise.StateSuspended, Session: "ses_tester", SessionFile: "/sessions/tester.jsonl"}, "")
+		State: supervise.StateSuspended, SuspendedBy: supervise.SuspendedByDaemon, Session: "ses_tester", SessionFile: "/sessions/tester.jsonl"}, "")
 	if err != nil {
 		t.Fatal(err)
 	}

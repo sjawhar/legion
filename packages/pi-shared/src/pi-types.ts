@@ -186,6 +186,20 @@ export interface ContextEventResult {
   readonly messages?: readonly unknown[];
 }
 
+/** Text about to run as typed input: typed at the terminal, an RPC prompt, or `sendUserInput`. */
+export interface InputEvent {
+  readonly text: string;
+  readonly images?: readonly ImageContent[];
+  readonly source: "interactive" | "rpc" | "extension";
+}
+
+/** A handler may consume the text, or replace its text or images for every later step. */
+export interface InputEventResult {
+  readonly handled?: boolean;
+  readonly text?: string;
+  readonly images?: readonly ImageContent[];
+}
+
 /**
  * Payload and result type of every host event these extensions subscribe to.
  * OMP declares `on` as one overload per event name; mirroring that here keeps a
@@ -214,6 +228,8 @@ export interface PiEventContract {
   readonly message_end: { readonly event: MessageStartEvent; readonly result: undefined };
   /** Every provider request the session's agent loop sends, each turn and each tool round. */
   readonly context: { readonly event: ContextEvent; readonly result: ContextEventResult };
+  /** Every input before it runs: the host's typed-input ingress, `sendUserInput` included. */
+  readonly input: { readonly event: InputEvent; readonly result: InputEventResult };
   readonly session_stop: {
     readonly event: SessionStopEvent;
     readonly result: SessionStopEventResult;
@@ -342,6 +358,25 @@ export type MessageRenderer = (
 
 export type { ExtensionAgentsApi };
 
+/**
+ * What `sendUserInput` did with its text: `prompt` and `skill` submitted a message carrying the
+ * caller's tag; `command` ran something locally (`agentInvoked` says it started a turn without a
+ * message, as `/retry` does); `terminal-only` is a built-in only the interactive terminal runs
+ * (`/new`, `/resume`), and nothing ran; `unavailable` is a host mode that does not wire the method,
+ * or a guest in a shared session, and nothing ran. `output` is what a built-in printed, on a
+ * `command` or on the `prompt` it then submitted (`/force:<tool> <prompt>`).
+ */
+export interface UserInputResult {
+  readonly handled: "prompt" | "command" | "skill" | "terminal-only" | "unavailable";
+  readonly output?: string;
+  readonly agentInvoked?: boolean;
+}
+
+export interface HostSlashCommand {
+  readonly name: string;
+  readonly description?: string;
+  readonly source: "extension" | "prompt" | "skill";
+}
 export interface PiApi {
   readonly zod: PiZod;
   readonly agents?: ExtensionAgentsApi;
@@ -365,6 +400,21 @@ export interface PiApi {
     content: string | readonly ContentBlock[],
     options?: { readonly deliverAs: "aside" }
   ) => void;
+  /**
+   * Runs text as if typed at the session's own terminal: a built-in its host can run headless, an
+   * extension or custom command, a file command or prompt template, and `/skill:<name>`; any other
+   * text goes to the model as a prompt. `tag` is recorded on the message the input submits and
+   * seen again on its `message_start`. Our Oh My Pi fork carries it (can1357/oh-my-pi#14323); a host
+   * without it has no such member. On an idle session it resolves only once the run it started
+   * ends, so a caller that must keep taking messages never awaits it in line.
+   */
+  readonly sendUserInput?: (
+    text: string,
+    options?: { readonly deliverAs?: "aside"; readonly tag?: string }
+  ) => Promise<UserInputResult>;
+  /** The session's extension, custom and skill slash commands (`skill:<name>`), never its
+   *  built-ins. Every Oh My Pi build has it; Legion's own test hosts leave it out. */
+  readonly getCommands?: () => readonly HostSlashCommand[];
   /** Persist extension state in the session transcript; never sent to the model. */
   readonly appendEntry: <T = unknown>(customType: string, data?: T) => void;
   /**

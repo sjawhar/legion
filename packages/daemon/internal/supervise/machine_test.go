@@ -358,7 +358,7 @@ func TestSuspendKeepsTheSessionAndDropsTheLocator(t *testing.T) {
 			h.reach(state)
 			loc := h.locator()
 
-			request := RequestSuspend{Claim: testToken, Reason: "LEGION-208 left implementing"}
+			request := RequestSuspend{Claim: testToken, Reason: "LEGION-208 left implementing", By: SuspendedByDaemon}
 			if state != StateWorking {
 				h.must(request)
 			} else if err := h.handle(request); !errors.Is(err, ErrSuspendHeld) {
@@ -375,11 +375,11 @@ func TestSuspendKeepsTheSessionAndDropsTheLocator(t *testing.T) {
 			}
 			h.wantState(StateSuspended)
 			c := h.claim()
-			if c.Locator != nil || c.SessionFile != sessionFile || c.Session != session {
-				t.Errorf("suspended claim %+v, want no locator and the session kept", c)
+			if c.Locator != nil || c.SessionFile != sessionFile || c.Session != session || c.SuspendedBy != SuspendedByDaemon {
+				t.Errorf("suspended claim %+v, want no locator, the session kept, and the daemon recorded as who suspended it", c)
 			}
-			if stored := h.store.load(testToken); stored.State != StateSuspended || stored.Locator != nil {
-				t.Errorf("stored %+v, want the suspension persisted", stored)
+			if stored := h.store.load(testToken); stored.State != StateSuspended || stored.Locator != nil || stored.SuspendedBy != SuspendedByDaemon {
+				t.Errorf("stored %+v, want the suspension and its source persisted", stored)
 			}
 			if state == StateWorking && c.Pending != nil {
 				t.Errorf("pending %+v, want the turn's delivery retired", c.Pending)
@@ -394,7 +394,7 @@ func TestASuspendThatFailsChangesNothing(t *testing.T) {
 	loc := h.locator()
 	h.rt.FailSuspend(errBoom)
 
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, errBoom) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByOperator}); !errors.Is(err, errBoom) {
 		t.Fatalf("suspend returned %v, want the runtime's error", err)
 	}
 	h.wantState(StateIdle)
@@ -409,7 +409,7 @@ func TestASuspendThatFailsChangesNothing(t *testing.T) {
 func TestSuspendingASuspendedClaimIsANoOp(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateSuspended)
-	h.must(RequestSuspend{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken, By: SuspendedByOperator})
 	h.wantCalls("Suspend", 1)
 }
 
@@ -417,7 +417,7 @@ func TestResumeRelaunchesTheSameSessionAfterTheSuspendedIncarnation(t *testing.T
 	h := newHarness(t)
 	h.reach(StateIdle)
 	suspended := h.locator()
-	h.must(RequestSuspend{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken, By: SuspendedByOperator})
 
 	h.must(RequestResume{Claim: testToken})
 
@@ -574,7 +574,7 @@ func TestASuspensionWhoseTaskCannotBeRetiredStillRevokesTheCapability(t *testing
 		end     func(h *harness) Event
 		restart bool
 	}{
-		{"suspend", queuedClaim(), func(h *harness) Event { return RequestSuspend{Claim: testToken} }, false},
+		{"suspend", queuedClaim(), func(h *harness) Event { return RequestSuspend{Claim: testToken, By: SuspendedByDaemon} }, false},
 		{"root exit", rootClaim(), func(h *harness) Event {
 			return RequestExit{Claim: rootToken, Generation: h.generation(), Session: session, Reason: "tree waiting"}
 		}, false},
@@ -641,7 +641,7 @@ func TestAnExitAfterTheDaemonEndedTheProcessIsAccepted(t *testing.T) {
 		state ClaimState
 		ended func(*harness)
 	}{
-		{StateSuspended, func(h *harness) { h.must(RequestSuspend{Claim: testToken}) }},
+		{StateSuspended, func(h *harness) { h.must(RequestSuspend{Claim: testToken, By: SuspendedByOperator}) }},
 		{StateRetired, func(h *harness) { h.must(RequestStop{Claim: testToken}) }},
 		{StateFailed, func(h *harness) {
 			for range 3 {
@@ -705,7 +705,7 @@ func TestAstraSuspensionNotYetComplete(t *testing.T) {
 	suspending := h.locator()
 
 	suspended := make(chan error, 1)
-	go func() { suspended <- h.m.Handle(h.ctx, RequestSuspend{Claim: testToken}) }()
+	go func() { suspended <- h.m.Handle(h.ctx, RequestSuspend{Claim: testToken, By: SuspendedByOperator}) }()
 	select {
 	case <-gated.entered:
 	case <-time.After(5 * time.Second):

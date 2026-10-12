@@ -1218,9 +1218,15 @@ document version, ask question, comment body, or issue message) are derived on e
 `created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right
 after the source's event is appended, in the same transaction). Structural relations stay in the
 columns that own them and the `graph_edges` view (migration 0032) unions both into one typed edge
-relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifacts.issue_key`),
-`anchored_to` (ask/comment anchors), `owned_by` (project-document asks/comments), `replies_to`
-(comment and message threads), `followed_by` (`ask_followers`). Artifact targets are addressed by
+relation: `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_links`),
+`attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by`
+(project-document asks/comments), `replies_to` (comment and message threads), `followed_by`
+(`ask_followers`). An issue may wait only on issues in its own project through `blocked_by`.
+For cycle checks an issue has two halves: it starts after its `blocked_by` targets are done and
+after its parent starts, and it is done after it starts and after its children are done. A
+write that would make either half wait on itself is `409 DEPENDENCY_CYCLE`. One sibling may
+wait on another, but a child cannot wait on its parent and a parent cannot wait on its
+descendant through `blocked_by`. Artifact targets are addressed by
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
@@ -1257,10 +1263,28 @@ version the binary it replaces writes leaves the previous version's excerpt with
 marks it owed at the reconciliation's next tick, which starts within five minutes
 (`docs.ReferenceExcerptReconcileInterval`) of the last one ending. The deploy's overlap lies inside
 the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
+Blocker-list and parent changes serialize per project through `lockProjectIssueDependencies`
+(`api/issue_parent.go`), using the two-key advisory-lock namespace `dispatch-issue-dependencies`.
+That transaction lock comes before any row or rank lock. A PATCH then locks every issue row it
+names `for no key update` in one key order, the order `LockOwners` takes event owners
+(`lockPatchRows`, `lockIssueRows`): the issue; its current parent when a status change or a
+reparent appends to it; the proposed parent; and the rank neighbours. `LockOwners` then re-locks
+rows already held, so no PATCH holds one of these rows while waiting for another that a second
+write holds. The current parent is read before the lock and again under it: a parent a concurrent
+reparent moved in between releases the attempt's locks (a savepoint) and is locked again in key
+order, and one that moves at both attempts is `409 PARENT_CONTENDED`, with nothing applied. The
+bounded dependency walk uses plain
+reads rather than contending on unrelated issue rows. Status-only, title, labels and rank writes
+take no dependency lock. Creation takes it only with non-empty `blocked_by`, before allocating
+the issue number or rank; creation without blockers takes no explicit parent-row lock.
+`blocked_by` inputs are limited to
+`contracts.MaxIssueBlockers` entries before deduplication on both create and PATCH; excess
+entries are `400 BLOCKED_BY_INPUT` naming the limit before any issue-row lock is acquired, and a
+PATCH naming the issue itself is `400 BLOCKED_BY_INPUT` too.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
-issue's own `child_of` and `affects` edges, and the cited node's `?to=` backlink names the spec.
+issue's own `child_of`, `blocked_by` and `affects` edges, and the cited node's `?to=` backlink names the spec.
 Where a reference in text ends, and what it names, is one rule with two readers: `text.ExtractAt`,
 which every write indexes through, and the dashboard's `composerReferences` (`refs/routes.ts`,
 scanning with `referenceSpans` and parsing with `referenceRouteFromHref`), behind its reference
@@ -1735,8 +1759,8 @@ from and that ask's document.
 
 - `packages/contracts` defines the TypeScript event schemas consumed by Dispatch clients. The Go Dispatch server maintains its emitted event names and wire payloads separately; `bun run gen:go` generates Envoy envelope validation only.
 - `GET /api/v1/issues` answers every issue its filters match (`project`, `status`, `parent`, `label`, `priority`, `open`, `updated_since`, `route_status`, and the human-only `pinned`) as an array, or one page of them when the caller names `limit` (1 to `contracts.MaxIssuePageLimit`, 250) or `offset` (0 or more; alone it pages `contracts.DefaultIssuePageLimit`, 50): `{issues, total, limit, offset}` (`model.IssueSummaryPage`), the count beside the rows as `GET /api/v1/asks/open` carries it. `parseIssuePage` (`api/issue_page.go`) reads both, and a repeated, blank, non-integer or out-of-range value is `400 INVALID_QUERY` naming the parameter; so is `cursor`, which the listing does not page with, since answering it with the first page would hand back rows the caller cannot tell from the ones it asked for (LEGION-406: the route ignored all three and answered every row). The page is cut after every filter, `route_status` included, which is applied in Go after the query, so `total` is what the filters match. The order ends on the key, the one column no two issues share: nothing makes a rank unique (`issues_project_rank` is a plain index, and every project's first issue is `U`), and `created_at` is the creating transaction's start, so without the key consecutive offsets could show a row twice or never even over a listing that holds still. A walk of the pages is exact only on an unchanged listing: an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, and one issue is served twice and another never. The unpaged array is the only exact set one read gives. The `dispatch issues` command always sends `limit` and `offset` (`DispatchClient.listIssuePage`, `packages/envoy-client`) and refuses an array answered to that paged request, which means a Dispatch older than #1612 or a regression of the page. So a Dispatch rolled back past #1612, or one that stops paging, fails every `dispatch issues` call with that refusal; the SPA and both daemons send neither parameter and keep reading the array.
-- Issues carry a nullable coarse priority (`P0` highest through `P3` lowest) alongside their server-generated fractional `rank`. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `priority` as `0` through `3` or null; each priority write emits `issue.updated`. Issue and pinned lists sort by lifecycle status, then rank, then creation time, then key; priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order. `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project before it rewrites only that issue's order key.
-- Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents after locking the issue and the proposed parent in key order and refusing a missing, self, or foreign-project parent (`400 PARENT_INPUT`) and a cycle (`409 PARENT_INPUT`, with a depth-capped `union` ancestor walk so reads terminate even if a raced reparent ever commits one; the pairwise lock leaves the multi-ancestor race accepted, like rank). A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, and a reopening `status` — any status but `done`; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
+- Issues carry a nullable coarse priority (`P0` highest through `P3` lowest) alongside their server-generated fractional `rank`. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `priority` as `0` through `3` or null; each priority write emits `issue.updated`. Issue and pinned lists sort by lifecycle status, then rank, then creation time, then key; priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order. `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project; it locks both neighbours together with every other issue row the PATCH names, in one key order, then rewrites only that issue's order key.
+- Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents. Parent changes take the project's dependency advisory lock, serializing with blocker writes, and then lock the issue, its old parent and the proposed parent together in one key order, as a status write locks the issue and its parent (`409 PARENT_CONTENDED` when a concurrent reparent moves the parent at both attempts). Plain, depth-capped reads refuse a missing, self, or foreign-project parent (`400 PARENT_INPUT`), a parent cycle (`409 PARENT_INPUT`), or a wait cycle through parent and `blocked_by` edges (`409 DEPENDENCY_CYCLE`); unrelated row activity adds no refusal. A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, and a reopening `status` — any status but `done`; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
 - Every issue has a nullable `assignee`: the **lowercase** email of the person who answers its asks (`issues.assignee`, migration `0034`, indexed on open issues). Both identity implementations name a person by lowercase email, so `api/issue_assignee.go`'s `canonicalLogin` (`strings.ToLower(strings.TrimSpace(login))`) is the stored form and plain `=` compares it; the SPA lowercases the `/auth/whoami` viewer once and compares exact. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `assignee` (the PATCH's `json.RawMessage` tri-state: absent leaves it, `null` clears, a string is canonicalised and must name a row of `people` (migration `0068`: everyone who has signed in) — else `400 ASSIGNEE_NOT_ALLOWED` naming the email; a non-string is `400 INVALID_ISSUE`). Any authenticated actor may set it; the event's actor is who assigned it, and the whole issue rides in `issue.created` / `issue.updated`, so there is no `assigned_by`. Absent on create, the default is the first match of: a human actor's email; a personal token's `Owner`; the parent's assignee (which may be null); null — so the shared token's parentless issues are unassigned and a daemon status PATCH (no `assignee` key) never touches it. `GET /api/v1/users` (human-only) returns everyone in `people`, sorted by email, as `{users: [{login}]}` — the picker's options; `GET /api/v1/whoami` (any auth) returns `{kind: "user", login}` (the person's lowercase email) for a cookie/header caller or `{kind: "agent", owner}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token) — what `dispatch whoami` reports. Issue reads (`GET /issues/{key}`, summaries, pinned) carry `assignee`, and so does the `issue` on every inbox row.
 - Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON — and `issues.claimed_at`, migration `0045`, both set or both null by `issues_claim_complete`). It is on every issue read (`Issue.claim`, `IssueSummary.claim`, so the detail, the listing and the board rows all carry it) and is neither the `route` (where messages go) nor the `assignee` (the human who answers the asks). The whole rule lives in `api/issue_claim.go`. `POST /api/v1/issues/{key}/claim` (any authenticated actor) claims it: the claimant is the request's own actor, the same identity every other write carries — a human's login from their signed cookie (a body naming a session is ignored for a cookie caller), or, for a bearer, the session the caller declares in `actor`, since a token proves its owner or service subject and not which session it runs. A bearer can therefore name another session here exactly as on any other write; what makes a claim trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model picks it, and that there is no second parameter for claiming on someone's behalf. The body rejects unknown fields, so an invented one is refused rather than ignored. It succeeds when the issue is unclaimed, when this actor already holds it (idempotent: the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener no longer lists as live (`fetchLiveSessions` takes that snapshot of the same live list `GET /api/v1/agents` serves, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place — decides from it under the issue's row lock), which records the takeover. Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message; a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all. `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force — a refusal on the release route never offers one. An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`. A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows: nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`. `DELETE /api/v1/issues/{key}/claim` releases it: the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op. Both answer the issue. Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it), because humans may track work by the status; closing an issue is the one write that clears a claim, in the same `PATCH` (`issue_patch.go`) that closes it. `issue.claimed` and `issue.released` carry `IssueClaimEventPayload {key, status, claim, previous_claim?, reason}`; the outbox publishes both to the previous claimant's own `notifications.agent.<session_id>` topic (`publishPreviousClaimant`), whatever the issue's route and regardless of `notify`, so a session learns it no longer holds the work.
 
@@ -2197,8 +2221,9 @@ retry. Other session routes map a not-live proof to `PROOF_INVALID` as before.
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
-credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
-credentials they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets
+credential; `internal/broker/machine` decides typed-code machine logins, logs services in with
+their Kubernetes tokens, and mints the launcher credentials both issue; and
+`internal/broker/secrets` reads the granted value from AWS Secrets
 Manager, or, for local development, from `secrets.Local`, an in-memory stand-in for the AWS calls.
 
 `internal/broker/policy` reads the policy from Secrets Manager itself (`policy.Loader`), and
@@ -2222,8 +2247,9 @@ an owner tag naming a service is refused as malformed unless `Loader.Services` l
 `service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
 `requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod
 and its verified `enrollments.subject` is the service account `BROKER_SERVICES` binds that service
-to (`requests.Machine.ServiceAccounts`, `requester()`): a machine login's service name is the machine's
-claim, which anyone signed in to Dispatch may approve. So a `legion-worker` pod the Legion daemon's
+to (`requests.Machine.ServiceAccounts`, `requester()`): a credential's service is the one a token
+login's `BROKER_SERVICE_LOGINS` entry names, or, for a service login a person approved through a
+code before token logins, the machine's own claim. So a `legion-worker` pod the Legion daemon's
 login enrolled is `legion-daemon`'s, and a service's secret goes at once to those pods and to no
 one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
@@ -2539,6 +2565,12 @@ entries, each name `record.ValidService`'s form, not `shared` and given once, an
 to one name, never a namespace's `default` account (every pod there that names no account runs as
 it) — any other entry is refused naming it, and an account given twice names both; unset,
 `Config.ServiceAccounts` is nil and no service is registered),
+`BROKER_SERVICE_LOGINS` (optional; whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>`
+entries, the ServiceAccounts that log in as a service with their own token, each account given
+once and named exactly, keyed by account in `Config.ServiceLogins`; read by the same parser as
+`BROKER_SERVICES` (`parseServiceAccounts`), so a namespace's `default` account is refused, and so
+is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for
+it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
@@ -2609,7 +2641,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 27 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 28 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -2633,17 +2665,54 @@ reload; a reread spends a token from either bucket only when both allow it
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
 with the refusing limit's `Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
-`BROKER_TRUSTED_PROXY_HEADER` above) and per login (`LauncherLimits.PerLogin`) — the per-login
-bucket keys on the signed request object itself (`launcherLoginKey`): one shared `service` bucket
-for every service's login, whatever service or `login_hint` it names, since a service's name is the
-machine's own claim and a bucket per name would give every invented name one, and `person:<login>`
-for a person's machine login, so the two never share a bucket; an attacker naming a specific
-victim operator, or naming any service, repeatedly can still lock out those machine logins at a
-low rate; this is inherent to a per-login
-limit on an unauthenticated route and is an accepted risk, not a bug. A request object `Login`
-refuses (a person's login with no `login_hint`, or `anyone`, a replayed `jti`) is
-`400 REQUEST_INVALID`. Read `routes()`
-for the current, authoritative route list.
+bucket keys on the signed request object itself (`launcherLoginKey`): `person:<login>`, the person
+the `login_hint` names; a request naming a service is refused `400 SERVICE_LOGS_IN_WITH_TOKEN` before
+any bucket. An attacker naming a specific victim operator repeatedly can still lock out that
+operator's machine logins at a low rate; this is inherent to a per-login limit on an
+unauthenticated route and is an accepted risk, not a bug. A request object `Login` refuses (a
+person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQUEST_INVALID`.
+`POST /v1/launcher-credentials/token`, a service's token login, spends its source address's bucket
+before the token verifies (`refuseAddress`), whatever account the token claims, since a refused
+token signature makes the verifier fetch the issuer's keys again; a verified account then spends
+an `account:<subject>` bucket of the per-login limit (`refuseAccount`), the same address-then-key
+pair the device-code route spends. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the address
+bucket on the caller's own address. Read `routes()` for the current, authoritative route list.
+
+A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
+token (`POST /v1/launcher-credentials/token`: `machine.Service.VerifyServiceToken`, then
+`TokenLogin`), and no person approves it. The body carries the token and a machine request object
+the login's key signed, with one `launcher_credential` detail naming the service. The broker
+verifies the token with `enroll.Service.Pod.VerifyAccount`, the verifier pod enrollment uses
+against `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` (a token bound to no pod is
+accepted, so a `kubectl create token` token logs a daemon off the cluster in), refuses a token that
+names no `iat` or whose `exp` lies more than `MaxTokenLoginLifetime` (an hour) plus the request
+skew past it, `401 TOKEN_TOO_LONG_LIVED`, so a copied token logs in for at most an hour after it
+was minted, and maps its subject through `BROKER_SERVICE_LOGINS` (`enroll.Service.ServiceLogins`,
+keyed by exact subject, no wildcard) to the one service it logs in as; a subject not listed, or
+listed for another service than the request names, is `403 ACCOUNT_NOT_LISTED`, an expired token
+`401 TOKEN_EXPIRED`, any other verification failure `401 TOKEN_INVALID`, a request object that does
+not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `Login`
+shares), a key another live credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a broker with no
+issuer `404 TOKEN_LOGIN_OFF`. `enroll.Service.IssueTokenLogin` writes the credential. Each subject
+holds one live launcher credential (migration 0015, `launcher_credentials.subject`, its partial
+unique index on live rows, and a check that a row with a subject names a service and no record):
+the first login inserts it, with no operator, the service, host `<namespace>/<name>` and no
+`record_id`, and each later one moves it, in one upsert under the same id, to the request's key and
+to the token's expiry, at most an hour away, so a key that was already the credential's (the
+daemon's renewals) changes nothing but the expiry, a new key (a restart) stops the previous one
+authenticating at once, and every pod the account enrolled stays under the same credential. Each
+login writes one `launcher_credential.token_login` audit row naming the credential as actor, the
+subject, the pod the token is bound to, the key, and both the credential's and the token's expiry
+(`token_expires_at`). `AuthenticateLauncher` authenticates such a credential while
+`enroll.Service.ServiceLogins` still names its subject for its service, rather than through a
+record's chain, so removing the entry and redeploying ends it at its next call. A revoke on
+Dispatch's machine-login page ends it as any service's login (anyone signed in, through
+`record.MayDecide`; `LiveCredentials` lists it with `approved_by` empty and its `subject`), and the
+service's next login inserts a new credential, which enrolls the pods it launches next; the daemon
+never enrolls a pod the revoke ended again. A service login a person approved through a code
+before token logins keeps authenticating through its record's chain until it expires; a pending one
+can only be denied (`ErrServiceLogsInWithToken`, `400 SERVICE_LOGS_IN_WITH_TOKEN`, the same
+sentinel a device-code login naming a service is refused with).
 
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
@@ -2665,7 +2734,9 @@ equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `r
 `Body.ApproverLogin(kind, service, login)` (`record.MayDecide`) is the one approver comparison. A
 record's approver is resolved when the record is created (a secret's owner, `anyone` for a shared
 human-tier secret, a person's machine login's `login_hint`, which is never `anyone`, or `anyone` for
-a service's machine login), and every decision and every chain re-check compares the canonical
+a service's machine login a broker before token logins opened, which `ApplyDecision` now refuses to
+approve though it may still be denied, and whose approved credentials keep re-verifying through
+this rule until they expire), and every decision and every chain re-check compares the canonical
 lowercase login against it, with `service` the one the record's signed request object names
 (`RequestObject.Service()`, re-read from `Body.Request`, never from the stored approver): any login
 but `anyone` itself deciding a machine login whose request names a service, whatever its record
@@ -2822,9 +2893,9 @@ value itself is read fresh from
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (exactly one `launcher_credential`
-authorization detail; a person's machine login also needs a `login_hint`, the approving operator's
-email, never `anyone`, while a service's login, one whose detail names a `service`, needs none and
-any it carries is ignored, its record's approver `anyone`), mints an
+authorization detail naming no service, and a `login_hint`, the approving operator's email, never
+`anyone`; a detail naming a `service` is `400 SERVICE_LOGS_IN_WITH_TOKEN` at the route and
+`record.ErrRequestInvalid` here, since a service logs in with its token, below), mints an
 eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
@@ -2834,8 +2905,9 @@ record (ruling 13: a direct link can never approve a machine login, only the typ
 it), so `code` is required and checked again on the decision itself, before the approver
 (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
 update`, which an event insert's foreign-key check does not wait on), refuses any login the
-record's rule does not admit (`403 NOT_APPROVER`: anyone signed in decides a service's login, only
-its person a person's machine login) whatever the record's state, answers a record that
+record's rule does not admit (`403 NOT_APPROVER`: only its person decides a person's machine login,
+and anyone signed in may deny a service's login a broker before token logins opened, which no one
+may approve, `400 REQUEST_INVALID`) whatever the record's state, answers a record that
 already carries a terminal event, or is past its `expires_at` before the sweeper has recorded it
 expired, `409 RECORD_TERMINAL` before minting anything, as a decided `agent_secret` record
 answers, so a second click, a concurrent one and a late one all get it — but a record past its

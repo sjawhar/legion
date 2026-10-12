@@ -13588,6 +13588,7 @@ function serviceSubjectLabel(subject) {
   }
   return subject;
 }
+var MAX_ISSUE_BLOCKERS = 20;
 var ISSUE_TITLE_MAX = 1000;
 var PROJECT_NAME_MAX = 80;
 var MAX_ISSUE_PAGE_LIMIT = 250;
@@ -13833,7 +13834,10 @@ var AGENT_STREAM_LIMITS = {
   modelChars: 200,
   historyMessages: 200,
   historyBytes: 512 * 1024,
-  snapshotIntervalMs: 100
+  snapshotIntervalMs: 100,
+  commands: 500,
+  commandNameChars: 100,
+  commandDescriptionChars: 200
 };
 // ../contracts/src/claim-holds.ts
 function claimHolds(claim, titles) {
@@ -14053,6 +14057,7 @@ var dispatchToolSpecs = [
       project: z2.string().describe("Project key for the new issue."),
       title: z2.string({ max: ISSUE_TITLE_MAX }).describe("Concise issue title, at most 1,000 characters."),
       parent: z2.string().describe("Optional parent issue.").optional(),
+      blocked_by: z2.array(z2.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS }).describe("Issue keys in the same project this issue waits on. Dispatch refuses a dependency cycle.").optional(),
       external: z2.string().describe("Optional external issue reference.").optional(),
       force: z2.boolean().describe("Create even though POSSIBLE_DUPLICATE listed similar issues; pass it only after reading them.").optional(),
       spec: z2.string().describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`).optional(),
@@ -14069,7 +14074,7 @@ var dispatchToolSpecs = [
       status: "done",
       reason: "Shipped in owner/repo#7; verified on the production dashboard."
     },
-    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, or attach it to architecture components. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. external_links are " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link. components replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. A closed issue takes only rank, components, " + "and a reopening status (any status but done); everything else, priority included, waits " + "for the reopen. " + "priority is yours to set and a human overrides it; rank, the board's own order, is not " + "settable here. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
+    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, replace the issues it is blocked by, or attach it to " + "architecture components. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. external_links are " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link. components replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. A closed issue takes only rank, components, " + "and a reopening status (any status but done); everything else, priority included, waits " + "for the reopen. " + "priority is yours to set and a human overrides it; rank, the board's own order, is not " + "settable here. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       status: z2.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
@@ -14080,15 +14085,16 @@ var dispatchToolSpecs = [
       external_links: z2.array(z2.string({ min: 1 })).describe("URLs to link; merged into the issue's existing external links by URL.").optional(),
       route: z2.string().describe("Route the issue to role:<name> or session:<id>; an empty string clears it.").optional(),
       parent: z2.string().describe("Parent issue key in the same project; an empty string clears the parent.").optional(),
+      blocked_by: z2.array(z2.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS }).describe("Replacement list of issue keys in the same project this issue waits on; [] clears it. Dispatch refuses a dependency cycle.").optional(),
       components: componentsArgument(z2).optional()
     }),
     validation: {
       check: (value) => {
         const input = value;
         const reasonFits = input.status === "done" ? typeof input.reason === "string" && input.reason.trim() !== "" : input.reason === undefined;
-        return reasonFits && (typeof input.status === "string" || typeof input.title === "string" || Array.isArray(input.labels) || typeof input.priority === "number" || input.priority === null || Array.isArray(input.external_links) || typeof input.route === "string" || typeof input.parent === "string" || typeof input.components === "object" && input.components !== null);
+        return reasonFits && (typeof input.status === "string" || typeof input.title === "string" || Array.isArray(input.labels) || typeof input.priority === "number" || input.priority === null || Array.isArray(input.external_links) || typeof input.route === "string" || typeof input.parent === "string" || Array.isArray(input.blocked_by) || typeof input.components === "object" && input.components !== null);
       },
-      message: "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components. " + "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done."
+      message: "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, or components. " + "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done."
     },
     strict: true
   },
@@ -17364,10 +17370,7 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version2.markdown.split(`
 `);
-  const stillOpen = (named, state) => {
-    const next = state === "answered" ? "fold the answer into the text" : "write the decision into the text";
-    return `${named}, ${state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`;
-  };
+  const stillOpen = (named, state) => state === "answered" ? `${named}, answered but still open in version ${latest}: it settles into a version on its own in about two seconds; wait, then request again` : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
     const openers = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`));
@@ -17396,7 +17399,7 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   throw new Error([
     `dispatch ${commandName(tool)} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
     ...open.map((line) => `- ${line}`),
-    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch doc-edit. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human."
+    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, it settles into a version on its own in about two seconds; wait, then request again. Edit the document only where the answer changes design text outside the block, never to restate it. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human."
   ].join(`
 `));
 }
@@ -17563,11 +17566,13 @@ async function executeDispatchTool(input) {
       const assignee = optionalString(args, "assignee");
       const components = optionalComponents(args, "components");
       const labels = args.labels;
+      const blockedBy = args.blocked_by;
       try {
         const created = await client.issue({
           project,
           title,
           ...parent === undefined ? {} : { parent },
+          ...Array.isArray(blockedBy) ? { blocked_by: blockedBy } : {},
           ...external2 === undefined ? {} : { external: external2 },
           ...force === undefined ? {} : { force },
           ...spec === undefined ? {} : { spec },
@@ -17625,6 +17630,7 @@ async function executeDispatchTool(input) {
       const components = optionalComponents(args, "components");
       const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? args.labels : undefined;
+      const blockedBy = Array.isArray(args.blocked_by) ? args.blocked_by : undefined;
       const requestedLinks = Array.isArray(args.external_links) ? [...new Set(args.external_links)] : undefined;
       let before;
       try {
@@ -17658,6 +17664,7 @@ async function executeDispatchTool(input) {
           ...priority === undefined ? {} : { priority },
           ...route === undefined ? {} : { route },
           ...parent === undefined ? {} : { parent: parent === "" ? null : parent },
+          ...blockedBy === undefined ? {} : { blocked_by: blockedBy },
           ...components === undefined ? {} : { components },
           ...requestedLinks === undefined ? {} : { external_links: [...before.external_links, ...newLinks.map((url2) => ({ url: url2 }))] },
           actor
@@ -17685,6 +17692,9 @@ async function executeDispatchTool(input) {
         ],
         ...route === undefined ? [] : [after.route === null ? "route cleared" : `route ${after.route}`],
         ...parent === undefined ? [] : [after.parent === null ? "parent cleared" : `parent -> ${after.parent}`],
+        ...blockedBy === undefined ? [] : [
+          after.blocked_by.length === 0 ? "blocked_by cleared" : `blocked by ${after.blocked_by.join(", ")}`
+        ],
         ...components === undefined ? [] : [componentsChange(components, after.components)]
       ];
       const adviceLines = renderAdvice(input.tool, after.key, after.advice, {

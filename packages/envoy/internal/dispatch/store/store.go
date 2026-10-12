@@ -18,10 +18,8 @@ type Store struct {
 	Pool *Pool
 }
 
-// The whole directory, not *.up.sql alone, and with all:, which keeps names beginning with _ or .
-// that a bare directory pattern leaves out: pgmigrate.Load then sees every file in the tree and
-// refuses one named any other way, rather than a migration going unembedded and unapplied while
-// its file sits there.
+// Every file in migrations, so pgmigrate.Load judges each one; pgmigratetest.CheckEmbedsEveryFile
+// states why the pattern is all:migrations and holds the tree to it.
 //
 //go:embed all:migrations
 var migrationFiles embed.FS

@@ -114,6 +114,8 @@ func main() {
 	verifier, err := oidc.Discover(ctx, cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience, oidc.DiscoveryTimeout)
 	fatal(err)
 	if verifier != nil {
+		// One verifier for both: a pod's enrollment token and a service's login token are the same
+		// cluster's projected tokens, for the same audience.
 		pod = enroll.K8sPodVerifier{Verifier: verifier}
 	}
 
@@ -146,7 +148,7 @@ func main() {
 	}
 	slog.Info("broker listening", "addr", listener.Addr().String())
 
-	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod}
+	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, reader, enr.Replay)
 	mach := &machine.Service{

@@ -400,6 +400,15 @@ type LingerExpired struct {
 
 func (LingerExpired) isFact() {}
 
+// DaemonBooted records a boot of the daemon: every stored claim has its machine again, and the
+// boot replayed what its claims' terminal states owe the workflow. Boot is the boot's record id
+// (daemon_boot), which makes each boot's fact its own.
+type DaemonBooted struct {
+	Boot int64
+}
+
+func (DaemonBooted) isFact() {}
+
 // Handler changes the workflow record inside the caller-owned transaction.
 type Handler interface {
 	Apply(context.Context, pgx.Tx, Fact) (Result, error)

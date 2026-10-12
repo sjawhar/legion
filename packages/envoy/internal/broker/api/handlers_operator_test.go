@@ -155,7 +155,7 @@ func TestOperatorMachinesAreThePersonsOwnRowsOfDispatchsList(t *testing.T) {
 	ts := newTestServer(t)
 	devbox, devboxKey := ts.mintLauncherCredential(t, testApprover, "example-host-devbox")
 	laptop, _ := ts.mintLauncherCredential(t, testApprover, "example-host-laptop")
-	service, _ := ts.mintServiceLauncherCredential(t)
+	service, _ := ts.mintOutstandingServiceCredential(t, testApprover)
 	mallory, malloryKey := ts.mintLauncherCredential(t, "mallory@example.com", "example-host-devbox-m")
 
 	page := ts.uiGet(t, "/v1/launcher-credentials", testApprover)
@@ -197,24 +197,41 @@ func TestOperatorMachinesAreThePersonsOwnRowsOfDispatchsList(t *testing.T) {
 	}
 }
 
-// TestServiceCredentialIsRefusedOperatorRoutes: the Legion daemon's service login has no operator,
-// so every operator route refuses it, its own revoke included, which ends nothing.
+// TestServiceCredentialIsRefusedOperatorRoutes: a service's credential has no operator, so every
+// operator route refuses it, its own revoke included, which ends nothing: a token login's (the
+// Legion daemon's) and one a person approved before token logins alike.
 func TestServiceCredentialIsRefusedOperatorRoutes(t *testing.T) {
 	ts := newTestServer(t)
-	credID, key := ts.mintServiceLauncherCredential(t)
-	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/v1/operator/machines"},
-		{http.MethodPost, "/v1/operator/machines/" + credID + "/revoke"},
-		{http.MethodGet, "/v1/operator/grants"},
-		{http.MethodPost, "/v1/operator/grants/" + uuid.NewString() + "/revoke"},
-	} {
-		status, body := ts.launcher(t, key, credID, tc.method, tc.path, nil)
-		if status != http.StatusForbidden || decode[wireError](t, body).Code != "SERVICE_CREDENTIAL" {
-			t.Fatalf("service login %s %s: %d %s, want 403 SERVICE_CREDENTIAL", tc.method, tc.path, status, body)
+	tokenID, tokenKey := ts.mintServiceLauncherCredential(t)
+	outstandingID, outstandingKey := ts.mintOutstandingServiceCredential(t, testApprover)
+	for _, cred := range []struct {
+		id  string
+		key *ecdsa.PrivateKey
+	}{{tokenID, tokenKey}, {outstandingID, outstandingKey}} {
+		for _, tc := range []struct{ method, path string }{
+			{http.MethodGet, "/v1/operator/machines"},
+			{http.MethodPost, "/v1/operator/machines/" + cred.id + "/revoke"},
+			{http.MethodGet, "/v1/operator/grants"},
+			{http.MethodPost, "/v1/operator/grants/" + uuid.NewString() + "/revoke"},
+		} {
+			status, body := ts.launcher(t, cred.key, cred.id, tc.method, tc.path, nil)
+			if status != http.StatusForbidden || decode[wireError](t, body).Code != "SERVICE_CREDENTIAL" {
+				t.Fatalf("service login %s %s: %d %s, want 403 SERVICE_CREDENTIAL", tc.method, tc.path, status, body)
+			}
 		}
 	}
-	if logins := ts.machineLogins(t, testApprover); len(logins) != 1 || logins[0].CredentialID != credID {
-		t.Fatalf("machine logins of %s = %+v, want the service login still live", testApprover, logins)
+	var listed []string
+	for _, login := range ts.machineLogins(t, testApprover) {
+		listed = append(listed, login.CredentialID)
+	}
+	slices.Sort(listed)
+	want := []string{tokenID, outstandingID}
+	slices.Sort(want)
+	if !slices.Equal(listed, want) {
+		t.Fatalf("machine logins of %s = %v, want both service logins, still live", testApprover, listed)
+	}
+	if status, body := ts.enrollPodWith(t, tokenKey, tokenID); status != http.StatusCreated {
+		t.Fatalf("the token login's credential after the refusals = %d %s, want it still enrolling", status, body)
 	}
 }
 

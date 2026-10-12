@@ -744,7 +744,9 @@ describe("github", () => {
 /** The cases both funnels are held to: `cleanDetail` here and the daemon's `capabilities.NewRow`.
  * `patterns` is a detail per credential shape or cleanup rule and what it reads cleaned, each
  * prefixed with `pad` letters `a` where it has one; `branches` is each branch of a check that quotes
- * upstream text, with that text, the credential in it, and the text redacted. */
+ * upstream text, with that text, the credential in it, and the text redacted; `linear`, which only
+ * this test reads since the daemon's RE2 cannot backtrack, is a unit that, repeated, would make a
+ * backtracking engine read a run once per start in it. */
 interface RedactionFixture {
   readonly patterns: readonly {
     readonly pattern: string;
@@ -760,6 +762,7 @@ interface RedactionFixture {
     readonly credential: string;
     readonly redacted: string;
   }[];
+  readonly linear: readonly { readonly name: string; readonly unit: string }[];
 }
 
 const fixtures = path.resolve(import.meta.dir, "../../contracts/fixtures");
@@ -779,6 +782,42 @@ describe("cleanDetail", () => {
       expect(cleanDetail(padding + detail)).toBe(padding + want);
       // The daemon cleans what this plugin sends again, so cleaning is idempotent.
       expect(cleanDetail(padding + want)).toBe(padding + want);
+    });
+  }
+
+  test("at the cut keeps what came before it and is idempotent: each byte of every case cut once", () => {
+    const problems: string[] = [];
+    for (const { pattern, name, pad, detail } of redaction.patterns) {
+      const whole = cleanDetail(detail);
+      for (
+        let letters = Math.max(0, 1024 - Buffer.byteLength(detail) - 16);
+        letters <= 1024 + 8;
+        letters++
+      ) {
+        const padding = "a".repeat(letters);
+        const once = cleanDetail(`${padding} ${detail}`);
+        const label = `${pattern}: ${name}, pushed by ${letters} letters`;
+        if (cleanDetail(once) !== once) problems.push(`${label}: not idempotent`);
+        if (!once.startsWith(padding.slice(0, 1024))) problems.push(`${label}: lost its padding`);
+        if (pad === undefined && !`${padding} ${whole}`.startsWith(once)) {
+          problems.push(`${label}: not a prefix of the case cleaned whole`);
+        }
+      }
+    }
+    expect(problems).toEqual([]);
+  });
+
+  // A rule that may start inside a run its own value class reads through makes JavaScriptCore,
+  // which backtracks, read that run once per start: time quadratic in the detail, which the plugin
+  // cleans before it cuts it to 1,024 bytes, so one such detail stalls a session's start. Each
+  // fixture unit, repeated, holds a start for every repetition. At 64 KiB a linear rule takes a few
+  // milliseconds and a quadratic one takes seconds, so the 1 s bound separates them on any machine.
+  for (const { name, unit } of redaction.linear) {
+    test(`stays linear: ${name}, 64 KiB in under 1 s`, () => {
+      const text = unit.repeat(Math.ceil((64 * 1024) / unit.length));
+      const started = performance.now();
+      cleanDetail(text);
+      expect(performance.now() - started).toBeLessThan(1_000);
     });
   }
 });

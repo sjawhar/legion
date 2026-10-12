@@ -68,7 +68,10 @@ modes it advertises. A Claude Code session, for example, takes Aside but not Sen
 mode the session does not take, the message box warns you and suggests a prefix it does take.
 
 On an Oh My Pi session, your Send or Aside arrives as your own message in its conversation, and the
-agent answers there. Watch the answer in the [live view](#the-live-view).
+agent answers there. A Send or Aside that starts with `/` runs as the session's terminal would run
+it. A command that prints output, such as `/session` or `/compact`, posts that output as the
+session's **Reply via Dispatch**; one that runs only in the session's own terminal says it did not
+run. Watch either result in the [live view](#the-live-view).
 
 ## Broadcasts
 
@@ -125,7 +128,10 @@ at the end of the page, so you can still read what it said.
 - Your messages to the agent, and its replies through Dispatch, are stored and shown in the same
   thread. A reply through Dispatch is labelled **Reply via Dispatch**.
 - The message box at the bottom sends to the agent. **Send as** picks the mode, from the modes the
-  session takes.
+  session takes. When this is **Send** or **Aside** and the session publishes a command list, type
+  `/` to choose from its commands. The list marks commands that only the session's terminal runs;
+  their reply says they did not run. Use the arrow keys to choose, **Tab** or **Enter** to pick, and
+  **Escape** to close the list. BTW offers no commands.
 
 Some sessions cannot stream their conversation, such as Claude Code sessions. The live view says
 so, and still shows your messages and their replies.

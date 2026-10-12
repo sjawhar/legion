@@ -16,12 +16,11 @@ import (
 )
 
 // Project joins durable issue facts to current supervision claims for GET /legion/v1/state. The
-// caller owns the repeatable-read transaction, so its record reads share one snapshot; claims are
-// intentionally live process facts and arrive separately from the supervisor. project is the
-// Dispatch project whose pending status writes the state lists. reports is each claim's latest
-// capability report, by claim (LEGION-663): a claim with one shows it whatever its incarnation —
-// the view carries the reporting process's, for a reader to compare with the locator's — and a
-// claim with none shows no capabilities. Nil is no reports.
+// caller owns the repeatable-read transaction, so its record reads and claims share one snapshot.
+// project is the Dispatch project whose pending status writes the state lists. reports is each
+// claim's latest capability report, by claim (LEGION-663): a claim with one shows it whatever its
+// incarnation — the view carries the reporting process's, for a reader to compare with the
+// locator's — and a claim with none shows no capabilities. Nil is no reports.
 func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, claims []supervise.Claim, reports map[claim.Token]capabilities.Report) (api.State, error) {
 	issues, err := s.Issues(ctx, tx)
 	if err != nil {

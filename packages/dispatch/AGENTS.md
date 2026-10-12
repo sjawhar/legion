@@ -151,12 +151,17 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
 - A person's direct Send or Aside reaches an Oh My Pi session as that person's own user turn once
   the session has accepted the attempt with Dispatch, so the live view shows it from the stream,
   where the session took it. When the stream tags it with its Dispatch id (`dispatchTurns` in
-  `features/agent-view/conversation.ts`), the view hides Dispatch's stored copy, only when the
+  `features/agent-view/conversation.ts`), the view hides Dispatch's stored copy only when the
   streamed text equals it, and still names its author when that is not the viewer. A turn the
-  stream carries untagged shows twice, as the streamed message and the stored copy;
+  stream missed shows twice, as the streamed message and stored copy; so does a prompt template or
+  file command whose streamed message is its expansion rather than the stored `/name …`.
   `packages/pi-envoy/AGENTS.md` says which turns the session leaves untagged. The live view's
   composer offers the modes the session advertises in `MODE_ORDER` (Send, Aside, BTW), so it opens
-  on Send wherever the session takes a steer and on Aside otherwise. On `/agents`, only an attempt
+  on Send wherever the session takes a steer and on Aside otherwise. In Send or Aside, the
+  session's `commands` frame becomes `sessionCommands`: `isRenderableFrame` takes the whole list
+  only when every `isCommand` entry is valid, latest sequence wins, and BTW or no list offers none.
+  `AgentThread` opens the `/` popover only at message start, ranks a prefix first and terminal-only
+  rows last, caps it at 50, and writes a picked item as `/name `. On `/agents`, only an attempt
   whose `accepted_as` is `user_turn` reads `Delivered to <session>'s conversation` with no retry
   row, even after a later `failed` (`takenAsUserTurn` in
   `features/conversation/TargetedMessageCard.tsx`); every other attempt, a Claude Code session's

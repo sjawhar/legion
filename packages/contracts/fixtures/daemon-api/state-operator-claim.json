@@ -34,5 +34,6 @@
     }
   },
   "pendingStatusWrites": [],
+  "strandedClaims": [],
   "capabilities": []
 }

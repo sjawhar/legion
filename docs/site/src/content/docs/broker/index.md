@@ -88,9 +88,9 @@ Settings page lists the live grants a person can revoke. The broker holds no Dis
 Dispatch's server calls the broker on the signed-in person's behalf.
 
 [Legion](/legion/legion/) runs agents. When its Kubernetes runtime is configured with the broker,
-the Legion daemon logs itself in once (a person approves its machine login in Dispatch) and enrolls
-every worker pod it starts, so each pod's agent gets only the grants of that pod. See
-[how Legion, Dispatch and the broker fit together](/legion/how-it-fits/).
+the Legion daemon logs itself in with its own Kubernetes ServiceAccount token, which no person
+approves, and enrolls every worker pod it starts, so each pod's agent gets only the grants of that
+pod. See [how Legion, Dispatch and the broker fit together](/legion/how-it-fits/).
 
 ## Where to go next
 
