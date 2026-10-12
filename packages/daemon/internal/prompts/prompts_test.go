@@ -51,8 +51,9 @@ func TestComposeOrdersSharedRolePartsBeforeTheGoDaemonParts(t *testing.T) {
 		// The packet limit the merger is told is the one the handoff route enforces. The merger submits
 		// the merge itself once READY is accepted, and its packet says so.
 		{"merger", claim.RoleMerger, false, []string{"mechanics/headless.md", "merger.md"}, []string{"merger.md", "worker-common.md"}, []string{`op: "handoff_complete"`, "`ready: true`", "`READY_HEAD_CONFLICTS`: the pull request conflicts with its base", "`READY_CHECKS_NOT_GREEN`: a check the base branch requires",
-			"refuses READY while that head still carries `.legion/<issue>/`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
-			"`gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`", "`READY_DISARM_PENDING`", "`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`"}},
+			"refuses READY with `READY_HEAD_CARRIES_HANDOFFS` while that head still carries `.legion/<issue>/`", fmt.Sprintf("at most %d characters", record.MessagePostLimit),
+			"`gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`", "`READY_DISARM_PENDING`", "`READY_HEAD_MOVED`", "`READY_FILES_TRUNCATED`", "`READY_PULL_REQUEST_CLOSED`",
+			"`GITHUB_READ_FAILED`", "`DESIGN_GATE_CLOSED`", "`NO_PULL_REQUEST`", "`READY_REQUIRED`"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			parts, err := composer.Compose(tc.role, tc.isRoot)
