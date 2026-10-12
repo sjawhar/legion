@@ -3,7 +3,12 @@
 // minutes, fetches the pull requests, the deploy runs and the PR CI runs together, so those three
 // share `last_reconcile_at` and `last_error`. Dispatch's issues and the agents' titles are read
 // from Dispatch's own tables while the server answers, so they are as old as the answer
-// (`readAtMs`). Events are the last GitHub event intake processed. No React.
+// (`readAtMs`). Events are the last GitHub event intake processed. While the page's live socket
+// (`api/delivery-live.ts`) is open, Dispatch tells it every change as it is recorded, so the
+// reconciled and event rows say Live, aged by the last change it applied, and the read rows are
+// current; a source Dispatch's verdict names stale, or a reconcile error, keeps today's red row.
+// No React.
+import type { DeliveryLiveState } from "../../../api/delivery-live";
 import type { DeliveryTimelineResponse } from "../../../api/types";
 
 export type DeliveryFreshness = DeliveryTimelineResponse["freshness"];
@@ -114,22 +119,72 @@ function eventsRow(lastEventAt: string | null, nowMs: number): FreshnessRow {
     detail: `Events: last GitHub event processed ${new Date(lastEventAt).toLocaleString()}`,
   };
 }
+/** The text a Live row shows in place of its age: `Live`, the last change's age, or, while the
+ *  socket reconnects, how long it has been lost. Undefined while the socket is closed. */
+function liveText(
+  live: DeliveryLiveState,
+  nowMs: number
+): { text: string; red: boolean } | undefined {
+  if (live.state === "reconnecting") {
+    const lost = Math.floor(Math.max(0, nowMs - (live.since ?? nowMs)) / 1000);
+    return { red: true, text: `Reconnecting, ${lost} s` };
+  }
+  if (live.state !== "open") return undefined;
+  if (live.changedAt === null) return { red: false, text: "Live" };
+  const age = formatAge(Math.max(0, (nowMs - Date.parse(live.changedAt)) / 1000));
+  return { red: false, text: `Live · last change ${age}` };
+}
+
+/** `row` as a Live row when the socket gives it one and nothing makes it red already. */
+function asLive(
+  row: FreshnessRow,
+  label: string,
+  live: { text: string; red: boolean } | undefined,
+  stale: boolean
+): FreshnessRow {
+  if (live === undefined || row.red || stale) {
+    return stale && !row.red
+      ? { ...row, red: true, detail: `${row.detail}; Dispatch reports it stale` }
+      : row;
+  }
+  return {
+    ...row,
+    red: live.red,
+    text: `${label} ${live.text}`,
+    detail: live.red
+      ? `${label}: the live connection to Dispatch is lost; it is reconnecting`
+      : `${label}: Dispatch sends this page every change as it is recorded`,
+  };
+}
 
 export function sourceFreshness(
   freshness: DeliveryFreshness,
   nowMs: number,
-  readAtMs: number
+  readAtMs: number,
+  live: DeliveryLiveState
 ): FreshnessRow[] {
-  const readAge = formatAge(Math.max(0, (nowMs - readAtMs) / 1000));
+  const liveRow = liveText(live, nowMs);
+  const stale = new Set(live.verdict?.stale ?? []);
+  // The read rows are as old as the last answer; while the socket is open every change reaches the
+  // page at once, so they are current, and while it reconnects they are as old as the loss.
+  const readMs =
+    live.state === "open"
+      ? nowMs
+      : live.state === "reconnecting"
+        ? (live.since ?? readAtMs)
+        : readAtMs;
+  const readAge = formatAge(Math.max(0, (nowMs - readMs) / 1000));
   const rows: FreshnessRow[] = [
-    ...RECONCILED.map(({ name, label }) => reconciledRow(name, label, freshness, nowMs)),
+    ...RECONCILED.map(({ name, label }) =>
+      asLive(reconciledRow(name, label, freshness, nowMs), label, liveRow, stale.has(name))
+    ),
     ...READ_LIVE.map(({ name, label }) => ({
       name,
       red: false,
       text: `${label} ${readAge}`,
-      detail: `${label}: read when the page was last answered, ${new Date(readAtMs).toLocaleString()}`,
+      detail: `${label}: read when the page was last answered, ${new Date(readMs).toLocaleString()}`,
     })),
-    eventsRow(freshness.last_event_at, nowMs),
+    asLive(eventsRow(freshness.last_event_at, nowMs), "Events", liveRow, stale.has("events")),
   ];
   // A population pull request whose completing fetch answered a permanent 404/410 from GitHub is
   // marked unfetchable rather than retried every pass forever: surfaced here, by count, apart

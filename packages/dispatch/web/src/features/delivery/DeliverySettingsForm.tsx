@@ -146,7 +146,12 @@ function DeliverySettingsFields({ record }: { record: DeliverySettings | null })
     onSettled: () => submitGuard.release(),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: deliverySettingsQuery().queryKey });
-      void queryClient.invalidateQueries({ queryKey: ["delivery"] });
+      // A live view learns of the save from Dispatch, as a delta, or as the snapshot a page that
+      // had none (DELIVERY_NOT_CONFIGURED) is answered once a configuration exists.
+      void queryClient.invalidateQueries({
+        queryKey: ["delivery"],
+        predicate: (query) => query.meta?.live !== true,
+      });
     },
   });
   const submit = (event: FormEvent<HTMLFormElement>) => {

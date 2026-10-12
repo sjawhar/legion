@@ -24,7 +24,7 @@ export function useSearchParamsUpdate(): (mutate: (params: URLSearchParams) => v
 /** Every value of each repeatable `?<name>=` parameter in `keys`, memoized on the live
  *  `URLSearchParams` object's identity so two renders of the same URL return the exact same
  *  arrays — without this, `searchParams.getAll` mints a fresh array every render, and a consumer
- *  that keys a `useMemo` or a query off the result (`deliveryTimelineQuery`'s options) never sees
+ *  that keys a `useMemo` or a query off the result (the Delivery page's live view) never sees
  *  two renders agree, recomputing or refetching on every render instead of only when the URL
  *  changes. `keys` is expected to be a module-level constant, since its own identity is a
  *  dependency of the memo. */

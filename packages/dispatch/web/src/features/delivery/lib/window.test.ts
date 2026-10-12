@@ -3,12 +3,10 @@ import { expect, test } from "bun:test";
 import {
   customRange,
   hasMalformedWindowParams,
+  liveWindow,
   MAX_WINDOW_DAYS,
-  presetRange,
   readWindow,
 } from "./window";
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 test("the URL's window: from and to are a custom range, window names a preset, and anything else is the last 28 days", () => {
   expect(
@@ -33,11 +31,12 @@ test("a malformed custom window falls back to the default and tells the page to 
   expect(hasMalformedWindowParams(inverted)).toBe(true);
 });
 
-test("a preset spans its days, ending now", () => {
-  const now = Date.parse("2026-10-11T12:00:00Z");
-  const range = presetRange("7d", now);
-  expect(range.to).toBe("2026-10-11T12:00:00.000Z");
-  expect(Date.parse(range.to) - Date.parse(range.from)).toBe(7 * DAY_MS);
+test("a preset subscribes by its days, which Dispatch keeps ending at the present; a custom range by its ends", () => {
+  expect(liveWindow({ kind: "preset", preset: "7d" })).toEqual({ preset: 7 });
+  expect(liveWindow({ kind: "preset", preset: "84d" })).toEqual({ preset: 84 });
+  expect(
+    liveWindow({ kind: "custom", from: "2026-01-01T00:00:00.000Z", to: "2026-01-08T00:00:00.000Z" })
+  ).toEqual({ from: "2026-01-01T00:00:00.000Z", to: "2026-01-08T00:00:00.000Z" });
 });
 
 test("a custom range takes whole UTC days, its last day included, up to the server's 84", () => {

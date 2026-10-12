@@ -75,6 +75,13 @@ export interface DeliveryLive {
   close(): void;
 }
 
+/** A first load's promise and the two functions that settle it. */
+interface PendingLoad {
+  readonly promise: Promise<DeliveryLiveBody>;
+  readonly resolve: (body: DeliveryLiveBody) => void;
+  readonly reject: (reason: unknown) => void;
+}
+
 interface Subscription {
   readonly id: string;
   readonly hash: string;
@@ -84,7 +91,7 @@ interface Subscription {
   seq: string | null;
   revs: DeliveryLiveRevs | null;
   /** The first load's promise, until the snapshot or an error frame settles it. */
-  pending: ReturnType<typeof Promise.withResolvers<DeliveryLiveBody>> | null;
+  pending: PendingLoad | null;
 }
 
 /** The live route on this page's own origin, as the document socket builds its own. */

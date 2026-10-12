@@ -1,19 +1,31 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
+import {
+  errorFrame,
+  type FakeDeliverySocket,
+  type FakeDeliverySockets,
+  installFakeDeliverySockets,
+  snapshotFrame,
+} from "../../__tests__/delivery-live-harness";
 import type {
   DeliveryLeadTimeTiming,
+  DeliveryLiveSubscribe,
   DeliveryPipelineResponse,
   DeliveryTiming,
   DeliveryTimingCell,
 } from "../../api/types";
 import { PipelinePage, PipelineView } from "./PipelinePage";
 
+let sockets: FakeDeliverySockets;
+beforeEach(() => {
+  sockets = installFakeDeliverySockets();
+});
 afterEach(() => {
   cleanup();
+  sockets.restore();
 });
 
 // The prototype's web/src/lib/pipeline.fixture.ts, its cells as the server answers them, with the
@@ -221,7 +233,12 @@ const PIPELINE: DeliveryPipelineResponse = {
 
 function view(pipeline: DeliveryPipelineResponse = PIPELINE): HTMLElement {
   const at = Date.parse("2026-10-02T12:00:00Z");
-  render(<PipelineView nowMs={at} pipeline={pipeline} readAtMs={at} />);
+  // The freshness row reads the live connection's state from the query client.
+  render(
+    <QueryClientProvider client={new QueryClient()}>
+      <PipelineView nowMs={at} pipeline={pipeline} readAtMs={at} />
+    </QueryClientProvider>
+  );
   return document.body;
 }
 
@@ -370,74 +387,71 @@ function renderPage(path = "/pipeline") {
   );
 }
 
-test("the page reads the pipeline, forwarding a pinned at from its URL, and titles the tab", async () => {
-  const getDeliveryPipeline = spyOn(api, "getDeliveryPipeline").mockResolvedValue(PIPELINE);
-  try {
-    renderPage("/pipeline?at=2026-10-02T12:00:00Z");
-    expect(await screen.findByRole("heading", { level: 1, name: "Pipeline" })).toBeDefined();
-    await screen.findByText("PR CI");
-    expect(getDeliveryPipeline).toHaveBeenCalledWith({ at: "2026-10-02T12:00:00Z" });
-    // A failure's age is measured from the pinned at (11:40 against 12:00), not the clock.
-    expect(document.querySelector('[data-failing-job="build / unit"] a')?.textContent).toBe(
-      "20 min ago"
-    );
-    expect(document.title).toBe("Pipeline · Dispatch");
-  } finally {
-    getDeliveryPipeline.mockRestore();
-  }
+/** The page's delivery socket, accepted, and the pipeline subscription it sent on it. */
+async function subscribed(): Promise<{ socket: FakeDeliverySocket; frame: DeliveryLiveSubscribe }> {
+  await waitFor(() => expect(sockets.sockets.length).toBeGreaterThan(0));
+  const socket = sockets.latest();
+  act(() => socket.open());
+  const frame = await waitFor(() => socket.subscribed("pipeline"));
+  return { socket, frame };
+}
+
+test("the page subscribes the pipeline, forwarding a pinned at from its URL, and titles the tab", async () => {
+  renderPage("/pipeline?at=2026-10-02T12:00:00Z");
+  expect(await screen.findByRole("heading", { level: 1, name: "Pipeline" })).toBeDefined();
+  const { socket, frame } = await subscribed();
+  expect(frame.view).toEqual({ kind: "pipeline", at: "2026-10-02T12:00:00Z" });
+  act(() => socket.receive(snapshotFrame(frame.sub, PIPELINE)));
+  await screen.findByText("PR CI");
+  // A failure's age is measured from the pinned at (11:40 against 12:00), not the clock.
+  expect(document.querySelector('[data-failing-job="build / unit"] a')?.textContent).toBe(
+    "20 min ago"
+  );
+  expect(document.title).toBe("Pipeline · Dispatch");
 });
 
-test("without at in its URL the page asks for today", async () => {
-  const getDeliveryPipeline = spyOn(api, "getDeliveryPipeline").mockResolvedValue(PIPELINE);
-  try {
-    renderPage();
-    await screen.findByText("PR CI");
-    expect(getDeliveryPipeline).toHaveBeenCalledWith({});
-  } finally {
-    getDeliveryPipeline.mockRestore();
-  }
+test("without at in its URL the page subscribes today's pipeline", async () => {
+  renderPage();
+  const { socket, frame } = await subscribed();
+  expect(frame.view).toEqual({ kind: "pipeline" });
+  act(() => socket.receive(snapshotFrame(frame.sub, PIPELINE)));
+  await screen.findByText("PR CI");
+  expect(socket.subscribes()).toHaveLength(1);
 });
 
 test("an unconfigured delivery points at the settings that set it up", async () => {
-  const getDeliveryPipeline = spyOn(api, "getDeliveryPipeline").mockRejectedValue(
-    new ApiError(404, { code: "DELIVERY_NOT_CONFIGURED", error: "delivery is not configured" })
+  renderPage();
+  const { socket, frame } = await subscribed();
+  act(() =>
+    socket.receive(errorFrame(frame.sub, "DELIVERY_NOT_CONFIGURED", "delivery is not configured"))
   );
-  try {
-    renderPage();
-    const link = await screen.findByRole("link", { name: "Set up the delivery timeline" });
-    expect(link.getAttribute("href")).toBe("/delivery");
-  } finally {
-    getDeliveryPipeline.mockRestore();
-  }
+  const link = await screen.findByRole("link", { name: "Set up the delivery timeline" });
+  expect(link.getAttribute("href")).toBe("/delivery");
 });
 
-test("while the read is out the page says it is loading, and shows nothing else", async () => {
-  const pending = new Promise<DeliveryPipelineResponse>(() => {});
-  const getDeliveryPipeline = spyOn(api, "getDeliveryPipeline").mockReturnValue(pending);
-  try {
-    renderPage();
-    expect(await screen.findByText("Loading pipeline…")).toBeDefined();
-    expect(screen.queryByText("PR CI")).toBeNull();
-    expect(screen.queryByRole("alert")).toBeNull();
-  } finally {
-    getDeliveryPipeline.mockRestore();
-  }
+test("while the snapshot is out the page says it is loading, and shows nothing else", async () => {
+  renderPage();
+  await subscribed();
+  expect(await screen.findByText("Loading pipeline…")).toBeDefined();
+  expect(screen.queryByText("PR CI")).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
 });
 
-test("a failed read says so with Retry, and Retry reads again", async () => {
-  const getDeliveryPipeline = spyOn(api, "getDeliveryPipeline")
-    .mockRejectedValueOnce(new ApiError(503, { code: "UNAVAILABLE", error: "try later" }))
-    .mockResolvedValueOnce(PIPELINE);
-  try {
-    renderPage();
-    const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("Couldn't load the pipeline.");
-    expect(screen.queryByRole("link", { name: "Set up the delivery timeline" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    await screen.findByText("PR CI");
-    expect(getDeliveryPipeline).toHaveBeenCalledTimes(2);
-    expect(screen.queryByRole("alert")).toBeNull();
-  } finally {
-    getDeliveryPipeline.mockRestore();
-  }
+test("a refused subscription says so with Retry, and Retry subscribes again", async () => {
+  renderPage();
+  const { socket, frame } = await subscribed();
+  act(() => socket.receive(errorFrame(frame.sub, "UNAVAILABLE", "try later")));
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("Couldn't load the pipeline.");
+  expect(screen.queryByRole("link", { name: "Set up the delivery timeline" })).toBeNull();
+
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  const retried = await waitFor(() => {
+    const again = socket.subscribed("pipeline");
+    expect(again.sub).not.toBe(frame.sub);
+    return again;
+  });
+  act(() => socket.receive(snapshotFrame(retried.sub, PIPELINE)));
+  await screen.findByText("PR CI");
+  expect(screen.queryByRole("alert")).toBeNull();
 });
