@@ -349,18 +349,10 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if err != nil {
 		return intake.Result{}, err
 	}
-	// A push can land after the route read the head READY names and before this completion
-	// commits. Accepted, that READY would leave the issue awaiting a merge of a head it does not
-	// name, and nothing withdraws a READY the issue never reached awaiting_merge to hold. The route
-	// held the commit to GitHub's head, and passes the head the record held then (RecordedHead):
-	// the record follows GitHub only by webhook, so one still there is lagging, not moved, and one
-	// at the commit has caught up. Only a record that moved to another head is a push in between,
-	// refused before anything of the READY is recorded, so the merger's READY at the new head is
-	// applied; refused on a lagging record, the right READY's retry at the same commit would be
-	// answered HANDOFF_ALREADY_RECORDED, and the issue would stay in merging.
-	if issue.Phase == phase.Merging && pr != nil && pr.State == record.PullRequestOpen && pr.HeadSHA != fact.Commit && pr.HeadSHA != fact.RecordedHead {
-		return refused("READY_HEAD_MOVED", fmt.Sprintf("pull request #%d of %s now heads at %s, not READY's %s: build a new packet at that head and complete again; this completion changed nothing",
-			pr.Number, issue.Key, pr.HeadSHA, fact.Commit)), nil
+	if issue.Phase == phase.Merging {
+		if result, err := e.holdReadyToItsHead(ctx, tx, *issue, pr, fact); err != nil || result.Refusal != nil {
+			return result, err
+		}
 	}
 	if phase.FileBacked(issue.Phase) {
 		// The commit a completion carries is the pushed commit carrying the phase's handoff, which

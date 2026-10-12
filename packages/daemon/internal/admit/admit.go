@@ -822,6 +822,11 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // ends last or supersedes the stop (workflow.StartFor, over the role's queued rows and this
 // daemon's own claim). Each start is queued behind a row creating its child's branch, as the root's
 // architect start is.
+//
+// A child the tree left awaiting its merge is sent back to merging first, and its merger started
+// there. The tree's linger disarmed its pull request, and the re-admission cleared its merger's
+// READY with the rest of the old generation's handoffs (readmit), so nothing is armed and no READY
+// is left to arm it again: only a new READY from its merger moves it.
 func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	project, err := claim.ProjectToken(a.project)
 	if err != nil {
@@ -830,6 +835,12 @@ func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root r
 	for _, child := range issues {
 		if child.Key == root.Key || child.Tree != root.Tree {
 			continue
+		}
+		if child.Phase == phase.AwaitingMerge && !record.OutOfWorkflow(child.Status) {
+			child.Phase = phase.Merging
+			if err := a.store.PutIssue(ctx, tx, child); err != nil {
+				return fmt.Errorf("send awaiting child %s back to merging: %w", child.Key, err)
+			}
 		}
 		role := workflow.RoleFor(child.Phase)
 		if role == "" || record.OutOfWorkflow(child.Status) {

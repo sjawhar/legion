@@ -8,6 +8,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
+	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
 )
@@ -21,6 +22,42 @@ import (
 // the completion itself, or on the approval that opens a gate that refused it.
 func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, merger record.PhaseRow) error {
 	return e.tellReadyAudience(ctx, tx, issue, record.ReadyPacket(merger.Summary, merger.MergeNote))
+}
+
+// holdReadyToItsHead holds a merger's READY to the pull request's head before anything of it is
+// recorded, and records that head. A push can land after the route read the head READY names and
+// before this completion commits: accepted, that READY would leave the issue awaiting a merge of a
+// head it does not name, and nothing withdraws a READY the issue never reached awaiting_merge to
+// hold. The route held the commit to GitHub's head, and passes the record as it read it, head and
+// clock (intake.HandoffComplete.RecordedHead, RecordedHeadAt): the record follows GitHub only by
+// webhook, so one still exactly that snapshot is lagging, not moved, and one at the commit has
+// caught up. Any other record is a push in between, a record back at the snapshot's head at a
+// later clock among them (a force push and its undo), and is refused, so the merger's READY at the
+// new head is applied. Refused on a merely lagging record, the right READY's retry at the same
+// commit would be answered HANDOFF_ALREADY_RECORDED, and the issue would stay in merging.
+//
+// A READY it lets through, accepted or held by the design gate, advances the record to its head at
+// GitHub's clock in the route's read (intake.HandoffComplete.HeadAt). GitHub showed that head then,
+// so a synchronize older than that read, for a head between the lagging one and the READY's or for
+// the lagging head itself, delivered late or again, changes nothing (classify.LateLifecycle), rather
+// than voiding a held READY or withdrawing an accepted one.
+func (e *Engine) holdReadyToItsHead(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest, fact intake.HandoffComplete) (intake.Result, error) {
+	if pr == nil || pr.State != record.PullRequestOpen {
+		return intake.Result{}, nil
+	}
+	snapshot := pr.HeadSHA == fact.RecordedHead && pr.HeadUpdatedAt.Equal(fact.RecordedHeadAt)
+	if pr.HeadSHA != fact.Commit && !snapshot {
+		return refused("READY_HEAD_MOVED", fmt.Sprintf("pull request #%d of %s now heads at %s, not READY's %s: build a new packet at that head and complete again; this completion changed nothing",
+			pr.Number, issue.Key, pr.HeadSHA, fact.Commit)), nil
+	}
+	if pr.HeadSHA == fact.Commit && !fact.HeadAt.After(pr.HeadUpdatedAt) {
+		return intake.Result{}, nil
+	}
+	if pr.HeadSHA != fact.Commit {
+		*pr = classify.AdvancePullRequestHead(*pr, fact.Commit)
+	}
+	pr.HeadUpdatedAt = classify.LatestClock(pr.HeadUpdatedAt, fact.HeadAt)
+	return intake.Result{}, e.store.PutPullRequest(ctx, tx, *pr)
 }
 
 // withdrawReady tells the READY's audience (tellReadyAudience) that the READY no longer stands:

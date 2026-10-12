@@ -133,7 +133,8 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// generation's key.
 	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
 	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim,
-		Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit, MergeNote: answer.mergeNote, RecordedHead: answer.recordedHead}, s.handlers...)
+		Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit, MergeNote: answer.mergeNote,
+		RecordedHead: answer.recordedHead, RecordedHeadAt: answer.recordedHeadAt, HeadAt: answer.headAt}, s.handlers...)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply handoff fact")
 		return
@@ -155,14 +156,6 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, HandoffCompleteResponse{Note: answer.note})
-}
-
-// readyAnswer is what READY's checks (readyChecks) leave for a merger's ready: true: the note the
-// completion answers with, the by-hand note the completion records when a person merges the pull
-// request, and the head the daemon's record held for it when they read it, which the workflow
-// tells a lagging record from a moved one by (intake.HandoffComplete.RecordedHead).
-type readyAnswer struct {
-	note, mergeNote, recordedHead string
 }
 
 // byHandShare is the clause READY_PACKET_TOO_LONG names a by-hand note's share of the packet with,
@@ -213,14 +206,10 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 	if s.mergeRules != nil {
 		rules = s.mergeRules(issue.Project)
 	}
-	note, mergeNote, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, pr, disarmPending)
+	answer, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, pr, disarmPending)
 	if refused != nil {
 		refused.write(w)
 		return readyAnswer{}, false
-	}
-	answer = readyAnswer{note: note, mergeNote: mergeNote}
-	if pr != nil {
-		answer.recordedHead = pr.HeadSHA
 	}
 	return answer, true
 }
