@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -242,6 +243,53 @@ func TestConcurrentReadsEachHoldOneConnection(t *testing.T) {
 	defer tx.Rollback(ctx)
 	if _, err := ForConcurrentRead(ctx); !errors.Is(err, ErrNestedAcquire) {
 		t.Fatalf("concurrent reads under an open transaction: %v, want ErrNestedAcquire", err)
+	}
+}
+
+// Listener hands out a connection of its own, outside the shared pool: one taken while every shared
+// connection is held is still served, it receives notifications, and once it is closed the next
+// call is served too.
+func TestListenerIsServedWhileTheSharedPoolIsFullyAcquired(t *testing.T) {
+	database := openTestStore(t)
+	ctx := context.Background()
+	held := make([]*pgxpool.Conn, 0, database.Pool.Config().MaxConns)
+	for range database.Pool.Config().MaxConns {
+		conn, err := database.Pool.Acquire(ctx)
+		if err != nil {
+			t.Fatalf("acquire a shared connection: %v", err)
+		}
+		held = append(held, conn)
+	}
+	defer func() {
+		for _, conn := range held {
+			conn.Release()
+		}
+	}()
+	if stat := database.Pool.Stat(); stat.AcquiredConns() != stat.MaxConns() {
+		t.Fatalf("shared pool holds %d of %d connections, want all", stat.AcquiredConns(), stat.MaxConns())
+	}
+
+	for round := range 2 {
+		waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		listener, err := database.Pool.Listener(waitCtx)
+		if err != nil {
+			cancel()
+			t.Fatalf("round %d: Listener with the shared pool fully acquired: %v", round, err)
+		}
+		if _, err := listener.Exec(waitCtx, "listen pool_listener_test"); err != nil {
+			t.Fatalf("round %d: listen: %v", round, err)
+		}
+		if _, err := held[0].Exec(waitCtx, "select pg_notify('pool_listener_test', 'ping')"); err != nil {
+			t.Fatalf("round %d: notify: %v", round, err)
+		}
+		notification, err := listener.WaitForNotification(waitCtx)
+		if err != nil || notification.Payload != "ping" {
+			t.Fatalf("round %d: notification = %+v, %v; want payload ping", round, notification, err)
+		}
+		if err := listener.Close(waitCtx); err != nil {
+			t.Fatalf("round %d: close: %v", round, err)
+		}
+		cancel()
 	}
 }
 

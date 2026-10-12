@@ -905,3 +905,56 @@ func ListPullRequestsInWindow(ctx context.Context, pool *store.Pool, from, to ti
 	}
 	return prs, rows.Err()
 }
+
+// OpenP0Keys is every open P0 issue's key, across every project: the issues whose change can move
+// the measures' unowned_p0 list. The delivery live hub (api/delivery_live_hub.go) loads it at start
+// and after the event log resets, and keeps it current from issue event payloads in between.
+func OpenP0Keys(ctx context.Context, pool *store.Pool) (map[string]struct{}, error) {
+	rows, err := pool.Query(ctx, `select key from issues where priority = 0 and status <> 'done'`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	keys := map[string]struct{}{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		keys[key] = struct{}{}
+	}
+	return keys, rows.Err()
+}
+
+// IssueAncestors is every ancestor of keys up their parent_key chains, at most maxDepth links up:
+// the issues whose component choice a key can inherit. The walk is a `union` recursion bounded by
+// maxDepth, so it terminates even if a raced reparent ever commits a cycle; the caller passes the
+// cap the API's other parent walks use (api.parentDepthCap), since this package cannot import api.
+func IssueAncestors(ctx context.Context, q Querier, keys []string, maxDepth int) (map[string]struct{}, error) {
+	ancestors := map[string]struct{}{}
+	if len(keys) == 0 {
+		return ancestors, nil
+	}
+	rows, err := q.Query(ctx, `
+		with recursive chain(key, parent_key, depth) as (
+			select key, parent_key, 0 from issues where key = any($1)
+			union
+			select p.key, p.parent_key, c.depth + 1
+			from chain c join issues p on p.key = c.parent_key
+			where c.depth < $2
+		)
+		select distinct key from chain where depth > 0
+	`, keys, maxDepth)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return nil, err
+		}
+		ancestors[key] = struct{}{}
+	}
+	return ancestors, rows.Err()
+}
