@@ -44,5 +44,8 @@
     "Two hover cards on a fallback link in the live editor (RefPreviewHost's and proof-editor's link card) - documented in AGENTS.md:719, not changed; a one-card design is a product decision for the architect.",
     "A dragstart whose target is inside the fallback link is not reachable by gesture (the wrapper is the drag source); the token that lets it through is code-traced only.",
     "WebKit is not exercised by any proof."
+  ],
+  "notes": [
+    "2026-10-12T20:41:44Z: this commit exists to give the head a CI settlement. The approval of 9ca60351 (handoff-only, pushed with the skip-checks trailer) got its own settlement from the PR Title runs the review events triggered, naming no result for the required lint/test/typecheck checks, and GitHub starts no Tests run while the head carries the trailer; the architect asked for one handoff-only push without it so the Tests run gives the head a settlement. Nothing outside .legion/ changes; the approval of 9ca60351 is carried."
   ]
 }
