@@ -291,7 +291,15 @@ test("phone search rows are at least 44px, do not overflow, and a comment result
     // the text assertion's clock once the region is mounted so a loaded runner does not fail it.
     const conversation = page.getByRole("region", { name: "Conversation" });
     await expect(conversation).toBeVisible();
-    await expect(conversation.getByText("Move the astrolabe diagram.")).toBeVisible();
+    // The comment link opens its thread full-screen over the Conversation; Back leaves it on the
+    // focused turn.
+    const thread = page.getByRole("dialog", { name: "Thread" });
+    await expect(thread.getByText("Move the astrolabe diagram.")).toBeVisible();
+    await thread.getByRole("button", { name: "Back" }).click();
+    await expect(thread).toHaveCount(0);
+    await expect(
+      conversation.locator(`li[data-turn="comment:${fixture.commentID}"][aria-current="true"]`)
+    ).toContainText("Move the astrolabe diagram.");
     await expect(page.getByTestId("margin-sheet")).not.toContainText("Move the astrolabe diagram.");
   } finally {
     await context.close();
