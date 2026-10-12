@@ -15,7 +15,11 @@ import {
  * `href` (a modifier click, a middle click and the read-only version view follow it) and
  * `data-dispatch-href` for the live editor's click handler and the hover card. The words are the
  * reference's own, never an author's caption, as `RefLink` shows them until a title resolves. */
-function fallbackLink(route: DispatchReferenceRoute, document: Document): HTMLAnchorElement {
+function fallbackLink(
+  route: DispatchReferenceRoute,
+  document: Document,
+  placeCaretAfter: () => void
+): HTMLAnchorElement {
   const link = document.createElement("a");
   link.setAttribute("href", buildReferencePath(route));
   link.dataset.dispatchHref = buildDispatchReference(route);
@@ -24,6 +28,16 @@ function fallbackLink(route: DispatchReferenceRoute, document: Document): HTMLAn
   // on the link moves the picture node as one on the `<img>` does, instead of dropping the
   // browser's own link HTML into the document.
   link.draggable = false;
+  // Firefox does not focus a link on mousedown: the editing host takes the focus, and ProseMirror
+  // then writes the editor's own selection into the DOM - the document's start, for a reader who
+  // has not clicked into the text - which scrolls a long document away from the link before the
+  // mouseup and the click land on it. Putting the caret beside the picture first makes that the
+  // selection ProseMirror restores, so nothing scrolls. Chromium focuses the link itself, and an
+  // unfocused editor moves its caret without touching the DOM selection. Not `preventDefault`:
+  // Firefox would then start no drag from the link.
+  link.addEventListener("mousedown", (event) => {
+    if (event.button === 0) placeCaretAfter();
+  });
   return link;
 }
 
@@ -35,11 +49,16 @@ function fallbackLink(route: DispatchReferenceRoute, document: Document): HTMLAn
  * `pictureSerializer`): the `alt`, or the artifact's slug when that is empty. A version the
  * browser cannot draw (a document, another file, a missing version) errors, and the picture
  * becomes `fallbackLink`; a source that pins no version or names something other than an artifact
- * is that link at once. Any other source - a picture on another website, a relative path, a
- * `dispatch://` string the reference grammar refuses - is drawn by the schema's own `toDOM`, as
- * today.
+ * is that link at once. `placeCaretAfter` puts the editor's caret just after the node, which the
+ * link calls on a primary-button mousedown (the comment in `fallbackLink` says why). Any other
+ * source - a picture on another website, a relative path, a `dispatch://` string the reference
+ * grammar refuses - is drawn by the schema's own `toDOM`, as today.
  */
-export function pictureView(node: ProseMirrorNode, document: Document): NodeView {
+export function pictureView(
+  node: ProseMirrorNode,
+  document: Document,
+  placeCaretAfter: () => void
+): NodeView {
   const picture = pictureReference(node.attrs);
   if (picture === undefined) {
     const toDOM = node.type.spec.toDOM;
@@ -53,7 +72,7 @@ export function pictureView(node: ProseMirrorNode, document: Document): NodeView
   dom.dataset.dispatchDocPicture = buildDispatchReference(route);
   let link: HTMLAnchorElement | undefined;
   const showLink = () => {
-    link = fallbackLink(route, document);
+    link = fallbackLink(route, document, placeCaretAfter);
     dom.replaceChildren(link);
   };
   if (named?.version === undefined) {

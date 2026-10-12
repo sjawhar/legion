@@ -3,7 +3,7 @@ import {
   DOMSerializer,
   type Node as ProseMirrorNode,
 } from "@milkdown/kit/prose/model";
-import { type EditorState, Plugin, PluginKey } from "@milkdown/kit/prose/state";
+import { type EditorState, Plugin, PluginKey, TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView, NodeView, ViewMutationRecord } from "@milkdown/kit/prose/view";
 
 import type { AskOption, AskUrgency, BlockSchema, BlockTypeSchema } from "../../api/types";
@@ -387,7 +387,15 @@ export function installTypedBlocks(
           ])
       ),
       ask: (node) => new AskBlockView(node, view.dom.ownerDocument, registry, publish),
-      image: (node) => pictureView(node, view.dom.ownerDocument),
+      // A changed `image` node is a new view (no `update`), so the `node` captured here is current.
+      image: (node, _view, getPos) =>
+        pictureView(node, view.dom.ownerDocument, () => {
+          const pos = getPos();
+          if (pos === undefined) return;
+          view.dispatch(
+            view.state.tr.setSelection(TextSelection.create(view.state.doc, pos + node.nodeSize))
+          );
+        }),
     },
     plugins: [...(view.props.plugins ?? []), askBlockEditingPlugin],
   });

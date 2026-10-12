@@ -26,8 +26,10 @@ function picture(src: string, alt = "") {
   return schema.node("image", { alt, src });
 }
 
+const noCaret = () => {};
+
 function wrapper(src: string, alt = ""): HTMLElement {
-  const { dom } = pictureView(picture(src, alt), document);
+  const { dom } = pictureView(picture(src, alt), document, noCaret);
   if (!(dom instanceof HTMLElement) || dom.tagName !== "SPAN") {
     throw new Error(`the view's dom is not a wrapper span: ${(dom as Element).outerHTML}`);
   }
@@ -78,14 +80,22 @@ test("an issue's picture at a version draws from the version's bytes route, capt
 });
 
 test("a leaf view: no contentDOM, no update, events on the picture kept", () => {
-  const view = pictureView(picture("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"), document);
+  let caretPlaced = 0;
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"),
+    document,
+    () => {
+      caretPlaced += 1;
+    }
+  );
 
   expect(view.contentDOM).toBeUndefined();
   expect(view.update).toBeUndefined();
   const img = pictureOf(view.dom as HTMLElement);
-  const click = new MouseEvent("mousedown", { bubbles: true });
+  const click = new MouseEvent("mousedown", { bubbles: true, button: 0 });
   img.dispatchEvent(click);
   expect(view.stopEvent?.(click)).toBe(false);
+  expect(caretPlaced).toBe(0);
 });
 
 test("an empty caption falls back to the artifact's slug", () => {
@@ -101,7 +111,14 @@ test("a project document's picture draws from the project's bytes route", () => 
 });
 
 test("a version the browser cannot draw becomes a link to the artifact's page", () => {
-  const view = pictureView(picture("dispatch://CORE-1/artifact/notes-md@v1", "notes.md"), document);
+  let caretPlaced = 0;
+  const view = pictureView(
+    picture("dispatch://CORE-1/artifact/notes-md@v1", "notes.md"),
+    document,
+    () => {
+      caretPlaced += 1;
+    }
+  );
   const dom = view.dom as HTMLElement;
 
   pictureOf(dom).dispatchEvent(new Event("error"));
@@ -113,9 +130,14 @@ test("a version the browser cannot draw becomes a link to the artifact's page", 
   expect(link.draggable).toBe(false);
   expect(dom.querySelector("img")).toBeNull();
   expect(dom.childNodes.length).toBe(1);
-  const click = new MouseEvent("mousedown", { bubbles: true });
+  const click = new MouseEvent("mousedown", { bubbles: true, button: 0 });
   link.dispatchEvent(click);
   expect(view.stopEvent?.(click)).toBe(true);
+  // A primary-button press on the link puts the caret beside the picture, so the selection the
+  // editor restores when Firefox focuses it is next to the link; a secondary button does not.
+  expect(caretPlaced).toBe(1);
+  link.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 2 }));
+  expect(caretPlaced).toBe(1);
 });
 
 test("an error raised as the source is set is not missed", () => {
@@ -152,7 +174,7 @@ test("a picture from elsewhere, or a reference the grammar refuses, is drawn by 
     "logo.png",
     "dispatch://not a reference",
   ]) {
-    const view = pictureView(picture(source, "logo"), document);
+    const view = pictureView(picture(source, "logo"), document, noCaret);
     const dom = view.dom as HTMLElement;
 
     expect(dom.tagName).toBe("IMG");
