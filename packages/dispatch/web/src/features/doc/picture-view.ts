@@ -7,8 +7,7 @@ import {
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
-  parseDispatchReference,
-  referencedArtifact,
+  pictureReference,
   shortForm,
 } from "../refs/routes";
 
@@ -32,23 +31,24 @@ function fallbackLink(route: DispatchReferenceRoute, document: Document): HTMLAn
  * The node view of Milkdown's `image` node. The browser cannot fetch `dispatch://`, so a picture
  * whose source names an artifact at a version (`![shot.png](dispatch://KEY/artifact/shot-png@v1)`,
  * the line a pasted picture is written as) is drawn from the version's same-origin bytes route,
- * with the caption `pictureSerializer` would give it (`markdown-engine.ts`): the `alt`, or the
- * artifact's slug when that is empty. A version the browser cannot draw (a document, another file,
- * a missing version) errors, and the picture becomes `fallbackLink`; a source that pins no version
- * or names something other than an artifact is that link at once. Any other source - a picture on
- * another website, a relative path, a `dispatch://` string the reference grammar refuses - is drawn
- * by the schema's own `toDOM`, as today.
+ * with the caption `pictureReference` reads (`refs/routes.ts`, the rule it shares with
+ * `pictureSerializer`): the `alt`, or the artifact's slug when that is empty. A version the
+ * browser cannot draw (a document, another file, a missing version) errors, and the picture
+ * becomes `fallbackLink`; a source that pins no version or names something other than an artifact
+ * is that link at once. Any other source - a picture on another website, a relative path, a
+ * `dispatch://` string the reference grammar refuses - is drawn by the schema's own `toDOM`, as
+ * today.
  */
 export function pictureView(node: ProseMirrorNode, document: Document): NodeView {
-  const src = String(node.attrs.src ?? "");
-  const route = src.startsWith("dispatch://") ? parseDispatchReference(src) : undefined;
-  if (route === undefined) {
+  const picture = pictureReference(node.attrs);
+  if (picture === undefined) {
     const toDOM = node.type.spec.toDOM;
     if (toDOM === undefined) {
       throw new Error(`the ${node.type.name} node has no toDOM`);
     }
     return { dom: DOMSerializer.renderSpec(document, toDOM(node)).dom };
   }
+  const { named, route } = picture;
   const dom = document.createElement("span");
   dom.dataset.dispatchDocPicture = buildDispatchReference(route);
   let link: HTMLAnchorElement | undefined;
@@ -56,13 +56,11 @@ export function pictureView(node: ProseMirrorNode, document: Document): NodeView
     link = fallbackLink(route, document);
     dom.replaceChildren(link);
   };
-  const named = referencedArtifact(route);
   if (named?.version === undefined) {
     showLink();
   } else {
-    const alt = String(node.attrs.alt ?? "").trim();
     const img = document.createElement("img");
-    img.setAttribute("alt", alt === "" ? named.slug : alt);
+    img.setAttribute("alt", picture.caption);
     img.setAttribute("loading", "lazy");
     img.className = pictureClassName;
     // The listener and the picture's place in the wrapper come before `src`, so an error the

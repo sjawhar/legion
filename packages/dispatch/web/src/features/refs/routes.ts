@@ -615,6 +615,37 @@ export function referencedArtifact(route: DispatchReferenceRoute): ReferencedArt
   }
 }
 
+/** What a picture whose source is a Dispatch reference names: the source as written, the route it
+ *  parses to, the artifact that route names (`referencedArtifact`, undefined for an ask, a comment
+ *  or an issue) and the caption to draw it with. */
+export interface PictureReference {
+  readonly caption: string;
+  readonly named: ReferencedArtifact | undefined;
+  readonly route: DispatchReferenceRoute;
+  readonly source: string;
+}
+
+/** The one reading of an `image` node's attributes as a Dispatch picture, shared by the engine's
+ *  `pictureSerializer` (`markdown-engine.ts`) and the editors' `pictureView`
+ *  (`doc/picture-view.ts`) so a picture in a comment and the same picture in a spec are read by
+ *  one rule. The source is `src` as a string (`""` when absent); it is a reference only when it
+ *  starts with `dispatch://` and the grammar reads it, else undefined and the picture is whatever
+ *  the caller draws for any other address. The caption is the trimmed `alt`, or the slug of the
+ *  artifact the reference names when the `alt` is blank (`""` when it names no artifact). */
+export function pictureReference(attrs: {
+  readonly alt?: unknown;
+  readonly src?: unknown;
+}): PictureReference | undefined {
+  const source = String(attrs.src ?? "");
+  const route = source.startsWith("dispatch://") ? parseDispatchReference(source) : undefined;
+  if (route === undefined) {
+    return undefined;
+  }
+  const named = referencedArtifact(route);
+  const alt = String(attrs.alt ?? "").trim();
+  return { caption: alt === "" ? (named?.slug ?? "") : alt, named, route, source };
+}
+
 /** The route an ask or comment is referenced by: under its issue when it has one, else under the
  *  project document that owns it. Only Inbox rows carry `document`, so a caller showing a
  *  project document's items names that document; without either there is no reference. */
