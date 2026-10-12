@@ -9,9 +9,10 @@
   custom `from`/`to`), the page's `DeliveryLiveSubscribe` and `DeliveryLiveUnsubscribe`, and
   Dispatch's `DeliveryLiveSnapshot` (the matching GET route's body and a revision per key),
   `DeliveryLiveDelta` (list items by id, map entries by key, counts by facet and value, null for a
-  key that left, and the other fields whole), `DeliveryLiveFreshness` and `DeliveryLiveError`.
-  `fixtures/delivery-live/` holds a snapshot, a delta, the snapshot after it and an error frame as
-  the server's diff writes them.
+  key that left, and the other fields whole), `DeliveryLiveFreshness`, `DeliveryLiveError` and
+  `DeliveryLiveHeartbeat` (sent every heartbeat interval beside the socket's ping, which a browser
+  never shows the page). `fixtures/delivery-live/` holds a snapshot, a delta, the snapshot after it,
+  an error and a heartbeat frame as the server writes them.
 
 - `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
   `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,

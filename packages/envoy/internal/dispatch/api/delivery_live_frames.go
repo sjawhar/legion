@@ -133,6 +133,16 @@ type DeliveryLiveError struct {
 	Message string `json:"message"`
 }
 
+// DeliveryLiveHeartbeat goes out every StreamHeartbeat beside the socket's control ping and carries
+// nothing: a browser never shows a ping to the page's script, so this frame is how an open page
+// tells a quiet socket from a dead one.
+type DeliveryLiveHeartbeat struct {
+	Type string `json:"type"`
+}
+
+// deliveryLiveHeartbeat is the one heartbeat frame.
+var deliveryLiveHeartbeat = DeliveryLiveHeartbeat{Type: "heartbeat"}
+
 // deliveryLiveClasses sorts one body kind's top-level JSON fields into how a delta sends them.
 // Every field is in exactly one class (TestEveryResponseFieldHasOneClass), so a field added to a
 // response is sent live or deliberately left out, never dropped unnoticed.

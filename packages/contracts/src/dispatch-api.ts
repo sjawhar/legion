@@ -3013,11 +3013,17 @@ export interface DeliveryLiveError {
   readonly code: string;
   readonly message: string;
 }
+/** Sent every heartbeat interval beside the socket's own ping, carrying nothing: a browser never
+ *  shows a ping to the page, so this is how the page tells a quiet socket from a dead one. */
+export interface DeliveryLiveHeartbeat {
+  readonly type: "heartbeat";
+}
 export type DeliveryLiveServerFrame =
   | DeliveryLiveSnapshot
   | DeliveryLiveDelta
   | DeliveryLiveFreshness
-  | DeliveryLiveError;
+  | DeliveryLiveError
+  | DeliveryLiveHeartbeat;
 
 /**
  * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or
