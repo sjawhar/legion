@@ -465,7 +465,7 @@ func TestReconcileMarksA404RunJobsUnfetchableAndSkipsItUntilItRecovers(t *testin
 	// UpsertRunJobs call, intake.go's own write path) clears the mark.
 	if err := UpsertRunJobs(ctx, pool, "acme/widgets", 901, []DeliveryRunJob{
 		{Repo: "acme/widgets", RunID: 901, Name: "build", StartedAt: ptrTime("2024-01-01T02:00:00Z"), CompletedAt: ptrTime("2024-01-01T02:05:00Z")},
-	}); err != nil {
+	}, true); err != nil {
 		t.Fatalf("UpsertRunJobs (simulating a live webhook retry): %v", err)
 	}
 	unfetchable, err = RunJobsUnfetchable(ctx, pool, "acme/widgets", 901)

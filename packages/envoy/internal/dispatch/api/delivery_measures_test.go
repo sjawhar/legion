@@ -157,7 +157,7 @@ func seedMeasuresFixture(t *testing.T, database *store.Store) measuresFixture {
 		for _, job := range jobs {
 			list = append(list, job)
 		}
-		if err := delivery.UpsertRunJobs(ctx, pool, fixture.Settings.DeployRepo, run.RunID, list); err != nil {
+		if err := delivery.UpsertRunJobs(ctx, pool, fixture.Settings.DeployRepo, run.RunID, list, true); err != nil {
 			t.Fatalf("seed jobs of run %d: %v", run.RunID, err)
 		}
 	}
@@ -392,7 +392,7 @@ func TestGetDeliveryMeasuresComputesTheFixture(t *testing.T) {
 	if err := delivery.UpsertRunJobs(t.Context(), database.Pool, fixture.Settings.DeployRepo, 509, []delivery.DeliveryRunJob{{
 		Repo: fixture.Settings.DeployRepo, RunID: 509, Name: fixture.Settings.ProductionJobName,
 		CompletedAt: &ninthDone, Conclusion: new(delivery.DeliveryJobConclusionSuccess),
-	}}); err != nil {
+	}}, true); err != nil {
 		t.Fatalf("seed run 509's production job: %v", err)
 	}
 	ninth := getDeliveryMeasures(t, handler, measuresFixtureWindow)

@@ -541,7 +541,7 @@ func (in *Intake) handleWorkflowEnvelope(ctx context.Context, settings DeliveryS
 		// jobs too and will complete them.
 		return fmt.Errorf("fetch jobs of run %d: %w", runID, err)
 	}
-	return UpsertRunJobs(ctx, in.pool, repoFull, runID, RunJobs(repoFull, runID, fetchedJobs))
+	return UpsertRunJobs(ctx, in.pool, repoFull, runID, RunJobs(repoFull, runID, fetchedJobs), fetched.CompletedAt != nil)
 }
 
 // commitMessagePayload is one element of GET /repos/{owner}/{repo}/pulls/{number}/commits,

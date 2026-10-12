@@ -587,11 +587,15 @@ func ScanJob(row pgx.Row) (DeliveryRunJob, error) {
 // UpsertRunJobs writes every job of one run, keyed on (repo, run_id, name): a job's own identity
 // is its name, since GitHub does not number jobs and a run never repeats one within the attempt
 // intake and reconcile keep. The run row itself must already exist (delivery_runs' foreign key).
+// complete is whether the run had ended when its jobs were read: until a read after the end lands,
+// the backfill keeps listing the run's jobs (ListRunIDsSkippingJobs). A read never undoes a later
+// one: a finished job is never replaced by an unfinished one, and jobs_complete never goes back to
+// false, so a read taken while the run ran that lands after the run's end changes nothing.
 // Reaching here means ListWorkflowRunJobs just succeeded for this run, so this also clears
 // jobs_unfetchable_at/jobs_unfetchable_reason to null: a successful listing is itself the "it is
 // fetchable after all" signal, the same way a successful UpsertPullRequest clears
 // unfetchable_at/unfetchable_reason.
-func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int64, jobs []DeliveryRunJob) error {
+func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int64, jobs []DeliveryRunJob, complete bool) error {
 	for _, job := range jobs {
 		var conclusion *string
 		if job.Conclusion != nil {
@@ -605,17 +609,34 @@ func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int
 				started_at = excluded.started_at,
 				completed_at = excluded.completed_at,
 				conclusion = excluded.conclusion
+			where delivery_run_jobs.completed_at is null or excluded.completed_at is not null
 		`, repo, runID, job.Name, job.StartedAt, job.CompletedAt, conclusion); err != nil {
 			return fmt.Errorf("upsert job %q of run %d: %w", job.Name, runID, err)
 		}
 	}
 	if _, err := pool.Exec(ctx, `
-		update delivery_runs set jobs_unfetchable_at = null, jobs_unfetchable_reason = null
+		update delivery_runs
+		set jobs_unfetchable_at = null, jobs_unfetchable_reason = null, jobs_complete = delivery_runs.jobs_complete or $3
 		where repo = $1 and run_id = $2
-	`, repo, runID); err != nil {
+	`, repo, runID, complete); err != nil {
 		return fmt.Errorf("clear jobs-unfetchable mark for run %d: %w", runID, err)
 	}
 	return nil
+}
+
+// RunCompletedAt reads the stored run's completed_at, and whether the run is stored at all: the
+// job consumer reads it after its GitHub read of the run's jobs, so a run whose end landed while
+// that read was in flight stores those jobs as read after the end (UpsertRunJobs' complete).
+func RunCompletedAt(ctx context.Context, q Querier, repo string, runID int64) (*time.Time, bool, error) {
+	var completedAt *time.Time
+	err := q.QueryRow(ctx, `select completed_at from delivery_runs where repo = $1 and run_id = $2`, repo, runID).Scan(&completedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return completedAt, true, nil
 }
 
 // MarkRunJobsUnfetchable records that repo's run_id's job listing answered a permanent 404
@@ -684,8 +705,9 @@ func ListUnfetchableRunIDs(ctx context.Context, pool *store.Pool, repo string, r
 
 // ListRunIDsSkippingJobs reads, among runIDs, the runs whose jobs the backfill does not list, in
 // one query: a run carrying a MarkRunJobsUnfetchable mark, or one that already has a stored job
-// row. The regular step lists every concluded run's jobs; the backfill exists for the run's own
-// head_branch and event, so it lists jobs only for a run that has none.
+// row read after it ended (jobs_complete). The regular step lists every concluded run's jobs; the
+// backfill exists for the run's own head_branch and event, so it lists jobs only for a run whose
+// stored jobs may still be missing some: none stored, or only those read while it ran.
 func ListRunIDsSkippingJobs(ctx context.Context, pool *store.Pool, repo string, runIDs []int64) (map[int64]bool, error) {
 	skip := make(map[int64]bool, len(runIDs))
 	if len(runIDs) == 0 {
@@ -695,7 +717,7 @@ func ListRunIDsSkippingJobs(ctx context.Context, pool *store.Pool, repo string, 
 		select r.run_id from delivery_runs r
 		where r.repo = $1 and r.run_id = any($2)
 			and (r.jobs_unfetchable_at is not null
-				or exists (select 1 from delivery_run_jobs j where j.repo = r.repo and j.run_id = r.run_id))
+				or (r.jobs_complete and exists (select 1 from delivery_run_jobs j where j.repo = r.repo and j.run_id = r.run_id)))
 	`, repo, runIDs)
 	if err != nil {
 		return nil, err
