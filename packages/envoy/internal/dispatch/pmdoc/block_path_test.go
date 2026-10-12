@@ -317,7 +317,7 @@ func TestTableRowsPlacesEveryRowAndCellAsBlockPathOfDoes(t *testing.T) {
 						entry.Row, entry.Column, entry.Header = *place.Table.Row, *place.Table.Column, openingWords(*place.Table.Header)
 					} else {
 						// BlockPathOf's own placement (tablePosition) of a cell no id reaches.
-						entry.Header = openingWords(*tablePosition(node, tableID, []int{rowIndex, column}).Header)
+						entry.Header = openingWords(*tablePosition(doc, node, tableID, []int{rowIndex, column}).Header)
 					}
 					want[rowIndex].Cells[column] = entry
 				}
@@ -379,6 +379,85 @@ func TestTableRowsColumnIsTheIndexDeleteTableColumnTakes(t *testing.T) {
 	}
 	if header := cellOpenings(deleted.Children[0].Children[0]); !reflect.DeepEqual(header, []string{"Owner", "Notes"}) {
 		t.Fatalf("after delete_column %d the header row is %q, want Owner · Notes: the Due cell alone removed", due.Column, header)
+	}
+}
+
+// The document's tables share one budget of the empty cells spans add (maxSpanCells), spent in
+// document order as the renderer spends it, so a cell is listed and placed under the header GET
+// /text draws above it. Two identical spanned tables stand either side of one spending the rest of
+// the budget: the renderer draws the first with Owner's second column and the last without it, and
+// the last's Oct 1 is under Due, where on a budget of its own it sat under Owner. A table the
+// listing skips - one with no block id, or a second table under an earlier one's id - still spends
+// what the renderer spends on it.
+func TestTablesShareOneSpanBudgetInDocumentOrder(t *testing.T) {
+	cell := func(kind, value string, colspan, rowspan int) *Node {
+		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}}}
+	}
+	owners := func() *Node {
+		return &Node{Type: "table", Children: []*Node{
+			{Type: "table_header_row", Children: []*Node{cell("table_header", "Owner", 2, 1), cell("table_header", "Due", 1, 1), cell("table_header", "Notes", 1, 1)}},
+			{Type: "table_row", Children: []*Node{cell("table_cell", "Sami", 1, 1), cell("table_cell", "Oct 1", 1, 1), cell("table_cell", "late", 1, 1)}},
+		}}
+	}
+	// spending covers 1,000 columns of each of its 100 body rows, past what the budget holds.
+	spending := func() *Node {
+		table := &Node{Type: "table", Children: []*Node{{Type: "table_header_row", Children: []*Node{cell("table_header", "Wide", 1_000, 101)}}}}
+		for row := range 100 {
+			table.Children = append(table.Children, &Node{Type: "table_row", Children: []*Node{cell("table_cell", fmt.Sprint(row), 1, 1)}})
+		}
+		return table
+	}
+	for _, test := range []struct {
+		name string
+		// unlisted marks the spending table the listing skips: its id removed, or set to before's.
+		unlisted func(before, spent *Node)
+	}{
+		{name: "every table listed"},
+		{name: "the spending table has no block id", unlisted: func(_, spent *Node) { delete(spent.Attrs, BlockIDAttr) }},
+		{name: "the spending table repeats an earlier table's id", unlisted: func(before, spent *Node) { spent.Attrs[BlockIDAttr] = before.Attrs[BlockIDAttr] }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before, spent, after := owners(), spending(), owners()
+			doc := &Node{Type: "doc", Children: []*Node{before, spent, after}}
+			EnsureBlockIDs(doc)
+			if test.unlisted != nil {
+				test.unlisted(before, spent)
+			}
+			markdown, err := Render(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			spanned, wide, unspanned := strings.Index(markdown, "| Owner |  | Due | Notes |"), strings.Index(markdown, "| Wide |"), strings.Index(markdown, "| Owner | Due | Notes |")
+			if spanned < 0 || wide < spanned || unspanned < wide {
+				t.Fatalf("the renderer draws the tables at %d, %d and %d of %.300q, want the first with Owner's second column, then the spending table, then the last without it", spanned, wide, unspanned, markdown)
+			}
+			listed, err := TableRows(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths, walked, err := BlockPathsAndTableRows(doc)
+			if err != nil || !reflect.DeepEqual(walked, listed) {
+				t.Fatalf("BlockPathsAndTableRows lists other rows than TableRows (err=%v)", err)
+			}
+			for _, check := range []struct {
+				name   string
+				table  *Node
+				header string
+			}{{"the table before the budget is spent", before, "Owner"}, {"the table after it", after, "Due"}} {
+				oct1 := check.table.Children[1].Children[1]
+				id := oct1.Attrs[BlockIDAttr].(string)
+				path, err := BlockPathOf(doc, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if *path.Table.Header != check.header || *paths[id].Table.Header != check.header {
+					t.Errorf("%s: Oct 1 placed under %q, and under %q by the walk, want %q as the renderer draws it", check.name, *path.Table.Header, *paths[id].Table.Header, check.header)
+				}
+				if rows := listed[check.table.Attrs[BlockIDAttr].(string)]; len(rows) != 2 || rows[1].Cells[1].Header != check.header {
+					t.Errorf("%s: Oct 1 listed as %#v, want under %q", check.name, rows, check.header)
+				}
+			}
+		})
 	}
 }
 

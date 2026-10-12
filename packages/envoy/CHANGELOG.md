@@ -10,7 +10,10 @@
   `delete_column` takes, so a cell spanning columns or rows counts once), the opening words of the
   header drawn above it, and its own. They are placed by the same walk of the same live tree as
   `GET /api/v1/artifacts/{id}/blocks/{block_id}`, so the two routes agree for every row and cell,
-  and the list still holds one entry per table (LEGION-693).
+  and the list still holds one entry per table. The document's tables are laid out in document
+  order on the one budget of span cells a render of it spends, so a cell's header is the one `GET
+  .../text` draws above it, and the block route places a cell under that same header; a table past
+  the budget is listed as its markdown draws it, its spans adding nothing (LEGION-693).
 
 - The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
   (migration 0093), is a stable id, a name and the sessions it holds; a pull request whose first

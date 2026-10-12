@@ -926,3 +926,54 @@ func TestBlockPathsOfTheHeaviestTablesStayWithinTheMemoryBound(t *testing.T) {
 		})
 	}
 }
+
+// A document a room holds is listed from its live tree, where a pasted HTML table carries spans no
+// markdown upload can (the shapes above are parsed markdown, so they hold none). Its tables share
+// the one budget of span cells a render of the document spends, in document order, so tables whose
+// spans each fill that budget cost the walk one budget, not one each: six tables whose header cell
+// spans 1,000 columns and the 100 rows below it, which a budget per table laid out at well past
+// the bound.
+func TestTableRowsOfSpannedTablesShareOneSpanBudget(t *testing.T) {
+	cell := func(kind, value string, colspan, rowspan int) *pmdoc.Node {
+		return &pmdoc.Node{
+			Type:     kind,
+			Attrs:    pmdoc.Attrs{"alignment": nil, "colspan": colspan, "colwidth": nil, "rowspan": rowspan},
+			Children: []*pmdoc.Node{{Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: value}}}},
+		}
+	}
+	tree := &pmdoc.Node{Type: "doc"}
+	for range 6 {
+		table := &pmdoc.Node{Type: "table", Children: []*pmdoc.Node{{Type: "table_header_row", Children: []*pmdoc.Node{cell("table_header", "Wide", 1_000, 101)}}}}
+		for row := range 100 {
+			table.Children = append(table.Children, &pmdoc.Node{Type: "table_row", Children: []*pmdoc.Node{cell("table_cell", fmt.Sprint(row), 1, 1)}})
+		}
+		tree.Children = append(tree.Children, table)
+	}
+	pmdoc.EnsureBlockIDs(tree)
+	for _, walk := range []struct {
+		name string
+		run  func() (int, error)
+	}{
+		{"TableRows", func() (int, error) { rows, err := pmdoc.TableRows(tree); return len(rows), err }},
+		{"BlockPathsAndTableRows", func() (int, error) { _, rows, err := pmdoc.BlockPathsAndTableRows(tree); return len(rows), err }},
+	} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		started := time.Now()
+		tables, err := walk.run()
+		elapsed := time.Since(started)
+		runtime.ReadMemStats(&after)
+		if err != nil {
+			t.Fatalf("%s: %v", walk.name, err)
+		}
+		allocated := int64(after.TotalAlloc - before.TotalAlloc)
+		t.Logf("%s of six budget-filling spanned tables: %d tables listed, %d MiB allocated in %s", walk.name, tables, allocated>>20, elapsed)
+		if tables != 6 {
+			t.Errorf("%s listed %d tables, want all 6", walk.name, tables)
+		}
+		if allocated > requestMemoryBound {
+			t.Errorf("%s of six budget-filling spanned tables allocated %d MiB, want at most %d MiB", walk.name, allocated>>20, requestMemoryBound>>20)
+		}
+	}
+}
