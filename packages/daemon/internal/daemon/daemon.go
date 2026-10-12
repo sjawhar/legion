@@ -135,7 +135,7 @@ type overrides struct {
 	// pluginRelaunchable overrides whether a stale-plugin claim can be relaunched onto a plugin
 	// (supervise.Deps.PluginRelaunchable), bypassing the configuration-derived default: nil keeps
 	// that default, which a kubernetes-runtime test without a real cluster has no other way to
-	// drive, since the daemon knows no plugin source until runtime.kubernetes.plugins exists (T4).
+	// drive, since such a test configures no runtime.kubernetes.plugins and links no plugin pair.
 	pluginRelaunchable *bool
 }
 
@@ -170,6 +170,9 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 	plan, err := prepare(cfg, log, o)
 	if err != nil {
 		return err
+	}
+	if cfg.Runtime.Name == "kubernetes" {
+		logPlugins(log, plan.plugins, plan.pluginsSource)
 	}
 	if cfg.DispatchURL != "" {
 		log.Info("legion workflow boot stage", "stage", "prompts")
@@ -529,10 +532,17 @@ type plan struct {
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
 	// pluginRelaunchable is supervise.Deps.PluginRelaunchable: whether this daemon can relaunch a
-	// stale-plugin claim onto a plugin at all. True under tmux always; under Kubernetes, true iff a
-	// plugin pair to install is known (kubernetesPluginSourceKnown), which is nowhere yet — T4
-	// wires runtime.kubernetes.plugins and the release's linked pair into this.
+	// stale-plugin claim onto a plugin at all. True under tmux always; under Kubernetes, true iff
+	// a plugin pair to install is known — plugins below, resolved by ResolvedPlugins from the
+	// file's runtime.kubernetes.plugins or the release's linked pair.
 	pluginRelaunchable bool
+	// plugins is this daemon's resolved Kubernetes plugin pair (ResolvedPlugins), with Contract
+	// already api.DaemonAPIVersion: what specs.SpawnSpec installs for a stale-plugin relaunch, and
+	// what the boot log and `legion start --check-config` name. nil under tmux, and under
+	// Kubernetes when the daemon knows no pair (LEGION-164's degraded mode); pluginsSource is
+	// "legion.yaml" or "binary" with a pair, "" without one.
+	plugins       *runtime.PluginInstall
+	pluginsSource string
 	// secretsLogin is the same login's client, read-only, for the state route to show its
 	// current status (source.State, agentsecrets.Client.LoginStatus); nil when the deployment
 	// enrolls no pod.
@@ -592,7 +602,8 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		stop = stopBudget
 	}
 	secretsEnroller, secretsLogin := newSecretsLogin(cfg, log)
-	pluginRelaunchable := cfg.Runtime.Name == "tmux" || kubernetesPluginSourceKnown(cfg)
+	plugins, pluginsSource := ResolvedPlugins(cfg)
+	pluginRelaunchable := cfg.Runtime.Name == "tmux" || plugins != nil
 	if o.pluginRelaunchable != nil {
 		pluginRelaunchable = *o.pluginRelaunchable
 	}
@@ -601,7 +612,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
 		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
-		pluginRelaunchable: pluginRelaunchable,
+		pluginRelaunchable: pluginRelaunchable, plugins: plugins, pluginsSource: pluginsSource,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
@@ -1017,7 +1028,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity, designGate: cfg.Gates.Design, reviewWorkflows: cfg.Projects[cfg.Project].ReviewWorkflows,
-			mergeRules: cfg.Projects[cfg.Project].Merge,
+			mergeRules: cfg.Projects[cfg.Project].Merge, runtimeName: cfg.Runtime.Name, plugins: p.plugins,
 		},
 		Identity:     p.identity,
 		Secrets:      p.secretsEnroller,

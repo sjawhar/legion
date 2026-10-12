@@ -82,14 +82,35 @@ func readSandbox(cfg config.Config, project, dispatchToken, paneNatsUser string,
 	return sandboxReads{client: rc, opts: opts}, nil
 }
 
-// kubernetesPluginSourceKnown is whether this Kubernetes daemon can name the plugin pair a
-// stale-plugin relaunch installs (LEGION-164): always false for now — runtime.kubernetes.plugins
-// does not exist in the configuration yet, and the release workflow does not yet link a published
-// pair into the daemon binary. Until both land (a later LEGION-164 work item), every Kubernetes
-// daemon runs the degraded mode: a stale claim is recorded and reported, never relaunched or
-// refused (supervise.Deps.PluginRelaunchable false).
-func kubernetesPluginSourceKnown(cfg config.Config) bool {
-	return false
+// ResolvedPlugins is the plugin pair this Kubernetes daemon installs for a stale-plugin relaunch
+// (LEGION-164), and where it came from: the file's `runtime.kubernetes.plugins` when the file sets
+// one ("legion.yaml"), else the binary's linked pair when main filled cfg.Runtime.Kubernetes.Plugins
+// from it (cmd/legion's piLegionVersion/piEnvoyVersion, PluginsFromBinary true; "binary"), else nil
+// pair and "" source — the daemon knows no plugin versions, and every stale claim is recorded and
+// reported, never relaunched or refused (supervise.Deps.PluginRelaunchable false). Nil under tmux,
+// whose pane always resumes on the plugin installed on the daemon's host. legion start
+// --check-config and the boot log both read this.
+func ResolvedPlugins(cfg config.Config) (*runtime.PluginInstall, string) {
+	k := cfg.Runtime.Kubernetes
+	if k == nil || k.Plugins == nil {
+		return nil, ""
+	}
+	source := "legion.yaml"
+	if k.PluginsFromBinary {
+		source = "binary"
+	}
+	return &runtime.PluginInstall{PiLegion: k.Plugins.PiLegion, PiEnvoy: k.Plugins.PiEnvoy, Contract: api.DaemonAPIVersion}, source
+}
+
+// logPlugins is the boot's one line on what this Kubernetes daemon will install for a
+// stale-plugin relaunch: an Info line naming the pair and where it came from, or, with none, the
+// Warn naming the gap: a stale claim is recorded and reported but never relaunched or refused.
+func logPlugins(log *slog.Logger, plugins *runtime.PluginInstall, source string) {
+	if plugins == nil {
+		log.Warn("daemon: this daemon knows no plugin versions to relaunch a stale process onto; set runtime.kubernetes.plugins or run a release build")
+		return
+	}
+	log.Info("daemon: stale-plugin relaunches install", "piLegion", plugins.PiLegion, "piEnvoy", plugins.PiEnvoy, "source", source)
 }
 
 // prepareSandbox is the runtime over readSandbox's client and Options, and the image probe. The

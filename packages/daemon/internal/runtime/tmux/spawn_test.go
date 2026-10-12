@@ -176,6 +176,31 @@ func TestPanePairs(t *testing.T) {
 	}
 }
 
+// The tmux runtime never reads spec.Plugins: a pane always resumes on the plugin installed on
+// the daemon's host, which the boot gate already holds to the daemon's contract, so a stale-plugin
+// relaunch (LEGION-164) needs nothing of it here. panePairs and secretFiles — what builds the
+// pane's own environment and secret files, the whole of what a launch beyond its argv carries —
+// produce byte-identical output whether or not Plugins is set.
+func TestTmuxRuntimeNeverReadsSpecPlugins(t *testing.T) {
+	in := PaneInputs{
+		StateDir:    "/state",
+		Workspace:   "/state/workspaces/LEGION-43",
+		DaemonURL:   "http://127.0.0.1:13370",
+		EnvoyURL:    "http://127.0.0.1:9020",
+		NATSURLs:    []string{"nats://a:4222"},
+		GHConfigDir: "/state/secrets/legion-omp-legion-43-tester-gh",
+	}
+	plain := testSpec()
+	withPlugins := testSpec()
+	withPlugins.Plugins = &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
+	if got, want := panePairs(withPlugins, in, secretFiles("/state", withPlugins)), panePairs(plain, in, secretFiles("/state", plain)); !reflect.DeepEqual(got, want) {
+		t.Errorf("panePairs with Plugins set =\n%q\nwant the same as without it:\n%q", got, want)
+	}
+	if got, want := secretFiles("/state", withPlugins), secretFiles("/state", plain); !reflect.DeepEqual(got, want) {
+		t.Errorf("secretFiles with Plugins set = %+v, want the same as without it: %+v", got, want)
+	}
+}
+
 // PaneVariables (and launch, the same way) writes the turn-scoping overlay under the state
 // directory, read-only, and names it in PI_CONFIG_FILES — the one settings overlay a pane gets at
 // all — so Quiesce's own promise holds under tmux too (LEGION-462).

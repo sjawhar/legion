@@ -16,6 +16,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -33,6 +34,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/testnats"
 	"github.com/sjawhar/legion/daemon/internal/testwait"
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
@@ -483,5 +485,89 @@ func TestARelaunchedProcessStillStaleIsChargedUntilWorkerDied(t *testing.T) {
 	})
 	if len(notices) != 1 || !reflect.DeepEqual(notices[0], record.OutboxPayload(died)) {
 		t.Fatalf("notices = %+v, want the one worker-died %+v", notices, died)
+	}
+}
+
+// prepare() resolves plan.plugins, plan.pluginsSource and plan.pluginRelaunchable from the
+// configuration alone: the file's runtime.kubernetes.plugins when set ("legion.yaml"), nil and ""
+// when it is not (the daemon knows no pair, and pluginRelaunchable is false under kubernetes);
+// tmux is always relaunchable and resolves no pair at all, since the tmux runtime never installs
+// one.
+func TestPrepareResolvesThePluginPairFromTheConfiguration(t *testing.T) {
+	t.Run("kubernetes, the file names a pair", func(t *testing.T) {
+		cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+		cfg.EnvoyTokenFile = filepath.Join(t.TempDir(), "envoy-token")
+		if err := os.WriteFile(cfg.EnvoyTokenFile, []byte("envoy-bearer\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
+		cfg.Runtime.Kubernetes.Plugins = &config.PluginsConfig{PiLegion: "9.7.0", PiEnvoy: "9.6.1"}
+
+		p, err := prepare(cfg, quietLogger(), overrides{environ: []string{}})
+		if err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+		want := &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: api.DaemonAPIVersion}
+		if p.plugins == nil || *p.plugins != *want || p.pluginsSource != "legion.yaml" || !p.pluginRelaunchable {
+			t.Fatalf("plugins = %+v, source %q, relaunchable %t; want %+v, \"legion.yaml\", true", p.plugins, p.pluginsSource, p.pluginRelaunchable, want)
+		}
+	})
+	t.Run("kubernetes, the file names none", func(t *testing.T) {
+		cfg := kubernetesConfig(t, "https://127.0.0.1:1")
+		cfg.EnvoyTokenFile = filepath.Join(t.TempDir(), "envoy-token")
+		if err := os.WriteFile(cfg.EnvoyTokenFile, []byte("envoy-bearer\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cfg.NatsNkeySeedFile = testnats.SeedFile(t, testnats.UserSeed(t))
+
+		p, err := prepare(cfg, quietLogger(), overrides{environ: []string{}})
+		if err != nil {
+			t.Fatalf("prepare: %v", err)
+		}
+		if p.plugins != nil || p.pluginsSource != "" || p.pluginRelaunchable {
+			t.Fatalf("plugins = %+v, source %q, relaunchable %t; want nil, \"\", false", p.plugins, p.pluginsSource, p.pluginRelaunchable)
+		}
+	})
+}
+
+// ResolvedPlugins is nil, "" without the kubernetes block or without a pair, the file's pair with
+// "legion.yaml", and, once main fills Plugins from the binary's linked pair (PluginsFromBinary),
+// the same pair with "binary".
+func TestResolvedPlugins(t *testing.T) {
+	k9 := &config.PluginsConfig{PiLegion: "9.7.0", PiEnvoy: "9.6.1"}
+	for _, tc := range []struct {
+		name       string
+		kubernetes *config.Kubernetes
+		wantPair   *runtime.PluginInstall
+		wantSource string
+	}{
+		{"tmux (no kubernetes block)", nil, nil, ""},
+		{"kubernetes, no plugins", &config.Kubernetes{}, nil, ""},
+		{"kubernetes, the file's pair", &config.Kubernetes{Plugins: k9}, &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: api.DaemonAPIVersion}, "legion.yaml"},
+		{"kubernetes, the binary's pair", &config.Kubernetes{Plugins: k9, PluginsFromBinary: true}, &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: api.DaemonAPIVersion}, "binary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := config.Config{Runtime: config.Runtime{Kubernetes: tc.kubernetes}}
+			pair, source := ResolvedPlugins(cfg)
+			if (pair == nil) != (tc.wantPair == nil) || (pair != nil && *pair != *tc.wantPair) || source != tc.wantSource {
+				t.Fatalf("ResolvedPlugins = %+v, %q; want %+v, %q", pair, source, tc.wantPair, tc.wantSource)
+			}
+		})
+	}
+}
+
+// logPlugins is the boot's one line: Info naming the pair and its source with a pair, Warn naming
+// the gap without one.
+func TestLogPlugins(t *testing.T) {
+	var buf syncBuffer
+	logPlugins(jsonLogger(&buf), &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: api.DaemonAPIVersion}, "legion.yaml")
+	if got := buf.String(); !strings.Contains(got, `"msg":"daemon: stale-plugin relaunches install"`) || !strings.Contains(got, `"piLegion":"9.7.0"`) ||
+		!strings.Contains(got, `"piEnvoy":"9.6.1"`) || !strings.Contains(got, `"source":"legion.yaml"`) {
+		t.Fatalf("logPlugins with a pair wrote %q", got)
+	}
+	buf.Reset()
+	logPlugins(jsonLogger(&buf), nil, "")
+	if got := buf.String(); !strings.Contains(got, `"level":"WARN"`) || !strings.Contains(got, "this daemon knows no plugin versions to relaunch a stale process onto; set runtime.kubernetes.plugins") {
+		t.Fatalf("logPlugins with no pair wrote %q", got)
 	}
 }

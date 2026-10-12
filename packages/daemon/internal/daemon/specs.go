@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sjawhar/legion/daemon/internal/api"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
@@ -43,6 +44,14 @@ type specs struct {
 	// identity is the role's App bot identity every pane commits as; nil for a daemon with no
 	// GitHub Apps.
 	identity func(ctx context.Context, role claim.Role) (runtime.GitIdentity, error)
+	// runtimeName is cfg.Runtime.Name: a stale-plugin install (stalePluginInstall) is Kubernetes'
+	// alone, since a tmux pane always resumes on the plugin installed on the daemon's host.
+	runtimeName string
+	// plugins is this daemon's resolved plugin pair under Kubernetes — the file's
+	// `runtime.kubernetes.plugins`, or the binary's linked pair when the file names none — with
+	// Contract already set to api.DaemonAPIVersion; nil when the daemon knows none
+	// (LEGION-164's degraded mode). Never read under any other runtime.
+	plugins *runtime.PluginInstall
 }
 
 // rolePromptPath is where a claim's role prompt is kept for every launch of it.
@@ -54,11 +63,26 @@ func rolePromptPath(stateDir string, token claim.Token) string {
 // when the daemon has one), its prompt — the role prompt parts, the addressing sentence, and the
 // deployment instructions — and its repository; for a claim whose workspace was lost with its
 // session, the issue's branch the recreated workspace is recovered from. The controller's launch
-// (controllerSpawnSpec) is its own.
+// (controllerSpawnSpec) is its own. Plugins carries the plugin pair a stale-plugin relaunch
+// installs (stalePluginInstall), set the same way for both — the controller the daemon launches
+// (`controller: daemon`) is covered like any claim.
 func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
+	var spec runtime.SpawnSpec
+	var err error
 	if c.Role == claim.RoleController {
-		return s.controllerSpawnSpec()
+		spec, err = s.controllerSpawnSpec()
+	} else {
+		spec, err = s.workerSpawnSpec(ctx, c)
 	}
+	if err != nil {
+		return runtime.SpawnSpec{}, err
+	}
+	spec.Plugins = s.stalePluginInstall(c)
+	return spec, nil
+}
+
+// workerSpawnSpec is SpawnSpec's own build for every claim but the controller's.
+func (s specs) workerSpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnSpec, error) {
 	promptPaths, err := s.rolePromptPaths(c)
 	if err != nil {
 		return runtime.SpawnSpec{}, err
@@ -98,6 +122,20 @@ func (s specs) SpawnSpec(ctx context.Context, c supervise.Claim) (runtime.SpawnS
 		spec.WorkspaceRecoveredFrom = workspace.Bookmark(c.Issue)
 	}
 	return spec, nil
+}
+
+// stalePluginInstall is spec.Plugins for c's launch (LEGION-164): the daemon's resolved pair,
+// with Contract already api.DaemonAPIVersion, iff the runtime is Kubernetes, c has registered a
+// session, and its recorded contract differs from this daemon's — never for a launch that is not
+// replacing a process on another plugin contract, and never when the daemon knows no pair
+// (s.plugins nil, the degraded mode). A fresh copy, so a caller mutating one launch's spec never
+// reaches another's.
+func (s specs) stalePluginInstall(c supervise.Claim) *runtime.PluginInstall {
+	if s.runtimeName != "kubernetes" || c.Session == "" || c.PluginContract == api.DaemonAPIVersion || s.plugins == nil {
+		return nil
+	}
+	install := *s.plugins
+	return &install
 }
 
 // controllerSpawnSpec is the daemon's controller's launch (`controller: daemon`): its role part and
