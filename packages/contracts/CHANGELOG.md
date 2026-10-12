@@ -4,6 +4,10 @@
 
 ### Added
 
+- `MyReplyRow`, `MyReplyReply` and `MyRepliesResponse`, the page `GET /api/v1/me/replies`
+  returns, and the `user_thread_state.updated` event with its `UserThreadStateUpdatedEventPayload`
+  (LEGION-687).
+
 - `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
   `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,
   `session_titles` and `session_pr_counts`; `DeliveryPR.parent_agent` is a session group's

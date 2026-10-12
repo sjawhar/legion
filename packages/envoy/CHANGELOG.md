@@ -4,6 +4,17 @@
 
 ### Added
 
+- Dispatch has a Replies page (LEGION-687): every thread a person wrote in - an ask's thread, a
+  comment thread, an issue message thread - where someone else has written since they last read
+  it, newest reply first, with a `Replies N` count in the sidebar and, below 1280 px, the compact
+  header. Reading the thread on screen, replying in it, or **Mark read** clears the row, and a
+  later reply brings it back; an open ask the Inbox lists stays off the page, and the Inbox is
+  unchanged. Migrations 0095-0098 add `user_threads`, kept by triggers on `comments`, `asks` and
+  `messages`, and seed it from history with every thread read, so the deploy marks nothing
+  unread. `GET /api/v1/me/replies` lists the threads and `PUT /api/v1/me/threads/{id}/read`
+  moves one forward, appending `user_thread_state.updated`, which never notifies. Opening a link
+  to a comment (`/issues/<KEY>/comments/<id>`) now opens its thread.
+
 - The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
   (migration 0093), is a stable id, a name and the sessions it holds; a pull request whose first
   session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,
