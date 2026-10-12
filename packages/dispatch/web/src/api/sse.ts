@@ -241,16 +241,15 @@ const REPLIES_WRITES: Partial<Record<EventType, true>> = {
 };
 
 // The Inbox lists an open ask only while its issue is open (`myRepliesUnread` in the server's
-// replies.go), so an issue closing (`issue.closed`) or reopening (an `issue.updated` status write)
-// moves the rows of its open asks. The payload names no changed field, so every `issue.updated` of
-// an issue with an open ask refreshes; one of an issue with none moves nothing.
+// replies.go), so an issue closing (`issue.closed`) or reopening moves its open asks' threads
+// between the Inbox and the Replies page. A reopen is an `issue.updated` (a status write off
+// `done`), and that payload is the issue after the write with no changed field and no ask count, so
+// every `issue.updated` refreshes, beside the issue lists the same event already refetches.
 function movesReplies(event: Event): boolean {
-  if (REPLIES_WRITES[event.type] === true) return true;
-  const openAsks = payloadValue(event, "open_asks");
   return (
-    (event.type === "issue.closed" || event.type === "issue.updated") &&
-    typeof openAsks === "number" &&
-    openAsks > 0
+    REPLIES_WRITES[event.type] === true ||
+    event.type === "issue.closed" ||
+    event.type === "issue.updated"
   );
 }
 

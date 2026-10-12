@@ -635,8 +635,9 @@ function answersPageAdditions(incoming: Event): unknown[][] {
 /** The Replies page, its count and every owner's unread set live under `["me", "replies"]`. Only
  *  an event that can move a row refreshes it, on an issue or a document alike: a write the
  *  `user_threads` triggers count (a comment, a session's reply to a mention, an issue message or
- *  a reply to one, an answer), an ask opening or being resolved, and an issue with an open ask
- *  closing or reopening, since each decides whether the Inbox lists an ask's thread instead; so
+ *  a reply to one, an answer), an ask opening or being resolved, and an issue closing
+ *  (`issue.closed`) or reopening (an `issue.updated`, whose payload cannot tell a reopen from
+ *  any other write), since each decides whether the Inbox lists an ask's thread instead; so
  *  does the signed-in viewer's own read mark from another tab. */
 const repliesWrites: Record<string, true> = {
   "comment.created": true,
@@ -655,12 +656,8 @@ function repliesAdditions(incoming: Event): unknown[][] {
   if (incoming.issue_key === null && mainIsMessageEvent(incoming)) {
     return [];
   }
-  const openAsks: unknown = Reflect.get(incoming.payload ?? {}, "open_asks");
-  const issueWithOpenAsks =
-    (incoming.type === "issue.closed" || incoming.type === "issue.updated") &&
-    typeof openAsks === "number" &&
-    openAsks > 0;
-  return repliesWrites[incoming.type] === true || issueWithOpenAsks ? [["me", "replies"]] : [];
+  const issueOpenedOrClosed = incoming.type === "issue.closed" || incoming.type === "issue.updated";
+  return repliesWrites[incoming.type] === true || issueOpenedOrClosed ? [["me", "replies"]] : [];
 }
 
 /** The targets the server named on this event; an event from before the field carries none. */
@@ -815,26 +812,62 @@ test("an ask reply keeps the ask-thread key the delayed-Inbox freshness marker r
   expect(keys).toContainEqual(["inbox"]);
 });
 
+/** The payload of an `issue.*` event as `issue_patch.go` sends it: `model.NewIssueEventPayload`
+ *  over the issue after the write, `model.Issue`'s fields flat, and no `references_changed` from a
+ *  patch, which indexes no text (the field is `omitempty`). It carries no ask count. */
+function issuePayload(status: string, closedAt: string | null): Record<string, unknown> {
+  return {
+    key: "CORE-1",
+    project: "CORE",
+    number: 1,
+    title: "Ship the release",
+    status,
+    priority: null,
+    rank: "a0",
+    labels: [],
+    parent: null,
+    blocked_by: [],
+    assignee: "alice@example.com",
+    claim: null,
+    components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
+    external_links: [],
+    route: null,
+    created_by: { kind: "user", id: "alice" },
+    created_at: "2026-09-09T00:00:00Z",
+    updated_at: "2026-09-10T00:00:00Z",
+    closed_at: closedAt,
+    primary_artifact_id: "artifact-1",
+    last_seq: 5,
+  };
+}
+
 test("the Replies page refreshes only on events that can move a row, and the viewer's own mark", () => {
   for (const mover of [
     event("comment.created", { id: "c1", anchor: null }),
     event("message.answered", { id: "m2" }),
     event("ask.answered", { id: "ask-1", anchor: null }),
     event("comment.created", { id: "c1", anchor: null }, documentOwner),
-    // An issue with an open ask closing or reopening moves whether the Inbox lists that ask.
-    event("issue.closed", { open_asks: 1 }),
-    event("issue.updated", { open_asks: 2 }),
+    // Closing an issue, and reopening it (an `issue.updated` off `done`), moves whether the Inbox
+    // or the Replies page lists each of its open asks' threads.
+    event("issue.closed", issuePayload("done", "2026-09-10T00:00:00Z")),
+    event("issue.updated", issuePayload("todo", null)),
   ]) {
     expect(invalidatedKeys(mover)).toContainEqual(["me", "replies"]);
   }
-  // An issue with no open ask, a claim, an edit and a delivery move no row.
+  // A claim, a release, an edit, a comment's resolution and a delivery move no row.
   for (const unrelated of [
-    event("issue.updated"),
-    event("issue.updated", { open_asks: 0 }),
-    event("issue.closed", { open_asks: 0 }),
     event("issue.claimed", {
+      key: "CORE-1",
+      status: "in_progress",
       claim: { actor: { kind: "session", id: "session-one" }, at: "2026-09-24T06:00:00Z" },
       reason: "claimed",
+    }),
+    event("issue.released", {
+      key: "CORE-1",
+      status: "done",
+      claim: null,
+      previous_claim: { actor: { kind: "session", id: "session-one" }, at: "2026-09-24T06:00:00Z" },
+      reason: "closed",
     }),
     event("comment.edited", { id: "c1", anchor: null }),
     event("comment.resolved", { id: "c1", anchor: null }, documentOwner),
