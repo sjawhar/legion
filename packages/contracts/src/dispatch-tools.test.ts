@@ -114,7 +114,7 @@ function schemaFor(name: keyof typeof validCalls) {
 }
 
 const ISSUE_UPDATE_RULES =
-  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components. " +
+  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, or components. " +
   "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done.";
 
 describe("zodSchemaApi", () => {
@@ -419,6 +419,8 @@ describe("dispatchToolSpecs", () => {
       { issue: "DSP-1", route: "" },
       { issue: "DSP-1", parent: "DSP-2" },
       { issue: "DSP-1", parent: "" },
+      { issue: "DSP-1", blocked_by: ["DSP-2"] },
+      { issue: "DSP-1", blocked_by: [] },
       { issue: "DSP-1", components: { mode: "inherit" } },
       { issue: "DSP-1", components: { mode: "explicit", ids: ["web", "dispatch-server"] } },
       { issue: "DSP-1", components: { mode: "none", reason: "hiring" } },

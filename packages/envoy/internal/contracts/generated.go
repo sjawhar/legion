@@ -175,6 +175,10 @@ const SearchKindDepth = 100
 // Dispatch writes and the string search-answer.ts compares against cannot drift apart.
 const SearchDegradedEmbedderUnavailable = "embedder_unavailable"
 
+// MaxIssueBlockers bounds blocked_by input before deduplication. Generated from
+// MAX_ISSUE_BLOCKERS in packages/contracts so the server and tool schemas share the limit.
+const MaxIssueBlockers = 20
+
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
 // MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds

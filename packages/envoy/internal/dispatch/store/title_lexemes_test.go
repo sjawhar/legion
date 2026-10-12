@@ -102,7 +102,7 @@ func TestTitleLexemesFillEveryStoredTitleAndFollowEveryRetitle(t *testing.T) {
 
 // 0089 holds no issue's row while it waits for a write that holds one. Its update locks every
 // issue's row in the order the rows lie on disk, and a reparent locks the issue and its new parent
-// in key order (lockIssueAndParent, api/issue_parent.go:54-61), which is text order: reparenting
+// in key order (lockIssueRows, api/issue_parent.go:71), which is text order: reparenting
 // CORE-9 under CORE-10 locks CORE-10, the later row on disk, first. A reparent that held CORE-10
 // while the update, already holding CORE-9, waited for it, and then asked for CORE-9, closed a
 // cycle, and Postgres's deadlock check killed one side with 40P01: the boot, or the reparent with

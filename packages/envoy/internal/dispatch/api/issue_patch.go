@@ -25,6 +25,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		ExternalLinks *[]model.ExternalLink `json:"external_links"`
 		Assignee      json.RawMessage       `json:"assignee"`
 		Parent        json.RawMessage       `json:"parent"`
+		BlockedBy     *[]string             `json:"blocked_by"`
 		Components    json.RawMessage       `json:"components"`
 		Actor         *model.Actor          `json:"actor"`
 	}
@@ -35,6 +36,15 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireActor(w, r, input.Actor)
 	if !ok {
 		return
+	}
+	var blockers []string
+	if input.BlockedBy != nil {
+		var err error
+		blockers, err = normalizeIssueBlockers(*input.BlockedBy)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	if input.Title != nil {
 		*input.Title = strings.TrimSpace(*input.Title)
@@ -103,24 +113,53 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	defer tx.Rollback(r.Context())
 
 	key := r.PathValue("key")
-	if input.Rank != nil {
+	dependencyWrite := input.BlockedBy != nil || parentProvided
+	if dependencyWrite || input.Rank != nil {
 		var project string
 		if err := tx.QueryRow(r.Context(), `select project_key from issues where key = $1`, key).Scan(&project); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
-		if err := lockProjectRankAllocation(r.Context(), tx, project); err != nil {
-			s.writeHandlerError(w, err)
-			return
+		if dependencyWrite {
+			if err := lockProjectIssueDependencies(r.Context(), tx, project); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+		if input.Rank != nil {
+			if err := lockProjectRankAllocation(r.Context(), tx, project); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
 		}
 	}
 
-	if parentProvided && parent != nil {
-		if err := lockIssueAndParent(r.Context(), tx, key, *parent); err != nil {
-			s.writeHandlerError(w, err)
-			return
+	// A PATCH locks every issue row it names in one key order before it reads any of them: the
+	// issue, its current parent when a status change or a reparent appends to it, the proposed
+	// parent and the rank neighbours (lockPatchRows, lockPatchRowsAndParent). It never holds one
+	// of those rows while waiting for another that a second write holds. Validation, the
+	// dependency walk and the rank reads below are plain reads of rows already held.
+	named := make([]string, 0, 3)
+	if parent != nil {
+		named = append(named, *parent)
+	}
+	if input.Rank != nil {
+		// Each neighbour is trimmed once, here, so the key the lock below takes is the key
+		// rankForInput reads.
+		if input.Rank.After != nil {
+			*input.Rank.After = strings.TrimSpace(*input.Rank.After)
+			named = append(named, *input.Rank.After)
 		}
-	} else if err := tx.QueryRow(r.Context(), `select key from issues where key = $1 for no key update`, key).Scan(new(string)); err != nil {
+		if input.Rank.Before != nil {
+			*input.Rank.Before = strings.TrimSpace(*input.Rank.Before)
+			named = append(named, *input.Rank.Before)
+		}
+	}
+	lock := lockPatchRows
+	if input.Status != nil || parentProvided {
+		lock = lockPatchRowsAndParent
+	}
+	if err := lock(r.Context(), tx, key, named...); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -129,11 +168,17 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
+	if parentProvided && parent != nil {
+		if err := validateIssueParent(r.Context(), tx, key, before.Project, *parent); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
 	if before.ClosedAt != nil {
 		// A closed issue takes only its rank (board order) and its component attachment
 		// (classified without reopening), alone or beside a reopening status; every other
 		// field, and closing it again, waits for a reopen.
-		others := input.Title != nil || input.Labels != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil || assigneeProvided || parentProvided
+		others := input.Title != nil || input.Labels != nil || priorityProvided || input.Route != nil || input.ExternalLinks != nil || assigneeProvided || parentProvided || input.BlockedBy != nil
 		reopening := input.Status != nil && status != "done"
 		if others || (input.Status != nil && !reopening) || (input.Status == nil && input.Rank == nil && !componentsProvided) {
 			writeError(w, "ISSUE_CLOSED", http.StatusConflict, "issue is closed")
@@ -197,7 +242,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		}
 		set("route", route)
 	}
-	changed := len(sets) > 0 || componentsProvided
+	changed := len(sets) > 0 || componentsProvided || input.BlockedBy != nil
 	if changed {
 		sets = append(sets, "updated_at = now()")
 		if _, err := tx.Exec(r.Context(), `update issues set `+strings.Join(sets, ", ")+` where key = $1`, args...); err != nil {
@@ -214,6 +259,18 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	if componentsProvided {
 		if err := writeIssueComponents(r.Context(), tx, key, before.Project, *components); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if input.BlockedBy != nil {
+		if err := writeBlockedBy(r.Context(), tx, key, before.Project, blockers); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+	}
+	if parentProvided && parent != nil {
+		if err := assertParentLeavesNoDependencyCycle(r.Context(), tx, key, *parent); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
@@ -282,6 +339,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every owner this transaction appends to must be in one LockOwners call before the
 	// first append: the issue itself, the status-change parent, and both ends of a reparent.
+	// lockPatchRowsAndParent already holds each of those rows, so LockOwners re-locks them in that order.
 	owners := []model.Event{issueOwner(key).event("", actor, nil)}
 	ownerKeys := map[string]bool{key: true}
 	addOwner := func(parentKey *string) {

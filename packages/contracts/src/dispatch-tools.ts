@@ -1,4 +1,9 @@
-import { DEFAULT_ISSUE_PAGE_LIMIT, ISSUE_TITLE_MAX, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
+import {
+  DEFAULT_ISSUE_PAGE_LIMIT,
+  ISSUE_TITLE_MAX,
+  MAX_ISSUE_BLOCKERS,
+  MAX_ISSUE_PAGE_LIMIT,
+} from "./dispatch-api";
 import type { SchemaApi, SchemaNode, ToolArgumentsShape } from "./tool-schema";
 
 export interface DispatchToolSpec {
@@ -270,6 +275,12 @@ export const dispatchToolSpecs = [
         .string({ max: ISSUE_TITLE_MAX })
         .describe("Concise issue title, at most 1,000 characters."),
       parent: z.string().describe("Optional parent issue.").optional(),
+      blocked_by: z
+        .array(z.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS })
+        .describe(
+          "Issue keys in the same project this issue waits on. Dispatch refuses a dependency cycle."
+        )
+        .optional(),
       external: z.string().describe("Optional external issue reference.").optional(),
       force: z
         .boolean()
@@ -308,7 +319,8 @@ export const dispatchToolSpecs = [
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " +
       "its priority, link a URL (the pull request that delivers it, a run, a document), set its " +
-      "route, set or clear its parent, or attach it to architecture components. Status is one of " +
+      "route, set or clear its parent, replace the issues it is blocked by, or attach it to " +
+      "architecture components. Status is one of " +
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. external_links are " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
@@ -361,6 +373,12 @@ export const dispatchToolSpecs = [
         .string()
         .describe("Parent issue key in the same project; an empty string clears the parent.")
         .optional(),
+      blocked_by: z
+        .array(z.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS })
+        .describe(
+          "Replacement list of issue keys in the same project this issue waits on; [] clears it. Dispatch refuses a dependency cycle."
+        )
+        .optional(),
       components: componentsArgument(z).optional(),
     }),
     validation: {
@@ -374,6 +392,7 @@ export const dispatchToolSpecs = [
           readonly external_links?: unknown;
           readonly route?: unknown;
           readonly parent?: unknown;
+          readonly blocked_by?: unknown;
           readonly components?: unknown;
         };
         const reasonFits =
@@ -390,11 +409,12 @@ export const dispatchToolSpecs = [
             Array.isArray(input.external_links) ||
             typeof input.route === "string" ||
             typeof input.parent === "string" ||
+            Array.isArray(input.blocked_by) ||
             (typeof input.components === "object" && input.components !== null))
         );
       },
       message:
-        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, or components. " +
+        "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, or components. " +
         "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts; reason goes only with status done.",
     },
     strict: true,

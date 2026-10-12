@@ -5,7 +5,7 @@
 --
 -- It takes issues EXCLUSIVE before it writes a row. The update alone locks every issue's row in the
 -- order the rows lie on disk, and a write that locks two issues takes them in another order: a
--- reparent locks the issue and its new parent in key order (lockIssueAndParent,
+-- reparent locks the issue and its new parent in key order (lockIssueRows,
 -- api/issue_parent.go), which is text order, so reparenting LK-9 under LK-18000 locks the later row
 -- on disk first. When the reparent held that row while the update, already holding the earlier one,
 -- waited for it, and then asked for the earlier one, Postgres's deadlock check killed one side with
