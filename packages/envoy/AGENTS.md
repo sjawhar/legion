@@ -2895,7 +2895,7 @@ value itself is read fresh from
 machine login. `Login` verifies a machine's signed request object (exactly one `launcher_credential`
 authorization detail naming no service, and a `login_hint`, the approving operator's email, never
 `anyone`; a detail naming a `service` is `400 SERVICE_LOGS_IN_WITH_TOKEN` at the route and
-`record.ErrRequestInvalid` here, since a service logs in with its token, below), mints an
+`machine.ErrServiceLogsInWithToken` here, since a service logs in with its token, below), mints an
 eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
@@ -2906,14 +2906,15 @@ it), so `code` is required and checked again on the decision itself, before the 
 (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
 update`, which an event insert's foreign-key check does not wait on), refuses any login the
 record's rule does not admit (`403 NOT_APPROVER`: only its person decides a person's machine login,
-and anyone signed in may deny a service's login a broker before token logins opened, which no one
-may approve, `400 SERVICE_LOGS_IN_WITH_TOKEN`) whatever the record's state, answers a record that
+and anyone signed in decides a service's) whatever the record's state, answers a record that
 already carries a terminal event, or is past its `expires_at` before the sweeper has recorded it
 expired, `409 RECORD_TERMINAL` before minting anything, as a decided `agent_secret` record
 answers, so a second click, a concurrent one and a late one all get it — but a record past its
 expiry, whether recorded expired by the sweeper or not, answers with a message saying it expired
-before its approver acted (`machine.ErrLoginExpired`), never that it was decided, and, on
-approval, mints the launcher
+before its approver acted (`machine.ErrLoginExpired`), never that it was decided; refuses
+approving a service's login a broker before token logins opened, which anyone signed in may still
+deny, `400 SERVICE_LOGS_IN_WITH_TOKEN` (`machine.ErrServiceLogsInWithToken`); and, on approval,
+mints the launcher
 credential in the same transaction: bound to the request object's own key (its thumbprint and
 embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted
 from the decision, so a crash between minting and recording the decision never orphans a
