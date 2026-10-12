@@ -19,6 +19,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/controller"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/supervise"
 )
 
 // Unrecorded is what this route reads for an issue the workflow does not record, where an
@@ -33,6 +34,10 @@ type State struct {
 	Admission           Admission            `json:"admission"`
 	Issues              map[string]Issue     `json:"issues"` // the issue record, keyed by issue key
 	PendingStatusWrites []PendingStatusWrite `json:"pendingStatusWrites"`
+	// StrandedClaims is every claim nothing will wake (workflow.Stranded), by issue and then
+	// role: the trees that will not move again until someone acts. Never null; empty while every
+	// claim is running or waits on something that will wake it.
+	StrandedClaims []StrandedClaim `json:"strandedClaims"`
 	// ControllerLocator is the project's controller, absent until a session registers as it: with
 	// the capability `legion controller start` fetched, or, under `controller: daemon`, with the boot
 	// token of the daemon's own controller launch.
@@ -103,8 +108,9 @@ type AgentSecretsLoginView struct {
 	State string `json:"state"`
 }
 
-// MarshalJSON keeps `issues` an object and `pendingStatusWrites` and `capabilities` arrays on the
-// wire: a nil Go map or slice is `null`, which the plugin's strict reader refuses.
+// MarshalJSON keeps `issues` an object and `pendingStatusWrites`, `strandedClaims` and
+// `capabilities` arrays on the wire: a nil Go map or slice is `null`, which the plugin's strict
+// reader refuses.
 func (s State) MarshalJSON() ([]byte, error) {
 	type wire State
 	out := wire(s)
@@ -113,6 +119,9 @@ func (s State) MarshalJSON() ([]byte, error) {
 	}
 	if out.PendingStatusWrites == nil {
 		out.PendingStatusWrites = []PendingStatusWrite{}
+	}
+	if out.StrandedClaims == nil {
+		out.StrandedClaims = []StrandedClaim{}
 	}
 	if out.Capabilities == nil {
 		out.Capabilities = []CapabilityState{}
@@ -281,6 +290,27 @@ type PendingStatusWrite struct {
 	Attempts  int             `json:"attempts"`
 	NextAt    time.Time       `json:"nextAt"`
 	LastError string          `json:"lastError,omitempty"`
+}
+
+// StrandedClaim is one claim nothing will wake — a worker of its issue's phase, or its tree's
+// architect, in a tree that runs — named by its issue, its role and its state; the issue's own
+// entry under `issues` carries the rest. The state is the move that brings it back: `suspended`,
+// the operator's resume (`legion claims resume`); `failed`, a workflow start, since a failed claim
+// ignores resume and deliver — its architect's retry of the held phase for a worker, its tree's
+// re-admission for an architect.
+type StrandedClaim struct {
+	Issue string     `json:"issue"`
+	Role  claim.Role `json:"role"`
+	State string     `json:"state"`
+}
+
+// StrandedClaimsOf is stranded as the state shows it, claim for claim.
+func StrandedClaimsOf(stranded []supervise.Claim) []StrandedClaim {
+	claims := make([]StrandedClaim, len(stranded))
+	for i, c := range stranded {
+		claims[i] = StrandedClaim{Issue: c.Issue, Role: c.Role, State: string(c.State)}
+	}
+	return claims
 }
 
 // StateSource maps the daemon's durable and live facts through the transaction the state route

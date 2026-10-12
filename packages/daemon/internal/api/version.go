@@ -152,4 +152,12 @@ package api
 // confirmation code exists any more) and its `state` is `none`, `issued` or `failed`. A 21 plugin's
 // strict reader requires `code` and refuses a 22 daemon's state, so the boot gate and `legion
 // probe-image` refuse the mixed pair.
-const DaemonAPIVersion = 22
+//
+// 23: LEGION-670 -- api.State gains `strandedClaims`, every claim nothing will wake
+// (workflow.Stranded): a suspended or failed worker of its issue's phase, or tree architect, in a
+// tree that runs, each named by its issue, role and state. Never null, so a plugin built before it
+// refuses the state, and the bump is why the two never meet. (This branch first took 19, then 20,
+// then 21, then 22; LEGION-631 landed at 19, LEGION-668 at 20, LEGION-663 at 21 and LEGION-618 at
+// 22 first, so a daemon at any of them would pass the gate against a plugin whose strict reader
+// lacks the field. Renumbered four times, as the collision note says.)
+const DaemonAPIVersion = 23

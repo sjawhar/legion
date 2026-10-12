@@ -182,6 +182,18 @@ const legionPendingStatusWrite = z.strictObject({
   lastError: z.string().optional(),
 });
 
+/** `api.StrandedClaim` — one claim nothing will wake (`workflow.Stranded`): a worker of its issue's
+ * phase, or its tree's architect, in a tree that runs, named by its issue, its role and its state;
+ * the issue's entry under `issues` carries the rest. The state is the move that brings it back:
+ * `suspended`, the operator's resume; `failed`, a workflow start, since a failed claim ignores
+ * resume and deliver (its architect's retry for a worker, its tree's re-admission for an
+ * architect). */
+const legionStrandedClaim = z.strictObject({
+  issue: issueKey,
+  role: z.enum(LEGION_ROLES),
+  state: z.enum(["suspended", "failed"]),
+});
+
 /** `api.Issue` — `workers` is keyed by role and partial: a phase that has not run has no entry
  * (Zod's plain `record` over an enum demands every key). */
 const legionIssue = z.strictObject({
@@ -258,12 +270,14 @@ const legionCapabilityState = z.strictObject({
  * registers as the project's controller: with the capability `legion controller start` fetched, or,
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
  * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9);
- * `capabilities` is the deployment's report, never null (contract 16). */
+ * `capabilities` is the deployment's report, never null (contract 16); `strandedClaims` is every
+ * claim nothing will wake, by issue and then role, never null (contract 23). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,
   issues: z.record(z.string(), legionIssue),
   pendingStatusWrites: z.array(legionPendingStatusWrite),
+  strandedClaims: z.array(legionStrandedClaim),
   controllerLocator: legionControllerLocator.optional(),
   agentSecretsLogin: legionAgentSecretsLoginView.optional(),
   capabilities: z.array(legionCapabilityState),

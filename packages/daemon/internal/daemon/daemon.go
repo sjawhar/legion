@@ -48,6 +48,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -127,6 +128,10 @@ type overrides struct {
 	githubAPI string
 	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
+	// strandedReported runs once the boot's report of the claims nothing will wake has finished,
+	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
+	// beside the API, so a test that asserts on its line waits for this rather than for /healthz.
+	strandedReported func()
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
@@ -522,6 +527,8 @@ type plan struct {
 	// current status (source.State, agentsecrets.Client.LoginStatus); nil when the deployment
 	// enrolls no pod.
 	secretsLogin *agentsecrets.Client
+	// strandedReported is overrides.strandedReported; nil runs nothing.
+	strandedReported func()
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
@@ -579,7 +586,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
-		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
+		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
@@ -1341,7 +1348,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		State: &source{
 			store:        st,
 			records:      records,
-			supervisor:   s.supervisor,
 			project:      cfg.Project,
 			projectToken: p.project,
 			runtime:      cfg.Runtime.Name,
@@ -1381,9 +1387,28 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	})
 
 	group, serving := errgroup.WithContext(ctx)
+	serverStarted := make(chan struct{})
 	group.Go(func() error {
+		close(serverStarted)
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve the API on %s: %w", server.Addr, err)
+		}
+		return nil
+	})
+	// The report is advisory: its transaction must never sit in the path from restored claims to a
+	// serving API. Start it only after the server goroutine has begun and bound its store read; a
+	// lock or unavailable connection is a report error, not a failed or unhealthy boot.
+	group.Go(func() error {
+		select {
+		case <-serverStarted:
+		case <-serving.Done():
+			return nil
+		}
+		report, cancel := context.WithTimeout(serving, strandedReportTimeout)
+		defer cancel()
+		reportStranded(report, st, projectRecords{Store: record.NewStore(), project: cfg.Project}, cfg.Project, p.project, s.log)
+		if p.strandedReported != nil {
+			p.strandedReported()
 		}
 		return nil
 	})
@@ -1417,13 +1442,13 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	return group.Wait()
 }
 
-// source answers the state route out of the daemon's own store: the daemon itself, the cap it
-// admits under, every claim it supervises, filed under the issue it is on, and the project's
-// controller.
+// source answers the state route out of one repeatable-read snapshot: the daemon itself, the cap
+// it admits under, every stored claim filed under the issue it is on, and the project's controller.
+// A machine persists its claim before it publishes it to supervision, so the durable snapshot
+// prevents a claim view and strandedClaims from describing different instants.
 type source struct {
 	store        *store.Store
 	records      record.Store
-	supervisor   *supervisor
 	project      string
 	projectToken string
 	runtime      string
@@ -1474,14 +1499,21 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	claims, err := s.supervisor.Claims(ctx)
+	claims, err := s.store.ClaimsTx(ctx, tx)
 	if err != nil {
 		return api.State{}, err
 	}
-	state, err := projection.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, s.project, claims, s.reports())
+	claims = ofProject(claims, s.projectToken)
+	records := projectRecords{Store: s.records, project: s.project}
+	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports())
 	if err != nil {
 		return api.State{}, err
 	}
+	stranded, err := workflow.Stranded(ctx, tx, records, claims)
+	if err != nil {
+		return api.State{}, err
+	}
+	state.StrandedClaims = api.StrandedClaimsOf(stranded)
 	state.Daemon = api.DaemonInfo{
 		Project:       s.project,
 		SchemaVersion: version,

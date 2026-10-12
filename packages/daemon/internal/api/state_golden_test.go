@@ -127,9 +127,14 @@ func populatedState() State {
 				Phase:      phase.Held,
 				Status:     "in_progress",
 				HoldReason: "escalated",
-				Workers:    map[claim.Role]PhaseView{},
+				Workers: map[claim.Role]PhaseView{
+					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
+				},
 			},
 		},
+		// LEGION-210's implementer failed while implementing: its issue is held from that phase,
+		// and nothing retries the claim until its architect retries the phase.
+		StrandedClaims: []StrandedClaim{{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"}},
 		ControllerLocator: &ControllerLocator{
 			Runtime:      "kubernetes",
 			External:     true,

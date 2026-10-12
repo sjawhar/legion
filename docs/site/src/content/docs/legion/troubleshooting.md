@@ -238,6 +238,48 @@ kubectl -n legion logs <pod> -c <role>   # e.g. -c implementer
 kubectl -n legion describe pod <pod>     # scheduling, image pulls, mounts
 ```
 
+## A tree does not move after a restart
+
+A restart re-adopts every process still running, but a claim with no process runs again only when
+something starts it. A worker is started by the workflow when its phase begins, and a tree's
+architect by its admission; a notice to an architect with no process waits for it rather than
+starting it. So a worker of its issue's current phase, or a tree's architect, that an operator
+suspended (`legion claims suspend`, one claim at a time or a whole fleet before a restart) or whose
+launches ran out is woken by nothing: the daemon looks healthy and the state shows the tree active,
+but the tree stops for good at the worker's phase, or at the first decision that needs its
+architect. Once a boot has re-adopted its claims, the daemon names every such claim in one error
+line, under the move that brings it back:
+
+```text
+{"level":"ERROR","msg":"legion daemon started with claims nothing will wake","project":"WIDGETS","count":3,"resume":["WIDGETS-12 architect","WIDGETS-12 implementer"],"needsWorkflowStart":["WIDGETS-14 architect"]}
+```
+
+The state names the same claims on every read, after a restart or not, each with its `state`, and
+`legion state` prints them on its `claims nothing will wake` line:
+
+```sh
+legion state --config legion.yaml --json | jq '.strandedClaims'
+```
+
+- **`resume`** (`state` is `suspended`): resume each. Its token is
+  `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows:
+
+  ```sh
+  legion claims resume --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-implementer
+  ```
+
+- **`needsWorkflowStart`** (`state` is `failed`): a failed claim ignores `legion claims resume` and
+  `legion claims deliver`, and runs again only when the workflow starts it. A failed worker's issue
+  is held ([An issue is held](#an-issue-is-held)), and its tree's architect retries the phase or
+  escalates it to the controller. A failed architect waits for its tree's re-admission, as
+  [An issue is held](#an-issue-is-held) shows.
+
+The list names only claims of trees that hold an admission slot, and leaves out claims that
+something will still start: a worker whose phase is not its own is started again when its phase
+comes, a parked tree's claims wait for its re-admission, and the architect of a tree re-admitted
+while every slot was taken waits for admission to start it once one frees. Do not resume that
+architect by hand: it would run outside the admission cap.
+
 ## A pod does not come up
 
 - **`Pending`.** Usually scheduling: a pod reserves its roles' cpu and memory (3 CPU and 19 GiB for

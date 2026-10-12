@@ -113,10 +113,25 @@
       "phase": "held",
       "status": "in_progress",
       "holdReason": "escalated",
-      "workers": {}
+      "workers": {
+        "implementer": {
+          "claim": {
+            "session": "ses_implementer_210",
+            "state": "failed"
+          },
+          "rounds": 1
+        }
+      }
     }
   },
   "pendingStatusWrites": [],
+  "strandedClaims": [
+    {
+      "issue": "LEGION-210",
+      "role": "implementer",
+      "state": "failed"
+    }
+  ],
   "controllerLocator": {
     "runtime": "kubernetes",
     "external": true,

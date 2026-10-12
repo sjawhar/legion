@@ -90,7 +90,22 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 // not validate refuses the whole read, naming the claim: a daemon that loaded it would believe in
 // a process it has no way to act on.
 func (s *Store) Claims(ctx context.Context) ([]supervise.Claim, error) {
-	rows, err := s.pool.Query(ctx, claimSelect+" order by c.token")
+	return readClaims(ctx, s.pool)
+}
+
+// ClaimsTx is Claims through tx's snapshot. State reports use it with their durable issue and
+// outbox reads, so a claim's state and the queued start that might wake it cannot come from two
+// moments.
+func (s *Store) ClaimsTx(ctx context.Context, tx pgx.Tx) ([]supervise.Claim, error) {
+	return readClaims(ctx, tx)
+}
+
+type claimQuerier interface {
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+}
+
+func readClaims(ctx context.Context, q claimQuerier) ([]supervise.Claim, error) {
+	rows, err := q.Query(ctx, claimSelect+" order by c.token")
 	if err != nil {
 		return nil, fmt.Errorf("read claims: %w", err)
 	}

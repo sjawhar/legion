@@ -45,6 +45,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- `legion.daemonApiVersion` is 23. Contract 23 adds `strandedClaims` to `GET /legion/v1/state`
+  (LEGION-670): every claim nothing will wake — a suspended or failed worker of its issue's phase
+  that no queued start will wake, or a suspended or failed tree architect, in a tree that holds an
+  admission slot — each named by its issue, role and state. The list is never absent, so a plugin
+  built before 23 refuses the state; install this release with a Go `legion` and a worker image
+  built from the same commit.
 - `legion.daemonApiVersion` is 22 (LEGION-618). The daemon logs in to the secrets broker with its
   own Kubernetes ServiceAccount token, which no person approves, so `agentSecretsLogin` on
   `GET /legion/v1/state` has no `code` any more and its `state` is `none`, `issued` or `failed`.
