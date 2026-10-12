@@ -2894,6 +2894,131 @@ export interface DeliveryPipelineResponse {
   readonly freshness: DeliveryTimelineResponse["freshness"];
 }
 
+/** A window by preset, whose end stays at the present, or by the exact `from`/`to` of a custom range. */
+export type DeliveryLiveWindow =
+  | { readonly preset: 7 | 14 | 28 | 84 }
+  | { readonly from: string; readonly to: string };
+
+/** One view a page shows. `query` is the query string the page would send to the matching GET route
+ *  without `from`/`to` (search and every facet), so the live answer and the GET answer are one. */
+export type DeliveryLiveView =
+  | { readonly kind: "timeline"; readonly window: DeliveryLiveWindow; readonly query: string }
+  | { readonly kind: "measures"; readonly window: DeliveryLiveWindow; readonly query: string }
+  | { readonly kind: "pipeline"; readonly at?: string };
+
+/** The timeline's lists sent item by item, by id. */
+export type DeliveryLiveList = "prs" | "runs" | "session_groups";
+/** The timeline's maps sent entry by entry, by key. */
+export type DeliveryLiveMap =
+  | "issue_titles"
+  | "session_titles"
+  | "session_pr_counts"
+  | "components";
+/** The timeline's two-level count maps, sent count by count: `{facet: {value: count}}`. */
+export type DeliveryLiveCounts = "facet_counts" | "color_counts";
+
+/** What a page holds, as revisions (16 hex digits each) in the frame's own sections. */
+export interface DeliveryLiveRevs {
+  readonly items: Readonly<Partial<Record<DeliveryLiveList, Readonly<Record<string, string>>>>>;
+  readonly maps: Readonly<Partial<Record<DeliveryLiveMap, Readonly<Record<string, string>>>>>;
+  readonly counts: Readonly<
+    Partial<Record<DeliveryLiveCounts, Readonly<Record<string, Readonly<Record<string, string>>>>>>
+  >;
+  /** Every field sent whole, by its name. */
+  readonly fields: Readonly<Record<string, string>>;
+}
+/** A delta's revision changes, in DeliveryLiveRevs' shape; null for a key that left. */
+export interface DeliveryLiveRevChanges {
+  readonly items?: Readonly<
+    Partial<Record<DeliveryLiveList, Readonly<Record<string, string | null>>>>
+  >;
+  readonly maps?: Readonly<
+    Partial<Record<DeliveryLiveMap, Readonly<Record<string, string | null>>>>
+  >;
+  readonly counts?: Readonly<
+    Partial<
+      Record<DeliveryLiveCounts, Readonly<Record<string, Readonly<Record<string, string | null>>>>>
+    >
+  >;
+  readonly fields?: Readonly<Record<string, string>>;
+}
+
+export interface DeliveryLiveSubscribe {
+  readonly type: "subscribe";
+  /** The page's own id for this subscription, echoed on every frame for it. */
+  readonly sub: string;
+  readonly view: DeliveryLiveView;
+  /** A reconnecting page's last applied change and what it holds; Dispatch answers the delta. */
+  readonly resume?: { readonly seq: string; readonly revs: DeliveryLiveRevs };
+}
+export interface DeliveryLiveUnsubscribe {
+  readonly type: "unsubscribe";
+  readonly sub: string;
+}
+export type DeliveryLiveClientFrame = DeliveryLiveSubscribe | DeliveryLiveUnsubscribe;
+
+export type DeliveryLiveBody =
+  | DeliveryTimelineResponse
+  | DeliveryMeasuresResponse
+  | DeliveryPipelineResponse;
+
+export interface DeliveryLiveSnapshot {
+  readonly type: "snapshot";
+  readonly sub: string;
+  /** The change log position this answer reflects; a decimal string, since it is a bigint. */
+  readonly seq: string;
+  /** When the newest change it reflects was recorded; null when the log is empty. */
+  readonly changed_at: string | null;
+  /** Exactly the matching GET route's body for the resolved window. */
+  readonly body: DeliveryLiveBody;
+  readonly revs: DeliveryLiveRevs;
+}
+/** One list's changes: its items that are new or changed, whole, and the ids of those that left. */
+export interface DeliveryLiveItemChanges<L extends DeliveryLiveList> {
+  readonly upsert: DeliveryTimelineResponse[L];
+  readonly remove: readonly string[];
+}
+export interface DeliveryLiveDelta {
+  readonly type: "delta";
+  readonly sub: string;
+  readonly seq: string;
+  readonly changed_at: string | null;
+  /** Fields replaced whole. `window` is here whenever it moved, and never alone. */
+  readonly set: Readonly<Record<string, unknown>>;
+  readonly items: { readonly [L in DeliveryLiveList]?: DeliveryLiveItemChanges<L> };
+  /** A key's new value, or null when it left. */
+  readonly maps: {
+    readonly [M in DeliveryLiveMap]?: Readonly<
+      Record<string, DeliveryTimelineResponse[M][string] | null>
+    >;
+  };
+  /** A count's new value, or null when it left. */
+  readonly counts: Readonly<
+    Partial<
+      Record<DeliveryLiveCounts, Readonly<Record<string, Readonly<Record<string, number | null>>>>>
+    >
+  >;
+  readonly revs: DeliveryLiveRevChanges;
+}
+/** Sent to every subscriber when the freshness row's verdict changes, and never otherwise. */
+export interface DeliveryLiveFreshness {
+  readonly type: "freshness";
+  readonly freshness: DeliveryTimelineResponse["freshness"];
+  /** The sources past their threshold: "prs", "runs", "ci", "events". */
+  readonly stale: readonly string[];
+}
+export interface DeliveryLiveError {
+  readonly type: "error";
+  readonly sub?: string;
+  readonly code: string;
+  readonly message: string;
+}
+export type DeliveryLiveServerFrame =
+  | DeliveryLiveSnapshot
+  | DeliveryLiveDelta
+  | DeliveryLiveFreshness
+  | DeliveryLiveError;
+
 /**
  * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or
  * `null` until someone sets it, and `PUT /api/v1/settings/delivery` answers the record it stored.
