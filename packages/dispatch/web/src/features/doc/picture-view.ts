@@ -21,6 +21,10 @@ function fallbackLink(route: DispatchReferenceRoute, document: Document): HTMLAn
   link.setAttribute("href", buildReferencePath(route));
   link.dataset.dispatchHref = buildDispatchReference(route);
   link.textContent = shortForm(route);
+  // Not a drag source: the wrapper (ProseMirror's draggable leaf root) is, so a drag that starts
+  // on the link moves the picture node as one on the `<img>` does, instead of dropping the
+  // browser's own link HTML into the document.
+  link.draggable = false;
   return link;
 }
 
@@ -69,8 +73,6 @@ export function pictureView(node: ProseMirrorNode, document: Document): NodeView
   }
   return {
     dom,
-    // The swap from `<img>` to `<a>` is the one DOM change the view makes itself; never an edit.
-    ignoreMutation: () => true,
     // A click on the link is a click on a link, not ProseMirror's node-selection gesture; events
     // on the picture are the editor's, so clicking it selects it.
     stopEvent: (event) =>

@@ -77,12 +77,11 @@ test("an issue's picture at a version draws from the version's bytes route, capt
   expect(dom.textContent).toBe("");
 });
 
-test("a leaf view: no contentDOM, no update, every mutation ignored, events on the picture kept", () => {
+test("a leaf view: no contentDOM, no update, events on the picture kept", () => {
   const view = pictureView(picture("dispatch://CORE-1/artifact/shot-png@v1", "shot.png"), document);
 
   expect(view.contentDOM).toBeUndefined();
   expect(view.update).toBeUndefined();
-  expect(view.ignoreMutation?.({ target: view.dom, type: "selection" })).toBe(true);
   const img = pictureOf(view.dom as HTMLElement);
   const click = new MouseEvent("mousedown", { bubbles: true });
   img.dispatchEvent(click);
@@ -111,6 +110,7 @@ test("a version the browser cannot draw becomes a link to the artifact's page", 
   expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/notes-md?v=1");
   expect(link.getAttribute("data-dispatch-href")).toBe("dispatch://CORE-1/artifact/notes-md@v1");
   expect(link.textContent).toBe("CORE-1 notes-md");
+  expect(link.draggable).toBe(false);
   expect(dom.querySelector("img")).toBeNull();
   expect(dom.childNodes.length).toBe(1);
   const click = new MouseEvent("mousedown", { bubbles: true });

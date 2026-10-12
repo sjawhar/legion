@@ -320,7 +320,33 @@ test("a picture line the browser cannot draw, or that pins no version, shows a l
       "https://example.invalid/logo.png"
     );
 
-    // The link is a link: a click on it in the live editor opens what it names.
+    // A drag that starts on the link moves the picture node, as one on an `<img>` does, and the
+    // link's own words never reach the document: dropped onto the last paragraph, the versioned
+    // picture now follows the unversioned one, still written as it was, and once. The paragraph
+    // is brought into view first, with the link still in it: `dragTo` scrolls its target into
+    // view only as it moves there, after the press, and Chromium begins no drag when the page
+    // scrolled between the press and the move (the desktop viewport puts the paragraph below the
+    // fold; the phone's does not).
+    const below = editor.getByText("Below the pictures.");
+    await below.evaluate((paragraph) => paragraph.scrollIntoView({ block: "nearest" }));
+    await expect(versionedLink).toBeInViewport();
+    await versionedLink.dragTo(below);
+    const versionedLine = `![notes.md](${versioned})`;
+    const unversionedLine = `![notes.md](${unversioned})`;
+    const markdown = async () => (await getIssueArtifactText(issue.key, "spec")).markdown;
+    await expect
+      .poll(async () => {
+        const text = await markdown();
+        return text.indexOf(versionedLine) > text.indexOf(unversionedLine);
+      })
+      .toBe(true);
+    const moved = await markdown();
+    // Split around the line: two parts is exactly one occurrence.
+    expect(moved.split(versionedLine)).toHaveLength(2);
+    expect(moved).not.toContain(`[${linkName}](`);
+
+    // The link is a link: a click on it in the live editor - the moved node's, which the locator
+    // resolves afresh - opens what it names.
     await versionedLink.click();
     await expect(page).toHaveURL(`/issues/${issue.key}/artifacts/notes-md?v=1`);
   } finally {
