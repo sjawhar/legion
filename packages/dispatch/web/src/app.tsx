@@ -22,11 +22,13 @@ import {
   buildProjectPath,
   parseIssuePath,
   parseProjectPath,
+  REPLIES_PATH,
   routeFillsViewport,
   routeHasMargin,
   routeIsInbox,
   routeProjectOf,
 } from "./features/refs/routes";
+import { useRepliesCount } from "./features/replies/useRepliesCount";
 import { SearchButton } from "./features/search/SearchButton";
 import { type PaletteMode, SearchPalette } from "./features/search/SearchPalette";
 import { SettingsPage } from "./features/settings/SettingsPage";
@@ -129,6 +131,9 @@ const MachineLoginPage = lazy(() =>
 );
 const AnswersPage = lazy(() =>
   import("./features/answers/AnswersPage").then((module) => ({ default: module.AnswersPage }))
+);
+const RepliesPage = lazy(() =>
+  import("./features/replies/RepliesPage").then((module) => ({ default: module.RepliesPage }))
 );
 
 function IssuePageFallback(): ReactNode {
@@ -400,6 +405,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const connection = useConnectionState();
   const needsYouCount = useNeedsYouCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
+  const unreadThreads = useRepliesCount();
 
   const mainRef = useRef<HTMLElement | null>(null);
   useKeyboardFit(mainRef, fillsViewport);
@@ -611,6 +617,14 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                   {unreadRepliesLabel(unreadReplies)}
                 </Link>
               )}
+              {unreadThreads === 0 ? null : (
+                <Link
+                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+                  to={REPLIES_PATH}
+                >
+                  Replies {unreadThreads}
+                </Link>
+              )}
             </div>
             <button
               aria-expanded={navigationOpen}
@@ -686,6 +700,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               <Routes>
                 <Route element={<InboxPage />} path="/" />
                 <Route element={<AnswersPage />} path={ANSWERS_PATH} />
+                <Route element={<RepliesPage />} path={REPLIES_PATH} />
                 <Route element={<AgentsPage />} path="/agents" />
                 <Route element={<BroadcastsPage />} path="/agents/broadcasts" />
                 <Route element={<BroadcastPage />} path="/agents/broadcasts/:id" />
