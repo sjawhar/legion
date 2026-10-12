@@ -493,8 +493,10 @@ writes under `ACCESS SHARE` on `comments`, `asks` and `messages` and moves each 
 someone else newer than its `replied_at`, which makes it unread past its read mark; it moves
 nothing backwards, and a write the seed saw stays read. On a copy of the 2026-10-12 production
 dump (11,497 comments, 3,882 asks, 14,289 messages) the seed wrote 3,819 rows for three logins,
-all of them read. All five censuses answer `0`: `0095`-`0097` create functions and triggers and
-refuse or rewrite no row, and `0098` and `0099` write only the table `0095` creates.
+all of them read, in 0.93 s, and `0099` ran in 0.11 s under the server's own runner and moved no
+row, taking `ACCESS SHARE` on the three tables it reads and `ROW EXCLUSIVE` on `user_threads`
+alone. All five censuses answer `0`: `0095`-`0097` create functions and triggers and refuse or
+rewrite no row, and `0098` and `0099` write only the table `0095` creates.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
