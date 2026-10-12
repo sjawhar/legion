@@ -400,7 +400,15 @@ Quote-anchored asks and comments retain their inline mark and quote cache, plus 
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays
 unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range,
 SHA-256 token over its complete Proof state (including inline marks), and `{comments, asks}`
-reference counts; `GET .../text` returns the full-document Proof-state token and the document's
+reference counts, and a table block's `table.rows`: each row's id and index and each cell's id,
+row, column, the opening words of the header drawn above it and its own, every one placed by the
+walk that places blocks for the block route (`pmdoc.BlockPathsAndTableRows`; `pmdoc.TableRows`
+for a document a room holds, which builds no path), so the two routes cannot disagree and the
+list stays one entry per table. The walk lays each table out once, in document order, on the one
+budget of span cells a render of the document spends (`maxSpanCells`, `tableGrid`), so a cell is
+listed under the header `GET .../text` draws above it, a table past the budget with its spans
+adding nothing, and tables a browser pasted with spans filling that budget cost one request one
+budget, not one each. `GET .../text` returns the full-document Proof-state token and the document's
 latest version number, or `null` when it has none (the live markdown beside it and that version
 are two unsynchronised reads, in both directions; `token` is the concurrency primitive). The server resolves
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
@@ -411,8 +419,9 @@ or a rendering cached under the stored head when no fork or room holds it): its 
 naming the table's id, the row's child index (0 is the header row), the cell's child index in its
 row (the indexes `delete_row` and `delete_column` take, so a spanning cell counts once), the text
 of the header cell drawn above the cell and the row's cells as their opening words. The header is
-found where the renderer writes the cell (`tableGrid`, which lays the whole table out on one span
-budget), so in a table with colspans or rowspans it is the column the cell is drawn in, not the
+found where the renderer writes the cell (`tableGrid`, which lays the whole table out on the span
+budget the document's tables before it left, as a render spends it), so in a table with colspans
+or rowspans it is the column the cell is drawn in, not the
 header row's child at the cell's index. `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}`
 same answer for the anchor's `block_id` as `anchor_block` (`api.anchorBlock`), computed at read
 time and never stored or carried on lists and events; a block the live document no longer holds
@@ -1218,9 +1227,15 @@ document version, ask question, comment body, or issue message) are derived on e
 `created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right
 after the source's event is appended, in the same transaction). Structural relations stay in the
 columns that own them and the `graph_edges` view (migration 0032) unions both into one typed edge
-relation: `mentions`, `child_of` (`issues.parent_key`), `attached_to` (`artifacts.issue_key`),
-`anchored_to` (ask/comment anchors), `owned_by` (project-document asks/comments), `replies_to`
-(comment and message threads), `followed_by` (`ask_followers`). Artifact targets are addressed by
+relation: `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_links`),
+`attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by`
+(project-document asks/comments), `replies_to` (comment and message threads), `followed_by`
+(`ask_followers`). An issue may wait only on issues in its own project through `blocked_by`.
+For cycle checks an issue has two halves: it starts after its `blocked_by` targets are done and
+after its parent starts, and it is done after it starts and after its children are done. A
+write that would make either half wait on itself is `409 DEPENDENCY_CYCLE`. One sibling may
+wait on another, but a child cannot wait on its parent and a parent cannot wait on its
+descendant through `blocked_by`. Artifact targets are addressed by
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
@@ -1257,10 +1272,28 @@ version the binary it replaces writes leaves the previous version's excerpt with
 marks it owed at the reconciliation's next tick, which starts within five minutes
 (`docs.ReferenceExcerptReconcileInterval`) of the last one ending. The deploy's overlap lies inside
 the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
+Blocker-list and parent changes serialize per project through `lockProjectIssueDependencies`
+(`api/issue_parent.go`), using the two-key advisory-lock namespace `dispatch-issue-dependencies`.
+That transaction lock comes before any row or rank lock. A PATCH then locks every issue row it
+names `for no key update` in one key order, the order `LockOwners` takes event owners
+(`lockPatchRows`, `lockIssueRows`): the issue; its current parent when a status change or a
+reparent appends to it; the proposed parent; and the rank neighbours. `LockOwners` then re-locks
+rows already held, so no PATCH holds one of these rows while waiting for another that a second
+write holds. The current parent is read before the lock and again under it: a parent a concurrent
+reparent moved in between releases the attempt's locks (a savepoint) and is locked again in key
+order, and one that moves at both attempts is `409 PARENT_CONTENDED`, with nothing applied. The
+bounded dependency walk uses plain
+reads rather than contending on unrelated issue rows. Status-only, title, labels and rank writes
+take no dependency lock. Creation takes it only with non-empty `blocked_by`, before allocating
+the issue number or rank; creation without blockers takes no explicit parent-row lock.
+`blocked_by` inputs are limited to
+`contracts.MaxIssueBlockers` entries before deduplication on both create and PATCH; excess
+entries are `400 BLOCKED_BY_INPUT` naming the limit before any issue-row lock is acquired, and a
+PATCH naming the issue itself is `400 BLOCKED_BY_INPUT` too.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
-issue's own `child_of` and `affects` edges, and the cited node's `?to=` backlink names the spec.
+issue's own `child_of`, `blocked_by` and `affects` edges, and the cited node's `?to=` backlink names the spec.
 Where a reference in text ends, and what it names, is one rule with two readers: `text.ExtractAt`,
 which every write indexes through, and the dashboard's `composerReferences` (`refs/routes.ts`,
 scanning with `referenceSpans` and parsing with `referenceRouteFromHref`), behind its reference
@@ -1735,8 +1768,8 @@ from and that ask's document.
 
 - `packages/contracts` defines the TypeScript event schemas consumed by Dispatch clients. The Go Dispatch server maintains its emitted event names and wire payloads separately; `bun run gen:go` generates Envoy envelope validation only.
 - `GET /api/v1/issues` answers every issue its filters match (`project`, `status`, `parent`, `label`, `priority`, `open`, `updated_since`, `route_status`, and the human-only `pinned`) as an array, or one page of them when the caller names `limit` (1 to `contracts.MaxIssuePageLimit`, 250) or `offset` (0 or more; alone it pages `contracts.DefaultIssuePageLimit`, 50): `{issues, total, limit, offset}` (`model.IssueSummaryPage`), the count beside the rows as `GET /api/v1/asks/open` carries it. `parseIssuePage` (`api/issue_page.go`) reads both, and a repeated, blank, non-integer or out-of-range value is `400 INVALID_QUERY` naming the parameter; so is `cursor`, which the listing does not page with, since answering it with the first page would hand back rows the caller cannot tell from the ones it asked for (LEGION-406: the route ignored all three and answered every row). The page is cut after every filter, `route_status` included, which is applied in Go after the query, so `total` is what the filters match. The order ends on the key, the one column no two issues share: nothing makes a rank unique (`issues_project_rank` is a plain index, and every project's first issue is `U`), and `created_at` is the creating transaction's start, so without the key consecutive offsets could show a row twice or never even over a listing that holds still. A walk of the pages is exact only on an unchanged listing: an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, and one issue is served twice and another never. The unpaged array is the only exact set one read gives. The `dispatch issues` command always sends `limit` and `offset` (`DispatchClient.listIssuePage`, `packages/envoy-client`) and refuses an array answered to that paged request, which means a Dispatch older than #1612 or a regression of the page. So a Dispatch rolled back past #1612, or one that stops paging, fails every `dispatch issues` call with that refusal; the SPA and both daemons send neither parameter and keep reading the array.
-- Issues carry a nullable coarse priority (`P0` highest through `P3` lowest) alongside their server-generated fractional `rank`. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `priority` as `0` through `3` or null; each priority write emits `issue.updated`. Issue and pinned lists sort by lifecycle status, then rank, then creation time, then key; priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order. `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project before it rewrites only that issue's order key.
-- Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents after locking the issue and the proposed parent in key order and refusing a missing, self, or foreign-project parent (`400 PARENT_INPUT`) and a cycle (`409 PARENT_INPUT`, with a depth-capped `union` ancestor walk so reads terminate even if a raced reparent ever commits one; the pairwise lock leaves the multi-ancestor race accepted, like rank). A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, and a reopening `status` — any status but `done`; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
+- Issues carry a nullable coarse priority (`P0` highest through `P3` lowest) alongside their server-generated fractional `rank`. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `priority` as `0` through `3` or null; each priority write emits `issue.updated`. Issue and pinned lists sort by lifecycle status, then rank, then creation time, then key; priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order. `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project; it locks both neighbours together with every other issue row the PATCH names, in one key order, then rewrites only that issue's order key.
+- Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents. Parent changes take the project's dependency advisory lock, serializing with blocker writes, and then lock the issue, its old parent and the proposed parent together in one key order, as a status write locks the issue and its parent (`409 PARENT_CONTENDED` when a concurrent reparent moves the parent at both attempts). Plain, depth-capped reads refuse a missing, self, or foreign-project parent (`400 PARENT_INPUT`), a parent cycle (`409 PARENT_INPUT`), or a wait cycle through parent and `blocked_by` edges (`409 DEPENDENCY_CYCLE`); unrelated row activity adds no refusal. A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, and a reopening `status` — any status but `done`; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
 - Every issue has a nullable `assignee`: the **lowercase** email of the person who answers its asks (`issues.assignee`, migration `0034`, indexed on open issues). Both identity implementations name a person by lowercase email, so `api/issue_assignee.go`'s `canonicalLogin` (`strings.ToLower(strings.TrimSpace(login))`) is the stored form and plain `=` compares it; the SPA lowercases the `/auth/whoami` viewer once and compares exact. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `assignee` (the PATCH's `json.RawMessage` tri-state: absent leaves it, `null` clears, a string is canonicalised and must name a row of `people` (migration `0068`: everyone who has signed in) — else `400 ASSIGNEE_NOT_ALLOWED` naming the email; a non-string is `400 INVALID_ISSUE`). Any authenticated actor may set it; the event's actor is who assigned it, and the whole issue rides in `issue.created` / `issue.updated`, so there is no `assigned_by`. Absent on create, the default is the first match of: a human actor's email; a personal token's `Owner`; the parent's assignee (which may be null); null — so the shared token's parentless issues are unassigned and a daemon status PATCH (no `assignee` key) never touches it. `GET /api/v1/users` (human-only) returns everyone in `people`, sorted by email, as `{users: [{login}]}` — the picker's options; `GET /api/v1/whoami` (any auth) returns `{kind: "user", login}` (the person's lowercase email) for a cookie/header caller or `{kind: "agent", owner}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token) — what `dispatch whoami` reports. Issue reads (`GET /issues/{key}`, summaries, pinned) carry `assignee`, and so does the `issue` on every inbox row.
 - Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON — and `issues.claimed_at`, migration `0045`, both set or both null by `issues_claim_complete`). It is on every issue read (`Issue.claim`, `IssueSummary.claim`, so the detail, the listing and the board rows all carry it) and is neither the `route` (where messages go) nor the `assignee` (the human who answers the asks). The whole rule lives in `api/issue_claim.go`. `POST /api/v1/issues/{key}/claim` (any authenticated actor) claims it: the claimant is the request's own actor, the same identity every other write carries — a human's login from their signed cookie (a body naming a session is ignored for a cookie caller), or, for a bearer, the session the caller declares in `actor`, since a token proves its owner or service subject and not which session it runs. A bearer can therefore name another session here exactly as on any other write; what makes a claim trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model picks it, and that there is no second parameter for claiming on someone's behalf. The body rejects unknown fields, so an invented one is refused rather than ignored. It succeeds when the issue is unclaimed, when this actor already holds it (idempotent: the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener no longer lists as live (`fetchLiveSessions` takes that snapshot of the same live list `GET /api/v1/agents` serves, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place — decides from it under the issue's row lock), which records the takeover. Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message; a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all. `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force — a refusal on the release route never offers one. An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`. A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows: nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`. `DELETE /api/v1/issues/{key}/claim` releases it: the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op. Both answer the issue. Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it), because humans may track work by the status; closing an issue is the one write that clears a claim, in the same `PATCH` (`issue_patch.go`) that closes it. `issue.claimed` and `issue.released` carry `IssueClaimEventPayload {key, status, claim, previous_claim?, reason}`; the outbox publishes both to the previous claimant's own `notifications.agent.<session_id>` topic (`publishPreviousClaimant`), whatever the issue's route and regardless of `notify`, so a session learns it no longer holds the work.
 
@@ -1745,7 +1778,7 @@ from and that ask's document.
 - The quote a refresh reads is the first contiguous run of the row's mark (`pmdoc.FindMark`), so text written inside an anchor must carry its mark. Two marks of one type may cover one character (two readers' comments, suggestions or asks: the record marks declare `excludes: ''`), so `pmdoc.MarkSpans` and `FindMark` match a run by the mark's type and id, never by the first mark of the type on it, and the server stores a record mark under y-prosemirror's overlapping-mark key shape `<type>--<8 characters>` (`pmdoc.markAttributeKey`, with its own digest), which both readers strip. A `replace` through the edit route, and the text an accepted suggestion writes inline or into code, takes every comment, suggestion and ask mark that covers all of the text it replaces (`pmdoc.AnchorMarksCovering`, the accepted suggestion's own mark excepted): replacing a word, the first or last word, or the whole quote leaves the anchor over the new text, and the refreshed quote is its whole current extent. A replace that runs past an anchor's edge rewrote text outside it too, so that anchor keeps only the text the replace left alone, and one covering the whole anchor and more orphans it. A block replacement from an accepted suggestion takes no mark, since it can land a code block an ask's mark cannot cover.
 - `POST /api/v1/issues/{key}/asks` and `POST /api/v1/artifacts/{id}/asks` create questions: the asker supplies the options and no option label carries a server rule (a human to-do is the to-do phrased as the question, with whatever options fit it). `kind` may be absent or `question`; `kind: "action"` (removed; migration 0035 folded every stored action ask into a question keeping its options and its answer) and `kind: "approval"` (server-created by the document-approval route only) answer `400 ASK_KIND_INPUT`.
 - Document approval is a human review pinned to a version, the way a pull-request review is pinned to a commit. `POST /api/v1/artifacts/{id}/approval-requests` `{summary?}` (any actor) opens an ask of `kind: "approval"` with the fixed options `Approve` / `Request changes`, naming the document and its latest settled version in `ask.approval`; its wording cannot be edited. Its question is `Approve <name> (version <N>)?`, followed by the request's `summary`: what the human is approving and nothing else, since an approval request carries nothing new. A summary is trimmed and must hold text (`400 SUMMARY_INPUT`), and one that would take the question past the ask cap is `400 CAP_EXCEEDED` naming `summary` and the characters left for it, counted against the longest version the request can reach (ten digits, the most `asks_approval_kind_check` admits), so no later version move takes the question past the cap; both are checked on every request, including one that opens nothing, and a request without one gets the bare question. An open approval ask follows every document version in the same transaction, preserving its thread and summary: the move rewords its question to the new version, stamps `edited_at` and appends `ask.edited`, while `requested_version` remains the version the agent last handed to the human, so a moved request is Waiting on agents. Only the first move since the request was opened or handed back wakes anyone, even when a thread reply had already left the request waiting on the agent: a later move, while `requested_version` is already below the version it named, carries `quiet: true` (`model.AskEditEventPayload.Quiet`), so `events.Broker.Notify` records it with `notify` false and the outbox routes it to no follower, as a human's unnamed `artifact.version` is recorded; the log and SSE still carry it, so a person typing in the document wakes the asker once rather than at every settled version. Calling the request route again reads the open row's `waiting_on` once, before it writes anything (`renewApprovalAsk`, `api/reviews.go`). While it is `agent` - the request moved, or a thread reply newer than its last hand-back holds the turn - the call hands it back to the human: a new summary first rewords it the same way (`edited_at`, `ask.edited`; a request that names none keeps the summary it has), and the hand-back then sets `requested_version` to the current version, records the thread's newest reply as the one it answered (`asks.handed_back_reply_id`, migration 0064, a foreign key to `comments` from 0066) and appends `ask.handed_back`, which leaves `edited_at` and the question as they were, so an answer the human started before it is not refused `ASK_EDITED` and the card's edit history gains nothing. While it is `human` the call hands nothing back: the same summary, or none, writes nothing, and a different one is `409 APPROVAL_WAITS_ON_HUMAN`, naming the question the human is reading, since rewording it would rewrite that card with no turn of theirs and refuse an answer they had started. The route answers 201 when it wrote anything and 200 when it wrote nothing, with the document's `approval` as the call left it. `docs.OpenApprovalAsk` locks that one row, `docs.RewriteApprovalAsk` is the one rewording a version move and a new summary share, and `handBackApprovalAsk` (`api/reviews.go`) the one hand-back. Every writer passes `MoveApprovalAsk` the actor whose edit moved the request: a route passes its own actor, settlement its latest known browser editor, and ambiguous browser content `SettlementActor`, `{kind: "system", id: "document-settlement"}`; how many authors the version credits does not choose the mover. What resolving an ask stores is written in one place, `docs.WriteAskResolution`, which settlement's retraction of a removed ask block and the resolve route both call. A request while the latest version is approved returns the approval and opens nothing. Answering an approval ask (humans only; `Request changes` requires text) writes an `artifact_reviews` row pinned to the version it names, which is the latest settled version at answer time, and appends `artifact.approved` or `artifact.changes_requested` (`{artifact_id, name, version, actor, reason, ask_id}`) on the document's owner alongside `ask.answered`. `POST /api/v1/artifacts/{id}/reviews` `{state, reason?}` (humans only) writes the same review from the document header, pinned to the version settled when the request arrives, and answers the open approval ask when present so the review keeps its thread. Every document read carries `approval` (`draft | awaiting | approved | stale | changes_requested`, with `latest_version`, the latest review's `version/by/at/reason/ask_id`, and `requested_by` and `waiting_on` while awaiting, the request's turn by `waitingOnExpression`, so an agent whose own revision moved its request, which sends it no event, reads that the request waits on it); `stale` is derived from versions. Every approval ask names its document and no other ask names one: `asks_approval_kind_check` (migration 0053) refuses a row that pairs `kind` and `approval` otherwise. Legion's design gate consumes the approval events; it is the exception path, not an every-issue step.
-- `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept up to 20 labels. Dispatch trims labels, preserves case, removes case-insensitive duplicates, and returns `400 LABELS_INPUT` for blank or over-40-character labels; every label update emits `issue.updated` with its labels. `GET /api/v1/issues?label=<label>` is repeatable, normalizes filter labels identically, and case-insensitively matches every supplied label.
+- `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept up to 20 labels. Dispatch trims labels, preserves case, removes case-insensitive duplicates, and returns `400 LABELS_INPUT` for blank or over-40-character labels; every label update emits `issue.updated` with its labels. `PATCH` also takes `labels_add` instead of `labels` (both together are `400 LABELS_INPUT`): the labels it names are merged, under the issue's row lock, into the labels the issue holds when the write commits, normalized as above and held to the same 20, so a label another writer added after the caller read the issue survives. `PATCH` takes `expected_sequence` too, the issue's `last_seq` the caller read: the write is refused `409 ISSUE_CHANGED` when the issue's last event is no longer that one. The Legion daemon's hand-over writes `status: todo` with both, so a person's change after its read is never overwritten; a Dispatch that predates them refuses each by name (`400 INVALID_JSON`), which the daemon rides out until Dispatch is deployed. `GET /api/v1/issues?label=<label>` is repeatable, normalizes filter labels identically, and case-insensitively matches every supplied label.
 - A reply to an open ask (`ask_id` set on `POST /api/v1/issues/{key}/comments` or `POST /api/v1/artifacts/{id}/comments`) records `turn` (`comments.turn`, migration 0028): who holds the turn after it. A human author's reply always stores `agent` whatever the request says; a session author's stores `human` unless the request says `turn: "agent"` (a progress note - the agent still owes the next move). A reply under an answered or resolved ask records no turn (nothing is waiting; a requested `turn` is ignored there, as a human's is). `turn` on a comment that is not an ask reply is `400 TURN_REQUIRES_ASK`; any value but `human`/`agent` is `400 INVALID_COMMENT`. Comment objects carry `turn` (null under a closed ask and off ask replies). The column's only constraint is `turn requires ask_id`, so a pre-0028 server still draining during a deploy inserts its ask replies with a null turn; every reader coalesces a null newest-reply turn to `human`.
 - Every ask the API serves is read through one row shape: `docs.AskColumns` + `docs.ScanAsk` decode the ask row (the document settler uses the same pair for indexed blocks and anchor-refresh events), while `api/ask_rows.go` extends it with the block ask's document (`askRowColumns`) and, for reads, the newest comment in its thread (`askReadColumns`, a `lateral ... limit 1` join). `opened_event_id` is attached afterwards by `attachOpenedEventIDs`, one `events` query per read served by the partial index `events_ask_payload_id` (`store/migrations/0030_events_ask_payload_id.up.sql`; its `type in (...)` list mirrors that query and must change with it). `asks.options` is always a JSON array, never null.
 - Every open ask read carries `waiting_on` (`human` | `agent`), and `waitingOnExpression` (`api/ask_rows.go`) is the rule's one home: the ask reads (`askReadColumns`, which alias it `waiting_on` so the Inbox order names that column and evaluates the rule once a row), `listOpenAsks`, a document's awaiting approval (`attachApprovals`), and the approval route's hand-back decision (`askWaitingOn`) all embed it. A reply learns its `ask_waiting_on` with no second statement: the comment write reads the ask it joins with the rule's moved-request arm, `approvalMoved` (`describeAsk`), under the owner row every version write and hand-back takes first, and once inserted the reply is the thread's newest, so `commentThreadTarget.waitingOnAfter` applies the rule to it in Go - `agent` for a moved request, otherwise the reply's own `turn`. An approval request whose `requested_version` is below its current `version` is waiting on its agent. One whose newest thread reply is the reply its last hand-back answered (`handed_back_reply_id`) is waiting on the human, and so is one nobody has replied to; otherwise the newest comment's `turn` decides. The newest reply is the one that committed last: `comments.created_at` defaults to `clock_timestamp()` (migration 0065), the moment its insert runs, and both comment inserts (`createCommentFor`, `replyComment`) leave it to the default and run once their transaction holds the owner row. The old default, `now()`, was the transaction's start, which sorted a reply that began first but waited for the row before one that committed while it waited; an older binary still serving during a rollout names no `created_at` either, so the default orders its replies too. The hand-back reads that reply under the same owner row, so a reply that inserts after the hand-back sorts after the reply it recorded and decides the turn, however early its own transaction began. It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`; closed asks and every `ask.*` event payload omit it. A `comment.created` or `comment.answered` payload that replies to an open ask carries the resulting `ask_waiting_on`, and every route that writes a comment (`POST /api/v1/issues/{key}/comments`, `POST /api/v1/artifacts/{id}/comments`, and the delivery callback `POST /api/v1/comments/{id}/reply`) answers the same `ask_waiting_on` beside the comment row (`commentWriteResponse`, `api/comment_projection.go`; `model.Comment` is the stored row and carries no derived turn), so a stream consumer or the writing agent reports the value every ask read has without a refetch. A replayed delivery callback, which writes nothing, answers the stored reply alone.
@@ -1762,6 +1795,7 @@ from and that ask's document.
 - Issue component attachment (`api/issue_components.go`, migration `0038`): `issue_components(issue_key pk, mode in (explicit, none), reason)` is an issue's own attachment and `issue_component_members(issue_key, project_key, component_id)` its explicit set; no row means inherit. Members reference `components` softly (no FK), so a re-import that retires a component leaves the link in place and every read reports the id under `unknown` instead of dropping it. `POST`/`PATCH /api/v1/issues[/{key}]` take `components` as a tri-state raw field like `parent`: `null`/`{mode: inherit}` deletes the row, `explicit` needs one to fifty slug ids that are components of the issue's project and not `external` (`400 COMPONENTS_INPUT` names each unknown, retired, external, or other-project id), `none` needs a non-blank `reason`; the closed-issue gate exempts `components` like `rank`, and a write bumps `issues.updated_at` and rides the ordinary `issue.updated` event with the whole issue. Resolution is on read, never stored: `issueComponentsLateral` is one `left join lateral` (a depth-capped `union` walk up `parent_key` to the nearest row of either mode — `none` is inherited exactly like `explicit` — splitting members into live and retired ids) that `loadIssue`, both list queries, and the tree route share, so every `Issue`/`IssueSummary` carries `components {mode, ids, unknown, reason, inherited_from}` from the same query. `GET /api/v1/projects/{key}/architecture` (`api/architecture_tree.go`, authAny, `404 SOURCE_NOT_FOUND`) computes the counting rule once: every project issue's effective set joined to the component containment closure (recursive over `components.parent`, depth-capped), one row per (issue, component) with the strongest way it qualified (`direct` > `inherited` > `contained` with `via`), aggregated in Go into `done`/`total` (distinct issues, icebox and closed included) and `own_*` (those naming the component itself), plus the `unassigned` (no row anywhere), `not_architectural` (a `none` row, own or inherited), and `retired_links` (non-empty `unknown`) lists and `totals` (`components_without_work` counts non-external components with `total == 0`). `graph_edges` gains the `affects` arm (`issue` → `component` per explicit member, `created_at` the row's `updated_at`; inherited attachments are not edges), `refs.Kinds` learns `part_of`/`depends_on`/`affects`, `refs.resolveNodes` loads `component` nodes from the current model (a retired id resolves to nothing and its edges are omitted), and `text.Extract` parses `dispatch://<PROJECT>/component/<id>` so a mention of a component is an ordinary `mentions` edge.
 - Per-user agent state is its own tables and route pair, not a key in `GET /api/v1/me/state` (that map is keyed by issue). `PUT /api/v1/me/agents/{session_id}/state` (human-only) takes `{cleared_before?, read_through?, read_replies?}` (the first two RFC3339; at least one): `cleared_before` upserts the viewer's Clear into `user_agent_state(login, session_id, cleared_before)` (`store/migrations/0033_user_agent_state.up.sql`), replacing the previous one, and `read_through` upserts their read mark into `user_agent_read(login, session_id, read_through)` (`0051_user_agent_read.up.sql`), which only moves forward so a tab that read less a moment ago cannot make a reply unread again, keyed on `canonicalLogin(actor.ID)` as `user_ask_snooze` is. `read_replies`, the ids of messages the path's session wrote, adds one row per reply to `user_agent_reply_read(login, session_id, reply_id)` (`0067_user_agent_reply_read.up.sql`, keyed on the canonical login too, primary key `(login, reply_id)`), which reads those replies and no other: a view that shows only some of a session's replies (the broadcast page, each recipient's reply to that broadcast) writes it, because moving the read mark through them would also read the session's older reply to another message, which the viewer never saw. A reply the session's read mark has already passed gets no row, so a revisit of replies the mark covers writes nothing. A `read_through` deletes, in the same transaction, that viewer's rows for that session whose replies it now reaches, which the mark already reads (`user_agent_reply_read_session`, on `(login, session_id)`, serves the delete), so a row lives only until a read mark, which only moves forward, passes its reply; a session the viewer reads only on broadcast pages keeps its rows, since nothing else records those reads. An id is taken in any form `uuid.Parse` reads (a `urn:uuid:` prefix, braces, upper case) and sent to Postgres in the canonical form, which Postgres takes; one `uuid.Parse` cannot read, or one that is not a message the path's session wrote, is `400 INVALID_STATE`, and nothing the request names is written. `0051` also inserts one read mark, at the migration's own time, for every (human, session) that already had an issue-less direct message, so the deploy does not turn every reply ever stored into an unread one. The read mark is a table of its own because a viewer who has only read a conversation has no Clear, and `user_agent_state.cleared_before` stays `not null` for a Dispatch that predates the read mark and scans it as a timestamp. No field given, a malformed value, or a cutoff more than a minute ahead of the server clock (`agentStateCutoffSkew`, the allowance for a fast browser clock) is `400 INVALID_STATE`; a value the skew admits is stored as `least(value, now())`, so a reply that lands while a fast browser's mark is still ahead of the server counts; the PUT answers the session's whole state. `GET /api/v1/me/agents/state` returns `{[session_id]: {cleared_before?, read_through?, unread_replies}}` for the caller: `unread_replies` counts the rows of `unreadDirectRepliesCTE` (`api/unread_replies.go`, the one definition the conversation window's unread term reads too): the session's replies anywhere under a direct message this viewer sent it (an issue-less message targeted at it, a broadcast's copy included, whose author matches the viewer's canonical login) that are newer than both the read mark and the Clear and that the viewer has not read by id, and a session with unread replies appears even with no stored row. The PUT touches no message and appends one `user_agent_state.updated` event (`{login, session_id}`, owned by the session like its issue-less messages, so the outbox publishes it nowhere and it never notifies), which the viewer's other open tabs and devices refetch their state on; a PUT that names only replies already read by id or passed by the read mark changes nothing and appends none, since a broadcast page sends its replies again on every visit while the session has an unread reply elsewhere. A reply the Clear hides but the read mark has not passed is neither, though `unread_replies` leaves it out: the Clear can move back, so the first PUT naming that reply writes its row and appends the event. The Clear is a view preference the Agents page applies client-side (an exchange is hidden when its newest message is at or before the cutoff), so a reply that lands after the Clear still surfaces. The SPA refetches the state on an issue-less `message.answered`, the one event every reply row is written with, and on this event for its own login; how it shows and marks unread replies is `packages/dispatch/AGENTS.md`'s (`features/agents/`).
 - A human's snooze on one inbox row is its own table and route pair, like per-user agent state. `PUT /api/v1/me/asks/{id}/snooze` (human-only, because the inbox is) takes `{snoozed_until: <RFC3339>}` and upserts `user_ask_snooze(login, ask_id, snoozed_until)`, keyed on `canonicalLogin(actor.ID)` rather than the actor id — both identity implementations name a person by lowercase email now, but a row written before they did can carry another casing of the same name, so keying on the raw id could give one person two snooze sets. That makes the `me/*` family inconsistent, deliberately and visibly: `user_ask_snooze` and `user_agent_read` (`0051`) key on the canonical login, while `user_issue_state` (migration `0001`) and `user_agent_state` (`0033`) key on the raw `actor.ID`, and `inbox.go` now binds one form twice — `canonicalLogin` for the assignee filter's `$3` and for the snooze join's `$4` — while those two tables are read elsewhere under the raw id. The two older tables carry the same latent split; it is not introduced here and is not fixed here, because normalising them needs a backfill of rows that already exist. `user_ask_snooze` has none to back-fill: the table is created by `0048` and its only writers ship in the same change, so no deployed schema ever carried a version of it written under a raw login — (`store/migrations/0048_user_ask_snooze.up.sql`); a non-uuid id is `400 ASK_ID_INPUT`, an unknown ask is `404 NOT_FOUND` (the insert selects the ask rather than naming its id, so the foreign key never surfaces as a 500), and a missing, malformed, or already-past `snoozed_until` is `400 SNOOZE_INPUT`; the bound allows no skew, and the SPA's presets keep clear of it (the one that can land near midnight falls through to the next morning rather than naming a moment inside the request's own latency). `DELETE /api/v1/me/asks/{id}/snooze` removes it and answers `204` whether or not a row was there. Neither write touches the ask, appends an event, or reaches any other login: a snooze is one viewer's view state. Keyed on the ask, not its issue, so a document ask snoozes exactly like an issue ask. `GET /api/v1/inbox` carries the caller's own `snoozed_until` (null when they have not snoozed the row) through a left join on that table and **never filters on it** — the row is listed either way and nothing sweeps the table, so a snooze whose moment has passed reads back as the ordinary row it is. The SPA folds a row whose moment is still ahead into a collapsed `Later` band, ahead of whose turn it is: an agent replying to a deferred ask hands the turn back without bringing the row back (`sectionOf` and `waitingOnYou`, `packages/dispatch/web/src/features/inbox/`).
+- A person's Replies page is its own table and route pair, like per-user agent state. `user_threads(login, thread_id, kind, project_key, issue_key, artifact_id, read_through, replied_at, last_reply_id, unread)` (migrations `0095`-`0099`) holds one row per person per thread they wrote in: an ask's thread (they asked it, answered it or replied in it), a comment thread by its root, or an issue message thread by its root (`in_reply_to` walked up, at most 64 deep, by the trigger, the seed and the catch-up alike). An issue-less direct message makes no row, since its replies are the Agents badge's. Triggers keep the rows, so no read scans `comments`: `after insert on comments`, `after insert or update of answer on asks` and `after insert on messages` each call `user_threads_record`, which moves every other participant's `replied_at` and `last_reply_id` on a comment, a message or an answer (an answer names its ask, so the asker's row goes unread when someone else answers), and the writer's own `read_through` on any write of theirs; asking moves only the asker's own mark. Only an insert or an answer counts: an edit, an anchor refresh or a resolution moves nothing, so a resolved comment thread stays listed until it is read. Authorship is the author's `kind` and `id`, so a session writing under a person's own token is someone else to that person. A person is keyed on `user_threads_login` (`0095`: the author id lowercased and trimmed of ASCII white space, as `canonicalLogin` lowercases and trims), so a row's login always matches the one the routes read. A write whose owner has no project (an agent conversation's file, which no route comments on) makes no row. `0098` seeds every row read through the newest write stored at the migration's own time, and `0099` moves a row forward to any write by someone else newer than its `replied_at` - a write that committed while `0098` ran, on a thread whose participant `0098` was still inserting, which the trigger could not see - so a write before the deploy stays read and one during it is not lost. `unread` is a stored generated column (`replied_at > read_through`) under the partial index `user_threads_unread` on `(login, replied_at desc, thread_id desc) where unread`, so the page and the count read only the person's unread rows. Rows are keyed on `canonicalLogin`. The table has no foreign key to the thread it names: nothing deletes a comment, ask, message, issue or document, so a row's thread exists, and a harness that empties those tables empties `user_threads` with them (`packages/dispatch/e2e/seed.ts`). `GET /api/v1/me/replies?limit=&offset=&issue=|artifact=` (human-only, `api/replies.go`) answers `{rows, total, limit, offset}`, newest reply first, less an open ask the Inbox lists (an open ask on an issue that is not closed, or on a project document), whose row in Waiting on you already shows its reply; an open ask on a closed issue stays, since the Inbox hides it. A row's `reply` is the thread's newest write by someone else: `kind: "reply"` for a comment or a message, `kind: "answer"` for an answer, whose `id` is the ask's, whose `author` is the answerer and whose `first_line` is the chosen options and the answer's text (`<selected> - <text>`, as the outbox's `payload_summary` renders it). `issue` and `artifact` together are `400 INVALID_QUERY`, and `limit` is 1-200 (default 50), as `GET /api/v1/me/answers` reads it. A row's `ref` names the thread's root, never the reply, so an anchored root still redirects to its document. `PUT /api/v1/me/threads/{id}/read` `{read_through}` stores `least(value, now())`, Postgres casting the caller's text so an answer's nanosecond time rounds as the trigger rounded it, and only moves forward, with `agentStateCutoffSkew`'s minute of allowance (`400 INVALID_STATE` past it); a non-uuid id is `400 THREAD_ID_INPUT`, a thread the caller has no row for writes nothing, and both answer `204`. It locks the thread's owner row `for share` before it touches the caller's row, since every writer holds that owner `for no key update` before its trigger fires, and appends `user_thread_state.updated` (`{login, thread_id}`, owned by the row's project, never notifying) only when the mark moved, so a revisit announces nothing. A person's own reply or answer needs no call: the trigger moves their mark in the write's own transaction. How the SPA shows and marks threads is `packages/dispatch/AGENTS.md`'s.
 - `GET /api/v1/issues/{key}/subscribers` and `GET /api/v1/artifacts/{id}/subscribers` (human-only) list the sessions whose persisted Envoy interests match that issue's or unlinked document's topic family, merging `GET /v1/interests/` with `GET /v1/sessions` for live status and title. `DELETE .../subscribers/{session_id}` removes matching topics with `POST /v1/interests/unsubscribe`; it first commits `subscription.remove_requested` with `pending: true`, which the outbox does not publish. After idempotent listener removal succeeds, Dispatch appends `subscription.removed` with the `request_event_id` it settles and routes that notice directly to the unsubscribed session's `notifications.agent.<session_id>` topic in addition to the owner topic.
 - The Dispatch API describes itself. `internal/dispatch/api/routes_table.go` is the one list of `/api/v1` routes (`apiRoute{Method, Pattern, Auth, Description, Handler}`, `Auth` one of `public`, `any`, `human`, `bearer`); `Register` mounts that table and public `GET /api/v1` serves it as `{routes: [{method, path, auth, description}], docs: "skills/dispatch/SKILL.md"}` sorted by path then method. A new route is a new row (and a bumped pin in `routes_table_test.go`), never a `mux.HandleFunc` line. An unknown path under `/api`, `/v1`, `/auth`, `/ws`, or `/healthz` is `404 {"code":"NOT_FOUND","error":"no route for GET /v1/issues","hint":"GET /api/v1 lists every route"}` from `routes/router.go`, decided before any dashboard lookup, so an API caller never receives the SPA shell. `GET /api/v1/agents` is readable by any authenticated caller (a session picks a message target by the `capabilities` it advertises); the issue-less `POST /api/v1/agents/{session_id}/messages` and `GET /api/v1/agents/{session_id}/messages` stay human-only.
 - Every session that writes to an ask follows it: `asks.FollowAuthor` runs at all three ask insert sites (`POST .../asks`, approval requests, ask blocks indexed from documents) and on every ask reply, whether it arrives through `POST .../comments` or through the delivery callback `POST /api/v1/comments/{id}/reply`, so no insert path can miss it; `store/migrations/0029_ask_followers.up.sql` backfills existing asks and replies. `GET /api/v1/asks/{id}` returns `followers` (`{session_id, since}`, oldest first); `GET /api/v1/asks/{id}/followers` (any authenticated actor) returns the same list. `PUT` / `DELETE /api/v1/asks/{id}/followers/{session_id}` add or remove one follower and append `ask.follower_added` / `ask.follower_removed` (`{ask_id, session_id, by}`): a bearer sends `{ "actor": { "kind": "session", "id": "<own id>" } }` in the body on both verbs and may act only when the path session equals it (`403 FOLLOWER_FORBIDDEN`); a human (cookie identity) sends no body and may add or remove any session. A non-UUID ask id is `400 ASK_ID_INPUT`; removing a session that does not follow is `404 FOLLOWER_NOT_FOUND`; a repeated `PUT` is a `204` no-op with no event.
@@ -2153,11 +2187,53 @@ dotfiles' pin is at this release and no helper has logged that line for 30 days)
 `enroll --helper` accepts agentbox's `--kind box` but refuses every other `--kind`
 (`cmd/agent-secrets/enroll.go`, `cmdEnroll`: gone once dotfiles' pin is legion-envoy 10 or later
 and `scripts/agentbox` on dotfiles' main passes no `--kind`).
+`enroll.Service.verifyPodToken` verifies a pod's projected token (issuer, audience, signature,
+expiry, a pod UID named) for both `Create` and `Renew`, before either opens a transaction. A pod's
+`POST /v1/enrollments/{id}/renew` carries its current token as `pod_token`, which must name the
+enrollment's pod UID and recorded subject (`403 POD_IDENTITY_MISMATCH`); one past its expiry is
+`403 POD_TOKEN_EXPIRED` naming that expiry, as at `Create`, which the renewer retries with the token
+its file holds next. A machine session's renewal carries none, and any token on it is the identity
+mismatch. Every pod row starts with `pod_token_renewed_at` null, whether `Create` made it or 0014
+found it, and the first renewal that carries the token sets that row's column, the record. The
+ratchet is keyed on the pod UID: a renewal without the token is `403 POD_TOKEN_REQUIRED` once any
+pod enrollment naming the same `runtime_id`, live or ended, has the column set, whichever launcher
+credential made it (`Renew`'s one lookup, `podTokenRatcheted`, on the partial index
+`enrollments_pod_token_renewed`, migration 0014), and otherwise is accepted and logged at WARN. So
+the copied-token gap closes for every pod UID a current-image pod has renewed under, a second
+login's copy among the rows it refuses, and stays open for old-image UIDs until the contract
+release. A current-image pod still leaves a copied token the time before its own first token
+renewal: seconds while the daemon holds an approved machine login, but after a daemon restart its
+pods enroll only once a person approves the new login, and a pod that ends before it enrolls never
+renews with its token, so its UID stays open as an old-image pod's does. Ended rows count: a pod
+UID names one pod for ever, so a mark refuses nothing of another pod, and it keeps refusing a copy
+between the pod's role generations and after the pod is gone.
+That release is safe once the unset-row count is 0 (rows older than a minute: a pod's row is
+unmarked until its first renewal), no token-less
+WARN appears for one full `BROKER_LEASE_SECONDS`, and no issue pod runs a worker image older than
+the one whose renewer sends the token (an old-image issue pod between role generations holds no
+enrollment, so it counts as 0 and logs nothing, yet its next phase enrolls an unmarked row). Every
+deploy order keeps every pod renewing (an older broker ignores the token, and 0014 is additive and
+nullable), but that is liveness, not exposure: a grant lasts until its session ends, so a copy
+renewing an old-image UID keeps one approval's grant while it renews. The rollout therefore
+replaces every old-image issue pod before or right after the broker deploys, then revokes the
+login that made each enrollment a remaining token-less WARN names (the line's own enrollment),
+on Dispatch's machine-login page by its **Credential** id once its code shows it is not the
+daemon's, never by its self-reported machine name (the operate page). A pod enrollment is ended
+only by the launcher credential that made it (`DELETE` by any other is
+`403 NOT_ENROLLING_CREDENTIAL`), so a Legion daemon that logs in again (a restart, or its login's
+expiry) leaves its earlier login's pods to their leases or to a revoke of that login.
+The renew route alone maps proof.ErrNotLive to `401 ENROLLMENT_NOT_LIVE` (its own `authRenewProof`
+case in `authenticate`, `sessionCaller`): a pod renewer stops only on it or `POD_TOKEN_REQUIRED`,
+and retries `POD_IDENTITY_MISMATCH`, which `verifyPodToken` also answers for a token it could not
+verify while the issuer or its key set was unreachable; a real mismatch ends with the lease, after
+which the renewal is `ENROLLMENT_NOT_LIVE`. Its iat/key/URL failures remain `PROOF_INVALID` and
+retry. Other session routes map a not-live proof to `PROOF_INVALID` as before.
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
-credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
-credentials they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets
+credential; `internal/broker/machine` decides typed-code machine logins, logs services in with
+their Kubernetes tokens, and mints the launcher credentials both issue; and
+`internal/broker/secrets` reads the granted value from AWS Secrets
 Manager, or, for local development, from `secrets.Local`, an in-memory stand-in for the AWS calls.
 
 `internal/broker/policy` reads the policy from Secrets Manager itself (`policy.Loader`), and
@@ -2181,8 +2257,9 @@ an owner tag naming a service is refused as malformed unless `Loader.Services` l
 `service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
 `requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod
 and its verified `enrollments.subject` is the service account `BROKER_SERVICES` binds that service
-to (`requests.Machine.ServiceAccounts`, `requester()`): a machine login's service name is the machine's
-claim, which anyone signed in to Dispatch may approve. So a `legion-worker` pod the Legion daemon's
+to (`requests.Machine.ServiceAccounts`, `requester()`): a credential's service is the one a token
+login's `BROKER_SERVICE_LOGINS` entry names, or, for a service login a person approved through a
+code before token logins, the machine's own claim. So a `legion-worker` pod the Legion daemon's
 login enrolled is `legion-daemon`'s, and a service's secret goes at once to those pods and to no
 one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
@@ -2383,10 +2460,12 @@ next proof valid.
 
 The login that installs a credential wakes every registered session's enrollment retry, so those
 sessions reach the broker within about a second of it rather than when a backoff of up to a minute
-comes round. A session whose renew the broker refuses (its lease lapsed) stops counting as enrolled
-at once, and its enrollment becomes the session's lapsed id; so does a re-pinned session's recorded
-enrollment after a helper restart. While it is lapsed and the helper holds a credential, sign
-answers NOT_ENROLLED naming the refused renew, and `register --wait N` waits for its
+comes round. A session whose renew the broker refuses `ENROLLMENT_NOT_LIVE` (its lease lapsed, or
+an older broker's `PROOF_INVALID` saying `not live`) stops counting as enrolled at once, and its
+enrollment becomes the session's lapsed id; so does a re-pinned session's recorded enrollment after
+a helper restart. Any other refused renew keeps the lease and retries. While it is lapsed and the
+helper holds a credential, sign answers NOT_ENROLLED naming the refused renew, and
+`register --wait N` waits for its
 re-enrollment. The helper revokes a lapsed id before the session enrolls again, and while the
 session lives its record keeps that id until the revoke lands, so a restart meanwhile, even a
 second one before any login, still revokes it. A session that ends
@@ -2493,8 +2572,15 @@ proves the caller is Dispatch, and Dispatch vouches for the approving login each
 `BROKER_SECRETS_KMS_KEY_ARN` (required; the agent-secrets key's ARN, `arn:aws:kms:…:key/<id>`),
 `BROKER_SERVICES` (optional; whitespace-separated `name=system:serviceaccount:<namespace>:<name>`
 entries, each name `record.ValidService`'s form, not `shared` and given once, and each account bound
-to one name — any other entry is refused naming it, and an account given twice names both; unset,
+to one name, never a namespace's `default` account (every pod there that names no account runs as
+it) — any other entry is refused naming it, and an account given twice names both; unset,
 `Config.ServiceAccounts` is nil and no service is registered),
+`BROKER_SERVICE_LOGINS` (optional; whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>`
+entries, the ServiceAccounts that log in as a service with their own token, each account given
+once and named exactly, keyed by account in `Config.ServiceLogins`; read by the same parser as
+`BROKER_SERVICES` (`parseServiceAccounts`), so a namespace's `default` account is refused, and so
+is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for
+it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
@@ -2565,7 +2651,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 27 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 28 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -2574,9 +2660,10 @@ launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route
 proves the caller is Dispatch, so every UI handler takes its subject from the path or body: a
 decision or a revoke names the deciding human in `approver`, and a list the person it lists for in
 `?approver=`, which Dispatch filled from its own session; an empty one is `400 APPROVER_REQUIRED`),
-so a handler cannot be wired to the wrong kind of caller. A bad
-credential is a 401 (`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); a store that cannot
-answer while authenticating is a 503 naming it. Every 500 is logged with its cause
+so a handler cannot be wired to the wrong kind of caller. A bad credential is a 401
+(`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); `renewAuth` alone adds
+`ENROLLMENT_NOT_LIVE` for a valid session proof that names an ended enrollment. A store that
+cannot answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
 against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
@@ -2588,17 +2675,54 @@ reload; a reread spends a token from either bucket only when both allow it
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
 with the refusing limit's `Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
-`BROKER_TRUSTED_PROXY_HEADER` above) and per login (`LauncherLimits.PerLogin`) — the per-login
-bucket keys on the signed request object itself (`launcherLoginKey`): one shared `service` bucket
-for every service's login, whatever service or `login_hint` it names, since a service's name is the
-machine's own claim and a bucket per name would give every invented name one, and `person:<login>`
-for a person's machine login, so the two never share a bucket; an attacker naming a specific
-victim operator, or naming any service, repeatedly can still lock out those machine logins at a
-low rate; this is inherent to a per-login
-limit on an unauthenticated route and is an accepted risk, not a bug. A request object `Login`
-refuses (a person's login with no `login_hint`, or `anyone`, a replayed `jti`) is
-`400 REQUEST_INVALID`. Read `routes()`
-for the current, authoritative route list.
+bucket keys on the signed request object itself (`launcherLoginKey`): `person:<login>`, the person
+the `login_hint` names; a request naming a service is refused `400 SERVICE_LOGS_IN_WITH_TOKEN` before
+any bucket. An attacker naming a specific victim operator repeatedly can still lock out that
+operator's machine logins at a low rate; this is inherent to a per-login limit on an
+unauthenticated route and is an accepted risk, not a bug. A request object `Login` refuses (a
+person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQUEST_INVALID`.
+`POST /v1/launcher-credentials/token`, a service's token login, spends its source address's bucket
+before the token verifies (`refuseAddress`), whatever account the token claims, since a refused
+token signature makes the verifier fetch the issuer's keys again; a verified account then spends
+an `account:<subject>` bucket of the per-login limit (`refuseAccount`), the same address-then-key
+pair the device-code route spends. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the address
+bucket on the caller's own address. Read `routes()` for the current, authoritative route list.
+
+A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
+token (`POST /v1/launcher-credentials/token`: `machine.Service.VerifyServiceToken`, then
+`TokenLogin`), and no person approves it. The body carries the token and a machine request object
+the login's key signed, with one `launcher_credential` detail naming the service. The broker
+verifies the token with `enroll.Service.Pod.VerifyAccount`, the verifier pod enrollment uses
+against `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` (a token bound to no pod is
+accepted, so a `kubectl create token` token logs a daemon off the cluster in), refuses a token that
+names no `iat` or whose `exp` lies more than `MaxTokenLoginLifetime` (an hour) plus the request
+skew past it, `401 TOKEN_TOO_LONG_LIVED`, so a copied token logs in for at most an hour after it
+was minted, and maps its subject through `BROKER_SERVICE_LOGINS` (`enroll.Service.ServiceLogins`,
+keyed by exact subject, no wildcard) to the one service it logs in as; a subject not listed, or
+listed for another service than the request names, is `403 ACCOUNT_NOT_LISTED`, an expired token
+`401 TOKEN_EXPIRED`, any other verification failure `401 TOKEN_INVALID`, a request object that does
+not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `Login`
+shares), a key another live credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a broker with no
+issuer `404 TOKEN_LOGIN_OFF`. `enroll.Service.IssueTokenLogin` writes the credential. Each subject
+holds one live launcher credential (migration 0015, `launcher_credentials.subject`, its partial
+unique index on live rows, and a check that a row with a subject names a service and no record):
+the first login inserts it, with no operator, the service, host `<namespace>/<name>` and no
+`record_id`, and each later one moves it, in one upsert under the same id, to the request's key and
+to the token's expiry, at most an hour away, so a key that was already the credential's (the
+daemon's renewals) changes nothing but the expiry, a new key (a restart) stops the previous one
+authenticating at once, and every pod the account enrolled stays under the same credential. Each
+login writes one `launcher_credential.token_login` audit row naming the credential as actor, the
+subject, the pod the token is bound to, the key, and both the credential's and the token's expiry
+(`token_expires_at`). `AuthenticateLauncher` authenticates such a credential while
+`enroll.Service.ServiceLogins` still names its subject for its service, rather than through a
+record's chain, so removing the entry and redeploying ends it at its next call. A revoke on
+Dispatch's machine-login page ends it as any service's login (anyone signed in, through
+`record.MayDecide`; `LiveCredentials` lists it with `approved_by` empty and its `subject`), and the
+service's next login inserts a new credential, which enrolls the pods it launches next; the daemon
+never enrolls a pod the revoke ended again. A service login a person approved through a code
+before token logins keeps authenticating through its record's chain until it expires; a pending one
+can only be denied (`ErrServiceLogsInWithToken`, `400 SERVICE_LOGS_IN_WITH_TOKEN`, the same
+sentinel a device-code login naming a service is refused with).
 
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
@@ -2620,7 +2744,9 @@ equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `r
 `Body.ApproverLogin(kind, service, login)` (`record.MayDecide`) is the one approver comparison. A
 record's approver is resolved when the record is created (a secret's owner, `anyone` for a shared
 human-tier secret, a person's machine login's `login_hint`, which is never `anyone`, or `anyone` for
-a service's machine login), and every decision and every chain re-check compares the canonical
+a service's machine login a broker before token logins opened, which `ApplyDecision` now refuses to
+approve though it may still be denied, and whose approved credentials keep re-verifying through
+this rule until they expire), and every decision and every chain re-check compares the canonical
 lowercase login against it, with `service` the one the record's signed request object names
 (`RequestObject.Service()`, re-read from `Body.Request`, never from the stored approver): any login
 but `anyone` itself deciding a machine login whose request names a service, whatever its record
@@ -2777,9 +2903,9 @@ value itself is read fresh from
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (exactly one `launcher_credential`
-authorization detail; a person's machine login also needs a `login_hint`, the approving operator's
-email, never `anyone`, while a service's login, one whose detail names a `service`, needs none and
-any it carries is ignored, its record's approver `anyone`), mints an
+authorization detail naming no service, and a `login_hint`, the approving operator's email, never
+`anyone`; a detail naming a `service` is `400 SERVICE_LOGS_IN_WITH_TOKEN` at the route and
+`machine.ErrServiceLogsInWithToken` here, since a service logs in with its token, below), mints an
 eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
@@ -2789,14 +2915,16 @@ record (ruling 13: a direct link can never approve a machine login, only the typ
 it), so `code` is required and checked again on the decision itself, before the approver
 (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
 update`, which an event insert's foreign-key check does not wait on), refuses any login the
-record's rule does not admit (`403 NOT_APPROVER`: anyone signed in decides a service's login, only
-its person a person's machine login) whatever the record's state, answers a record that
+record's rule does not admit (`403 NOT_APPROVER`: only its person decides a person's machine login,
+and anyone signed in decides a service's) whatever the record's state, answers a record that
 already carries a terminal event, or is past its `expires_at` before the sweeper has recorded it
 expired, `409 RECORD_TERMINAL` before minting anything, as a decided `agent_secret` record
 answers, so a second click, a concurrent one and a late one all get it — but a record past its
 expiry, whether recorded expired by the sweeper or not, answers with a message saying it expired
-before its approver acted (`machine.ErrLoginExpired`), never that it was decided, and, on
-approval, mints the launcher
+before its approver acted (`machine.ErrLoginExpired`), never that it was decided; refuses
+approving a service's login a broker before token logins opened, which anyone signed in may still
+deny, `400 SERVICE_LOGS_IN_WITH_TOKEN` (`machine.ErrServiceLogsInWithToken`); and, on approval,
+mints the launcher
 credential in the same transaction: bound to the request object's own key (its thumbprint and
 embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_SECONDS` counted
 from the decision, so a crash between minting and recording the decision never orphans a
@@ -2817,7 +2945,8 @@ listed, `expired: true`, until its last enrollment ends or its lease lapses, swe
 revoking every listed login ends every session the person's machines started.
 `POST /v1/launcher-credentials/{id}/revoke-by-approver` `{approver}` ends one, expired or not
 (`enroll.Service.RevokeCredential`). A service's credential (the Legion daemon's,
-`launcher_credentials.service` set) has no operator (`authorized` needs it null to enroll pods) and
+`launcher_credentials.service` set) has no operator (`authorized` needs it null to enroll pods, and
+`Revoke` also needs a pod enrollment's `launcher_credential_id` to be the caller's) and
 acts as no person, so both routes give it to every login but `anyone` and an empty one, whoever
 approved it. A person's own credential keys on the approver of the `launcher_credential` record it
 was minted from (`credential_requests.approver`, joined through `launcher_credentials.record_id`
@@ -2837,11 +2966,12 @@ changes nothing. It locks the credential's row before the enrollments', and `Cre
 either commits first and is ended by it, or finds the credential revoked and is
 `401 LAUNCHER_INVALID`; the credential lock also makes two concurrent revokes write one
 `launcher_credential.revoked` row, and the enrollments' `for update` makes a revoke racing a
-launcher's own `Revoke` of one enrollment end it once. Nothing tells the machine: its helper's next
-renewal of a session is refused `PROOF_INVALID`, revoking that lapsed enrollment is refused
-`LAUNCHER_INVALID`, and the helper drops the credential as for any refusal; a helper with no live
-session learns it at its next enrollment, and the Legion daemon at its next pod enrollment or
-unenrollment, after which it starts a new
+launcher's own `Revoke` of one enrollment end it once. A helper renew that gets
+`ENROLLMENT_NOT_LIVE` (or an older broker's `PROOF_INVALID` whose message says `not live`) marks
+the session lapsed and re-enrolls it; a skewed/key/URL `PROOF_INVALID` keeps the lease and retries.
+Revoking that lapsed enrollment is refused `LAUNCHER_INVALID`, and the helper drops the credential
+as for any refusal; a helper with no live session learns it at its next enrollment, and the Legion
+daemon at its next pod enrollment or unenrollment, after which it starts a new
 machine login. Dispatch's machine-login page lists and revokes, through these two routes, the
 signed-in person's own machines' logins and every service's.
 

@@ -2,9 +2,9 @@
 # The namespace rig of a stage proof that runs pods in a shared cluster namespace: everything the
 # run creates carries its own project label (legion.dev/project), the teardown deletes by exact name
 # every Sandbox the run recorded and then everything labelled with that exact project — never by
-# label existence — and namespace-clean compares the namespace with the snapshot taken before the
-# run, restricted to objects of this run or of no project, so another tree's objects cannot fail it.
-# Nothing outside the namespace is touched.
+# label existence — and namespace-clean compares the run's own objects with the snapshot taken
+# before the run, so another system's objects, labelled or not, cannot fail it. Nothing outside the
+# namespace is touched.
 #
 # Sourced, never run. The caller sets
 #   operator         the admin kubectl context the operator steps use
@@ -31,13 +31,34 @@ op() { timeout --foreground 300 kubectl --context "$operator" -n "$namespace" "$
 # ConfigMaps an operator's pod mounts, and the operator's providers Secret when the run has one.
 kinds=sandboxes,secrets,pvc,pods,configmaps
 
-# snapshot FILE: the namespace's objects of those kinds that carry this run's project label or no
-# project label at all, as the operator sees them.
+# snapshot FILE: the run's own objects of those kinds, as the operator sees them: those labelled
+# with its project, and those with no project label whose name run_named counts as the run's. It
+# fails when either listing does.
 snapshot() {
+  local unlabelled labelled
+  unlabelled=$(op get "$kinds" -l '!legion.dev/project' -o name) || return 1
+  labelled=$(op get "$kinds" -l "legion.dev/project=$run_label" -o name) || return 1
   {
-    op get "$kinds" -l '!legion.dev/project' -o name
-    op get "$kinds" -l "legion.dev/project=$run_label" -o name
+    run_named "$unlabelled"
+    [ -z "$labelled" ] || printf '%s\n' "$labelled"
   } | sort >"$1"
+}
+
+# run_named LIST prints the lines of LIST, kubectl's `-o name` output, whose object name carries the
+# run's identity: its project label as written, or as a claim token carries it (claim.ProjectToken,
+# every character outside a-z0-9 dropped). Every object the run's daemon and harness create is named
+# from one or the other (SandboxName, the -boot Secrets, the issue-<sandbox> volume, the providers
+# Secret and the operator route), so one that lost its label is still the run's here, and is still
+# held to the snapshot, since the teardown deletes by label and would leave it behind. An unlabelled
+# object named otherwise is another system's: the namespace is shared, and the deployment's own
+# infrastructure creates and removes objects in it while a run goes on.
+run_named() {
+  local token=${run_label//[^a-z0-9]/} line name
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    name=${line#*/}
+    case $name in *"$run_label"* | *"$token"*) printf '%s\n' "$line" ;; esac
+  done <<<"$1"
 }
 
 # issue_pvcs ISSUE prints each PersistentVolumeClaim of the run labelled legion.dev/issue=ISSUE as
@@ -111,8 +132,8 @@ namespace_clean() {
   begin namespace-clean
   snapshot "$evidence/namespace-after.txt" || fail "the operator could not list namespace $namespace"
   if ! diff -u "$evidence/namespace-before.txt" "$evidence/namespace-after.txt"; then
-    fail "namespace $namespace differs from its snapshot (restricted to project $run_label and unlabelled objects)"
+    fail "namespace $namespace differs from its snapshot (the run's objects: labelled with project $run_label, or unlabelled and named for it)"
   fi
-  note "[operator] $(wc -l <"$evidence/namespace-after.txt") objects before and after, identical (unlabelled or project $run_label; $kinds)"
+  note "[operator] $(wc -l <"$evidence/namespace-after.txt") of the run's objects before and after, identical (labelled with project $run_label, or unlabelled and named for it; $kinds)"
   pass
 }

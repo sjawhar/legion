@@ -298,7 +298,7 @@ func TestANoticeIsNotRoutedToASubArchitectBeingSuspended(t *testing.T) {
 	}
 	rt.stallsSuspend.Store(true)
 	go func() {
-		_ = machine.Handle(ctx, supervise.RequestSuspend{Claim: sub, Reason: "its issue left its phase"})
+		_ = machine.Handle(ctx, supervise.RequestSuspend{Claim: sub, Reason: "its issue left its phase", By: supervise.SuspendedByDaemon})
 	}()
 	select {
 	case <-rt.entered:

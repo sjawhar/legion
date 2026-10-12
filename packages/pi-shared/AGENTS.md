@@ -28,8 +28,10 @@ publishes nothing, so the first publisher wins. The object carries:
 
 - `roleClaim` — the role-claim bridge (`src/role-claim-bridge.ts`): Envoy's bound instances, the
   sessions Legion drives, and the one `regained` hook slot.
-- `injectedUserTurns` — the user turns Envoy sent into each session
-  (`src/injected-user-turns.ts`), which both entries match user messages against.
+- `injectedUserTurns` — the turns Envoy sent into each session
+  (`src/injected-user-turns.ts`). A `sendUserMessage` turn is found by its text; a typed
+  `sendUserInput` turn is found by the tag the host kept. Both entries match user messages and
+  tagged custom messages (the `skill-prompt` a `/skill:` creates) against that record.
 - `bootstrappedSession` — the transcript of the session this process bootstrapped as its Legion
   identity (`src/subagent-session.ts`).
 
@@ -48,6 +50,15 @@ exact `Symbol.for` strings, so renaming one is a daemon change too):
 **Bump rule.** Any change to the shape of `EnvoyPluginInterface`, or to what either side reads from
 it, bumps `ENVOY_PLUGIN_INTERFACE_VERSION`; both plugins release from the same commit, and the
 daemon's gate refuses a pair whose versions differ.
+
+**Version 2 rollout.** Version 2 tells the two separately bundled plugins that typed turns are
+tag-matched rather than text-matched and that a tagged `skill-prompt` is the person's turn. The
+real readers are the Legion load marker (`extensions/legion.ts`), `readEnvoyPluginInterface`, the
+Envoy publisher's mismatch refusal, the daemon probe (`packages/daemon/probe.mjs`) and the
+real-plugin OMP test; all take `ENVOY_PLUGIN_INTERFACE_VERSION`, so they read 2. The stage 1/2
+shell stubs and fake Go probes deliberately print 1 for **both** plugins: the boot gate compares
+their numbers with each other, so they test matching/mismatching fixtures rather than a release
+value. A real pair at different versions refuses before a Legion pane runs.
 
 **No per-instance state.** The interface holds process-wide state only — the arrays, the map, the
 record holder — never a function bound to one extension instance. Oh My Pi re-binds every
@@ -79,7 +90,7 @@ it returns reads back as `turns`, `selfChecks`, `toolResults` and `transcriptEnt
 | Task | Location | Notes |
 | --- | --- | --- |
 | The interface | `src/interface.ts`, `src/interface.test.ts` | The key, the version, the types, `envoyPluginInterface`, `publishEnvoyPluginInterface`, `readEnvoyPluginInterface`, the test seam; the test holds the get-or-create order independence, the second publisher at the same and at another version, the three readings, and the exact `Symbol.for` strings the Go probe reads |
-| Modules both entries use | `src/role-claim-bridge.ts`, `src/injected-user-turns.ts`, `src/subagent-session.ts`, `src/tool-result.ts`, `src/pi-types.ts`, `src/omp-host.d.ts` | Each resolves the interface at each use; `omp-host.d.ts` is the ambient `@oh-my-pi/pi-coding-agent` declaration each plugin's `tsconfig` includes |
+| Modules both entries use | `src/role-claim-bridge.ts`, `src/injected-user-turns.ts`, `src/subagent-session.ts`, `src/tool-result.ts`, `src/pi-types.ts`, `src/omp-host.d.ts` | Each resolves the interface at each use; `omp-host.d.ts` is the ambient `@oh-my-pi/pi-coding-agent` declaration each plugin's `tsconfig` includes, plus this fork's `…/extensibility/extensions/send-user-input-handler` declaration |
 | Shell command scan | `src/shell-command.ts`, `src/shell-command.test.ts` | `dispatchCommandHead`: the first line of one `dispatch` command, optionally fed one here-document opened with a quoted delimiter, ending where bash ends it (a tab before the delimiter counts only under `<<-`), or undefined for any other command. pi-envoy's run-end check reads it; the test compares the scan with a real non-interactive bash fed over a pipe |
 | Skills guard rules | `test/skills-guard.ts` | What `packages/pi-envoy/src/skills-guard.test.ts` and `packages/pi-legion/src/skills-guard.test.ts` run over each plugin's staged partition: `stageSkills(<package name>)` stages it through `scripts/pi-plugin-prepack.sh --stage-skills`, exactly as the prepack does; `oversizedFiles` (a file at or over Oh My Pi's 51,200-byte spill threshold), `longSkillBodies` (a `SKILL.md` of 500 lines or more), `misnamedSkills` (a frontmatter `name` that is not the directory's), `brokenSkillLinks` (a `skill://<name>/<path>[#anchor]` link naming a missing file or heading, resolved against the repository's `skills/`, where both partitions live), `brokenRelativeLinks` (a `](../…)` or `](./…)` link outside a code fence that leaves the staged partition or names no file: a cross-partition link is written `skill://<name>/<path>`), and, for the Envoy guard, `unresolvedAgentDispatches` (a `task(agent="<name>")` read whole, fences included, as the daemon's gate reads a prompt, naming an agent in neither `shippedAgents(<package root>)`, the `*.md` under its `agents/`, nor `bundledAgents(<omp>)`, what the pinned binary's `omp agents unpack` writes under a fresh HOME) |
 | Skills partition | `test/skills-partition.test.ts` | Stages both partitions and holds them to the repository's `skills/`: together they are every skill directory, none is in both, each staged skill is a copy of the repository's, and a package the prepack does not know (`@sjawhar/pi-shared`) has none |

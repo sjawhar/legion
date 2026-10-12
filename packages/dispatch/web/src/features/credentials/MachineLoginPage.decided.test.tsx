@@ -103,21 +103,16 @@ for (const [decided, word] of [
   });
 }
 
-// A service's login (the Legion daemon's) starts worker pods as the service, so its approval never
-// says the machine acts as the person who approved it.
-test("approving a service's login says it starts worker pods as the service, not as you", async () => {
+// A service's login (the Legion daemon's) an older broker opened and a person approved starts
+// worker pods as the service, so a lookup of it never says the machine acts as the person who
+// approved it.
+test("a looked-up approved service's login says it starts worker pods as the service, not as you", async () => {
   const lookup = spyOn(api, "lookupMachineCredential").mockResolvedValue({
-    ...machineRecord(),
+    ...machineRecord({ at: "2026-09-27T00:05:00Z", credential_id: "cred-9", event: "approved" }),
     service: "legion-daemon",
-  });
-  const approve = spyOn(api, "approveCredentialRecord").mockResolvedValue({
-    credential_id: "cred-9",
-    grant_id: null,
-    state: "approved",
   });
   try {
     await lookUp();
-    fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     expect(
       await screen.findByText(
         "Approved. legion-daemon on worker-7.example.com can start worker pods as legion-daemon."
@@ -127,6 +122,5 @@ test("approving a service's login says it starts worker pods as the service, not
   } finally {
     cleanup();
     lookup.mockRestore();
-    approve.mockRestore();
   }
 });

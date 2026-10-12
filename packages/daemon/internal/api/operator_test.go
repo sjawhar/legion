@@ -193,8 +193,17 @@ func TestSuspendResumeAndStopDriveTheClaimsMachine(t *testing.T) {
 		return "/legion/v1/operator/claims/" + string(token) + "/" + action
 	}
 
-	wantRefusal(t, h.operator(http.MethodPost, route(architectToken, "suspend"), nil), http.StatusConflict,
-		"suspend refused: the claim is launching (the agent has not registered)")
+	// An operator suspend that races a rule-resuming launch is retained through the launch instead
+	// of being refused: once the agent is ready it is suspended before it can take work.
+	recorder := h.operator(http.MethodPost, route(architectToken, "suspend"), nil)
+	if recorder.Code != http.StatusAccepted {
+		t.Fatalf("suspend during launch = %d, want 202; body %s", recorder.Code, recorder.Body)
+	}
+	var held OperatorClaim
+	decodeInto(t, recorder, &held)
+	if !held.SuspensionHeld {
+		t.Fatalf("suspend during launch answered %+v, want the operator's suspension held", held)
+	}
 
 	registered := h.registered(h.bootToken(architectToken), "ses_architect")
 	if recorder := h.request(http.MethodPost, "/legion/v1/claims/ready", claim.ReadyRequest{

@@ -15,6 +15,7 @@ import {
   agentMessagesQuery,
   architectureSourcesQuery,
   inboxQuery,
+  myRepliesKey,
   projectsQuery,
   userAgentStateQuery,
   userStateQuery,
@@ -31,6 +32,7 @@ const knownEventTypes: Record<EventType, true> = {
   "architecture.sync_failed": true,
   "user_state.updated": true,
   "user_agent_state.updated": true,
+  "user_thread_state.updated": true,
   "issue.created": true,
   "issue.updated": true,
   "issue.closed": true,
@@ -223,6 +225,34 @@ function isMessageEvent(event: Event): boolean {
   );
 }
 
+// The events that can move a row of the viewer's Replies page (`["me", "replies"]`, its count and
+// every owner's unread set): a write that fires a `user_threads` trigger - a comment, a session's
+// reply to a mention (`comment.answered`), an issue message or a reply to one, an answer - and an
+// ask opening (settlement restoring one) or being resolved, which decides whether the Inbox lists
+// its thread instead. An edit, a resolution of a comment, a delivery or a claim moves no row.
+const REPLIES_WRITES: Partial<Record<EventType, true>> = {
+  "comment.created": true,
+  "comment.answered": true,
+  "message.created": true,
+  "message.answered": true,
+  "ask.opened": true,
+  "ask.answered": true,
+  "ask.resolved": true,
+};
+
+// The Inbox lists an open ask only while its issue is open (`myRepliesUnread` in the server's
+// replies.go), so an issue closing (`issue.closed`) or reopening moves its open asks' threads
+// between the Inbox and the Replies page. A reopen is an `issue.updated` (a status write off
+// `done`), and that payload is the issue after the write with no changed field and no ask count, so
+// every `issue.updated` refreshes, beside the issue lists the same event already refetches.
+function movesReplies(event: Event): boolean {
+  return (
+    REPLIES_WRITES[event.type] === true ||
+    event.type === "issue.closed" ||
+    event.type === "issue.updated"
+  );
+}
+
 // Every event whose server path rewrites the reference index (`refs.ReplaceCounted`/`refs.Stamp`)
 // or moves a structural edge of `graph_edges`: document versions and uploads, ask creation and
 // edits (including a settled ask block), comment and message writes — an answer's reply body is
@@ -409,6 +439,10 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // Another tab or device of this viewer read or cleared a conversation: refresh the badge.
     return payloadString(event, "login") === signedInLogin ? [userAgentStateQuery().queryKey] : [];
   }
+  if (event.type === "user_thread_state.updated") {
+    // Another tab or device of this viewer read a thread: drop its row and its count here too.
+    return payloadString(event, "login") === signedInLogin ? [myRepliesKey] : [];
+  }
   if (event.type === "subscription.remove_requested") {
     return [];
   }
@@ -448,6 +482,11 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     if (isCommentLikeEvent(event)) {
       appendCommentDetailKeys(keys, event);
     }
+    // A reply or an answer in a document's comment or ask thread can put a row on the viewer's
+    // Replies page.
+    if (movesReplies(event)) {
+      keys.push(myRepliesKey);
+    }
     appendAnswersPageKey(keys, event);
     if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
       keys.push(inboxQuery().queryKey);
@@ -468,6 +507,9 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     userStateQuery().queryKey,
     inboxQuery().queryKey,
   ];
+  if (movesReplies(event)) {
+    keys.push(myRepliesKey);
+  }
 
   if (
     event.type === "issue.created" ||

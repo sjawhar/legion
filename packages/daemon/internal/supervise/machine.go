@@ -65,6 +65,32 @@ const (
 	StateRetired ClaimState = "retired"
 )
 
+// SuspendSource is who suspended a claim. The daemon resumes a suspended claim by rule on the
+// triggers main had — its phase's start, a workflow delivery, the controller keeper
+// (RequestRuleResume) — unless an operator suspended it: that suspension holds until the operator
+// resumes the claim. The boot's resume by rule, which main did not have, acts only on a source
+// ByRule names, so it never overrides a drain recorded before the source existed.
+type SuspendSource string
+
+const (
+	// SuspendedByUnknown is the source migration 0038 assigns every claim that was already
+	// suspended before the source existed: most such rows are the daemon's own (a lingering tree, a
+	// parked child, a re-entry's interrupted worker), and main's triggers resume them as before.
+	SuspendedByUnknown SuspendSource = "unknown"
+	// SuspendedByOperator: the operator's suspend route.
+	SuspendedByOperator SuspendSource = "operator"
+	// SuspendedByDaemon: the workflow's own suspend — the issue left the workflow, or its tree
+	// lingers.
+	SuspendedByDaemon SuspendSource = "daemon"
+	// SuspendedByExit: the tree root's agent reported its own exit, which suspends a root.
+	SuspendedByExit SuspendSource = "exit"
+)
+
+// ByRule is whether the source is one the daemon itself recorded, the daemon's own suspend or a
+// root's exit: the only sources the boot's resume by rule acts on, and the only suspended phase
+// workers the stranded report leaves out.
+func (s SuspendSource) ByRule() bool { return s == SuspendedByDaemon || s == SuspendedByExit }
+
 // Claim is one role claim as the supervisor holds and persists it.
 type Claim struct {
 	Token      claim.Token
@@ -111,9 +137,34 @@ type Claim struct {
 	BootTokenHash   []byte
 	CapabilityHash  []byte
 	UncertainStreak int
-	// SuspensionHeld is whether a suspension is held for the agent's turn (holdSuspension). It is
-	// memory only: Machine.Claim reports it, and the store never writes it.
-	SuspensionHeld bool
+	// SuspendedBy is who suspended the claim while it is suspended, and "" otherwise.
+	SuspendedBy SuspendSource
+	// SuspensionHeld is whether a suspension is held for the agent's turn (holdSuspension), and
+	// SuspensionHeldBy who asked for it. Both are memory only: Machine.Claim reports them, and the
+	// store never writes them.
+	SuspensionHeld   bool
+	SuspensionHeldBy SuspendSource
+}
+
+// RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
+// operator's, which holds until an operator resumes the claim.
+func (c Claim) RuleMayResume() bool {
+	return c.State == StateSuspended && c.SuspendedBy != SuspendedByOperator
+}
+
+// RuleHolds is whether an operator's suspension blocks a daemon rule: the claim is suspended by the
+// operator, or the operator's suspension is held for its agent's turn.
+func (c Claim) RuleHolds() bool {
+	if c.SuspensionHeld {
+		return c.SuspensionHeldBy == SuspendedByOperator
+	}
+	return c.State == StateSuspended && c.SuspendedBy == SuspendedByOperator
+}
+
+// RuleHoldError says why a start or outbox delivery waits: the operator's suspension, which only
+// the operator's resume ends.
+func (c Claim) RuleHoldError() error {
+	return fmt.Errorf("the claim is suspended by %s; it waits for the operator's resume: %w", SuspendedByOperator, ErrHeldByOperator)
 }
 
 // ClaimView is a claim as its machine last published it (Machine.View), with what only the decision
@@ -297,6 +348,11 @@ var ErrDeliveryPending = wait.New("a delivery is already pending")
 // state: the root ends only with its tree. The refusal adds what stops the root's process instead,
 // where one runs.
 var ErrRootStop = errors.New("the tree's root claim ends only when its tree closes")
+
+// ErrHeldByOperator is the daemon's start or task meeting an operator's suspension, which no rule
+// overrides (Claim.RuleHolds): a wait, ended only by the operator's resume. RuleHoldError wraps it
+// for the outbox log.
+var ErrHeldByOperator = wait.New("the suspension holds until the operator resumes the claim")
 
 // Machine is one claim's decision owner.
 type Machine struct {
@@ -491,10 +547,15 @@ func (c Claim) ReleasedLaunch() bool {
 // StartedBy records the outbox row of the start being run against this claim, so a stop written
 // before it can be told apart from one written after. A stop is retried until the runtime takes
 // it, and a retry that lands after this start would suspend the run this start began. That
-// includes a held suspension (holdSuspension), which the start drops.
+// includes a held suspension (holdSuspension), which the start drops — unless it is the operator's:
+// a claim an operator's suspension holds records no start and answers ErrHeldByOperator, so the
+// start waits for the operator to resume the claim.
 func (m *Machine) StartedBy(ctx context.Context, row int64) error {
 	m.mu.Lock()
 	defer m.unlock()
+	if m.current().RuleHolds() {
+		return fmt.Errorf("start row %d of %s: %w", row, m.claim.Token, m.current().RuleHoldError())
+	}
 	if row <= m.claim.LastStartRow {
 		return nil
 	}
@@ -577,7 +638,9 @@ func (m *Machine) decide(ev Event) {
 // caller holds mu.
 func (m *Machine) current() Claim {
 	c := copyClaim(m.claim)
-	c.SuspensionHeld = m.held != nil
+	if m.held != nil {
+		c.SuspensionHeld, c.SuspensionHeldBy = true, m.held.By
+	}
 	return c
 }
 
@@ -821,7 +884,7 @@ func (m *Machine) stopPrevious(ctx context.Context) error {
 func (m *Machine) died(ctx context.Context, observation runtime.Observation) error {
 	m.log.Warn("supervise: process died", "incarnation", m.claim.Locator.Incarnation, "observed", string(observation.Kind),
 		"detail", observation.Detail)
-	if err := m.interrupted(ctx); err != nil {
+	if err := m.interrupted(ctx, "the process died in the task's turn"); err != nil {
 		return err
 	}
 	if m.held != nil {
@@ -1046,11 +1109,16 @@ func (m *Machine) forgetSend() {
 // its capability up here, on the machine's own claim, which is what the capability check reads
 // (api/claims.go): the old secret authenticates nothing and every grant it minted fails its fence,
 // as the shipped daemon revokes a session's capability and its grants on death, retirement, and
-// teardown. A confirmation and a retire write the claim together with the delivery they change,
-// each in one transaction, and every write hands the store the same shape (stored).
+// teardown. Who suspended the claim is kept only while it is suspended: a claim that runs again, or
+// ends, was suspended by nobody. A confirmation and a retire write the claim together with the
+// delivery they change, each in one transaction, and every write hands the store the same shape
+// (stored).
 func (m *Machine) persist(ctx context.Context) error {
 	if !holdsCapability(m.claim.State) {
 		m.claim.CapabilityHash = nil
+	}
+	if m.claim.State != StateSuspended {
+		m.claim.SuspendedBy = ""
 	}
 	// Published here as well as when the decision ends: a launch writes the claim before it waits
 	// in the runtime, and View then shows the launch rather than what it replaced.
@@ -1059,13 +1127,17 @@ func (m *Machine) persist(ctx context.Context) error {
 }
 
 // stored is the claim as a write hands it to the store: without its pending delivery, which has a
-// table of its own, and without a capability once the claim no longer holds one. It is a copy and
-// changes nothing; revoking the live capability is persist's.
+// table of its own, without a capability once the claim no longer holds one, and without a
+// suspend's source once it is not suspended. It is a copy and changes nothing; revoking the live
+// capability is persist's.
 func (m *Machine) stored() Claim {
 	c := m.claim
 	c.Pending = nil
 	if !holdsCapability(c.State) {
 		c.CapabilityHash = nil
+	}
+	if c.State != StateSuspended {
+		c.SuspendedBy = ""
 	}
 	return c
 }
@@ -1111,6 +1183,8 @@ func claimOf(ev Event) claim.Token {
 	case RequestSuspend:
 		return ev.Claim
 	case RequestResume:
+		return ev.Claim
+	case RequestRuleResume:
 		return ev.Claim
 	case RequestStop:
 		return ev.Claim

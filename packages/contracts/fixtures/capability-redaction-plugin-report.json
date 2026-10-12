@@ -1,0 +1,34 @@
+{
+  "rows": [
+    {
+      "name": "subagents",
+      "ok": false,
+      "detail": "agent index https://***@agents.example/index.json unreachable"
+    },
+    {
+      "name": "web-search",
+      "ok": false,
+      "detail": "web_search failed: provider brave answered 401 for https://api.search.example/res/v1/web/search?q=jujutsu&key=***"
+    },
+    {
+      "name": "mcp",
+      "ok": false,
+      "detail": "not connected: alpha (status failed: AKIA*** is not authorized to invoke the server)"
+    },
+    {
+      "name": "repository-extensions",
+      "ok": true,
+      "detail": "the repository carries no .omp/extensions, .omp/skills or .claude/skills"
+    },
+    {
+      "name": "dispatch-envoy-tools",
+      "ok": false,
+      "detail": "dispatch read failed: dispatch: 401 Unauthorized (Authorization: Bearer ***)"
+    },
+    {
+      "name": "github",
+      "ok": false,
+      "detail": "gh viewer login failed: HTTP 401: Bad credentials (token ghs_***)"
+    }
+  ]
+}

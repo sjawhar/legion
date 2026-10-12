@@ -4,6 +4,29 @@
 
 ### Added
 
+- `MyReplyRow`, `MyReplyReply` and `MyRepliesResponse`, the page `GET /api/v1/me/replies`
+  returns, and the `user_thread_state.updated` event with its `UserThreadStateUpdatedEventPayload`
+  (LEGION-687).
+- `ArtifactBlock.table` (`BlockTable`, `BlockTableRow`, `BlockTableCell`): a table block's rows and
+  cells in `GET /api/v1/artifacts/{id}/blocks`, by the indexes `delete_row` and `delete_column`
+  take; optional, since a Dispatch older than the listing omits it. `dispatch_doc_read` takes
+  `blocks`, which lists the live document's blocks instead of its markdown, and `dispatch_doc_edit`
+  and `dispatch_doc_read` point to it for block ids and tokens (LEGION-693).
+
+- Added the `dispatch_project` spec, `{ key, name }` (strict), behind the `dispatch project`
+  command, and `dispatch_projects`, no arguments, behind `dispatch projects`, which lists every
+  project's key and name: twenty-three Dispatch specs. A project's `name` is at most
+  `PROJECT_NAME_MAX` (80) characters, generated into Go as `contracts.ProjectNameMax`, which the
+  server enforces and the Settings name field takes as its `maxLength` (LEGION-684).
+- Added `PROJECT_KEY_RULE`, the one wording of a project key's rule, generated into Go as
+  `contracts.ProjectKeyRule`, and `PROJECT_KEY_PATTERN` is generated as `contracts.ProjectKeyPattern`.
+  `dispatch search --project` and every owner check refuse a key that is not one with
+  `project is not a project key: <rule>`, as every server route does, where they said
+  `project must be a project key such as CORE` (LEGION-684).
+- `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
+  `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,
+  `session_titles` and `session_pr_counts`; `DeliveryPR.parent_agent` is a session group's
+  `group:<id>` for a pull request whose first session is a member (LEGION-682).
 - Added `LegionReadyRequest`, the body of the Legion daemon's `POST /legion/v1/claims/ready`, and
   `LegionCapabilityReport`, its optional `capabilities`: what a session measured of the six live
   capability rows at boot (`measuredAt`, `elapsedMs`, `rows[{name, ok, detail}]`; a `detail` may
@@ -22,6 +45,16 @@
   and the picture syntax; `SESSION_ID_PATTERN` and `isSessionId`, the one session-id rule the
   dashboard and envoy-client read a reference by (the server's `text.IsSessionID`), and
   `pictureCaption`, the one caption a picture line carries (LEGION-541).
+- Added the agent stream's `commands` frame (`AgentStreamFrame` of `kind: "commands"`, holding
+  `AgentStreamCommand[]`), the slash commands a person can send the session from Dispatch, the
+  whole list each time it changes and the last frame of a replay, with
+  `AGENT_STREAM_LIMITS.commands`, `commandNameChars` and `commandDescriptionChars`, the caps the
+  publisher applies before the frame leaves the session. Each command names its `source`
+  (`builtin`, `extension`, `prompt` for a custom command, MCP prompt, file command or prompt
+  template, `skill`), and a built-in only the session's own terminal runs carries `terminalOnly`
+  (LEGION-394). `isTypableCommandName` is the one command-name rule the publisher lists a command
+  by and a viewer accepts one by: one non-empty token, no whitespace, no control character. A
+  viewer older than the frame ignores it.
 - `Version.size` is documented for document versions too: the bytes of the markdown a version
   stores, which Dispatch now answers on every document version it lists or reads, read from the
   stored row without rendering the document (LEGION-481). It stays optional, absent on a document

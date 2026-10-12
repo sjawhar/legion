@@ -47,6 +47,7 @@ const issue: IssueDetails = {
   open_asks: [],
   progress: { tasks: null, children: null },
   parent: null,
+  blocked_by: [],
   assignee: null,
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },

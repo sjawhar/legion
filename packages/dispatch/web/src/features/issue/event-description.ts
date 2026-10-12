@@ -20,6 +20,8 @@ export function eventDescription(event: Event): string {
       return "User state updated";
     case "user_agent_state.updated":
       return "Agent conversation state updated";
+    case "user_thread_state.updated":
+      return "Thread read";
     case "ask.resolved":
       return describeAskResolution(event.payload.resolution);
     case "ask.answered":

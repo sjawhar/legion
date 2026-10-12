@@ -7,18 +7,22 @@
 package sandbox
 
 import (
+	"slices"
 	"strings"
 )
 
-// agentSecretsBlockReason is secretsBlocked's logic: the four broker inputs every secrets-* check
+// agentSecretsBlockReason is secretsBlocked's logic: the five broker inputs every secrets-* check
 // needs (the production broker's URL, the email of the person who approves the run's credential
-// request for LEGION_E2E_APPROVAL, the automatic rule's dummy value's hash, and the checkout's
-// agent-secrets binary), named for whichever are unset. Empty means the run is not blocked.
-func agentSecretsBlockReason(url, operator, autoSHA, bin string) string {
+// request for LEGION_E2E_APPROVAL, the automatic rule's dummy value's hash, the checkout's
+// agent-secrets binary, and the token file the script mints from LEGION_E2E_AGENT_SECRETS_ACCOUNT,
+// which the run logs in with as the daemon does), named for whichever are unset. Empty means the
+// run is not blocked.
+func agentSecretsBlockReason(url, operator, autoSHA, bin, tokenFile string) string {
 	var missing []string
 	for name, value := range map[string]string{
 		"LEGION_E2E_AGENT_SECRETS_URL": url, "LEGION_E2E_AGENT_SECRETS_OPERATOR": operator,
 		"LEGION_E2E_AGENT_SECRETS_AUTO_SHA256": autoSHA, "LEGION_E2E_AGENT_SECRETS_BIN": bin,
+		"LEGION_E2E_AGENT_SECRETS_ACCOUNT": tokenFile,
 	} {
 		if value == "" {
 			missing = append(missing, name)
@@ -27,7 +31,8 @@ func agentSecretsBlockReason(url, operator, autoSHA, bin string) string {
 	if len(missing) == 0 {
 		return ""
 	}
-	return "no broker for this run: " + strings.Join(missing, ", ") + " unset (the production broker with Plan D's rules, and the person who approves this run's credential request, supply them)"
+	slices.Sort(missing)
+	return "no broker for this run: " + strings.Join(missing, ", ") + " unset (the production broker with Plan D's rules, a ServiceAccount its BROKER_SERVICE_LOGINS names, and the person who approves this run's credential request, supply them)"
 }
 
 // shellJoin quotes args for a POSIX shell -c string, the way (*liveRig).agentSecrets builds the

@@ -74,6 +74,55 @@ func TestARootArchitectIsToldItsTreeAtEachLaunchsReady(t *testing.T) {
 	}
 }
 
+// A root a hand-over created at this generation is said to be handed over in its architect's
+// catch-up, whatever the phase, so the architect resumes rather than decomposing the tree anew; it
+// is said to be carried as well when its old root's gate came with it, so the architect registers
+// no spec. The same root at a later generation (closed and reopened) is a root like any other.
+func TestACatchUpMarksAHandedOverRootInEveryPhase(t *testing.T) {
+	for _, at := range []phase.Phase{phase.Planning, phase.Reviewing, phase.ProductionCheck} {
+		for _, gateCarried := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, gate carried %t", at, gateCarried), func(t *testing.T) {
+				pool := migratedPool(t)
+				root := record.Issue{Key: "LEGION-1", Tree: "LEGION-1", Project: "LEGION", Title: "Root", Phase: at, Generation: 2, Status: "in_progress", Rank: "U"}
+				seedIssue(t, pool, root)
+				if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
+					return record.NewStore().PutHandedOverRoot(context.Background(), tx, record.HandedOverRoot{Issue: root.Key, Generation: 2, GateCarried: gateCarried})
+				}); err != nil {
+					t.Fatalf("seed handed-over root: %v", err)
+				}
+				engine := testEngine(config.DesignGateRootIssues, nil)
+				claimReady(t, pool, engine, root.Key, claim.RoleArchitect, 1)
+				if got := lastCatchUp(t, pool); !got.HandedOver || got.Carried != gateCarried {
+					t.Fatalf("handed-over root in %s: catch-up says handed over %t, carried %t; want true, %t", at, got.HandedOver, got.Carried, gateCarried)
+				}
+				if _, err := pool.Exec(t.Context(), "delete from outbox"); err != nil {
+					t.Fatal(err)
+				}
+				root.Generation = 3
+				seedIssue(t, pool, root)
+				claimReady(t, pool, engine, root.Key, claim.RoleArchitect, 2)
+				if got := lastCatchUp(t, pool); got.HandedOver || got.Carried {
+					t.Fatalf("the root's later generation in %s: catch-up still says handed over %t, carried %t", at, got.HandedOver, got.Carried)
+				}
+			})
+		}
+	}
+}
+
+func lastCatchUp(t *testing.T, pool *pgxpool.Pool) record.CatchUp {
+	t.Helper()
+	var got *record.CatchUp
+	for _, payload := range noticeRows(t, pool) {
+		if notice, ok := payload.(record.Notice); ok && notice.Kind == "catch-up" {
+			got = notice.CatchUp
+		}
+	}
+	if got == nil {
+		t.Fatal("no catch-up queued")
+	}
+	return *got
+}
+
 // Only a live tree's root architect is told its tree. A tree that lingers or has left the
 // workflow is told nothing, nor is a sub-architect, nor a phase worker on the root.
 func TestOnlyALiveTreesRootArchitectIsToldItsTree(t *testing.T) {

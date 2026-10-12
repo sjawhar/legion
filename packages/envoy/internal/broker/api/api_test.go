@@ -56,10 +56,22 @@ type testServer struct {
 	Secrets   *secrets.Local
 	podIssuer *oidctest.Issuer
 	podKey    *oidctest.Key
+	// ServiceLogins is the broker's live BROKER_SERVICE_LOGINS, daemonAccount and
+	// otherDaemonAccount each logging in as legion-daemon; a test removes an entry to take an
+	// account off it.
+	ServiceLogins map[string]string
 }
 
 // podAudience is the audience the test server's pod verifier checks and podToken mints for.
 const podAudience = "legion-broker-pod"
+
+// daemonAccount and otherDaemonAccount are the ServiceAccounts the test server's
+// BROKER_SERVICE_LOGINS lets log in as legion-daemon with their tokens, as two Legion daemons' own
+// accounts do.
+const (
+	daemonAccount      = "system:serviceaccount:legion-system:legion-daemon-test"
+	otherDaemonAccount = "system:serviceaccount:legion-system:legion-daemon-other"
+)
 
 // newTestServer holds three secrets: DEEL_API_KEY, human-tier, which testApprover owns and so
 // approves for every requester; WORKER_TOKEN, shared and agent-tier, which every session and pod
@@ -95,7 +107,8 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	if err != nil {
 		t.Fatalf("oidc.New: %v", err)
 	}
-	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}}
+	serviceLogins := map[string]string{daemonAccount: "legion-daemon", otherDaemonAccount: "legion-daemon"}
+	enr := &enroll.Service{Store: st, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: podVerifier}, ServiceLogins: serviceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, srv.URL, time.Minute)
 
 	reqMachine := &requests.Machine{
@@ -119,7 +132,7 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 	adjust(&deps)
 	api.Register(mux, deps)
 
-	return &testServer{URL: srv.URL, Store: st, Secrets: local, podIssuer: issuer, podKey: podKey}
+	return &testServer{URL: srv.URL, Store: st, Secrets: local, podIssuer: issuer, podKey: podKey, ServiceLogins: serviceLogins}
 }
 
 // newSessionEnrollment inserts a live session enrollment (and its backing launcher_credentials
@@ -1186,13 +1199,12 @@ func TestALauncherCredentialRefusalRoundsRetryAfterUp(t *testing.T) {
 	}
 }
 
-// TestAServiceLoginAndAPersonsNeverShareARateLimitBucket pins the per-login bucket's key spaces:
-// every service's login spends one shared bucket, whatever service it names (the name is the
-// machine's own unauthenticated claim, so a fresh name must not buy a fresh bucket) and whatever
-// person its login_hint names, and a person's machine login spends that person's, even one whose
-// login_hint is the bare word the service bucket is keyed on, or a service's name. With one login
-// per bucket, each person's first login is accepted and only a second service's login is refused.
-func TestAServiceLoginAndAPersonsNeverShareARateLimitBucket(t *testing.T) {
+// TestEachPersonsMachineLoginSpendsTheirOwnBucket pins the per-login bucket's key space: a
+// person's machine login spends that person's bucket, even one whose login_hint is a word or a
+// service's name, and a service's device-code login is refused 400 before it spends any bucket.
+// With one login per bucket, each person's first login is accepted and only a second login naming
+// the same person is refused.
+func TestEachPersonsMachineLoginSpendsTheirOwnBucket(t *testing.T) {
 	ts := newTestServerWith(t, func(d *api.Deps) {
 		d.LauncherLimits = &api.LauncherLimits{
 			PerAddress: ratelimit.Limit{Every: time.Hour, Burst: 100},
@@ -1209,11 +1221,11 @@ func TestAServiceLoginAndAPersonsNeverShareARateLimitBucket(t *testing.T) {
 		name, loginHint, service string
 		want                     int
 	}{
-		{"a service's login naming a person", testApprover, "legion-daemon", http.StatusAccepted},
-		{"a person's machine login naming the service bucket's bare key", "service", "", http.StatusAccepted},
+		{"a service's device-code login naming a person", testApprover, "legion-daemon", http.StatusBadRequest},
+		{"a person's machine login naming the word service", "service", "", http.StatusAccepted},
 		{"a person's machine login naming a service's bare name", "other-service", "", http.StatusAccepted},
 		{"the person the service's login named", testApprover, "", http.StatusAccepted},
-		{"another service's login, under a name nobody registered", "", "other-service", http.StatusTooManyRequests},
+		{"a second login naming that person", testApprover, "", http.StatusTooManyRequests},
 	} {
 		if got := login(c.loginHint, c.service); got != c.want {
 			t.Fatalf("%s = %d, want %d", c.name, got, c.want)

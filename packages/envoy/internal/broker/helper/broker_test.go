@@ -101,10 +101,12 @@ type fakeBroker struct {
 	// before it does.
 	loginLifetime time.Duration
 
-	// refuseRenewNext answers the next N renews 401 LEASE_EXPIRED whatever the lease, so a test
-	// lapses a session on its next renew without racing the lease's wall clock. A renew that
-	// renewFail also covers gets renewFail's 503 instead, since renewFail is checked first.
-	refuseRenewNext int
+	// refuseRenewNext answers the next N renews 401. renewRefusalCode defaults to
+	// ENROLLMENT_NOT_LIVE, the current broker's terminal renewal verdict; a test names
+	// PROOF_INVALID to model a retryable proof-skew failure. A renew that renewFail also covers
+	// gets its 503 first.
+	refuseRenewNext  int
+	renewRefusalCode string
 	// enrollGate, when set, holds every enroll POST until the test closes it, so a test can keep a
 	// session enrolling for exactly as long as it needs.
 	enrollGate chan struct{}
@@ -258,7 +260,15 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 		}
 		if f.refuseRenewNext > 0 {
 			f.refuseRenewNext--
-			writeJSON(w, 401, map[string]string{"code": "LEASE_EXPIRED", "error": "the lease has expired"})
+			code := f.renewRefusalCode
+			if code == "" {
+				code = "ENROLLMENT_NOT_LIVE"
+			}
+			message := "enrollment is not live"
+			if code == "PROOF_INVALID" {
+				message = "iat outside the proof skew"
+			}
+			writeJSON(w, 401, map[string]string{"code": code, "error": message})
 			return
 		}
 		v := &proof.Verifier{
@@ -275,14 +285,20 @@ func newFakeBroker(t *testing.T) *fakeBroker {
 				return true, nil
 			},
 		}
-		if sub, err := v.Verify(r.Context(), r.Header.Get("Proof"), "POST", f.srv.URL+"/v1/enrollments/"+id+"/renew", time.Now()); err != nil || sub.EnrollmentID != id {
+		sub, err := v.Verify(r.Context(), r.Header.Get("Proof"), "POST", f.srv.URL+"/v1/enrollments/"+id+"/renew", time.Now())
+		switch {
+		case errors.Is(err, proof.ErrNotLive):
+			// As the broker's renew route answers a proof naming an enrollment it no longer holds.
+			writeJSON(w, 401, map[string]string{"code": "ENROLLMENT_NOT_LIVE", "error": "enrollment is not live"})
+			return
+		case err != nil || sub.EnrollmentID != id:
 			writeJSON(w, 401, map[string]string{"code": "PROOF_INVALID", "error": "proof invalid"})
 			return
 		}
 		// The enrollment row itself survives its own lease — a renew past that stored expiry is
 		// refused, but nothing about the enrollment is deleted; only Revoke deletes it.
 		if exp, ok := f.leaseExpiry[id]; ok && !time.Now().Before(exp) {
-			writeJSON(w, 401, map[string]string{"code": "LEASE_EXPIRED", "error": "the lease has expired"})
+			writeJSON(w, 401, map[string]string{"code": "ENROLLMENT_NOT_LIVE", "error": "enrollment is not live"})
 			return
 		}
 		f.renews++

@@ -64,6 +64,15 @@ type leaseResponse struct {
 	LeaseExpiresAt time.Time `json:"lease_expires_at"`
 }
 
+// renewEnrollmentBody is POST /v1/enrollments/{id}/renew's optional body: no body at all is a
+// renewal carrying no token.
+type renewEnrollmentBody struct {
+	// A pod only: its current projected service-account token, which must name the pod UID and
+	// service account the enrollment was made for. Required once the enrollment has renewed with
+	// it (enroll.Service.Renew).
+	PodToken *string `json:"pod_token"`
+}
+
 // selfResponse is GET /v1/enrollments/self's answer: the calling session as the broker knows it.
 type selfResponse struct {
 	// The session's enrollment id.
@@ -150,20 +159,24 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 // design, so it never writes a spurious audit row for an enrollment that never transitioned);
 // DELETE's own idempotent semantics mean the caller doesn't need to know or care which happened.
 // Ownership is checked first: a launcher credential may only revoke an enrollment of its own
-// operator (or, for a service credential, any pod enrollment) — the same trust boundary
-// enroll.Service.Create enforces when creating one — so a mismatch is always 403
-// OPERATOR_MISMATCH, never a no-op 204, regardless of whether the target enrollment is live.
+// operator, and a pod enrollment, which carries no operator, only when it is the credential that
+// enrolled the pod (enroll.Service.Revoke says why, and what that leaves a restarted Legion daemon)
+// — so a mismatch is always 403 (OPERATOR_MISMATCH, or NOT_ENROLLING_CREDENTIAL for another
+// service credential's pod), never a no-op 204, regardless of whether the target enrollment is live.
 func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred enroll.Credential) {
 	id, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
 	if !ok {
 		return
 	}
 	err := s.deps.Enroll.Revoke(r.Context(), cred, id, record.LauncherActor(cred.ID.String()))
-	if errors.Is(err, enroll.ErrOperatorMismatch) {
+	switch {
+	case errors.Is(err, enroll.ErrOperatorMismatch):
 		writeError(w, http.StatusForbidden, "OPERATOR_MISMATCH", err.Error())
 		return
-	}
-	if err != nil && !errors.Is(err, enroll.ErrNotLive) {
+	case errors.Is(err, enroll.ErrNotEnrollingCredential):
+		writeError(w, http.StatusForbidden, "NOT_ENROLLING_CREDENTIAL", err.Error())
+		return
+	case err != nil && !errors.Is(err, enroll.ErrNotLive):
 		writeInternal(w, "revoke enrollment", err)
 		return
 	}
@@ -172,7 +185,11 @@ func (s *server) deleteEnrollment(w http.ResponseWriter, r *http.Request, cred e
 
 // renewEnrollment renews the caller's own enrollment. The proof-verified enrollment id is
 // authoritative — a session can only ever act as itself — so a URL {id} that names a different
-// enrollment is refused rather than silently honored or silently ignored.
+// enrollment is refused rather than silently honored or silently ignored. A pod's renewal carries
+// its current projected token in the body, which enroll.Service.Renew verifies against the pod UID
+// and service account the enrollment was made for; a pod enrollment that has never renewed with
+// one still renews with no body, logged here, naming the enrollment, until the token-less path is
+// removed (Renew says when).
 func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id string) {
 	urlID, ok := pathUUID(w, r, "id", "ENROLLMENT_ID_INPUT", "enrollment")
 	if !ok {
@@ -182,16 +199,33 @@ func (s *server) renewEnrollment(w http.ResponseWriter, r *http.Request, id stri
 		writeError(w, http.StatusForbidden, "NOT_YOURS", "a session may only renew its own enrollment")
 		return
 	}
-	expires, err := s.deps.Enroll.Renew(r.Context(), id)
-	if errors.Is(err, enroll.ErrNotLive) {
-		writeError(w, http.StatusUnauthorized, "PROOF_INVALID", "enrollment is not live")
+	var body renewEnrollmentBody
+	if r.ContentLength != 0 && !readJSON(w, r, &body, "INVALID_RENEWAL") {
 		return
 	}
-	if err != nil {
+	renewal, err := s.deps.Enroll.Renew(r.Context(), id, derefOr(body.PodToken, ""))
+	switch {
+	case errors.Is(err, enroll.ErrNotLive):
+		writeError(w, http.StatusUnauthorized, "ENROLLMENT_NOT_LIVE", "enrollment is not live")
+		return
+	case errors.Is(err, enroll.ErrPodTokenExpired):
+		writeError(w, http.StatusForbidden, "POD_TOKEN_EXPIRED", err.Error())
+		return
+	case errors.Is(err, enroll.ErrPodIdentity):
+		writeError(w, http.StatusForbidden, "POD_IDENTITY_MISMATCH", err.Error())
+		return
+	case errors.Is(err, enroll.ErrPodTokenRequired):
+		slog.Warn("broker: pod enrollment renewal refused: projected token required", "enrollment", id)
+		writeError(w, http.StatusForbidden, "POD_TOKEN_REQUIRED", err.Error())
+		return
+	case err != nil:
 		writeInternal(w, "renew enrollment", err)
 		return
 	}
-	writeJSON(w, http.StatusOK, leaseResponse{LeaseExpiresAt: expires})
+	if renewal.WithoutPodToken {
+		slog.Warn("broker: pod enrollment renewed without its projected token", "enrollment", id, "pod_uid", renewal.RuntimeID, "slot", renewal.Slot)
+	}
+	writeJSON(w, http.StatusOK, leaseResponse{LeaseExpiresAt: renewal.LeaseExpires})
 }
 
 func (s *server) readSelf(w http.ResponseWriter, r *http.Request, id string) {

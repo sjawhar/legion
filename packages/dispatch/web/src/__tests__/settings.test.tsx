@@ -1,4 +1,5 @@
 import { expect, spyOn, test } from "bun:test";
+import { PROJECT_NAME_MAX } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -166,6 +167,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
     expect(await screen.findByRole("cell", { name: "CORE" })).toBeDefined();
     fireEvent.change(screen.getByLabelText("Key"), { target: { value: "qa" } });
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Quality" } });
+    expect(screen.getByLabelText("Name")).toHaveProperty("maxLength", PROJECT_NAME_MAX);
     fireEvent.click(screen.getByRole("button", { name: "New project" }));
 
     await waitFor(() =>

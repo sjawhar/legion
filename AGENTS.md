@@ -68,7 +68,7 @@ bash scripts/e2e/stage1-skeleton.sh    # Stage 1's live proof: the Go daemon boo
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage2-tmux-supervision.sh   # Stage 2's live proof, devbox only: real Oh My Pi panes with the branch's two plugins (pi-envoy and pi-legion) under the Go daemon's private tmux server, against a real Envoy listener and NATS — register, role claim, delivery once, resume, suspend, the registration deadline, re-adoption across a restart, the orphan sweep, the gate's refusal of pi-legion without pi-envoy (scripts/e2e/README.md)
 LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://envoy-nats.<tailnet>.ts.net:4222 bash scripts/e2e/stage3-devbox-workflow.sh      # Stage 3's devbox-only live proof: real OMP panes drive a scratch Dispatch issue through the Go workflow, the design gate, review rounds, ordinary human merge, production check, restart, held worker, pending status write, and pane credentials against sjawhar/legion-smoke (scripts/e2e/README.md)
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_SESSION_DB_PORT=<port> bash scripts/e2e/stage4a-sandbox-runtime.sh   # Stage 4a's live proof, devbox only: the Go Agent Sandbox runtime on the production cluster (namespace legion) through the Legion daemon's restricted identity, on the operator fixture's pod and a providers Secret of its own — install check, the image probe with the daemon's own command (and its refusal once the operator's overlay drops a role an agent names), gVisor, every container's reservation with no affinity, the operator's ServiceAccount and token, the pod baseline, the provider key reaching the agent alone, suspend/resume, same-agent refusal, kill, relaunch before registration, independent provisioning (two issues of one tree, each pod on a volume of its own), re-adoption, the orphan sweep taking the swept issue's volume, release, a resume under `session_store: postgres` held to the table of a scratch Postgres the script starts on the devbox's private address at `LEGION_E2E_SESSION_DB_PORT` (a port the Legion nodes can reach), and a namespace left as it was (scripts/e2e/README.md)
-LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_DISPATCH_URL=<dispatch> LEGION_E2E_ENVOY_URL=<listener> LEGION_E2E_NATS_URL=nats://<nats>:4222 LEGION_E2E_DISPATCH_TOKEN_FILE=<0600 file> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> bash scripts/e2e/stage4b-sandbox-tree.sh   # Stage 4b's live proof, devbox only: the Go daemon drives three real issue trees on the Agent Sandbox runtime in the production cluster (namespace legion), against production Dispatch (project LEGSMOKE), Envoy and NATS, with real agents — admission under the cap, specs, the daemon bound to every interface with every pod dialing its advertise_host, issue independence (a root and two of its children at once, each pod on a volume of its own with no affinity, none able to read another's workspace) and a done child's release of its Sandbox and volume while its parent runs, the repository-configuration fixture, the whole workflow to done with the review pair and a review round no review decides until the architect asks, then a changes-requested round whose approval does not wait for its thread to resolve, and a READY with every thread resolved, CI going red mid-test interrupting the tester's turn before the implementer starts, every worker's phase completion answered in the live session it keeps in its first pod until its issue closes, a finished role answering while another phase runs, token rotation, kill and fence, a daemon restart mid-tree relaunching nothing, a restart with only `envoy_url` respelled relaunching every role in its own issue pod and one with the worker stream and API moved replacing every issue pod, the operator's controller, a worker that dies with its task outstanding, the close suspending every role, node release, linger close, re-admission, every pod's shape and reservation, the pod watch, and an audit that the run wrote nothing outside LEGSMOKE; one run at a time, STAGE4B_UNTIL=<checkpoint> for a development run (scripts/e2e/README.md)
+LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=<worker image@sha256> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_DISPATCH_URL=<dispatch> LEGION_E2E_ENVOY_URL=<listener> LEGION_E2E_NATS_URL=nats://<nats>:4222 LEGION_E2E_DISPATCH_TOKEN_FILE=<0600 file> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> bash scripts/e2e/stage4b-sandbox-tree.sh   # Stage 4b's live proof, devbox only: the Go daemon drives three real issue trees on the Agent Sandbox runtime in the production cluster (namespace legion), against production Dispatch (project LEGSMOKE), Envoy and NATS, with real agents — admission under the cap, specs, the daemon bound to every interface with every pod dialing its advertise_host, issue independence (a root and two of its children at once, each pod on a volume of its own with no affinity, none able to read another's workspace) and a done child's release of its Sandbox and volume while its parent runs, the repository-configuration fixture, the whole workflow to done with the review pair and a review round no review decides until the architect asks, then a changes-requested round whose approval does not wait for its thread to resolve, and a READY with every thread resolved, CI going red mid-test interrupting the tester's turn before the implementer starts, every worker's phase completion answered in the live session it keeps in its first pod until its issue closes, a finished role answering while another phase runs, token rotation, kill and fence, a daemon restart mid-tree relaunching nothing, a restart with only `envoy_url` respelled relaunching every role in its own issue pod and one with the worker stream and API moved replacing every issue pod, the operator's controller, a worker that dies with its task outstanding, the close suspending every role, node release, linger close, a child the close left mid-run handed to Legion as a carried tree of its own (production Dispatch's refusal of the hand-over's `labels_add` ridden out, then the proof human's label), re-admission, every pod's shape and reservation, the pod watch, and an audit that the run wrote nothing outside LEGSMOKE; one run at a time, STAGE4B_UNTIL=<checkpoint> for a development run (scripts/e2e/README.md)
 ```
 
 ## Configuration
@@ -156,9 +156,18 @@ The controller hands over work itself: whenever an admission slot is free, it la
 the highest-priority `todo` leaf issue (one with no children) nobody else is working
 (`skills/legion-controller/SKILL.md`, "Keeping the slots full", which names when it walks).
 A root in `todo` without the label is never admitted, and a root in `triage` without it never wakes
-the controller. A child needs none: it runs under its tree's architect once its root is admitted. A
-child whose tree is not live is an orphan, admitted as a root of its own, so it needs the label as
-any root does. Taking the label off a waiting root drops it from the waiting line, as a status that
+the controller. A child needs none: it runs under its tree's architect once its root is admitted,
+and its architect's `release_children` records it in the tree even when Dispatch already showed it
+`todo`. A child whose tree is not live is an orphan, admitted as a root of its own, so it needs the
+label as any root does. A root that stays `done` through its linger hands every child still in the
+workflow to Legion as a root of its own: the daemon sets it `todo` with the label in one Dispatch
+write, and the write's event carries the child's phase, design gate, phase records and pull request
+into a new generation, then starts that phase's role. A child whose old root had no gate (cleared
+by a reopen in its linger) carries none: its architect registers its own spec while the child is
+before `awaiting_merge` (after that its READY is already through), and decomposes nothing anew,
+since its workers already run their phases. A child stays its own tree after hand-over; reopening
+the old root later does not take it back. A root reopened inside its linger instead keeps its
+children. Taking the label off a waiting root drops it from the waiting line, as a status that
 leaves `todo` does; taking it off a root already admitted does not stop its tree. The mark is a
 label rather than the issue's `route` because Dispatch publishes every event of a routed issue to
 the route's topic, where a label only marks the issue; it carries no workflow state.
@@ -174,21 +183,32 @@ daemon reads the approval; it never writes one). A later spec version closes the
 someone approves the new version, and a `changes_requested` review closes it with the reviewer's
 reason. `gates.design: off` is the only way past the gate without a human review — Legion has no
 operator approve command; with `off` the root architect is told so in its system prompt and adds
-no approval step. Whether a human must
-approve a pull request before it merges is the repository's own branch-protection or CODEOWNERS
-rule: Legion neither reads nor writes it. The merger sends its `READY` packet with its completion;
-the daemon posts it on the Dispatch issue and, when the project's `projects.<KEY>.merge_queue_role`
-names one, publishes it to that role. On the acceptance the merger submits the pull request with
-`gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` (a merge queue
-enqueues it; a repository without one arms auto-merge), and the repository's required reviews and
-checks decide when it merges — Legion neither reads nor writes those rules. When the head's own CI
-turns red before the merge, or the
-head starts conflicting with its base (GitHub computes no merge ref for a conflicting head and
-runs no checks on it at all), the daemon sends the issue back to `implementing`, posts the READY's
-withdrawal on the Dispatch issue, and publishes it to that role.
-GitHub's own merge queue (the `merge_group` trigger) is a
-repository setting Legion neither reads nor writes. No lifecycle labels exist; GitHub issues are
-never read or written by Legion.
+no approval step. Whether a human must approve a pull request before it merges is the repository's
+own branch-protection or CODEOWNERS rule: Legion neither reads nor writes it. The merger sends its
+`READY` packet with its completion; the daemon posts it on the Dispatch issue and, when the project's
+`projects.<KEY>.merge_queue_role` names one, publishes it to that role. A project may configure
+`projects.<KEY>.merge.by_hand` regular-expression paths: a matching pull request completes READY
+without auto-arming, the daemon tells that READY with its `MANUAL_MERGE_REQUIRED:` note at the head
+of the packet and the packet's `Merge:` line replaced, so neither the issue nor that role is asked to
+arm it, and the repository's authorized person merges it. Otherwise, on acceptance the
+merger submits the pull request with `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` (a
+merge queue enqueues it; a repository without one arms auto-merge), and the repository's required
+reviews and checks decide when it merges. A head that moves before submission is not armed: the
+merger builds a new READY packet. GitHub checks the head match only when auto-merge is enabled, and
+arming is right only for an awaiting issue's READY head, so the daemon queues an
+`auto_merge_disable` outbox row on every other push or reopen, when a child is set back to `todo`,
+and when an issue leaves the workflow. The row reads GitHub, then the record: it keeps the arm only
+while the issue awaits its merge, its READY is not by hand, and the pull request's head is the
+merger's READY commit, and otherwise disables auto-merge and removes the merge-queue entry, as the
+implement App; READY is refused (`READY_DISARM_PENDING`) while such a row is unfinished, and
+(`READY_HEAD_MOVED`) when the head moved past its commit. When a push or reopen moves the head past
+the one READY named, the head's own CI turns red before the merge, or the head starts conflicting
+with its base (GitHub computes no merge
+ref for a conflicting head and runs no checks on it at all), the daemon sends the issue back to
+`implementing`, disarms the pull request, posts the READY's withdrawal on the Dispatch issue, and
+publishes it to that role. GitHub's own merge queue (`merge_group`
+trigger) is a repository setting Legion does not modify. No lifecycle labels exist; GitHub issues
+are never read or written by Legion.
 
 **Review signaling:** Native GitHub review API, tester status checks, and committed handoffs are
 the phase-verdict artifacts. No lifecycle labels carry worker state.

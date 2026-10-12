@@ -29,6 +29,7 @@ import type {
   CreateAskInput,
   CreateBroadcastInput,
   CreateCommentInput,
+  CreateDeliverySessionGroupInput,
   CreatedAgentToken,
   CreateIssueInput,
   CreateMessageInput,
@@ -41,6 +42,7 @@ import type {
   DeliveryMeasuresResponse,
   DeliveryPipelineResponse,
   DeliveryRunDetail,
+  DeliverySessionGroup,
   DeliverySettings,
   DeliverySettingsInput,
   DeliveryTimelineResponse,
@@ -59,10 +61,12 @@ import type {
   MessageDelivery,
   MessageRead,
   MyAnswersResponse,
+  MyRepliesResponse,
   Project,
   RepoProject,
   SearchResponse,
   Subscriber,
+  UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
   UserAgentStateInput,
@@ -491,6 +495,28 @@ export class DispatchApiClient {
     return this.json<MyAnswersResponse>(pathWithQuery("/api/v1/me/answers", page));
   }
 
+  /** `GET /api/v1/me/replies`: the threads the signed-in person wrote in where someone else has
+   *  written since they last read it, newest reply first; `issue` or `artifact` narrows to one
+   *  owner. Human-only. */
+  listMyReplies(page: {
+    artifact?: string;
+    issue?: string;
+    limit: number;
+    offset?: number;
+  }): Promise<MyRepliesResponse> {
+    return this.json<MyRepliesResponse>(pathWithQuery("/api/v1/me/replies", page));
+  }
+
+  /** `PUT /api/v1/me/threads/{id}/read`: move the signed-in person's read mark on one thread
+   *  forward to `readThrough` (RFC3339, the newest reply shown). Answers 204 whether or not it
+   *  moved. */
+  async markThreadRead(threadId: string, readThrough: string): Promise<void> {
+    await this.response(
+      `/api/v1/me/threads/${pathSegment(threadId)}/read`,
+      idempotentWriteInit("PUT", { read_through: readThrough })
+    );
+  }
+
   async removeAskFollower(id: string, sessionId: string): Promise<void> {
     await this.response(`/api/v1/asks/${pathSegment(id)}/followers/${pathSegment(sessionId)}`, {
       method: "DELETE",
@@ -736,6 +762,34 @@ export class DispatchApiClient {
    *  the GitHub App can read `deploy_repo`, answering `409 DELIVERY_SETTINGS_ACCESS` when not. */
   putDeliverySettings(input: DeliverySettingsInput): Promise<DeliverySettings> {
     return this.send<DeliverySettings>("PUT", "/api/v1/settings/delivery", input);
+  }
+
+  /** Creates a Delivery session group: its sessions' pull requests take it as their Parent agent.
+   *  A session another group holds is `409 SESSION_IN_GROUP`; a name another group has, or that is
+   *  the title of a session outside the group, is `409` as well, the message naming which. */
+  createDeliverySessionGroup(
+    input: CreateDeliverySessionGroupInput
+  ): Promise<DeliverySessionGroup> {
+    return this.post<DeliverySessionGroup>("/api/v1/delivery/session-groups", input);
+  }
+
+  /** Renames a session group, adds sessions to it or removes sessions from it. */
+  updateDeliverySessionGroup(
+    id: string,
+    input: UpdateDeliverySessionGroupInput
+  ): Promise<DeliverySessionGroup> {
+    return this.send<DeliverySessionGroup>(
+      "PATCH",
+      `/api/v1/delivery/session-groups/${pathSegment(id)}`,
+      input
+    );
+  }
+
+  /** Deletes a session group; its sessions show as themselves again. */
+  async deleteDeliverySessionGroup(id: string): Promise<void> {
+    await this.response(`/api/v1/delivery/session-groups/${pathSegment(id)}`, {
+      method: "DELETE",
+    });
   }
 
   getIssueSubscribers(key: string): Promise<Subscriber[]> {

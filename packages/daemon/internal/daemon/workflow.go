@@ -398,6 +398,52 @@ func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise
 	return nil
 }
 
+// Each retry of the boot fact waits twice the last, from bootRetryFirst to at most bootRetryMax.
+const (
+	bootRetryFirst = time.Second
+	bootRetryMax   = 30 * time.Second
+)
+
+// runBooted applies this boot's fact (booted) beside the serving API, retrying every failure — a
+// timeout included — on a backoff, each logged at ERROR, until it lands or the daemon stops. The
+// fact is keyed by the boot, so a retry after a commit whose answer was lost is a duplicate, not a
+// second census. Only the daemon's stop leaves it unapplied, and the next boot applies its own.
+func (w *workflowRuntime) runBooted(ctx context.Context, bootID int64) {
+	retryUntilApplied(ctx, w.log, bootRetryFirst, bootRetryMax, func(ctx context.Context) error { return w.booted(ctx, bootID) })
+}
+
+// retryUntilApplied runs apply until it succeeds or ctx ends, waiting first, then twice as long up
+// to most, between attempts, and logging each failure at ERROR. A failure once ctx has ended is the
+// stop, and logs nothing.
+func retryUntilApplied(ctx context.Context, log *slog.Logger, first, most time.Duration, apply func(context.Context) error) {
+	wait := first
+	for attempt := 1; ; attempt++ {
+		err := apply(ctx)
+		if err == nil || ctx.Err() != nil {
+			return
+		}
+		log.Error("legion daemon could not apply its boot; retrying", "attempt", attempt, "retryIn", wait, "error", err)
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+		wait = min(2*wait, most)
+	}
+}
+
+// booted tells the workflow of this boot (intake.DaemonBooted), once every stored claim has its
+// machine and the terminal facts are replayed: it starts, through the outbox's start, every claim
+// that owns its issue's current phase and that the daemon or its own exit suspended.
+func (w *workflowRuntime) booted(ctx context.Context, bootID int64) error {
+	if _, err := intake.ApplyFact(ctx, w.pool, "daemon", fmt.Sprintf("boot:%s:%d", w.dispatchProject, bootID), intake.DaemonBooted{Boot: bootID}, w.handlers...); err != nil {
+		return fmt.Errorf("apply the boot of %s: %w", w.dispatchProject, err)
+	}
+	return nil
+}
+
 func (w *workflowRuntime) terminal(c supervise.Claim, state supervise.ClaimState) {
 	if err := w.applyTerminal(context.Background(), c, state); err != nil {
 		w.log.Error("apply supervision terminal fact", "claim", c.Token, "state", state, "error", err)

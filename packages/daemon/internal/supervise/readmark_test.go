@@ -277,7 +277,7 @@ func TestAnOldProcessesRefusalLeavesTheNewSendsMark(t *testing.T) {
 	first := h.wantPrompts(base + 1)[base]
 	h.advance(2 * testRPC)
 
-	h.must(RequestSuspend{Claim: testToken})
+	h.must(RequestSuspend{Claim: testToken, By: SuspendedByOperator})
 	h.must(RequestResume{Claim: testToken})
 	h.reach(StateReady)
 	h.observe(runtime.Alive)
@@ -333,7 +333,7 @@ func TestAnUnacknowledgedResendLeavesTheGivenUpPromptsRefusalToClearTheMark(t *t
 		}},
 		{name: "a relaunch, then the new process's send is lost", resend: func(h *harness) {
 			h.conn.FailPrompt(errBoom)
-			h.must(RequestSuspend{Claim: testToken})
+			h.must(RequestSuspend{Claim: testToken, By: SuspendedByOperator})
 			h.must(RequestResume{Claim: testToken})
 			h.reach(StateReady)
 		}},

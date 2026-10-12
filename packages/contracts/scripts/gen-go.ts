@@ -9,11 +9,19 @@ import {
   DOCUMENT_SCHEMA_CLOSE_REASON,
   ISSUE_TITLE_MAX,
   MAX_BROADCAST_RECIPIENTS,
+  MAX_ISSUE_BLOCKERS,
   MAX_ISSUE_PAGE_LIMIT,
+  PROJECT_NAME_MAX,
   RECEIPT_TIMEOUT_CAUSE,
   SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE,
 } from "../src/dispatch-api";
-import { SEARCH_KIND_DEPTH, SEARCH_QUERY_HINT, SEARCH_QUERY_MAX } from "../src/dispatch-tools";
+import {
+  PROJECT_KEY_PATTERN,
+  PROJECT_KEY_RULE,
+  SEARCH_KIND_DEPTH,
+  SEARCH_QUERY_HINT,
+  SEARCH_QUERY_MAX,
+} from "../src/dispatch-tools";
 import { MINTED_DEDUPE_KEY_PATTERN } from "../src/envelope";
 import { SUBJECT_SEGMENT_REPLACED } from "../src/subject";
 
@@ -114,6 +122,16 @@ const SearchQueryMax = ${SEARCH_QUERY_MAX}
 // from SEARCH_QUERY_HINT in packages/contracts so the server and the tool word it once.
 const SearchQueryHint = ${JSON.stringify(SEARCH_QUERY_HINT)}
 
+// ProjectKeyRule says the project-key pattern's rule in words; every refusal of a key that is not
+// a project key gives it. Generated from PROJECT_KEY_RULE in packages/contracts so the server and
+// the tool word it once.
+const ProjectKeyRule = ${JSON.stringify(PROJECT_KEY_RULE)}
+
+// ProjectKeyPattern is a whole project key, as the server creates them and the projects.key check
+// constraint holds. Generated from PROJECT_KEY_PATTERN in packages/contracts, which the dispatch
+// command checks a key against, so the two accept the same keys.
+const ProjectKeyPattern = ${JSON.stringify(PROJECT_KEY_PATTERN.source)}
+
 // SearchKindDepth is how many of its best matches each kind of content lists before
 // GET /api/v1/search merges the kinds; a kind's later matches count in the total and no offset
 // returns them. Generated from SEARCH_KIND_DEPTH in packages/contracts so the server's cut and the
@@ -126,6 +144,10 @@ const SearchKindDepth = ${SEARCH_KIND_DEPTH}
 // Dispatch writes and the string search-answer.ts compares against cannot drift apart.
 const SearchDegradedEmbedderUnavailable = ${JSON.stringify(SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE)}
 
+// MaxIssueBlockers bounds blocked_by input before deduplication. Generated from
+// MAX_ISSUE_BLOCKERS in packages/contracts so the server and tool schemas share the limit.
+const MaxIssueBlockers = ${MAX_ISSUE_BLOCKERS}
+
 // MaxIssuePageLimit is the most issues one page of GET /api/v1/issues holds, and
 // DefaultIssuePageLimit the page size when a caller pages with offset alone. Generated from
 // MAX_ISSUE_PAGE_LIMIT and DEFAULT_ISSUE_PAGE_LIMIT in packages/contracts so the server's bounds
@@ -137,6 +159,11 @@ const DefaultIssuePageLimit = ${DEFAULT_ISSUE_PAGE_LIMIT}
 // PATCH /api/v1/issues/{key} accept. Generated from ISSUE_TITLE_MAX in packages/contracts so the
 // server's refusal and the dashboard's title fields cannot drift apart.
 const IssueTitleMax = ${ISSUE_TITLE_MAX}
+
+// ProjectNameMax is the longest project name, in UTF-16 units, that POST /api/v1/projects
+// accepts. Generated from PROJECT_NAME_MAX in packages/contracts so the server's refusal, the
+// Settings name field and the dispatch command cannot drift apart.
+const ProjectNameMax = ${PROJECT_NAME_MAX}
 
 // DocumentSchemaCloseCode and DocumentSchemaCloseReason close a document websocket whose room is
 // outside the Proof schema, before any sync. Generated from DOCUMENT_SCHEMA_CLOSE_CODE and

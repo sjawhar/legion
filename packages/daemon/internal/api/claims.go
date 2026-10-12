@@ -126,7 +126,8 @@ func (s *server) promptAgentsList() []string {
 // once the claim's connection is registered. A ready that carries the session's capability report
 // (LEGION-663) hands it, normalised, to Options.CapabilityReported once the claim has taken the
 // ready: what the report says is never a reason to refuse the ready — the daemon runs the session
-// and reports what it lacks — and a row the table has no live row for is dropped and logged.
+// and reports what it lacks — and a row the table has no live row for is dropped and logged by its
+// name cleaned as a detail is (capabilities.Normalize).
 func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	var req claim.ReadyRequest
 	if !readBody(w, r, &req) || !requireFields(w,

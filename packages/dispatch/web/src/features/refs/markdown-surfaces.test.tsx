@@ -65,6 +65,7 @@ const issue: IssueDetails = {
   open_asks: [],
   progress: { tasks: null, children: null },
   parent: null,
+  blocked_by: [],
   assignee: null,
   claim: null,
   components: { mode: "inherit", ids: [], unknown: [], reason: null, inherited_from: null },
@@ -122,7 +123,12 @@ function Transcript({ messages }: { messages: ThreadMessageLike[] }): ReactNode 
   });
   return (
     <AssistantRuntimeProvider runtime={runtime}>
-      <AgentThread empty="Nothing yet." placeholder="Message the session…" resetKey="session-1" />
+      <AgentThread
+        commands={undefined}
+        empty="Nothing yet."
+        placeholder="Message the session…"
+        resetKey="session-1"
+      />
     </AssistantRuntimeProvider>
   );
 }

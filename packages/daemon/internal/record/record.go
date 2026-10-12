@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -112,6 +113,32 @@ type PhaseRow struct {
 	// ClearGeneration resets the row without it. Behind a completion an old daemon wrote, a stale time
 	// at worst makes a review read as the reviewer's answer: one extra review-stuck notice.
 	CompletedAt time.Time
+	// MergeNote is the by-hand note the merger's READY was accepted with, empty for any other: the
+	// MANUAL_MERGE_REQUIRED answer READY gives a pull request whose change touches a path the
+	// project's merge.by_hand names. The packet the daemon tells starts with it (ReadyPacket), and the
+	// disarm keeps nothing armed for such a READY.
+	MergeNote string
+}
+
+// byHandMergeLine is the line ReadyPacket puts in place of the merger's request to submit the
+// merge, for a READY a person merges.
+const byHandMergeLine = "Merge: by hand. A person merges this pull request under the repository's rules; nothing arms it."
+
+// ReadyPacket is the READY packet the daemon tells for summary, the merger's packet, and note, its
+// READY's by-hand note (PhaseRow.MergeNote): summary as it is when there is no note; otherwise the
+// note, a blank line, then summary with each line that begins `Merge:`, the merger's request to
+// submit the merge, replaced by one saying a person merges it, so no reader of the packet arms it.
+func ReadyPacket(summary, note string) string {
+	if note == "" {
+		return summary
+	}
+	lines := strings.Split(summary, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "Merge:") {
+			lines[i] = byHandMergeLine
+		}
+	}
+	return note + "\n\n" + strings.Join(lines, "\n")
 }
 
 // ReviewDecision is what one review decided: its state (changes_requested or approved), its body,
@@ -286,6 +313,34 @@ type OutboxRow struct {
 	LeaseUntil *time.Time
 }
 
+// Handover is a root linger's pending move of one child to an independent tree. It persists from
+// the decision until the daemon-authored Dispatch event consumes or rejects it.
+type Handover struct {
+	Issue      string
+	Tree       string
+	Generation uint64
+	Cancelled  bool
+}
+
+// ReleaseRetry is the bounded wait for a released todo child whose parent event has not reached the
+// daemon yet. A changed Dispatch sequence begins a fresh bounded attempt.
+type ReleaseRetry struct {
+	Issue     string
+	Sequence  int64
+	Attempts  int
+	NextAt    time.Time
+	Exhausted bool
+}
+
+// HandedOverRoot is a root a hand-over created: the generation at which the child became a root of
+// its own, carrying its phase, phase rows and pull request, and whether its old root's gate came
+// with them.
+type HandedOverRoot struct {
+	Issue       string
+	Generation  uint64
+	GateCarried bool
+}
+
 // Store contains only transactional operations. The caller owns each transaction so intake can
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
@@ -316,6 +371,9 @@ type Store interface {
 	ClearGeneration(ctx context.Context, tx pgx.Tx, issue string) error
 	ClearTreeGeneration(ctx context.Context, tx pgx.Tx, tree string) error
 	Gate(ctx context.Context, tx pgx.Tx, issue string) (*DesignGate, error)
+	// GatesForArtifact is every gate registered on artifactID, in issue order: the document owner's
+	// gate and each copy a hand-over carried to a child of its tree.
+	GatesForArtifact(ctx context.Context, tx pgx.Tx, artifactID string) ([]DesignGate, error)
 	PutGate(ctx context.Context, tx pgx.Tx, gate DesignGate) error
 	Slots(ctx context.Context, tx pgx.Tx) ([]Slot, error)
 	PutSlot(ctx context.Context, tx pgx.Tx, slot Slot) error
@@ -332,11 +390,28 @@ type Store interface {
 	// holds an unpublished controller notice of kind, so a wake is never queued behind an
 	// identical one.
 	ControllerNoticePending(ctx context.Context, tx pgx.Tx, project string, kind NoticeKind) (bool, error)
+	// DisarmPending says whether the outbox still holds an unfinished auto_merge_disable row of
+	// issue: a finished row is deleted, so any row of the kind is one still to run or retrying.
+	DisarmPending(ctx context.Context, tx pgx.Tx, issue string) (bool, error)
 	Enqueue(ctx context.Context, tx pgx.Tx, row OutboxRow) error
 	ClaimDue(ctx context.Context, tx pgx.Tx, project string, now time.Time, limit int, leaseFor time.Duration) ([]OutboxRow, error)
 	FinishOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string) error
 	RetryOutbox(ctx context.Context, tx pgx.Tx, id int64, leaseToken string, nextAt time.Time, lastErr string) error
 	PendingStatusWrites(ctx context.Context, tx pgx.Tx, project string) ([]OutboxRow, error)
+	Handover(ctx context.Context, tx pgx.Tx, issue string) (*Handover, error)
+	PutHandover(ctx context.Context, tx pgx.Tx, handover Handover) error
+	CancelTreeHandovers(ctx context.Context, tx pgx.Tx, tree string, generation uint64) error
+	DeleteHandover(ctx context.Context, tx pgx.Tx, issue string) error
+	// DeleteHandoverAt deletes issue's fence only while it is the one tree and linger generation
+	// name: a newer linger's fence on the same issue belongs to its own outbox row.
+	DeleteHandoverAt(ctx context.Context, tx pgx.Tx, issue, tree string, generation uint64) error
+	ReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) (*ReleaseRetry, error)
+	PutReleaseRetry(ctx context.Context, tx pgx.Tx, retry ReleaseRetry) error
+	DeleteReleaseRetry(ctx context.Context, tx pgx.Tx, issue string) error
+	// HandedOverRoot is issue's record as a root a hand-over created, nil for none;
+	// PutHandedOverRoot records it.
+	HandedOverRoot(ctx context.Context, tx pgx.Tx, issue string) (*HandedOverRoot, error)
+	PutHandedOverRoot(ctx context.Context, tx pgx.Tx, root HandedOverRoot) error
 	// WaitingNotices is every notice row of project's issues not yet due at now, oldest first.
 	WaitingNotices(ctx context.Context, tx pgx.Tx, project string, now time.Time) ([]OutboxRow, error)
 	// ExpediteOutbox makes row id due at now if it was due later.
@@ -362,6 +437,17 @@ type Store interface {
 	// RoleRun reads one role's run of an issue generation: its queued supervise rows and the claim
 	// with token.
 	RoleRun(ctx context.Context, tx pgx.Tx, token claim.Token, issue string, role claim.Role, generation uint64) (RoleRun, error)
+	// RoleRuns is RoleRun for a bounded batch, keyed by token. Each batch reads its queued starts
+	// and claims from the caller's transaction snapshot rather than one query pair per role.
+	RoleRuns(ctx context.Context, tx pgx.Tx, keys []RoleRunKey) (map[claim.Token]RoleRun, error)
+}
+
+// RoleRunKey identifies one role's run of an issue generation.
+type RoleRunKey struct {
+	Token      claim.Token
+	Issue      string
+	Role       claim.Role
+	Generation uint64
 }
 
 // RoleRun is what the store holds of one role's run of an issue generation: the role's supervise
@@ -379,11 +465,12 @@ type QueuedSupervise struct {
 	Request SuperviseRequest
 }
 
-// RoleClaim is a claim as RoleRun reads it: its state, the newest start the outbox ran against it
-// (last_start_row), and the task it holds, nil for none, with the task's generation, phase and
-// confirmation.
+// RoleClaim is a claim as RoleRun reads it: its state, who suspended it while it is suspended, the
+// newest start the outbox ran against it (last_start_row), and the task it holds, nil for none, with
+// the task's generation, phase and confirmation.
 type RoleClaim struct {
 	State        supervise.ClaimState
+	SuspendedBy  supervise.SuspendSource
 	LastStartRow int64
 	Pending      *supervise.Delivery
 }

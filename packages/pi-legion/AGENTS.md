@@ -15,7 +15,7 @@ in the environment: a person's own session gets no tool, no title and no daemon 
 The Legion entry claims roles, matches injected user turns and reads the bootstrapped session
 through the interface the Envoy entry publishes: one process-wide object on `globalThis` under
 `Symbol.for("legion.pi-shared.envoy-plugin-interface")`, at `ENVOY_PLUGIN_INTERFACE_VERSION`
-(currently 1), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
+(currently 2), described in `packages/pi-shared/AGENTS.md`. At factory time `extensions/legion.ts`
 sets its own load marker, `Symbol.for("legion.pi-legion.loaded")`, to
 `{ from: import.meta.url, envoyInterface: ENVOY_PLUGIN_INTERFACE_VERSION }`, which the daemon's load
 probe reads.
@@ -87,10 +87,14 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is 21 for contract 21's capability report (LEGION-663: `claims/register` answers
-`promptAgents`, `claims/ready` takes an optional `capabilities` report, each claim view on
-`GET /legion/v1/state` carries its session's latest report as `capabilities`, and `live` is gone
-from the capability status enum), after contract 20's controller credential (LEGION-668: the
+number is 23 for contract 23's `strandedClaims` list on `GET /legion/v1/state` (LEGION-670: every
+claim nothing will wake, by issue, role and state), after contract 22's token login (LEGION-618: the
+daemon logs in to the secrets broker with its own ServiceAccount token, so `agentSecretsLogin` on
+`GET /legion/v1/state` loses `code` and its `state` is `none`, `issued` or `failed`), after contract
+21's capability report (LEGION-663:
+`claims/register` answers `promptAgents`, `claims/ready` takes an optional `capabilities` report,
+each claim view on `GET /legion/v1/state` carries its session's latest report as `capabilities`,
+and `live` is gone from the capability status enum), after contract 20's controller credential (LEGION-668: the
 controller holds the review App's GitHub token like every role — `POST
 /legion/v1/controller/github-credential` answers the operator-launched controller's `legion
 controller start` the review App's gh files for the current controller capability, and the
@@ -298,9 +302,11 @@ or is not yet on `legion/<issue>@origin` (push the issue branch, then complete a
 other phase the commit the workspace stands on, `@-`. It then posts
 `POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`). The daemon reads no
 handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
-reported for its previous phase) and, for the merger's `ready: true`, runs READY's three refusals on
-the pull request's head (`READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS`, `READY_CHECKS_NOT_GREEN`); a refusal changed
-nothing, and the answer's `note` is what READY's checks said when they read no head. The
+reported for its previous phase) and, for the merger's `ready: true`, runs READY's checks on the
+pull request's head, each refusal named in the merger's role prompt
+(`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's
+`note` is what READY's checks said when they read no head, or the by-hand note
+(`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
 pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's
 plain `gh` and `git`, which read the role's App token from the gh files under `GH_CONFIG_DIR`; no
@@ -321,14 +327,24 @@ In a phase-worker session (planner, implementer, tester, reviewer, merger: never
 controller, a session with no Legion environment, or a `task` subagent), `src/phase-stall.ts`
 tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
 `handoff_complete` closes it. A person's direct message the Envoy extension sent in as the user's
-own turn is a user message too, and counts as an Envoy delivery rather than an assignment: the
-Envoy extension records each body it sends in, process-wide, on the shared interface
-(`injectedUserTurns`, `@legion/pi-shared/injected-user-turns`), and legion.ts asks that record at
-`message_start` (`matchInjectedUserTurn`). The record is forgotten at the run's `agent_end`, so a
-Send or an Aside sent in after the run's last queue or aside poll and before that `agent_end`,
-which the host then runs as a turn of its own, matches nothing: it counts as an assignment, which
-opens even a closed phase, and the dashboard shows it twice. One sent in after that `agent_end`
-starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
+own turn is a user message too (for a `/skill:`, the host's `skill-prompt` custom message), and
+counts as an Envoy delivery rather than an assignment: the Envoy extension records each turn it
+sends in, process-wide, on the shared interface (`injectedUserTurns`,
+`@legion/pi-shared/injected-user-turns`), and legion.ts asks that record at `message_start`
+(`matchInjectedUserTurn`). A turn sent as typed input (`pi.sendUserInput`) is found by the Dispatch
+id the host keeps as the message's `tag`, and only by it, so a command that submitted nothing
+(`/compact`, `/session`) leaves nothing the daemon's next assignment could match; it stays in the
+record past the run's `agent_end` until its message arrives, the host answers that the input
+submitted none, or the session changes, so a Send the host runs as a turn of its own after that
+run still counts as the person's. legion.ts asks under the live session id, so a typed turn the
+host starts under a new id (queued across a branch or a session file's move-off, or a session
+change during its `sendUserInput`) carries no note there and counts as an assignment, or, for a
+`/skill:`, whose `skill-prompt` custom message `inboundKind` reads as neither, wakes no stall. On a
+host without `sendUserInput` a turn is found by its text and forgotten at the run's
+`agent_end`, so a Send or an Aside sent in after the run's last queue or aside poll and before that
+`agent_end`, which the host then runs as a turn of its own, matches nothing: it counts as an
+assignment, which opens even a closed phase, and the dashboard shows it twice. One sent in after
+that `agent_end` starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
 open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
 as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
 message holding a tool call written as text is told so. One follow-up per stall; a WAITING reply or a

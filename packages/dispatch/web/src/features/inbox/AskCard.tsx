@@ -15,6 +15,7 @@ import { ChevronIcon } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
 import { TruncatedText } from "../../components/TruncatedText";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
+import { compareTimestamps } from "../../lib/timestamps";
 import {
   askUrgencyAccent,
   badgeBlocking,
@@ -44,6 +45,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, itemRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { askRepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { AskAnchorHeader } from "./AskAnchorLink";
 import { AskApprovalLink } from "./AskApprovalLink";
 import { AskBlockLink } from "./AskBlockLink";
@@ -103,6 +105,11 @@ export interface AskCardProps {
   onAnswered?: (id: string) => void;
   /** `change` opens the seeded form when the viewer may replace the current answer. */
   mode?: "answer" | "change";
+  /** Marks the ask's thread read on the Replies page once its newest write (the newest reply, or
+   *  an answer given after every reply) has been on screen. Set only on the ask's own pages - its
+   *  Conversation turn, its margin card, its decision block - so the Inbox, its drawer and the
+   *  Answers page start no unread-set reads. */
+  markRead?: boolean;
 }
 
 /** The urgency notch's text colour, matching the urgency badge of the same level. */
@@ -159,6 +166,7 @@ export function AskCard({
   documentLink = true,
   onAnswered,
   mode = "answer",
+  markRead = false,
 }: AskCardProps): ReactNode {
   const {
     answerFailure,
@@ -282,6 +290,19 @@ export function AskCard({
   // a backlink count, and the answer response is the one ask shape that carries no count.
   const referencedByCount = displayedAsk.referenced_by_count ?? 0;
   const turnLabel = askTurnLabel(currentAsk, threadQuery.data?.replies.at(-1));
+  // The thread's newest write the card shows, which the Replies mark watches and reads through:
+  // the newest reply, unless the record's answer came after it (an answer is a write like a reply).
+  const newestReply = threadQuery.data?.replies.at(-1);
+  const recordedAnswer = completed?.state === "answered" ? completed.answer : null;
+  const answerIsNewest =
+    recordedAnswer !== null &&
+    (newestReply === undefined || compareTimestamps(recordedAnswer.at, newestReply.created_at) > 0);
+  const markNewest = useMarkThreadRead({
+    enabled: markRead,
+    newestShownAt: answerIsNewest ? recordedAnswer?.at : newestReply?.created_at,
+    owner: askRepliesOwner(displayedAsk),
+    threadId: displayedAsk.id,
+  });
   const referencedByNode =
     reference === undefined || referencedByCount === 0 ? null : (
       <div className="mt-3">
@@ -306,6 +327,7 @@ export function AskCard({
         ask={currentAsk}
         createReply={reply}
         embedded={completed === null}
+        markNewest={answerIsNewest ? undefined : markNewest}
         thread={threadQuery}
         uploadOwner={uploadOwner}
       />
@@ -314,6 +336,7 @@ export function AskCard({
         ask={currentAsk}
         createReply={reply}
         embedded={completed === null}
+        markNewest={answerIsNewest ? undefined : markNewest}
         thread={threadQuery}
         uploadOwner={uploadOwner}
       />
@@ -435,6 +458,7 @@ export function AskCard({
           documentLink={documentLink}
           edits={edits}
           frame={frame}
+          markRef={answerIsNewest ? markNewest : undefined}
           onChangeAnswer={canChangeAnswer ? startChanging : undefined}
         />
         {answerFailure === null ? null : <QueryError message={answerFailure.message} />}

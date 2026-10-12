@@ -4,18 +4,22 @@ import { useSearchParams } from "react-router-dom";
 
 import { type DeliveryTimelineOptions, isDeliveryNotConfigured } from "../../api/client";
 import { deliveryMeasuresQuery, deliveryTimelineQuery } from "../../api/queries";
+import type { DeliverySessionGroup } from "../../api/types";
+import { MultiSelect } from "../../components/MultiSelect";
 import { QueryError } from "../../components/QueryError";
 import { useRepeatableSearchParams, useSearchParamsUpdate } from "../../lib/url-array-params";
 import {
   borderStrong,
   dragHandleBg,
   linkText,
+  surfaceBg,
   surfaceMutedBg,
   switchOffBg,
   switchOnBg,
   switchThumbBg,
   textMutedOnCanvas,
   textPrimaryOnCanvas,
+  textPrimaryOnSurface,
   textPrimaryOnSurfaceMuted,
   textSecondaryOnCanvas,
 } from "../../theme/classes";
@@ -34,15 +38,23 @@ import {
   FACET_KEYS,
   FACET_PARAMS,
   type Filters,
+  PLACEHOLDER_LABELS,
   type ReworkFacet,
 } from "./lib/facets";
+import { parentAgentLabel } from "./lib/parentAgent";
+import {
+  DEFAULT_WINDOW_PRESET,
+  hasMalformedWindowParams,
+  presetRange,
+  readWindow,
+  type WindowChoice,
+  type WindowPreset,
+} from "./lib/window";
 import { MeasuresPanel } from "./MeasuresPanel";
 import { PRList } from "./PRList";
 import { SourceFreshness } from "./SourceFreshness";
 import { Timeline, type TimelineSelection } from "./Timeline";
-
-/** The window the page reads when its URL names none: the prototype's 28 days. */
-const DEFAULT_WINDOW_MS = 28 * 24 * 60 * 60 * 1000;
+import { WindowControl } from "./WindowControl";
 
 /** How long the search waits after the last keystroke before the server is asked again. */
 const SEARCH_DEBOUNCE_MS = 250;
@@ -52,15 +64,25 @@ const COLOR_FACETS = COLOR_FACET_OPTIONS.map((option) => option.value);
 /** The colour-by facet the page uses when its URL names none, as the prototype does. */
 const DEFAULT_COLOR_BY: ColorFacet = "repo";
 
+/** No Parent agent value chosen: one array, so a render that chooses none hands the colour scale
+ *  the same dependency. */
+const NO_AGENTS: readonly string[] = [];
+
 type Mode = "timeline" | "list";
 
 /** How the filtered PRs are shown: dots on the timeline or a sortable list, the facet the merges
- *  are coloured by, and whether the timeline splits them into one column per value. */
+ *  are coloured by, whether the timeline splits them into one column per value, and, coloured by
+ *  Parent agent, the values chosen to have their own colour and lane (`agents`). */
 interface DeliveryView {
   colorBy: ColorFacet;
   lanes: boolean;
   mode: Mode;
+  agents: string[];
 }
+
+/** The repeatable URL parameter that names the Parent agent values given their own colour and
+ *  lane, kept apart from the facet filters, which narrow the population. */
+const AGENTS_PARAM = ["agents"] as const;
 
 /** A sub-window of the read window a brush drag set (`ws`/`we`): it narrows what the chart, the
  *  list and the count show without a new read, so the facets keep counting the whole window. */
@@ -70,6 +92,9 @@ export interface BrushWindow {
 }
 
 interface DeliveryUrlState {
+  /** The window the URL names: a rolling preset or a custom range. */
+  window: WindowChoice;
+  /** That window's range: a preset's ends at the moment the preset was chosen or first read. */
   from: string;
   to: string;
   filters: Filters;
@@ -84,25 +109,48 @@ interface DeliveryUrlState {
  *  identity, so a render with an unchanged URL hands `deliveryTimelineQuery` the same options. */
 function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => void] {
   const [searchParams] = useSearchParams();
-  const defaultWindowRef = useRef<{ from: string; to: string } | undefined>(undefined);
-  // Frozen at first render: computing "now" fresh on every render would mint a new ISO string
-  // (and so a new deliveryTimelineQuery cache key) on every render whenever the URL carries no
-  // explicit from/to, refetching in a tight loop instead of once.
-  if (defaultWindowRef.current === undefined) {
-    const nowMs = Date.now();
-    defaultWindowRef.current = {
-      from: new Date(nowMs - DEFAULT_WINDOW_MS).toISOString(),
-      to: new Date(nowMs).toISOString(),
-    };
+  const update = useSearchParamsUpdate();
+  const malformedWindow = hasMalformedWindowParams(searchParams);
+  const windowChoice = readWindow(searchParams);
+  // A preset's range is computed when the preset is chosen or first read, then held: computing
+  // "now" fresh on every render would mint a new ISO string (and so a new deliveryTimelineQuery
+  // cache key) on every render, refetching in a tight loop instead of once. A custom range drops
+  // it, so coming back to a preset starts it from that moment.
+  const presetRef = useRef<{ preset: WindowPreset; from: string; to: string } | undefined>(
+    undefined
+  );
+  let from: string;
+  let to: string;
+  if (windowChoice.kind === "custom") {
+    presetRef.current = undefined;
+    ({ from, to } = windowChoice);
+  } else {
+    if (presetRef.current?.preset !== windowChoice.preset) {
+      presetRef.current = {
+        preset: windowChoice.preset,
+        ...presetRange(windowChoice.preset, Date.now()),
+      };
+    }
+    ({ from, to } = presetRef.current);
   }
-  const from = searchParams.get("from") ?? defaultWindowRef.current.from;
-  const to = searchParams.get("to") ?? defaultWindowRef.current.to;
+  useEffect(() => {
+    if (!malformedWindow) return;
+    update((params) => {
+      params.delete("from");
+      params.delete("to");
+      params.delete("window");
+      params.delete("ws");
+      params.delete("we");
+    });
+  }, [malformedWindow, update]);
   const search = searchParams.get("q") ?? "";
   const colorByParam = searchParams.get("colorBy");
   const colorBy = COLOR_FACETS.find((facet) => facet === colorByParam) ?? DEFAULT_COLOR_BY;
   const lanes = searchParams.get("lanes") === "1";
   const mode: Mode = searchParams.get("mode") === "list" ? "list" : "timeline";
-  const view = useMemo(() => ({ colorBy, lanes, mode }), [colorBy, lanes, mode]);
+  const { agents: agentParams } = useRepeatableSearchParams(AGENTS_PARAM);
+  const agents = useMemo(() => [...new Set(agentParams)], [agentParams]);
+  const view = useMemo(() => ({ colorBy, lanes, mode, agents }), [colorBy, lanes, mode, agents]);
   const ws = searchParams.get("ws");
   const we = searchParams.get("we");
   const brush = useMemo(
@@ -120,12 +168,19 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
     [arrayParams, search]
   );
 
-  const update = useSearchParamsUpdate();
   const setState = useCallback(
     (next: DeliveryUrlState) => {
       update((params) => {
-        params.set("from", next.from);
-        params.set("to", next.to);
+        if (next.window.kind === "custom") {
+          params.set("from", next.window.from);
+          params.set("to", next.window.to);
+          params.delete("window");
+        } else {
+          params.delete("from");
+          params.delete("to");
+          if (next.window.preset === DEFAULT_WINDOW_PRESET) params.delete("window");
+          else params.set("window", next.window.preset);
+        }
         for (const key of FACET_KEYS) {
           params.delete(key);
           for (const value of next.filters[key]) params.append(key, value);
@@ -138,6 +193,8 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
         else params.delete("lanes");
         if (next.view.mode === "list") params.set("mode", "list");
         else params.delete("mode");
+        params.delete("agents");
+        for (const agent of next.view.agents) params.append("agents", agent);
         if (next.brush === null) {
           params.delete("ws");
           params.delete("we");
@@ -150,7 +207,7 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
     [update]
   );
 
-  return [{ from, to, filters, view, brush }, setState];
+  return [{ window: windowChoice, from, to, filters, view, brush }, setState];
 }
 
 /** `value`, once it has held still for `delayMs`. */
@@ -209,6 +266,46 @@ function LanesSwitch({
       </button>
       <span className={textPrimaryOnCanvas}>Swimlanes</span>
     </label>
+  );
+}
+
+/** Coloured by Parent agent: which values get their own colour and lane, busiest first. The rest
+ *  share one Other colour and lane; with none chosen, the colours and lanes are the facet's usual. */
+function OwnColourPicker({
+  counts,
+  groups,
+  selected,
+  onChange,
+}: {
+  counts: Readonly<Record<string, number>>;
+  groups: readonly DeliverySessionGroup[];
+  selected: readonly string[];
+  onChange: (next: string[]) => void;
+}): ReactNode {
+  const [open, setOpen] = useState(false);
+  const options = Object.keys(counts)
+    .filter((value) => !(value in PLACEHOLDER_LABELS))
+    .sort((a, b) => (counts[b] ?? 0) - (counts[a] ?? 0));
+  const state = selected.length === 0 ? "every value" : `${selected.length} chosen`;
+  const countOf = (value: string) => counts[value] ?? 0;
+  return (
+    <MultiSelect
+      emptyMessage="No matches."
+      label="Own colour and lane"
+      onChange={onChange}
+      onOpenChange={setOpen}
+      open={open}
+      optionDetail={(value) => String(countOf(value))}
+      optionDetailLabel={(value) => `${countOf(value)} PR${countOf(value) === 1 ? "" : "s"}`}
+      optionLabel={(value) => parentAgentLabel(value, groups)}
+      options={[...new Set([...selected, ...options])]}
+      searchLabel="Search parent agents…"
+      selected={selected}
+      triggerAriaLabel={`Own colour and lane: ${state}`}
+      triggerClassName={`flex h-8 items-center rounded border px-2 text-sm ${borderStrong} ${surfaceBg} ${textPrimaryOnSurface}`}
+    >
+      <span className="truncate">Own colour: {state}</span>
+    </MultiSelect>
   );
 }
 
@@ -285,9 +382,12 @@ export function DeliveryPage(): ReactNode {
     ],
     [data]
   );
+  // Coloured by Parent agent, the chosen values take the palette and the rest share Other.
+  const chosenAgents = state.view.colorBy === "parentAgent" ? state.view.agents : NO_AGENTS;
   const colorScale = useMemo(
-    () => buildColorScale(data?.color_counts[COLOR_COUNT_KEYS[state.view.colorBy]] ?? {}),
-    [data, state.view.colorBy]
+    () =>
+      buildColorScale(data?.color_counts[COLOR_COUNT_KEYS[state.view.colorBy]] ?? {}, chosenAgents),
+    [data, state.view.colorBy, chosenAgents]
   );
   const allRepos = useMemo(() => Object.keys(data?.color_counts.repo ?? {}), [data]);
 
@@ -314,6 +414,17 @@ export function DeliveryPage(): ReactNode {
     <section className="flex flex-col gap-3 xl:h-[calc(100dvh-3rem)]">
       <header className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
         <h1 className={`text-xl font-bold ${textPrimaryOnCanvas}`}>Delivery timeline</h1>
+        {notConfigured ? null : (
+          <WindowControl
+            key={
+              state.window.kind === "custom"
+                ? `${state.window.from}|${state.window.to}`
+                : state.window.preset
+            }
+            onChange={(window) => setState({ ...state, window, brush: null })}
+            value={state.window}
+          />
+        )}
         {data === undefined ? null : (
           <div className={`text-xs ${textMutedOnCanvas}`}>
             Generated {new Date(answeredAt).toLocaleString()} · window{" "}
@@ -393,6 +504,14 @@ export function DeliveryPage(): ReactNode {
                     ))}
                   </select>
                 </label>
+                {state.view.colorBy === "parentAgent" ? (
+                  <OwnColourPicker
+                    counts={data.color_counts.parent_agent}
+                    groups={data.session_groups}
+                    onChange={(agents) => setView({ ...state.view, agents })}
+                    selected={state.view.agents}
+                  />
+                ) : null}
                 {state.view.mode === "timeline" ? (
                   <LanesSwitch
                     checked={state.view.lanes}
@@ -415,6 +534,7 @@ export function DeliveryPage(): ReactNode {
                 <div className="flex h-[75dvh] min-h-[28rem] min-w-0 flex-col xl:h-auto xl:flex-1">
                   {state.view.mode === "timeline" ? (
                     <Timeline
+                      chosen={chosenAgents}
                       colorBy={state.view.colorBy}
                       colorScale={colorScale}
                       components={data.components}
@@ -424,6 +544,7 @@ export function DeliveryPage(): ReactNode {
                       onSelect={setSelection}
                       prs={shownPRs}
                       runs={data.runs}
+                      sessionGroups={data.session_groups}
                       waiting={waitingMerges}
                       window={activeWindow}
                     />
@@ -436,6 +557,7 @@ export function DeliveryPage(): ReactNode {
                       onSelectRun={(id) => setSelection({ kind: "deploy", id })}
                       prs={shownPRs}
                       selectedId={selection?.kind === "pr" ? selection.id : undefined}
+                      sessionGroups={data.session_groups}
                     />
                   )}
                 </div>
@@ -445,6 +567,7 @@ export function DeliveryPage(): ReactNode {
                   prs={data.prs}
                   runs={data.runs}
                   selection={drillDownSelection}
+                  sessionGroups={data.session_groups}
                 />
               </div>
             </>

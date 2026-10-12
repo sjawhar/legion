@@ -65,6 +65,7 @@ export type {
   CreateAskInput,
   CreateBroadcastInput,
   CreateCommentInput,
+  CreateDeliverySessionGroupInput,
   CreatedAgentToken,
   CreateIssueInput,
   CreateMessageInput,
@@ -94,6 +95,7 @@ export type {
   DeliveryRunJob,
   DeliveryRunJobDetail,
   DeliveryRunProduction,
+  DeliverySessionGroup,
   DeliverySettings,
   DeliverySettingsInput,
   DeliverySpread,
@@ -141,6 +143,8 @@ export type {
   MessageRead,
   MyAnswerRow,
   MyAnswersResponse,
+  MyRepliesResponse,
+  MyReplyRow,
   OpenAskOwner,
   ProgressCount,
   Project,
@@ -155,6 +159,7 @@ export type {
   SubscriptionRemovedEventPayload,
   Suggestion,
   TargetCandidate,
+  UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
   UserAgentStateInput,
@@ -283,7 +288,12 @@ export interface MachineLogin {
   /** The service a service's login is for (`legion-daemon`), whose sessions are its worker pods;
    *  null for the viewer's own machine. */
   service: string | null;
-  /** The login of the person who approved it. */
+  /** The Kubernetes ServiceAccount a service's token login proved
+   *  (`system:serviceaccount:<namespace>:<name>`); null for every login a person approved, and
+   *  absent from a broker older than token logins. */
+  subject?: string | null;
+  /** The login of the person who approved it; empty for a service's token login, which no person
+   *  approves. */
   approved_by: string;
   issued_at: string;
   expires_at: string;

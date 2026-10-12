@@ -951,3 +951,28 @@ test("maps an ask resolution to the authenticated API", async () => {
     reason: "A newer question supersedes this one.",
   });
 });
+
+test("createProject posts the key, name and actor and answers the created project", async () => {
+  const project = { key: "CORE", name: "Core", open_asks: 0, created_at: "2026-10-11T00:00:00Z" };
+  const { fetchImpl, requests } = fakeFetch([jsonResponse(project, 201)]);
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+  expect(await client.createProject({ key: "CORE", name: "Core", actor })).toEqual(project);
+  expect(requests.map((request) => [request.init.method, new URL(request.url).pathname])).toEqual([
+    ["POST", "/api/v1/projects"],
+  ]);
+  expect(requestBody(requests[0] as RecordedRequest)).toEqual({ key: "CORE", name: "Core", actor });
+});
+
+test("createProject surfaces PROJECT_EXISTS as the refusal's code", async () => {
+  const { fetchImpl } = fakeFetch([
+    jsonResponse({ code: "PROJECT_EXISTS", error: "a project with this key already exists" }, 409),
+  ]);
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+  await expect(client.createProject({ key: "CORE", name: "Core", actor })).rejects.toMatchObject({
+    code: "PROJECT_EXISTS",
+    status: 409,
+    fromDispatch: true,
+  });
+});

@@ -569,6 +569,7 @@ func TestEventNotifyRules(t *testing.T) {
 		{name: "repository project mapping", event: model.Event{Type: "settings.repo_project.updated", Actor: user}, want: false},
 		{name: "architecture source", event: model.Event{Type: "settings.architecture_source.updated", Actor: user}, want: false},
 		{name: "user state", event: model.Event{Type: "user_state.updated", Actor: user}, want: false},
+		{name: "user thread state", event: model.Event{Type: "user_thread_state.updated", Actor: user}, want: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			if got := broker.Notify(test.event); got != test.want {
@@ -1799,7 +1800,14 @@ func TestIssueDocumentCreationIndexesDispatchReferences(t *testing.T) {
 	}
 }
 
-func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
+// cookieRequest sends one request to a newCookieServer handler as alice, with body as its JSON.
+type cookieRequest func(method, target string, body any) *httptest.ResponseRecorder
+
+// newCookieServer is a server whose people sign in with a session cookie, beside the shared agent
+// bearer: the handler, the store's session table, which a test revokes, alice@d.example's cookie,
+// and a request sent with it.
+func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.Cookie, cookieRequest) {
+	t.Helper()
 	database := storetest.Open(t)
 	sessions := store.NewPgSessionStore(database.Pool)
 	cookieIdentity := identity.CookieIdentity{SigningKey: "signing-key", Sessions: sessions}
@@ -1846,6 +1854,11 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 		handler.ServeHTTP(response, req)
 		return response
 	}
+	return handler, sessions, cookie, request
+}
+
+func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
+	handler, sessions, cookie, request := newCookieServer(t)
 	if response := request(http.MethodPost, "/api/v1/projects", map[string]string{"key": "TEST", "name": "Test"}); response.Code != http.StatusCreated {
 		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
 	}

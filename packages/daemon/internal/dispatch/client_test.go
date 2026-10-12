@@ -60,6 +60,7 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 			"title":               "Ship Dispatch client",
 			"status":              "in_progress",
 			"rank":                "opaque-rank",
+			"labels":              []string{"repo:x", "LEGION"},
 			"parent":              "LEGION-1",
 			"primary_artifact_id": "artifact-8",
 			"last_seq":            47,
@@ -71,11 +72,63 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get issue: %v", err)
 	}
-	if issue.Key != "LEGION-8" || issue.Project != "LEGION" || issue.Title != "Ship Dispatch client" || issue.Status != "in_progress" || issue.PrimaryArtifactID != "artifact-8" || issue.LastSeq != 47 {
+	if issue.Key != "LEGION-8" || issue.Project != "LEGION" || issue.Title != "Ship Dispatch client" || issue.Status != "in_progress" || issue.PrimaryArtifactID != "artifact-8" || issue.LastSeq != 47 ||
+		issue.Rank != "opaque-rank" || !issue.HandedOver || len(issue.Labels) != 2 || issue.Labels[0] != "repo:x" || issue.Labels[1] != "LEGION" {
 		t.Fatalf("issue = %#v, want workflow fields from Dispatch", issue)
 	}
 	if issue.Parent == nil || *issue.Parent != "LEGION-1" {
 		t.Fatalf("issue parent = %v, want LEGION-1", issue.Parent)
+	}
+}
+
+// A hand-over is one PATCH carrying the status and an additive legion label under the daemon's
+// actor, so concurrent labels survive and the one event it makes carries both.
+func TestHandOverWritesTheStatusAndTheLabelsInOnePatch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/v1/issues/LEGION-4" {
+			t.Fatalf("request = %s %s, want PATCH /api/v1/issues/LEGION-4", r.Method, r.URL.Path)
+		}
+		assertBearer(t, r)
+		var body struct {
+			Status           string   `json:"status"`
+			LabelsAdd        []string `json:"labels_add"`
+			ExpectedSequence int64    `json:"expected_sequence"`
+			Actor            struct {
+				Kind string `json:"kind"`
+				ID   string `json:"id"`
+			} `json:"actor"`
+		}
+		decodeJSON(t, r, &body)
+		if body.Status != "todo" || len(body.LabelsAdd) != 1 || body.LabelsAdd[0] != LegionLabel || body.ExpectedSequence != 7 ||
+			body.Actor.Kind != "session" || body.Actor.ID != "legion-daemon:LEGION" {
+			t.Fatalf("hand-over request = %#v, want todo with additive legion at sequence 7 from legion-daemon:LEGION", body)
+		}
+		writeJSON(t, w, map[string]string{"status": "todo"})
+	}))
+	defer server.Close()
+
+	if err := New(server.URL, dispatchToken).HandOver(context.Background(), Issue{Key: "LEGION-4", Status: "in_progress", Labels: []string{"repo:x"}, LastSeq: 7}, "todo"); err != nil {
+		t.Fatalf("hand over: %v", err)
+	}
+}
+
+// A hand-over of an issue a person already labelled writes only the status, but on the same
+// precondition: expected_sequence, so a person's park between the daemon's read and its write is
+// refused (ISSUE_CHANGED) rather than overwritten. It adds no label, since the issue carries one.
+func TestHandOverOfALabelledIssueWritesTheStatusAtItsSequence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]json.RawMessage
+		decodeJSON(t, r, &body)
+		_, labelsAdd := body["labels_add"]
+		if string(body["status"]) != `"todo"` || string(body["expected_sequence"]) != "9" || labelsAdd {
+			t.Fatalf("hand-over request of a labelled issue = %v, want status todo at expected_sequence 9 and no labels_add", body)
+		}
+		writeJSON(t, w, map[string]string{"status": "todo"})
+	}))
+	defer server.Close()
+
+	if err := New(server.URL, dispatchToken).HandOver(context.Background(), Issue{Key: "LEGION-4", Status: "testing", Labels: []string{"Legion"}, HandedOver: true, LastSeq: 9}, "todo"); err != nil {
+		t.Fatalf("hand over: %v", err)
 	}
 }
 
@@ -320,6 +373,25 @@ func TestCarriesLegionLabelMatchesTheLabelInAnyCaseAndNothingElse(t *testing.T) 
 	} {
 		if got := CarriesLegionLabel(tc.labels); got != tc.want {
 			t.Errorf("CarriesLegionLabel(%q) = %v, want %v", tc.labels, got, tc.want)
+		}
+	}
+}
+
+// A daemon newer than its Dispatch sends fields the older server does not know yet (labels_add,
+// expected_sequence on a hand-over), which it answers 400 INVALID_JSON naming the unknown field.
+// That refusal ends when Dispatch is upgraded, so it is ridden out, not taken as permanent, and the
+// two need not be deployed in a set order. Any other unknown field or malformed body stays permanent.
+func TestAnUnknownFieldRefusalIsRiddenOutUntilDispatchKnowsTheField(t *testing.T) {
+	for _, field := range []string{"labels_add", "expected_sequence"} {
+		unknown := &Error{Status: http.StatusBadRequest, Code: "INVALID_JSON", Message: `invalid JSON body: json: unknown field "` + field + `"`}
+		if refusal, permanent := PermanentRefusal(unknown); permanent {
+			t.Fatalf("PermanentRefusal(unknown %s) = %v, permanent; want it ridden out", field, refusal)
+		}
+	}
+	for _, message := range []string{`invalid JSON body: json: unknown field "bogus"`, "invalid JSON body: unexpected EOF"} {
+		refused := &Error{Status: http.StatusBadRequest, Code: "INVALID_JSON", Message: message}
+		if _, permanent := PermanentRefusal(refused); !permanent {
+			t.Fatalf("PermanentRefusal(%q) = not permanent; want it permanent", message)
 		}
 	}
 }

@@ -84,6 +84,7 @@ test("swimlanes off: one Merges column holding every merge", () => {
       filters: noFilters,
       width: widthFor(1),
       components: {},
+      sessionGroups: [],
     })
   ).toEqual([{ key: "__merges__", label: "Merges", count: 21 }]);
 });
@@ -95,6 +96,7 @@ test("the busiest values get lanes, the rest fold into Other, and the lanes neve
     filters: noFilters,
     width: widthFor(3),
     components: {},
+    sessionGroups: [],
   });
   expect(lanes).toEqual([
     { key: "a", label: "a", count: 6 },
@@ -110,6 +112,7 @@ test("a one-lane budget folds every value into Other, never one value beside it"
     filters: noFilters,
     width: widthFor(1),
     components: {},
+    sessionGroups: [],
   });
   expect(lanes).toEqual([{ key: OTHER_LANE, label: "Other", count: 21 }]);
 });
@@ -127,6 +130,7 @@ test("placeholder lanes come after Other and always show", () => {
     filters: noFilters,
     width: widthFor(3),
     components: {},
+    sessionGroups: [],
   });
   expect(lanes.map((lane) => [lane.label, lane.count])).toEqual([
     ["P0", 3],
@@ -142,8 +146,63 @@ test("a facet with values picked in its own filter shows exactly those, never fo
     filters: { ...noFilters, author: ["a", "b", "c", "d", "e", "f"] },
     width: widthFor(1),
     components: {},
+    sessionGroups: [],
   });
   expect(lanes.map((lane) => lane.key)).toEqual(["a", "b", "c", "d", "e", "f"]);
+});
+
+test("laned by Parent agent, a group's lane reads as the group's name", () => {
+  const grouped = [
+    ...byAuthor("a", 2, 1).map((pr) => ({ ...pr, parent_agent: "group:g1" })),
+    ...byAuthor("b", 1, 100).map((pr) => ({ ...pr, parent_agent: "Reviewer" })),
+  ];
+  const lanes = foldLanes(grouped, {
+    colorBy: "parentAgent",
+    lanes: true,
+    filters: noFilters,
+    width: widthFor(3),
+    components: {},
+    sessionGroups: [
+      {
+        created_at: "2026-10-11T00:00:00Z",
+        created_by: { id: "alice@example.com", kind: "user" },
+        id: "g1",
+        name: "Release crew",
+        sessions: ["s1", "s2"],
+        updated_at: "2026-10-11T00:00:00Z",
+        updated_by: { id: "alice@example.com", kind: "user" },
+      },
+    ],
+  });
+  expect(lanes.map((lane) => [lane.key, lane.label])).toEqual([
+    ["group:g1", "Release crew"],
+    ["Reviewer", "Reviewer"],
+  ]);
+});
+
+test("laned by Parent agent with values chosen, each chosen value has its lane, in the chosen order, and the rest share Other at any width", () => {
+  const agents = [
+    ...byAuthor("x", 3, 1).map((pr) => ({ ...pr, parent_agent: "a" })),
+    ...byAuthor("x", 2, 100).map((pr) => ({ ...pr, parent_agent: "b" })),
+    ...byAuthor("x", 1, 200).map((pr) => ({ ...pr, parent_agent: "c" })),
+    ...byAuthor("x", 1, 300),
+  ];
+  for (const width of [widthFor(1), widthFor(8)]) {
+    const lanes = foldLanes(agents, {
+      colorBy: "parentAgent",
+      lanes: true,
+      filters: noFilters,
+      width,
+      components: {},
+      sessionGroups: [],
+      chosen: ["b", "b"],
+    });
+    expect(lanes.map((lane) => [lane.key, lane.count])).toEqual([
+      ["b", 2],
+      [OTHER_LANE, 4],
+      ["__no_session__", 1],
+    ]);
+  }
 });
 
 test("a drag becomes the brush window earlier end first, and an unplaced end sets none", () => {

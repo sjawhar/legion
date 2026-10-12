@@ -42,11 +42,12 @@ for.
 
 | Area | Commands |
 | --- | --- |
-| Issues | `dispatch issue` creates one. `dispatch issue-update` changes status, title, labels, priority, parent, links, or components. `dispatch claim` claims an issue before work starts. `dispatch issues` lists a project's issues. |
+| Issues | `dispatch issue` creates one; `--blocked-by <key>`, repeated, names up to 20 issues in the same project it waits on. `dispatch issue-update` changes status, title, labels, priority, parent, links, blockers, or components; its `--blocked-by` replaces the list, and `--clear-blocked-by` empties it. `dispatch claim` claims an issue before work starts. `dispatch issues` lists a project's issues. |
+| Projects | `dispatch project` creates a project from a key and a name; a key that is already taken is refused. `dispatch projects` lists every project's key and name. |
 | Asks | `dispatch ask` opens one. `dispatch edit-ask` rewords an open one. `dispatch resolve-ask` retracts or resolves one. `dispatch follow` follows or leaves an ask's thread. `dispatch open-asks` lists open asks. |
 | Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |
-| Documents | `dispatch doc-read` reads a document, or the text of an uploaded file. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
+| Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
 | Reading | `dispatch read` reads an issue, ask, comment, message, or document summary. `dispatch search` searches everything. `dispatch whoami` reports who Dispatch takes the agent for. |
 | Architecture | `dispatch architecture-sync` imports a project's architecture model now. |
 
@@ -152,8 +153,12 @@ issue reaches you unless you subscribe to the issue's Envoy topic,
 
 A person can also message you from the Agents page:
 
-- On Oh My Pi, their **Send** or **Aside** arrives as their own message in your conversation.
-  Answer it there, as you would anything typed at your terminal.
+- On Oh My Pi, their **Send** or **Aside** arrives as their own message in your conversation,
+  except a message beginning with `/` runs as the session's terminal would run it. A prompt
+  template, file command or skill gives you the resulting prompt; an unknown `/name` gives you the
+  words themselves. What a command prints, or its note that it did not run because it belongs
+  only to the terminal, is already a **Reply via Dispatch**: write nothing for it. Only a command
+  that also submits a prompt, such as `/force:<tool> <prompt>`, gives you that prompt to answer.
 - A **BTW**, a broadcast, or any message to a host that takes no such turn (Claude Code) arrives as
   a Dispatch notice with a ready-made reply command. Answer with `dispatch message` and its
   `--in-reply-to`.

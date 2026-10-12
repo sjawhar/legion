@@ -852,12 +852,13 @@ func TestASpecOfFrontMatterAndTheMostHeadingsIsStored(t *testing.T) {
 	}
 }
 
-// Every block's path in one walk (pmdoc.BlockPaths, which a cold read caches beside the document's
-// text and blocks) allocates at most the bound for the heaviest tables the element limit admits:
-// the two- and four-column tables of the most rows, and the widest table, one header and one body
-// row of the most cells. Every row, cell and cell paragraph carries a block id, so a walk that
-// copied a row's cells for every id or laid the rows above out for every cell would cost the
-// square of the width in strings, and its cube in grid steps.
+// Every block's path and every table's rows in one walk (pmdoc.BlockPathsAndTableRows, which a
+// cold read caches beside the document's text and blocks) allocates at most the bound for the
+// heaviest tables the element limit admits: the two- and four-column tables of the most rows, and
+// the widest table, one header and one body row of the most cells. Every row, cell and cell
+// paragraph carries a block id, so a walk that copied a row's cells for every id or laid the rows
+// above out for every cell would cost the square of the width in strings, and its cube in grid
+// steps.
 func TestBlockPathsOfTheHeaviestTablesStayWithinTheMemoryBound(t *testing.T) {
 	shapes := []admittedShape{{
 		name: "the widest table",
@@ -883,20 +884,96 @@ func TestBlockPathsOfTheHeaviestTablesStayWithinTheMemoryBound(t *testing.T) {
 			runtime.GC()
 			runtime.ReadMemStats(&before)
 			started := time.Now()
-			paths, err := pmdoc.BlockPaths(tree)
+			paths, rows, err := pmdoc.BlockPathsAndTableRows(tree)
 			elapsed := time.Since(started)
 			runtime.ReadMemStats(&after)
 			if err != nil {
-				t.Fatalf("BlockPaths: %v", err)
+				t.Fatalf("BlockPathsAndTableRows: %v", err)
 			}
 			allocated := int64(after.TotalAlloc - before.TotalAlloc)
-			t.Logf("%s: %d paths, %d MiB allocated in %s", shape.name, len(paths), allocated>>20, elapsed)
+			cells := 0
+			for _, table := range rows {
+				for _, row := range table {
+					cells += len(row.Cells)
+				}
+			}
+			t.Logf("%s: %d paths, %d cells listed, %d MiB allocated in %s", shape.name, len(paths), cells, allocated>>20, elapsed)
 			if len(paths) < 3*pmdoc.MaxDocumentElements/16 {
 				t.Errorf("%s: %d paths, want the table's every row, cell and paragraph", shape.name, len(paths))
 			}
+			if cells < pmdoc.MaxDocumentElements/16 {
+				t.Errorf("%s: %d cells listed, want the table's every cell", shape.name, cells)
+			}
 			if allocated > requestMemoryBound {
-				t.Errorf("BlockPaths of %s allocated %d MiB, want at most %d MiB", shape.name, allocated>>20, requestMemoryBound>>20)
+				t.Errorf("BlockPathsAndTableRows of %s allocated %d MiB, want at most %d MiB", shape.name, allocated>>20, requestMemoryBound>>20)
+			}
+			// A document a room holds is read from its live tree on every GET /blocks, uncached, so
+			// its tables' rows come from TableRows alone, which builds no path.
+			runtime.GC()
+			runtime.ReadMemStats(&before)
+			started = time.Now()
+			alone, err := pmdoc.TableRows(tree)
+			elapsed = time.Since(started)
+			runtime.ReadMemStats(&after)
+			if err != nil {
+				t.Fatalf("TableRows: %v", err)
+			}
+			allocated = int64(after.TotalAlloc - before.TotalAlloc)
+			t.Logf("%s: TableRows alone, %d tables, %d MiB allocated in %s", shape.name, len(alone), allocated>>20, elapsed)
+			if allocated > requestMemoryBound {
+				t.Errorf("TableRows of %s allocated %d MiB, want at most %d MiB", shape.name, allocated>>20, requestMemoryBound>>20)
 			}
 		})
+	}
+}
+
+// A document a room holds is listed from its live tree, where a pasted HTML table carries spans no
+// markdown upload can (the shapes above are parsed markdown, so they hold none). Its tables share
+// the one budget of span cells a render of the document spends, in document order, so tables whose
+// spans each fill that budget cost the walk one budget, not one each: six tables whose header cell
+// spans 1,000 columns and the 100 rows below it, which a budget per table laid out at well past
+// the bound.
+func TestTableRowsOfSpannedTablesShareOneSpanBudget(t *testing.T) {
+	cell := func(kind, value string, colspan, rowspan int) *pmdoc.Node {
+		return &pmdoc.Node{
+			Type:     kind,
+			Attrs:    pmdoc.Attrs{"alignment": nil, "colspan": colspan, "colwidth": nil, "rowspan": rowspan},
+			Children: []*pmdoc.Node{{Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: value}}}},
+		}
+	}
+	tree := &pmdoc.Node{Type: "doc"}
+	for range 6 {
+		table := &pmdoc.Node{Type: "table", Children: []*pmdoc.Node{{Type: "table_header_row", Children: []*pmdoc.Node{cell("table_header", "Wide", 1_000, 101)}}}}
+		for row := range 100 {
+			table.Children = append(table.Children, &pmdoc.Node{Type: "table_row", Children: []*pmdoc.Node{cell("table_cell", fmt.Sprint(row), 1, 1)}})
+		}
+		tree.Children = append(tree.Children, table)
+	}
+	pmdoc.EnsureBlockIDs(tree)
+	for _, walk := range []struct {
+		name string
+		run  func() (int, error)
+	}{
+		{"TableRows", func() (int, error) { rows, err := pmdoc.TableRows(tree); return len(rows), err }},
+		{"BlockPathsAndTableRows", func() (int, error) { _, rows, err := pmdoc.BlockPathsAndTableRows(tree); return len(rows), err }},
+	} {
+		var before, after runtime.MemStats
+		runtime.GC()
+		runtime.ReadMemStats(&before)
+		started := time.Now()
+		tables, err := walk.run()
+		elapsed := time.Since(started)
+		runtime.ReadMemStats(&after)
+		if err != nil {
+			t.Fatalf("%s: %v", walk.name, err)
+		}
+		allocated := int64(after.TotalAlloc - before.TotalAlloc)
+		t.Logf("%s of six budget-filling spanned tables: %d tables listed, %d MiB allocated in %s", walk.name, tables, allocated>>20, elapsed)
+		if tables != 6 {
+			t.Errorf("%s listed %d tables, want all 6", walk.name, tables)
+		}
+		if allocated > requestMemoryBound {
+			t.Errorf("%s of six budget-filling spanned tables allocated %d MiB, want at most %d MiB", walk.name, allocated>>20, requestMemoryBound>>20)
+		}
 	}
 }
