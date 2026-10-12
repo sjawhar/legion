@@ -368,7 +368,7 @@ var credentialRules = []struct {
 	{pattern: regexp.MustCompile(`(?i)\b(bearer[ \x{FFFE}\x{FFFF}]+)(?:[A-Za-z0-9._~+/=*-]|` + heldSequence + `)+`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`\b(gh[pousr]_|github_pat_)(?:[A-Za-z0-9._-]|` + heldSequence + `){20,}`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`(?:\x{FFFF}eyJ(?:[A-Za-z0-9_-]|\x{FFFE}){8,}|\x{FFFF}\[[0-?]*(?:[@-~]|\\u[0-9A-Fa-f]{4})?eyJ[A-Za-z0-9_-]*\x{FFFE}(?:[A-Za-z0-9_-]|\x{FFFE})*|(?:^|[^A-Za-z0-9_\x{FFFE}\x{FFFF}-]|%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4})eyJ(?:[A-Za-z0-9_-]|` + jwtFirstHeldSequence + `){8,})\.(?:[A-Za-z0-9_-]|` + heldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `)*|\x{FFFF}\[[0-?]*(?:[@-~]?|\\u[0-9A-Fa-f]{4})eyJ`), replace: redactJWT},
-	{pattern: regexp.MustCompile(`\b(sk-|dsp_|ya29\.|xox[a-z]-|glpat-|npm_)(?:[A-Za-z0-9_-]|` + heldSequence + `){20,}`), replacement: "${1}***"},
+	{pattern: regexp.MustCompile(`\b(sk-|dsp_|ddsat_|ya29\.|xox[a-z]-|glpat-|npm_)(?:[A-Za-z0-9_-]|` + heldSequence + `){20,}`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`\b(AIza)(?:[A-Za-z0-9_-]|` + heldSequence + `){35,}`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`\b(AKIA|ASIA)(?:(?:` + heldSequence + `)*[A-Z0-9]){16}\b`), replacement: "${1}***"},
 }

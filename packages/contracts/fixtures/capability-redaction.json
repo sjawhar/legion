@@ -297,6 +297,12 @@
     },
     {
       "pattern": "prefixed-token",
+      "name": "a Datadog service account token (ddsat_)",
+      "detail": "dispatch: 401 for ddsat_EXAMPLE-not-a-real-token-00000000 revoked",
+      "want": "dispatch: 401 for ddsat_*** revoked"
+    },
+    {
+      "pattern": "prefixed-token",
       "name": "a Google OAuth access token (ya29.)",
       "detail": "google: 401 for ya29.a0AfH6SMBexampleToken0123456789abc",
       "want": "google: 401 for ya29.***"
