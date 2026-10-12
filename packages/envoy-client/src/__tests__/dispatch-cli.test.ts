@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ArtifactBlock } from "@legion/contracts";
 import { PROJECT_KEY_RULE } from "@legion/contracts";
 import { fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
@@ -32,6 +33,130 @@ const issue = {
   artifacts: [],
 };
 
+/** DSP-2's spec, whose blocks `dispatch doc-read --blocks` lists. "é" is two bytes in UTF-8, so
+ *  every block after the heading starts at a byte offset past its index in the string. */
+const intro = `${"x".repeat(59)}😀 then more words past the cut.`;
+const spec = [
+  "# Café plan",
+  "",
+  intro,
+  "",
+  "- First item",
+  "- Second item",
+  "",
+  "| # | Line | |",
+  "| --- | --- | --- |",
+  "| 1 | Backfill | extra |",
+  "",
+].join("\n");
+
+/** Where `text` first stands in `spec`, in UTF-8 bytes, as Dispatch's /blocks route reports it. */
+function byteRange(text: string): { from: number; to: number } {
+  const at = spec.indexOf(text);
+  if (at < 0) throw new Error(`the spec holds no ${JSON.stringify(text)}`);
+  const from = Buffer.byteLength(spec.slice(0, at));
+  return { from, to: from + Buffer.byteLength(text) };
+}
+
+const unanchored = { comments: 0, asks: 0 };
+const specBlocks: ArtifactBlock[] = [
+  {
+    id: "h-1",
+    type: "heading",
+    ...byteRange("# Café plan"),
+    token: "sha256:h",
+    references: unanchored,
+  },
+  {
+    id: "p-1",
+    type: "paragraph",
+    ...byteRange(intro),
+    token: "sha256:p",
+    references: { comments: 1, asks: 0 },
+  },
+  {
+    id: "l-1",
+    type: "bullet_list",
+    ...byteRange("- First item\n- Second item"),
+    token: "sha256:l",
+    references: unanchored,
+  },
+  {
+    id: "i-1",
+    type: "list_item",
+    ...byteRange("- First item"),
+    token: "sha256:i1",
+    references: unanchored,
+  },
+  {
+    id: "ip-1",
+    type: "paragraph",
+    ...byteRange("First item"),
+    token: "sha256:ip1",
+    references: unanchored,
+  },
+  {
+    id: "i-2",
+    type: "list_item",
+    ...byteRange("- Second item"),
+    token: "sha256:i2",
+    references: unanchored,
+  },
+  {
+    id: "t-1",
+    type: "table",
+    ...byteRange("| # | Line | |\n| --- | --- | --- |\n| 1 | Backfill | extra |"),
+    token: "sha256:t",
+    references: { comments: 0, asks: 1 },
+    table: {
+      rows: [
+        {
+          id: "r-0",
+          index: 0,
+          cells: [
+            { id: "c-0-0", row: 0, column: 0, header: "#", text: "#" },
+            { id: "c-0-1", row: 0, column: 1, header: "Line", text: "Line" },
+            { id: "c-0-2", row: 0, column: 2, header: "", text: "" },
+          ],
+        },
+        {
+          id: "",
+          index: 1,
+          cells: [
+            { id: "c-1-0", row: 1, column: 0, header: "#", text: "1" },
+            { id: "", row: 1, column: 1, header: "Line", text: "Backfill" },
+            { id: "c-1-2", row: 1, column: 2, header: "", text: "extra" },
+          ],
+        },
+      ],
+    },
+  },
+];
+
+const blocksIssue = {
+  ...issue,
+  key: "DSP-2",
+  primary_artifact_id: "doc-2",
+  open_asks: [],
+  artifacts: [
+    { id: "doc-2", slug: "spec", name: "spec.md", kind: "doc", primary: true, versions: [] },
+    {
+      id: "pic-2",
+      slug: "chart-png",
+      name: "chart.png",
+      kind: "image",
+      primary: false,
+      versions: [{ number: 1, mime: "image/png", size: PNG.length }],
+    },
+  ],
+};
+
+/** How the DSP-2 routes answer: a Dispatch older than the table listing omits `table`, and a
+ *  document a browser edits between the CLI's two reads of its text answers the second with other
+ *  text and another token. */
+let blocksServer = { tableRows: true, editedBetweenReads: false };
+let textReads = 0;
+
 const server = Bun.serve({
   port: 0,
   async fetch(request) {
@@ -39,6 +164,23 @@ const server = Bun.serve({
     const text = await request.text();
     const body = text === "" ? undefined : JSON.parse(text);
     requests.push({ method: request.method, path: pathname, body });
+    if (pathname === "/api/v1/issues/DSP-2" && request.method === "GET") {
+      return Response.json(blocksIssue);
+    }
+    if (pathname === "/api/v1/artifacts/doc-2/text") {
+      textReads++;
+      const edited = blocksServer.editedBetweenReads && textReads > 1;
+      return Response.json({
+        markdown: edited ? `${spec}\nTyped in the browser.\n` : spec,
+        version: 3,
+        token: edited ? "sha256:edited" : "sha256:doc",
+      });
+    }
+    if (pathname === "/api/v1/artifacts/doc-2/blocks") {
+      return Response.json(
+        blocksServer.tableRows ? specBlocks : specBlocks.map(({ table: _, ...block }) => block)
+      );
+    }
     if (pathname === "/api/v1/issues/DSP-1/asks" && request.method === "POST") {
       return Response.json({
         id: "ask-a",
@@ -131,6 +273,8 @@ let stateDir = "";
 beforeEach(() => {
   requests.length = 0;
   triage = false;
+  blocksServer = { tableRows: true, editedBetweenReads: false };
+  textReads = 0;
   stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
   // Each run is its own process in production: nothing the library remembers carries over.
   resetAdviceMemory();
@@ -353,6 +497,111 @@ describe("the dispatch CLI", () => {
     expect(stdout).toContain("Picture shot.png");
     expect(stdout).not.toContain("- picture: ");
     expect(stdout).toContain("dispatch: Dispatch took the call, but this session's state");
+  });
+
+  describe("doc-read --blocks", () => {
+    const listing = [
+      "Blocks of spec.md, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.",
+      "h-1 heading (sha256:h; 0 comments, 0 asks): # Café plan",
+      // The 60th character is an emoji, two UTF-16 units: a cut by code unit would split it.
+      `p-1 paragraph (sha256:p; 1 comment, 0 asks): ${"x".repeat(59)}😀…`,
+      "l-1 bullet_list (sha256:l; 0 comments, 0 asks): - First item - Second item",
+      "  i-1 list_item (sha256:i1; 0 comments, 0 asks): - First item",
+      "    ip-1 paragraph (sha256:ip1; 0 comments, 0 asks): First item",
+      "  i-2 list_item (sha256:i2; 0 comments, 0 asks): - Second item",
+      "t-1 table (sha256:t; 0 comments, 1 ask): | # | Line | | | --- | --- | --- | | 1 | Backfill | extra |",
+    ];
+    const reads = [
+      "/api/v1/issues/DSP-2",
+      "/api/v1/artifacts/doc-2/text",
+      "/api/v1/artifacts/doc-2/blocks",
+      "/api/v1/artifacts/doc-2/text",
+    ];
+
+    test("lists every block's id, type, token, anchors and opening words, and each table's rows and cells", async () => {
+      const { code, stdout } = await run(["doc-read", "--issue", "DSP-2", "--blocks"], omp);
+      expect(code).toBe(0);
+      expect(stdout).toBe(
+        [
+          ...listing,
+          "  row 0, id r-0",
+          '    row 0 column 0, id c-0-0, under "#": #',
+          '    row 0 column 1, id c-0-1, under "Line": Line',
+          "    row 0 column 2, id c-0-2: (empty)",
+          "  row 1, no id yet",
+          '    row 1 column 0, id c-1-0, under "#": 1',
+          '    row 1 column 1, no id yet, under "Line": Backfill',
+          "    row 1 column 2, id c-1-2: extra",
+          "",
+          "Document token: sha256:doc",
+          "",
+        ].join("\n")
+      );
+      expect(requests.map((request) => request.path)).toEqual(reads);
+    });
+
+    test("says the Dispatch lists no rows when its table entry carries none, and reads no markdown for them", async () => {
+      blocksServer.tableRows = false;
+      const { code, stdout } = await run(["doc-read", "--issue", "DSP-2", "--blocks"], omp);
+      expect(code).toBe(0);
+      expect(stdout).toBe(
+        [
+          ...listing,
+          "  This Dispatch does not report table rows yet, so no row or column index is listed.",
+          "",
+          "Document token: sha256:doc",
+          "",
+        ].join("\n")
+      );
+      expect(requests.map((request) => request.path)).toEqual(reads);
+    });
+
+    test("refuses an uploaded picture, naming it, and reads none of its bytes", async () => {
+      const { code, stdout } = await run(
+        ["doc-read", "--issue", "DSP-2", "--artifact", "chart.png", "--blocks"],
+        omp
+      );
+      expect(code).toBe(1);
+      expect(stdout).toBe(
+        "chart.png is an uploaded image, not a document, so it has no blocks. Read it with dispatch doc-read without --blocks.\n"
+      );
+      expect(requests.map((request) => request.path)).toEqual(["/api/v1/issues/DSP-2"]);
+    });
+
+    test("refuses a conversation's upload, naming it, as it refuses an issue's", async () => {
+      const { code, stdout } = await run(
+        ["doc-read", "--ref", "dispatch://agent/ses-pic/artifact/shot-png@v1", "--blocks"],
+        omp
+      );
+      expect(code).toBe(1);
+      expect(stdout).toBe(
+        "shot.png is an uploaded image, not a document, so it has no blocks. Read it with dispatch doc-read without --blocks.\n"
+      );
+      expect(requests.map((request) => request.path)).toEqual([
+        "/api/v1/agents/ses-pic/artifacts/shot-png",
+      ]);
+    });
+
+    test("refuses a version, since only the live document's blocks are what an edit addresses", async () => {
+      const { code, stdout } = await run(
+        ["doc-read", "--issue", "DSP-2", "--blocks", "--version", "2"],
+        omp
+      );
+      expect(code).toBe(1);
+      expect(stdout).toContain(
+        "- blocks lists the live document, the one dispatch doc-edit changes; name no version"
+      );
+      expect(requests).toEqual([]);
+    });
+
+    test("refuses a document that changed between its reads, listing nothing", async () => {
+      blocksServer.editedBetweenReads = true;
+      const { code, stdout } = await run(["doc-read", "--issue", "DSP-2", "--blocks"], omp);
+      expect(code).toBe(1);
+      expect(stdout).toBe(
+        "spec.md changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.\n"
+      );
+    });
   });
 
   test("dispatch project prints the created project, and a taken key exits 1 naming PROJECT_EXISTS", async () => {

@@ -586,8 +586,19 @@ func (s *Service) TextWithBlocks(ctx context.Context, artifactID string) (string
 }
 
 // documentBlocks renders tree once into its canonical markdown and the blocks whose byte ranges
-// index into it, each with its token and, for a table, the blocks it holds.
+// index into it, each with its token and, for a table, the blocks it holds and its rows.
 func documentBlocks(tree *pmdoc.Node) (string, []model.ArtifactBlock, error) {
+	rows, err := pmdoc.TableRows(tree)
+	if err != nil {
+		return "", nil, documentSchemaError(err)
+	}
+	return renderedBlocks(tree, rows)
+}
+
+// renderedBlocks is documentBlocks with each table's rows already listed (pmdoc.TableRows). A
+// table block carries the rows of the table its id addresses: where two tables carry one id, the
+// first in document order, the one an edit naming that id changes.
+func renderedBlocks(tree *pmdoc.Node, rows map[string][]pmdoc.TableRow) (string, []model.ArtifactBlock, error) {
 	tableDescendants, err := pmdoc.TableDescendantIDs(tree)
 	if err != nil {
 		return "", nil, documentSchemaError(err)
@@ -600,6 +611,7 @@ func documentBlocks(tree *pmdoc.Node) (string, []model.ArtifactBlock, error) {
 	if err != nil {
 		return "", nil, documentSchemaError(err)
 	}
+	tables := make(map[string]*model.BlockTable, len(rows))
 	blocks := make([]model.ArtifactBlock, len(offsets))
 	for index, offset := range offsets {
 		blocks[index] = model.ArtifactBlock{
@@ -610,8 +622,30 @@ func documentBlocks(tree *pmdoc.Node) (string, []model.ArtifactBlock, error) {
 			Token:         tokens[offset.ID],
 			DescendantIDs: tableDescendants[offset.ID],
 		}
+		if offset.Type != "table" {
+			continue
+		}
+		table, listed := tables[offset.ID]
+		if !listed {
+			table = blockTable(rows[offset.ID])
+			tables[offset.ID] = table
+		}
+		blocks[index].Table = table
 	}
 	return markdown, blocks, nil
+}
+
+// blockTable is a table's rows as the API carries them.
+func blockTable(rows []pmdoc.TableRow) *model.BlockTable {
+	table := &model.BlockTable{Rows: make([]model.BlockTableRow, len(rows))}
+	for index, row := range rows {
+		cells := make([]model.BlockTableCell, len(row.Cells))
+		for column, cell := range row.Cells {
+			cells[column] = model.BlockTableCell(cell)
+		}
+		table.Rows[index] = model.BlockTableRow{ID: row.ID, Index: row.Index, Cells: cells}
+	}
+	return table
 }
 
 // BlockPath is where the block carrying blockID stands in the document the caller sees
@@ -640,7 +674,7 @@ func (s *Service) BlockPath(ctx context.Context, artifactID, blockID string) (mo
 }
 
 // modelBlockPath is path as the API carries it, in entries of its own. Its table position's row,
-// column, header and cells are shared with path, which BlockPaths shares across a table's paths and
+// column, header and cells are shared with path, which pmdoc.BlockPathsAndTableRows shares across a table's paths and
 // the read cache across every read of one stored head (documentRead); nothing writes them.
 func modelBlockPath(path pmdoc.BlockPath) model.BlockPath {
 	out := model.BlockPath{ID: path.ID, Type: path.Type, Path: make([]model.BlockPathEntry, len(path.Path))}

@@ -7,6 +7,11 @@
 - `MyReplyRow`, `MyReplyReply` and `MyRepliesResponse`, the page `GET /api/v1/me/replies`
   returns, and the `user_thread_state.updated` event with its `UserThreadStateUpdatedEventPayload`
   (LEGION-687).
+- `ArtifactBlock.table` (`BlockTable`, `BlockTableRow`, `BlockTableCell`): a table block's rows and
+  cells in `GET /api/v1/artifacts/{id}/blocks`, by the indexes `delete_row` and `delete_column`
+  take; optional, since a Dispatch older than the listing omits it. `dispatch_doc_read` takes
+  `blocks`, which lists the live document's blocks instead of its markdown, and `dispatch_doc_edit`
+  and `dispatch_doc_read` point to it for block ids and tokens (LEGION-693).
 
 - Added the `dispatch_project` spec, `{ key, name }` (strict), behind the `dispatch project`
   command, and `dispatch_projects`, no arguments, behind `dispatch projects`, which lists every

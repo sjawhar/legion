@@ -25,6 +25,14 @@
 
 ### Added
 
+- `dispatch doc-read --blocks` lists the live document's blocks instead of its markdown, one line
+  each in document order, indented under the block holding it: id, type, token, anchored comments
+  and asks, and opening words sliced from the live markdown by the block's byte range. Under a
+  table it lists each row by the index `delete_row` takes and each cell by its row, the column
+  `delete_column` takes and the header drawn above it, as Dispatch places them; a Dispatch that
+  does not report table rows yet is said to, with no index read from the markdown. It refuses a
+  version and an uploaded file, naming the file, and a document that changed between its two
+  reads of the text (LEGION-693).
 - `dispatch project --key <KEY> --name <name>` creates a Dispatch project as the calling session
   (`DispatchClient.createProject`, `POST /api/v1/projects`) and prints it with its dashboard link.
   A taken key exits 1 with `PROJECT_EXISTS: …`, and a bad key or an empty name with

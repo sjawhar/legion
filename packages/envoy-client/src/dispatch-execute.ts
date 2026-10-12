@@ -3,6 +3,7 @@ import type {
   Actor,
   Advised,
   Artifact,
+  ArtifactBlock,
   ArtifactUploadResponse,
   Ask,
   AskRead,
@@ -754,6 +755,17 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
       if (message !== undefined && messageIdOf(message) === undefined) {
         problems.push(
           "message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference"
+        );
+      }
+      break;
+    }
+    case "dispatch_doc_read": {
+      if (
+        optionalBoolean(args, "blocks") === true &&
+        optionalNumber(args, "version") !== undefined
+      ) {
+        problems.push(
+          "blocks lists the live document, the one dispatch doc-edit changes; name no version"
         );
       }
       break;
@@ -1790,6 +1802,78 @@ async function readUploadedFile(
     text: `File ${artifact.name}: ${file.mime}, version ${number}${of}, ${size}.\n\n${text}`,
     details,
   };
+}
+
+/** How many characters of a block's text `dispatch doc-read --blocks` shows: enough to tell blocks
+ *  apart without printing the document twice. */
+const BLOCK_OPENING_CHARS = 60;
+
+/**
+ * `dispatch doc-read --blocks`: the live document's blocks in document order, one line each, a
+ * block indented under the block whose markdown range holds it. Each line carries the id, type,
+ * token and anchor counts `/blocks` reports, then the block's opening words, sliced from the live
+ * markdown by the block's byte range (Dispatch reports UTF-8 offsets into `/text`'s markdown). A
+ * table lists its rows and cells from its `/blocks` entry, the indexes `delete_row` and
+ * `delete_column` take placed by Dispatch from its tree; a Dispatch whose entry carries no rows is
+ * said to report none, never answered from the markdown, since a column read from the markdown is
+ * not the index `delete_column` takes once a cell spans columns. The markdown is read before and
+ * after the blocks, and a document whose token or text moved between them is refused, since the
+ * offsets would slice text they were not computed over.
+ */
+async function listDocumentBlocks(
+  client: DispatchClient,
+  artifact: Artifact
+): Promise<{ text: string; token: string | undefined }> {
+  const before = await client.docRead(artifact.id);
+  const blocks = await client.artifactBlocks(artifact.id);
+  const after = await client.docRead(artifact.id);
+  if (before.token !== after.token || before.markdown !== after.markdown) {
+    throw new Error(
+      `${artifact.name} changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.`
+    );
+  }
+  const bytes = new TextEncoder().encode(before.markdown);
+  const decoder = new TextDecoder();
+  const lines = [
+    `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`,
+  ];
+  const holders: ArtifactBlock[] = [];
+  for (const block of blocks) {
+    while (holders.length > 0 && block.from >= (holders.at(-1)?.to ?? 0)) holders.pop();
+    const indent = "  ".repeat(holders.length);
+    const flat = decoder.decode(bytes.subarray(block.from, block.to)).replace(/\s+/g, " ").trim();
+    // Cut by code point, never inside a surrogate pair, which would print U+FFFD.
+    const points = Array.from(flat);
+    const opening =
+      points.length > BLOCK_OPENING_CHARS
+        ? `${points.slice(0, BLOCK_OPENING_CHARS).join("")}…`
+        : flat;
+    const { comments, asks } = block.references;
+    lines.push(
+      `${indent}${block.id} ${block.type} (${block.token ?? "no token"}; ${comments} comment${comments === 1 ? "" : "s"}, ${asks} ask${asks === 1 ? "" : "s"}): ${opening}`
+    );
+    if (block.type === "table") {
+      if (block.table === undefined) {
+        lines.push(
+          `${indent}  This Dispatch does not report table rows yet, so no row or column index is listed.`
+        );
+      } else {
+        for (const row of block.table.rows) {
+          lines.push(
+            `${indent}  row ${row.index}, ${row.id === "" ? "no id yet" : `id ${row.id}`}`
+          );
+          for (const cell of row.cells) {
+            const under = cell.header === "" ? "" : `, under ${JSON.stringify(cell.header)}`;
+            lines.push(
+              `${indent}    row ${cell.row} column ${cell.column}, ${cell.id === "" ? "no id yet" : `id ${cell.id}`}${under}: ${cell.text === "" ? "(empty)" : cell.text}`
+            );
+          }
+        }
+      }
+    }
+    holders.push(block);
+  }
+  return { text: lines.join("\n"), token: before.token };
 }
 
 /**
@@ -2957,6 +3041,11 @@ export async function executeDispatchTool(
       if (agentArtifact !== undefined) {
         // A conversation's upload is a file or picture; Dispatch keeps no document there.
         const artifact = await client.getAgentArtifact(agentArtifact.session, agentArtifact.slug);
+        if (optionalBoolean(args, "blocks") === true) {
+          throw new Error(
+            `${artifact.name} is an uploaded ${artifact.kind}, not a document, so it has no blocks. Read it with dispatch doc-read without --blocks.`
+          );
+        }
         return readUploadedFile(
           client,
           artifact,
@@ -2973,6 +3062,27 @@ export async function executeDispatchTool(
           : undefined);
       const resolved = await resolveDocument(documentOwner(), artifactReference);
       const version = optionalNumber(args, "version") ?? ownerArguments.ref?.version;
+      if (optionalBoolean(args, "blocks") === true) {
+        if (resolved.artifact.kind === "file" || resolved.artifact.kind === "image") {
+          throw new Error(
+            `${resolved.artifact.name} is an uploaded ${resolved.artifact.kind}, not a document, so it has no blocks. Read it with dispatch doc-read without --blocks.`
+          );
+        }
+        const listed = await listDocumentBlocks(client, resolved.artifact);
+        return {
+          text:
+            listed.token === undefined
+              ? listed.text
+              : `${listed.text}\n\nDocument token: ${listed.token}`,
+          details:
+            resolved.owner.kind === "project"
+              ? {
+                  project: resolved.artifact.project,
+                  document: documentLabel(resolved.artifact.project, resolved.artifact.slug),
+                }
+              : { issue: resolved.issue?.key },
+        };
+      }
       if (resolved.artifact.kind === "file" || resolved.artifact.kind === "image") {
         const { artifact } = resolved;
         return readUploadedFile(

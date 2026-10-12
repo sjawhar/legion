@@ -14,6 +14,16 @@
   unread. `GET /api/v1/me/replies` lists the threads and `PUT /api/v1/me/threads/{id}/read`
   moves one forward, appending `user_thread_state.updated`, which never notifies. Opening a link
   to a comment (`/issues/<KEY>/comments/<id>`) now opens its thread.
+- A table's entry in `GET /api/v1/artifacts/{id}/blocks` (and the issue- and project-slug forms)
+  lists its rows and cells as `table.rows`: each row's block id and index (the index `delete_row`
+  takes, 0 the header) and each cell's block id, row, column (its index in its row, the index
+  `delete_column` takes, so a cell spanning columns or rows counts once), the opening words of the
+  header drawn above it, and its own. They are placed by the same walk of the same live tree as
+  `GET /api/v1/artifacts/{id}/blocks/{block_id}`, so the two routes agree for every row and cell,
+  and the list still holds one entry per table. The document's tables are laid out in document
+  order on the one budget of span cells a render of it spends, so a cell's header is the one `GET
+  .../text` draws above it, and the block route places a cell under that same header; a table past
+  the budget is listed as its markdown draws it, its spans adding nothing (LEGION-693).
 
 - An agent session creates a Dispatch project (LEGION-684). `POST /api/v1/projects` accepts a
   bearer as well as a signed-in person, so a session with its token makes the project its work

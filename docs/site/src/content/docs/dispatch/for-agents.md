@@ -47,7 +47,7 @@ for.
 | Asks | `dispatch ask` opens one. `dispatch edit-ask` rewords an open one. `dispatch resolve-ask` retracts or resolves one. `dispatch follow` follows or leaves an ask's thread. `dispatch open-asks` lists open asks. |
 | Comments | `dispatch comment` comments on a document or replies in a thread. `dispatch suggest` proposes replacement text. `dispatch resolve-comment` resolves a thread. |
 | Messages | `dispatch message` posts a message or replies to one. |
-| Documents | `dispatch doc-read` reads a document, or the text of an uploaded file. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
+| Documents | `dispatch doc-read` reads a document, or the text of an uploaded file; with `--blocks` it lists the document's block ids, tokens and table rows that `dispatch doc-edit` addresses. `dispatch doc-edit` edits one in place. `dispatch artifact` uploads a file or a new document. `dispatch request-approval` asks a person to approve a document. |
 | Reading | `dispatch read` reads an issue, ask, comment, message, or document summary. `dispatch search` searches everything. `dispatch whoami` reports who Dispatch takes the agent for. |
 | Architecture | `dispatch architecture-sync` imports a project's architecture model now. |
 

@@ -60,10 +60,15 @@ table's block id. A row index includes the header: row `0` is the header and its
 row and any row's last column cannot be deleted. An index is required. A missing, non-integer, negative, or out-of-range index is
 `INVALID_OP` on `index`, naming the supplied value and the table's actual dimensions before making any change. Markdown parsing
 canonicalizes short ragged rows by padding missing cells, so column deletion preserves every non-selected cell in the canonical table.
-`GET /api/v1/artifacts/<artifact UUID>/blocks` reports a table's own references plus its descendant cell anchors.
-`GET /api/v1/artifacts/<artifact UUID>/blocks/<block id>` places one block: its path from the top-level block down, and for a cell
-the row index (0 is the header, what `delete_row` takes), the column index (what `delete_column` takes), the text of the header cell
-drawn above it (with colspans or rowspans, the column the cell is drawn in) and the row's cells. A row or column
+`dispatch doc-read --issue <KEY> --blocks` (or `--project` and `--artifact`) lists every block of the live document in place of its
+markdown, one line each, in document order and indented under the block holding it: its id, its type, its token, how many comments
+and asks anchor to it (a table counts its cells' anchors) and its opening words. Under a table it lists each row by its index, what
+`delete_row` takes (0 is the header), and each cell by its row and its column, what `delete_column` takes, with the opening words
+of the header drawn above it. A cell spanning columns or rows counts once in its row, so its column is that index and not where
+the markdown writes it. A Dispatch that does not list table rows yet says so instead of an index. It takes no `--version`, since
+only the live document's ids and tokens address an edit, and an uploaded file has no blocks.
+`GET /api/v1/artifacts/<artifact UUID>/blocks` and `GET /api/v1/artifacts/<artifact UUID>/blocks/<block id>` answer the same
+facts for a reader outside the command. A row or column
 deletion that would remove an open ask or unresolved comment anchor is `INVALID_OP` on `index`, naming the axis and anchor ids;
 answered asks and resolved comments are history and do not block it. A `find` or quote anchor tolerates inline Markdown
 (`**bold**`, `` `code` ``) and a leading `# ` selects a heading by its text; a miss names the quote and the three nearest blocks so
@@ -160,14 +165,12 @@ blockquote or list item removes that emptied container, the list too when no ite
 held nothing else (`> - Only.` loses the blockquote as well as the item and the list). The moved block itself keeps its id,
 as do `replace` (an accepted empty `with` and a heading-level change included), `insert` and `retype`; `retype` carries the
 paragraph's id onto the typed block it becomes. Block ids are the `#id` a typed block renders
-(`:::ask{#5467e5ce-…}`) and, for every block including untyped ones, the `id` rows from
-`GET /api/v1/artifacts/<artifact UUID>/blocks` (or `/api/v1/issues/{key}/artifacts/{slug}/blocks`), each with its `type` and byte range
-in canonical markdown; the UUID route does not accept a slug. A later operation in the same atomic batch that names a block removed by
+(`:::ask{#5467e5ce-…}`) and, for every block including untyped ones, the ids `dispatch doc-read --blocks` lists. A later operation in the same atomic batch that names a block removed by
 an earlier `delete {block}` fails as `INVALID_OP` naming the earlier operation and the parent block that cascaded the removal. A move
 whose anchor lies inside the moved block, or a delete that would leave a typed block without the body its content rule requires, is
 `INVALID_OP` naming the field and the rule.
 
-`GET /api/v1/artifacts/<artifact UUID>/blocks` includes a full-state `token` on every block, including
+`dispatch doc-read --blocks` lists a full-state `token` on every block, including
 inline marks. To reject a stale edit, pass `--precondition-json` with exactly one of
 `{"document": "<document token>"}` or
 `{"blocks": [{"id": "<block id>", "token": "<block token>"}]}`. A document token comes from

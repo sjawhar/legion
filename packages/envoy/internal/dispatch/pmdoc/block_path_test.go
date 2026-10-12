@@ -178,11 +178,51 @@ func TestBlockPathOfNamesTheHeaderTheRendererDrawsOverAWideTable(t *testing.T) {
 	}
 }
 
-// BlockPaths places every block in one walk exactly as BlockPathOf places it alone: over the
-// pmdoc fixtures, a list whose ancestors carry no block id, an id two blocks carry (the first in
-// document order keeps it, as BlockPathOf finds it), tables with column and row spans, and a body
-// row of more than 1,000 cells. An id no block carries is in neither.
+// BlockPathsAndTableRows places every block in one walk exactly as BlockPathOf places it alone:
+// over the placement documents (placementDocuments). An id no block carries is in neither.
 func TestBlockPathsPlacesEveryBlockAsBlockPathOfDoes(t *testing.T) {
+	for name, doc := range placementDocuments(t) {
+		t.Run(name, func(t *testing.T) {
+			paths, _, err := BlockPathsAndTableRows(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ids := map[string]bool{}
+			Walk(doc, func(node *Node) bool {
+				if id, ok := node.Attrs[BlockIDAttr].(string); ok && node.Type != "doc" && !isInlineNodeType(node.Type) {
+					ids[id] = true
+				}
+				return true
+			})
+			if len(ids) == 0 {
+				t.Fatal("the document carries no block id")
+			}
+			for id := range ids {
+				want, err := BlockPathOf(doc, id)
+				if err != nil {
+					t.Fatalf("BlockPathOf(%q): %v", id, err)
+				}
+				if got, ok := paths[id]; !ok || !reflect.DeepEqual(got, want) {
+					t.Fatalf("paths[%q] = %#v (present %t), want BlockPathOf's %#v", id, got, ok, want)
+				}
+			}
+			for id := range paths {
+				if !ids[id] {
+					t.Fatalf("the paths hold %q, which no block carries", id)
+				}
+			}
+			if _, err := BlockPathOf(doc, "missing"); !errors.Is(err, ErrTargetNotFound) {
+				t.Fatalf("BlockPathOf of an id no block carries: %v, want ErrTargetNotFound", err)
+			}
+		})
+	}
+}
+
+// placementDocuments are the documents the placement tests read: the pmdoc fixtures, a list whose
+// ancestors carry no block id, an id two blocks carry (the first in document order keeps it, as
+// BlockPathOf finds it), tables with column and row spans, and a body row of more than 1,000 cells.
+func placementDocuments(t *testing.T) map[string]*Node {
+	t.Helper()
 	documents := map[string]*Node{}
 	for _, fx := range loadFixtures(t) {
 		doc, err := FromJSON(fx.PMJSON)
@@ -207,7 +247,7 @@ func TestBlockPathsPlacesEveryBlockAsBlockPathOfDoes(t *testing.T) {
 		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: text(value)}}}
 	}
 	spans := &Node{Type: "doc", Children: []*Node{{Type: "table", Children: []*Node{
-		{Type: "table_header_row", Children: []*Node{cell("table_header", "Owner", 2, 1), cell("table_header", "Due", 1, 1), cell("table_header", "Notes", 3, 1)}},
+		{Type: "table_header_row", Children: []*Node{cell("table_header", "Owner", 2, 1), cell("table_header", "Due", 1, 1), cell("table_header", "Notes on what each owner still owes this week", 3, 1)}},
 		{Type: "table_row", Children: []*Node{cell("table_cell", "Backfill", 1, 3), cell("table_cell", "Sami", 2, 1), cell("table_cell", "Oct 1", 1, 2), cell("table_cell", "x", 1, 1)}},
 		{Type: "table_row", Children: []*Node{cell("table_cell", "Lucas", 1, 1), cell("table_cell", "Oct 2", 1, 1)}},
 		{Type: "table_row", Children: []*Node{cell("table_cell", "Wide", 4, 1), cell("table_cell", "past", 1, 1), cell("table_cell", "more", 1, 1)}},
@@ -227,39 +267,195 @@ func TestBlockPathsPlacesEveryBlockAsBlockPathOfDoes(t *testing.T) {
 	}}}}}}
 	EnsureBlockIDs(wide)
 	documents["a row of more than 1,000 cells"] = wide
+	return documents
+}
 
-	for name, doc := range documents {
-		t.Run(name, func(t *testing.T) {
-			paths, err := BlockPaths(doc)
+// TableRows lists every row and cell of every table carrying a block id, each stamped one placed
+// exactly as BlockPathOf places it alone: a row's index is its Row, and a cell's row and column are
+// its Row and Column (the child indexes delete_row and delete_column take, a spanning cell counted
+// once) and its header the opening words of its Header, over the placement documents, the tables
+// with column and row spans among them, one of whose headers runs past the opening words. Every row
+// and cell is listed in child order with its opening words, one the live document has not stamped
+// yet with no id, since its indexes still address it.
+func TestTableRowsPlacesEveryRowAndCellAsBlockPathOfDoes(t *testing.T) {
+	tables := 0
+	for name, doc := range placementDocuments(t) {
+		listed, err := TableRows(doc)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		// The cached read takes the rows from the walk that places blocks, which must list what
+		// TableRows lists alone.
+		_, rows, err := BlockPathsAndTableRows(doc)
+		if err != nil || !reflect.DeepEqual(rows, listed) {
+			t.Fatalf("%s: BlockPathsAndTableRows lists other rows than TableRows (err=%v)", name, err)
+		}
+		Walk(doc, func(node *Node) bool {
+			tableID, _ := node.Attrs[BlockIDAttr].(string)
+			if node.Type != "table" || tableID == "" {
+				return true
+			}
+			tables++
+			want := make([]TableRow, len(node.Children))
+			for rowIndex, row := range node.Children {
+				rowID, _ := row.Attrs[BlockIDAttr].(string)
+				if rowID != "" {
+					path, err := BlockPathOf(doc, rowID)
+					if err != nil || *path.Table.Row != rowIndex {
+						t.Fatalf("%s: BlockPathOf(row %q) = %#v err=%v, want row %d", name, rowID, path.Table, err, rowIndex)
+					}
+				}
+				want[rowIndex] = TableRow{ID: rowID, Index: rowIndex, Cells: make([]TableCell, len(row.Children))}
+				for column, cell := range row.Children {
+					cellID, _ := cell.Attrs[BlockIDAttr].(string)
+					entry := TableCell{ID: cellID, Row: rowIndex, Column: column, Text: openingWords(oneLineText(cell))}
+					if cellID != "" {
+						place, err := BlockPathOf(doc, cellID)
+						if err != nil {
+							t.Fatalf("%s: BlockPathOf(cell %q): %v", name, cellID, err)
+						}
+						entry.Row, entry.Column, entry.Header = *place.Table.Row, *place.Table.Column, openingWords(*place.Table.Header)
+					} else {
+						// BlockPathOf's own placement (tablePosition) of a cell no id reaches.
+						entry.Header = openingWords(*tablePosition(doc, node, tableID, []int{rowIndex, column}).Header)
+					}
+					want[rowIndex].Cells[column] = entry
+				}
+			}
+			if got := listed[tableID]; !reflect.DeepEqual(got, want) {
+				t.Fatalf("%s: TableRows[%q] = %#v, want BlockPathOf's %#v", name, tableID, got, want)
+			}
+			return true
+		})
+		for id := range listed {
+			if path, err := BlockPathOf(doc, id); err != nil || path.Type != "table" {
+				t.Fatalf("%s: TableRows lists %q, which no table carries (%v)", name, id, err)
+			}
+		}
+	}
+	if tables < 3 {
+		t.Fatalf("the placement documents hold %d tables with a block id, want the spanned and the wide ones at least", tables)
+	}
+}
+
+// A cell is counted once in its row however many columns it spans, so its listed column is its
+// child index, the index delete_column takes: deleting it removes that cell and no other. Negative
+// control: the markdown the table is written as places that cell at another column, so a column
+// read from the markdown would delete a different one.
+func TestTableRowsColumnIsTheIndexDeleteTableColumnTakes(t *testing.T) {
+	cell := func(kind, value string, colspan, rowspan int) *Node {
+		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}}}
+	}
+	doc := &Node{Type: "doc", Children: []*Node{{Type: "table", Children: []*Node{
+		{Type: "table_header_row", Children: []*Node{cell("table_header", "Owner", 2, 1), cell("table_header", "Due", 1, 1), cell("table_header", "Notes", 1, 1)}},
+		{Type: "table_row", Children: []*Node{cell("table_cell", "Sami", 1, 1), cell("table_cell", "Oct 1", 1, 1), cell("table_cell", "late", 1, 1)}},
+		{Type: "table_row", Children: []*Node{cell("table_cell", "Lucas", 1, 1), cell("table_cell", "Oct 2", 1, 1), cell("table_cell", "soon", 1, 1)}},
+	}}}}
+	EnsureBlockIDs(doc)
+	table := doc.Children[0]
+	tableID := table.Attrs[BlockIDAttr].(string)
+	listed, err := TableRows(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var due TableCell
+	for _, row := range listed[tableID] {
+		for _, listedCell := range row.Cells {
+			if listedCell.Text == "Due" {
+				due = listedCell
+			}
+		}
+	}
+	if due.ID == "" || due.Row != 0 || due.Column != 1 || due.Header != "Due" {
+		t.Fatalf("Due = %#v, want row 0, column 1 headed Due", due)
+	}
+	grid, _ := (&renderer{spanBudget: maxSpanCells}).tableGrid(table)
+	if written := slices.Index(grid[0], table.Children[0].Children[1]); written == due.Column {
+		t.Fatalf("control: the markdown writes Due at column %d too, so this table cannot tell the two indexes apart", written)
+	}
+	deleted, err := DeleteTableColumn(doc, tableID, due.Column)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if header := cellOpenings(deleted.Children[0].Children[0]); !reflect.DeepEqual(header, []string{"Owner", "Notes"}) {
+		t.Fatalf("after delete_column %d the header row is %q, want Owner · Notes: the Due cell alone removed", due.Column, header)
+	}
+}
+
+// The document's tables share one budget of the empty cells spans add (maxSpanCells), spent in
+// document order as the renderer spends it, so a cell is listed and placed under the header GET
+// /text draws above it. Two identical spanned tables stand either side of one spending the rest of
+// the budget: the renderer draws the first with Owner's second column and the last without it, and
+// the last's Oct 1 is under Due, where on a budget of its own it sat under Owner. A table the
+// listing skips - one with no block id, or a second table under an earlier one's id - still spends
+// what the renderer spends on it.
+func TestTablesShareOneSpanBudgetInDocumentOrder(t *testing.T) {
+	cell := func(kind, value string, colspan, rowspan int) *Node {
+		return &Node{Type: kind, Attrs: Attrs{"colspan": colspan, "rowspan": rowspan}, Children: []*Node{{Type: "paragraph", Children: []*Node{{Type: "text", Text: value}}}}}
+	}
+	owners := func() *Node {
+		return &Node{Type: "table", Children: []*Node{
+			{Type: "table_header_row", Children: []*Node{cell("table_header", "Owner", 2, 1), cell("table_header", "Due", 1, 1), cell("table_header", "Notes", 1, 1)}},
+			{Type: "table_row", Children: []*Node{cell("table_cell", "Sami", 1, 1), cell("table_cell", "Oct 1", 1, 1), cell("table_cell", "late", 1, 1)}},
+		}}
+	}
+	// spending covers 1,000 columns of each of its 100 body rows, past what the budget holds.
+	spending := func() *Node {
+		table := &Node{Type: "table", Children: []*Node{{Type: "table_header_row", Children: []*Node{cell("table_header", "Wide", 1_000, 101)}}}}
+		for row := range 100 {
+			table.Children = append(table.Children, &Node{Type: "table_row", Children: []*Node{cell("table_cell", fmt.Sprint(row), 1, 1)}})
+		}
+		return table
+	}
+	for _, test := range []struct {
+		name string
+		// unlisted marks the spending table the listing skips: its id removed, or set to before's.
+		unlisted func(before, spent *Node)
+	}{
+		{name: "every table listed"},
+		{name: "the spending table has no block id", unlisted: func(_, spent *Node) { delete(spent.Attrs, BlockIDAttr) }},
+		{name: "the spending table repeats an earlier table's id", unlisted: func(before, spent *Node) { spent.Attrs[BlockIDAttr] = before.Attrs[BlockIDAttr] }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			before, spent, after := owners(), spending(), owners()
+			doc := &Node{Type: "doc", Children: []*Node{before, spent, after}}
+			EnsureBlockIDs(doc)
+			if test.unlisted != nil {
+				test.unlisted(before, spent)
+			}
+			markdown, err := Render(doc)
 			if err != nil {
 				t.Fatal(err)
 			}
-			ids := map[string]bool{}
-			Walk(doc, func(node *Node) bool {
-				if id, ok := node.Attrs[BlockIDAttr].(string); ok && node.Type != "doc" && !isInlineNodeType(node.Type) {
-					ids[id] = true
-				}
-				return true
-			})
-			if len(ids) == 0 {
-				t.Fatal("the document carries no block id")
+			spanned, wide, unspanned := strings.Index(markdown, "| Owner |  | Due | Notes |"), strings.Index(markdown, "| Wide |"), strings.Index(markdown, "| Owner | Due | Notes |")
+			if spanned < 0 || wide < spanned || unspanned < wide {
+				t.Fatalf("the renderer draws the tables at %d, %d and %d of %.300q, want the first with Owner's second column, then the spending table, then the last without it", spanned, wide, unspanned, markdown)
 			}
-			for id := range ids {
-				want, err := BlockPathOf(doc, id)
+			listed, err := TableRows(doc)
+			if err != nil {
+				t.Fatal(err)
+			}
+			paths, walked, err := BlockPathsAndTableRows(doc)
+			if err != nil || !reflect.DeepEqual(walked, listed) {
+				t.Fatalf("BlockPathsAndTableRows lists other rows than TableRows (err=%v)", err)
+			}
+			for _, check := range []struct {
+				name   string
+				table  *Node
+				header string
+			}{{"the table before the budget is spent", before, "Owner"}, {"the table after it", after, "Due"}} {
+				oct1 := check.table.Children[1].Children[1]
+				id := oct1.Attrs[BlockIDAttr].(string)
+				path, err := BlockPathOf(doc, id)
 				if err != nil {
-					t.Fatalf("BlockPathOf(%q): %v", id, err)
+					t.Fatal(err)
 				}
-				if got, ok := paths[id]; !ok || !reflect.DeepEqual(got, want) {
-					t.Fatalf("BlockPaths[%q] = %#v (present %t), want BlockPathOf's %#v", id, got, ok, want)
+				if *path.Table.Header != check.header || *paths[id].Table.Header != check.header {
+					t.Errorf("%s: Oct 1 placed under %q, and under %q by the walk, want %q as the renderer draws it", check.name, *path.Table.Header, *paths[id].Table.Header, check.header)
 				}
-			}
-			for id := range paths {
-				if !ids[id] {
-					t.Fatalf("BlockPaths holds %q, which no block carries", id)
+				if rows := listed[check.table.Attrs[BlockIDAttr].(string)]; len(rows) != 2 || rows[1].Cells[1].Header != check.header {
+					t.Errorf("%s: Oct 1 listed as %#v, want under %q", check.name, rows, check.header)
 				}
-			}
-			if _, err := BlockPathOf(doc, "missing"); !errors.Is(err, ErrTargetNotFound) {
-				t.Fatalf("BlockPathOf of an id no block carries: %v, want ErrTargetNotFound", err)
 			}
 		})
 	}

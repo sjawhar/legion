@@ -406,7 +406,9 @@ every version that records a decision is named with `dispatch doc-edit --summary
 
 Read the current document before changing it with `dispatch doc-read` (`--issue`, or `--project`
 and `--artifact`, an optional `--version`, or `--ref`).
-It prints live or versioned markdown with open marks. A live read ends with a document token; `--issue` with no
+It prints live or versioned markdown with open marks. A live read ends with a document token; `--blocks` lists the live
+document's block ids, tokens and table rows instead, which `dispatch doc-edit` takes to address a block that is not a typed
+block. `--issue` with no
 `--artifact` reads the issue specification; a project needs `--artifact`; and a `dispatch://PROJECT/artifact/<document-ref>`
 ref supplies both, where `document-ref` is the slug (an id or a filename resolves when no document has that slug). A file
 `dispatch artifact` uploaded reads its text at the latest or named version, or a description when it is not UTF-8 text.

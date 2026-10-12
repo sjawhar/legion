@@ -89,7 +89,7 @@ the Dispatch specs behind the `dispatch` command:
   key the tool layer already stripped, so this is the boundary that catches it. An unknown key
   nested anywhere is reported with that object's keys, not the tool's (`formatZodIssues`).
   An optional `precondition` selects exactly one whole-document token from `dispatch doc-read` or
-  block `{id, token}` entries from `/blocks`; a block guard must cover every content block the
+  block `{id, token}` entries from `dispatch doc-read --blocks`; a block guard must cover every content block the
   batch changes, while untouched sections remain independent. Insert and move need the document
   token because they depend on document order.
   Tokens include inline marks, so a new anchored ask or comment rejects a stale edit. A stale guard

@@ -230,9 +230,9 @@ with elsewhere (`DOC_SERVICE_UNAVAILABLE`, `DOC_SCHEMA` or `INTERNAL`); the read
 `dispatch doc-edit` may retype an identified paragraph or typed block into any schema-declared typed block with
 the `--ops-json` entry `{ "op": "retype", block, type, attributes }`, delete or move a whole block by id with
 `{ "op": "delete", block }` and `{ "op": "move", block, after | before }`, and delete a table row or column in place
-with `{ "op": "delete_row" | "delete_column", block, index }`. Table `index` is zero-based and its table `block` id
-comes from the artifact-UUID `GET /api/v1/artifacts/{id}/blocks` route; that route returns each block's
-full-state token, including inline marks. `dispatch doc-read` returns the whole-document token. Supply an
+with `{ "op": "delete_row" | "delete_column", block, index }`. Table `index` is zero-based; `dispatch doc-read --blocks`
+lists every block's id and full-state token (including inline marks) and each table's rows and cells by the indexes
+`delete_row` and `delete_column` take, from `GET /api/v1/artifacts/{id}/blocks`. `dispatch doc-read` returns the whole-document token. Supply an
 optional `--precondition-json` with exactly one document token or one-or-more block `{id, token}` entries; a block
 guard must cover every content block the resolved batch changes, while unrelated sections stay independent.
 Insert and move require the document token because their meaning depends on document order. A stale

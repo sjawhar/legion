@@ -815,8 +815,8 @@ export const dispatchToolSpecs = [
       "For replace, delete, and quote anchors, find text as rendered: inline Markdown (**bold**, `code`) is tolerated and must be balanced; a leading '# ' matches a heading at any level. replace is inline: with is the new text of the matched span, so a marker of a different kind from the block's own stays literal text ('4. Design' written into a heading). A with that opens with a marker of the same kind as the matched block's own would write it twice and is INVALID_OP - including prose that merely looks like one ('1999. was a year' into an ordered item), which you write as text by escaping it ('1999\\. was a year'). The exception is a heading rename whose find carried a heading marker: replace(find=\"## Old\", with=\"## New\") gives '## New', and a different level applies only when find named the heading's actual level (find \"## Old\" with \"### New\" makes it an h3), since '# ' selects a heading without naming its level. A task item (`- [ ]` / `- [x]`) is ticked the same way: when find matches from the start of the item's text and with opens with '[x] ' or '[ ] ', the opening sets the item's box and the rest is its new text (replace(find=\"Write it\", with=\"[x] Write it\") ticks it); the same opening over a plain list item or a paragraph stays literal text. Any non-empty with that renders to no text - a line indented four spaces or a tab, which markdown reads as a code block, or whitespace alone - is INVALID_OP rather than a silent deletion; pass an empty with to delete the matched text on purpose - a list item, quote, typed block or footnote definition left holding only the emptied paragraph keeps it. " +
       "with cannot open a new block: after a hard line break inside with (two trailing spaces, or a backslash, before the newline) a heading, bullet, '1.'/'1)' ordered, or '>' blockquote marker is INVALID_OP too, since that line would stay escaped text inside the matched block - use insert, plus delete for what it replaces, to add the block. A hard break in with is itself INVALID_OP when the matched text is in a heading or a table cell, which are written on one line. " +
       "A delete whose find is a block's entire text removes the block (a list emptied of its items goes too); delete with block removes any block by id, and move with block relocates one. A delete or retype that would take an ask block out of the document while its ask is open is refused, with nothing sent. delete_row and delete_column take a table block and a zero-based index, preserving the table block id and refusing to remove cells with open asks or unresolved comments. " +
-      'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; block ids and their tokens come from GET /api/v1/artifacts/{artifact UUID}/blocks (the route takes the artifact UUID, not its slug). ' +
-      "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from /blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
+      'Insert and move anchors also accept "start", "end", "heading:<exact heading text>", and "block:<id>"; dispatch doc-read --blocks lists every block\'s id, type, opening words and token, and each table\'s rows and cells with the indexes delete_row and delete_column take (GET /api/v1/artifacts/{artifact UUID}/blocks serves the same list). ' +
+      "Optionally require the state just read: precondition selects exactly one of a document token from dispatch doc-read, or block {id, token} values from dispatch doc-read --blocks. A block guard must include every block the batch changes; Dispatch resolves quote targets and rejects an uncovered batch rather than applying it. Use a document token for insert or move, which depend on document order. Prefer block tokens when the covered content blocks are independent sections. Tokens include inline marks, so a fresh human comment also makes a stale edit fail. PRECONDITION_FAILED means re-read; EDIT_QUEUE_FULL means back off before retrying. " +
       "The result carries the document token this edit produced, so a chain of guarded edits passes each result's token as the next edit's precondition with no dispatch doc-read between them. " +
       "A batch that leaves the document exactly as it was mints no version, named or not, and the result says nothing changed and names each operation that did nothing. " +
       "A change a browser removes while the edit is in flight is never reported as applied: EDIT_LOST_TO_CONCURRENT_CHANGE means the write was refused and nothing was written, so re-read the document and decide again, as with PRECONDITION_FAILED; lost_ops on a successful result names operations whose text the live document no longer has, because the deletion landed after the version was written. " +
@@ -874,7 +874,7 @@ export const dispatchToolSpecs = [
               block: z
                 .string()
                 .describe(
-                  "Block id for retype, delete, move, delete_row, or delete_column: the #id of a typed block, or an id from GET /api/v1/artifacts/{id}/blocks."
+                  "Block id for retype, delete, move, delete_row, or delete_column: the #id of a typed block, or an id dispatch doc-read --blocks lists."
                 )
                 .optional(),
               index: z
@@ -906,7 +906,7 @@ export const dispatchToolSpecs = [
               z.object({
                 id: z
                   .string({ min: 1 })
-                  .describe("Stable block id from GET /api/v1/artifacts/{id}/blocks."),
+                  .describe("Stable block id dispatch doc-read --blocks lists."),
                 token: z
                   .string({ min: 1 })
                   .describe("That block's full-state token, including inline marks."),
@@ -914,7 +914,7 @@ export const dispatchToolSpecs = [
               { min: 1 }
             )
             .describe(
-              "Every content block this batch changes, each with the token returned by /blocks."
+              "Every content block this batch changes, each with the token dispatch doc-read --blocks lists."
             )
             .optional(),
         })
@@ -933,7 +933,7 @@ export const dispatchToolSpecs = [
       "Read a live document or a named document version, or the text of an uploaded file at its latest or named version. " +
       "Do not use it for issue status, asks, or events; " +
       "use dispatch read instead. Supply ref, issue, or project plus artifact; issue plus an omitted artifact reads the primary document. " +
-      "A live read returns its document token for an optional dispatch doc-edit precondition; use /blocks for per-block tokens. " +
+      "A live read returns its document token for an optional dispatch doc-edit precondition. With blocks it lists the live document's blocks instead of its markdown, in document order: each block's id, type, token, anchored comments and asks, and opening words, and under a table each row by the index delete_row takes and each cell by its row and the column delete_column takes; block ids, block tokens and those indexes are what dispatch doc-edit takes. " +
       "A picture (an uploaded PNG, JPEG, GIF or WebP of at most 3,750,000 bytes, 5 MB once base64-encoded) comes back as an image you see, with its name, type, size and version, every time you ask, including one a read already showed this session; " +
       "any other file that is not UTF-8 text is described, with the route that serves its bytes. " +
       OWNER_REFERENCE,
@@ -947,6 +947,12 @@ export const dispatchToolSpecs = [
         )
         .optional(),
       version: z.number({ int: true, min: 1 }).describe("Optional version number.").optional(),
+      blocks: z
+        .boolean()
+        .describe(
+          "List the live document's blocks, with each table's rows and cells, instead of its markdown; refused with a version, or for an uploaded file."
+        )
+        .optional(),
       ref: z
         .string()
         .describe(

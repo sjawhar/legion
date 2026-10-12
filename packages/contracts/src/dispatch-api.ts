@@ -544,6 +544,36 @@ export interface ArtifactBlock {
     readonly comments: number;
     readonly asks: number;
   };
+  /** A table block's rows and cells; absent on every other block, and on a table from a Dispatch
+   *  server older than the listing. */
+  readonly table?: BlockTable;
+}
+
+/** A table block's rows in child order, the header row first, each row and cell placed as
+ *  `GET /api/v1/artifacts/{id}/blocks/{block_id}` places it, from the same live tree. */
+export interface BlockTable {
+  readonly rows: readonly BlockTableRow[];
+}
+
+/** One row of a table: its block id ("" for a row the live document has not stamped yet), its
+ *  index among the table's rows (0 is the header row, the index `delete_row` takes) and its cells
+ *  in child order. */
+export interface BlockTableRow {
+  readonly id: string;
+  readonly index: number;
+  readonly cells: readonly BlockTableCell[];
+}
+
+/** One cell of a table row: its block id ("" for a cell the live document has not stamped yet),
+ *  its row index, its column (its index in its row, the index `delete_column` takes, so a cell
+ *  spanning columns counts once), the opening words of the header cell drawn above it ("" where
+ *  none is) and its own opening words. */
+export interface BlockTableCell {
+  readonly id: string;
+  readonly row: number;
+  readonly column: number;
+  readonly header: string;
+  readonly text: string;
 }
 
 /** One node on a block's path from the document's top-level block down to the block: its type,

@@ -514,7 +514,8 @@ type ArtifactReviewEventPayload struct {
 	AskID      *string `json:"ask_id"`
 }
 
-// ArtifactBlock is an addressable document block and its byte range in canonical markdown.
+// ArtifactBlock is an addressable document block and its byte range in canonical markdown. Table
+// lists a table block's rows and cells; nil for every other block.
 type ArtifactBlock struct {
 	ID            string          `json:"id"`
 	Type          string          `json:"type"`
@@ -522,7 +523,36 @@ type ArtifactBlock struct {
 	To            int             `json:"to"`
 	Token         string          `json:"token"`
 	References    BlockReferences `json:"references"`
+	Table         *BlockTable     `json:"table,omitempty"`
 	DescendantIDs []string        `json:"-"`
+}
+
+// BlockTable is a table block's rows in child order, the header row first, as GET
+// /api/v1/artifacts/{id}/blocks lists them under the table: each row and cell placed as GET
+// /api/v1/artifacts/{id}/blocks/{block_id} places it, from the same live tree.
+type BlockTable struct {
+	Rows []BlockTableRow `json:"rows"`
+}
+
+// BlockTableRow is one row of a table: its block id ("" for a row the live document has not
+// stamped yet), its index among the table's rows (0 the header row, the index delete_row takes)
+// and its cells in child order.
+type BlockTableRow struct {
+	ID    string           `json:"id"`
+	Index int              `json:"index"`
+	Cells []BlockTableCell `json:"cells"`
+}
+
+// BlockTableCell is one cell of a table row: its block id ("" for a cell the live document has not
+// stamped yet), its row index, its column (its index in its row, the index delete_column takes, so
+// a cell spanning columns counts once), the opening words of the header cell drawn above it ("" where
+// none is) and its own opening words.
+type BlockTableCell struct {
+	ID     string `json:"id"`
+	Row    int    `json:"row"`
+	Column int    `json:"column"`
+	Header string `json:"header"`
+	Text   string `json:"text"`
 }
 
 // BlockReferences counts rows whose inline anchor is pinned to a document block;

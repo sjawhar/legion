@@ -400,7 +400,15 @@ Quote-anchored asks and comments retain their inline mark and quote cache, plus 
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays
 unpinned. `GET /api/v1/artifacts/{id}/blocks` returns each block's canonical markdown range,
 SHA-256 token over its complete Proof state (including inline marks), and `{comments, asks}`
-reference counts; `GET .../text` returns the full-document Proof-state token and the document's
+reference counts, and a table block's `table.rows`: each row's id and index and each cell's id,
+row, column, the opening words of the header drawn above it and its own, every one placed by the
+walk that places blocks for the block route (`pmdoc.BlockPathsAndTableRows`; `pmdoc.TableRows`
+for a document a room holds, which builds no path), so the two routes cannot disagree and the
+list stays one entry per table. The walk lays each table out once, in document order, on the one
+budget of span cells a render of the document spends (`maxSpanCells`, `tableGrid`), so a cell is
+listed under the header `GET .../text` draws above it, a table past the budget with its spans
+adding nothing, and tables a browser pasted with spans filling that budget cost one request one
+budget, not one each. `GET .../text` returns the full-document Proof-state token and the document's
 latest version number, or `null` when it has none (the live markdown beside it and that version
 are two unsynchronised reads, in both directions; `token` is the concurrency primitive). The server resolves
 the block when it creates a quote or browser-mark anchor; `envoy-dispatch backfill-anchor-blocks`
@@ -411,8 +419,9 @@ or a rendering cached under the stored head when no fork or room holds it): its 
 naming the table's id, the row's child index (0 is the header row), the cell's child index in its
 row (the indexes `delete_row` and `delete_column` take, so a spanning cell counts once), the text
 of the header cell drawn above the cell and the row's cells as their opening words. The header is
-found where the renderer writes the cell (`tableGrid`, which lays the whole table out on one span
-budget), so in a table with colspans or rowspans it is the column the cell is drawn in, not the
+found where the renderer writes the cell (`tableGrid`, which lays the whole table out on the span
+budget the document's tables before it left, as a render spends it), so in a table with colspans
+or rowspans it is the column the cell is drawn in, not the
 header row's child at the cell's index. `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}`
 same answer for the anchor's `block_id` as `anchor_block` (`api.anchorBlock`), computed at read
 time and never stored or carried on lists and events; a block the live document no longer holds
