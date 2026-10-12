@@ -170,10 +170,14 @@ func readyChecks(ctx context.Context, github githubrest.Client, repository ghrep
 // that reaches it may change a path the list never shows.
 const pullRequestFilesLimit = 3000
 
-// mergeReadyPolicy is the project's merge policy for pull request number: the
-// MANUAL_MERGE_REQUIRED note when its change touches a by_hand path, which tells the merger not to
-// arm it, and nothing otherwise. A list GitHub cut at pullRequestFilesLimit leaves a by_hand path
-// unread, so READY is refused rather than armed on it.
+// byHandNotePrefix opens READY's by-hand note (mergeReadyPolicy), and only it: the note the
+// completion records for the packet the daemon tells (intake.HandoffComplete.MergeNote).
+const byHandNotePrefix = "MANUAL_MERGE_REQUIRED:"
+
+// mergeReadyPolicy is the project's merge policy for pull request number: the by-hand note
+// (byHandNotePrefix) when its change touches a by_hand path, which tells the merger not to arm it,
+// and nothing otherwise. A list GitHub cut at pullRequestFilesLimit leaves a by_hand path unread,
+// so READY is refused rather than armed on it.
 func mergeReadyPolicy(ctx context.Context, github githubrest.Client, rules config.MergeRules, number int) (string, *refusal) {
 	if len(rules.ByHand) == 0 {
 		return "", nil
@@ -183,7 +187,7 @@ func mergeReadyPolicy(ctx context.Context, github githubrest.Client, rules confi
 		return "", githubReadFailed(err)
 	}
 	if rules.MatchByHand(paths) {
-		return fmt.Sprintf("MANUAL_MERGE_REQUIRED: pull request #%d matches a by_hand merge rule; do not auto-arm it", number), nil
+		return fmt.Sprintf("%s pull request #%d matches a by_hand merge rule; do not auto-arm it", byHandNotePrefix, number), nil
 	}
 	if files >= pullRequestFilesLimit {
 		return "", &refusal{http.StatusConflict, "READY_FILES_TRUNCATED", fmt.Sprintf("pull request #%d changes at least %d files, the most GitHub lists, so whether it touches a by_hand path is unknown: a person merges it, or the change is split; tell the architect", number, pullRequestFilesLimit)}

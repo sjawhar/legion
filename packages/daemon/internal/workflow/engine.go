@@ -351,6 +351,18 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	if err != nil {
 		return intake.Result{}, err
 	}
+	pr, err := e.store.PullRequest(ctx, tx, fact.Issue)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	// A push can land after the route read the head READY names and before this completion
+	// commits. Accepted, that READY would leave the issue awaiting a merge of a head it does not
+	// name, and nothing withdraws a READY the issue never reached awaiting_merge to hold. It is
+	// refused before anything of it is recorded, so the merger's READY at the new head is applied.
+	if issue.Phase == phase.Merging && pr != nil && pr.State == record.PullRequestOpen && pr.HeadSHA != fact.Commit {
+		return refused("READY_HEAD_MOVED", fmt.Sprintf("pull request #%d of %s now heads at %s, not READY's %s: build a new packet at that head and complete again; this completion changed nothing",
+			pr.Number, issue.Key, pr.HeadSHA, fact.Commit)), nil
+	}
 	if phase.FileBacked(issue.Phase) {
 		// The commit a completion carries is the pushed commit carrying the phase's handoff, which
 		// the `legion` tool's handoff_complete found in the pane: the one the role reported for its
@@ -361,11 +373,8 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 		row.LastHandoff = fact.Commit
 	}
 	row.Claim, row.HandoffCommit, row.Verdict, row.Summary, row.CompletedAt = fact.Claim, fact.Commit, fact.Verdict, fact.Summary, e.now()
+	row.MergeNote = fact.MergeNote
 	if err := e.store.PutPhase(ctx, tx, row); err != nil {
-		return intake.Result{}, err
-	}
-	pr, err := e.store.PullRequest(ctx, tx, fact.Issue)
-	if err != nil {
 		return intake.Result{}, err
 	}
 	switch issue.Phase {
@@ -857,7 +866,7 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 		if pr != nil && pr.State == record.PullRequestMerged {
 			return e.transition(ctx, tx, issue, TriggerPullRequestMerged, "", record.PhaseRow{}, pr, "")
 		}
-		return e.ready(ctx, tx, issue, handoff.Summary)
+		return e.ready(ctx, tx, issue, handoff)
 	}
 	if row.To == phase.Done {
 		return e.leave(ctx, tx, issue, "done")

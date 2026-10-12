@@ -136,6 +136,55 @@ func TestAPushPastTheREADYHeadInALingeringTreeDisarmsWithoutATransition(t *testi
 	}
 }
 
+// An issue leaving the workflow leaves no READY standing for its pull request, so whatever is
+// armed for it is disarmed: a child a person moves out of the workflow, and every member of a tree
+// whose root does, each with an open pull request. A merged one is not disarmed.
+func TestLeavingTheWorkflowDisarmsTheOpenPullRequests(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		moved string
+		want  []record.AutoMergeDisable
+	}{
+		{"a child moved to backlog", "LEGION-209", []record.AutoMergeDisable{{Number: 43}}},
+		{"the root closed", "LEGION-208", []record.AutoMergeDisable{{Number: 42}, {Number: 43}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			parent := "LEGION-208"
+			seedIssue(t, pool, record.Issue{Key: "LEGION-208", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "U"})
+			seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-209", Tree: "LEGION-208", Parent: &parent, Project: "LEGION", Title: "child", Phase: phase.AwaitingMerge, Generation: 1, Status: "retro", Rank: "V"})
+			seedIssue(t, pool, record.Issue{Key: "LEGION-210", Tree: "LEGION-208", Parent: &parent, Project: "LEGION", Title: "merged", Phase: phase.ProductionCheck, Generation: 1, Status: "retro", Rank: "W"})
+			for key, pr := range map[string]record.PullRequest{
+				"LEGION-208": {State: record.PullRequestOpen, Number: 42, HeadSHA: "head-42"},
+				"LEGION-209": {State: record.PullRequestOpen, Number: 43, HeadSHA: "head-43"},
+				"LEGION-210": {State: record.PullRequestMerged, Number: 44, HeadSHA: "head-44"},
+			} {
+				pr.Issue, pr.Repo, pr.Branch = key, "sjawhar/legion", "legion/"+key
+				seedPR(t, pool, pr)
+			}
+			status, kind := "backlog", "issue.updated"
+			if tc.moved == "LEGION-208" {
+				status, kind = "done", "issue.closed"
+			}
+			applyRefusingNothing(t, pool, readyEngine(""), intake.DispatchIssue{Key: tc.moved, Seq: 2, Type: kind, Status: status, Title: "moved", Parent: parentOf(tc.moved), Rank: "U"})
+			got := autoMergeDisables(t, pool)
+			slices.SortFunc(got, func(a, b record.AutoMergeDisable) int { return a.Number - b.Number })
+			if !slices.Equal(got, tc.want) {
+				t.Fatalf("auto-merge disables %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// parentOf is the parent the Dispatch event of key names: none for the root, LEGION-208 for a child.
+func parentOf(key string) string {
+	if key == "LEGION-208" {
+		return ""
+	}
+	return "LEGION-208"
+}
+
 // A READY withdrawn because the head's own CI turned red, or because the head started conflicting
 // with its base, sends the issue back to implementing: an auto-merge armed for that READY must not
 // outlive it, so the withdrawal queues a disarm too.

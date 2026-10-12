@@ -137,8 +137,11 @@ What each part is for:
   each Dispatch project the daemon runs to its GitHub repository. A project may name a
   `merge_queue_role`, a role that receives a copy of every `READY`, and a notice withdrawing it
   when the head's own CI turns red before the merge, or the head starts conflicting with its base.
-  Its optional `merge.by_hand` mapping holds regular-expression paths. A matching `READY` tells the
-  merger not to auto-arm it, so a person merges it under the repository's rules. It may also list
+  Its optional `merge.by_hand` mapping holds regular-expression paths, each matched anywhere in a
+  changed path, so anchor one (`^migrations/versions/`) to mean a directory. A pull request whose
+  change touches one is `READY` with a `MANUAL_MERGE_REQUIRED:` note: the merger does not auto-arm
+  it, the packet the daemon tells starts with the note, and a person merges it under the
+  repository's rules. It may also list
   `review_workflows`, the paths (`.github/workflows/<name>.yml`, each once) of the workflows its
   base branch requires that review the code and fail on their own findings, such as a review bot's.
   A red only they make, in testing or review, goes to the reviewer, who adjudicates their findings

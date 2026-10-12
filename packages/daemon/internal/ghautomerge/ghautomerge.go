@@ -35,18 +35,24 @@ const (
 	dequeue = `mutation DequeuePullRequest($id: ID!) { dequeuePullRequest(input: {id: $id}) { clientMutationId } }`
 )
 
+// Keep answers the READY head an arm is legitimate for, empty when none is. Disarm asks it only
+// after reading GitHub.
+type Keep func(context.Context) (string, error)
+
 // Disarm turns off what would merge pull request number of repo without a person, through github,
 // a GraphQL client (githubrest.GraphQLAPI): its merge-queue entry where it has one, then its
 // auto-merge where GitHub has it enabled. The queue entry goes first, being the step closest to
 // merging, so a disable that keeps failing never leaves it standing. It decides by the pull
 // request's state when it runs, never by when anything was armed: GitHub enqueues an armed pull
-// request only once its checks pass, so a queue entry can postdate the arm it belongs to. keep is
-// the READY head an arm is legitimate for, empty when none is: while the pull request's head on
-// GitHub is keep, nothing is touched (Kept). Otherwise everything armed is turned off. It reads
-// first, so a pull request with nothing armed is left alone and a retried Disarm changes nothing. A
-// NOT_FOUND at the pull request is Missing, not an error; one anywhere else, such as a repository
-// the token cannot see, is an error.
-func Disarm(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, keep string) (Disarmed, error) {
+// request only once its checks pass, so a queue entry can postdate the arm it belongs to. It reads
+// GitHub first and then asks keep for the READY head an arm is legitimate for: an arm is made only
+// once its READY is recorded, so an arm the read finds is covered by what keep answers after it,
+// where asked the other way round a READY recorded between the two would have its arm turned off.
+// While the pull request's head on GitHub is that head, nothing is touched (Kept); otherwise
+// everything armed is turned off. A pull request with nothing armed is left alone, so a retried
+// Disarm changes nothing. A NOT_FOUND at the pull request is Missing, not an error; one anywhere
+// else, such as a repository the token cannot see, is an error.
+func Disarm(ctx context.Context, github githubrest.Client, repo ghrepo.Repository, number int, keep Keep) (Disarmed, error) {
 	var answer struct {
 		Repository struct {
 			PullRequest *struct {
@@ -69,7 +75,14 @@ func Disarm(ctx context.Context, github githubrest.Client, repo ghrepo.Repositor
 	if pull == nil {
 		return Disarmed{Missing: true}, nil
 	}
-	if keep != "" && pull.HeadRefOid == keep {
+	if pull.MergeQueueEntry == nil && pull.AutoMergeRequest == nil {
+		return Disarmed{}, nil
+	}
+	head, err := keep(ctx)
+	if err != nil {
+		return Disarmed{}, err
+	}
+	if head != "" && pull.HeadRefOid == head {
 		return Disarmed{Kept: true}, nil
 	}
 	var disarmed Disarmed

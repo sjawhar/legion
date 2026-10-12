@@ -127,9 +127,12 @@ review posted without a completion leaves the issue in reviewing until you finis
   auto-merge enabled, or merged — and the head. When the answer's `note` begins
   `MANUAL_MERGE_REQUIRED:` (the pull request touches a path the project's `merge.by_hand` names),
   READY stands but the merger submits nothing: it tells the architect the note and the head, and a
-  person merges under the repository's rules. On any READY refusal it submits nothing, since an
-  armed request would merge through the gate the refusal names; a READY the design gate refused is
-  submitted later, on the architect's word, once the gate opens, and that turn runs only `gh`. A
+  person merges under the repository's rules. The daemon tells that READY with the note at its head
+  and the packet's `Merge:` line replaced, so the issue and the merge queue role are never asked to
+  arm it. On any READY refusal it submits nothing, since an armed request would merge through the
+  gate the refusal names; a READY the design gate refused is submitted later, on the architect's
+  word, once the gate opens, and that turn runs only `gh` and a read of the READY the daemon posted
+  then: a refusal or a posted READY carrying the by-hand note is submitted by nobody. A
   `gh pr merge` GitHub refuses is reported to the architect with its message; a person can still
   merge after READY. The packet's second line records the step,
   `Merge: submit on normal acceptance with gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`.
@@ -138,7 +141,8 @@ review posted without a completion leaves the issue in reviewing until you finis
   request out of a merge queue and disables its auto-merge, as the implement App, on any push or
   reopen but one landing on an awaiting READY's head, when READY is withdrawn (a push or reopen
   moved the head past it, its CI turned red, or it conflicts with its base, each of which sends the
-  issue back to `implementing`), and when a child is set back to `todo`. READY waits
+  issue back to `implementing`), when a child is set back to `todo`, and when the issue leaves the
+  workflow. A by-hand READY covers no arm, so whoever arms it is undone. READY waits
   (`READY_DISARM_PENDING`) until that disarm has finished. No role runs a disarm.
 
 ## After the merge

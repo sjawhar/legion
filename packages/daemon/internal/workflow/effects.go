@@ -154,11 +154,12 @@ func refusedLingering(issue record.Issue, request string) intake.Result {
 }
 
 // clearHandoff empties the handoff a role reported for its previous phase — its commit, verdict,
-// summary, and the review round's decision, which ends with the round — keeping its claim and the
-// review rounds, when a transition starts it on a new phase. A role's recorded handoff is then
-// always its current phase's: the implementer's round-1 commit cannot advance round 2, the
-// production check is recorded only by the production check's own completion, a merger sent back to
-// verify again has no READY packet until its next one, and no round inherits an earlier decision.
+// summary and by-hand note, and the review round's decision, which ends with the round — keeping
+// its claim and the review rounds, when a transition starts it on a new phase. A role's recorded
+// handoff is then always its current phase's: the implementer's round-1 commit cannot advance
+// round 2, the production check is recorded only by the production check's own completion, a
+// merger sent back to verify again has no READY packet until its next one, and no round inherits
+// an earlier decision.
 func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) error {
 	if role == "" {
 		return nil
@@ -168,7 +169,7 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 		return err
 	}
 	cleared := row
-	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt = "", "", "", nil, time.Time{}
+	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt, cleared.MergeNote = "", "", "", nil, time.Time{}, ""
 	if cleared == row {
 		return nil
 	}

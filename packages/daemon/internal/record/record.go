@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -112,6 +113,32 @@ type PhaseRow struct {
 	// ClearGeneration resets the row without it. Behind a completion an old daemon wrote, a stale time
 	// at worst makes a review read as the reviewer's answer: one extra review-stuck notice.
 	CompletedAt time.Time
+	// MergeNote is the by-hand note the merger's READY was accepted with, empty for any other: the
+	// MANUAL_MERGE_REQUIRED answer READY gives a pull request whose change touches a path the
+	// project's merge.by_hand names. The packet the daemon tells starts with it (ReadyPacket), and the
+	// disarm keeps nothing armed for such a READY.
+	MergeNote string
+}
+
+// byHandMergeLine is the line ReadyPacket puts in place of the merger's request to submit the
+// merge, for a READY a person merges.
+const byHandMergeLine = "Merge: by hand. A person merges this pull request under the repository's rules; nothing arms it."
+
+// ReadyPacket is the READY packet the daemon tells for summary, the merger's packet, and note, its
+// READY's by-hand note (PhaseRow.MergeNote): summary as it is when there is no note; otherwise the
+// note, a blank line, then summary with each line that begins `Merge:`, the merger's request to
+// submit the merge, replaced by one saying a person merges it, so no reader of the packet arms it.
+func ReadyPacket(summary, note string) string {
+	if note == "" {
+		return summary
+	}
+	lines := strings.Split(summary, "\n")
+	for i, line := range lines {
+		if strings.HasPrefix(line, "Merge:") {
+			lines[i] = byHandMergeLine
+		}
+	}
+	return note + "\n\n" + strings.Join(lines, "\n")
 }
 
 // ReviewDecision is what one review decided: its state (changes_requested or approved), its body,

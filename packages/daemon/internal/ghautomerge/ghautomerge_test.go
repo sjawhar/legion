@@ -104,11 +104,11 @@ func TestDisarmTurnsOffEverythingArmedUnlessTheHeadIsTheKeptREADYHead(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			g := &github{notFound: tc.notFound, head: "head", armed: tc.armed, queued: tc.queued}
 			client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-			got, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, tc.keep)
+			got, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, keeping(tc.keep))
 			if err != nil || got != tc.wantDisarmed {
 				t.Fatalf("Disarm = %+v, %v; want %+v", got, err, tc.wantDisarmed)
 			}
-			if again, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, tc.keep); err != nil || again.AutoMerge || again.Queue {
+			if again, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, keeping(tc.keep)); err != nil || again.AutoMerge || again.Queue {
 				t.Fatalf("a second Disarm = %+v, %v; want nothing left to disarm", again, err)
 			}
 			g.mu.Lock()
@@ -126,8 +126,13 @@ func TestDisarmTurnsOffEverythingArmedUnlessTheHeadIsTheKeptREADYHead(t *testing
 func TestDisarmFailsWhenGitHubCannotFindTheRepository(t *testing.T) {
 	g := &github{notFound: "repository"}
 	client := githubrest.Client{Token: "token", API: githubrest.GraphQLAPI(g.serve(t))}
-	got, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, "")
+	got, err := Disarm(context.Background(), client, ghrepo.MustParse("acme/widgets"), 42, keeping(""))
 	if err == nil || got.Missing {
 		t.Fatalf("Disarm of a repository GitHub cannot find = %+v, %v; want an error, not Missing", got, err)
 	}
+}
+
+// keeping is a Keep that answers head.
+func keeping(head string) Keep {
+	return func(context.Context) (string, error) { return head, nil }
 }

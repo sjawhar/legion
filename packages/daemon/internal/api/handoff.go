@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -110,11 +111,22 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// READY is held to the pull request's head on GitHub before the fact is applied: a refusal the
 	// workflow committed would be recorded as processed under this completion's key (the READY
 	// packet's hazard above), while a refusal here records nothing, and the corrected retry at the
-	// same commit is applied.
-	var note string
+	// same commit is applied. A by-hand READY's note is recorded with it, since the packet the
+	// daemon tells carries the note at its head (record.ReadyPacket), and so must fit one message
+	// with it.
+	var note, mergeNote string
 	if req.Ready {
 		if note, ok = s.readyNote(w, r, grant, issue, req.Commit); !ok {
 			return
+		}
+		if strings.HasPrefix(note, byHandNotePrefix) {
+			mergeNote = note
+			if length := dispatch.MessageBodyLength(record.ReadyPacket(req.Summary, mergeNote)); length > record.MessagePostLimit {
+				writeFailure(w, http.StatusBadRequest, "READY_PACKET_TOO_LONG", fmt.Sprintf(
+					"the READY packet, with the by-hand note the daemon tells above it, is %d characters over the %d the daemon can post as one Dispatch message (%d/%d): shorten the packet, then call handoff_complete again; this completion changed nothing",
+					length-record.MessagePostLimit, record.MessagePostLimit, length, record.MessagePostLimit))
+				return
+			}
 		}
 	}
 	// One phase's completion is identified by where the issue stands — its generation, phase, and
@@ -135,7 +147,8 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 	// (while the tree lingered, or while the old gate was closed) would otherwise take the new
 	// generation's key.
 	eventID := fmt.Sprintf("handoff:%s:%d:%d:%d:%s:%s:%d:%s:%s:%t", grant.Issue, treeGeneration, issue.Generation, serving, grant.Role, issue.Phase, round, req.Commit, req.Verdict, req.Ready)
-	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim, Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit}, s.handlers...)
+	result, err := intake.ApplyFact(r.Context(), s.pool, "api", eventID, intake.HandoffComplete{Generation: serving, Issue: grant.Issue, Role: grant.Role, Claim: grant.Claim,
+		Summary: req.Summary, Verdict: req.Verdict, Ready: req.Ready, Commit: req.Commit, MergeNote: mergeNote}, s.handlers...)
 	if err != nil {
 		writeFailure(w, http.StatusInternalServerError, "FACT_APPLY_FAILED", "could not apply handoff fact")
 		return
@@ -147,7 +160,13 @@ func (s *server) handoffComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if result.Refusal != nil {
-		writeFailure(w, result.Refusal.Status, result.Refusal.Code, result.Refusal.Message)
+		// A refused READY, the design gate's among them, keeps its by-hand note in the refusal: the
+		// merger submits a gate-refused READY later, on the architect's word, and must not arm it.
+		message := result.Refusal.Message
+		if mergeNote != "" {
+			message += " " + mergeNote
+		}
+		writeFailure(w, result.Refusal.Status, result.Refusal.Code, message)
 		return
 	}
 	writeJSON(w, http.StatusOK, HandoffCompleteResponse{Note: note})

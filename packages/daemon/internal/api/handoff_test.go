@@ -1092,6 +1092,8 @@ func TestHandoffCompleteReadyRefusesAHeadThatMovedBeforeTheMergerCanArmIt(t *tes
 // A pull request whose change touches a by_hand path is READY for a person to merge, never armed:
 // the answer carries MANUAL_MERGE_REQUIRED whether or not the base branch requires a check, and a
 // rename counts both of its paths, so moving a protected file out of a by_hand path is by hand too.
+// The completion the workflow records carries the note too, so the packet the daemon tells carries
+// it and nobody it reaches arms the pull request.
 func TestHandoffCompleteReadyMarksAByHandPullRequestWithoutAutoArmingIt(t *testing.T) {
 	noChecks := func(g *handoffGitHub) { g.rules, g.mainBranch = `[]`, `{"name":"main","protected":false}` }
 	for _, tc := range []struct {
@@ -1103,18 +1105,61 @@ func TestHandoffCompleteReadyMarksAByHandPullRequestWithoutAutoArmingIt(t *testi
 		{"a rename out of a by_hand path", `[{"filename":"src/legacy.py","previous_filename":"migrations/versions/0001_init.py","status":"renamed"}]`, noChecks},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			github := newHandoffGitHub(t)
-			github.set(func(g *handoffGitHub) {
-				g.merge.ByHand = []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}}
-				g.pullFiles = tc.files
-				tc.base(g)
-			})
-			h, _, merger := newReadyHarness(t, github)
-			if code, body := ready(t, h, merger); code != http.StatusOK || !strings.HasPrefix(body, "MANUAL_MERGE_REQUIRED:") {
+			github := byHandGitHub(t, tc.files)
+			github.set(tc.base)
+			h, facts, merger := newReadyHarness(t, github)
+			code, body := ready(t, h, merger)
+			if code != http.StatusOK || !strings.HasPrefix(body, "MANUAL_MERGE_REQUIRED:") {
 				t.Fatalf("READY for a by-hand pull request = %d %q", code, body)
+			}
+			if got := lastCompletion(t, facts).MergeNote; got != body {
+				t.Fatalf("the recorded READY's by-hand note = %q, want the answer's %q", got, body)
 			}
 		})
 	}
+}
+
+// A by-hand READY the design gate refuses keeps its note in the refusal, so the merger, which
+// submits the merge on the architect's word once the gate opens, already knows a person merges it.
+func TestHandoffCompleteReadyKeepsTheByHandNoteInADesignGateRefusal(t *testing.T) {
+	github := byHandGitHub(t, `[{"filename":"migrations/versions/0001_init.py"}]`)
+	h, facts := newHandoffHarness(t, github, nil, &intake.Refusal{Status: http.StatusConflict, Code: "DESIGN_GATE_CLOSED", Message: "READY refused: approve design version 4 before requesting READY."})
+	seedIssueAt(t, h, "LEGION-208", phase.Merging)
+	seedPullRequest(t, h, "LEGION-208", headSHA)
+	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
+	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "gate facts hold", Ready: true, Commit: headSHA})
+	if message := refused(t, recorder, http.StatusConflict, "DESIGN_GATE_CLOSED"); !strings.Contains(message, "MANUAL_MERGE_REQUIRED: pull request #42") {
+		t.Fatalf("the design gate's refusal of a by-hand READY = %q, want it to carry the by-hand note", message)
+	}
+	if got := lastCompletion(t, facts).MergeNote; !strings.HasPrefix(got, "MANUAL_MERGE_REQUIRED:") {
+		t.Fatalf("the refused READY's by-hand note = %q, want it recorded for the approval to tell", got)
+	}
+}
+
+// The packet the daemon tells for a by-hand READY carries its note above the merger's packet, so it
+// is the told packet that must fit one Dispatch message. A packet that fits alone but not with the
+// note is refused, naming the note's share, and records nothing.
+func TestHandoffCompleteReadyRefusesAByHandPacketTooLongWithItsNote(t *testing.T) {
+	h, facts, merger := newReadyHarness(t, byHandGitHub(t, `[{"filename":"migrations/versions/0001_init.py"}]`))
+	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: strings.Repeat("x", record.MessagePostLimit), Ready: true, Commit: headSHA})
+	if message := refused(t, recorder, http.StatusBadRequest, "READY_PACKET_TOO_LONG"); !strings.Contains(message, "by-hand note") {
+		t.Fatalf("a by-hand READY whose packet fits only alone = %q, want it refused naming the by-hand note", message)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
+	}
+}
+
+// byHandGitHub is a GitHub whose pull request #42 changes files, under a by_hand rule for
+// migrations/versions/.
+func byHandGitHub(t *testing.T, files string) *handoffGitHub {
+	t.Helper()
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) {
+		g.merge.ByHand = []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}}
+		g.pullFiles = files
+	})
+	return github
 }
 
 // GitHub lists at most 3,000 of a pull request's changed files, so a by_hand path past that limit

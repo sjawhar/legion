@@ -312,6 +312,10 @@ type HandoffComplete struct {
 	Verdict    string
 	Ready      bool
 	Commit     string
+	// MergeNote is READY's by-hand note, empty for any other completion: the MANUAL_MERGE_REQUIRED
+	// answer the route's READY checks give a pull request whose change touches a path the project's
+	// merge.by_hand names. The workflow keeps it with the merger's packet and tells it at its head.
+	MergeNote string
 }
 
 func (HandoffComplete) isFact() {}
