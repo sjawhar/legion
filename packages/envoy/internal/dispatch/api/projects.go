@@ -114,13 +114,13 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 
 // projectNameProblem refuses a project name that would mislead its reader: one holding a control
 // character, one holding a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), the
-// controls a Trojan Source spoof reorders text with, and one with no visible character (a letter,
+// controls a Trojan Source spoof reorders text with, and one with no visible character: no letter,
 // number, punctuation or symbol other than the blank fillers U+115F, U+1160, U+3164, U+FFA0 and
-// U+2800; combining marks, format characters and whitespace don't count). Every other format
-// character and combining mark does visible work in real names and stays beside a visible one: the
-// joiner inside an emoji, a flag's tag characters, a direction mark (U+200E, U+200F, U+061C) in
-// mixed-direction text, a soft hyphen, an accent written as a combining mark. It answers "" for a
-// name it takes.
+// U+2800, and no code point Go's Unicode tables leave unassigned other than a noncharacter or a
+// reserved default-ignorable (visibleCharacter). Every other format character and combining mark
+// does visible work in real names and stays beside a visible one: the joiner inside an emoji, a
+// flag's tag characters, a direction mark (U+200E, U+200F, U+061C) in mixed-direction text, a soft
+// hyphen, an accent written as a combining mark. It answers "" for a name it takes.
 func projectNameProblem(name string) string {
 	visible := false
 	for _, character := range name {
@@ -144,8 +144,23 @@ func projectNameProblem(name string) string {
 // (U+2800, So). A name of only these looks empty wherever it is shown.
 var blankGlyphs = map[rune]bool{0x115F: true, 0x1160: true, 0x3164: true, 0xFFA0: true, 0x2800: true}
 
-// visibleCharacter reports whether the character is a letter, number, punctuation or symbol
-// (Unicode L, N, P, S) other than the blank fillers.
+// visibleCharacter reports whether the character is one a reader sees: a letter, number,
+// punctuation or symbol (Unicode L, N, P, S) other than the blank fillers, or a code point Go's
+// Unicode tables leave unassigned (Cn), since a newer Unicode may have made it a character the
+// reader's device draws (U+1FAE9 is Unicode 16; Go 1.26's tables are Unicode 15.0). An unassigned
+// code point that stays invisible in every Unicode version is not one: a noncharacter (U+FDD0-U+FDEF
+// and each code point ending in FFFE or FFFF), which Unicode never assigns, or a reserved
+// default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF), which a reader renders as nothing even
+// once it is assigned; the two property tables hold exactly those unassigned code points. Combining
+// marks, format characters, private-use characters (Co) and whitespace are not visible. A surrogate
+// (Cs) never reaches here: ranging over a Go string yields U+FFFD for invalid UTF-8, which an encoded
+// surrogate is, and JSON decoding writes a lone surrogate escape as U+FFFD too.
 func visibleCharacter(character rune) bool {
-	return unicode.In(character, unicode.L, unicode.N, unicode.P, unicode.S) && !blankGlyphs[character]
+	switch {
+	case unicode.In(character, unicode.L, unicode.N, unicode.P, unicode.S):
+		return !blankGlyphs[character]
+	case unicode.Is(unicode.Cn, character):
+		return !unicode.In(character, unicode.Noncharacter_Code_Point, unicode.Other_Default_Ignorable_Code_Point)
+	}
+	return false
 }

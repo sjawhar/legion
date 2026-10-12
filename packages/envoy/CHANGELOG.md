@@ -13,9 +13,12 @@
   the trim; past it `400 CAP_EXCEEDED`), and is `400 INVALID_PROJECT` when it holds a control
   character (Unicode Cc) or a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), or
   has no visible character (a letter, number, punctuation or symbol other than the blank fillers
-  U+115F, U+1160, U+3164, U+FFA0 and U+2800; combining marks, format characters and whitespace don't
-  count); every other format character (an emoji's joiner, a flag's tags, a direction mark, a soft
-  hyphen) and every combining mark is allowed beside a visible one. Any bearer
+  U+115F, U+1160, U+3164, U+FFA0 and U+2800, or a code point Go's Unicode tables leave unassigned,
+  such as an emoji newer than them, other than a noncharacter (U+FDD0-U+FDEF and each code point
+  ending in FFFE or FFFF) or a reserved default-ignorable (U+2065, U+FFF0-U+FFF8, U+E0000-U+E0FFF);
+  combining marks, format characters, private-use characters and whitespace don't count); every
+  other format character (an emoji's joiner, a flag's tags, a direction mark, a soft hyphen) and
+  every combining mark is allowed beside a visible one. Any bearer
   writes a name into the project list every dashboard reads and no route renames a project. Every route
   that refuses a project key that is not one (creating a project or an issue, mapping a repository,
   search) now says the rule one way, `<field> "x" is not a project key: an uppercase letter, then 1

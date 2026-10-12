@@ -160,6 +160,15 @@ func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
 		{"Braille pattern blanks", "AGENT", "\u2800\u2800", "name has no visible character"},
 		{"a bare combining mark and a variation selector", "AGENT", "\u0301\ufe0f", "name has no visible character"},
 		{"a spacing combining mark alone", "AGENT", "\u093e", "name has no visible character"},
+		// Characters that stay invisible however new the reader's Unicode is: a reserved
+		// default-ignorable (U+2065, U+FFF0, U+E0000-U+E0FFF) renders as nothing, and a
+		// noncharacter is never assigned. U+E0080 is unassigned; the language tag U+E0001 beside
+		// it is an assigned format character.
+		{"a reserved default-ignorable in the general punctuation block", "AGENT", "\u2065", "name has no visible character"},
+		{"a reserved default-ignorable before the specials", "AGENT", "\ufff0", "name has no visible character"},
+		{"a reserved default-ignorable in the tag block", "AGENT", "\U000E0080", "name has no visible character"},
+		{"a language tag", "AGENT", "\U000E0001", "name has no visible character"},
+		{"a noncharacter", "AGENT", "\ufdd0", "name has no visible character"},
 	} {
 		t.Run(input.name, func(t *testing.T) {
 			for _, attempt := range []struct {
@@ -197,6 +206,15 @@ func TestAVisibleNameWithFormatCharactersIsAcceptedForABearerAndAPerson(t *testi
 		"한국 팀",
 		"cafe\u0301",
 		"Cafe\u0301",
+		// Scripts whose names lean on combining marks and conjoining letters: Devanagari, Thai
+		// with a tone mark, and a Hangul syllable written as its conjoining jamo.
+		"नमस्ते",
+		"น้ำ",
+		"\u1112\u1161\u11ab",
+		// A character newer than the Unicode tables Go ships (U+1FAE9, Unicode 16, sent by phones
+		// now): a reader's device draws it, so it is not "no visible character".
+		"🫩",
+		"Team 🫩",
 	} {
 		bearer := sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
 			"key": fmt.Sprintf("VISB%d", index), "name": name, "actor": sessionActor(),
