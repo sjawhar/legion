@@ -362,8 +362,10 @@ wait_for_topic_count "notifications.github.example-org.example-repo.pr.42.checks
 post_github pull_request "${fixture_dir}/pull-request-closed-merged.json"
 post_github workflow_run "${fixture_dir}/workflow-run-with-pr.json"
 post_github workflow_run "${fixture_dir}/workflow-run-without-pr.json"
+post_github check_run "${fixture_dir}/check-run-actions-job-without-pr.json"
+post_github check_run "${fixture_dir}/check-run-actions-job-merge-queue.json"
 post_github push "${fixture_dir}/push.json"
-wait_for_prompt_count 13
+wait_for_prompt_count 14
 
 (
   cd "$repo_root/packages/envoy-client"
@@ -499,6 +501,14 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
 
     const workflow = withTopic(topic("workflow.ci_yml.completed"));
     require(workflow.length === 1 && payload(workflow[0]).run_id === "3002", "only the PR-less workflow run may publish");
+    // A finished Actions job of that PR-less run on main, the default branch, publishes on the job
+    // topic of the run; the same job of a merge queue commit (run 3003) publishes nothing, and the
+    // four check runs above list pull request 42 and publish only through its checks settlement.
+    const jobs = envelopes.filter((item) => item.topic.startsWith(topic("job.")));
+    require(jobs.length === 1 && jobs[0].topic === topic("job.3002.completed"), `job topics = ${jobs.map((item) => item.topic).join(",")}`);
+    const job = payload(jobs[0]);
+    require(job.kind === "job" && job.repo === "example-org/example-repo" && job.run_id === "3002" && job.job_id === "3101" && job.name === "deploy / production" && job.conclusion === "success" && job.completed_at === "2026-09-07T03:24:00Z", `job payload = ${jobs[0].payload}`);
+    require(jobs[0].payload_summary === "job deploy / production run 3002 completed/success", `job summary = ${jobs[0].payload_summary}`);
     require(withTopic(topic("push.branch.main")).length === 1, "main push topic is missing");
 
     const obsolete = ["pr.42.check", "pr.42.ci", "pr.42.merged", "pr.42.closed"];

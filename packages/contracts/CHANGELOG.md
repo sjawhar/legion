@@ -13,6 +13,10 @@
   `DeliveryLiveHeartbeat` (sent every heartbeat interval beside the socket's ping, which a browser
   never shows the page). `fixtures/delivery-live/` holds a snapshot, a delta, the snapshot after it,
   an error and a heartbeat frame as the server writes them.
+- `githubJobSubject(owner, repo, runId, "completed")` and its type `GithubJobSubject`,
+  `notifications.github.<owner>.<repo>.job.<run_id>.completed`: a finished Actions job on the
+  default branch, of a run with no pull request, and the generated Go `GithubJobSubject`
+  (LEGION-690).
 
 - `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
   `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,

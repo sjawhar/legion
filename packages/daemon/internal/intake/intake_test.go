@@ -389,6 +389,28 @@ func TestDecodeChecksIgnoresAMalformedSettledAt(t *testing.T) {
 	}
 }
 
+// Envoy publishes a finished GitHub Actions job on the default branch, of a run with no pull
+// request, on `notifications.github.<owner>.<repo>.job.<run_id>.completed`, with `kind: "job"`,
+// inside the repository's filter. It changes no workflow record, so it decodes to no fact even for
+// a configured repository, which consumeMessage acknowledges.
+func TestAJobEnvelopeIsNoFact(t *testing.T) {
+	const subject = "notifications.github.sjawhar.legion.job.38230245571.completed"
+	payload := `{"kind":"job","repo":"sjawhar/legion","run_id":"38230245571","job_id":"114758907253",` +
+		`"name":"release","status":"completed","conclusion":"success","started_at":"2026-10-12T10:01:21Z",` +
+		`"completed_at":"2026-10-12T10:02:02Z","head_sha":"f15b4562bb3b9ba82cf4c25a82ff0a312fc3e80b",` +
+		`"url":"https://github.com/sjawhar/legion/actions/runs/38230245571/job/114758907253"}`
+	if filter := githubFilters(capturedRepositories)[0]; !strings.HasPrefix(subject, strings.TrimSuffix(filter, ">")) {
+		t.Fatalf("the repository's filter %s does not take the job subject %s, so this proves nothing", filter, subject)
+	}
+	decoded, err := decodeMessage(subject, "CAPTURE", capturedRepositories, envelopeJSON(t, "job-1", "github", payload))
+	if err != nil {
+		t.Fatalf("decode a job envelope: %v", err)
+	}
+	if decoded.Fact != nil || len(decoded.Unread) != 0 {
+		t.Fatalf("decoded = %#v, want no fact and no unread field", decoded)
+	}
+}
+
 func TestConsumeTermsPoisonMessagesOnce(t *testing.T) {
 	pool := migratedPool(t)
 	createWrites(t, pool)

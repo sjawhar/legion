@@ -4,6 +4,16 @@
 
 ### Added
 
+- A finished Actions job on the default branch, of a run with no pull request, is published on
+  `notifications.github.<owner>.<repo>.job.<run_id>.completed` (LEGION-690): a completed
+  `check_run` that lists no pull request, from the GitHub Actions App, whose
+  `check_suite.head_branch` is the repository's `default_branch` and whose `details_url` names
+  `/actions/runs/<run_id>/job/<job_id>`. The payload is `kind: "job"`, `repo`, `run_id`, `job_id`,
+  `name`, `status`, `conclusion`, `started_at`, `completed_at`, `head_sha` and `url`, each text
+  capped like every envelope's. A check run that lists a pull request still goes only to the CI
+  store, a merge queue's or another branch's job is published nowhere, and `job` joins
+  `contracts.GithubTopicKinds`, so the listener's subscribe warnings take it as a kind.
+
 - The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
   (migration 0093), is a stable id, a name and the sessions it holds; a pull request whose first
   session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,

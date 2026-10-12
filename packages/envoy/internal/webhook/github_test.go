@@ -95,6 +95,27 @@ func TestGitHubHandler(t *testing.T) {
 		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
 	}`
 
+	// A finished GitHub Actions job on the default branch, of a run with no pull request.
+	actionsJob := `{
+		"action": "completed",
+		"check_run": {
+			"id": 114758907253,
+			"name": "release",
+			"status": "completed",
+			"conclusion": "success",
+			"started_at": "2026-10-12T10:01:21Z",
+			"completed_at": "2026-10-12T10:02:02Z",
+			"head_sha": "f15b4562bb3b9ba82cf4c25a82ff0a312fc3e80b",
+			"html_url": "https://github.com/sjawhar/legion/actions/runs/38230245571/job/114758907253",
+			"details_url": "https://github.com/sjawhar/legion/actions/runs/38230245571/job/114758907253",
+			"app": {"id": 15368, "slug": "github-actions"},
+			"check_suite": {"id": 103576905558, "head_branch": "main", "head_sha": "f15b4562bb3b9ba82cf4c25a82ff0a312fc3e80b"},
+			"pull_requests": []
+		},
+		"sender": {"login": "github-actions[bot]", "type": "Bot"},
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion", "default_branch": "main"}
+	}`
+
 	cases := []struct {
 		name           string
 		method         string
@@ -215,6 +236,17 @@ func TestGitHubHandler(t *testing.T) {
 			wantStatus:    200,
 			wantPublished: 0,
 			wantRecorded:  1,
+		},
+		{
+			name:          "a finished Actions job on the default branch, of a run with no pull request, publishes its job topic and records nothing",
+			method:        "POST",
+			body:          actionsJob,
+			delivery:      "d-job",
+			event:         "check_run",
+			secret:        "s",
+			wantStatus:    200,
+			wantPublished: 1,
+			wantTopics:    []string{"notifications.github.sjawhar.legion.job.38230245571.completed"},
 		},
 		{
 			name:          "publish failure returns 503",

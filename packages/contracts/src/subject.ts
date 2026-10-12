@@ -237,6 +237,42 @@ export function githubWorkflowSubject(
   return `${githubRepositoryPrefix(owner, repo)}.workflow.${sanitizeSubjectSegment(workflowFilename)}.${action}`;
 }
 
+export type GithubJobAction = "completed";
+
+/**
+ * A GitHub Actions job on the repository's default branch, of a run with no pull request, published
+ * when it finishes: Envoy reads one from a `check_run` webhook whose App is GitHub Actions, whose
+ * check suite's `head_branch` is the repository's `default_branch` and whose `details_url` names the
+ * run and the job. The run id is the subject's segment, so a consumer follows one run's jobs as they
+ * end.
+ */
+export type GithubJobSubject<
+  Owner extends string = string,
+  Repo extends string = string,
+  RunId extends string | number = string | number,
+  Action extends GithubJobAction = GithubJobAction,
+> = `notifications.github.${SanitizedSubjectSegment<Owner>}.${SanitizedSubjectSegment<Repo>}.job.${SanitizedSubjectSegment<`${RunId}`>}.${Action}`;
+
+export function githubJobSubject<
+  Owner extends string,
+  Repo extends string,
+  RunId extends string | number,
+  Action extends GithubJobAction,
+>(
+  owner: Owner,
+  repo: Repo,
+  runId: RunId,
+  action: Action
+): GithubJobSubject<Owner, Repo, RunId, Action>;
+export function githubJobSubject(
+  owner: string,
+  repo: string,
+  runId: string | number,
+  action: GithubJobAction
+) {
+  return `${githubRepositoryPrefix(owner, repo)}.job.${sanitizeSubjectSegment(String(runId))}.${action}`;
+}
+
 export const GHOSTWISPR_TOPIC_PREFIX = "notifications.ghostwispr." as const;
 
 export type GhostWisprSubject<
@@ -276,6 +312,7 @@ export type Subject =
   | GithubResourceSubject
   | GithubPushSubject
   | GithubWorkflowSubject
+  | GithubJobSubject
   | SlackSubject
   | SlackThreadSubject
   | GhostWisprSubject

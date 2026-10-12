@@ -35,6 +35,7 @@ granularity they need using wildcard patterns.
 | Issue comment | `notifications.github.{owner}.{repo}.issue.{number}.comment` |
 | Mention (repo-level) | `notifications.github.{owner}.{repo}.mention` |
 | Mention (resource-level) | `notifications.github.{owner}.{repo}.{type}.{number}.mention` |
+| Actions job finished on the default branch, of a run with no PR (`githubJobSubject`) | `notifications.github.{owner}.{repo}.job.{run_id}.completed` |
 
 ### Subscription granularity
 
