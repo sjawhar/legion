@@ -1,4 +1,9 @@
-import { DEFAULT_ISSUE_PAGE_LIMIT, ISSUE_TITLE_MAX, MAX_ISSUE_PAGE_LIMIT } from "./dispatch-api";
+import {
+  DEFAULT_ISSUE_PAGE_LIMIT,
+  ISSUE_TITLE_MAX,
+  MAX_ISSUE_PAGE_LIMIT,
+  PROJECT_NAME_MAX,
+} from "./dispatch-api";
 import type { SchemaApi, SchemaNode, ToolArgumentsShape } from "./tool-schema";
 
 export interface DispatchToolSpec {
@@ -1159,12 +1164,16 @@ export const dispatchToolSpecs = [
       "Projects cannot be renamed or deleted, so a mistyped key stays for good: check the keys that exist first " +
       "with GET /api/v1/projects, since no dispatch command lists projects. A key that already exists is refused " +
       "with 409 PROJECT_EXISTS whoever created it, so after a retry it can mean the first call made the project. " +
-      "A key that is not a project key (an uppercase letter, then 1 to 9 uppercase letters or digits) or an empty " +
-      "name is refused with 400 INVALID_PROJECT. Do not use it when an existing project already covers the work; " +
-      "file an issue there with dispatch issue instead.",
+      `A key that is not a project key (${PROJECT_KEY_RULE}) or an empty name is refused with 400 ` +
+      `INVALID_PROJECT, and a name over ${PROJECT_NAME_MAX} characters with 400 CAP_EXCEEDED. Do not use ` +
+      "it when an existing project already covers the work; file an issue there with dispatch issue instead.",
     arguments: (z) => ({
       key: z.string().describe("The new project's key, such as CORE."),
-      name: z.string().describe("The project's name, shown beside its key."),
+      name: z
+        .string({ max: PROJECT_NAME_MAX })
+        .describe(
+          `The project's name, shown beside its key, at most ${PROJECT_NAME_MAX} characters.`
+        ),
     }),
     strict: true,
   },

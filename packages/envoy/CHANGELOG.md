@@ -9,10 +9,15 @@
   needs, with its `project.created` event naming that session, rather than asking a person to
   make it in Settings. A key that already exists is still `409 PROJECT_EXISTS` whoever asks, and a
   key that is not a project key or an empty name `400 INVALID_PROJECT`. `GET /api/v1` lists the
-  route as `any`. Every route that refuses a project key that is not one (creating a project or an
-  issue, mapping a repository, search) now says the rule the same way: `project "x" is not a project
-  key: an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE`. Creating an
-  issue without a title answers `title is required`.
+  route as `any`. A name is at most 80 characters (`contracts.ProjectNameMax`, UTF-16 units after
+  the trim; past it `400 CAP_EXCEEDED`) and holds no control or format character (Unicode Cc, Cf:
+  a bidi override, a zero-width character; `400 INVALID_PROJECT` naming it), since any bearer
+  writes it into the project list every dashboard reads and no route renames a project. Every route
+  that refuses a project key that is not one (creating a project or an issue, mapping a repository,
+  search) now says the rule one way, `<field> "x" is not a project key: an uppercase letter, then 1
+  to 9 uppercase letters or digits, such as CORE`, from `contracts.ProjectKeyRule`, and the key
+  pattern itself is generated as `contracts.ProjectKeyPattern`. Creating an issue without a title
+  answers `title is required`.
 - The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
   (migration 0093), is a stable id, a name and the sessions it holds; a pull request whose first
   session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,

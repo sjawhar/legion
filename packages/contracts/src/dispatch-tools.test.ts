@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { ISSUE_TITLE_MAX } from "./dispatch-api";
+import { ISSUE_TITLE_MAX, PROJECT_NAME_MAX } from "./dispatch-api";
 import {
   dispatchToolSchema,
   dispatchToolSpecs,
@@ -273,11 +273,8 @@ describe("dispatchToolSpecs", () => {
     }
   });
 
-  test("the project-key rule is worded once, as the server's refusal words it", () => {
-    // Generated into Go as contracts.ProjectKeyRule, which every server refusal of a bad key uses.
-    expect(PROJECT_KEY_RULE).toBe(
-      "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE"
-    );
+  test("dispatch_project's description gives the project-key rule", () => {
+    expect(specFor("dispatch_project").description).toContain(PROJECT_KEY_RULE);
   });
 
   test("dispatch_open_asks accepts no arguments or a project and rejects unknown selectors", () => {
@@ -366,6 +363,13 @@ describe("dispatchToolSpecs", () => {
       expect(schema.safeParse(args).success, JSON.stringify(args)).toBe(false);
     }
     expect(schema.safeParse({ key: "CORE", name: "Core", force: true }).success).toBe(false);
+    expect(schema.safeParse({ key: "CORE", name: "n".repeat(PROJECT_NAME_MAX) }).success).toBe(
+      true
+    );
+    const over = schema.safeParse({ key: "CORE", name: "n".repeat(PROJECT_NAME_MAX + 1) });
+    expect(over.error?.issues.map((issue) => issue.message)).toEqual([
+      `is 1 characters over the ${PROJECT_NAME_MAX}-character limit (${PROJECT_NAME_MAX + 1}/${PROJECT_NAME_MAX})`,
+    ]);
   });
 
   test("dispatch_issue accepts an assignee login", () => {

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"unicode"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -64,12 +65,24 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 	input.Key = strings.TrimSpace(input.Key)
 	input.Name = strings.TrimSpace(input.Name)
 	if !projectKeyPattern.MatchString(input.Key) {
-		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, fmt.Sprintf("project key %q is not a project key: %s", input.Key, contracts.ProjectKeyRule))
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, projectKeyProblem("key", input.Key))
 		return
 	}
 	if input.Name == "" {
 		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "project name is required")
 		return
+	}
+	// Any bearer writes a name into the project list every dashboard reads, and no route renames a
+	// project, so a name is capped as an issue title is and holds nothing a reader cannot see.
+	if length := len16(input.Name); length > contracts.ProjectNameMax {
+		capExceeded(w, "name", length, contracts.ProjectNameMax)
+		return
+	}
+	for _, character := range input.Name {
+		if unicode.In(character, unicode.Cc, unicode.Cf) {
+			writeError(w, "INVALID_PROJECT", http.StatusBadRequest, fmt.Sprintf("name holds U+%04X, a control or format character (a bidi override, a zero-width character), which a reader cannot see", character))
+			return
+		}
 	}
 	tx, err := s.begin(r.Context())
 	if err != nil {

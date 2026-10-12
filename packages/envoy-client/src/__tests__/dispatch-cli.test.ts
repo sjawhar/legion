@@ -2,6 +2,7 @@ import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PROJECT_KEY_RULE } from "@legion/contracts";
 import { fitOutput, runDispatchCli } from "../dispatch-cli";
 import { resetAdviceMemory } from "../dispatch-execute";
 import { forgetShownPictures } from "../dispatch-picture-tools";
@@ -372,9 +373,7 @@ describe("the dispatch CLI", () => {
   test("dispatch search refuses a project that is not a key in the server's wording, sending nothing", async () => {
     const { code, stdout } = await run(["search", "--query", "ok", "--project", "lower"], omp);
     expect(code).toBe(1);
-    expect(stdout).toContain(
-      "project is not a project key: an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE"
-    );
+    expect(stdout).toContain(`project is not a project key: ${PROJECT_KEY_RULE}`);
     expect(requests).toEqual([]);
   });
 });

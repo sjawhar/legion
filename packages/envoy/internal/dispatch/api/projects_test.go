@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -112,15 +113,11 @@ func TestCreatingATakenProjectKeyIsRefusedForABearerAndACookie(t *testing.T) {
 }
 
 // Every route that takes a project key refuses a bad one with the same description of the rule,
-// so an agent learns the rule once, whichever route it called. The rule is generated from
-// contracts' PROJECT_KEY_RULE, which the dispatch command's own refusal gives too; this pins its
-// text on the Go side as contracts' test pins it on the TypeScript side.
+// so an agent learns the rule once, whichever route it called. The rule is contracts'
+// PROJECT_KEY_RULE, generated into Go, which the dispatch command's own refusal gives too.
 func TestEveryRouteRefusesABadProjectKeyInOneWording(t *testing.T) {
 	handler := newTestHandler(t)
-	const rule = "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE"
-	if contracts.ProjectKeyRule != rule {
-		t.Fatalf("contracts.ProjectKeyRule = %q, want %q", contracts.ProjectKeyRule, rule)
-	}
+	rule := contracts.ProjectKeyRule
 	for _, probe := range []struct {
 		name, method, target, code string
 		body                       any
@@ -142,14 +139,19 @@ func TestEveryRouteRefusesABadProjectKeyInOneWording(t *testing.T) {
 // refusal names which of the two is wrong: an agent reads it as the whole answer.
 func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
 	handler := newTestHandler(t)
-	const badKey = `is not a project key: an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE`
+	badKey := func(key string) string {
+		return fmt.Sprintf(`key \"%s\" is not a project key: %s`, key, contracts.ProjectKeyRule)
+	}
 	for _, input := range []struct{ name, key, projectName, says string }{
-		{"lowercase key", "agent", "Agent project", `project key \"agent\" ` + badKey},
-		{"one-character key", "A", "Agent project", `project key \"A\" ` + badKey},
-		{"key starting with a digit", "1AGENT", "Agent project", `project key \"1AGENT\" ` + badKey},
-		{"key over ten characters", "ABCDEFGHIJK", "Agent project", `project key \"ABCDEFGHIJK\" ` + badKey},
+		{"lowercase key", "agent", "Agent project", badKey("agent")},
+		{"one-character key", "A", "Agent project", badKey("A")},
+		{"key starting with a digit", "1AGENT", "Agent project", badKey("1AGENT")},
+		{"key over ten characters", "ABCDEFGHIJK", "Agent project", badKey("ABCDEFGHIJK")},
 		{"empty name", "AGENT", "", "project name is required"},
 		{"blank name", "AGENT", "   ", "project name is required"},
+		{"a bidi override", "AGENT", "Agent \u202eproject", `name holds U+202E, a control or format character`},
+		{"zero-width characters only", "AGENT", "\u200b\u200d", `name holds U+200B, a control or format character`},
+		{"a control character", "AGENT", "Agent\u0007project", `name holds U+0007, a control or format character`},
 	} {
 		t.Run(input.name, func(t *testing.T) {
 			for _, attempt := range []struct {
@@ -169,6 +171,37 @@ func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A project name is capped as an issue title is: any bearer can write one into the project list
+// every dashboard reads, and no route renames a project. The cap counts UTF-16 units after the
+// trim, so a name at it is created and one unit over is CAP_EXCEEDED, for a session as for a person.
+func TestAProjectNameOverTheCapIsCapExceededForABearerAndAPerson(t *testing.T) {
+	handler := newTestHandler(t)
+	atCap := strings.Repeat("n", contracts.ProjectNameMax)
+	over := strings.Repeat("😀", contracts.ProjectNameMax/2) + "n"
+	for _, caller := range []struct {
+		name string
+		send func(body map[string]any) *httptest.ResponseRecorder
+	}{
+		{"bearer", func(body map[string]any) *httptest.ResponseRecorder {
+			body["actor"] = sessionActor()
+			return sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", body)
+		}},
+		{"person", func(body map[string]any) *httptest.ResponseRecorder {
+			return dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", body, "alice")
+		}},
+	} {
+		key := map[string]string{"bearer": "CAPB", "person": "CAPP"}[caller.name]
+		refused := caller.send(map[string]any{"key": key, "name": "  " + over + "  "})
+		want := fmt.Sprintf("name is 1 characters over the %d-character limit (%d/%d)", contracts.ProjectNameMax, contracts.ProjectNameMax+1, contracts.ProjectNameMax)
+		if refused.Code != http.StatusBadRequest || !strings.Contains(refused.Body.String(), `"code":"CAP_EXCEEDED"`) || !strings.Contains(refused.Body.String(), want) {
+			t.Fatalf("a %s's name one unit over the cap: status=%d body=%s, want 400 CAP_EXCEEDED saying %q", caller.name, refused.Code, refused.Body.String(), want)
+		}
+		if created := caller.send(map[string]any{"key": key, "name": "  " + atCap + "  "}); created.Code != http.StatusCreated {
+			t.Fatalf("a %s's name at the cap: status=%d body=%s, want 201", caller.name, created.Code, created.Body.String())
+		}
 	}
 }
 
