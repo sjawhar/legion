@@ -24,6 +24,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -97,12 +98,20 @@ func run() error {
 	}
 	daemon := os.Getenv("LEGION_DAEMON_URL")
 	var registered claim.RegisterResponse
+	pluginContract := 1
+	if raw := os.Getenv("LEGION_STANDIN_PLUGIN_CONTRACT"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil {
+			return fmt.Errorf("parse LEGION_STANDIN_PLUGIN_CONTRACT: %w", err)
+		}
+		pluginContract = parsed
+	}
 	if err := post(daemon+"/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken:      strings.TrimSpace(string(token)),
 		SessionID:      report.SessionID,
 		OmpSessionFile: report.SessionFile,
 		AgentID:        "omp-standin",
-		PluginContract: 1,
+		PluginContract: pluginContract,
 	}, &registered); err != nil {
 		return err
 	}

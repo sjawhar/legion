@@ -89,6 +89,9 @@ type ControllerLocator struct {
 	External     bool      `json:"external"`
 	SessionID    string    `json:"sessionId"`
 	RegisteredAt time.Time `json:"registeredAt"`
+	// PluginContract is the contract the registered session's plugin declared, 0 when none
+	// recorded, always emitted.
+	PluginContract int `json:"pluginContract"`
 }
 
 // ControllerLocatorOf is record as the state shows it under the runtime runtimeName names: the
@@ -97,7 +100,7 @@ func ControllerLocatorOf(runtimeName string, record controller.Record) *Controll
 	if !record.Registered() {
 		return nil
 	}
-	return &ControllerLocator{Runtime: runtimeName, External: true, SessionID: record.Session, RegisteredAt: record.RegisteredAt}
+	return &ControllerLocator{Runtime: runtimeName, External: true, SessionID: record.Session, RegisteredAt: record.RegisteredAt, PluginContract: record.PluginContract}
 }
 
 // AgentSecretsLoginView is the daemon's own agent-secrets token login's current status
@@ -205,6 +208,9 @@ type ClaimView struct {
 	State        string                `json:"state"`
 	Locator      *runtime.Locator      `json:"locator,omitempty"`
 	Capabilities *CapabilityReportView `json:"capabilities,omitempty"`
+	// PluginContract is the contract the claim's current registration declared, 0 when none
+	// recorded, always emitted.
+	PluginContract int `json:"pluginContract"`
 }
 
 // CapabilityReportView is one session's capability report as the state shows it: when the session

@@ -94,6 +94,7 @@ func (s *server) register(w http.ResponseWriter, r *http.Request) {
 		Session:        req.SessionID,
 		SessionFile:    req.OmpSessionFile,
 		CapabilityHash: capabilityHash(secret),
+		PluginContract: req.PluginContract,
 	})
 	if err != nil {
 		s.claimFailure(w, "register", launch.Claim, err)

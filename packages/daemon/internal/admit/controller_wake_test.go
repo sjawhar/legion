@@ -37,7 +37,7 @@ func registerController(t *testing.T, pool *pgxpool.Pool) {
 	if err != nil {
 		t.Fatalf("mint the controller capability: %v", err)
 	}
-	if ok, err := st.RegisterController(ctx, token, generation, "ses-controller", []byte("secret"), time.Now()); err != nil || !ok {
+	if ok, err := st.RegisterController(ctx, token, generation, "ses-controller", []byte("secret"), time.Now(), 0); err != nil || !ok {
 		t.Fatalf("register the controller = %t, %v", ok, err)
 	}
 }

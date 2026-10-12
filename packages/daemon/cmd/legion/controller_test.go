@@ -60,13 +60,13 @@ func (m *memoryController) Controller(context.Context, string) (controller.Recor
 	return m.record, m.record.Generation != 0, nil
 }
 
-func (m *memoryController) RegisterController(_ context.Context, _ string, generation uint64, session string, secretHash []byte, at time.Time) (bool, error) {
+func (m *memoryController) RegisterController(_ context.Context, _ string, generation uint64, session string, secretHash []byte, at time.Time, pluginContract int) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if generation != m.record.Generation {
 		return false, nil
 	}
-	m.record.Session, m.record.SecretHash, m.record.RegisteredAt = session, secretHash, at
+	m.record.Session, m.record.SecretHash, m.record.RegisteredAt, m.record.PluginContract = session, secretHash, at, pluginContract
 	return true, nil
 }
 

@@ -60,6 +60,9 @@ type OperatorClaim struct {
 	// SuspensionHeld is a suspension the machine holds for the agent's turn (supervise's
 	// holdSuspension); absent when none is.
 	SuspensionHeld bool `json:"suspensionHeld,omitempty"`
+	// PluginContract is the contract the claim's current registration declared, 0 when none
+	// recorded, always emitted.
+	PluginContract int `json:"pluginContract"`
 }
 
 // BudgetsView is the claim's retry counters (`supervise.Budgets`).
@@ -123,6 +126,7 @@ func operatorView(c supervise.Claim) OperatorClaim {
 		UncertainStreak: c.UncertainStreak,
 		SuspendedBy:     string(c.SuspendedBy),
 		SuspensionHeld:  c.SuspensionHeld,
+		PluginContract:  c.PluginContract,
 	}
 	if p := c.Pending; p != nil {
 		view.Pending = &DeliveryView{

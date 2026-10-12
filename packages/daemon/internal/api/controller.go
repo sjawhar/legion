@@ -21,7 +21,7 @@ import (
 type ControllerStore interface {
 	MintController(ctx context.Context, project string, capabilityHash []byte) (uint64, error)
 	Controller(ctx context.Context, project string) (controller.Record, bool, error)
-	RegisterController(ctx context.Context, project string, generation uint64, session string, secretHash []byte, at time.Time) (bool, error)
+	RegisterController(ctx context.Context, project string, generation uint64, session string, secretHash []byte, at time.Time, pluginContract int) (bool, error)
 }
 
 // ControllerSecretRequest is `POST /legion/v1/controller/secret`'s body: the daemon API contract
@@ -220,7 +220,7 @@ func (s *server) registerController(w http.ResponseWriter, r *http.Request, req 
 		return
 	}
 	secret := rand.Text()
-	registered, err := s.controller.RegisterController(ctx, s.project, record.Generation, req.SessionID, capabilityHash(secret), time.Now().UTC())
+	registered, err := s.controller.RegisterController(ctx, s.project, record.Generation, req.SessionID, capabilityHash(secret), time.Now().UTC(), req.PluginContract)
 	if err != nil {
 		s.log.Error("api: record a controller registration", "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record it"))
@@ -260,7 +260,7 @@ func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Reque
 	defer s.controllerMu.Unlock()
 	if err := m.Handle(ctx, supervise.RequestRegister{
 		Claim: launch.Claim, Generation: launch.Generation, Session: req.SessionID, SessionFile: req.OmpSessionFile,
-		CapabilityHash: capabilityHash(secret),
+		CapabilityHash: capabilityHash(secret), PluginContract: req.PluginContract,
 	}); err != nil {
 		s.claimFailure(w, "register", launch.Claim, err)
 		return
@@ -272,7 +272,7 @@ func (s *server) registerLaunchedController(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.grants.RevokeControllers()
-	registered, err := s.controller.RegisterController(ctx, s.project, generation, req.SessionID, capabilityHash(secret), time.Now().UTC())
+	registered, err := s.controller.RegisterController(ctx, s.project, generation, req.SessionID, capabilityHash(secret), time.Now().UTC(), req.PluginContract)
 	if err != nil || !registered {
 		s.logFailure("api: record the launched controller's registration", "claim", launch.Claim, "registered", registered, "error", err)
 		writeJSON(w, http.StatusInternalServerError, errorBody("register failed: the daemon could not record its controller"))

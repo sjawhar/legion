@@ -144,6 +144,15 @@ type Claim struct {
 	// store never writes them.
 	SuspensionHeld   bool
 	SuspensionHeldBy SuspendSource
+	// PluginContract is the contract the current registration declared: 0 means no contract has
+	// been recorded, which every claim has at the first boot on this release. It is set whenever a
+	// registration records Session/SessionFile/CapabilityHash (register, reregister).
+	PluginContract int
+	// PluginRelaunchFor is the daemon contract the last stale-plugin relaunch was made for, 0 when
+	// none. It is set at every stale relaunch (refreshPlugin) and cleared when a registration
+	// records the daemon's own contract, so a registration that still differs while it equals the
+	// daemon's contract is the one that is charged rather than relaunched again uncharged.
+	PluginRelaunchFor int
 }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
@@ -286,6 +295,10 @@ type Deps struct {
 	// the tree commits in its own transaction and can still land between this answer and the
 	// retire. nil closes every tree.
 	TreeClosable func(ctx context.Context, c Claim) (bool, error)
+	// PluginContract is the daemon's own plugin contract number (api.DaemonAPIVersion; supervise
+	// cannot import api), compared against each claim's recorded PluginContract to decide whether a
+	// registration or a restored claim is stale.
+	PluginContract int
 }
 
 func (d Deps) check() error {

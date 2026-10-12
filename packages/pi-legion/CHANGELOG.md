@@ -45,6 +45,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
+  and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the
+  controller locator; a session whose plugin speaks another contract is relaunched onto the
+  current plugin and its calls are refused with `pi-legion speaks daemon API contract <got>; this
+  daemon requires <want>: the daemon is relaunching this process onto the current plugin` (or
+  `pi-legion registered no daemon API contract; this daemon requires <want>: …` when none was
+  recorded), and the operator's controller with `…: run legion controller start from the release
+  built with this daemon`. Install this release with a Go `legion` built from the same commit: a
+  23 plugin's strict reader refuses a state whose views carry `pluginContract`, so the boot gate
+  and `legion probe-image` refuse the mixed pair.
+
 - `legion.daemonApiVersion` is 23. Contract 23 adds `strandedClaims` to `GET /legion/v1/state`
   (LEGION-670): every claim nothing will wake — a suspended or failed worker of its issue's phase
   that no queued start will wake, or a suspended or failed tree architect, in a tree that holds an

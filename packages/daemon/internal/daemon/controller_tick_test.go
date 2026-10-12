@@ -38,7 +38,7 @@ func TestTheControllerTickQueuesOneWakeWhileASlotIsFree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint the controller capability: %v", err)
 	}
-	if ok, err := st.RegisterController(context.Background(), token, generation, "ses-controller", []byte("secret"), time.Now()); err != nil || !ok {
+	if ok, err := st.RegisterController(context.Background(), token, generation, "ses-controller", []byte("secret"), time.Now(), 0); err != nil || !ok {
 		t.Fatalf("register the controller = %t, %v", ok, err)
 	}
 	engine := workflow.New(record.NewStore(), workflow.Config{Project: "CAPTURE"}, log)

@@ -120,6 +120,9 @@ type RequestRegister struct {
 	Session        string
 	SessionFile    string
 	CapabilityHash []byte
+	// PluginContract is the contract the registering process's plugin declared, 0 when it
+	// declared none.
+	PluginContract int
 }
 
 // RequestReady is the agent saying it can be prompted.
@@ -925,6 +928,10 @@ func register(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.Session, m.claim.SessionFile, m.claim.WorkspaceLost = r.Session, r.SessionFile, false
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
+	m.claim.PluginContract = r.PluginContract
+	if r.PluginContract == m.deps.PluginContract {
+		m.claim.PluginRelaunchFor = 0
+	}
 	m.claim.State = StateRegistered
 	m.disarm(TimerBoot)
 	m.armRegistration()
@@ -941,6 +948,10 @@ func reregister(m *Machine, ctx context.Context, ev Event) error {
 	r := ev.(RequestRegister)
 	m.claim.SessionFile = r.SessionFile
 	m.claim.CapabilityHash = bytes.Clone(r.CapabilityHash)
+	m.claim.PluginContract = r.PluginContract
+	if r.PluginContract == m.deps.PluginContract {
+		m.claim.PluginRelaunchFor = 0
+	}
 	return m.persist(ctx)
 }
 

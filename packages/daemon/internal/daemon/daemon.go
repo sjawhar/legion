@@ -1023,6 +1023,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 			Probe:                 cfg.ProbeInterval,
 			Stop:                  cfg.WorkerStopTimeout,
 		},
+		PluginContract: api.DaemonAPIVersion,
 	}
 	stopping, beginStop := context.WithCancel(context.Background())
 	return &supervision{

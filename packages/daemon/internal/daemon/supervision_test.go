@@ -284,7 +284,7 @@ func TestRunFeedsTheStreamAndTheSweepIntoTheClaimsMachine(t *testing.T) {
 
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register = %d; body %s", status, body)
@@ -424,7 +424,7 @@ func TestRunRelaunchesAClaimWhoseAgentRegisteredAndNeverSaidReady(t *testing.T) 
 		t.Helper()
 		status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 			BootToken: bootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
-			AgentID: "agent", PluginContract: 1,
+			AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 		}, false)
 		if status != http.StatusOK {
 			t.Fatalf("register = %d; body %s", status, body)
@@ -489,7 +489,7 @@ func TestRunReadoptsEveryClaimWithALiveLocatorOnRestart(t *testing.T) {
 	sh := dialShim(t, record.address, launch.BootToken)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_architect", OmpSessionFile: "/sessions/architect.jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register = %d; body %s", status, body)
@@ -684,7 +684,7 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	}
 	oldShim := dialShim(t, record.address, bootToken)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
-		BootToken: bootToken, SessionID: "old-session", OmpSessionFile: "/sessions/old.jsonl", AgentID: "old-agent", PluginContract: 1,
+		BootToken: bootToken, SessionID: "old-session", OmpSessionFile: "/sessions/old.jsonl", AgentID: "old-agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusConflict || !strings.Contains(string(body), "previous launch") {
 		t.Fatalf("old shim register while the pane is uncertain = %d %s, want a named 409", status, body)
@@ -1011,7 +1011,7 @@ func readyClaimReporting(t *testing.T, d *daemon, rt *fake.Runtime, token claim.
 	launch := lastLaunch(t, rt, token)
 	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
 		BootToken: launch.BootToken, SessionID: "ses_" + string(token), OmpSessionFile: "/sessions/" + string(token) + ".jsonl",
-		AgentID: "agent", PluginContract: 1,
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
 	}, false)
 	if status != http.StatusOK {
 		t.Fatalf("register %s = %d; body %s", token, status, body)
