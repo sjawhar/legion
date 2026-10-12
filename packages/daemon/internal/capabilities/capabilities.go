@@ -233,8 +233,8 @@ func Normalize(rows []claim.CapabilityRow) (kept []Row, dropped []string) {
 // readings in turn (heldReadings), each pass after the last:
 //  1. Each control rune held on its own, a `[` and what follows it plain text: a credential right
 //     after an unterminated `ESC [` (`ESC [ghp_…`, `ESC [?token=…`).
-//  2. Each introducer (held `[`, or c1Introducer), its parameters and intermediates as opener, the
-//     final byte kept as text: a credential glued to a parameter (`ESC [1ghp_…`, `ESC [0Bearer …`).
+//  2. Each introducer (held `[`, or c1Introducer), its parameters and intermediates as opener, what
+//     follows kept as text: a credential glued to a parameter (`ESC [1ghp_…`, `ESC [0Bearer …`).
 //  3. Each opener and the final byte after it as held: a credential a sequence's final letter is
 //     glued to (`ESC [1mghp_…`, `ESC [Kghp_…`), and grep's colour around a match.
 //  4. Each held rune a space: a JWT right after a control rune or a sequence, which the JWT rule
@@ -258,7 +258,7 @@ func cleanDetail(text string) string {
 			return ' '
 		case r == '\u009b':
 			return c1Introducer
-		case unicode.IsControl(r), r == c1Introducer, r == opener:
+		case unicode.IsControl(r), r == c1Introducer, r == opener, r == utf8.RuneError:
 			return held
 		}
 		return r
@@ -299,23 +299,28 @@ const (
 // heldReadings are cleanDetail's readings of held text after the first, in order: an introducer,
 // its parameters and intermediates as opener; an opener and an optional final byte as held; held
 // as a space. A space or a `*` never stands in as an intermediate, so neither a word nor a redacted
-// `***` reads as one.
+// `***` reads as one, and nor does a `.`, which separates a JWT's segments.
 var heldReadings = []struct {
 	pattern     *regexp.Regexp
 	replacement string
 }{
-	{regexp.MustCompile(`(?:\x{FFFF}\[|\x{FFFE})[0-?]*[!-)+-/]*`), string(opener)},
+	{regexp.MustCompile(`(?:\x{FFFF}\[|\x{FFFE})[0-?]*[!-)+,/-]*`), string(opener)},
 	{regexp.MustCompile(`\x{FDD0}[@-~]?`), string(held)},
 	{regexp.MustCompile(`\x{FFFF}`), " "},
 }
 
-// heldSequence, in a value class, is c1Introducer, opener, a replacement character (what an invalid
-// UTF-8 byte decodes to), held alone, or a held escape followed by the `[`, parameters and final
-// byte that complete a control sequence, a colour sequence such as `ESC [ 1 m` among them. A value
-// runs across an opener because a reading turns every introducer into one, the one inside a value
-// as well as the one before it. Parameters (`0`–`?`) and the final byte (`@`–`~`) share no
-// character, so a class reads it one way only.
-const heldSequence = `\x{FFFE}|\x{FDD0}|\x{FFFD}|\x{FFFF}(?:\[[0-?]*[@-~])?`
+// heldSequence, in a value class, is c1Introducer, opener, held alone, or a held escape followed by
+// the `[`, parameters and final byte that complete a control sequence, a colour sequence such as
+// `ESC [ 1 m` among them. A value runs across an opener because a reading turns every introducer
+// into one, the one inside a value as well as the one before it. Parameters (`0`–`?`) and the final
+// byte (`@`–`~`) share no character, so a class reads it one way only. The replacement character an
+// invalid UTF-8 byte decodes to is held like a control rune, so a value runs across it too.
+const heldSequence = `\x{FFFE}|\x{FDD0}|\x{FFFF}(?:\[[0-?]*[@-~])?`
+
+// jwtFirstHeldSequence is heldSequence without opener: what a JWT's first segment runs across. A
+// JWT may start right after an opener (`ESC [1eyJ…` reads `opener eyJ…`), so a first segment that
+// also ran across one would let one run hold a start after each opener in it.
+const jwtFirstHeldSequence = `\x{FFFE}|\x{FFFF}(?:\[[0-?]*[@-~])?`
 
 // credentialRules are the credential shapes redactCredentials replaces, each keeping what names
 // the credential and replacing the secret with `***`; the shared fixture names each with an
@@ -325,18 +330,20 @@ const heldSequence = `\x{FFFE}|\x{FDD0}|\x{FFFD}|\x{FFFF}(?:\[[0-?]*[@-~])?`
 // was escaped again. Order matters: the Authorization header runs before the bare bearer rule, so a
 // header under any scheme loses its whole value and keeps a listed scheme's label, and the GitHub
 // rule before the JWT rule, so a stateless installation token (`ghs_<app id>_<JWT>`) reads
-// `ghs_***`. A JWT starts only where a run of base64url characters and held sequences starts, or
-// right after a percent or `\u` escape: not after either marker, and not after a held `[` and its
-// parameters, where its `e` is the sequence's final letter. The plugin says so with a lookbehind;
-// here the rule's first alternative matches that held prefix with `eyJ` and redactJWT gives it back
-// unchanged. JavaScriptCore would otherwise read a long run once per `eyJ` in it. An Authorization
-// value opened by an escaped quote ends at the next backslash or quote; one opened by a quote runs
-// over escaped characters to an unescaped quote; one with neither runs to a closing bracket or the
-// end of the line, since an AWS signature or a Digest credential carries commas, semicolons and
-// quotes of its own. The API-key rule has no left anchor, so `api-key` also covers `x-api-key` and
-// `x-goog-api-key`. A rule whose value may be short takes `*` in its value class, and a quoted
-// connection-string password keeps its quotes, so a value already redacted is matched whole and
-// left as it is; the others need more than `***` to match at all.
+// `ghs_***`. The JWT rule starts nowhere its first segment's class could have run on from: not
+// after held, a C1 introducer or a value character, and not after a held `[`, its parameters and
+// any final byte. The plugin says so with lookbehinds; here the rule's first alternative matches
+// that held prefix with `eyJ` and redactJWT gives it back unchanged. It may start after an opener,
+// which its first segment does not run across, and right after a percent or `\u` escape. So in the
+// plugin's JavaScriptCore, which backtracks, a start that fails reads at most to the next opener,
+// where one inside a run the first segment reads through would read that run once per start. An
+// Authorization value opened by an escaped quote ends at the next backslash or quote; one opened by
+// a quote runs over escaped characters to an unescaped quote; one with neither runs to a closing
+// bracket or the end of the line, since an AWS signature or a Digest credential carries commas,
+// semicolons and quotes of its own. The API-key rule has no left anchor, so `api-key` also covers
+// `x-api-key` and `x-goog-api-key`. A rule whose value may be short takes `*` in its value class,
+// and a quoted connection-string password keeps its quotes, so a value already redacted is matched
+// whole and left as it is; the others need more than `***` to match at all.
 var credentialRules = []struct {
 	pattern *regexp.Regexp
 	// replacement expands the match; replace, when set, computes it instead.
@@ -351,15 +358,15 @@ var credentialRules = []struct {
 	{pattern: regexp.MustCompile(`(?i)(\\?["'](?:api_key|access_token)\\?["'][ \x{FFFE}\x{FFFF}]*:[ \x{FFFE}\x{FFFF}]*\\?["'])[^"'\\]+`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`(?i)\b(bearer[ \x{FFFE}\x{FFFF}]+)(?:[A-Za-z0-9._~+/=*-]|` + heldSequence + `)+`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`\b(gh[pousr]_|github_pat_)(?:[A-Za-z0-9._-]|` + heldSequence + `){20,}`), replacement: "${1}***"},
-	{pattern: regexp.MustCompile(`\x{FFFF}\[[0-?]*eyJ|(?:^|[^A-Za-z0-9_\x{FFFE}\x{FFFF}-]|%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4})eyJ(?:[A-Za-z0-9_-]|` + heldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `)*`), replace: redactJWT},
+	{pattern: regexp.MustCompile(`\x{FFFF}\[[0-?]*[@-~]?eyJ|(?:^|[^A-Za-z0-9_\x{FFFE}\x{FFFF}-]|%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4})eyJ(?:[A-Za-z0-9_-]|` + jwtFirstHeldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `){8,}\.(?:[A-Za-z0-9_-]|` + heldSequence + `)*`), replace: redactJWT},
 	{pattern: regexp.MustCompile(`\b(sk-|dsp_|ya29\.|xox[a-z]-|glpat-|npm_)(?:[A-Za-z0-9_-]|` + heldSequence + `){20,}`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`\b(AIza)(?:[A-Za-z0-9_-]|` + heldSequence + `){35,}`), replacement: "${1}***"},
 	{pattern: regexp.MustCompile(`\b(AKIA|ASIA)(?:[A-Z0-9](?:` + heldSequence + `)?){16}\b`), replacement: "${1}***"},
 }
 
-// redactJWT is a JWT rule match redacted. One that opens on held is a held `[` and its parameters
-// followed by `eyJ`, whose `e` closes the sequence rather than starting a JWT, so it is given back
-// unchanged; any other keeps what came before `eyJ` and replaces the JWT.
+// redactJWT is a JWT rule match redacted. One that opens on held is a held `[`, its parameters and
+// any final byte followed by `eyJ`, which no JWT starts after, so it is given back unchanged; any
+// other keeps what came before `eyJ` and replaces the JWT.
 func redactJWT(match string) string {
 	if strings.HasPrefix(match, string(held)) {
 		return match

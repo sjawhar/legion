@@ -416,17 +416,21 @@ const HELD = "\uffff";
 const C1_INTRODUCER = "\ufffe";
 const OPENER = "\ufdd0";
 
-/** `cleanDetail`'s readings of held text after the first, in order: the daemon's `heldReadings`. */
+/** `cleanDetail`'s readings of held text after the first, in order: the daemon's `heldReadings`,
+ * whose second takes no `.` as an intermediate, since it separates a JWT's segments. */
 const HELD_READINGS: readonly (readonly [RegExp, string])[] = [
-  [/(?:\uffff\[|\ufffe)[0-?]*[!-)+-/]*/g, OPENER],
+  [/(?:\uffff\[|\ufffe)[0-?]*[!-)+,/-]*/g, OPENER],
   [/\ufdd0[@-~]?/g, HELD],
   [/\uffff/g, " "],
 ];
 
-/** `C1_INTRODUCER`, `OPENER`, a replacement character, held alone, or a held escape with the `[`,
- * parameters and final byte that complete a control sequence: the daemon's `heldSequence`, as
- * regular-expression source. */
-const HELD_SEQUENCE = String.raw`\ufffe|\ufdd0|\ufffd|\uffff(?:\[[0-?]*[@-~])?`;
+/** `C1_INTRODUCER`, `OPENER`, held alone, or a held escape with the `[`, parameters and final byte
+ * that complete a control sequence: the daemon's `heldSequence`, as regular-expression source. */
+const HELD_SEQUENCE = String.raw`\ufffe|\ufdd0|\uffff(?:\[[0-?]*[@-~])?`;
+
+/** `HELD_SEQUENCE` without `OPENER`: what a JWT's first segment runs across, the daemon's
+ * `jwtFirstHeldSequence`. */
+const JWT_FIRST_HELD_SEQUENCE = String.raw`\ufffe|\uffff(?:\[[0-?]*[@-~])?`;
 
 /** Go's `unicode.IsSpace`, the space runes the daemon's cleanup splits on. */
 function isSpace(code: number): boolean {
@@ -462,12 +466,14 @@ function truncateUtf8(text: string, max: number): string {
  * The credential shapes `cleanDetail` replaces, as the daemon's `credentialRules` in
  * `packages/daemon/internal/capabilities` and in its order, which its comment explains; the shared
  * fixture names each with an example. A value class runs across a `HELD_SEQUENCE`, and a separator
- * takes a space or `HELD`. The userinfo rule starts only where a run of scheme characters starts,
- * and the JWT rule only where a run of base64url characters and held sequences starts or right
- * after a percent or `\u` escape: its lookbehinds skip a start after held, or after a held `[` and
- * its parameters, where the daemon's rule matches that prefix and gives it back. So a long run that
- * never completes a match is read once rather than once per start: JavaScriptCore backtracks, where
- * the daemon's RE2 does not.
+ * takes a space or `HELD`. The userinfo rule starts only where a run of scheme characters starts.
+ * The JWT rule starts nowhere its first segment's class could have run on from: not after held, a
+ * C1 introducer or a value character, and not after a held `[`, its parameters and any final byte,
+ * where the daemon's rule matches that prefix and gives it back. It may start after an opener,
+ * which its first segment does not run across, and right after a percent or `\u` escape. So a
+ * start that fails reads at most to the next opener: JavaScriptCore backtracks, where the daemon's
+ * RE2 does not, and a start inside a run the first segment reads through would read that run once
+ * per start.
  */
 const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   [/(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^ /?#]+@/gi, "$1***@"],
@@ -507,7 +513,7 @@ const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   ],
   [
     new RegExp(
-      String.raw`(?=eyJ)(?:(?<![A-Za-z0-9_\ufffe\uffff-])(?<!\uffff\[[0-?]*)|(?<=%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}))eyJ(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE})*`,
+      String.raw`(?=eyJ)(?:(?<![A-Za-z0-9_\ufffe\uffff-])(?<!\uffff\[[0-?]*)(?<!\uffff\[[0-?]*[@-~])|(?<=%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}))eyJ(?:[A-Za-z0-9_-]|${JWT_FIRST_HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE})*`,
       "g"
     ),
     "***",
@@ -564,9 +570,14 @@ export function cleanDetail(text: string): string {
   let marked = "";
   for (const char of text) {
     const code = char.codePointAt(0) ?? 0;
-    // Go's unicode.IsControl (C0, DEL and C1), and the three markers themselves.
+    // Go's unicode.IsControl (C0, DEL and C1), the three markers themselves, and the replacement
+    // character an invalid UTF-8 byte decodes to.
     const control =
-      code < 0x20 || (code >= 0x7f && code < 0xa0) || code === 0xfffe || code === 0xfdd0;
+      code < 0x20 ||
+      (code >= 0x7f && code < 0xa0) ||
+      code === 0xfffe ||
+      code === 0xfdd0 ||
+      code === 0xfffd;
     marked += isSpace(code) ? " " : code === 0x9b ? C1_INTRODUCER : control ? HELD : char;
   }
   let redacted = redactCredentials(marked);

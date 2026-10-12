@@ -447,6 +447,12 @@
     },
     {
       "pattern": "cleanup",
+      "name": "a JWT right after an unterminated ESC [, with a C1 sequence introducer right before a dot",
+      "detail": "token \u001b[eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ\u009b.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
       "name": "an AWS key id right after an unterminated ESC [",
       "detail": "AccessDenied: \u001b[AKIAIOSFODNN7EXAMPLE is not authorized",
       "want": "AccessDenied: KIA*** is not authorized"
@@ -736,5 +742,30 @@
       "credential": "IOSFODNN7EXAMPLE",
       "redacted": "failed: AKIA*** is not authorized to invoke the server"
     }
+  ],
+  "linear": [
+    {
+      "name": "a value run, then a JWT start after a replacement character",
+      "unit": "abcdefgh\ufffdeyJ"
+    },
+    {
+      "name": "a value run, then a JWT start after an unterminated ESC [",
+      "unit": "abcdefgh\u001b[eyJ"
+    },
+    {
+      "name": "a value run, then a JWT start after a C1 sequence introducer",
+      "unit": "abcdefgh\u009beyJ"
+    },
+    {
+      "name": "a value run, then a JWT start after an ESC [ parameter",
+      "unit": "abcdefgh\u001b[1eyJ"
+    },
+    { "name": "a JWT start before each replacement character", "unit": "eyJ\ufffd" },
+    { "name": "a JWT start before each C1 sequence introducer", "unit": "eyJ\u009b" },
+    {
+      "name": "a JWT start after each complete sequence ending in a non-word byte",
+      "unit": "eyJ\u001b[~"
+    },
+    { "name": "a JWT start after each unterminated ESC [", "unit": "eyJ\u001b[" }
   ]
 }

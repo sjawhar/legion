@@ -744,7 +744,9 @@ describe("github", () => {
 /** The cases both funnels are held to: `cleanDetail` here and the daemon's `capabilities.NewRow`.
  * `patterns` is a detail per credential shape or cleanup rule and what it reads cleaned, each
  * prefixed with `pad` letters `a` where it has one; `branches` is each branch of a check that quotes
- * upstream text, with that text, the credential in it, and the text redacted. */
+ * upstream text, with that text, the credential in it, and the text redacted; `linear`, which only
+ * this test reads since the daemon's RE2 cannot backtrack, is a unit that, repeated, would make a
+ * backtracking engine read a run once per start in it. */
 interface RedactionFixture {
   readonly patterns: readonly {
     readonly pattern: string;
@@ -760,6 +762,7 @@ interface RedactionFixture {
     readonly credential: string;
     readonly redacted: string;
   }[];
+  readonly linear: readonly { readonly name: string; readonly unit: string }[];
 }
 
 const fixtures = path.resolve(import.meta.dir, "../../contracts/fixtures");
@@ -803,6 +806,19 @@ describe("cleanDetail", () => {
     }
     expect(problems).toEqual([]);
   });
+
+  // JavaScriptCore backtracks, so a rule that may start inside a run its own value class reads
+  // through takes time quadratic in the run: at d78aa3d4 these units took 1.2 to 1.8 s at 50 KiB on
+  // a loaded machine, where a linear rule takes a few milliseconds. 64 KiB keeps the quadratic case
+  // above 1 s on a faster one.
+  for (const { name, unit } of redaction.linear) {
+    test(`stays linear: ${name}, 64 KiB in under 1 s`, () => {
+      const text = unit.repeat(Math.ceil((64 * 1024) / unit.length));
+      const started = performance.now();
+      cleanDetail(text);
+      expect(performance.now() - started).toBeLessThan(1_000);
+    });
+  }
 });
 
 describe("credential redaction", () => {
