@@ -114,10 +114,13 @@ func (s *server) createProject(w http.ResponseWriter, r *http.Request) {
 
 // projectNameProblem refuses a project name that would mislead its reader: one holding a control
 // character, one holding a bidi embedding, override or isolate (U+202A-U+202E, U+2066-U+2069), the
-// controls a Trojan Source spoof reorders text with, and one with no visible character once its
-// format characters and whitespace are set aside. Every other format character does visible work
-// in real names and stays: the joiner inside an emoji, a flag's tag characters, a direction mark
-// (U+200E, U+200F, U+061C) in mixed-direction text, a soft hyphen. It answers "" for a name it takes.
+// controls a Trojan Source spoof reorders text with, and one with no visible character. A character
+// is visible when it is graphic (unicode.IsGraphic), is not a combining mark (Mn, Me), a format
+// character (Cf) or a space separator (Zs), and is not one of the letters and symbols that render
+// blank (blankGlyphs). Every other format character and combining mark does visible work in real
+// names and stays beside a visible one: the joiner inside an emoji, a flag's tag characters, a
+// direction mark (U+200E, U+200F, U+061C) in mixed-direction text, a soft hyphen, an accent
+// written as a combining mark. It answers "" for a name it takes.
 func projectNameProblem(name string) string {
 	visible := false
 	for _, character := range name {
@@ -126,7 +129,7 @@ func projectNameProblem(name string) string {
 			return fmt.Sprintf("name holds U+%04X, a control character", character)
 		case (character >= 0x202A && character <= 0x202E) || (character >= 0x2066 && character <= 0x2069):
 			return fmt.Sprintf("name holds U+%04X, a bidi control that reorders the text a reader sees", character)
-		case !unicode.Is(unicode.Cf, character) && !unicode.IsSpace(character):
+		case visibleCharacter(character):
 			visible = true
 		}
 	}
@@ -134,4 +137,16 @@ func projectNameProblem(name string) string {
 		return "name has no visible character"
 	}
 	return ""
+}
+
+// blankGlyphs are characters Unicode files as letters or symbols that render as blank space: the
+// Hangul fillers (U+115F, U+1160, U+3164, U+FFA0, category Lo) and the Braille pattern blank
+// (U+2800, So). A name of only these looks empty wherever it is shown.
+var blankGlyphs = map[rune]bool{0x115F: true, 0x1160: true, 0x3164: true, 0xFFA0: true, 0x2800: true}
+
+// visibleCharacter reports whether a reader sees the character as a mark of its own.
+func visibleCharacter(character rune) bool {
+	return unicode.IsGraphic(character) &&
+		!unicode.In(character, unicode.Mn, unicode.Me, unicode.Cf, unicode.Zs) &&
+		!blankGlyphs[character]
 }

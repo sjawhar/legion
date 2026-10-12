@@ -17835,7 +17835,7 @@ async function executeDispatchTool(input) {
     case "dispatch_projects": {
       const projects = (await client.listProjects()).map(({ key, name }) => ({ key, name }));
       return {
-        text: projects.map(({ key, name }) => `${key} ${name}`).join(`
+        text: projects.length === 0 ? "No projects." : projects.map(({ key, name }) => `${key} ${name}`).join(`
 `),
         details: { projects }
       };

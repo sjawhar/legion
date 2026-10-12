@@ -154,6 +154,11 @@ func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
 		{"zero-width characters only", "AGENT", "\u200b\u200d", "name has no visible character"},
 		{"zero-width characters and a space only", "AGENT", "\u200b \u2060", "name has no visible character"},
 		{"a control character", "AGENT", "Agent\u0007project", "name holds U+0007, a control character"},
+		{"a Hangul filler", "AGENT", "\u3164", "name has no visible character"},
+		{"Hangul choseong and jungseong fillers", "AGENT", "\u115f\u1160", "name has no visible character"},
+		{"a halfwidth Hangul filler, a space and a filler", "AGENT", "\uffa0 \u3164", "name has no visible character"},
+		{"Braille pattern blanks", "AGENT", "\u2800\u2800", "name has no visible character"},
+		{"a bare combining mark and a variation selector", "AGENT", "\u0301\ufe0f", "name has no visible character"},
 	} {
 		t.Run(input.name, func(t *testing.T) {
 			for _, attempt := range []struct {
@@ -177,8 +182,9 @@ func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
 }
 
 // A name a reader sees whole is accepted even where it holds a format character doing visible
-// work: a joiner building an emoji, a flag's tag characters, a direction mark in mixed text, a soft
-// hyphen. No route renames a project, so refusing one leaves its maker no way to the name they meant.
+// work - a joiner building an emoji, a flag's tag characters, a direction mark in mixed text, a
+// soft hyphen - or a combining mark on a letter, and in any script, Hangul included. No route
+// renames a project, so refusing one leaves its maker no way to the name they meant.
 func TestAVisibleNameWithFormatCharactersIsAcceptedForABearerAndAPerson(t *testing.T) {
 	handler := newTestHandler(t)
 	for index, name := range []string{
@@ -187,6 +193,8 @@ func TestAVisibleNameWithFormatCharactersIsAcceptedForABearerAndAPerson(t *testi
 		"🏴\U000E0067\U000E0062\U000E0065\U000E006E\U000E0067\U000E007F Team",
 		"Project שלום\u200f",
 		"Super\u00adcalifragilistic",
+		"한국 팀",
+		"cafe\u0301",
 	} {
 		bearer := sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
 			"key": fmt.Sprintf("VISB%d", index), "name": name, "actor": sessionActor(),

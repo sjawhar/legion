@@ -1575,6 +1575,25 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("dispatch_projects says there are none when Dispatch has no projects", async () => {
+    const fetchImpl = (async (): Promise<Response> => response([])) as unknown as typeof fetch;
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_projects",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+    expect(result.text).toBe("No projects.");
+    expect(result.details).toEqual({ projects: [] });
+  });
+
   test("dispatch_open_asks renders active asks by whose reply is due", async () => {
     const requests: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
