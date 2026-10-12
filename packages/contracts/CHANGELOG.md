@@ -4,6 +4,11 @@
 
 ### Added
 
+- `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
+  `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,
+  `session_titles` and `session_pr_counts`; `DeliveryPR.parent_agent` is a session group's
+  `group:<id>` for a pull request whose first session is a member (LEGION-682).
+
 - Added `LegionReadyRequest`, the body of the Legion daemon's `POST /legion/v1/claims/ready`, and
   `LegionCapabilityReport`, its optional `capabilities`: what a session measured of the six live
   capability rows at boot (`measuredAt`, `elapsedMs`, `rows[{name, ok, detail}]`; a `detail` may
@@ -22,6 +27,16 @@
   and the picture syntax; `SESSION_ID_PATTERN` and `isSessionId`, the one session-id rule the
   dashboard and envoy-client read a reference by (the server's `text.IsSessionID`), and
   `pictureCaption`, the one caption a picture line carries (LEGION-541).
+- Added the agent stream's `commands` frame (`AgentStreamFrame` of `kind: "commands"`, holding
+  `AgentStreamCommand[]`), the slash commands a person can send the session from Dispatch, the
+  whole list each time it changes and the last frame of a replay, with
+  `AGENT_STREAM_LIMITS.commands`, `commandNameChars` and `commandDescriptionChars`, the caps the
+  publisher applies before the frame leaves the session. Each command names its `source`
+  (`builtin`, `extension`, `prompt` for a custom command, MCP prompt, file command or prompt
+  template, `skill`), and a built-in only the session's own terminal runs carries `terminalOnly`
+  (LEGION-394). `isTypableCommandName` is the one command-name rule the publisher lists a command
+  by and a viewer accepts one by: one non-empty token, no whitespace, no control character. A
+  viewer older than the frame ignores it.
 - `Version.size` is documented for document versions too: the bytes of the markdown a version
   stores, which Dispatch now answers on every document version it lists or reads, read from the
   stored row without rendering the document (LEGION-481). It stays optional, absent on a document

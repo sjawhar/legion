@@ -17,6 +17,7 @@ const devbox: MachineLogin = {
   host: "devbox.example.com",
   issued_at: "2026-10-03T12:00:00Z",
   service: null,
+  subject: null,
 };
 const laptop: MachineLogin = {
   approved_by: "ada@example.com",
@@ -26,9 +27,10 @@ const laptop: MachineLogin = {
   host: "laptop.example.com",
   issued_at: "2026-10-02T08:00:00Z",
   service: null,
+  subject: null,
 };
-/** The Legion daemon's login, which someone other than the viewer approved: anyone signed in
- *  approves, lists and revokes a service's login. */
+/** A service's login a person approved before services logged in with their own Kubernetes
+ *  token, which someone other than the viewer approved: anyone signed in lists and revokes it. */
 const daemon: MachineLogin = {
   approved_by: "bob@example.com",
   credential_id: "cred-daemon",
@@ -37,6 +39,7 @@ const daemon: MachineLogin = {
   host: "cluster.example.com",
   issued_at: "2026-10-03T09:00:00Z",
   service: "legion-daemon",
+  subject: null,
 };
 /** The devbox's previous login: expired, but a box it started still renews with its own key. */
 const stale: MachineLogin = {
@@ -47,6 +50,7 @@ const stale: MachineLogin = {
   host: "devbox.example.com",
   issued_at: "2026-09-26T11:00:00Z",
   service: null,
+  subject: null,
 };
 
 function renderPage() {
@@ -209,7 +213,7 @@ test("a service's login someone else approved is listed by its service and its a
     fireEvent.click(within(daemonRow as HTMLElement).getByRole("button", { name: "Revoke" }));
     expect(confirm.mock.calls).toEqual([
       [
-        "Revoke the machine login for legion-daemon on cluster.example.com? Every session it started, its worker pods included, ends at once, and legion-daemon needs a new login approval before it starts any more.",
+        "Revoke the machine login for legion-daemon on cluster.example.com? Every session it started, its worker pods included, ends at once.",
       ],
     ]);
     await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-daemon"));
@@ -217,6 +221,116 @@ test("a service's login someone else approved is listed by its service and its a
       expect(section.queryByText("legion-daemon on cluster.example.com")).toBeNull()
     );
     expect(section.getByText("devbox.example.com")).toBeDefined();
+  } finally {
+    cleanup();
+    confirm.mockRestore();
+    getMachineLogins.mockRestore();
+    revokeMachineLogin.mockRestore();
+  }
+});
+
+// A broker older than token logins sends no `subject` at all, so while Dispatch deploys first, a
+// service's login a person approved is shown with its approver and its plain Revoke, never as a
+// token login of `undefined`.
+test("a service's login from a broker that sends no subject is shown as one a person approved", async () => {
+  const { subject: _omitted, ...fromOlderBroker } = daemon;
+  const getMachineLogins = spyOn(api, "getMachineLogins").mockResolvedValue({
+    credentials: [fromOlderBroker],
+  });
+  const confirm = spyOn(window, "confirm").mockReturnValue(false);
+
+  try {
+    renderPage();
+    const section = within(await screen.findByRole("region", { name: "Machine logins" }));
+    const row = (await section.findByText("legion-daemon on cluster.example.com")).closest("tr");
+    expect(within(row as HTMLElement).getByText("bob@example.com")).toBeDefined();
+    expect(section.queryByText(/undefined/)).toBeNull();
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Revoke" }));
+    expect(confirm.mock.calls).toEqual([
+      [
+        "Revoke the machine login for legion-daemon on cluster.example.com? Every session it started, its worker pods included, ends at once.",
+      ],
+    ]);
+  } finally {
+    cleanup();
+    confirm.mockRestore();
+    getMachineLogins.mockRestore();
+  }
+});
+
+test("a service's token login names its ServiceAccount, and its Revoke says what logs in again", async () => {
+  const tokenLogin: MachineLogin = {
+    ...daemon,
+    approved_by: "",
+    credential_id: "cred-token",
+    host: "legion-system/legion-daemon-legion",
+    subject: "system:serviceaccount:legion-system:legion-daemon-legion",
+  };
+  const getMachineLogins = spyOn(api, "getMachineLogins").mockResolvedValue({
+    credentials: [tokenLogin],
+  });
+  const revokeMachineLogin = spyOn(api, "revokeMachineLogin").mockResolvedValue(undefined);
+  const confirm = spyOn(window, "confirm").mockReturnValue(false);
+
+  try {
+    renderPage();
+    const section = within(await screen.findByRole("region", { name: "Machine logins" }));
+    const row = (
+      await section.findByText("legion-daemon on legion-system/legion-daemon-legion")
+    ).closest("tr");
+    expect(
+      within(row as HTMLElement).getByText(
+        "No one: system:serviceaccount:legion-system:legion-daemon-legion"
+      )
+    ).toBeDefined();
+    fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Revoke" }));
+    expect(confirm.mock.calls).toEqual([
+      [
+        "Revoke the machine login for legion-daemon on legion-system/legion-daemon-legion? Every session it started, its worker pods included, ends at once, and a running pod stays without secrets until it is replaced; legion-daemon logs in again with its Kubernetes token, for the pods it launches next, unless system:serviceaccount:legion-system:legion-daemon-legion is removed from the broker's BROKER_SERVICE_LOGINS.",
+      ],
+    ]);
+    expect(revokeMachineLogin).not.toHaveBeenCalled();
+  } finally {
+    cleanup();
+    confirm.mockRestore();
+    getMachineLogins.mockRestore();
+    revokeMachineLogin.mockRestore();
+  }
+});
+
+// Two logins of one service from machines reporting one host name read alike but for their
+// credential ids, which every enrollment a login made names: each row shows its own, and Revoke on
+// the row a credential id picks ends that login and no other.
+test("two logins of one service on one host are told apart by their credential ids, and Revoke ends the one picked by its id", async () => {
+  const copy: MachineLogin = {
+    ...daemon,
+    approved_by: "mallory@example.com",
+    credential_id: "cred-copy",
+    issued_at: "2026-10-03T10:00:00Z",
+  };
+  let live = [daemon, copy];
+  const getMachineLogins = spyOn(api, "getMachineLogins").mockImplementation(async () => ({
+    credentials: live,
+  }));
+  const revokeMachineLogin = spyOn(api, "revokeMachineLogin").mockImplementation(async (id) => {
+    live = live.filter((login) => login.credential_id !== id);
+  });
+  const confirm = spyOn(window, "confirm").mockReturnValue(true);
+
+  try {
+    renderPage();
+    const section = within(await screen.findByRole("region", { name: "Machine logins" }));
+    expect(await section.findAllByText("legion-daemon on cluster.example.com")).toHaveLength(2);
+    const copyRow = section.getByText("cred-copy").closest("tr") as HTMLElement;
+    expect(within(copyRow).getByText("mallory@example.com")).toBeDefined();
+    const daemonRow = section.getByText("cred-daemon").closest("tr") as HTMLElement;
+    expect(within(daemonRow).getByText("bob@example.com")).toBeDefined();
+
+    fireEvent.click(within(copyRow).getByRole("button", { name: "Revoke" }));
+    await waitFor(() => expect(revokeMachineLogin).toHaveBeenCalledWith("cred-copy"));
+    await waitFor(() => expect(section.queryByText("cred-copy")).toBeNull());
+    expect(section.getByText("cred-daemon")).toBeDefined();
+    expect(revokeMachineLogin).toHaveBeenCalledTimes(1);
   } finally {
     cleanup();
     confirm.mockRestore();

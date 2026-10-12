@@ -64,11 +64,12 @@ func putCapabilityReport(ctx context.Context, db execer, report capabilities.Rep
 	return nil
 }
 
-// CapabilityReports reads every claim's latest report, in claim token order. A stored locator that
-// names a process and does not validate refuses the whole read, naming the claim, as Claims does:
-// a daemon that loaded it would fence live sessions against a process it has no way to recognise.
-// A locator naming the claim alone — what a ready records for a claim whose machine holds no
-// process — names none, and is read as it is.
+// CapabilityReports reads every claim's latest report, in claim token order, each row built by
+// capabilities.NewRow, so a detail an earlier daemon kept before it cleaned something is cleaned as
+// it is read. A stored locator that names a process and does not validate refuses the whole read,
+// naming the claim, as Claims does: a daemon that loaded it would fence live sessions against a
+// process it has no way to recognise. A locator naming the claim alone — what a ready records for a
+// claim whose machine holds no process — names none, and is read as it is.
 func (s *Store) CapabilityReports(ctx context.Context) ([]capabilities.Report, error) {
 	rows, err := s.pool.Query(ctx, `select claim_token, generation, locator, measured_at, reported_at, report
 		from claim_capabilities order by claim_token`)
@@ -104,7 +105,7 @@ func (s *Store) CapabilityReports(ctx context.Context) ([]capabilities.Report, e
 		report.ElapsedMs = decoded.ElapsedMs
 		report.Rows = make([]capabilities.Row, len(decoded.Rows))
 		for i, row := range decoded.Rows {
-			report.Rows[i] = capabilities.Row{Name: capabilities.Name(row.Name), OK: row.OK, Detail: row.Detail}
+			report.Rows[i] = capabilities.NewRow(capabilities.Name(row.Name), row.OK, row.Detail)
 		}
 		reports = append(reports, report)
 	}

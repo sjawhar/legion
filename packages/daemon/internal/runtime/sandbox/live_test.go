@@ -216,12 +216,11 @@ type liveEnv struct {
 	operatorPodFile, operatorConfigMap string
 	// The agent-secrets checks' inputs: the production broker, the email of the person who
 	// approves the run's credential request for LEGION_E2E_APPROVAL, the sha256 of the automatic
-	// rule's dummy value, and the checkout's agent-secrets binary. With all four set the harness
-	// also starts a legion-daemon machine login, which any person signed in to Dispatch approves
-	// during the run (an attended step: they enter the printed code on the Dispatch credential page
-	// and click Approve). Every field here is read with os.Getenv, unlike the rest of liveEnv: unset
+	// rule's dummy value, the checkout's agent-secrets binary, and the token file the script mints
+	// for LEGION_E2E_AGENT_SECRETS_ACCOUNT, which the harness logs in with as the daemon does, no
+	// person approving it. Every field here is read with os.Getenv, unlike the rest of liveEnv: unset
 	// is a blocked run of the secrets-* checks, never a refusal to start (secretsBlocked).
-	agentSecretsURL, agentSecretsOperator, agentSecretsAutoSHA, agentSecretsBin string
+	agentSecretsURL, agentSecretsOperator, agentSecretsAutoSHA, agentSecretsBin, agentSecretsTokenFile string
 	// The scratch Postgres the script started for postgres-resume: the file holding its URL, which
 	// the script also wrote into the providers Secret under liveSessionsSecretKey, and the address it
 	// listens on, which every pod must reach as it reaches the worker stream.
@@ -239,27 +238,28 @@ func readLiveEnv(t *testing.T) liveEnv {
 		return value
 	}
 	env := liveEnv{
-		runtimeKubeconfig:    get("LEGION_E2E_RUNTIME_KUBECONFIG"),
-		runtimeContext:       get("LEGION_E2E_RUNTIME_CONTEXT"),
-		operatorContext:      get("LEGION_E2E_OPERATOR_CONTEXT"),
-		namespace:            get("LEGION_E2E_NAMESPACE"),
-		project:              get("LEGION_E2E_PROJECT"),
-		image:                get("LEGION_E2E_IMAGE"),
-		streamHost:           get("LEGION_E2E_STREAM_HOST"),
-		streamPort:           get("LEGION_E2E_STREAM_PORT"),
-		appID:                get("LEGION_E2E_IMPLEMENT_APP_ID"),
-		appKeyName:           get("LEGION_E2E_IMPLEMENT_APP_KEY"),
-		record:               get("LEGION_E2E_RECORD"),
-		work:                 get("LEGION_E2E_WORK"),
-		from:                 os.Getenv("LEGION_E2E_FROM"),
-		operatorPodFile:      get("LEGION_E2E_OPERATOR_POD"),
-		operatorConfigMap:    get("LEGION_E2E_OPERATOR_CONFIGMAP"),
-		agentSecretsURL:      os.Getenv("LEGION_E2E_AGENT_SECRETS_URL"),
-		agentSecretsOperator: os.Getenv("LEGION_E2E_AGENT_SECRETS_OPERATOR"),
-		agentSecretsAutoSHA:  os.Getenv("LEGION_E2E_AGENT_SECRETS_AUTO_SHA256"),
-		agentSecretsBin:      os.Getenv("LEGION_E2E_AGENT_SECRETS_BIN"),
-		sessionDSNFile:       get("LEGION_E2E_SESSION_DSN_FILE"),
-		sessionDBAddress:     get("LEGION_E2E_SESSION_DB_ADDRESS"),
+		runtimeKubeconfig:     get("LEGION_E2E_RUNTIME_KUBECONFIG"),
+		runtimeContext:        get("LEGION_E2E_RUNTIME_CONTEXT"),
+		operatorContext:       get("LEGION_E2E_OPERATOR_CONTEXT"),
+		namespace:             get("LEGION_E2E_NAMESPACE"),
+		project:               get("LEGION_E2E_PROJECT"),
+		image:                 get("LEGION_E2E_IMAGE"),
+		streamHost:            get("LEGION_E2E_STREAM_HOST"),
+		streamPort:            get("LEGION_E2E_STREAM_PORT"),
+		appID:                 get("LEGION_E2E_IMPLEMENT_APP_ID"),
+		appKeyName:            get("LEGION_E2E_IMPLEMENT_APP_KEY"),
+		record:                get("LEGION_E2E_RECORD"),
+		work:                  get("LEGION_E2E_WORK"),
+		from:                  os.Getenv("LEGION_E2E_FROM"),
+		operatorPodFile:       get("LEGION_E2E_OPERATOR_POD"),
+		operatorConfigMap:     get("LEGION_E2E_OPERATOR_CONFIGMAP"),
+		agentSecretsURL:       os.Getenv("LEGION_E2E_AGENT_SECRETS_URL"),
+		agentSecretsOperator:  os.Getenv("LEGION_E2E_AGENT_SECRETS_OPERATOR"),
+		agentSecretsAutoSHA:   os.Getenv("LEGION_E2E_AGENT_SECRETS_AUTO_SHA256"),
+		agentSecretsBin:       os.Getenv("LEGION_E2E_AGENT_SECRETS_BIN"),
+		agentSecretsTokenFile: os.Getenv("LEGION_E2E_AGENT_SECRETS_TOKEN_FILE"),
+		sessionDSNFile:        get("LEGION_E2E_SESSION_DSN_FILE"),
+		sessionDBAddress:      get("LEGION_E2E_SESSION_DB_ADDRESS"),
 	}
 	repo, err := ghrepo.Parse("LEGION_E2E_REPO", get("LEGION_E2E_REPO"))
 	if err != nil {
@@ -596,12 +596,11 @@ type liveRig struct {
 		gone       observed
 	}
 
-	// secrets is the broker client, nil when this run's inputs leave it
-	// unconfigured or the attended machine login started in newLiveRig never reached "issued"
-	// (secretsBlocked). secretsBlockReason is empty exactly when secrets is set: it holds the
-	// login's outcome — timed out, denied, or expired — for secretsBlocked to report through the
-	// same SKIPPED-BLOCKED path a missing env var takes, since a login
-	// outcome discovered at rig setup has nowhere else to surface before any check runs.
+	// secrets is the broker client, nil when this run's inputs leave it unconfigured or the token
+	// login started in newLiveRig was refused (secretsBlocked). secretsBlockReason is empty exactly
+	// when secrets is set: it holds that refusal for secretsBlocked to report through the same
+	// SKIPPED-BLOCKED path a missing env var takes, since a login outcome discovered at rig setup has
+	// nowhere else to surface before any check runs.
 	// enrollments is the harness's own enrollment of each claim's running pod, as the daemon's
 	// machine holds it; grants and requests are what checkSecretsAutomaticGrant records for
 	// checkSecretsCrossPodNegative to attack.
@@ -691,29 +690,14 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	if r.dyn, err = dynamic.NewForConfig(own); err != nil {
 		fail("%v", err)
 	}
-	if agentSecretsBlockReason(env.agentSecretsURL, env.agentSecretsOperator, env.agentSecretsAutoSHA, env.agentSecretsBin) == "" {
-		client := &agentsecrets.Client{URL: env.agentSecretsURL}
-		code, err := client.Login(r.ctx)
-		if err != nil {
-			fail("%v", err)
-		}
-		fmt.Printf("STAGE4A: approve machine login code %s on the Dispatch credential page, signed in as any person\n", code)
-		var state agentsecrets.LoginState
-		pollErr := r.poll(10*time.Minute, "machine login "+code+" to be approved", func() (bool, error) {
-			state = client.LoginStatus()
-			return state.State != "pending", nil
-		})
-		switch {
-		case pollErr != nil:
-			r.secretsBlockReason = fmt.Sprintf("attended machine login (code %s) was not approved within 10m", code)
-		case state.State == "issued":
+	if agentSecretsBlockReason(env.agentSecretsURL, env.agentSecretsOperator, env.agentSecretsAutoSHA, env.agentSecretsBin, env.agentSecretsTokenFile) == "" {
+		// The run logs in as the daemon does, with the ServiceAccount token the script minted; no
+		// person approves it, and the client keeps logging in for as long as the run lasts.
+		client := &agentsecrets.Client{URL: env.agentSecretsURL, TokenFile: env.agentSecretsTokenFile, Log: r.log}
+		if err := client.Start(r.ctx); err != nil {
+			r.secretsBlockReason = fmt.Sprintf("the token login was refused: %v", err)
+		} else {
 			r.secrets = client
-		case state.State == "denied":
-			r.secretsBlockReason = fmt.Sprintf("attended machine login (code %s) was denied", code)
-		case state.State == "expired":
-			r.secretsBlockReason = fmt.Sprintf("attended machine login (code %s) expired before approval", code)
-		default:
-			r.secretsBlockReason = fmt.Sprintf("attended machine login (code %s) ended in unexpected state %q", code, state.State)
 		}
 	}
 

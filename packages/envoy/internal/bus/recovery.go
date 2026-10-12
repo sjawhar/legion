@@ -18,11 +18,11 @@ func (c *Client) onClosed() {
 }
 
 func (c *Client) onReconnect(nc *nats.Conn) {
-	// A reconnect while Drain runs belongs to a process that is shutting down: nats.go has re-sent
-	// the draining subscriptions, and nothing will drain them now, so close the connection rather
-	// than hand deliveries to a process that is exiting.
+	// A reconnect after the client stopped belongs to a process that is shutting down: closeStopped
+	// closes the connection, or leaves it to the drain when the reconnect came before Drain stopped
+	// the client.
 	if c.stopped() {
-		nc.Close()
+		c.closeStopped(nc)
 		return
 	}
 	// nc is the connection already in c.Conn, reconnected in place, and the JetStream context taken
@@ -37,7 +37,7 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	pending, restoreErr := c.restoreSubscriptions()
 	if errors.Is(restoreErr, errStopped) {
 		// Stopped between the check above and the re-subscribe: same as that branch.
-		nc.Close()
+		c.closeStopped(nc)
 		return
 	}
 	if restoreErr != nil {
@@ -68,6 +68,23 @@ func (c *Client) onReconnect(nc *nats.Conn) {
 	// event nothing else does either.
 	if pending || restoreErr != nil || hookErr != nil {
 		go c.recover()
+	}
+}
+
+// closeStopped closes nc, the connection a reconnect callback reports once the client has stopped:
+// nats.go has re-sent the subscriptions a drain is draining, and nothing will drain them now, so
+// the connection is closed rather than hand deliveries to a process that is exiting. A reconnect
+// that came before Drain stopped the client is the drain's: nats.go can run its callback only once
+// the drain is under way, and by then the drain itself is draining what nats.go re-sent, so closing
+// there would cut off the deliveries still in their handlers.
+func (c *Client) closeStopped(nc *nats.Conn) {
+	c.mu.Lock()
+	// A callback reports at least one reconnect, and a client stopped by Close alone leaves the
+	// count at 0, so only a reconnect Drain counted at its stop matches.
+	reconnectedBeforeTheDrain := nc == c.Conn && nc.Stats().Reconnects == c.drainedReconnects
+	c.mu.Unlock()
+	if !reconnectedBeforeTheDrain {
+		nc.Close()
 	}
 }
 

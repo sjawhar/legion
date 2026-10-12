@@ -201,7 +201,7 @@ func TestOnlyTheApproverRevokesAMachineLogin(t *testing.T) {
 	if _, err := svc.Store.Pool.Exec(ctx, `update launcher_credentials set expires_at = now() - interval '1 minute' where id = any($1)`, []uuid.UUID{expired.ID, stale.ID}); err != nil {
 		t.Fatalf("expire two credentials: %v", err)
 	}
-	if _, err := svc.Renew(ctx, staleBox.ID.String()); err != nil {
+	if _, err := svc.Renew(ctx, staleBox.ID.String(), ""); err != nil {
 		t.Fatalf("Renew(the box) after its login expired = %v; a session outlives its login's expiry", err)
 	}
 	enr, err := svc.Create(ctx, ada, Enrollment{Kind: "session", RuntimeID: "host-ada", Thumbprint: "tp-ada"})
@@ -446,7 +446,7 @@ func TestAnyoneRevokesAServiceLoginAndEveryPodItEnrolled(t *testing.T) {
 		if _, live, err := svc.Lookup(ctx, e.ID.String()); err != nil || live {
 			t.Fatalf("Lookup(pod slot %s) after the revoke = live %v, %v; want ended", e.Slot, live, err)
 		}
-		if _, err := svc.Renew(ctx, e.ID.String()); !errors.Is(err, ErrNotLive) {
+		if _, err := svc.Renew(ctx, e.ID.String(), ""); !errors.Is(err, ErrNotLive) {
 			t.Fatalf("Renew(pod slot %s) after the revoke = %v, want ErrNotLive", e.Slot, err)
 		}
 	}

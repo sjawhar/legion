@@ -52,8 +52,9 @@ function MachineLoginDecision({
 
 /**
  * The machine-login page: `agent-secrets machine login` prints an 8-character code on the
- * machine, and the operator types it here; a service's login, such as the Legion daemon's, prints
- * its code in its log, and any signed-in person types it. Ruling 13 of the shared broker contract:
+ * machine, and the operator types it here. A service, such as the Legion daemon, logs in with its
+ * own Kubernetes token and prints no code; a service's login an older broker opened can still be
+ * looked up here, and only denied. Ruling 13 of the shared broker contract:
  * only this code-lookup route selects a
  * `launcher_credential` record, and deciding it sends the same code again, so this is the one
  * place a machine record gets Approve/Deny buttons. A looked-up login already decided shows its
@@ -153,7 +154,11 @@ export function MachineLoginPage(): ReactNode {
         <div className="space-y-4">
           <CredentialRecordFacts record={view.record} />
           {view.decided === null ? (
-            <CredentialDecisionButtons approve={approve} deny={deny} submitGuard={submitGuard} />
+            <CredentialDecisionButtons
+              approve={view.record.service === null ? approve : undefined}
+              deny={deny}
+              submitGuard={submitGuard}
+            />
           ) : (
             <MachineLoginDecision
               credentialId={view.decided.credential_id}

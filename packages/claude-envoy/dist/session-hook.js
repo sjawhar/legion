@@ -13988,7 +13988,10 @@ var AGENT_STREAM_LIMITS = {
   modelChars: 200,
   historyMessages: 200,
   historyBytes: 512 * 1024,
-  snapshotIntervalMs: 100
+  snapshotIntervalMs: 100,
+  commands: 500,
+  commandNameChars: 100,
+  commandDescriptionChars: 200
 };
 // ../contracts/src/claim-holds.ts
 function claimHolds(claim, titles) {

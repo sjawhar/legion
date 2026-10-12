@@ -585,11 +585,11 @@ func (s *Server) enrollLoop(ctx context.Context, sess *Session) {
 	}
 }
 
-// renewLoop renews at a third of the lease until the session ends (false) or the broker
-// refuses the proof (true: the caller enrolls again). A refused renew means the lease has
-// lapsed, so the session stops counting as enrolled at once (markLapsed): until enrollLoop has
-// revoked the lapsed id and enrolled afresh, sign answers as for any session still enrolling
-// rather than signing proofs the broker refuses.
+// renewLoop renews at a third of the lease until the session ends (false) or the broker says this
+// enrollment ended (true: the caller enrolls again). ENROLLMENT_NOT_LIVE is that final new-broker
+// verdict. An older broker still says PROOF_INVALID with "not live"; retain that exact fallback
+// until old brokers are retired. Other proof failures, including clock skew, keep the lease and
+// retry: a corrected clock can make the next proof valid.
 func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) bool {
 	for {
 		interval := max(s.MinRenew, time.Until(lease)/3)
@@ -602,7 +602,8 @@ func (s *Server) renewLoop(ctx context.Context, sess *Session, lease time.Time) 
 		}
 		next, err := s.Broker.Renew(ctx, sess)
 		var be *BrokerError
-		if errors.As(err, &be) && be.Status == http.StatusUnauthorized {
+		if errors.As(err, &be) && (be.Code == "ENROLLMENT_NOT_LIVE" ||
+			(be.Code == "PROOF_INVALID" && strings.Contains(be.Message, "not live"))) {
 			id := sess.markLapsed("the broker refused this session's renew (" + be.Code + "); enrolling again")
 			s.Log.Warn("renew refused; revoking the lapsed enrollment before enrolling again", "runtime_id", sess.RuntimeID, "code", be.Code, "enrollment_id", id)
 			return true

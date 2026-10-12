@@ -110,7 +110,7 @@ test("a machine-kind record renders the machine sentence, links to the machine p
     },
     {
       sentence:
-        "Approving lets legion-daemon on worker-7.example.com start worker pods as legion-daemon, not as you: no secret of yours reaches its pods unless you approve the request for it.",
+        "legion-daemon on worker-7.example.com is a service's login from before services logged in with their own Kubernetes token, and no one can approve it any more: deny it, or let it expire.",
       service: "legion-daemon",
     },
   ]) {

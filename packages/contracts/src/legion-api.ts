@@ -240,14 +240,12 @@ const legionControllerLocator = z.strictObject({
   registeredAt: timestamp,
 });
 
-/** `api.AgentSecretsLoginView` — the daemon's own agent-secrets machine login's current status
- * (runtime.kubernetes.agent_secrets): `state` is one of "none" (no login has
- * ever been started), "pending", "issued", "denied", "expired", or "failed" (the broker never
- * opened the most recent login: it refused it, or did not answer); `code` is the confirmation
- * code shown on the Dispatch credential page for a pending login, "" otherwise. */
+/** `api.AgentSecretsLoginView` — the daemon's own agent-secrets token login's current status
+ * (runtime.kubernetes.agent_secrets): `state` is one of "none" (no login has finished yet),
+ * "issued", or "failed" (the latest login won no credential). The daemon logs in with its own
+ * ServiceAccount token, which no person approves, so there is no confirmation code (contract 22). */
 const legionAgentSecretsLoginView = z.strictObject({
   state: z.string(),
-  code: z.string(),
 });
 
 /** `api.CapabilityState` — one row of the deployment's capability report
@@ -273,7 +271,7 @@ const legionCapabilityState = z.strictObject({
  * under `controller: daemon`, with the boot token of the daemon's own controller launch;
  * `agentSecretsLogin` is absent when the deployment configures no broker (contract 9);
  * `capabilities` is the deployment's report, never null (contract 16); `strandedClaims` is every
- * claim nothing will wake, by issue and then role, never null (contract 22). */
+ * claim nothing will wake, by issue and then role, never null (contract 23). */
 export const LegionStateResponse = z.strictObject({
   daemon: daemonInfo,
   admission: legionAdmission,

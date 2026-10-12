@@ -410,7 +410,7 @@ test("the state golden shows a claim's capability report beside its locator", ()
   expect(LegionStateResponse.safeParse(blank.document).success).toBeFalse();
 });
 
-// The claims nothing will wake (contract 22): the golden names LEGION-210's failed implementer,
+// The claims nothing will wake (contract 23): the golden names LEGION-210's failed implementer,
 // whose issue is held, and a state with none carries an empty list rather than none.
 test("the state golden names the claims nothing will wake, and the list cannot be dropped", () => {
   const state = LegionStateResponse.parse(fixture("state.json"));

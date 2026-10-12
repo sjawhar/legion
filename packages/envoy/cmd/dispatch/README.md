@@ -306,9 +306,14 @@ when a file is named other than `<version>_<name>.up.sql`, `<version>_<name>.dow
 `.census.sql` is the migration's census, "Pre-deploy census" below; each needs its `.up.sql`),
 when a census is not one `select` or calls a function it may not (below), when a version
 is not decimal digits from 1 to 2147483647, and when a file cannot be read. The directory is
-embedded with `all:`, so a name beginning with `_` or `.` is refused like any other, and an editor's
-swap file left in the directory fails a local build's tests until it is gone. Versions are applied
-by number, not by file name, and the store's tests require every file on disk to be embedded
+embedded with `all:`, which keeps a name beginning with `_` or `.`, so such a name is refused like
+any other. An editor's swap file therefore stops a locally built `envoy-dispatch` from booting, and
+fails the store's tests, until it is removed, and a binary built while it was there keeps refusing
+to boot until it is rebuilt; Vim writes its swap file beside the file it edits by default. What no
+directive embeds, such as a symlink, a `.git` or a hidden name Go's module paths refuse, never
+reaches the runner, so only the store's tests catch it
+(`pgmigrate/pgmigratetest.CheckEmbedsEveryFile` names each cause). Versions are applied by number,
+not by file name, and the store's tests require every file on disk to be embedded
 (`TestEveryMigrationFileIsEmbedded`) and the versions to run 1 to N with no gap
 (`TestMigrationSetIsNumberedOneToN`), both reading file names alone, so take the next free number
 on `main`.
@@ -317,9 +322,10 @@ Every migration's lock waits are bounded at five seconds (`pgmigrate.LockTimeout
 `pgmigrate.Exec` sets on each migration it applies, after the runner's advisory lock), so a
 migration queued behind a long transaction fails the boot instead of holding every read and write
 of its table behind its request. The failure names the migration, the lock it wanted, the sessions
-it was queued behind, and the `pg_stat_activity` query that lists the holders; end the holder or
-let it finish and start the server again. A migration that needs another bound sets its own
-`SET LOCAL lock_timeout`.
+it was queued behind, and a `pg_stat_activity` query for the sessions holding the lock; end the
+holder or let it finish and start the server again. That query can come back empty: a prepared
+transaction's locks carry no pid, so the join to `pg_stat_activity` drops them (LEGION-432). A
+migration that needs another bound sets its own `SET LOCAL lock_timeout`.
 
 Migrations `0056`–`0062` make search indexing linear. Each table has its own migration, so its
 transaction holds an `ACCESS EXCLUSIVE` lock only for the `DROP EXPRESSION` and trigger setup;
@@ -758,6 +764,8 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/projects` | POST | cookie or trusted header | Create a project from `key` and `name`; rejects a duplicate key with `409 PROJECT_EXISTS`. |
 | `/api/v1/settings/repo-projects` | GET | cookie or trusted header | List external repository-to-project mappings. |
 | `/api/v1/settings/repo-projects/{owner}/{repo}` | PUT, DELETE | cookie or trusted header | Create or replace, or remove, an external repository mapping. |
+| `/api/v1/delivery/session-groups` | POST | cookie, trusted header, or bearer | Create a Delivery session group `{name, sessions}`: its sessions' pull requests take it as their Parent agent, `group:<id>`. `409 SESSION_IN_GROUP` for a session another group holds, `409 SESSION_GROUP_NAME_TAKEN` for a name another group has (ignoring case), `409 SESSION_GROUP_NAME_IS_SESSION_TITLE` for a name that is the latest title of a session outside the group, `400 SESSION_GROUP_INPUT` for a blank name or no sessions. The timeline lists every group (`session_groups`). |
+| `/api/v1/delivery/session-groups/{id}` | PATCH, DELETE | cookie, trusted header, or bearer | Rename a session group, add sessions to it or remove them `{name?, add?, remove?}`, with the create route's refusals and `400 SESSION_GROUP_INPUT` for an edit that would leave it empty; or delete it, its sessions showing as themselves again. `400 SESSION_GROUP_ID_INPUT` for an id that is not a UUID, `404 NOT_FOUND` for one no group has. |
 | `/api/v1/me/agent-tokens` | GET, POST | cookie or trusted header (human only) | List personal-token metadata or mint a personal agent token. |
 | `/api/v1/me/agent-tokens/{id}` | DELETE | cookie or trusted header (human only) | Revoke a personal agent token. |
 | `/api/v1/users` | GET | cookie or trusted header (human only) | Everyone who has signed in, as `{users: [{login}]}` sorted by email — the assignee picker's options. |
