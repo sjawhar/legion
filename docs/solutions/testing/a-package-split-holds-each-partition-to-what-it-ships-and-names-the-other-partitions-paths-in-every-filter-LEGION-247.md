@@ -71,4 +71,6 @@ pi-envoy skipped, and the next pull requests that touched pi-envoy failed on mai
 what a filter owes, run the job's suite under `strace -f -y -e trace=%file` (`-y` resolves a
 script's relative opens) and list every repository path it opened outside the package; add the
 `tsc --listFiles` inputs outside the package for the typecheck. Both plugin filters now name all of
-`skills/`, and the run turned up the same miss in four other filters of that workflow.
+`skills/`. The run turned up the same miss in six other filters of that workflow (`contracts`,
+`plugin`, `claude_plugin`, `dispatch`, `envoy`, `envoy_e2e_local`), and every Bun job's filter
+lacked the Bun pin and the action that installs it.

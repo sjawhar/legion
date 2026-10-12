@@ -136,10 +136,15 @@ jobs:
         with:
           # Each filter names everything its job's checks read: the package and what its tests
           # and typecheck read outside it, the composite actions the job installs its tools
-          # through (.github/actions/setup-bun reads .bun-version, so every Bun job names both),
-          # and, for a Go build in workspace mode, every module go.work binds, whose go.mod moves
-          # the versions the build compiles.
+          # through, and, for a Go build in workspace mode, every module go.work binds, whose
+          # go.mod moves the versions the build compiles. `bun_toolchain` is no job's gate: it is
+          # the Bun pin and the action that installs it (.github/actions/setup-bun reads
+          # .bun-version), written once and named by every Bun job's filter through its anchor,
+          # which dorny/paths-filter flattens into the list that names it.
           filters: |
+            bun_toolchain: &bun_toolchain
+              - '.bun-version'
+              - '.github/actions/setup-bun/**'
             contracts:
               - 'packages/contracts/**'
               - 'skills/dispatch/**'
@@ -152,15 +157,13 @@ jobs:
               # a second zod under contracts through the lock alone).
               - 'package.json'
               - 'bun.lock'
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
             envoy_client:
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
             envoy:
               - 'packages/envoy/**'
               - 'packages/proof-editor/**'
@@ -178,8 +181,7 @@ jobs:
               # The pmdoc fixture check and pmdoc's render tests run pmdoc/gen, which reads the
               # editor's schema through @milkdown/preset-gfm; bun.lock names the patch only by path.
               - 'patches/**'
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
               # Its pack step writes each archive's notices, for each target the list names.
               - 'scripts/go-third-party-notices.sh'
               - '.github/go-release-targets.json'
@@ -230,16 +232,14 @@ jobs:
               - 'packages/daemon/go.sum'
               - 'package.json'
               - 'bun.lock'
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
             plugin:
               - 'packages/envoy-plugin/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
               # Its pack step writes dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
               # Its prepack copies the repository's skills/ into the tarball scripts/prepack.test.ts
@@ -256,8 +256,7 @@ jobs:
               - 'scripts/third-party-notices.ts'
               # scripts/build.ts, which check-dist and tests/dist-fresh.test.ts run, builds only under
               # the Bun .bun-version pins, since the committed bundle depends on it.
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
               # tests/dispatch-first-hook.test.ts reads the skill through the plugin's skills/ link
               # and holds the hook's context to Claude Code's 10,000-character cap.
               - 'skills/dispatch-first/**'
@@ -270,8 +269,7 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
               - 'skills/**'
               - 'scripts/pi-plugin-prepack.sh'
             # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
@@ -290,8 +288,7 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
               # Its pack step writes dist/THIRD_PARTY_NOTICES.
               - 'scripts/third-party-notices.ts'
               - 'scripts/pi-plugin-prepack.sh'
@@ -326,8 +323,7 @@ jobs:
               - 'packages/contracts/**'
               - 'package.json'
               - 'bun.lock'
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
               - 'scripts/third-party-notices.ts'
               - 'scripts/pi-plugin-prepack.sh'
               - 'skills/**'
@@ -380,8 +376,7 @@ jobs:
               - 'patches/**'
               - 'package.json'
               - 'bun.lock'
-              - '.bun-version'
-              - '.github/actions/setup-bun/**'
+              - *bun_toolchain
               # The SPA build writes dist/THIRD_PARTY_NOTICES.txt.
               - 'scripts/third-party-notices.ts'
 

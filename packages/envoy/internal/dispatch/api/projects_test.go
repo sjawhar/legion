@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode"
 
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
@@ -228,6 +229,38 @@ func TestAVisibleNameWithFormatCharactersIsAcceptedForABearerAndAPerson(t *testi
 		if person.Code != http.StatusCreated {
 			t.Errorf("a person creating name %q: status=%d body=%s, want 201", name, person.Code, person.Body.String())
 		}
+	}
+}
+
+// The 🫩 row above tests the unassigned-code-point rule only while Go's tables predate Unicode 16;
+// Go 1.27's assign U+1FAE9 as a symbol. This test finds, in the running Go's own tables, a code
+// point of plane 3 (outside the noncharacter and default-ignorable ranges) they leave unassigned,
+// so it keeps testing that rule on whatever toolchain runs it, and fails if none is left to find.
+func TestACodePointGoLeavesUnassignedIsVisibleForABearerAndAPerson(t *testing.T) {
+	unassigned := rune(-1)
+	for candidate := rune(0x30000); candidate <= 0x3FFFD; candidate++ {
+		if unicode.Is(unicode.Cn, candidate) {
+			unassigned = candidate
+			break
+		}
+	}
+	if unassigned < 0 {
+		t.Fatal("Go's Unicode tables assign every code point in U+30000-U+3FFFD; pick another unassigned range for this test")
+	}
+	if !visibleCharacter(unassigned) {
+		t.Fatalf("visibleCharacter(U+%04X) = false for a code point Go's Unicode %s tables leave unassigned", unassigned, unicode.Version)
+	}
+	handler := newTestHandler(t)
+	name := string(unassigned)
+	if bearer := sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
+		"key": "UNASB", "name": name, "actor": sessionActor(),
+	}); bearer.Code != http.StatusCreated {
+		t.Errorf("a bearer creating name U+%04X: status=%d body=%s, want 201", unassigned, bearer.Code, bearer.Body.String())
+	}
+	if person := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": "UNASP", "name": name,
+	}, "alice"); person.Code != http.StatusCreated {
+		t.Errorf("a person creating name U+%04X: status=%d body=%s, want 201", unassigned, person.Code, person.Body.String())
 	}
 }
 
