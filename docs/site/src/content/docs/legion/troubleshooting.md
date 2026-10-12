@@ -253,7 +253,7 @@ decision that needs its architect. Once a boot has re-adopted its claims, the da
 such claim in one error line, under the move that brings it back:
 
 ```text
-{"level":"ERROR","msg":"legion daemon started with claims nothing will wake","project":"WIDGETS","count":3,"resume":["WIDGETS-12 architect"],"deliver":["WIDGETS-12 implementer"],"needsWorkflowStart":["WIDGETS-14 architect"]}
+{"level":"ERROR","msg":"legion daemon started with claims nothing will wake","project":"WIDGETS","count":3,"resume":["WIDGETS-12 architect"],"suspendedWorkers":["WIDGETS-12 implementer"],"needsWorkflowStart":["WIDGETS-14 architect"]}
 ```
 
 The state names the same claims on every read, after a restart or not, each with its `state`, and
@@ -273,8 +273,8 @@ is `legion-<project>-<issue, lowercased>-<role>`, as `legion claims list` shows.
   legion claims resume --config legion.yaml --operator-token-file operator-token --claim legion-widgets-widgets-12-architect
   ```
 
-- **`deliver`** (a suspended phase worker): the line files every suspended worker here, but the
-  move depends on who suspended it, which `legion claims list --json` shows as `suspendedBy`.
+- **`suspendedWorkers`** (a suspended phase worker): the move depends on who suspended it, which
+  `legion claims list --json` shows as `suspendedBy`, and `legion state` points there too.
   Only an architect is sent a catch-up, so a worker resumed with no task relaunches with nothing to
   do, and once it runs the list stops naming it.
 

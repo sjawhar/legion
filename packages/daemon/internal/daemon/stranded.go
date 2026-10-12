@@ -24,10 +24,12 @@ const strandedReportTimeout = 5 * time.Second
 // the workflow, the claims nothing will wake (workflow.Stranded), read from records as the state
 // route reads them: one error line, however many there are, naming each claim as `<issue> <role>`
 // under the move that brings it back. `resume` lists the suspended architects, which the
-// operator's `legion claims resume` brings back with a catch-up; `deliver` lists the suspended
-// phase workers, which a resume would relaunch with no task (a suspension retires the phase's
-// task, and only an architect is sent a catch-up), so the operator's `legion claims deliver` with
-// the phase's resume task brings each back; `needsWorkflowStart` lists the failed ones, which
+// operator's `legion claims resume` brings back with a catch-up; `suspendedWorkers` lists the
+// suspended phase workers, whose move depends on who suspended each (its `suspendedBy` in `legion
+// claims list --json`, and the troubleshooting page's "A tree does not move after a restart"): one
+// suspended before 0038 is marked the daemon's for the boot to start, one an operator suspended
+// that kept its task or whose phase start waits is resumed, and any other is delivered its phase's
+// resume task; `needsWorkflowStart` lists the failed ones, which
 // ignore resume and deliver and run again only on a workflow start: their architect's retry of the
 // held phase for a worker, their tree's re-admission for an architect. A fleet a restart did not
 // bring back otherwise looks healthy — its controller registers, the state shows its trees active,
@@ -57,7 +59,7 @@ func reportStranded(ctx context.Context, st *store.Store, records record.Store, 
 	if len(stranded) == 0 {
 		return
 	}
-	resume, deliver, workflowStart := []string{}, []string{}, []string{}
+	resume, workers, workflowStart := []string{}, []string{}, []string{}
 	for _, c := range stranded {
 		named := c.Issue + " " + string(c.Role)
 		switch {
@@ -66,9 +68,9 @@ func reportStranded(ctx context.Context, st *store.Store, records record.Store, 
 		case c.Role == claim.RoleArchitect:
 			resume = append(resume, named)
 		default:
-			deliver = append(deliver, named)
+			workers = append(workers, named)
 		}
 	}
 	log.Error("legion daemon started with claims nothing will wake", "project", project, "count", len(stranded),
-		"resume", resume, "deliver", deliver, "needsWorkflowStart", workflowStart)
+		"resume", resume, "suspendedWorkers", workers, "needsWorkflowStart", workflowStart)
 }

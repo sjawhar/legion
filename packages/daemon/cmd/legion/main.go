@@ -408,15 +408,15 @@ func pendingSummary(pending []api.PendingStatusWrite) string {
 
 // strandedSummary is the one line an operator reads for the claims nothing will wake: how many,
 // and each by issue and role under the move that brings it back. `legion claims resume` brings back
-// a suspended architect, which is sent a catch-up once it is ready; a suspended phase worker needs
-// `legion claims deliver` with its phase's resume task, since a suspension retired its phase's task
-// and a resume would relaunch it with nothing to do; a failed one ignores both, and runs again only
-// on a workflow start.
+// a suspended architect, which is sent a catch-up once it is ready; a suspended phase worker's move
+// depends on who suspended it, which `legion claims list --json` shows as its suspendedBy and the
+// troubleshooting page's "A tree does not move after a restart" turns into a move; a failed one
+// ignores resume and deliver, and runs again only on a workflow start.
 func strandedSummary(stranded []api.StrandedClaim) string {
 	if len(stranded) == 0 {
 		return "claims nothing will wake: none"
 	}
-	var resume, deliver, workflowStart []string
+	var resume, workers, workflowStart []string
 	for _, c := range stranded {
 		named := c.Issue + " " + string(c.Role)
 		switch {
@@ -425,15 +425,15 @@ func strandedSummary(stranded []api.StrandedClaim) string {
 		case c.Role == legionclaim.RoleArchitect:
 			resume = append(resume, named)
 		default:
-			deliver = append(deliver, named)
+			workers = append(workers, named)
 		}
 	}
 	var groups []string
 	if len(resume) > 0 {
 		groups = append(groups, "resume "+strings.Join(resume, ", "))
 	}
-	if len(deliver) > 0 {
-		groups = append(groups, "deliver its phase's resume task to "+strings.Join(deliver, ", "))
+	if len(workers) > 0 {
+		groups = append(groups, "suspended workers, each brought back as its suspendedBy calls for (legion claims list --json) "+strings.Join(workers, ", "))
 	}
 	if len(workflowStart) > 0 {
 		groups = append(groups, "failed, needs a workflow start "+strings.Join(workflowStart, ", "))
