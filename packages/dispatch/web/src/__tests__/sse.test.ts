@@ -143,6 +143,10 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
   if (event.type === "user_agent_state.updated") {
     return mainPayloadString(event, "login") === signedInLogin ? [["user-agent-state"]] : [];
   }
+  // An event main never had: it names no key main refreshed. repliesAdditions adds its own.
+  if (event.type === "user_thread_state.updated") {
+    return [];
+  }
   if (event.type === "subscription.remove_requested") {
     return [];
   }
@@ -348,6 +352,10 @@ const eventsByType: Record<EventType, readonly Event[]> = {
   "user_agent_state.updated": [
     event("user_agent_state.updated", { login: "alice", session_id: "s1" }, { issue_key: null }),
     event("user_agent_state.updated", { login: "bob", session_id: "s1" }, { issue_key: null }),
+  ],
+  "user_thread_state.updated": [
+    event("user_thread_state.updated", { login: "alice", thread_id: "c1" }, { issue_key: null }),
+    event("user_thread_state.updated", { login: "bob", thread_id: "c1" }, { issue_key: null }),
   ],
   "issue.created": [event("issue.created")],
   "issue.updated": [event("issue.updated")],
@@ -624,6 +632,32 @@ function answersPageAdditions(incoming: Event): unknown[][] {
   return [];
 }
 
+/** The Replies page, its count and every owner's unread set live under `["me", "replies"]`. Any
+ *  write on an issue can move a row (a comment, a session's reply, an issue message, an answer,
+ *  a close that puts an open ask's thread on the page), so every issue-owned event refreshes it,
+ *  as it refreshes the Inbox - except a pending unsubscribe, which refreshes nothing at all; so
+ *  does a document's ask or comment event, and the signed-in viewer's own read mark from another
+ *  tab. */
+function repliesAdditions(incoming: Event): unknown[][] {
+  if (incoming.type === "user_thread_state.updated") {
+    return mainPayloadString(incoming, "login") === "alice" ? [["me", "replies"]] : [];
+  }
+  if (incoming.type === "subscription.remove_requested") {
+    return [];
+  }
+  if (incoming.issue_key !== null) {
+    return [["me", "replies"]];
+  }
+  if (
+    incoming.artifact_id !== null &&
+    incoming.artifact_id !== undefined &&
+    (incoming.type.startsWith("ask.") || mainIsCommentLikeEvent(incoming))
+  ) {
+    return [["me", "replies"]];
+  }
+  return [];
+}
+
 /** The targets the server named on this event; an event from before the field carries none. */
 function changedTargets(incoming: Event): { [key: string]: unknown }[] {
   const payload: unknown = incoming.payload;
@@ -675,7 +709,12 @@ test.each(
   const kept = subtractsInbox(incoming) ? oracle.filter((key) => key[0] !== "inbox") : oracle;
   // The rows a cited node's count sits on are appended once: a key the baseline already
   // refreshes is not repeated, which is what puts the Inbox back after the subtraction.
-  const base = [...kept, ...rollupAdditions(incoming), ...answersPageAdditions(incoming)];
+  const base = [
+    ...kept,
+    ...rollupAdditions(incoming),
+    ...answersPageAdditions(incoming),
+    ...repliesAdditions(incoming),
+  ];
   const counted = countedRowKeys(incoming);
   const references = referenceWrites.has(incoming.type) ? [["references"]] : [];
   // Which rows refresh is the contract; the order they are queued in and whether a key is
@@ -769,6 +808,30 @@ test("an ask reply keeps the ask-thread key the delayed-Inbox freshness marker r
   const keys = invalidatedKeys(event("comment.created", { id: "comment-1", ask_id: "ask-1" }));
   expect(keys).toContainEqual(["ask-thread", "ask-1"]);
   expect(keys).toContainEqual(["inbox"]);
+});
+
+test("the Replies page refreshes on issue writes, document threads and the viewer's own mark", () => {
+  expect(invalidatedKeys(event("comment.created", { id: "c1", anchor: null }))).toContainEqual([
+    "me",
+    "replies",
+  ]);
+  expect(invalidatedKeys(event("message.answered", { id: "m2" }))).toContainEqual([
+    "me",
+    "replies",
+  ]);
+  expect(
+    invalidatedKeys(event("comment.created", { id: "c1", anchor: null }, documentOwner))
+  ).toContainEqual(["me", "replies"]);
+  expect(
+    invalidatedKeys(
+      event("user_thread_state.updated", { login: "alice", thread_id: "c1" }, { issue_key: null })
+    )
+  ).toEqual([["me", "replies"]]);
+  expect(
+    invalidatedKeys(
+      event("user_thread_state.updated", { login: "bob", thread_id: "c1" }, { issue_key: null })
+    )
+  ).toEqual([]);
 });
 
 test("SSE event prepends a newer event to the loaded log page", () => {

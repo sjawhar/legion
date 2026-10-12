@@ -35,6 +35,7 @@ import type {
   MessageDelivery,
   MessageRead,
   MyAnswersResponse,
+  MyRepliesResponse,
   Project,
   UpdateIssueInput,
   UserAgentState,
@@ -235,6 +236,33 @@ export function listMyAnswers(
   if (page.offset !== undefined) query.set("offset", String(page.offset));
   const suffix = query.size === 0 ? "" : `?${query}`;
   return request<MyAnswersResponse>(`/api/v1/me/answers${suffix}`, "GET", undefined, options);
+}
+
+/** `GET /api/v1/me/replies`: the threads the caller wrote in where someone else has written since
+ *  they last read it, newest reply first, one page. */
+export function listMyReplies(
+  page: { limit?: number; offset?: number } = {},
+  options: ApiOptions = {}
+): Promise<MyRepliesResponse> {
+  const query = new URLSearchParams();
+  if (page.limit !== undefined) query.set("limit", String(page.limit));
+  if (page.offset !== undefined) query.set("offset", String(page.offset));
+  const suffix = query.size === 0 ? "" : `?${query}`;
+  return request<MyRepliesResponse>(`/api/v1/me/replies${suffix}`, "GET", undefined, options);
+}
+
+/** `PUT /api/v1/me/threads/{id}/read`: move the caller's read mark on one thread forward. */
+export function markThreadRead(
+  threadId: string,
+  readThrough: string,
+  options: ApiOptions = {}
+): Promise<void> {
+  return request<void>(
+    `/api/v1/me/threads/${encodeURIComponent(threadId)}/read`,
+    "PUT",
+    { read_through: readThrough },
+    options
+  );
 }
 
 /** `PUT /api/v1/me/asks/{id}/snooze`: the caller's own snooze on an Inbox row, until

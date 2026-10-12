@@ -61,6 +61,7 @@ import type {
   MessageDelivery,
   MessageRead,
   MyAnswersResponse,
+  MyRepliesResponse,
   Project,
   RepoProject,
   SearchResponse,
@@ -492,6 +493,28 @@ export class DispatchApiClient {
    *  one page at a time. Human-only. */
   listMyAnswers(page: { limit: number; offset: number }): Promise<MyAnswersResponse> {
     return this.json<MyAnswersResponse>(pathWithQuery("/api/v1/me/answers", page));
+  }
+
+  /** `GET /api/v1/me/replies`: the threads the signed-in person wrote in where someone else has
+   *  written since they last read it, newest reply first; `issue` or `artifact` narrows to one
+   *  owner. Human-only. */
+  listMyReplies(page: {
+    artifact?: string;
+    issue?: string;
+    limit: number;
+    offset?: number;
+  }): Promise<MyRepliesResponse> {
+    return this.json<MyRepliesResponse>(pathWithQuery("/api/v1/me/replies", page));
+  }
+
+  /** `PUT /api/v1/me/threads/{id}/read`: move the signed-in person's read mark on one thread
+   *  forward to `readThrough` (RFC3339, the newest reply shown). Answers 204 whether or not it
+   *  moved. */
+  async markThreadRead(threadId: string, readThrough: string): Promise<void> {
+    await this.response(
+      `/api/v1/me/threads/${pathSegment(threadId)}/read`,
+      idempotentWriteInit("PUT", { read_through: readThrough })
+    );
   }
 
   async removeAskFollower(id: string, sessionId: string): Promise<void> {

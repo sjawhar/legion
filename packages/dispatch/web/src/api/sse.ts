@@ -15,6 +15,7 @@ import {
   agentMessagesQuery,
   architectureSourcesQuery,
   inboxQuery,
+  myRepliesKey,
   projectsQuery,
   userAgentStateQuery,
   userStateQuery,
@@ -31,6 +32,7 @@ const knownEventTypes: Record<EventType, true> = {
   "architecture.sync_failed": true,
   "user_state.updated": true,
   "user_agent_state.updated": true,
+  "user_thread_state.updated": true,
   "issue.created": true,
   "issue.updated": true,
   "issue.closed": true,
@@ -409,6 +411,10 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // Another tab or device of this viewer read or cleared a conversation: refresh the badge.
     return payloadString(event, "login") === signedInLogin ? [userAgentStateQuery().queryKey] : [];
   }
+  if (event.type === "user_thread_state.updated") {
+    // Another tab or device of this viewer read a thread: drop its row and its count here too.
+    return payloadString(event, "login") === signedInLogin ? [myRepliesKey] : [];
+  }
   if (event.type === "subscription.remove_requested") {
     return [];
   }
@@ -448,6 +454,10 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     if (isCommentLikeEvent(event)) {
       appendCommentDetailKeys(keys, event);
     }
+    // A reply in a document's comment or ask thread can put a row on the viewer's Replies page.
+    if (isAskEvent(event) || isCommentLikeEvent(event)) {
+      keys.push(myRepliesKey);
+    }
     appendAnswersPageKey(keys, event);
     if (event.type === "artifact.approved" || event.type === "artifact.changes_requested") {
       keys.push(inboxQuery().queryKey);
@@ -467,6 +477,10 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
     // updates this out from under any other open tab watching the same user.
     userStateQuery().queryKey,
     inboxQuery().queryKey,
+    // The Replies page and its count, by the Inbox's own rule: any write on an issue - a comment,
+    // a session's reply, an issue message, an answer, a close that puts an open ask's thread on
+    // the page - can move one of the viewer's rows.
+    myRepliesKey,
   ];
 
   if (
