@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "LEGION-695",
+  "completed": "2026-10-12T14:36:37Z",
+  "plan": "dispatch://LEGION-695/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase mechanics - the PR body template and the `E2E (implementer)` proof on `bun run dispatch:local` (references/pr-body.md), review-thread handling, the push rules; `packages/dispatch/AGENTS.md` and `packages/proof-editor/AGENTS.md` are the repository's own guidance for the paths touched.",
+      "ce-simplify-code: the one simplify pass the implementer runs on the diff in its first implementing round, after its own proof (references/pr-body.md).",
+      "dispatch: the by-hand check drives the real `dispatch artifact` and `dispatch doc-edit` against the local instance, and the production check records a `dispatch message` and, while the deploy is pending, a `dispatch ask`."
+    ],
+    "test": [
+      "legion-worker: the tester's own proof on the same surface (`E2E (tester)` line, `implementerProof`, `failures`), what CI covers (lint, types, the unit and browser suites) versus what the tester drives by hand.",
+      "dispatch: reading the issue's plan.md and recording anything a person must know through the issue, never a GitHub issue."
+    ],
+    "review": [
+      "legion-worker: the review round's order (handoff push, CI green at the head, the review of that head, the completion), review-threads.md and merge-gate.md for the approval and READY.",
+      "dispatch: the plan's departure record and the spec live on the issue; a review finding that changes the design goes to the architect, which writes any decision block."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The fallback link has no text: the read-only engine's anchor is empty (markdown-engine.ts:72-90) and its words come from React's RefLink (`title ?? shortForm(route)`, RefLink.tsx:53), which a plain-DOM node view cannot call.",
+        "answer": "Decided: the link's text is `shortForm(route)` (routes.ts:680-708; `CORE-1 notes-md`), the engine's own text until a title resolves, derived from the target so never wrong; the hover card shows the title. Recorded as a departure (outcome unchanged) and named to the architect, who may prefer the caption or a resolved title (the latter needs a React host registry and is not in this plan)."
+      },
+      {
+        "finding": "Clicking and hovering the fallback link: the live editor intercepts only anchors with a `dispatch://` target in `data-dispatch-href ?? href` (ProofDocument.tsx:165-168, 763-782); VersionView's article has no click handler (VersionView.tsx:138); a click on an atom is also ProseMirror's node-selection gesture.",
+        "answer": "The anchor carries both `href=buildReferencePath(route)` and `data-dispatch-href=buildDispatchReference(route)`; `stopEvent` returns true for events inside the anchor so the click reaches the article handler and navigates in-app (e2e Test B step 7 asserts the URL). In the version view the browser follows `href` with a full page load; no VersionView change (its link marks reload the page today - a separate defect, named for the architect)."
+      },
+      {
+        "finding": "`pictureClassName` is module-private in DispatchPicture.tsx:20, so reusing it edits features/refs, a file the spec's change list does not name.",
+        "answer": "Export it from DispatchPicture.tsx (one line; file list names it); not moved to theme/classes.ts (it is the picture's shape, not a theme token, and check:classes gains nothing); not duplicated."
+      },
+      {
+        "finding": "'The suite's edit helper' names nothing that exists; candidates are `editArtifact` ops, typing, or `createIssue({spec})` (which cannot pin @v1 before the artifact exists).",
+        "answer": "`editArtifact(issue.primary_artifact_id, { ops: [{ after: \"end\", markdown, op: \"insert\" }] }, agentSession)` (api.ts:539-550, as doc.e2e.ts:153-156), with the session option shape of doc.e2e.ts:28-31; it is the agent path the spec describes and makes the next version the past-version case needs. The typing path writes only the sentence of the stored-markdown check."
+      },
+      {
+        "finding": "The stored-markdown acceptance names the slug route, but e2e's `request` is private (api.ts:126) and only `getArtifactText(id)` exists; and `typeAtEnd` puts the caret after the last text node (editor.ts:122-135), so a picture as the last node would not get the sentence below it.",
+        "answer": "Add `getIssueArtifactText(issue, slug)` to e2e/api.ts hitting `GET /api/v1/issues/<KEY>/artifacts/<slug>/text` (routes_table.go:154), so the exact route is tested. The insert carries a trailing paragraph (`Below the picture.`) after the picture line, so `typeAtEnd` lands a new paragraph below the picture."
+      },
+      {
+        "finding": "Both upload paths exist in the suite; the Artifacts-tab one only as helpers local to artifacts.e2e.ts (`setInputFiles` on `Upload artifact`, local `confirmUpload`). The research note's claim that no such helper exists was wrong.",
+        "answer": "The tests use the composer paste (`pastePicture`) on the conversation page and send the comment with Control+Enter, as pictures.e2e.ts:52-67 does, so no unsent draft lingers; the Artifacts-tab helpers are not extracted. The plan carries the corrected fact."
+      },
+      {
+        "finding": "'A past version' is ambiguous when the version holding the picture is the newest; the version view is reached by the `Version` combobox or `?v=N`.",
+        "answer": "Test A opens the version the insert made through the `Version` combobox (SpecToolbar.tsx:45-60 lists every version), after the typed sentence has moved the live text past it; the point is the second render path (VersionView.tsx:76-91), and no extra version is created."
+      },
+      {
+        "finding": "`loading=\"lazy\"` means an off-screen picture never fetches, so its `error` never fires and the fallback link never appears until scrolled near; the iPhone project has a short viewport.",
+        "answer": "Kept lazy as the spec says (parity with DispatchPicture.tsx:73-85). Test B scrolls the wrapper (`[data-dispatch-doc-picture=\"…\"]`) into view before asserting the link and img count 0; the reader-facing consequence is the same as a comment's today and is recorded in the plan."
+      },
+      {
+        "finding": "A `dispatch://` source the reference grammar refuses still renders as a broken `<img>` in the engine (markdown-engine.ts:78-81); the spec settles nothing for it.",
+        "answer": "Decided: keep today's rendering (the schema's own toDOM, with Chrome's broken-image glyph and alt text) so both renderers stay in step and no scope is added; one unit case makes the choice deliberate; named to the architect."
+      },
+      {
+        "finding": "Delegating a non-dispatch picture to the schema's toDOM has a typing wrinkle (a falsy nodeView return is untyped), and the `https://` row cannot use `expectDrawn` (no `loading` attribute, no external host in CI).",
+        "answer": "`DOMSerializer.renderSpec(document, node.type.spec.toDOM(node))` returned as `{ dom }` (typed; a missing toDOM throws). The `https://` row asserts the `<img>`'s `src` attribute only."
+      },
+      {
+        "finding": "Project documents and agent artifacts are reachable by the view (referencedArtifact, routes.ts:603-616; artifactVersionPath, client.ts:258-260) but outside the acceptance list.",
+        "answer": "The view resolves owners through `referencedArtifact`, so both work with no extra code; a unit case covers the project owner (`dispatch://CORE/artifact/design@v2` → `/api/v1/projects/CORE/artifacts/design/versions/2`)."
+      },
+      {
+        "finding": "Docs made wrong include AGENTS.md:717-721 (installTypedBlocks mounts `ask` and the other typed types), not in the spec's list; the CHANGELOG has no `### Fixed` under Unreleased.",
+        "answer": "AGENTS.md:717, :901-902 and :1108 are all updated; the view lives in its own `features/doc/picture-view.ts` installed from `installTypedBlocks`, whose comment names it; the changelog entry goes under a new `### Fixed` heading in `## [Unreleased]`."
+      },
+      {
+        "finding": "'Confirmed by hand in a real browser against `bun run dispatch:local`' is an acceptance no machine checks and defines no evidence.",
+        "answer": "Made a proof: the implementer runs `bun run dispatch:local`, writes the picture with the real `dispatch artifact` / `dispatch doc-edit` against it (DISPATCH_URL=<origin> DISPATCH_TOKEN=e2e-token, DISPATCH_TOKEN_FILE unset), opens the signed-in spec URL in a real Chromium, records a screenshot and the `/text` read, with a `@v9` line as the negative control; it is the PR body's `E2E (implementer)` line and implement.json's `proof`; the tester drives the same surface independently."
+      },
+      {
+        "finding": "The production acceptance depends on a person's deploy step (image pin + `dispatch-deploy.yml`) and cannot be met before merge.",
+        "answer": "Classified as the post-merge production check owned by the implementer (merge-gate.md 'After the merge'): the PR body names the deploy dependency from the start, `Production:` stays `pending <the deploy>` with a `dispatch ask` for the deploy step, then `GET /healthz` `commit` and a production spec holding a picture (an existing one found with `dispatch search`, or a LEGSMOKE scratch issue) are recorded on the PR and the issue."
+      },
+      {
+        "finding": "Unit tests of the view need a page origin (happy-dom starts at about:blank, where every relative src fails at once) and a testable export.",
+        "answer": "`pictureView(node, document)` is an exported pure function tested with a hand-built prosemirror-model Schema (ask-block.test.ts style); the test sets `testWindow.happyDOM.setURL(…)` as MarkdownBody.test.tsx:36-47 does and dispatches `error` on the img for the fallback case."
+      },
+      {
+        "finding": "Claims checked: Milkdown's image node shape, no existing image node view, images unsanitized through parse/serialize, the two install sites, VersionDiff unchanged, the slug text route, doc-kind versions answering JSON, CI's two projects - all true; the Artifacts-tab helper claim was false; 'as the read-only engine makes it' is incomplete.",
+        "answer": "The plan carries the corrected upload-path fact and states the fallback link's text and attributes explicitly rather than by reference to the engine."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "A `dispatch://` picture source that pins no version or names no artifact 'becomes a link to what it names, as the read-only engine makes it'; a version the browser cannot draw 'gives way to a link to the artifact's page'.",
+      "plan": "The link's visible text is the reference's short form (`shortForm(route)`, e.g. `CORE-1 notes-md`), not the artifact's resolved title: the engine's anchor is empty and its title is written later by React (`RefLink`, `useReferenceTarget`), which a plain-DOM node view - the design the spec chose - cannot call. The link carries `href` to the artifact's page and `data-dispatch-href`, so it navigates in-app from the live editor and gets the hover card, which shows the title.",
+      "evidence": "features/refs/markdown-engine.ts:67-99 (childless anchors); features/refs/DispatchPicture.tsx:63-65 and features/refs/RefLink.tsx:35-56 (`title ?? shortForm(route)` from a React hook); features/doc/ask-block.ts:114-125 (plain-DOM node views); features/refs/RefPreview.tsx:36, 221-224 (hover card on `[data-dispatch-href]`).",
+      "outcome": { "kind": "unchanged" }
+    }
+  ]
+}
