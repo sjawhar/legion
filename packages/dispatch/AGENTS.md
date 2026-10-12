@@ -1021,6 +1021,16 @@ closes the gap, since the reset runs only after the server's `/healthz` answered
 refuses to boot on a non-loopback database under `DISPATCH_DEV_SIGNIN`. Keep the health wait ahead
 of the reset.
 
+`e2e/delivery-live-probe.ts` is an agent's client for `GET /ws/delivery`, run with `bun` against
+any Dispatch under a bearer (`--url`, `--token-file`, `--view <json>`, `--minutes`): it writes one
+JSON line per frame, applies each with the page's own `applyDelta` and `applyRevs`, reconnects and
+resumes as `api/delivery-live.ts` does, and with `--compare` reads the GET routes for the last
+window it applied and writes whether the pull request ids, run ids and every measure are equal,
+exiting 1 when one is not. `docs/site/src/content/docs/dispatch/delivery.md` ("For agents") is its
+user's guide. `e2e/__tests__/delivery-live-probe.test.ts` (`bun run test`) runs it as a process
+against a Bun websocket server that replays `packages/contracts/fixtures/delivery-live`, and holds
+the body it applies to `after.json`.
+
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, and `e2e/offline-edits.e2e.ts`. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,

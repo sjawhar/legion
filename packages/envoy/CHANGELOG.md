@@ -14,6 +14,18 @@
   store, a merge queue's or another branch's job is published nowhere, and `job` joins
   `contracts.GithubTopicKinds`, so the listener's subscribe warnings take it as a kind.
 
+- The Delivery and Pipeline pages update themselves live (LEGION-690). `GET /ws/delivery` (any
+  signed-in person or agent token) takes a `subscribe` frame naming a view, the GET route's query
+  string and a preset or custom window, and answers a `snapshot`, the matching GET route's body
+  with a revision per key; after that it sends only `delta` frames carrying what changed (pull
+  requests, runs and session groups by id, map entries by key, counts by facet and value, the
+  other fields whole), a `freshness` frame when the freshness verdict changes, and a `heartbeat`
+  every 15 s, the only frame on a quiet window. Nothing re-reads on a timer, a preset's end stays
+  at the present, and a reconnecting page resumes with its last change and revisions and is sent
+  what changed since. Under `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/delivery/_test/disconnect`
+  closes every such socket. `packages/dispatch/e2e/delivery-live-probe.ts` watches the route under
+  a bearer, one JSON line per frame, and compares what it applied with the GET routes.
+
 - The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
   (migration 0093), is a stable id, a name and the sessions it holds; a pull request whose first
   session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,
