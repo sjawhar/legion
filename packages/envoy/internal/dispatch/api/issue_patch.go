@@ -136,22 +136,30 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 
 	// A PATCH locks every issue row it names in one key order before it reads any of them: the
 	// issue, its current parent when a status change or a reparent appends to it, the proposed
-	// parent and the rank neighbours (lockPatchRows). It never holds one of those rows while
-	// waiting for another that a second write holds. Validation, the dependency walk and the rank
-	// reads below are plain reads or re-lock rows already held.
+	// parent and the rank neighbours (lockPatchRows, lockPatchRowsAndParent). It never holds one
+	// of those rows while waiting for another that a second write holds. Validation, the
+	// dependency walk and the rank reads below are plain reads of rows already held.
 	named := make([]string, 0, 3)
 	if parent != nil {
 		named = append(named, *parent)
 	}
 	if input.Rank != nil {
+		// Each neighbour is trimmed once, here, so the key the lock below takes is the key
+		// rankForInput reads.
 		if input.Rank.After != nil {
-			named = append(named, strings.TrimSpace(*input.Rank.After))
+			*input.Rank.After = strings.TrimSpace(*input.Rank.After)
+			named = append(named, *input.Rank.After)
 		}
 		if input.Rank.Before != nil {
-			named = append(named, strings.TrimSpace(*input.Rank.Before))
+			*input.Rank.Before = strings.TrimSpace(*input.Rank.Before)
+			named = append(named, *input.Rank.Before)
 		}
 	}
-	if err := lockPatchRows(r.Context(), tx, key, input.Status != nil || parentProvided, named...); err != nil {
+	lock := lockPatchRows
+	if input.Status != nil || parentProvided {
+		lock = lockPatchRowsAndParent
+	}
+	if err := lock(r.Context(), tx, key, named...); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -331,7 +339,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every owner this transaction appends to must be in one LockOwners call before the
 	// first append: the issue itself, the status-change parent, and both ends of a reparent.
-	// lockPatchRows already holds each of those rows, so LockOwners re-locks them in that order.
+	// lockPatchRowsAndParent already holds each of those rows, so LockOwners re-locks them in that order.
 	owners := []model.Event{issueOwner(key).event("", actor, nil)}
 	ownerKeys := map[string]bool{key: true}
 	addOwner := func(parentKey *string) {

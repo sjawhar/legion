@@ -106,6 +106,12 @@ func Missing(err error) bool {
 	return errors.As(err, &refusal) && refusal.Status == http.StatusNotFound
 }
 
+// ParentContended is the code Dispatch answers an issue PATCH with when a concurrent reparent
+// moved the issue's parent at every attempt to lock it, applying nothing
+// (packages/envoy/internal/dispatch/api/issue_parent.go:99, parentContended). No mechanism shares
+// a value between this module and Dispatch's, so the two spellings change together.
+const ParentContended = "PARENT_CONTENDED"
+
 // PermanentRefusal is a write Dispatch will refuse the same way however many times it is made:
 // the issue is gone, or what it carries is something Dispatch will not take. Only a refusal
 // Dispatch itself made counts, which is a 4xx carrying one of its error codes.
@@ -129,7 +135,7 @@ func PermanentRefusal(err error) (*Error, bool) {
 		refusal.Status == http.StatusTooManyRequests,
 		refusal.Status == http.StatusUnauthorized,
 		refusal.Status == http.StatusForbidden,
-		refusal.Status == http.StatusConflict && refusal.Code == "PARENT_CONTENDED":
+		refusal.Status == http.StatusConflict && refusal.Code == ParentContended:
 		return nil, false
 	}
 	return refusal, true
@@ -154,10 +160,9 @@ func (e *TransientError) Unwrap() error { return e.Err }
 // every 5xx, a codeless 4xx, 408, 429, 409 PARENT_CONTENDED, and a credential answer (401, 403;
 // the Dispatch token (dispatch_token_file) is read once at boot, so a corrected file takes a
 // restart to take effect, same as a queued write already accepts). Anything else — a genuine coded
-// refusal
-// PermanentRefusal does call permanent, or an error that is neither a TransientError nor a
-// Dispatch *Error at all, such as a 200 response
-// whose body is not the JSON it promised — is not an outage this waits out.
+// refusal PermanentRefusal does call permanent, or an error that is neither a TransientError nor
+// a Dispatch *Error at all, such as a 200 response whose body is not the JSON it promised — is not
+// an outage this waits out.
 func Unreachable(err error) bool {
 	var transient *TransientError
 	if errors.As(err, &transient) {

@@ -170,6 +170,22 @@ func TestIssueBlockedByRefusesDependencyCycles(t *testing.T) {
 	}, "alice"), http.StatusBadRequest, "BLOCKED_BY_OUTSIDE_PROJECT")
 }
 
+// An issue naming itself in blocked_by is an input mistake, refused as one rather than as a
+// dependency cycle.
+func TestIssueBlockedBySelfIsAnInputError(t *testing.T) {
+	handler := newTestHandler(t)
+	key := createListedIssues(t, handler, "CORE", 1)[0]
+	response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]any{"blocked_by": []string{key}}, "alice")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("self blocker: %d %s", response.Code, response.Body.String())
+	}
+	if refusal := decodeBody[struct {
+		Code string `json:"code"`
+	}](t, response); refusal.Code != "BLOCKED_BY_INPUT" {
+		t.Fatalf("refusal = %s, want BLOCKED_BY_INPUT", response.Body.String())
+	}
+}
+
 func TestIssueBlockedByConcurrentWritesDoNotDeadlock(t *testing.T) {
 	for _, scenario := range []string{"reciprocal blockers", "blocker and reparent", "old parent and reparent"} {
 		t.Run(scenario, func(t *testing.T) {

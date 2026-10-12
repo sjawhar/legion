@@ -1279,7 +1279,8 @@ take no dependency lock. Creation takes it only with non-empty `blocked_by`, bef
 the issue number or rank; creation without blockers takes no explicit parent-row lock.
 `blocked_by` inputs are limited to
 `contracts.MaxIssueBlockers` entries before deduplication on both create and PATCH; excess
-entries are `400 BLOCKED_BY_INPUT` naming the limit before any issue-row lock is acquired.
+entries are `400 BLOCKED_BY_INPUT` naming the limit before any issue-row lock is acquired, and a
+PATCH naming the issue itself is `400 BLOCKED_BY_INPUT` too.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
