@@ -1,0 +1,79 @@
+import { DOMSerializer, type Node as ProseMirrorNode } from "@milkdown/kit/prose/model";
+import type { NodeView } from "@milkdown/kit/prose/view";
+
+import { artifactVersionPath } from "../../api/client";
+import { pictureClassName } from "../refs/DispatchPicture";
+import {
+  buildDispatchReference,
+  buildReferencePath,
+  type DispatchReferenceRoute,
+  parseDispatchReference,
+  referencedArtifact,
+  shortForm,
+} from "../refs/routes";
+
+/** The link a picture falls back to: the reference's short form, with the real SPA path as its
+ * `href` (a modifier click, a middle click and the read-only version view follow it) and
+ * `data-dispatch-href` for the live editor's click handler and the hover card. The words are the
+ * reference's own, never an author's caption, as `RefLink` shows them until a title resolves. */
+function fallbackLink(route: DispatchReferenceRoute, document: Document): HTMLAnchorElement {
+  const link = document.createElement("a");
+  link.setAttribute("href", buildReferencePath(route));
+  link.dataset.dispatchHref = buildDispatchReference(route);
+  link.textContent = shortForm(route);
+  return link;
+}
+
+/**
+ * The node view of Milkdown's `image` node. The browser cannot fetch `dispatch://`, so a picture
+ * whose source names an artifact at a version (`![shot.png](dispatch://KEY/artifact/shot-png@v1)`,
+ * the line a pasted picture is written as) is drawn from the version's same-origin bytes route,
+ * with the caption `pictureSerializer` would give it (`markdown-engine.ts`): the `alt`, or the
+ * artifact's slug when that is empty. A version the browser cannot draw (a document, another file,
+ * a missing version) errors, and the picture becomes `fallbackLink`; a source that pins no version
+ * or names something other than an artifact is that link at once. Any other source - a picture on
+ * another website, a relative path, a `dispatch://` string the reference grammar refuses - is drawn
+ * by the schema's own `toDOM`, as today.
+ */
+export function pictureView(node: ProseMirrorNode, document: Document): NodeView {
+  const src = String(node.attrs.src ?? "");
+  const route = src.startsWith("dispatch://") ? parseDispatchReference(src) : undefined;
+  if (route === undefined) {
+    const toDOM = node.type.spec.toDOM;
+    if (toDOM === undefined) {
+      throw new Error(`the ${node.type.name} node has no toDOM`);
+    }
+    return { dom: DOMSerializer.renderSpec(document, toDOM(node)).dom };
+  }
+  const dom = document.createElement("span");
+  dom.dataset.dispatchDocPicture = buildDispatchReference(route);
+  let link: HTMLAnchorElement | undefined;
+  const showLink = () => {
+    link = fallbackLink(route, document);
+    dom.replaceChildren(link);
+  };
+  const named = referencedArtifact(route);
+  if (named?.version === undefined) {
+    showLink();
+  } else {
+    const alt = String(node.attrs.alt ?? "").trim();
+    const img = document.createElement("img");
+    img.setAttribute("alt", alt === "" ? named.slug : alt);
+    img.setAttribute("loading", "lazy");
+    img.className = pictureClassName;
+    // The listener and the picture's place in the wrapper come before `src`, so an error the
+    // browser raises at once is caught and replaces the picture rather than preceding it.
+    img.addEventListener("error", showLink);
+    dom.append(img);
+    img.setAttribute("src", artifactVersionPath(named.owner, named.slug, named.version));
+  }
+  return {
+    dom,
+    // The swap from `<img>` to `<a>` is the one DOM change the view makes itself; never an edit.
+    ignoreMutation: () => true,
+    // A click on the link is a click on a link, not ProseMirror's node-selection gesture; events
+    // on the picture are the editor's, so clicking it selects it.
+    stopEvent: (event) =>
+      link !== undefined && event.target instanceof Node && link.contains(event.target),
+  };
+}
