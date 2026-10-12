@@ -546,8 +546,12 @@ func TestSettlementRecordsMalformedAskAndRepairsIt(t *testing.T) {
 // and flags it instead of indexing it.
 func TestSettlementMarksUnsupportedAskBodyInvalid(t *testing.T) {
 	service, artifactID := newTestService(t)
+	// The edit lands before any settlement: one that ran first would index the seeded ask while its
+	// body still allows it.
+	service.settle = time.Hour
 	seedServiceText(t, service, artifactID, ":::ask{#ask-heading urgency=\"med\" multiple=\"false\" state=\"open\"}\nShould we ship?\n:::\n")
 	editLiveTree(t, service, artifactID, appendToAsk(&pmdoc.Node{Type: "heading", Attrs: pmdoc.Attrs{"level": float64(2)}, Children: []*pmdoc.Node{{Type: "text", Text: "Not an option"}}}))
+	settleCurrentGeneration(t, service, artifactID)
 
 	waitForDocumentVersion(t, service.store, artifactID, 2)
 	const reason = `ask block "ask-heading" has unsupported body node "heading"`
@@ -796,6 +800,7 @@ func TestEditsBesideAnAskTheBrowserLeftUnreadableAreAccepted(t *testing.T) {
 func TestSettleRendersTreeAndWritesVersion(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
+	alignLatestVersionWithUpdates(t, service, artifactID)
 	editLiveTree(t, service, artifactID, replaceRun("before", "after"))
 	version := waitForDocumentVersion(t, service.store, artifactID, 2)
 	var markdown string
@@ -1655,6 +1660,7 @@ func TestRolledBackWriteNeverReachesTheRoom(t *testing.T) {
 func TestSettlePersistsPendingAuthorAfterDisconnect(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
+	alignLatestVersionWithUpdates(t, service, artifactID)
 	actor := model.Actor{Kind: "user", ID: "alice"}
 	connectionID := service.nextConnection.Add(1)
 	service.addConnection(artifactID, connectionID, actor)
@@ -1683,6 +1689,7 @@ func TestSettleWritesDirtyVersionWithoutPendingAuthors(t *testing.T) {
 func TestConnectedActorIsPendingAfterEachDocumentUpdate(t *testing.T) {
 	service, artifactID := newTestService(t)
 	seedServiceText(t, service, artifactID, "before")
+	alignLatestVersionWithUpdates(t, service, artifactID)
 	actor := model.Actor{Kind: "user", ID: "alice"}
 	connectionID := service.nextConnection.Add(1)
 	service.addConnection(artifactID, connectionID, actor)
@@ -2760,6 +2767,11 @@ func namedVersion(t *testing.T, service *Service, artifactID, summary string, ac
 	return result, nil
 }
 
+// alignLatestVersionWithUpdates makes the latest version hold every update the document has, as a
+// seeded document's first version does outside these tests (SeedText's caller writes it). Without
+// it the text seedServiceText wrote is a change no version holds, and the settlement the room's
+// first load arms for the seed versions it on its own whenever it runs before the test's first
+// browser edit is credited: a version none of that edit's authors are listed on.
 func alignLatestVersionWithUpdates(t *testing.T, service *Service, artifactID string) {
 	t.Helper()
 	if _, err := service.store.Pool.Exec(context.Background(), `
