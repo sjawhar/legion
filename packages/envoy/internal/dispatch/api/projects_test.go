@@ -159,6 +159,7 @@ func TestAnInvalidProjectIsRefusedForABearerAndAPerson(t *testing.T) {
 		{"a halfwidth Hangul filler, a space and a filler", "AGENT", "\uffa0 \u3164", "name has no visible character"},
 		{"Braille pattern blanks", "AGENT", "\u2800\u2800", "name has no visible character"},
 		{"a bare combining mark and a variation selector", "AGENT", "\u0301\ufe0f", "name has no visible character"},
+		{"a spacing combining mark alone", "AGENT", "\u093e", "name has no visible character"},
 	} {
 		t.Run(input.name, func(t *testing.T) {
 			for _, attempt := range []struct {
@@ -195,6 +196,7 @@ func TestAVisibleNameWithFormatCharactersIsAcceptedForABearerAndAPerson(t *testi
 		"Super\u00adcalifragilistic",
 		"한국 팀",
 		"cafe\u0301",
+		"Cafe\u0301",
 	} {
 		bearer := sessionRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]any{
 			"key": fmt.Sprintf("VISB%d", index), "name": name, "actor": sessionActor(),
