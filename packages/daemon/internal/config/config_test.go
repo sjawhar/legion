@@ -283,6 +283,19 @@ max_fix_attempts: 4
 	}
 }
 
+func TestLoadReadsProjectMergeRules(t *testing.T) {
+	body := strings.Replace(minimalFile, "{ repo: acme/widgets }",
+		"{ repo: ACME/widgets, merge: { by_hand: ['^migrations/versions/'] } }", 1)
+	cfg, err := Load(writeConfigFile(t, body), noEnv)
+	if err != nil {
+		t.Fatalf("Load project merge rules: %v", err)
+	}
+	rules := cfg.Projects["DEMO"].Merge
+	if !rules.MatchByHand([]string{"migrations/versions/0001.py"}) {
+		t.Error("by_hand rule does not match its migration path")
+	}
+}
+
 func TestLoadReadsPrivateKeyCommand(t *testing.T) {
 	body := strings.Replace(minimalFile, "private_key: implement-test-key", "private_key_command: printf command-key", 1)
 

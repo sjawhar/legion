@@ -39,6 +39,18 @@ func RoleFor(p phase.Phase) claim.Role {
 	}
 }
 
+// ResumePhase is the phase a re-admitted tree resumes its mid-phase child in: the child's own,
+// except that a child left awaiting its merge resumes in merging. The tree's linger disarmed its
+// pull request (beginLinger), and re-admission clears its merger's READY with the rest of the old
+// generation's handoffs (record.Store.ClearTreeGeneration), so nothing is armed and no READY is left
+// to arm it again: only a new READY from its merger moves it.
+func ResumePhase(child record.Issue) phase.Phase {
+	if child.Phase == phase.AwaitingMerge {
+		return phase.Merging
+	}
+	return child.Phase
+}
+
 // workingPhase is the phase issue's worker works: its phase, or, while it is held, the phase its
 // hold left, the one whose worker's claim failed. RoleFor(workingPhase(issue)) is the role whose
 // failure holds the issue (claimFailed), and the one whose claim Stranded names when nothing will
@@ -171,11 +183,12 @@ func refusedLingering(issue record.Issue, request string) intake.Result {
 }
 
 // clearHandoff empties the handoff a role reported for its previous phase — its commit, verdict,
-// summary, and the review round's decision, which ends with the round — keeping its claim and the
-// review rounds, when a transition starts it on a new phase. A role's recorded handoff is then
-// always its current phase's: the implementer's round-1 commit cannot advance round 2, the
-// production check is recorded only by the production check's own completion, a merger sent back to
-// verify again has no READY packet until its next one, and no round inherits an earlier decision.
+// summary and by-hand note, and the review round's decision, which ends with the round — keeping
+// its claim and the review rounds, when a transition starts it on a new phase. A role's recorded
+// handoff is then always its current phase's: the implementer's round-1 commit cannot advance
+// round 2, the production check is recorded only by the production check's own completion, a
+// merger sent back to verify again has no READY packet until its next one, and no round inherits
+// an earlier decision.
 func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role claim.Role) error {
 	if role == "" {
 		return nil
@@ -185,7 +198,7 @@ func (e *Engine) clearHandoff(ctx context.Context, tx pgx.Tx, issue string, role
 		return err
 	}
 	cleared := row
-	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt = "", "", "", nil, time.Time{}
+	cleared.HandoffCommit, cleared.Verdict, cleared.Summary, cleared.Decision, cleared.CompletedAt, cleared.MergeNote = "", "", "", nil, time.Time{}, ""
 	if cleared == row {
 		return nil
 	}

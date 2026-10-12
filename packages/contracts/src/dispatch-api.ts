@@ -338,6 +338,16 @@ export const MAX_ISSUE_BLOCKERS = 20;
 export const ISSUE_TITLE_MAX = 1000;
 
 /**
+ * The longest project name, in UTF-16 units, counted after the trim `POST /api/v1/projects`
+ * applies; a longer one is `400 CAP_EXCEEDED`. A name shows beside its key in the sidebar's
+ * 20rem rail and in every project picker's `KEY · Name` option, any bearer may write one, and no
+ * route renames a project, so it is held to about two lines of that rail; production's longest name
+ * was 25 characters when this was set. Generated into Go as `contracts.ProjectNameMax`, which the
+ * server enforces, and the Settings name field and `dispatch project` take it as their maximum.
+ */
+export const PROJECT_NAME_MAX = 80;
+
+/**
  * The most issues one page of `GET /api/v1/issues` holds: `limit` is 1 to this. Generated into Go
  * as `contracts.MaxIssuePageLimit`, which the server enforces, and the `dispatch_issues` tool's
  * `limit` takes the same bound, so the two ends agree.

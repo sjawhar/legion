@@ -33,6 +33,7 @@ import type {
   MessageRead,
   OpenAsk,
   OpenAsksResponse,
+  Project,
   Suggestions,
   WriteAdvice,
   WriteSuggestion,
@@ -49,6 +50,7 @@ import {
   itemFromSearch,
   overCapMessage,
   PROJECT_KEY_PATTERN,
+  PROJECT_KEY_RULE,
   serviceSubjectLabel,
   zodSchemaApi,
 } from "@legion/contracts";
@@ -398,6 +400,8 @@ const issueFreeTools: Readonly<Record<string, true>> = {
   dispatch_follow: true,
   dispatch_search: true,
   dispatch_issues: true,
+  dispatch_project: true,
+  dispatch_projects: true,
   dispatch_open_asks: true,
   dispatch_whoami: true,
   dispatch_architecture_sync: true,
@@ -910,7 +914,7 @@ async function resolveOwnerArguments(
   }
   if (typeof projectArgument === "string") {
     if (!PROJECT_KEY_PATTERN.test(projectArgument)) {
-      problems.push("project must be a project key such as CORE");
+      problems.push(`project is not a project key: ${PROJECT_KEY_RULE}`);
     }
     const refDocument = ref?.owner.kind === "project" ? (ref.artifact ?? ref.id) : undefined;
     if (
@@ -2502,6 +2506,35 @@ export async function executeDispatchTool(
                 }),
               ].join("\n"),
         details: { issues: rows, total, offset, limit },
+      };
+    }
+    case "dispatch_project": {
+      let project: Project;
+      try {
+        project = await client.createProject({
+          key: stringArg(args, "key"),
+          name: stringArg(args, "name"),
+          actor,
+        });
+      } catch (error) {
+        // PROJECT_EXISTS and INVALID_PROJECT ask for different things, and the description names
+        // both by code.
+        throw refusalWithCode(error);
+      }
+      const href = new URL(`/projects/${encodeURIComponent(project.key)}`, configUrl).toString();
+      return {
+        text: `Created project ${project.key} (${project.name}) at ${project.created_at}: ${href}`,
+        details: { project: project.key, name: project.name, created_at: project.created_at },
+      };
+    }
+    case "dispatch_projects": {
+      const projects = (await client.listProjects()).map(({ key, name }) => ({ key, name }));
+      return {
+        text:
+          projects.length === 0
+            ? "No projects."
+            : projects.map(({ key, name }) => `${key} ${name}`).join("\n"),
+        details: { projects },
       };
     }
     case "dispatch_architecture_sync": {

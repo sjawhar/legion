@@ -8,11 +8,20 @@
   returns, and the `user_thread_state.updated` event with its `UserThreadStateUpdatedEventPayload`
   (LEGION-687).
 
+- Added the `dispatch_project` spec, `{ key, name }` (strict), behind the `dispatch project`
+  command, and `dispatch_projects`, no arguments, behind `dispatch projects`, which lists every
+  project's key and name: twenty-three Dispatch specs. A project's `name` is at most
+  `PROJECT_NAME_MAX` (80) characters, generated into Go as `contracts.ProjectNameMax`, which the
+  server enforces and the Settings name field takes as its `maxLength` (LEGION-684).
+- Added `PROJECT_KEY_RULE`, the one wording of a project key's rule, generated into Go as
+  `contracts.ProjectKeyRule`, and `PROJECT_KEY_PATTERN` is generated as `contracts.ProjectKeyPattern`.
+  `dispatch search --project` and every owner check refuse a key that is not one with
+  `project is not a project key: <rule>`, as every server route does, where they said
+  `project must be a project key such as CORE` (LEGION-684).
 - `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
   `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,
   `session_titles` and `session_pr_counts`; `DeliveryPR.parent_agent` is a session group's
   `group:<id>` for a pull request whose first session is a member (LEGION-682).
-
 - Added `LegionReadyRequest`, the body of the Legion daemon's `POST /legion/v1/claims/ready`, and
   `LegionCapabilityReport`, its optional `capabilities`: what a session measured of the six live
   capability rows at boot (`measuredAt`, `elapsedMs`, `rows[{name, ok, detail}]`; a `detail` may

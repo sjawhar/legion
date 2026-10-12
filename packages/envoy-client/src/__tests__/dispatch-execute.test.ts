@@ -7,6 +7,7 @@ import {
   type BlockPath,
   dispatchToolSpecs,
   type IssueComponents,
+  PROJECT_KEY_RULE,
   SEARCH_QUERY_MAX,
   type SearchResult,
   type TablePosition,
@@ -1476,6 +1477,121 @@ describe("executeDispatchTool", () => {
       commit: "c0ffee",
       error: "api.md: duplicate component id",
     });
+  });
+
+  test("dispatch_project posts the key and name as this session and prints the created project", async () => {
+    const requests: Array<{ readonly route: string; readonly body: unknown }> = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const target = new URL(String(url));
+      requests.push({
+        route: `${init?.method ?? "GET"} ${target.pathname}`,
+        body: JSON.parse(String(init?.body)),
+      });
+      return response(
+        { key: "CORE", name: "Core", open_asks: 0, created_at: "2026-10-11T00:00:00Z" },
+        201
+      );
+    }) as typeof fetch;
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_project",
+      args: { key: "CORE", name: "Core" },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+    expect(requests.map((request) => request.route)).toEqual(["POST /api/v1/projects"]);
+    expect(requests[0]?.body).toMatchObject({
+      key: "CORE",
+      name: "Core",
+      actor: { kind: "session", id: "session-1" },
+    });
+    expect(result.text).toBe(
+      "Created project CORE (Core) at 2026-10-11T00:00:00Z: http://dispatch.test/projects/CORE"
+    );
+    expect(result.details).toEqual({
+      project: "CORE",
+      name: "Core",
+      created_at: "2026-10-11T00:00:00Z",
+    });
+  });
+
+  test("dispatch_project names the server's code when the key is taken", async () => {
+    const fetchImpl = (async (): Promise<Response> =>
+      response(
+        { code: "PROJECT_EXISTS", error: "a project with this key already exists" },
+        409
+      )) as unknown as typeof fetch;
+
+    await expect(
+      executeDispatchTool({
+        tool: "dispatch_project",
+        args: { key: "CORE", name: "Core" },
+        cwd: "/workspace",
+        host: "omp",
+        sessionId: "session-1",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl,
+      })
+    ).rejects.toThrow("PROJECT_EXISTS: a project with this key already exists");
+  });
+
+  test("dispatch_projects lists every project's key and name, one per line, keys first", async () => {
+    const requests: string[] = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push(`${init?.method ?? "GET"} ${new URL(String(url)).pathname}`);
+      return response([
+        { key: "CORE", name: "Core", open_asks: 2, created_at: "2026-09-01T00:00:00Z" },
+        { key: "OPS", name: "Ops", open_asks: 0, created_at: "2026-09-02T00:00:00Z" },
+      ]);
+    }) as typeof fetch;
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_projects",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+    expect(requests).toEqual(["GET /api/v1/projects"]);
+    expect(result.text).toBe("CORE Core\nOPS Ops");
+    expect(result.details).toEqual({
+      projects: [
+        { key: "CORE", name: "Core" },
+        { key: "OPS", name: "Ops" },
+      ],
+    });
+  });
+
+  test("dispatch_projects says there are none when Dispatch has no projects", async () => {
+    const fetchImpl = (async (): Promise<Response> => response([])) as unknown as typeof fetch;
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_projects",
+      args: {},
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-1",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl,
+    });
+
+    expect(result.text).toBe("No projects.");
+    expect(result.details).toEqual({ projects: [] });
   });
 
   test("dispatch_open_asks renders active asks by whose reply is due", async () => {
@@ -5572,7 +5688,7 @@ describe("executeDispatchTool", () => {
         args: { project: "not-a-project", artifact: "runbook-md" },
         ...shared,
       })
-    ).rejects.toThrow("project must be a project key");
+    ).rejects.toThrow(`project is not a project key: ${PROJECT_KEY_RULE}`);
   });
   test("uploads a relative artifact path from the Dispatch process cwd", async () => {
     const cwd = mkdtempSync(path.join(os.tmpdir(), "dispatch-execute-"));

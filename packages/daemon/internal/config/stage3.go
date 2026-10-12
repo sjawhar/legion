@@ -37,15 +37,43 @@ type Gates struct {
 }
 
 // Project maps a Dispatch project prefix to its repository, parsed at load, its optional
-// merge-queue role, and the required workflows it declares as review workflows.
+// merge-queue role, merge rules, and the required workflows it declares as review workflows.
 type Project struct {
 	Repo           ghrepo.Repository
 	MergeQueueRole string
+	Merge          MergeRules
 	// ReviewWorkflows is `review_workflows`: the path of each workflow the base branch requires that
 	// reviews the code and fails on its own findings, such as a review bot's, whose red alone the
 	// reviewer's round decides rather than the implementer (workflow.Config.ReviewWorkflows). Empty,
 	// every red required workflow sends the work back as a red required check does.
 	ReviewWorkflows []string
+}
+
+// MergeRules is the project's `merge` policy. A path matching ByHand is never auto-armed.
+type MergeRules struct {
+	ByHand []PathPattern
+}
+
+// PathPattern is one validated regular expression from a project's merge policy.
+type PathPattern struct {
+	Expression string
+	Regexp     *regexp.Regexp
+}
+
+// MatchByHand reports whether any changed path matches a by-hand rule.
+func (rules MergeRules) MatchByHand(paths []string) bool {
+	return matchesPathPattern(rules.ByHand, paths)
+}
+
+func matchesPathPattern(patterns []PathPattern, paths []string) bool {
+	for _, pattern := range patterns {
+		for _, path := range paths {
+			if pattern.Regexp.MatchString(path) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // GitHubApp is one App's configuration. Load resolves the configured private-key source into
@@ -106,7 +134,7 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if value.Kind != yaml.MappingNode {
 		return Project{}, fmt.Errorf("%s must be a mapping with repo", key)
 	}
-	fields, err := members(value, key, "repo", "merge_queue_role", "mergeQueueRole", "review_workflows")
+	fields, err := members(value, key, "repo", "merge", "merge_queue_role", "mergeQueueRole", "review_workflows")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
 		// The shipped loader's own words (validateProjectEntry, config.ts).
@@ -136,6 +164,11 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if project.MergeQueueRole != "" && !roleNamePattern.MatchString(project.MergeQueueRole) {
 		return Project{}, fmt.Errorf("%s.merge_queue_role is a bare role name (no notifications.role. prefix)", key)
 	}
+	if merge := fields["merge"]; merge != nil {
+		if project.Merge, err = readMergeRules(merge, key+".merge"); err != nil {
+			return Project{}, err
+		}
+	}
 	if workflows := fields["review_workflows"]; workflows != nil {
 		if project.ReviewWorkflows, err = readReviewWorkflows(workflows, key+".review_workflows"); err != nil {
 			return Project{}, err
@@ -161,6 +194,42 @@ func readReviewWorkflows(value *yaml.Node, key string) ([]string, error) {
 		}
 	}
 	return paths, nil
+}
+
+func readMergeRules(value *yaml.Node, key string) (MergeRules, error) {
+	if value.Kind != yaml.MappingNode {
+		return MergeRules{}, fmt.Errorf("%s must be a mapping", key)
+	}
+	fields, err := members(value, key, "by_hand")
+	if err != nil {
+		return MergeRules{}, err
+	}
+	var rules MergeRules
+	if byHand := fields["by_hand"]; byHand != nil {
+		if rules.ByHand, err = readPathPatterns(byHand, key+".by_hand"); err != nil {
+			return MergeRules{}, err
+		}
+	}
+	return rules, nil
+}
+
+func readPathPatterns(value *yaml.Node, key string) ([]PathPattern, error) {
+	expressions, err := readStrings(value, key)
+	if err != nil || len(expressions) == 0 {
+		return nil, err
+	}
+	patterns := make([]PathPattern, 0, len(expressions))
+	for _, expression := range expressions {
+		if slices.Contains(expressions[:len(patterns)], expression) {
+			return nil, fmt.Errorf("%s names %q twice", key, expression)
+		}
+		compiled, err := regexp.Compile(expression)
+		if err != nil {
+			return nil, fmt.Errorf("%s entry %q is not a valid regular expression: %w", key, expression, err)
+		}
+		patterns = append(patterns, PathPattern{Expression: expression, Regexp: compiled})
+	}
+	return patterns, nil
 }
 
 func readGates(value *yaml.Node, key string) (*Gates, error) {

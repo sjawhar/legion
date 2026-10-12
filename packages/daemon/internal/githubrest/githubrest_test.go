@@ -50,6 +50,39 @@ func TestPostSendsJSONAndAnswersWithTheStatus(t *testing.T) {
 	}
 }
 
+// GraphQL posts to the client's GraphQL route itself, so an answer other than 2xx names that route
+// rather than nothing: a failed disarm logs "POST /graphql with 502", not "POST  with 502". An
+// answer that carries errors with status 200 is a *GraphQLError, whose NOT_FOUND names its path.
+func TestGraphQLNamesItsRouteAndItsErrors(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var sent struct {
+			Query string `json:"query"`
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/graphql" || json.NewDecoder(r.Body).Decode(&sent) != nil {
+			http.Error(w, `{"message":"bad request"}`, http.StatusBadRequest)
+			return
+		}
+		if strings.Contains(sent.Query, "missing") {
+			w.Write([]byte(`{"data":{"repository":{"pullRequest":null}},"errors":[{"type":"NOT_FOUND","path":["repository","pullRequest"],"message":"Could not resolve to a PullRequest with the number of 42."}]}`))
+			return
+		}
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+	}))
+	defer server.Close()
+	client := Client{Token: "token", API: GraphQLAPI(server.URL)}
+
+	err := client.GraphQL(context.Background(), "query { failing }", nil, nil)
+	var answer *Answer
+	if !errors.As(err, &answer) || answer.Path != "/graphql" || answer.Status != http.StatusBadGateway {
+		t.Fatalf("GraphQL on a 502 = %v, want an *Answer for POST /graphql with 502", err)
+	}
+	err = client.GraphQL(context.Background(), "query { missing }", nil, nil)
+	var failed *GraphQLError
+	if !errors.As(err, &failed) || !failed.NotFoundAt("repository", "pullRequest") || failed.NotFoundAt("repository") {
+		t.Fatalf("GraphQL on a NOT_FOUND answer = %v, want a *GraphQLError NOT_FOUND at repository.pullRequest only", err)
+	}
+}
+
 // GetPages and GetListPages follow GitHub's next pages wherever GitHub names them on the API's own
 // origin, its /repositories/<id>/ form included, and an answer on such a page names that page's
 // path. A next page on another host is refused before the token is sent there.

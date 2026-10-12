@@ -57,5 +57,9 @@ daemon's table; a worker that reports no surface reaches the changed path gets a
 this tree to build it, and waits, idle and not suspended, until you tell it to continue
 (`envoy_publish` to its role topic) once that child closes.
 
+A merge is never a human to-do: open no `dispatch ask` for it. The merger follows the project's
+merge policy after READY; a by-hand READY tells you that a person merges under the repository's
+rules, while the usual READY arms the pull request itself.
+
 The root architect writes no `.legion/` handoff: unlike a phase worker, it is not a file-backed
 phase, and its root-issue close plus Envoy messaging are the durable record of its work.

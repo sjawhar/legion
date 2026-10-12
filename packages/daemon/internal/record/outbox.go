@@ -29,6 +29,7 @@ const (
 	OutboxKindWorkspaceRemove   OutboxKind = "workspace_remove"
 	OutboxKindMergeQueuePublish OutboxKind = "merge_queue_publish"
 	OutboxKindIssueBranch       OutboxKind = "issue_branch"
+	OutboxKindAutoMergeDisable  OutboxKind = "auto_merge_disable"
 )
 
 // OutboxPayload is the sealed vocabulary of payloads a workflow may enqueue.
@@ -304,6 +305,19 @@ type IssueBranch struct {
 
 func (IssueBranch) OutboxKind() OutboxKind { return OutboxKindIssueBranch }
 
+// AutoMergeDisable turns off whatever would merge the pull request without a person: GitHub's
+// auto-merge, then its place in a merge queue. Arming is legitimate only for the READY head of an
+// issue awaiting its merge, so the workflow queues it on every head move but one landing on that
+// head (a push, or a reopen), on every READY withdrawal, on a child's re-entry and on an issue's
+// leaving the workflow. Its executor decides by the record when it runs, keeping the arm only while
+// the issue awaits its merge at the merger's READY commit, and READY is refused while one is
+// unfinished (Store.DisarmPending).
+type AutoMergeDisable struct {
+	Number int `json:"number"`
+}
+
+func (AutoMergeDisable) OutboxKind() OutboxKind { return OutboxKindAutoMergeDisable }
+
 // NewOutboxRow encodes one validated payload for durable delivery at nextAt.
 func NewOutboxRow(issue string, payload OutboxPayload, nextAt time.Time) (OutboxRow, error) {
 	if err := validateOutboxPayload(payload); err != nil {
@@ -402,6 +416,12 @@ func decodeOutboxJSON(row OutboxRow) (OutboxPayload, error) {
 			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
 		}
 		payload = value
+	case OutboxKindAutoMergeDisable:
+		value := AutoMergeDisable{}
+		if err := decoder.Decode(&value); err != nil {
+			return nil, fmt.Errorf("decode outbox row %d: %w", row.ID, err)
+		}
+		payload = value
 	default:
 		return nil, fmt.Errorf("decode outbox row %d: unknown kind %q", row.ID, row.Kind)
 	}
@@ -480,6 +500,10 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		}
 		if value.Packet == "" {
 			return fmt.Errorf("merge queue publish requires packet")
+		}
+	case AutoMergeDisable:
+		if value.Number <= 0 {
+			return fmt.Errorf("auto-merge disable requires its pull request number")
 		}
 	default:
 		return fmt.Errorf("unknown outbox payload %T", payload)

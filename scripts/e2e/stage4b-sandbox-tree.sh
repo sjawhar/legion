@@ -72,8 +72,8 @@
 #   security group admits from the Legion nodes (README's port-admission note states the current
 #   allocation and how many lanes it leaves room for); widening that admitted range is a change to
 #   the deployment repository's infrastructure, not this one. LEGION_E2E_PROJECT must already exist
-#   as a Dispatch project: production Dispatch has no auto-create, and only a signed-in human may
-#   create one (createProject refuses a bearer actor, HUMAN_ONLY).
+#   as a Dispatch project: the run creates none, and production Dispatch has no auto-create (any
+#   person or agent session creates one, e.g. `dispatch project --key <KEY> --name <name>`).
 # - STAGE4B_UNTIL=<checkpoint> stops after that checkpoint. A run with it set is a development run,
 #   never the proof, and never prints PASS.
 # - STAGE4B_SKIP_CONTROLLER=1, in a development run only, runs none of `controller`'s checks and only

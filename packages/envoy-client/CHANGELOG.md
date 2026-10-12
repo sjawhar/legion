@@ -25,6 +25,13 @@
 
 ### Added
 
+- `dispatch project --key <KEY> --name <name>` creates a Dispatch project as the calling session
+  (`DispatchClient.createProject`, `POST /api/v1/projects`) and prints it with its dashboard link.
+  A taken key exits 1 with `PROJECT_EXISTS: …`, and a bad key or an empty name with
+  `INVALID_PROJECT: …` (LEGION-684).
+- `dispatch projects` lists every Dispatch project, one per line, its key then its name
+  (`DispatchClient.listProjects`, `GET /api/v1/projects`), so an agent checks the keys that exist
+  before `dispatch project` creates one (LEGION-684).
 - A delivered `ask.answered` that changes an earlier answer renders `previous_answer`, an issue
   log names the answer it replaced, and `dispatch_read` of an ask lists its earlier answers
   (LEGION-622).

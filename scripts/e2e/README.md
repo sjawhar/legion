@@ -817,9 +817,9 @@ devbox's admitted range ([Port admission](#port-admission)); the run's daemon ma
 its two takes the API and which the worker stream (`address-moved-stream-new-pod`), never a third.
 Left at their defaults, a run collides with another default run exactly as it always has; set all
 three to distinct values and two runs proceed at once, on the same devbox, against the
-same production cluster. `LEGION_E2E_PROJECT` must already exist as a Dispatch project:
-production Dispatch has no auto-create, and only a signed-in human may create one
-(`createProject` refuses a bearer actor, `HUMAN_ONLY`).
+same production cluster. `LEGION_E2E_PROJECT` must already exist as a Dispatch project: the run
+creates none, and production Dispatch has no auto-create (any person or agent session creates one,
+for example with `dispatch project --key <KEY> --name <name>`).
 - The run takes its own lock, derived from the project (above).
 - It owns its identity's shared objects only after four checks pass: that lock, both its ports
   free, no leftover `run_label` object in the namespace, and no `legion-go-<project>-` consumer on
