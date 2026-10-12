@@ -232,8 +232,8 @@ the head match only when auto-merge is enabled, so an arm outliving its `READY` 
 unreviewed head. Arming is right only for the `READY` head of an issue awaiting its merge, so the
 daemon queues a disarm on every other push or reopen, when a child is set back to `todo`, and when
 an issue leaves the workflow. The disarm reads GitHub, then the record: it keeps the arm only while
-the issue awaits its merge at its `READY` head and that `READY` is not by hand, and otherwise takes
-the pull request out of a merge queue and disables auto-merge, as the implement App. The daemon
+the issue awaits its merge at its `READY` head and that `READY` is not by hand, and otherwise disables
+auto-merge and takes the pull request out of a merge queue, as the implement App. The daemon
 refuses a `READY` until any such disarm has finished. `READY` is
 withdrawn when a push or reopen moves the head past the one `READY` named, when the head's own CI
 turns red, or when it starts conflicting with its base: the

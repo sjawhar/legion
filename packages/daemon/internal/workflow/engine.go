@@ -284,14 +284,8 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	}
 	// The child's open pull request outlives the run, and may still be armed for the READY of the
 	// run being left: no head of the new run is an accepted READY's, so it is disarmed now.
-	pr, err := e.store.PullRequest(ctx, tx, child.Key)
-	if err != nil {
+	if err := e.disarmOpen(ctx, tx, child.Key); err != nil {
 		return err
-	}
-	if pr != nil && pr.State == record.PullRequestOpen {
-		if err := e.disarm(ctx, tx, child.Key, pr); err != nil {
-			return err
-		}
 	}
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
@@ -357,9 +351,14 @@ func (e *Engine) handoff(ctx context.Context, tx pgx.Tx, fact intake.HandoffComp
 	}
 	// A push can land after the route read the head READY names and before this completion
 	// commits. Accepted, that READY would leave the issue awaiting a merge of a head it does not
-	// name, and nothing withdraws a READY the issue never reached awaiting_merge to hold. It is
-	// refused before anything of it is recorded, so the merger's READY at the new head is applied.
-	if issue.Phase == phase.Merging && pr != nil && pr.State == record.PullRequestOpen && pr.HeadSHA != fact.Commit {
+	// name, and nothing withdraws a READY the issue never reached awaiting_merge to hold. The route
+	// held the commit to GitHub's head, and passes the head the record held then (RecordedHead):
+	// the record follows GitHub only by webhook, so one still there is lagging, not moved, and one
+	// at the commit has caught up. Only a record that moved to another head is a push in between,
+	// refused before anything of the READY is recorded, so the merger's READY at the new head is
+	// applied; refused on a lagging record, the right READY's retry at the same commit would be
+	// answered HANDOFF_ALREADY_RECORDED, and the issue would stay in merging.
+	if issue.Phase == phase.Merging && pr != nil && pr.State == record.PullRequestOpen && pr.HeadSHA != fact.Commit && pr.HeadSHA != fact.RecordedHead {
 		return refused("READY_HEAD_MOVED", fmt.Sprintf("pull request #%d of %s now heads at %s, not READY's %s: build a new packet at that head and complete again; this completion changed nothing",
 			pr.Number, issue.Key, pr.HeadSHA, fact.Commit)), nil
 	}

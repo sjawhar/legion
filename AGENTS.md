@@ -190,7 +190,7 @@ arming is right only for an awaiting issue's READY head, so the daemon queues an
 `auto_merge_disable` outbox row on every other push or reopen, when a child is set back to `todo`,
 and when an issue leaves the workflow. The row reads GitHub, then the record: it keeps the arm only
 while the issue awaits its merge, its READY is not by hand, and the pull request's head is the
-merger's READY commit, and otherwise removes the merge-queue entry and disables auto-merge, as the
+merger's READY commit, and otherwise disables auto-merge and removes the merge-queue entry, as the
 implement App; READY is refused (`READY_DISARM_PENDING`) while such a row is unfinished, and
 (`READY_HEAD_MOVED`) when the head moved past its commit. When a push or reopen moves the head past
 the one READY named, the head's own CI turns red before the merge, or the head starts conflicting

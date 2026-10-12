@@ -104,16 +104,6 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	return nil
 }
 
-// disarmOpen disarms issue's pull request when it is open: an issue leaving the workflow leaves no
-// READY standing for it, so whatever is armed would merge with nobody awaiting the merge.
-func (e *Engine) disarmOpen(ctx context.Context, tx pgx.Tx, issue string) error {
-	pr, err := e.store.PullRequest(ctx, tx, issue)
-	if err != nil || pr == nil || pr.State != record.PullRequestOpen {
-		return err
-	}
-	return e.disarm(ctx, tx, issue, pr)
-}
-
 func (e *Engine) lingerExpired(ctx context.Context, tx pgx.Tx, fact intake.LingerExpired) (intake.Result, error) {
 	issue, err := e.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || issue == nil || issue.Generation != fact.Generation || !issue.Lingers() {

@@ -41,12 +41,51 @@ func (e *Engine) withdrawReady(ctx context.Context, tx pgx.Tx, issue record.Issu
 // the pull request was closed. Arming is legitimate only for an awaiting READY's head, so in
 // awaiting_merge the move withdraws a READY whose head it left (withdrawMovedReady), and in any
 // other phase it disarms whatever an earlier READY left armed, a child re-entered from
-// awaiting_merge, say.
+// awaiting_merge, say. In merging it also voids a READY the design gate holds for another head
+// (voidMovedHeldReady), so the gate's approval never advances it.
 func (e *Engine) headMoved(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
-	if issue.Phase == phase.AwaitingMerge {
+	switch issue.Phase {
+	case phase.AwaitingMerge:
 		return e.withdrawMovedReady(ctx, tx, issue, pr)
+	case phase.Merging:
+		if err := e.voidMovedHeldReady(ctx, tx, issue, pr); err != nil {
+			return err
+		}
 	}
 	return e.disarm(ctx, tx, issue.Key, pr)
+}
+
+// voidMovedHeldReady voids the READY the design gate holds in merging (its packet kept on the
+// merger's row, which advancePendingReady advances when a human approves the gate) once a push or
+// a reopen moves the head past its commit: advanced, it would leave the issue awaiting a merge of
+// a head no READY named. The merger's READY is cleared and the architect told READY_HEAD_MOVED,
+// to have the merger build a new READY at the new head. The record follows GitHub only by
+// webhook, so the move is judged here, when one arrives, and not at the approval, when a record
+// that lags would void a READY GitHub showed at its commit. A push landing on the held READY's
+// commit voids nothing, and a tree that lingers is held where it stands: its approval advances
+// nothing, and re-admission clears the READY with the rest of the run.
+func (e *Engine) voidMovedHeldReady(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+	merger, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleMerger)
+	if err != nil || merger.Summary == "" || merger.HandoffCommit == pr.HeadSHA {
+		return err
+	}
+	if lingers, err := record.TreeLingers(ctx, e.store, tx, issue.Tree); err != nil || lingers {
+		return err
+	}
+	if err := e.clearHandoff(ctx, tx, issue.Key, claim.RoleMerger); err != nil {
+		return err
+	}
+	version := 0
+	if issue.ReadyPendingVersion != nil {
+		version = *issue.ReadyPendingVersion
+		issue.ReadyPendingVersion = nil
+		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
+			return err
+		}
+	}
+	return e.notice(ctx, tx, issue.Key, record.Notice{Kind: "ready-refused", Role: claim.RoleArchitect, Version: version,
+		Reason: fmt.Sprintf("READY_HEAD_MOVED: %s's READY at %s, which the design gate held, is void: a push moved pull request #%d's head to %s, which that READY does not name, so the gate's approval advances nothing; have the merger build a new READY at the new head once the change it carries is ready",
+			issue.Key, merger.HandoffCommit, pr.Number, pr.HeadSHA)})
 }
 
 // withdrawMovedReady withdraws the READY of an awaiting_merge pull request a push or a reopen moved
@@ -84,6 +123,16 @@ func (e *Engine) disarm(ctx context.Context, tx pgx.Tx, issue string, pr *record
 	return e.enqueue(ctx, tx, issue, record.AutoMergeDisable{Number: pr.Number})
 }
 
+// disarmOpen disarms issue's pull request when it is open (disarm). It is how an issue that leaves
+// the workflow, or is re-entered, leaves no merge armed for a READY of the run it left.
+func (e *Engine) disarmOpen(ctx context.Context, tx pgx.Tx, issue string) error {
+	pr, err := e.store.PullRequest(ctx, tx, issue)
+	if err != nil || pr == nil || pr.State != record.PullRequestOpen {
+		return err
+	}
+	return e.disarm(ctx, tx, issue, pr)
+}
+
 // tellReadyAudience tells packet to everyone a READY goes to: posted on the Dispatch issue, and
 // published to the project's merge queue role when it names one. A READY and its withdrawal both
 // go through it, so a withdrawal reaches whoever the READY reached.
@@ -107,7 +156,9 @@ func (e *Engine) tellReadyAudience(ctx context.Context, tx pgx.Tx, issue record.
 // refused READY's: handoff()'s READY_REQUIRED guard (engine.go:334) refuses a non-READY merger
 // completion before it ever writes the summary (engine.go:347), and clearHandoff empties it again
 // on every fresh entry into merging (engine.go:757), so neither leaves one behind for this to
-// mistake — even though the issue itself records no pending version for it.
+// mistake — even though the issue itself records no pending version for it. A held READY whose
+// head a push or a reopen moved was voided then (voidMovedHeldReady), so a packet this advances
+// names the head GitHub showed when the route accepted it.
 func (e *Engine) advancePendingReady(ctx context.Context, tx pgx.Tx, rootKey string, gate record.DesignGate) error {
 	if !classify.DesignGateOpen(gate) {
 		return nil

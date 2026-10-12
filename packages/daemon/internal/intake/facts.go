@@ -316,6 +316,12 @@ type HandoffComplete struct {
 	// answer the route's READY checks give a pull request whose change touches a path the project's
 	// merge.by_hand names. The workflow keeps it with the merger's packet and tells it at its head.
 	MergeNote string
+	// RecordedHead is the head the daemon's record held for the issue's pull request when the route
+	// read it for READY, beside GitHub's head, which it held to Commit. The record follows
+	// GitHub only by webhook, so it can lag: the workflow refuses READY only when the record moved
+	// after the route read it, to a head other than Commit (a push that landed in between), and
+	// takes a record still at this value as lagging, not moved.
+	RecordedHead string
 }
 
 func (HandoffComplete) isFact() {}

@@ -132,13 +132,15 @@ review posted without a completion leaves the issue in reviewing until you finis
   arm it. On any READY refusal it submits nothing, since an armed request would merge through the
   gate the refusal names; a READY the design gate refused is submitted later, on the architect's
   word, once the gate opens, and that turn runs only `gh` and a read of the READY the daemon posted
-  then: a refusal or a posted READY carrying the by-hand note is submitted by nobody. A
+  then: a refusal or a posted READY carrying the by-hand note is submitted by nobody. A push that
+  moves the head past a READY the gate holds voids it before then: the architect is told
+  `READY_HEAD_MOVED` and has the merger build a new READY at the new head. A
   `gh pr merge` GitHub refuses is reported to the architect with its message; a person can still
   merge after READY. The packet's second line records the step,
   `Merge: submit on normal acceptance with gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`.
 - **The daemon disarms a merge no READY covers.** Auto-merge stays enabled across pushes, and
-  `--match-head-commit` is checked only when it is enabled, so the daemon itself takes the pull
-  request out of a merge queue and disables its auto-merge, as the implement App, on any push or
+  `--match-head-commit` is checked only when it is enabled, so the daemon itself disables the pull
+  request's auto-merge and takes it out of a merge queue, as the implement App, on any push or
   reopen but one landing on an awaiting READY's head, when READY is withdrawn (a push or reopen
   moved the head past it, its CI turned red, or it conflicts with its base, each of which sends the
   issue back to `implementing`), when a child is set back to `todo`, and when the issue leaves the

@@ -1089,6 +1089,19 @@ func TestHandoffCompleteReadyRefusesAHeadThatMovedBeforeTheMergerCanArmIt(t *tes
 	}
 }
 
+// The route holds READY's commit to GitHub's head and passes the workflow the head the daemon's
+// record held when it read it, which follows GitHub only by webhook and can lag. Here the record
+// still holds an earlier push while GitHub and the commit are at retro's last: the READY passes,
+// and its fact carries the lagging head, so the workflow takes the record as lagging, not moved.
+func TestHandoffCompleteReadyPassesTheRecordedHeadItRead(t *testing.T) {
+	h, facts, merger := newReadyHarness(t, newHandoffGitHub(t))
+	seedPullRequest(t, h, "LEGION-208", "stale")
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at retro's last push", Ready: true, Commit: headSHA}))
+	if got := lastCompletion(t, facts); got.Commit != headSHA || got.RecordedHead != "stale" {
+		t.Fatalf("the READY fact = commit %q, recorded head %q; want %q and the record's %q", got.Commit, got.RecordedHead, headSHA, "stale")
+	}
+}
+
 // A pull request whose change touches a by_hand path is READY for a person to merge, never armed:
 // the answer carries MANUAL_MERGE_REQUIRED whether or not the base branch requires a check, and a
 // rename counts both of its paths, so moving a protected file out of a by_hand path is by hand too.

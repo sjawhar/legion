@@ -873,12 +873,16 @@ func (r *outbox) autoMergeDisable(ctx context.Context, row record.OutboxRow, pay
 
 // readyHeadToKeep is the head whose arm issue's READY covers: the merger's READY commit while the
 // issue awaits its merge, and none in any other phase, where no arm is legitimate, nor for a READY
-// a person merges (its by-hand note, record.PhaseRow.MergeNote), which covers no arm.
+// a person merges (its by-hand note, record.PhaseRow.MergeNote), which covers no arm, nor in a tree
+// that lingers after its root left the workflow, whose members beginLinger disarms.
 func (r *outbox) readyHeadToKeep(ctx context.Context, issue string) (string, error) {
 	var keep string
 	if err := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
 		current, err := r.records.Issue(ctx, tx, issue)
 		if err != nil || current == nil || current.Phase != phase.AwaitingMerge {
+			return err
+		}
+		if lingers, err := record.TreeLingers(ctx, r.records, tx, current.Tree); err != nil || lingers {
 			return err
 		}
 		phases, err := r.records.Phases(ctx, tx, issue)

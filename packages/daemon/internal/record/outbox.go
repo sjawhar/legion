@@ -301,12 +301,13 @@ type IssueBranch struct {
 
 func (IssueBranch) OutboxKind() OutboxKind { return OutboxKindIssueBranch }
 
-// AutoMergeDisable turns off whatever would merge the pull request without a person: its place in
-// a merge queue and GitHub's auto-merge. Arming is legitimate only for the READY head of an issue
-// awaiting its merge, so the workflow queues it on every head move but one landing on that head (a
-// push, or a reopen), on every READY withdrawal, and on a child's re-entry. Its executor decides by
-// the record when it runs, keeping the arm only while the issue awaits its merge at the merger's
-// READY commit, and READY is refused while one is unfinished (Store.DisarmPending).
+// AutoMergeDisable turns off whatever would merge the pull request without a person: GitHub's
+// auto-merge, then its place in a merge queue. Arming is legitimate only for the READY head of an
+// issue awaiting its merge, so the workflow queues it on every head move but one landing on that
+// head (a push, or a reopen), on every READY withdrawal, on a child's re-entry and on an issue's
+// leaving the workflow. Its executor decides by the record when it runs, keeping the arm only while
+// the issue awaits its merge at the merger's READY commit, and READY is refused while one is
+// unfinished (Store.DisarmPending).
 type AutoMergeDisable struct {
 	Number int `json:"number"`
 }

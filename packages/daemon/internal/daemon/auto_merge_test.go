@@ -23,7 +23,9 @@ import (
 // issue awaits its merge and the pull request's head on GitHub is the merger's READY commit, the
 // arm is that READY's and is kept; otherwise auto-merge is disabled. A row queued long before, by
 // a withdrawal the issue has since come back from, so never undoes the READY that followed it. A
-// READY a person merges (its by-hand note) covers no arm at all, so whoever armed it is undone.
+// READY a person merges (its by-hand note) covers no arm at all, so whoever armed it is undone, and
+// neither does one in a tree that lingers after its root left the workflow, which beginLinger
+// disarms.
 func TestAnAutoMergeDisableRowKeepsOnlyTheAwaitedREADYHeadsArm(t *testing.T) {
 	const byHand = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
 	for _, tc := range []struct {
@@ -31,12 +33,14 @@ func TestAnAutoMergeDisableRowKeepsOnlyTheAwaitedREADYHeadsArm(t *testing.T) {
 		at        phase.Phase
 		ready     string
 		mergeNote string
+		lingers   bool
 		want      int
 	}{
-		{"awaiting its merge at the READY head", phase.AwaitingMerge, "ready-head", "", 0},
-		{"awaiting its merge, the head past READY", phase.AwaitingMerge, "older-head", "", 1},
-		{"back in implementing", phase.Implementing, "ready-head", "", 1},
-		{"awaiting a person's merge at the READY head", phase.AwaitingMerge, "ready-head", byHand, 1},
+		{"awaiting its merge at the READY head", phase.AwaitingMerge, "ready-head", "", false, 0},
+		{"awaiting its merge, the head past READY", phase.AwaitingMerge, "older-head", "", false, 1},
+		{"back in implementing", phase.Implementing, "ready-head", "", false, 1},
+		{"awaiting a person's merge at the READY head", phase.AwaitingMerge, "ready-head", byHand, false, 1},
+		{"awaiting its merge at the READY head in a lingering tree", phase.AwaitingMerge, "ready-head", "", true, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var mu sync.Mutex
@@ -57,13 +61,23 @@ func TestAnAutoMergeDisableRowKeepsOnlyTheAwaitedREADYHeadsArm(t *testing.T) {
 					_, _ = w.Write([]byte(`{"data":{"disablePullRequestAutoMerge":{"clientMutationId":null}}}`))
 					return
 				}
-				_, _ = fmt.Fprint(w, `{"data":{"repository":{"pullRequest":{"id":"PR_42","headRefOid":"ready-head","autoMergeRequest":{"enabledAt":"2026-10-11T00:00:00Z"},"mergeQueueEntry":null}}}}`)
+				autoMerge := `{"enabledAt":"2026-10-11T00:00:00Z"}`
+				if disables > 0 {
+					autoMerge = "null"
+				}
+				_, _ = fmt.Fprintf(w, `{"data":{"repository":{"pullRequest":{"id":"PR_42","headRefOid":"ready-head","autoMergeRequest":%s,"mergeQueueEntry":null}}}}`, autoMerge)
 			}))
 			t.Cleanup(server.Close)
 			pool := isolatedOutboxPool(t)
 			records := record.NewStore()
-			putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: tc.at,
-				Generation: 1, Status: "retro", Rank: "U"})
+			child := record.Issue{Key: "LEGION-208", Project: "LEGION", Tree: "LEGION-208", Title: "Workflow", Phase: tc.at, Generation: 1, Status: "retro", Rank: "U"}
+			if tc.lingers {
+				until, parent := time.Now().Add(time.Hour), "LEGION-207"
+				putOutboxIssue(t, pool, records, record.Issue{Key: "LEGION-207", Project: "LEGION", Tree: "LEGION-207", Title: "Root", Phase: phase.Done,
+					Generation: 1, Status: "done", Rank: "T", LingerUntil: &until})
+				child.Tree, child.Parent = "LEGION-207", &parent
+			}
+			putOutboxIssue(t, pool, records, child)
 			if err := pgx.BeginFunc(context.Background(), pool, func(tx pgx.Tx) error {
 				return records.PutPhase(context.Background(), tx, record.PhaseRow{Issue: "LEGION-208", Role: claim.RoleMerger, Claim: "merge-claim", HandoffCommit: tc.ready, MergeNote: tc.mergeNote})
 			}); err != nil {
