@@ -541,7 +541,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   const needsYouBadge =
     needsYouCount === 0 ? null : (
       <span
-        className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+        className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
       >
         Needs you {needsYouCount}
       </span>
@@ -586,8 +586,10 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
           <header
             className={`flex items-center justify-between border-b px-3 ${railBorder} ${railBg} ${railText}`}
           >
-            <div className="flex items-center gap-2">
-              <Link className="text-lg font-semibold" to="/">
+            {/* The title never shrinks and no count breaks its own words: the counts that do not
+                fit beside the title wrap onto a second row of the bar, with Menu on the right. */}
+            <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+              <Link className="shrink-0 text-lg font-semibold" to="/">
                 Dispatch
               </Link>
               {/* Everywhere but the Inbox page, the same badge also opens the Inbox drawer. */}
@@ -598,7 +600,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                   aria-label={
                     needsYouCount === 0 ? "Open inbox" : `Open inbox, needs you ${needsYouCount}`
                   }
-                  className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                  className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${
                     needsYouCount === 0
                       ? railHoverBg
                       : `${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`
@@ -611,7 +613,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               )}
               {unreadReplies === 0 ? null : (
                 <Link
-                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+                  className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
                   to="/agents"
                 >
                   {unreadRepliesLabel(unreadReplies)}
@@ -619,7 +621,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               )}
               {unreadThreads === 0 ? null : (
                 <Link
-                  className={`rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
+                  className={`whitespace-nowrap rounded-full px-2 py-1 text-xs font-semibold ${railNeedsYouBadgeBg} ${railNeedsYouBadgeText}`}
                   to={REPLIES_PATH}
                 >
                   Replies {unreadThreads}
@@ -629,7 +631,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             <button
               aria-expanded={navigationOpen}
               aria-label="Open navigation"
-              className={`rounded-lg px-3 py-2 text-sm font-medium ${railHoverBg}`}
+              className={`shrink-0 rounded-lg px-3 py-2 text-sm font-medium ${railHoverBg}`}
               onClick={() => setNavigationOpen(true)}
               type="button"
             >

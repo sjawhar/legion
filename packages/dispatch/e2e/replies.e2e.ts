@@ -1,13 +1,16 @@
 import { expect, type Page, test } from "@playwright/test";
 
+import { type FakeSession, setLiveSessions } from "./agents";
 import {
   answerAsk,
+  createAgentMessage,
   createAsk,
   createComment,
   createIssue,
   createMessage,
   createProject,
   listMyReplies,
+  replyToMessageDelivery,
 } from "./api";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
@@ -134,3 +137,70 @@ for (const [kind, seed] of Object.entries(threadKinds)) {
     }
   });
 }
+
+const planner: FakeSession = {
+  capabilities: ["aside", "btw", "steer"],
+  roles: [],
+  session_id: "01a0e090-4848-7473-acc5-fc96e6a646d3",
+  title: "Planner",
+};
+
+// A phone's compact header carries the title, every count that is up and Menu on one bar. With
+// all three counts up (an open ask, an agent's reply, a thread's reply), the title stays whole,
+// every badge reads on one line, Menu stays on screen, and the page never scrolls sideways.
+test("replies: the phone header keeps the title and every count whole when all three are up", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "iphone", "the compact header renders below 1280 px");
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Release train" });
+  await createAsk(issue.key, { question: "Ship tonight?" }, session);
+  const asked = await createAgentMessage(planner.session_id, {
+    body: "Status?",
+    delivery: "aside",
+  });
+  await replyToMessageDelivery(
+    asked.id,
+    { attempt: 1, body: "Green." },
+    { id: planner.session_id, kind: "session" }
+  );
+  const root = await createComment(issue.key, { body: "Please fix the flaky test." });
+  await createComment(issue.key, { body: "Done.", reply_to: root.id }, session);
+  expect((await listMyReplies()).total).toBe(1);
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    for (const width of [390, 360, 320]) {
+      await page.setViewportSize({ height: 844, width });
+      await page.goto("/replies");
+      const header = page.locator("header").first();
+      const badges = [
+        header.getByRole("button", { name: "Open inbox, needs you 1" }),
+        header.getByRole("link", { name: "New reply 1" }),
+        header.getByRole("link", { name: "Replies 1" }),
+      ];
+      for (const badge of badges) await expect(badge).toBeVisible();
+      const title = header.getByRole("link", { name: "Dispatch", exact: true });
+      // A clipped title reads `Dispatc`: its text is wider than its box.
+      expect(await title.evaluate((node) => node.scrollWidth <= node.clientWidth), `${width}`).toBe(
+        true
+      );
+      // A badge wrapped onto two lines is taller than the one-line Menu button beside it.
+      const menu = header.getByRole("button", { name: "Open navigation" });
+      const lineHeight = (await menu.boundingBox())?.height ?? 0;
+      for (const badge of badges) {
+        expect((await badge.boundingBox())?.height, `${width}`).toBeLessThanOrEqual(lineHeight);
+      }
+      await expect(menu).toBeInViewport({ ratio: 1 });
+      expect(
+        await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth),
+        `${width}`
+      ).toBe(true);
+      await header.screenshot({ path: testInfo.outputPath(`replies-header-${width}.png`) });
+    }
+  } finally {
+    await alice.close();
+  }
+});
