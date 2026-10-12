@@ -216,14 +216,17 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // A Sandbox fits a launch when it carries the tree label the launch's pod carries, none for the
 // controller's pod. It is made for an issue, whose key, so its Sandbox's name, outlives a move to
 // another tree: a child of a closed tree re-admitted as a root of its own finds the Sandbox its old
-// tree suspended, labelled with that tree and owning the volume that holds the issue's clone,
-// workspace and its roles' sessions. Such a Sandbox, once Suspended, is relabelled for this
-// launch's tree and kept, volume and sessions with it; the Running patch rewrites its pod template,
-// labels included, before any pod runs. One that still runs roles of the old tree is a refusal,
-// since replacing it would end them. Nothing here deletes a Sandbox, and none without a volume of
-// its own reaches here: every Sandbox this runtime makes carries the issue claim template
-// (sandboxManifest), and the boot census refuses one of the tree-volume layout before any launch
-// (treeVolumeLayout).
+// tree left, labelled with that tree and owning the volume that holds the issue's clone, workspace
+// and its roles' sessions. Such a Sandbox is relabelled for this launch's tree and kept, volume and
+// sessions with it, once no stored claim of the issue in another tree may still run a process
+// there (Store.IssueRunsElsewhere); the Running patch rewrites its pod template, labels included,
+// before any pod runs. One its old tree left Running — the old tree's close suspended every role
+// of it, but the issue's suspension never ran, since the issue had moved — is suspended in the
+// same patch, so the relaunch waits its pod out. One a claim of the old tree may still run in is a
+// refusal, since replacing it would end that claim. Nothing here deletes a Sandbox, and none
+// without a volume of its own reaches here: every Sandbox this runtime makes carries the issue
+// claim template (sandboxManifest), and the boot census refuses one of the tree-volume layout
+// before any launch (treeVolumeLayout).
 func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
 	tree := r.labels(l)[labelTree]
@@ -261,13 +264,21 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 			if s.Labels[labelTree] == tree {
 				return s, nil
 			}
+			ops := []jsonPatchOp{{Op: "add", Path: labelPatchPath(labelTree), Value: tree}}
 			if s.mode() != modeSuspended {
-				return nil, fmt.Errorf("sandbox %s, made for tree %s, does not fit this launch of tree %s and still runs roles; it is relabelled once they stop",
-					l.name, s.Labels[labelTree], tree)
+				running, err := r.store.IssueRunsElsewhere(ctx, r.project, l.spec.Issue, l.spec.Tree)
+				if err != nil {
+					return nil, fmt.Errorf("sandbox %s, made for tree %s: %w", l.name, s.Labels[labelTree], err)
+				}
+				if running != "" {
+					return nil, fmt.Errorf("sandbox %s, made for tree %s, does not fit this launch of tree %s and still runs roles (%s); it is relabelled once they stop",
+						l.name, s.Labels[labelTree], tree, running)
+				}
+				ops = append(ops, jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeSuspended})
 			}
-			r.log.Info("sandbox runtime: relabelling a suspended sandbox for its issue's new tree, keeping its volume",
-				"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree)
-			relabelled, err := r.patch(ctx, s, jsonPatchOp{Op: "add", Path: labelPatchPath(labelTree), Value: tree})
+			r.log.Info("sandbox runtime: relabelling a sandbox for its issue's new tree, keeping its volume",
+				"sandbox", l.name, "uid", s.UID, "tree", s.Labels[labelTree], "for", tree, "operatingMode", s.mode())
+			relabelled, err := r.patch(ctx, s, ops...)
 			if err != nil {
 				return nil, fmt.Errorf("relabel sandbox %s for tree %s: %w", l.name, tree, err)
 			}

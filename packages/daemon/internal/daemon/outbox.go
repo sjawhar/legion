@@ -574,6 +574,13 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 				return fmt.Errorf("start %s of %s: %w", payload.Role, issue.Key, held.RuleHoldError())
 			}
 		}
+		// A child carried into a tree of its own — a finished root's hand-over, or a person's label
+		// on a child its tree left mid-run — may still run a role of its old tree: one in a turn when
+		// the old tree's close held its suspension, which that close's row, now of an earlier
+		// generation, finishes without acting on. No role of the new tree starts while one runs.
+		if err := r.stopElsewhere(ctx, issue); err != nil {
+			return err
+		}
 		// A start that takes the phase over from a role still at work in it (CI settled red before
 		// that role completed) does nothing — no claim, no working-copy adoption, no task — until
 		// that role's turn is over (supervise.Machine.Quiesce), so the two never write the shared
@@ -746,6 +753,46 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 	default:
 		return fmt.Errorf("outbox row %d has unknown supervise operation %q", row.ID, payload.Op)
 	}
+}
+
+// stopElsewhere suspends, as the daemon and keeping its session, every claim of issue that still
+// runs a process in a tree other than the issue's, and is a wait (wait.ErrWaiting) until none
+// does. A claim in a turn holds the suspension for the turn's end and a launching one until its
+// agent is ready (supervise's suspend rows), so the start that asks is what waits, retried on its
+// backoff, charging no claim a launch. The hold lives in the claim's memory, so a restart that
+// forgets it is asked again by the start's next attempt. Once none runs, every claim of the issue
+// may be re-pointed to the issue's tree (supervise.Machine.Retree), and the issue's Sandbox, which
+// no role of the old tree then runs in, is the new tree's to relabel (runtime/sandbox's
+// ensureSandbox).
+func (r *outbox) stopElsewhere(ctx context.Context, issue record.Issue) error {
+	var running []string
+	for _, role := range claim.Roles {
+		token, err := claim.NewToken(r.project, issue.Key, role)
+		if err != nil {
+			return fmt.Errorf("derive the %s claim of %s: %w", role, issue.Key, err)
+		}
+		machine, found := r.supervisor.Machine(token)
+		if !found {
+			continue
+		}
+		held := machine.Claim()
+		if held.Tree == issue.Tree || held.RunsNothing() {
+			continue
+		}
+		err = machine.Handle(ctx, supervise.RequestSuspend{Claim: token, By: supervise.SuspendedByDaemon,
+			Reason: fmt.Sprintf("%s moved from tree %s to tree %s", issue.Key, held.Tree, issue.Tree)})
+		var refused *supervise.RefusedError
+		if err != nil && !errors.Is(err, supervise.ErrSuspendHeld) && !errors.As(err, &refused) {
+			return fmt.Errorf("suspend claim %s, still running in tree %s: %w", token, held.Tree, err)
+		}
+		if held = machine.Claim(); !held.RunsNothing() {
+			running = append(running, fmt.Sprintf("%s:%s in tree %s", token, held.State, held.Tree))
+		}
+	}
+	if len(running) > 0 {
+		return wait.Errorf("start of %s in tree %s waits for %s to stop", issue.Key, issue.Tree, strings.Join(running, ", "))
+	}
+	return nil
 }
 
 // reservedTreeClose runs a workflow tree close through its tree's durable cleanup reservation, and

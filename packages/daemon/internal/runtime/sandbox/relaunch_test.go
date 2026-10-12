@@ -208,10 +208,11 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 }
 
 // A child of a closed tree re-admitted as a root of its own keeps its key, so its Sandbox's name,
-// and finds the Sandbox its old tree suspended, still labelled with that tree. The Sandbox owns the
+// and finds the Sandbox its old tree left, still labelled with that tree. The Sandbox owns the
 // issue's volume, which holds its clone, workspace and its roles' sessions, so the orphan root's
-// launch keeps it, relabelled for its own tree, and its pod mounts the same claim. One still running
-// roles of the old tree is refused and left as it is.
+// launch keeps it, relabelled for its own tree, and its pod mounts the same claim. One its old tree
+// left Running, none of whose roles runs any more, is suspended in the relabel's patch and kept the
+// same way. One a claim of the old tree still runs in is refused and left as it is.
 func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-209-architect")
 	name := SandboxName(orphan)
@@ -249,13 +250,41 @@ func TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft(t *testing.T) {
 			t.Fatalf("the new pod's volumes %+v, want the issue's own claim %s", pod.Spec.Volumes, IssueClaimName(orphan))
 		}
 	})
+	t.Run("left running by its old tree, none of whose roles runs", func(t *testing.T) {
+		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
+		g.eventually("the old tree's pod", func() bool { return g.pod(name) != nil })
+		old := g.pod(name).UID
+		loc := g.spawn(orphanSpec(t))
+		s := g.sandbox(name)
+		if s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || s.mode() != modeRunning {
+			t.Fatalf("the orphan root's Sandbox = %+v, want the old tree's Sandbox kept, relabelled for LEGION-209 and running its launch", s)
+		}
+		relabels := 0
+		for _, w := range g.writes() {
+			if w.resource == "sandboxes" && w.verb == "patch" && modePatched(t, w.patch, modeSuspended) && strings.Contains(w.patch, labelValue("LEGION-209")) {
+				relabels++
+			}
+		}
+		if relabels != 1 {
+			t.Fatalf("writes %v; want one patch that relabels the Sandbox for LEGION-209 and suspends it", g.writes())
+		}
+		pod := g.pod(name)
+		if pod == nil || pod.UID == old || string(pod.UID) != loc.Sandbox.PodUID || pod.Labels[labelTree] != labelValue("LEGION-209") {
+			t.Fatalf("pod %+v, locator %+v; want a new pod of tree LEGION-209 in place of the old tree's %s", pod, loc, old)
+		}
+		mounted := slices.IndexFunc(pod.Spec.Volumes, func(v corev1.Volume) bool { return v.Name == issueVolume })
+		if mounted < 0 || pod.Spec.Volumes[mounted].PersistentVolumeClaim == nil || pod.Spec.Volumes[mounted].PersistentVolumeClaim.ClaimName != IssueClaimName(orphan) {
+			t.Fatalf("the new pod's volumes %+v, want the issue's own claim %s", pod.Spec.Volumes, IssueClaimName(orphan))
+		}
+	})
 	t.Run("still running its old tree's roles", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
+		g.store.elsewhere["LEGION-209"] = "legion-legion-legion-209-implementer:working"
 		g.launcher(orphan)
-		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "still runs roles") {
-			t.Fatalf("orphan root's launch over a running Sandbox of its old tree = %v, want the refusal", err)
+		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "still runs roles (legion-legion-legion-209-implementer:working)") {
+			t.Fatalf("orphan root's launch over a running Sandbox of its old tree = %v, want the refusal naming the running claim", err)
 		}
-		if s := g.sandbox(name); s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue(testTree) {
+		if s := g.sandbox(name); s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue(testTree) || s.mode() != modeRunning {
 			t.Fatalf("the old tree's running Sandbox = %+v, want it left as it was", s)
 		}
 	})

@@ -703,12 +703,18 @@ its Sandboxes was created lists none and confirms its reservation without deleti
 A child of a closed tree re-admitted as a root of its own keeps its key, so its claims and its
 Sandbox's name. Its old tree's cleanup does not wait on a claim of it that runs nothing; each of
 its claims is re-pointed to its new tree before its first start there, and binds that tree's epoch;
-and its root launch keeps the Sandbox its old tree suspended, which owns the volume holding the
+and its root launch keeps the Sandbox its old tree left, which owns the volume holding the
 issue's clone, workspace and its roles' sessions: the Sandbox is relabelled for the new tree
-(`ensureSandbox`, `internal/runtime/sandbox/relaunch.go`) and the sessions resume. A Sandbox of the
-old tree that still runs roles is not relabelled: the launch is refused until they stop. That holds
-while the old tree lingers; once its cleanup has run (`CleanupTree`, after the linger), the Sandbox
-and the volume are gone, and the re-pointed claim still names its session (`Retree`,
+(`ensureSandbox`, `internal/runtime/sandbox/relaunch.go`) and the sessions resume. A role still in a
+turn when the old tree closed holds that close's suspension until the turn ends, and the carry's new
+generation finishes the close's own suspend row without acting. So no start of the new tree launches
+anything while a claim of the issue still runs a process in another tree: the start suspends that
+claim itself, as the daemon and keeping its session, and waits on its backoff, charging nothing, until
+the claim has stopped (`stopElsewhere`, `internal/daemon/outbox.go`). A Sandbox the old tree left
+`Running`, none of whose claims runs any more, is relabelled and suspended in one fenced patch, so the
+launch waits its pod out; while a claim of the old tree still runs, the launch is refused, naming it.
+That holds while the old tree lingers; once its cleanup has run (`CleanupTree`, after the linger),
+the Sandbox and the volume are gone, and the re-pointed claim still names its session (`Retree`,
 `internal/supervise/lifecycle.go`, keeps it: the supervisor knows nothing of Sandboxes, and a check
 there would race the cleanup). The launch then expects the volume to hold the clone
 (`LEGION_EXPECT_ISSUE_VOLUME`), `workspace-init` exits 3 on the fresh volume, the daemon logs

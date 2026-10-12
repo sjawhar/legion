@@ -110,15 +110,16 @@ func staticCredential(_ context.Context, role claim.Role) (ghconfig.Rendered, er
 }
 
 // fakeStore is the runtime's durable state, in memory: every tree is live (its lifecycle open)
-// unless closed says its cleanup confirmed, and an issue recorded sessions only when sessions says
-// so.
+// unless closed says its cleanup confirmed, an issue recorded sessions only when sessions says
+// so, and a claim of an issue may still run in another tree only when elsewhere names it.
 type fakeStore struct {
 	mu               sync.Mutex
 	closed, sessions map[string]bool
+	elsewhere        map[string]string
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{closed: map[string]bool{}, sessions: map[string]bool{}}
+	return &fakeStore{closed: map[string]bool{}, sessions: map[string]bool{}, elsewhere: map[string]string{}}
 }
 
 func (s *fakeStore) IssueHasSessions(_ context.Context, _, issue string) (bool, error) {
@@ -131,6 +132,12 @@ func (s *fakeStore) TreeLive(_ context.Context, _, tree string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return !s.closed[tree], nil
+}
+
+func (s *fakeStore) IssueRunsElsewhere(_ context.Context, _, issue, _ string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.elsewhere[issue], nil
 }
 
 // close records tree's cleanup as confirmed: what the tree left behind is then an orphan.

@@ -62,6 +62,10 @@ type Store interface {
 	// TreeLive is whether tree's lifecycle is open, or its cleanup reserved and unconfirmed: the
 	// tree's issue Sandboxes are then its cleanup's alone, never the orphan sweep's.
 	TreeLive(ctx context.Context, project, tree string) (bool, error)
+	// IssueRunsElsewhere names a stored claim of issue whose tree is not tree and that may hold a
+	// process now, a locator or a state with one (token:state), or "" when none does: a Sandbox
+	// labelled for another tree is then this tree's to relabel (ensureSandbox).
+	IssueRunsElsewhere(ctx context.Context, project, issue, tree string) (string, error)
 }
 
 // Options is what a Runtime is built from. Every field without a stated default is required.
