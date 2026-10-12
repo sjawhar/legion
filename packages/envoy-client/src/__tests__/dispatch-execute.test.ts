@@ -4078,7 +4078,7 @@ describe("executeDispatchTool", () => {
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
         "- block b-2, whose ask Dispatch has not opened yet",
         "- block b-3, which version 4 does not hold yet",
-        '- "Question of b-4?" (block b-4, ask ask-b-4), answered but still open in version 4: fold the answer into the text with dispatch doc-edit, which writes a version that carries it',
+        '- "Question of b-4?" (block b-4, ask ask-b-4), answered but still open in version 4: it settles into a version on its own in about two seconds; wait, then request again',
       ]);
       expect(refusal).toContain("even when a human asked for it");
       expect(refusal).toContain("ask them to answer it or to waive it");
