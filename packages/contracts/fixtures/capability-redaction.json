@@ -441,6 +441,12 @@
     },
     {
       "pattern": "cleanup",
+      "name": "a JWT right after an unterminated ESC [, with a C1 sequence introducer inside it",
+      "detail": "token \u001b[eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0\u009bZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
       "name": "an AWS key id right after an unterminated ESC [",
       "detail": "AccessDenied: \u001b[AKIAIOSFODNN7EXAMPLE is not authorized",
       "want": "AccessDenied: KIA*** is not authorized"
@@ -581,6 +587,12 @@
       "pattern": "cleanup",
       "name": "a C1 sequence introducer inside a GitHub token",
       "detail": "token ghp_EXAMPLEtoken0123456789abcdef\u009bghijklmn expired",
+      "want": "token ghp_*** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a replacement character, as an invalid UTF-8 byte decodes, inside a GitHub token",
+      "detail": "token ghp_EXAMPLEtoken0123\ufffd456789abcdefghijklmn expired",
       "want": "token ghp_*** expired"
     },
     {

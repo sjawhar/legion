@@ -309,11 +309,13 @@ var heldReadings = []struct {
 	{regexp.MustCompile(`\x{FFFF}`), " "},
 }
 
-// heldSequence, in a value class, is c1Introducer, held alone, or a held escape followed by the
-// `[`, parameters and final byte that complete a control sequence, a colour sequence such as
-// `ESC [ 1 m` among them. Parameters (`0`–`?`) and the final byte (`@`–`~`) share no character, so
-// a class reads it one way only.
-const heldSequence = `\x{FFFE}|\x{FFFF}(?:\[[0-?]*[@-~])?`
+// heldSequence, in a value class, is c1Introducer, opener, a replacement character (what an invalid
+// UTF-8 byte decodes to), held alone, or a held escape followed by the `[`, parameters and final
+// byte that complete a control sequence, a colour sequence such as `ESC [ 1 m` among them. A value
+// runs across an opener because a reading turns every introducer into one, the one inside a value
+// as well as the one before it. Parameters (`0`–`?`) and the final byte (`@`–`~`) share no
+// character, so a class reads it one way only.
+const heldSequence = `\x{FFFE}|\x{FDD0}|\x{FFFD}|\x{FFFF}(?:\[[0-?]*[@-~])?`
 
 // credentialRules are the credential shapes redactCredentials replaces, each keeping what names
 // the credential and replacing the secret with `***`; the shared fixture names each with an

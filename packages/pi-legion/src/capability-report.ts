@@ -423,9 +423,10 @@ const HELD_READINGS: readonly (readonly [RegExp, string])[] = [
   [/\uffff/g, " "],
 ];
 
-/** `C1_INTRODUCER`, held alone, or a held escape with the `[`, parameters and final byte that
- * complete a control sequence: the daemon's `heldSequence`, as regular-expression source. */
-const HELD_SEQUENCE = String.raw`\ufffe|\uffff(?:\[[0-?]*[@-~])?`;
+/** `C1_INTRODUCER`, `OPENER`, a replacement character, held alone, or a held escape with the `[`,
+ * parameters and final byte that complete a control sequence: the daemon's `heldSequence`, as
+ * regular-expression source. */
+const HELD_SEQUENCE = String.raw`\ufffe|\ufdd0|\ufffd|\uffff(?:\[[0-?]*[@-~])?`;
 
 /** Go's `unicode.IsSpace`, the space runes the daemon's cleanup splits on. */
 function isSpace(code: number): boolean {
