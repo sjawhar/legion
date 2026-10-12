@@ -1,10 +1,20 @@
-import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
-import { ApiError, api } from "../../api/client";
+import {
+  errorFrame,
+  type FakeDeliverySocket,
+  type FakeDeliverySockets,
+  installFakeDeliverySockets,
+  snapshotFrame,
+} from "../../__tests__/delivery-live-harness";
+import { api } from "../../api/client";
 import type {
+  DeliveryLiveServerFrame,
+  DeliveryLiveSubscribe,
+  DeliveryLiveView,
   DeliveryMeasuresResponse,
   DeliveryPR,
   DeliverySettings,
@@ -16,6 +26,8 @@ import { DeliveryPage } from "./DeliveryPage";
 // The list view, so the page renders without the timeline chart, whose library needs a canvas.
 const DELIVERY_URL =
   "/delivery?mode=list&from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z";
+/** The custom window DELIVERY_URL names, as the page subscribes it. */
+const URL_WINDOW = { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" };
 
 const emptyCounts = {
   repo: {},
@@ -36,12 +48,11 @@ const emptyFreshness: DeliveryTimelineResponse["freshness"] = {
   unfetchable_count: 0,
 };
 
-const notConfigured = new ApiError(404, {
-  code: "DELIVERY_NOT_CONFIGURED",
-  error: "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
-});
+const NOT_CONFIGURED = "DELIVERY_NOT_CONFIGURED";
+const notConfiguredMessage =
+  "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery";
 
-/** The measures panel's read for the page's window: nothing in it, so every test that is not
+/** The measures panel's answer for the page's window: nothing in it, so every test that is not
  *  about the panel renders it without asserting on it. */
 const emptyMeasures: DeliveryMeasuresResponse = {
   window: { from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" },
@@ -140,15 +151,57 @@ function currentSearch(): URLSearchParams {
   return new URLSearchParams(screen.getByTestId("location").textContent ?? "");
 }
 
-let getDeliveryMeasures: Mock<typeof api.getDeliveryMeasures>;
+let sockets: FakeDeliverySockets;
 beforeEach(() => {
-  getDeliveryMeasures = spyOn(api, "getDeliveryMeasures").mockResolvedValue(emptyMeasures);
+  sockets = installFakeDeliverySockets();
 });
 afterEach(() => {
-  getDeliveryMeasures.mockRestore();
+  cleanup();
+  sockets.restore();
 });
 
-test("an unconfigured timeline shows the setup form in its place, reading no settings, and a save brings the timeline", async () => {
+/** The page's delivery socket, once the page has opened one, as Dispatch accepts it. */
+async function openSocket(): Promise<FakeDeliverySocket> {
+  await waitFor(() => expect(sockets.sockets.length).toBeGreaterThan(0));
+  const socket = sockets.latest();
+  act(() => socket.open());
+  return socket;
+}
+
+/** The newest subscribe frame of `kind` the page has sent on `socket`, once it has sent one. */
+function subscription(
+  socket: FakeDeliverySocket,
+  kind: DeliveryLiveView["kind"]
+): Promise<DeliveryLiveSubscribe> {
+  return waitFor(() => socket.subscribed(kind));
+}
+
+/** The newest subscribe frame of `view`'s kind, once it subscribes `view`. */
+function subscriptionTo(
+  socket: FakeDeliverySocket,
+  view: DeliveryLiveView
+): Promise<DeliveryLiveSubscribe> {
+  return waitFor(() => {
+    const frame = socket.subscribed(view.kind);
+    expect(frame.view).toEqual(view);
+    return frame;
+  });
+}
+
+/** Dispatch sends `frame` to the page. */
+function serve(socket: FakeDeliverySocket, frame: DeliveryLiveServerFrame): void {
+  act(() => socket.receive(frame));
+}
+
+/** The page subscribed its timeline, and Dispatch answered with `body`. */
+async function answered(body: DeliveryTimelineResponse): Promise<FakeDeliverySocket> {
+  const socket = await openSocket();
+  const { sub } = await subscription(socket, "timeline");
+  serve(socket, snapshotFrame(sub, body));
+  return socket;
+}
+
+test("an unconfigured timeline shows the setup form in its place, reading no settings, and once a save configures it the page's own subscription brings the timeline", async () => {
   const saved: DeliverySettings = {
     deploy_repo: "acme/widgets",
     deploy_workflow_path: ".github/workflows/deploy.yml",
@@ -165,22 +218,22 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
     updated_at: "2026-10-07T12:00:00Z",
     updated_by: { id: "alice@example.com", kind: "user" },
   };
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline")
-    .mockRejectedValueOnce(notConfigured)
-    .mockResolvedValue(emptyTimeline);
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
   const putDeliverySettings = spyOn(api, "putDeliverySettings").mockResolvedValue(saved);
 
   try {
-    renderPage();
+    const queryClient = renderPage();
+    const socket = await openSocket();
+    const { sub } = await subscription(socket, "timeline");
+    serve(socket, errorFrame(sub, NOT_CONFIGURED, notConfiguredMessage));
 
     expect(
       await screen.findByRole("heading", { name: "Set up the delivery timeline" })
     ).toBeDefined();
     expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
-    // The timeline's DELIVERY_NOT_CONFIGURED already says no record is stored: the form's fields
-    // are there at once, empty, with no read of the record and no loading line.
+    // DELIVERY_NOT_CONFIGURED already says no record is stored: the form's fields are there at
+    // once, empty, with no read of the record and no loading line.
     expect(screen.queryByText("Loading delivery settings…")).toBeNull();
     expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe("");
 
@@ -200,113 +253,118 @@ test("an unconfigured timeline shows the setup form in its place, reading no set
       target: { value: "octocat" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save delivery settings" }));
+    await waitFor(() => expect(putDeliverySettings).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+
+    // The save reads nothing again: the page stays subscribed, and Dispatch answers that same
+    // subscription once a configuration exists.
+    expect(socket.subscribes()).toHaveLength(1);
+    expect(queryClient.isFetching()).toBe(0);
+    serve(socket, snapshotFrame(sub, emptyTimeline));
 
     expect(await screen.findByText("No PRs in the current filter/window.")).toBeDefined();
     expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
-    expect(putDeliverySettings).toHaveBeenCalledTimes(1);
-    expect(getDeliveryTimeline).toHaveBeenCalledTimes(2);
     expect(getDeliverySettings).not.toHaveBeenCalled();
   } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
     getDeliverySettings.mockRestore();
     putDeliverySettings.mockRestore();
   }
 });
 
-test("a refetch of the unconfigured timeline, as tab focus starts, keeps the setup form and its unsaved draft", async () => {
-  const refetch = Promise.withResolvers<DeliveryTimelineResponse>();
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline")
-    .mockRejectedValueOnce(notConfigured)
-    .mockReturnValueOnce(refetch.promise);
+test("a reconnect while the timeline is unconfigured keeps the setup form and its unsaved draft", async () => {
+  renderPage();
+  const socket = await openSocket();
+  const { sub } = await subscription(socket, "timeline");
+  serve(socket, errorFrame(sub, NOT_CONFIGURED, notConfiguredMessage));
+  await screen.findByRole("heading", { name: "Set up the delivery timeline" });
+  fireEvent.change(screen.getByLabelText("Deploy repository"), {
+    target: { value: "acme/widgets" },
+  });
+  const draft = () => (screen.getByLabelText("Deploy repository") as HTMLInputElement).value;
 
-  try {
-    const queryClient = renderPage();
-    await screen.findByRole("heading", { name: "Set up the delivery timeline" });
-    fireEvent.change(screen.getByLabelText("Deploy repository"), {
-      target: { value: "acme/widgets" },
-    });
-
-    // Coming back to the tab (TanStack's focus listener is on `window`) refetches the timeline,
-    // and while that refetch runs the query holds no error at all. Any render of the timeline's
-    // body in between would unmount the form, so the draft surviving says none happened.
+  // Coming back to the tab (TanStack's focus listener is on `window`) reads nothing.
+  act(() => {
     window.dispatchEvent(new Event("visibilitychange"));
-    await waitFor(() => expect(queryClient.isFetching()).toBe(1));
-    expect(getDeliveryTimeline).toHaveBeenCalledTimes(2);
-    expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe(
-      "acme/widgets"
-    );
-    expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
-    expect(screen.queryByText("Loading delivery timeline…")).toBeNull();
+  });
+  expect(socket.subscribes()).toHaveLength(1);
 
-    refetch.reject(notConfigured);
-    await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-    expect(screen.getByRole("heading", { name: "Set up the delivery timeline" })).toBeDefined();
-    expect((screen.getByLabelText("Deploy repository") as HTMLInputElement).value).toBe(
-      "acme/widgets"
-    );
-    expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  // Dispatch restarts: the page opens a new socket at once and subscribes again. Any render of
+  // the timeline's body while that waits would unmount the form, so the draft surviving says none
+  // happened.
+  act(() => socket.drop(1012));
+  expect(sockets.sockets).toHaveLength(2);
+  const again = sockets.latest();
+  act(() => again.open());
+  expect(again.subscribed("timeline").sub).toBe(sub);
+  expect(draft()).toBe("acme/widgets");
+  expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
+  expect(screen.queryByText("Loading delivery timeline…")).toBeNull();
+
+  serve(again, errorFrame(sub, NOT_CONFIGURED, notConfiguredMessage));
+  expect(screen.getByRole("heading", { name: "Set up the delivery timeline" })).toBeDefined();
+  expect(draft()).toBe("acme/widgets");
+  expect(screen.queryByRole("button", { name: "Timeline" })).toBeNull();
 });
 
-test("a refetch of the unconfigured timeline that fails otherwise shows that failure and Retry, not the setup form", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline")
-    .mockRejectedValueOnce(notConfigured)
-    .mockRejectedValueOnce(new ApiError(500, { code: "INTERNAL", error: "database unavailable" }));
+test("an unconfigured timeline that Dispatch then refuses otherwise shows that failure and Retry, not the setup form", async () => {
+  renderPage();
+  const socket = await openSocket();
+  const { sub } = await subscription(socket, "timeline");
+  serve(socket, errorFrame(sub, NOT_CONFIGURED, notConfiguredMessage));
+  await screen.findByRole("heading", { name: "Set up the delivery timeline" });
 
-  try {
-    renderPage();
-    await screen.findByRole("heading", { name: "Set up the delivery timeline" });
+  act(() => socket.drop(1012));
+  const again = sockets.latest();
+  act(() => again.open());
+  serve(again, errorFrame(sub, "INTERNAL", "database unavailable"));
 
-    window.dispatchEvent(new Event("visibilitychange"));
-
-    expect(await screen.findByText("Couldn't load the delivery timeline.")).toBeDefined();
-    expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
-    expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
-    expect(getDeliveryTimeline).toHaveBeenCalledTimes(2);
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  expect(await screen.findByText("Couldn't load the delivery timeline.")).toBeDefined();
+  expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
+  expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
 });
 
-test("a configured timeline renders with no setup form", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
+test("a configured timeline renders with no setup form, subscribing the window and facets the URL names", async () => {
   const getDeliverySettings = spyOn(api, "getDeliverySettings").mockResolvedValue(null);
 
   try {
     renderPage();
+    const socket = await openSocket();
+    const { sub } = await subscriptionTo(socket, {
+      kind: "timeline",
+      window: URL_WINDOW,
+      query: "",
+    });
+    serve(socket, snapshotFrame(sub, emptyTimeline));
 
     expect(await screen.findByText("No PRs in the current filter/window.")).toBeDefined();
     expect(screen.getByRole("button", { name: "List" }).getAttribute("aria-pressed")).toBe("true");
     expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
-    await waitFor(() => expect(getDeliveryTimeline).toHaveBeenCalledTimes(1));
+    expect(socket.subscribes()).toHaveLength(1);
     expect(getDeliverySettings).not.toHaveBeenCalled();
   } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
     getDeliverySettings.mockRestore();
   }
 });
 
-test("any other timeline failure keeps the page and offers Retry, not the setup form", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockRejectedValue(
-    new ApiError(503, { code: "INTERNAL", error: "database unavailable" })
-  );
+test("any other refusal keeps the page and offers Retry, not the setup form, and Retry subscribes again", async () => {
+  renderPage();
+  const socket = await openSocket();
+  const { sub } = await subscription(socket, "timeline");
+  serve(socket, errorFrame(sub, "INTERNAL", "database unavailable"));
 
-  try {
-    renderPage();
+  expect(await screen.findByText("Couldn't load the delivery timeline.")).toBeDefined();
+  expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
 
-    expect(await screen.findByText("Couldn't load the delivery timeline.")).toBeDefined();
-    expect(screen.getByRole("button", { name: "Retry" })).toBeDefined();
-    expect(screen.queryByRole("heading", { name: "Set up the delivery timeline" })).toBeNull();
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  const retried = await waitFor(() => {
+    const frame = socket.subscribed("timeline");
+    expect(frame.sub).not.toBe(sub);
+    return frame;
+  });
+  expect(socket.sent).toContainEqual({ type: "unsubscribe", sub });
+  serve(socket, snapshotFrame(retried.sub, emptyTimeline));
+  expect(await screen.findByText("No PRs in the current filter/window.")).toBeDefined();
+  expect(screen.queryByText("Couldn't load the delivery timeline.")).toBeNull();
 });
 
 const listedPR: DeliveryPR = {
@@ -335,7 +393,7 @@ const listedPR: DeliveryPR = {
   url: "https://github.com/acme/widgets/pull/1",
 };
 
-test("the facet column offers each value with its count, sends a pick to the server and keeps the view in the URL", async () => {
+test("the facet column offers each value with its count, subscribes a pick and keeps the view in the URL", async () => {
   const timeline: DeliveryTimelineResponse = {
     ...emptyTimeline,
     components: { "ACME/api": { parent: null, title: "Public API" } },
@@ -349,102 +407,91 @@ test("the facet column offers each value with its count, sends a pick to the ser
     issue_titles: { "ACME-1": "Ship widgets" },
     prs: [listedPR],
   };
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(timeline);
 
-  try {
-    renderPage();
+  renderPage();
+  const socket = await answered(timeline);
 
-    expect(await screen.findByText("1 PRs in current filter/window")).toBeDefined();
-    expect(screen.getByRole("button", { name: /^Repository/ }).textContent).toBe("Any repository");
-    fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
-    const priorityOptions = within(screen.getByRole("listbox", { name: "Priority options" }));
-    const options = priorityOptions.getAllByRole("option").map((option) => option.textContent);
-    expect(options).toEqual(["No issue3", "P01"]);
-    fireEvent.click(priorityOptions.getByRole("option", { name: /^P0/ }));
+  expect(await screen.findByText("1 PRs in current filter/window")).toBeDefined();
+  expect(screen.getByRole("button", { name: /^Repository/ }).textContent).toBe("Any repository");
+  fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
+  const priorityOptions = within(screen.getByRole("listbox", { name: "Priority options" }));
+  const options = priorityOptions.getAllByRole("option").map((option) => option.textContent);
+  expect(options).toEqual(["No issue3", "P01"]);
+  fireEvent.click(priorityOptions.getByRole("option", { name: /^P0/ }));
 
-    await waitFor(() =>
-      expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
-        expect.objectContaining({ priority: ["P0"], repo: [] })
-      )
-    );
-    expect(screen.getByRole("button", { name: /^Priority/ }).textContent).toBe("1 selected");
+  // Dispatch applies the facets: the pick is a view of its own, its query the GET route's.
+  await subscriptionTo(socket, { kind: "timeline", window: URL_WINDOW, query: "priority=P0" });
+  expect(screen.getByRole("button", { name: /^Priority/ }).textContent).toBe("1 selected");
 
-    fireEvent.click(screen.getByRole("button", { name: /^Dispatch issue/ }));
-    expect(screen.getByRole("option", { name: /ACME-1 — Ship widgets/ })).toBeDefined();
+  fireEvent.click(screen.getByRole("button", { name: /^Dispatch issue/ }));
+  expect(screen.getByRole("option", { name: /ACME-1 — Ship widgets/ })).toBeDefined();
 
-    const colorBy = screen.getByLabelText("Color merges by") as HTMLSelectElement;
-    expect([...colorBy.options].map((option) => option.textContent)).toEqual([
-      "Repository",
-      "Author",
-      "Priority",
-      "Component",
-      "Parent agent",
-    ]);
-    fireEvent.change(colorBy, { target: { value: "component" } });
-    expect(colorBy.value).toBe("component");
-    // The list's dot follows the colour-by facet, and the row reads its issue with its priority.
-    expect(screen.getByText("ACME-1 · P0")).toBeDefined();
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  const colorBy = screen.getByLabelText("Color merges by") as HTMLSelectElement;
+  expect([...colorBy.options].map((option) => option.textContent)).toEqual([
+    "Repository",
+    "Author",
+    "Priority",
+    "Component",
+    "Parent agent",
+  ]);
+  fireEvent.change(colorBy, { target: { value: "component" } });
+  expect(colorBy.value).toBe("component");
+  // The list's dot follows the colour-by facet, and the row reads its issue with its priority.
+  expect(screen.getByText("ACME-1 · P0")).toBeDefined();
 });
 
 test("the header names the window and the freshness row the prototype's six sources", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+  renderPage();
+  await answered({
     ...emptyTimeline,
     freshness: { ...emptyTimeline.freshness, last_error: "rate limited" },
   });
-  try {
-    renderPage();
-    expect(await screen.findByRole("heading", { name: "Delivery timeline" })).toBeDefined();
-    const generated = screen.getByText(/^Generated .* · window/);
-    expect(generated.textContent).not.toContain("1970");
-    // No brush window in the URL: nothing to clear.
-    expect(screen.queryByRole("button", { name: "clear brush window" })).toBeNull();
-    const row = screen.getByRole("region", { name: "Source freshness" });
-    const sources = [...row.querySelectorAll("[data-source]")].map((node) =>
-      node.getAttribute("data-source")
-    );
-    expect(sources).toEqual(["prs", "runs", "ci", "dispatch", "agents", "events"]);
-    expect(within(row).getByText("Deploy runs never checked: rate limited")).toBeDefined();
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+
+  expect(await screen.findByRole("heading", { name: "Delivery timeline" })).toBeDefined();
+  const generated = await screen.findByText(/^Generated .* · window/);
+  expect(generated.textContent).not.toContain("1970");
+  // No brush window in the URL: nothing to clear.
+  expect(screen.queryByRole("button", { name: "clear brush window" })).toBeNull();
+  const row = screen.getByRole("region", { name: "Source freshness" });
+  const sources = [...row.querySelectorAll("[data-source]")].map((node) =>
+    node.getAttribute("data-source")
+  );
+  expect(sources).toEqual(["prs", "runs", "ci", "dispatch", "agents", "events"]);
+  expect(within(row).getByText("Deploy runs never checked: rate limited")).toBeDefined();
 });
 
-test("while a facet pick refetches, the header and freshness keep the last answer's time, never the epoch", async () => {
-  const refetch = Promise.withResolvers<DeliveryTimelineResponse>();
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline")
-    .mockResolvedValueOnce({
+test("while a facet pick waits for its snapshot, the header and freshness keep the last answer's time, never the epoch", async () => {
+  renderPage();
+  const socket = await openSocket();
+  const { sub } = await subscription(socket, "timeline");
+  serve(
+    socket,
+    snapshotFrame(sub, {
       ...emptyTimeline,
       facet_counts: { ...emptyCounts, priority: { P0: 1 } },
       prs: [listedPR],
     })
-    .mockReturnValueOnce(refetch.promise);
-  try {
-    renderPage();
-    await screen.findByText(/^Generated .* · window/);
-    fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
-    fireEvent.click(
-      within(screen.getByRole("listbox", { name: "Priority options" })).getByRole("option", {
-        name: /^P0/,
-      })
-    );
-    await waitFor(() => expect(getDeliveryTimeline).toHaveBeenCalledTimes(2));
+  );
+  await screen.findByText(/^Generated .* · window/);
+  fireEvent.click(screen.getByRole("button", { name: /^Priority/ }));
+  fireEvent.click(
+    within(screen.getByRole("listbox", { name: "Priority options" })).getByRole("option", {
+      name: /^P0/,
+    })
+  );
+  const picked = await subscriptionTo(socket, {
+    kind: "timeline",
+    window: URL_WINDOW,
+    query: "priority=P0",
+  });
 
-    // The previous answer stays on screen while the new read is in flight.
-    expect(screen.getByText(/^Generated .* · window/).textContent).not.toContain("1970");
-    const row = screen.getByRole("region", { name: "Source freshness" });
-    expect(row.querySelector('[data-source="dispatch"]')?.textContent).toMatch(
-      /^Dispatch \d+ s ago$/
-    );
-    refetch.resolve({ ...emptyTimeline, prs: [listedPR] });
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  // The previous answer stays on screen while the new view's snapshot is out.
+  expect(screen.getByText(/^Generated .* · window/).textContent).not.toContain("1970");
+  const row = screen.getByRole("region", { name: "Source freshness" });
+  expect(row.querySelector('[data-source="dispatch"]')?.textContent).toMatch(
+    /^Dispatch \d+ s ago$/
+  );
+  serve(socket, snapshotFrame(picked.sub, { ...emptyTimeline, prs: [listedPR] }));
 });
 
 test("the list sorts by its headers and a row opens the PR's details", async () => {
@@ -459,170 +506,154 @@ test("the list sorts by its headers and a row opens the PR's details", async () 
     title: "feat: a shipped widget",
     url: "https://github.com/acme/widgets/pull/2",
   };
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+  renderPage();
+  await answered({
     ...emptyTimeline,
     components: { "ACME/api": { parent: null, title: "Public API" } },
     prs: [listedPR, shipped],
   });
-  try {
-    renderPage();
-    const titles = async () =>
-      (await screen.findAllByRole("row"))
-        .slice(1)
-        .map((row) => (row instanceof HTMLTableRowElement ? row.cells[3]?.textContent : undefined));
-    expect(await titles()).toEqual(["feat: a waiting widget", "feat: a shipped widget"]);
-    fireEvent.click(screen.getByRole("button", { name: /^Merged/ }));
-    expect(await titles()).toEqual(["feat: a shipped widget", "feat: a waiting widget"]);
 
-    fireEvent.click(screen.getByText("feat: a shipped widget"));
-    const details = await screen.findByRole("dialog", { name: "Details" });
-    expect(within(details).getByRole("link", { name: "Open on GitHub" }).getAttribute("href")).toBe(
-      "https://github.com/acme/widgets/pull/2"
-    );
-    expect(within(details).getByText("ACME-1 — Ship widgets")).toBeDefined();
-    expect(within(details).getByText("Public API")).toBeDefined();
-    expect(within(details).getByText("70 min")).toBeDefined();
-    fireEvent.click(within(details).getByRole("button", { name: "Close details" }));
-    expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  const titles = async () =>
+    (await screen.findAllByRole("row"))
+      .slice(1)
+      .map((row) => (row instanceof HTMLTableRowElement ? row.cells[3]?.textContent : undefined));
+  expect(await titles()).toEqual(["feat: a waiting widget", "feat: a shipped widget"]);
+  fireEvent.click(screen.getByRole("button", { name: /^Merged/ }));
+  expect(await titles()).toEqual(["feat: a shipped widget", "feat: a waiting widget"]);
+
+  fireEvent.click(screen.getByText("feat: a shipped widget"));
+  const details = await screen.findByRole("dialog", { name: "Details" });
+  expect(within(details).getByRole("link", { name: "Open on GitHub" }).getAttribute("href")).toBe(
+    "https://github.com/acme/widgets/pull/2"
+  );
+  expect(within(details).getByText("ACME-1 — Ship widgets")).toBeDefined();
+  expect(within(details).getByText("Public API")).toBeDefined();
+  expect(within(details).getByText("70 min")).toBeDefined();
+  fireEvent.click(within(details).getByRole("button", { name: "Close details" }));
+  expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
 });
 
-test("the measures panel sits between the freshness row and the view controls and shows the timeline's own measures, fetching no second read", async () => {
-  const withP0 = (repo: readonly string[]) => ({
+test("the measures panel sits between the freshness row and the view controls and shows the timeline's own measures, subscribing no second view", async () => {
+  const withP0 = (key: string): DeliveryTimelineResponse => ({
     ...emptyTimeline,
     facet_counts: { ...emptyCounts, repo: { "acme/widgets": 1 } },
     prs: [listedPR],
     measures: {
       ...emptyMeasures,
-      unowned_p0: [
-        {
-          key: repo.length === 0 ? "ACME-103" : "ACME-104",
-          title: "Production deploy gate flakes",
-        },
-      ],
+      unowned_p0: [{ key, title: "Production deploy gate flakes" }],
     },
   });
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockImplementation(
-    async (options) => withP0(options.repo ?? [])
-  );
-  try {
-    renderPage();
-    const p0 = await screen.findByRole("link", { name: "ACME-103" });
-    expect(p0.getAttribute("href")).toBe("/issues/ACME-103");
-    const freshness = screen.getByRole("region", { name: "Source freshness" });
-    const panel = screen.getByLabelText("KPI targets");
-    const controls = screen.getByRole("group", { name: "View" });
-    expect(
-      freshness.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
-    expect(panel.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: /^Repository/ }));
-    fireEvent.click(
-      within(screen.getByRole("listbox", { name: "Repository options" })).getByRole("option", {
-        name: /^acme\/widgets/,
-      })
-    );
-    // The facet refetches the timeline, and the panel follows that one answer.
-    expect(await screen.findByRole("link", { name: "ACME-104" })).toBeDefined();
-    expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
-      expect.objectContaining({ repo: ["acme/widgets"] })
-    );
-    expect(getDeliveryMeasures).not.toHaveBeenCalled();
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  renderPage();
+  const socket = await answered(withP0("ACME-103"));
+  const p0 = await screen.findByRole("link", { name: "ACME-103" });
+  expect(p0.getAttribute("href")).toBe("/issues/ACME-103");
+  const freshness = screen.getByRole("region", { name: "Source freshness" });
+  const panel = screen.getByLabelText("KPI targets");
+  const controls = screen.getByRole("group", { name: "View" });
+  expect(freshness.compareDocumentPosition(panel) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(panel.compareDocumentPosition(controls) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+
+  fireEvent.click(screen.getByRole("button", { name: /^Repository/ }));
+  fireEvent.click(
+    within(screen.getByRole("listbox", { name: "Repository options" })).getByRole("option", {
+      name: /^acme\/widgets/,
+    })
+  );
+  // The facet subscribes the timeline's new view, and the panel follows that one answer.
+  const picked = await subscriptionTo(socket, {
+    kind: "timeline",
+    window: URL_WINDOW,
+    query: "repo=acme%2Fwidgets",
+  });
+  serve(socket, snapshotFrame(picked.sub, withP0("ACME-104")));
+  expect(await screen.findByRole("link", { name: "ACME-104" })).toBeDefined();
+  expect(socket.subscribes().filter((frame) => frame.view.kind === "measures")).toHaveLength(0);
 });
 
-test("a brush window narrows the measures to it with a read of its own, leaves the timeline's read on the whole window, and clearing it returns to the timeline's measures", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
-    ...emptyTimeline,
-    measures: { ...emptyMeasures, unowned_p0: [{ key: "ACME-1", title: "the whole window" }] },
-  });
-  getDeliveryMeasures.mockResolvedValue({
-    ...emptyMeasures,
-    unowned_p0: [{ key: "ACME-2", title: "the brush window" }],
-  });
+test("a brush window narrows the measures to it with a view of its own, leaves the timeline's view on the whole window, and clearing it returns to the timeline's measures", async () => {
   const brushStart = "2024-06-01T06:00:00.000Z";
   const brushEnd = "2024-06-01T12:00:00.000Z";
-  try {
-    renderPage(
-      `${DELIVERY_URL}&ws=${encodeURIComponent(brushStart)}&we=${encodeURIComponent(brushEnd)}`
-    );
-    expect(await screen.findByRole("link", { name: "ACME-2" })).toBeDefined();
-    expect(getDeliveryMeasures).toHaveBeenCalledTimes(1);
-    expect(getDeliveryMeasures).toHaveBeenLastCalledWith(
-      expect.objectContaining({ from: brushStart, to: brushEnd })
-    );
-    for (const [options] of getDeliveryTimeline.mock.calls) {
-      expect(options).toEqual(
-        expect.objectContaining({ from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" })
-      );
-    }
+  renderPage(
+    `${DELIVERY_URL}&ws=${encodeURIComponent(brushStart)}&we=${encodeURIComponent(brushEnd)}`
+  );
+  const socket = await openSocket();
+  const timeline = await subscriptionTo(socket, {
+    kind: "timeline",
+    window: URL_WINDOW,
+    query: "",
+  });
+  const brushed = await subscriptionTo(socket, {
+    kind: "measures",
+    window: { from: brushStart, to: brushEnd },
+    query: "",
+  });
+  serve(
+    socket,
+    snapshotFrame(timeline.sub, {
+      ...emptyTimeline,
+      measures: { ...emptyMeasures, unowned_p0: [{ key: "ACME-1", title: "the whole window" }] },
+    })
+  );
+  serve(
+    socket,
+    snapshotFrame(brushed.sub, {
+      ...emptyMeasures,
+      unowned_p0: [{ key: "ACME-2", title: "the brush window" }],
+    })
+  );
+  expect(await screen.findByRole("link", { name: "ACME-2" })).toBeDefined();
 
-    fireEvent.click(await screen.findByRole("button", { name: "clear brush window" }));
-    expect(await screen.findByRole("link", { name: "ACME-1" })).toBeDefined();
-    expect(getDeliveryMeasures).toHaveBeenCalledTimes(1);
-    expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
-      expect.objectContaining({ from: "2024-06-01T00:00:00Z", to: "2024-06-02T00:00:00Z" })
-    );
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  fireEvent.click(await screen.findByRole("button", { name: "clear brush window" }));
+  expect(await screen.findByRole("link", { name: "ACME-1" })).toBeDefined();
+  // The brush's view ends with it, and the timeline's never moved.
+  expect(socket.sent).toContainEqual({ type: "unsubscribe", sub: brushed.sub });
+  expect(socket.subscribes()).toHaveLength(2);
 });
 
 test("a brushed measures failure keeps the timeline and offers its own Retry", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
-  getDeliveryMeasures
-    .mockRejectedValueOnce(new ApiError(503, { code: "INTERNAL", error: "database unavailable" }))
-    .mockResolvedValue(emptyMeasures);
-  try {
-    renderPage(
-      `${DELIVERY_URL}&ws=${encodeURIComponent("2024-06-01T06:00:00.000Z")}&we=${encodeURIComponent("2024-06-01T12:00:00.000Z")}`
-    );
-    expect(await screen.findByText("Couldn't load the delivery measures.")).toBeDefined();
-    expect(screen.getByText("No PRs in the current filter/window.")).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
-    expect(await screen.findByLabelText("KPI targets")).toBeDefined();
-    expect(screen.queryByText("Couldn't load the delivery measures.")).toBeNull();
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  const brush = `&ws=${encodeURIComponent("2024-06-01T06:00:00.000Z")}&we=${encodeURIComponent("2024-06-01T12:00:00.000Z")}`;
+  renderPage(`${DELIVERY_URL}${brush}`);
+  const socket = await openSocket();
+  const timeline = await subscription(socket, "timeline");
+  const brushed = await subscription(socket, "measures");
+  serve(socket, snapshotFrame(timeline.sub, emptyTimeline));
+  serve(socket, errorFrame(brushed.sub, "INTERNAL", "database unavailable"));
+
+  expect(await screen.findByText("Couldn't load the delivery measures.")).toBeDefined();
+  expect(screen.getByText("No PRs in the current filter/window.")).toBeDefined();
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  const retried = await waitFor(() => {
+    const frame = socket.subscribed("measures");
+    expect(frame.sub).not.toBe(brushed.sub);
+    return frame;
+  });
+  serve(socket, snapshotFrame(retried.sub, emptyMeasures));
+  expect(await screen.findByLabelText("KPI targets")).toBeDefined();
+  expect(screen.queryByText("Couldn't load the delivery measures.")).toBeNull();
 });
 
 test("the drill-down is a dialog: focus moves into it, Escape closes it and focus returns to the row", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
-    ...emptyTimeline,
-    prs: [listedPR],
-  });
-  try {
-    renderPage();
-    const row = await screen.findByRole("row", { name: /feat: a waiting widget/ });
-    row.focus();
-    fireEvent.keyDown(row, { key: "Enter" });
-    const details = await screen.findByRole("dialog", { name: "Details" });
-    await waitFor(() =>
-      expect(document.activeElement).toBe(
-        within(details).getByRole("button", { name: "Close details" })
-      )
-    );
-    fireEvent.keyDown(document.body, { key: "Escape" });
-    expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
-    expect(document.activeElement).toBe(row);
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  renderPage();
+  await answered({ ...emptyTimeline, prs: [listedPR] });
+
+  const row = await screen.findByRole("row", { name: /feat: a waiting widget/ });
+  row.focus();
+  fireEvent.keyDown(row, { key: "Enter" });
+  const details = await screen.findByRole("dialog", { name: "Details" });
+  await waitFor(() =>
+    expect(document.activeElement).toBe(
+      within(details).getByRole("button", { name: "Close details" })
+    )
+  );
+  fireEvent.keyDown(document.body, { key: "Escape" });
+  expect(screen.queryByRole("dialog", { name: "Details" })).toBeNull();
+  expect(document.activeElement).toBe(row);
 });
 
 test("colouring by Parent agent offers the values to give their own colour and lane, kept in the URL", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+  renderPage(`${DELIVERY_URL}&colorBy=parentAgent&agents=group%3Ag1&agents=group%3Ag1`);
+  await answered({
     ...emptyTimeline,
     color_counts: {
       ...emptyTimeline.color_counts,
@@ -640,105 +671,139 @@ test("colouring by Parent agent offers the values to give their own colour and l
       },
     ],
   });
-  try {
-    renderPage(`${DELIVERY_URL}&colorBy=parentAgent&agents=group%3Ag1&agents=group%3Ag1`);
-    const trigger = await screen.findByRole("button", { name: "Own colour and lane: 1 chosen" });
-    fireEvent.click(trigger);
-    const listbox = within(screen.getByRole("listbox", { name: "Own colour and lane options" }));
-    expect(
-      listbox.getAllByRole("option").map((option) => option.getAttribute("aria-label"))
-    ).toEqual(["Release crew, 3 PRs", "Reviewer, 2 PRs"]);
-    fireEvent.click(listbox.getByRole("option", { name: /^Reviewer/ }));
-    await waitFor(() => expect(currentSearch().getAll("agents")).toEqual(["group:g1", "Reviewer"]));
 
-    fireEvent.change(screen.getByLabelText("Color merges by"), { target: { value: "repo" } });
-    expect(screen.queryByRole("button", { name: /^Own colour and lane/ })).toBeNull();
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  const trigger = await screen.findByRole("button", { name: "Own colour and lane: 1 chosen" });
+  fireEvent.click(trigger);
+  const listbox = within(screen.getByRole("listbox", { name: "Own colour and lane options" }));
+  expect(listbox.getAllByRole("option").map((option) => option.getAttribute("aria-label"))).toEqual(
+    ["Release crew, 3 PRs", "Reviewer, 2 PRs"]
+  );
+  fireEvent.click(listbox.getByRole("option", { name: /^Reviewer/ }));
+  await waitFor(() => expect(currentSearch().getAll("agents")).toEqual(["group:g1", "Reviewer"]));
+
+  fireEvent.change(screen.getByLabelText("Color merges by"), { target: { value: "repo" } });
+  expect(screen.queryByRole("button", { name: /^Own colour and lane/ })).toBeNull();
 });
 
 test("a malformed custom window falls back to the 28-day preset and removes its bad parameters", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
-  try {
-    renderPage("/delivery?mode=list&from=not-a-date&to=also-not-a-date");
-    const window = await screen.findByLabelText("Window");
-    expect((window as HTMLSelectElement).value).toBe("28d");
-    await waitFor(() => {
-      expect(currentSearch().has("from")).toBe(false);
-      expect(currentSearch().has("to")).toBe(false);
-      expect(currentSearch().has("window")).toBe(false);
-    });
-    const options = getDeliveryTimeline.mock.lastCall?.[0];
-    expect(Date.parse(options?.to ?? "") - Date.parse(options?.from ?? "")).toBe(
-      28 * 24 * 60 * 60 * 1000
-    );
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
+  renderPage("/delivery?mode=list&from=not-a-date&to=also-not-a-date");
+  const window = await screen.findByLabelText("Window");
+  expect((window as HTMLSelectElement).value).toBe("28d");
+  await waitFor(() => {
+    expect(currentSearch().has("from")).toBe(false);
+    expect(currentSearch().has("to")).toBe(false);
+    expect(currentSearch().has("window")).toBe(false);
+  });
+  const socket = await openSocket();
+  await subscription(socket, "timeline");
+  for (const frame of socket.subscribes()) {
+    expect(frame.view).toEqual({ kind: "timeline", window: { preset: 28 }, query: "" });
   }
 });
 
-test("a facet pick leaves the window rolling: it writes no from or to", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
+test("a preset subscribes by its days, and the header names the window Dispatch resolved", async () => {
+  renderPage("/delivery?mode=list&window=7d");
+  const socket = await openSocket();
+  const { sub } = await subscriptionTo(socket, {
+    kind: "timeline",
+    window: { preset: 7 },
+    query: "",
+  });
+  const resolved = { from: "2026-10-05T12:00:00Z", to: "2026-10-12T12:00:00Z" };
+  serve(socket, snapshotFrame(sub, { ...emptyTimeline, window: resolved }));
+
+  const header = await screen.findByText(/^Generated .* · window/);
+  expect(header.textContent).toContain(
+    `${new Date(resolved.from).toLocaleDateString()}–${new Date(resolved.to).toLocaleDateString()}`
+  );
+  expect(currentSearch().get("window")).toBe("7d");
+  expect(currentSearch().has("from")).toBe(false);
+  expect(currentSearch().has("to")).toBe(false);
+});
+
+test("a facet pick leaves the window rolling: it writes no from or to, and subscribes by the preset", async () => {
+  renderPage("/delivery?mode=list");
+  const socket = await answered({
     ...emptyTimeline,
     facet_counts: { ...emptyCounts, priority: { P0: 1 } },
   });
-  try {
-    renderPage("/delivery?mode=list");
-    fireEvent.click(await screen.findByRole("button", { name: /^Priority/ }));
-    fireEvent.click(
-      within(screen.getByRole("listbox", { name: "Priority options" })).getByRole("option", {
-        name: /^P0/,
-      })
-    );
-    await waitFor(() => expect(currentSearch().getAll("priority")).toEqual(["P0"]));
-    expect(currentSearch().has("from")).toBe(false);
-    expect(currentSearch().has("to")).toBe(false);
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  fireEvent.click(await screen.findByRole("button", { name: /^Priority/ }));
+  fireEvent.click(
+    within(screen.getByRole("listbox", { name: "Priority options" })).getByRole("option", {
+      name: /^P0/,
+    })
+  );
+  await waitFor(() => expect(currentSearch().getAll("priority")).toEqual(["P0"]));
+  expect(currentSearch().has("from")).toBe(false);
+  expect(currentSearch().has("to")).toBe(false);
+  await subscriptionTo(socket, {
+    kind: "timeline",
+    window: { preset: 28 },
+    query: "priority=P0",
+  });
 });
 
 test("the window control: a preset rolls and clears the brush, a custom range writes its days", async () => {
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue(emptyTimeline);
-  try {
-    renderPage(
-      `/delivery?mode=list&ws=${encodeURIComponent("2024-06-01T06:00:00Z")}&we=${encodeURIComponent("2024-06-01T12:00:00Z")}`
-    );
-    fireEvent.change(await screen.findByLabelText("Window"), { target: { value: "7d" } });
-    await waitFor(() => expect(currentSearch().get("window")).toBe("7d"));
-    expect(currentSearch().has("ws")).toBe(false);
-    expect(currentSearch().has("we")).toBe(false);
-    expect(currentSearch().has("from")).toBe(false);
-    await waitFor(() => {
-      const options = getDeliveryTimeline.mock.lastCall?.[0];
-      expect(Date.parse(options?.to ?? "") - Date.parse(options?.from ?? "")).toBe(
-        7 * 24 * 60 * 60 * 1000
-      );
-    });
+  renderPage(
+    `/delivery?mode=list&ws=${encodeURIComponent("2024-06-01T06:00:00Z")}&we=${encodeURIComponent("2024-06-01T12:00:00Z")}`
+  );
+  const socket = await openSocket();
+  const brushed = await subscription(socket, "measures");
 
-    fireEvent.change(screen.getByLabelText("Window"), { target: { value: "custom" } });
-    fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-01-01" } });
-    fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-01-07" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
-    await waitFor(() => expect(currentSearch().get("from")).toBe("2026-01-01T00:00:00.000Z"));
-    expect(currentSearch().get("to")).toBe("2026-01-08T00:00:00.000Z");
-    expect(currentSearch().has("window")).toBe(false);
-    await waitFor(() =>
-      expect(getDeliveryTimeline).toHaveBeenLastCalledWith(
-        expect.objectContaining({
-          from: "2026-01-01T00:00:00.000Z",
-          to: "2026-01-08T00:00:00.000Z",
-        })
-      )
-    );
-  } finally {
-    cleanup();
-    getDeliveryTimeline.mockRestore();
-  }
+  fireEvent.change(await screen.findByLabelText("Window"), { target: { value: "7d" } });
+  await waitFor(() => expect(currentSearch().get("window")).toBe("7d"));
+  expect(currentSearch().has("ws")).toBe(false);
+  expect(currentSearch().has("we")).toBe(false);
+  expect(currentSearch().has("from")).toBe(false);
+  await subscriptionTo(socket, { kind: "timeline", window: { preset: 7 }, query: "" });
+  expect(socket.sent).toContainEqual({ type: "unsubscribe", sub: brushed.sub });
+
+  fireEvent.change(screen.getByLabelText("Window"), { target: { value: "custom" } });
+  fireEvent.change(screen.getByLabelText("From"), { target: { value: "2026-01-01" } });
+  fireEvent.change(screen.getByLabelText("To"), { target: { value: "2026-01-07" } });
+  fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+  await waitFor(() => expect(currentSearch().get("from")).toBe("2026-01-01T00:00:00.000Z"));
+  expect(currentSearch().get("to")).toBe("2026-01-08T00:00:00.000Z");
+  expect(currentSearch().has("window")).toBe(false);
+  await subscriptionTo(socket, {
+    kind: "timeline",
+    window: { from: "2026-01-01T00:00:00.000Z", to: "2026-01-08T00:00:00.000Z" },
+    query: "",
+  });
+});
+
+test("the freshness row says Live with the last change while the socket is open, and Reconnecting once it drops", async () => {
+  const now = Date.now();
+  const ago = (ms: number) => new Date(now - ms).toISOString();
+  renderPage();
+  const socket = await openSocket();
+  const { sub } = await subscription(socket, "timeline");
+  serve(
+    socket,
+    snapshotFrame(
+      sub,
+      {
+        ...emptyTimeline,
+        freshness: {
+          last_error: null,
+          last_event_at: ago(30_000),
+          last_reconcile_at: ago(60_000),
+          unfetchable_count: 0,
+        },
+      },
+      { changedAt: ago(4 * 60_000) }
+    )
+  );
+
+  const row = await screen.findByRole("region", { name: "Source freshness" });
+  const prs = row.querySelector('[data-source="prs"]');
+  expect(prs?.textContent).toBe("PRs Live · last change 4 min ago");
+  expect(row.querySelector('[data-source="events"]')?.textContent).toBe(
+    "Events Live · last change 4 min ago"
+  );
+
+  act(() => socket.drop(1006));
+  expect(prs?.textContent).toMatch(/^PRs Reconnecting, \d+ s$/);
 });
 
 /** happy-dom has no canvas, and ECharts throws without a 2D context: a context that accepts every
@@ -766,24 +831,23 @@ function stubCanvasContext(): () => void {
 
 test("a brush window narrows the merges shown but the waiting line still counts what waits before it", async () => {
   const restoreCanvas = stubCanvasContext();
-  const getDeliveryTimeline = spyOn(api, "getDeliveryTimeline").mockResolvedValue({
-    ...emptyTimeline,
-    // Merged 28 days before the window and not shipped: the server's `waiting`.
-    waiting: [{ merged_at: "2024-05-04T00:00:00Z", deployed_at: null }],
-    // Merged inside the window at 01:00, before the brush, and still waiting.
-    prs: [listedPR],
-  });
   try {
     renderPage(
       "/delivery?from=2024-06-01T00%3A00%3A00Z&to=2024-06-02T00%3A00%3A00Z&ws=2024-06-01T06%3A00%3A00Z&we=2024-06-01T12%3A00%3A00Z"
     );
+    await answered({
+      ...emptyTimeline,
+      // Merged 28 days before the window and not shipped: the server's `waiting`.
+      waiting: [{ merged_at: "2024-05-04T00:00:00Z", deployed_at: null }],
+      // Merged inside the window at 01:00, before the brush, and still waiting.
+      prs: [listedPR],
+    });
     const chart = await screen.findByRole("img", { name: /^Delivery timeline/ });
     expect(chart.getAttribute("aria-label")).toContain(
       "0 merged pull requests, 2 waiting to deploy at the start"
     );
   } finally {
     cleanup();
-    getDeliveryTimeline.mockRestore();
     restoreCanvas();
   }
 });

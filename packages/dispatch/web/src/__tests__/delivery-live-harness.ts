@@ -1,8 +1,17 @@
+import type { QueryClient } from "@tanstack/react-query";
+
+import { deliveryRunQuery, deliveryTimelineQuery } from "../api/queries";
 import type {
+  DeliveryLiveBody,
   DeliveryLiveClientFrame,
+  DeliveryLiveError,
+  DeliveryLiveRevs,
   DeliveryLiveServerFrame,
+  DeliveryLiveSnapshot,
   DeliveryLiveSubscribe,
   DeliveryLiveView,
+  DeliveryRunDetail,
+  DeliveryTimelineResponse,
 } from "../api/types";
 
 type Listener = (event: Event) => void;
@@ -109,4 +118,51 @@ export function installFakeDeliverySockets(): FakeDeliverySockets {
       globalThis.WebSocket = original;
     },
   };
+}
+
+/** What a page holds after a snapshot that names no revision; a test that sends no delta never
+ *  reads them. */
+const NO_REVS: DeliveryLiveRevs = { items: {}, maps: {}, counts: {}, fields: {} };
+
+/** Dispatch's first answer to subscription `sub`: `body`, as of change `seq`. */
+export function snapshotFrame(
+  sub: string,
+  body: DeliveryLiveBody,
+  options: { seq?: string; changedAt?: string | null } = {}
+): DeliveryLiveSnapshot {
+  return {
+    type: "snapshot",
+    sub,
+    seq: options.seq ?? "1",
+    changed_at: options.changedAt ?? null,
+    body,
+    revs: NO_REVS,
+  };
+}
+
+/** Dispatch refusing subscription `sub` with the code the matching GET route would answer. */
+export function errorFrame(sub: string, code: string, message: string): DeliveryLiveError {
+  return { type: "error", sub, code, message };
+}
+
+/** A live-owned timeline query and an ordinary run read, both held in `queryClient`'s cache with
+ *  data and no observer, keyed and marked (`meta`) by the page's own query options, so a test reads
+ *  which of them a write invalidates. The live one is kept past its `gcTime` of 0. */
+export function seedDeliveryReads(queryClient: QueryClient): {
+  live: readonly unknown[];
+  run: readonly unknown[];
+} {
+  const timeline = deliveryTimelineQuery({ kind: "timeline", window: { preset: 28 }, query: "" });
+  const live: readonly unknown[] = timeline.queryKey;
+  const run: readonly unknown[] = deliveryRunQuery(42).queryKey;
+  const cache = queryClient.getQueryCache();
+  cache.build(queryClient, {
+    queryKey: live,
+    meta: timeline.meta,
+    gcTime: Number.POSITIVE_INFINITY,
+  });
+  cache.build(queryClient, { queryKey: run });
+  queryClient.setQueryData(live, {} as DeliveryTimelineResponse);
+  queryClient.setQueryData(run, { id: 42, jobs: [] } as unknown as DeliveryRunDetail);
+  return { live, run };
 }

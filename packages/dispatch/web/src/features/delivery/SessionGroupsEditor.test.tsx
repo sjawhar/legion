@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { seedDeliveryReads } from "../../__tests__/delivery-live-harness";
 import { ApiError, api } from "../../api/client";
 import type { DeliverySessionGroup } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -29,7 +30,6 @@ function renderEditor(
   } = {}
 ) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  const invalidate = spyOn(queryClient, "invalidateQueries");
   render(
     <MemoryRouter>
       <QueryClientProvider client={queryClient}>
@@ -44,7 +44,7 @@ function renderEditor(
       </QueryClientProvider>
     </MemoryRouter>
   );
-  return invalidate;
+  return queryClient;
 }
 
 test("it lists the window's sessions busiest first, each with its title, count and group", () => {
@@ -75,9 +75,10 @@ test("sessions sharing a title carry their ids in their checkbox labels", () => 
   }
 });
 
-test("create: two selected sessions and a name become a group, and the page reads again", async () => {
+test("create: two selected sessions and a name become a group; the live views hear of it from Dispatch, and only the reads that are not live read again", async () => {
   const create = spyOn(api, "createDeliverySessionGroup").mockResolvedValue(crew);
-  const invalidate = renderEditor();
+  const queryClient = renderEditor();
+  const reads = seedDeliveryReads(queryClient);
   try {
     fireEvent.click(screen.getByRole("checkbox", { name: "Planner one (s1)" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer (s3)" }));
@@ -88,7 +89,8 @@ test("create: two selected sessions and a name become a group, and the page read
     await waitFor(() =>
       expect(create).toHaveBeenCalledWith({ name: "Release crew", sessions: ["s1", "s3"] })
     );
-    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ["delivery"] }));
+    await waitFor(() => expect(queryClient.getQueryState(reads.run)?.isInvalidated).toBe(true));
+    expect(queryClient.getQueryState(reads.live)?.isInvalidated).toBe(false);
   } finally {
     cleanup();
     create.mockRestore();

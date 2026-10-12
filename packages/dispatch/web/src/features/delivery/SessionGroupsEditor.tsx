@@ -110,9 +110,10 @@ function GroupCard({
 /** The Delivery page's session-groups editor, opened from the Parent agent facet: the window's
  *  sessions with their titles, pull request counts and groups, to select and name as a new group,
  *  and every group, to rename, add the selected sessions to, remove members from, or delete. A
- *  member no pull request of the window names shows by its id. Each save reads the page again
- *  (every `["delivery"]` query), and a refusal shows as the server wrote it. A dialog
- *  (`useDialog`), at the right edge as the drill-down is, open while it is mounted. */
+ *  member no pull request of the window names shows by its id. A save reaches the page's live views
+ *  as Dispatch's own delta, so it refreshes only the `["delivery"]` reads that are not live (an open
+ *  run's drill-down), and a refusal shows as the server wrote it. A dialog (`useDialog`), at the
+ *  right edge as the drill-down is, open while it is mounted. */
 export function SessionGroupsEditor({
   onClose,
   groups,
@@ -134,7 +135,10 @@ export function SessionGroupsEditor({
     mutationFn: (change: () => Promise<unknown>) => change(),
     onSuccess: () => {
       setSelected([]);
-      void queryClient.invalidateQueries({ queryKey: ["delivery"] });
+      void queryClient.invalidateQueries({
+        queryKey: ["delivery"],
+        predicate: (query) => query.meta?.live !== true,
+      });
     },
   });
 

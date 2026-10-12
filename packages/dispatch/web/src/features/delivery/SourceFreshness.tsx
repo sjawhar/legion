@@ -1,5 +1,6 @@
 import { type ReactNode, useEffect, useState } from "react";
 
+import { useDeliveryLiveState } from "../../api/delivery-live";
 import {
   connectionDotConnected,
   connectionDotFailed,
@@ -9,11 +10,13 @@ import {
 import { type DeliveryFreshness, sourceFreshness } from "./lib/freshness";
 
 /** One row naming each source with how long ago it was checked (sourceFreshness): red, with its
- *  last error in the text and on hover, when its last check failed or it has gone stale. `readAtMs`
- *  is when the timeline was last answered, which is when Dispatch's issues and the agents' titles
- *  were read. Ticks every second on its own, so the ages move between refetches without
- *  re-rendering the page. The ticking ages are not a live region: a screen reader hears the
- *  visually hidden status line instead, which changes only when a source turns red or recovers. */
+ *  last error in the text and on hover, when its last check failed or it has gone stale. While the
+ *  page's live socket is open, the reconciled and event rows say Live instead, aged by the last
+ *  change the page applied, and read Reconnecting in red while the socket is lost. `readAtMs` is
+ *  when the page was last answered, which is when Dispatch's issues and the agents' titles were
+ *  read. Ticks every second on its own, so the ages move without re-rendering the page. The ticking
+ *  ages are not a live region: a screen reader hears the visually hidden status line instead,
+ *  which changes only when a source turns red or recovers. */
 export function SourceFreshness({
   freshness,
   readAtMs,
@@ -21,13 +24,14 @@ export function SourceFreshness({
   freshness: DeliveryFreshness;
   readAtMs: number;
 }): ReactNode {
+  const live = useDeliveryLiveState();
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(id);
   }, []);
 
-  const rows = sourceFreshness(freshness, now, readAtMs);
+  const rows = sourceFreshness(freshness, now, readAtMs, live);
   const red = rows.filter((row) => row.red);
   const announcement =
     red.length === 0

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { type DeliveryTimelineOptions, isDeliveryNotConfigured } from "../../api/client";
+import { isDeliveryNotConfigured } from "../../api/client";
 import { deliveryMeasuresQuery, deliveryTimelineQuery } from "../../api/queries";
 import type { DeliverySessionGroup } from "../../api/types";
 import { MultiSelect } from "../../components/MultiSelect";
@@ -45,10 +45,9 @@ import { parentAgentLabel } from "./lib/parentAgent";
 import {
   DEFAULT_WINDOW_PRESET,
   hasMalformedWindowParams,
-  presetRange,
+  liveWindow,
   readWindow,
   type WindowChoice,
-  type WindowPreset,
 } from "./lib/window";
 import { MeasuresPanel } from "./MeasuresPanel";
 import { PRList } from "./PRList";
@@ -92,11 +91,9 @@ export interface BrushWindow {
 }
 
 interface DeliveryUrlState {
-  /** The window the URL names: a rolling preset or a custom range. */
+  /** The window the URL names: a rolling preset, whose end Dispatch keeps at the present, or a
+   *  custom range. The range a preset resolved to is the answer's `window`. */
   window: WindowChoice;
-  /** That window's range: a preset's ends at the moment the preset was chosen or first read. */
-  from: string;
-  to: string;
   filters: Filters;
   view: DeliveryView;
   brush: BrushWindow | null;
@@ -105,34 +102,13 @@ interface DeliveryUrlState {
 /** The delivery page's full state, read from and written to the URL — the same pattern
  *  `features/project/issue-filters.ts`'s `useIssueFilters` uses: repeatable facet params through
  *  the shared `useRepeatableSearchParams`, one `update` (`useSearchParamsUpdate`) funnelling every
- *  write through `setSearchParams(..., {replace: true})`. `filters` is memoized on the URL's own
- *  identity, so a render with an unchanged URL hands `deliveryTimelineQuery` the same options. */
+ *  write through `setSearchParams(..., {replace: true})`. `window` and `filters` are memoized on the
+ *  URL's own identity, so a render with an unchanged URL builds the same live view. */
 function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => void] {
   const [searchParams] = useSearchParams();
   const update = useSearchParamsUpdate();
   const malformedWindow = hasMalformedWindowParams(searchParams);
-  const windowChoice = readWindow(searchParams);
-  // A preset's range is computed when the preset is chosen or first read, then held: computing
-  // "now" fresh on every render would mint a new ISO string (and so a new deliveryTimelineQuery
-  // cache key) on every render, refetching in a tight loop instead of once. A custom range drops
-  // it, so coming back to a preset starts it from that moment.
-  const presetRef = useRef<{ preset: WindowPreset; from: string; to: string } | undefined>(
-    undefined
-  );
-  let from: string;
-  let to: string;
-  if (windowChoice.kind === "custom") {
-    presetRef.current = undefined;
-    ({ from, to } = windowChoice);
-  } else {
-    if (presetRef.current?.preset !== windowChoice.preset) {
-      presetRef.current = {
-        preset: windowChoice.preset,
-        ...presetRange(windowChoice.preset, Date.now()),
-      };
-    }
-    ({ from, to } = presetRef.current);
-  }
+  const windowChoice = useMemo(() => readWindow(searchParams), [searchParams]);
   useEffect(() => {
     if (!malformedWindow) return;
     update((params) => {
@@ -207,7 +183,7 @@ function useDeliveryUrlState(): [DeliveryUrlState, (next: DeliveryUrlState) => v
     [update]
   );
 
-  return [{ window: windowChoice, from, to, filters, view, brush }, setState];
+  return [{ window: windowChoice, filters, view, brush }, setState];
 }
 
 /** `value`, once it has held still for `delayMs`. */
@@ -311,46 +287,50 @@ function OwnColourPicker({
 
 /** `/delivery`: successful production deploys, pipeline failures, and merged PRs labelled by
  *  agent session, Dispatch issue, priority, and architectural component, as the prototype's
- *  timeline view shows them. Until the timeline's configuration is set, the server answers
- *  `DELIVERY_NOT_CONFIGURED` and the page shows the settings form in the timeline's place; a save
- *  refetches the timeline, which then renders. */
+ *  timeline view shows them. Until the timeline's configuration is set, Dispatch refuses the
+ *  page's live view with `DELIVERY_NOT_CONFIGURED` and the page shows the settings form in the
+ *  timeline's place; once a save configures it, Dispatch answers the same subscription with the
+ *  timeline. */
 export function DeliveryPage(): ReactNode {
   useDocumentTitle("Delivery · Dispatch");
   const [state, setState] = useDeliveryUrlState();
   const [selection, setSelection] = useState<TimelineSelection | null>(null);
   const search = useSettled(state.filters.search.trim(), SEARCH_DEBOUNCE_MS);
 
-  // Every active facet and the search, sent to the server: `query.data.prs` is already the
-  // filtered list. Memoized so a render with an unchanged URL hands `deliveryTimelineQuery` back
-  // the same options object.
-  const timelineOptions: DeliveryTimelineOptions = useMemo(() => {
-    const options: DeliveryTimelineOptions = { from: state.from, to: state.to, q: search };
-    const facets: Record<string, readonly string[]> = {};
-    for (const key of FACET_KEYS) facets[FACET_PARAMS[key]] = state.filters[key];
-    return { ...options, ...facets };
-  }, [state.from, state.to, state.filters, search]);
-  const query = useQuery(deliveryTimelineQuery(timelineOptions));
+  // Every active facet and the search, as the query string the GET route would take without its
+  // window: Dispatch applies them, so `query.data.prs` is already the filtered list.
+  const liveQuery = useMemo(() => {
+    const params = new URLSearchParams();
+    if (search !== "") params.set("q", search);
+    for (const key of FACET_KEYS) {
+      for (const value of state.filters[key]) params.append(FACET_PARAMS[key], value);
+    }
+    return params.toString();
+  }, [state.filters, search]);
+  const query = useQuery(
+    deliveryTimelineQuery({ kind: "timeline", window: liveWindow(state.window), query: liveQuery })
+  );
   const data = query.data;
   // The measures follow a brush drag as the prototype's panel does (its App.tsx: computeDora over
   // the brush window), so they read the brush where the timeline keeps reading the whole window.
-  // With no brush the timeline's own read carries them (`measures`), so the page reads its
-  // population once; only a brush asks `GET /api/v1/delivery/measures` for its window.
-  const brushOptions: DeliveryTimelineOptions | null = useMemo(
-    () =>
-      state.brush === null
-        ? null
-        : { ...timelineOptions, from: state.brush.start, to: state.brush.end },
-    [timelineOptions, state.brush]
-  );
+  // With no brush the timeline's own answer carries them (`measures`), so the page subscribes its
+  // population once; only a brush subscribes a measures view of its own, for its window.
   const brushed = useQuery({
-    ...deliveryMeasuresQuery(brushOptions ?? timelineOptions),
-    enabled: brushOptions !== null,
+    ...deliveryMeasuresQuery({
+      kind: "measures",
+      window:
+        state.brush === null
+          ? liveWindow(state.window)
+          : { from: state.brush.start, to: state.brush.end },
+      query: liveQuery,
+    }),
+    enabled: state.brush !== null,
   });
-  const measures = brushOptions === null ? data?.measures : brushed.data;
-  // When the answer on screen was read. While a facet change refetches, the previous answer stays
-  // on screen (`keepPreviousData`) and the new query reports `dataUpdatedAt` 0, so this keeps the
-  // last time an answer arrived instead of reading that as the epoch. The response carries no
-  // generated time of its own.
+  const measures = state.brush === null ? data?.measures : brushed.data;
+  // When the answer on screen last changed (its snapshot or its latest delta). While a facet change
+  // waits for its snapshot, the previous answer stays on screen (`keepPreviousData`) and the new
+  // query reports `dataUpdatedAt` 0, so this keeps the last time an answer arrived instead of
+  // reading that as the epoch.
   const answeredAtRef = useRef(0);
   if (query.dataUpdatedAt > 0) answeredAtRef.current = query.dataUpdatedAt;
   const answeredAt = answeredAtRef.current;
@@ -471,7 +451,7 @@ export function DeliveryPage(): ReactNode {
             />
           ) : null}
 
-          {data === undefined ? null : brushOptions !== null && brushed.isError ? (
+          {data === undefined ? null : state.brush !== null && brushed.isError ? (
             <QueryError
               message="Couldn't load the delivery measures."
               onRetry={() => void brushed.refetch()}

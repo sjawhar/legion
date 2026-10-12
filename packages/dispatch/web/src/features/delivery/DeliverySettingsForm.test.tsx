@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+import { seedDeliveryReads } from "../../__tests__/delivery-live-harness";
 import { ApiError, api } from "../../api/client";
 import type { DeliverySettings } from "../../api/types";
 import { DeliverySettingsForm } from "./DeliverySettingsForm";
@@ -87,6 +88,7 @@ test("Save sends the fields trimmed and each list split into its entries", async
 
   try {
     const queryClient = renderForm();
+    const reads = seedDeliveryReads(queryClient);
     const invalidate = spyOn(queryClient, "invalidateQueries");
     await screen.findByRole("button", { name: "Save delivery settings" });
 
@@ -118,13 +120,16 @@ test("Save sends the fields trimmed and each list split into its entries", async
       staging_apply_job_name: null,
       staging_e2e_job_name: null,
     });
-    // A save refreshes the record and every delivery timeline read beneath ["delivery"].
+    // A save refreshes the record and the delivery reads that are not live (an open run's
+    // drill-down); a live view learns of the save from Dispatch, as a delta.
     await waitFor(() =>
       expect(invalidate.mock.calls.map(([filters]) => filters?.queryKey)).toEqual([
         ["delivery-settings"],
         ["delivery"],
       ])
     );
+    expect(queryClient.getQueryState(reads.run)?.isInvalidated).toBe(true);
+    expect(queryClient.getQueryState(reads.live)?.isInvalidated).toBe(false);
   } finally {
     cleanup();
     getDeliverySettings.mockRestore();
