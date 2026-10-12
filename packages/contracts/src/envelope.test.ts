@@ -6,6 +6,7 @@ import {
   dispatchDocumentSubject,
   GHOSTWISPR_TOPIC_PREFIX,
   ghostWisprSubject,
+  githubJobSubject,
   githubPushSubject,
   githubResourceSubject,
   githubSubject,
@@ -221,6 +222,9 @@ test("GitHub subjects write a dotted owner or name as one segment", () => {
   expect(githubWorkflowSubject("acme", "site.io", "ci.yml", "completed")).toBe(
     "notifications.github.acme.site_io.workflow.ci_yml.completed"
   );
+  expect(githubJobSubject("acme", "site.io", 500, "completed")).toBe(
+    "notifications.github.acme.site_io.job.500.completed"
+  );
   expect(githubSubject("acme", "widgets", "pr.7.checks")).toBe(
     "notifications.github.acme.widgets.pr.7.checks"
   );
@@ -393,6 +397,22 @@ describe("githubWorkflowSubject", () => {
     const workflow = githubWorkflowSubject("acme", "widgets", "ci.yml", "completed");
     const repoLevel = githubSubject("acme", "widgets", "workflow");
     expect(workflow.startsWith(`${repoLevel}.`)).toBe(true);
+  });
+});
+
+describe("githubJobSubject", () => {
+  test("names the run whose Actions job finished", () => {
+    expect(githubJobSubject("acme", "widgets", 500, "completed")).toBe(
+      "notifications.github.acme.widgets.job.500.completed"
+    );
+    expect(githubJobSubject("sjawhar", "legion", "38230245571", "completed")).toBe(
+      "notifications.github.sjawhar.legion.job.38230245571.completed"
+    );
+  });
+
+  test("is consistent with githubSubject prefix", () => {
+    const job = githubJobSubject("acme", "widgets", 500, "completed");
+    expect(job.startsWith(`${githubSubject("acme", "widgets", "job")}.`)).toBe(true);
   });
 });
 
