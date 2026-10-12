@@ -289,9 +289,12 @@ func sessionOnVolume(file, root string) string {
 	return filepath.Join(root, SessionsSubPath, strings.TrimPrefix(file, ompSessionsDir+"/"))
 }
 
-// agentArgv is the command the shim runs: the agent with the image's Envoy and Legion plugins as
-// its two explicit extensions, the Envoy plugin first, `--resume` on the recorded session when
-// resuming, then RPC mode and the system prompt. Extension discovery stays on: a pod runs the
+// agentArgv is the command the shim runs: the agent with its two explicit extensions, the Envoy
+// plugin first, `--resume` on the recorded session when resuming, then RPC mode and the system
+// prompt. For a plain launch the two roots are the image's own (envoyPlugin, legionPlugin); for
+// an installing launch (l.spec.Plugins set, LEGION-164) they are the pair launcherCommand's
+// install wrapper lands under this generation's own directory (pluginRoots), installed before Oh
+// My Pi starts rather than the image's. Extension discovery stays on either way: a pod runs the
 // repository's .omp/extensions, hooks, TypeScript commands, `extensions:` settings and installed
 // profile plugins exactly as a tmux pane always has (the boot gate's pane lane is built on
 // discovery). Repository code runs in the agent's process, which holds the role's credential grant
@@ -301,7 +304,11 @@ func sessionOnVolume(file, root string) string {
 // image leaves unlinked from its profile: Oh My Pi loads a plugin that is both installed and named
 // by --extension twice, which the boot gate's pod lane refuses an image for.
 func (l launch) agentArgv(agent []string) []string {
-	argv := append(slices.Clone(agent), "--extension", envoyPlugin, "--extension", legionPlugin)
+	envoy, legion := envoyPlugin, legionPlugin
+	if l.spec.Plugins != nil {
+		envoy, legion = pluginRoots(pluginGenDir(roleStateHome(l.spec.Role), l.spec.Generation))
+	}
+	argv := append(slices.Clone(agent), "--extension", envoy, "--extension", legion)
 	if l.resumeFile != "" {
 		argv = append(argv, "--resume="+l.resumeFile)
 	}
