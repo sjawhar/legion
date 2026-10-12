@@ -807,10 +807,11 @@ describe("cleanDetail", () => {
     expect(problems).toEqual([]);
   });
 
-  // JavaScriptCore backtracks, so a rule that may start inside a run its own value class reads
-  // through takes time quadratic in the run: at d78aa3d4 these units took 1.2 to 1.8 s at 50 KiB on
-  // a loaded machine, where a linear rule takes a few milliseconds. 64 KiB keeps the quadratic case
-  // above 1 s on a faster one.
+  // A rule that may start inside a run its own value class reads through makes JavaScriptCore,
+  // which backtracks, read that run once per start: time quadratic in the detail, which the plugin
+  // cleans before it cuts it to 1,024 bytes, so one such detail stalls a session's start. Each
+  // fixture unit, repeated, holds a start for every repetition. At 64 KiB a linear rule takes a few
+  // milliseconds and a quadratic one takes seconds, so the 1 s bound separates them on any machine.
   for (const { name, unit } of redaction.linear) {
     test(`stays linear: ${name}, 64 KiB in under 1 s`, () => {
       const text = unit.repeat(Math.ceil((64 * 1024) / unit.length));

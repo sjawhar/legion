@@ -453,6 +453,18 @@
     },
     {
       "pattern": "cleanup",
+      "name": "a JWT right after a replacement character, with a C1 control in its second segment",
+      "detail": "token \ufffdeyJhbGciOiJSUzI1NiJ9.eyJzdWIiOi\u0090JzeXN0ZW0ifQ.c2lnbmF0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
+      "name": "a JWT right after a replacement character, with a BEL in its third segment",
+      "detail": "token \ufffdeyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJzeXN0ZW0ifQ.c2lnbm\u0007F0dXJl expired",
+      "want": "token *** expired"
+    },
+    {
+      "pattern": "cleanup",
       "name": "an AWS key id right after an unterminated ESC [",
       "detail": "AccessDenied: \u001b[AKIAIOSFODNN7EXAMPLE is not authorized",
       "want": "AccessDenied: KIA*** is not authorized"
@@ -766,6 +778,14 @@
       "name": "a JWT start after each complete sequence ending in a non-word byte",
       "unit": "eyJ\u001b[~"
     },
-    { "name": "a JWT start after each unterminated ESC [", "unit": "eyJ\u001b[" }
+    { "name": "a JWT start after each unterminated ESC [", "unit": "eyJ\u001b[" },
+    {
+      "name": "a JWT start after each \\uXXXX escape whose backslash closes an ESC [",
+      "unit": "\u001b[\\u0022eyJ"
+    },
+    {
+      "name": "a JWT start after each held character, its first segment ended by a dot and its second by a non-value byte",
+      "unit": "\u0007eyJabcdefgh.abcdefghijklmnopqrstuvwxyzabcd!"
+    }
   ]
 }

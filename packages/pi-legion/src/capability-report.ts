@@ -468,12 +468,16 @@ function truncateUtf8(text: string, max: number): string {
  * fixture names each with an example. A value class runs across a `HELD_SEQUENCE`, and a separator
  * takes a space or `HELD`. The userinfo rule starts only where a run of scheme characters starts.
  * The JWT rule starts nowhere its first segment's class could have run on from: not after held, a
- * C1 introducer or a value character, and not after a held `[`, its parameters and any final byte,
- * where the daemon's rule matches that prefix and gives it back. It may start after an opener,
- * which its first segment does not run across, and right after a percent or `\u` escape. So a
- * start that fails reads at most to the next opener: JavaScriptCore backtracks, where the daemon's
- * RE2 does not, and a start inside a run the first segment reads through would read that run once
- * per start.
+ * C1 introducer or a value character, and not after a held `[` and its parameters, followed by any
+ * final byte or by a `\uXXXX` escape whose backslash is that final byte. Its one lookbehind for the
+ * held prefix reads like the daemon's rule, which matches that prefix with `eyJ` and gives it back.
+ * It may start after an opener, which its first segment does not run across, and right after a
+ * percent or `\u` escape that no held sequence closes. It may also start right after held when its
+ * first segment crosses neither held nor an opener, so a JWT right after a replacement character is
+ * masked in the first pass, before the fourth reading would split it at a control inside it. So a
+ * start that fails reads at most to the next held character or opener: JavaScriptCore backtracks,
+ * where the daemon's RE2 does not, and a start inside a run the first segment reads through would
+ * read that run once per start.
  */
 const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   [/(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^ /?#]+@/gi, "$1***@"],
@@ -513,7 +517,7 @@ const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
   ],
   [
     new RegExp(
-      String.raw`(?=eyJ)(?:(?<![A-Za-z0-9_\ufffe\uffff-])(?<!\uffff\[[0-?]*)(?<!\uffff\[[0-?]*[@-~])|(?<=%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}))eyJ(?:[A-Za-z0-9_-]|${JWT_FIRST_HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE})*`,
+      String.raw`(?:(?=eyJ)(?<!\uffff\[[0-?]*(?:[@-~]?|\\u[0-9A-Fa-f]{4}))(?:(?<![A-Za-z0-9_\ufffe\uffff-])|(?<=%[0-9A-Fa-f]{2}|\\u[0-9A-Fa-f]{4}))eyJ(?:[A-Za-z0-9_-]|${JWT_FIRST_HELD_SEQUENCE}){8,}|(?<=\uffff)eyJ(?:[A-Za-z0-9_-]|\ufffe){8,})\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE}){8,}\.(?:[A-Za-z0-9_-]|${HELD_SEQUENCE})*`,
       "g"
     ),
     "***",
