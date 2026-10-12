@@ -3,7 +3,6 @@ import type { Window as HappyDOMWindow } from "happy-dom";
 import { Schema } from "prosemirror-model";
 
 import { pictureClassName } from "../refs/DispatchPicture";
-import { buildReferencePath, parseDispatchReference } from "../refs/routes";
 import { pictureView } from "./picture-view";
 
 // Milkdown's `image` node: `src`/`alt`/`title` strings and a `toDOM` that writes them onto an
@@ -131,21 +130,20 @@ test("an error raised as the source is set is not missed", () => {
 });
 
 test("a source that pins no version, or names no artifact, is a link at once", () => {
-  for (const source of ["dispatch://CORE-1/artifact/notes-md", "dispatch://CORE-1/ask/a1"]) {
-    const route = parseDispatchReference(source);
-    if (route === undefined) throw new Error(`${source} is no reference`);
+  const cases = [
+    ["dispatch://CORE-1/artifact/notes-md", "/issues/CORE-1/artifacts/notes-md", "CORE-1 notes-md"],
+    ["dispatch://CORE-1/ask/a1", "/issues/CORE-1/asks/a1", "CORE-1 ask"],
+  ] as const;
+  for (const [source, href, words] of cases) {
     const dom = wrapper(source, "notes.md");
 
     expect(dom.getAttribute("data-dispatch-doc-picture")).toBe(source);
     expect(dom.querySelector("img")).toBeNull();
     const link = linkOf(dom);
-    expect(link.getAttribute("href")).toBe(buildReferencePath(route));
+    expect(link.getAttribute("href")).toBe(href);
     expect(link.getAttribute("data-dispatch-href")).toBe(source);
+    expect(link.textContent).toBe(words);
   }
-  expect(linkOf(wrapper("dispatch://CORE-1/artifact/notes-md")).textContent).toBe(
-    "CORE-1 notes-md"
-  );
-  expect(linkOf(wrapper("dispatch://CORE-1/ask/a1")).textContent).toBe("CORE-1 ask");
 });
 
 test("a picture from elsewhere, or a reference the grammar refuses, is drawn by the schema", () => {
