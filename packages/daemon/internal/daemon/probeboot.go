@@ -55,9 +55,12 @@ func probeBoot(ctx context.Context, cfg config.Config, lookup func(string) (stri
 	if err != nil {
 		return bootprobe.ImageReport{}, err
 	}
-	prober, err := newProber(ctx, reads.sandbox.client, reads.sandbox.opts)
+	// The prober's informers run until this context ends, so they stop when the probe returns.
+	probing, stop := context.WithCancel(ctx)
+	defer stop()
+	prober, err := newProber(probing, reads.sandbox.client, reads.sandbox.opts)
 	if err != nil {
 		return bootprobe.ImageReport{}, err
 	}
-	return prober.ProbeImage(ctx, probe)
+	return prober.ProbeImage(probing, probe)
 }

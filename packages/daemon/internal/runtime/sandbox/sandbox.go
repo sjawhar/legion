@@ -326,9 +326,11 @@ func configureFor(opts Options, supervised bool) (*Runtime, error) {
 	if errs := validation.IsValidLabelValue(opts.Project); len(errs) > 0 {
 		return refuse("project %q is not a label value: %s", opts.Project, strings.Join(errs, "; "))
 	}
-	host, ok := strings.CutPrefix(opts.StreamURL, "tcp://")
-	if _, _, err := net.SplitHostPort(host); supervised && (!ok || err != nil) {
-		return refuse("stream URL %q is not tcp://host:port, which a pod can dial", opts.StreamURL)
+	if supervised {
+		host, ok := strings.CutPrefix(opts.StreamURL, "tcp://")
+		if _, _, err := net.SplitHostPort(host); !ok || err != nil {
+			return refuse("stream URL %q is not tcp://host:port, which a pod can dial", opts.StreamURL)
+		}
 	}
 	for _, tool := range []struct{ name, path string }{
 		{"gh", opts.Tools.GH}, {"git", opts.Tools.Git}, {"jj", opts.Tools.JJ}, {"legion", opts.Tools.Legion},
