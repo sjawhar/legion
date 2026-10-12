@@ -2,59 +2,47 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "LEGION-695",
-  "completed": "2026-10-12T19:24:00Z",
+  "completed": "2026-10-12T20:35:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1928",
-  "round": 2,
-  "reviewedHead": "61d72a1c00ed22da09e6404a61b2c4bda8dee31b",
-  "codeHead": "fcf0ad1b1b66f45b99b62ed04a067ac42f0e4ecb",
-  "verdict": "changes_requested",
+  "round": 3,
+  "reviewedHead": "3141cdc51b1cad5d5d97d06989bd990c2d06ddbb",
+  "codeHead": "af766f053b7a9917ce9361409a00e07a45e8f2fe",
+  "verdict": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
+  "important": 0,
+  "minor": 2,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/dispatch/AGENTS.md:719",
-      "description": "Documentation correctness: the passage ends '`ignoreMutation` is always true, since the swap from `<img>` to `<a>` is the one DOM change it makes itself and is never an edit' - the view has had no `ignoreMutation` since 8af418cf (picture-view.ts returns `{ dom }` or `{ dom, stopEvent }`), removed because `() => true` swallowed ProseMirror's selection record (round 1). The sentence documents the round-1 defect as a rule a future reader would restore. Correct statement: the view sets no `ignoreMutation`; prosemirror-view's leaf default (`!contentDOM && mutation.type != \"selection\"`, dist/index.js:1110-1111) already ignores the swap and still reports selection records."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/AGENTS.md:719; packages/dispatch/web/src/features/doc/picture-view.ts:14-17",
-      "description": "Documentation correctness: 'the read-only version view has no click handler so there the browser follows its `href`' is not what happens. `click` is not a prosemirror-view native handler, so proof-editor's `markdownLinkClickPlugin` (`handleDOMEvents.click`, lib.ts:343) runs ungated by `stopEvent`; on a non-editable view `shouldOpenLinkForEvent` is `!event.defaultPrevented` and the plugin `preventDefault`s and opens the href in a new tab (`window.open(href, '_blank', 'noopener,noreferrer')`) - the tester observed exactly this. In the live editor the in-app navigation also depends on that plugin declining an unmodified primary click on an editable view (markdown-link-click.ts:521-527). Same passage: `RefPreviewHost` is not the only hover card - the library's link card (`handleMouseMove` -> `showCardForLink`, any `a[href]` outside `[data-mark-id]`, editable view) opens on the same element, so a fallback link shows two cards; settle (suppress one) or document."
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/doc/picture-view.ts:113-122",
+      "description": "Structure (Fast-follow, not blocking): `pictureNodeView(view)` is a factory closing over the `EditorView` it is handed, while prosemirror-view passes that same view as the constructor's second argument (`NodeViewConstructor = (node, view, getPos, …)`, dist/index.d.ts:617; built at dist/index.js:1297-1305) - the `_view` placeholder it discards is the captured object. A plain `export const pictureNodeView: NodeViewConstructor = (node, view, getPos) => …` and `image: pictureNodeView` removes the layer with identical behaviour."
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/AGENTS.md:1067-1068",
-      "description": "The exhaustive list of specs the `firefox` Playwright project runs was not extended with `e2e/picture-link-click.e2e.ts`, which playwright.config.ts:151-152 now matches."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/doc/picture-view.ts:95-96",
-      "description": "Hardening: `stopEvent` is still true for `dragstart` whose target is inside the link. `link.draggable = false` removes the known path (the wrapper is the drag source), but a drag of a DOM selection made over the link's words still fires `dragstart` inside the link, leaves `view.dragging` null and sends the drop down `handleDrop`'s external-HTML branch - the round-1 shape. Returning false for `dragstart` costs nothing: `handlers.dragstart` (:3816-3819) resolves the wrapper's desc and drags the picture node. Not reproduced in a browser."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/doc/ask-block.ts:390-398",
-      "description": "Structure (Fast-follow): the Firefox caret workaround's reason lives in picture-view.ts:31-40 and its implementation (the `TextSelection` dispatch at `getPos() + node.nodeSize`) in ask-block.ts; a `pictureNodeView(view)` exported from picture-view.ts would keep them together and leave ask-block.ts to the typed blocks."
+      "file": "packages/dispatch/web/src/features/doc/picture-view.test.ts:97,135",
+      "description": "The round's one behaviour token (`stopEvent` false for `dragstart`) has no pin: the two `stopEvent` assertions pass a `click`; the e2e drag row's `dragstart` targets the wrapper (`link.draggable = false`), so it ran the same before and after. The path is not reachable by gesture (tester, round 4), so this is a contract pin, not a missing regression lock - one assertion beside the link case when the file is next touched."
     }
   ],
-  "round1": {
-    "reviewedHead": "715590d7c6bdca589b7dec439b439230eb3752f1",
-    "verdict": "changes_requested",
-    "threads": {
-      "PRRT_kwDORFy7ds6rjBua": "fixed in 8af418cf - ignoreMutation override removed; accepted",
-      "PRRT_kwDORFy7ds6rjBud": "fixed in 8af418cf - link.draggable = false, e2e drag lock, proven in Chromium and Firefox; accepted",
-      "PRRT_kwDORFy7ds6rjBuf": "declined - published renderSpec signature has three parameters (prosemirror-model dist/index.d.ts:150), guard not engaged; accepted as not a defect"
-    }
+  "round2Threads": {
+    "PRRT_kwDORFy7ds6rmCkN": "fixed in af766f05 - AGENTS.md:719 says the view sets no ignoreMutation and why the leaf default suffices; checked against picture-view.ts:94-106 and prosemirror-view :1110-1111, :1632-1634; accepted",
+    "PRRT_kwDORFy7ds6rmCkT": "fixed in af766f05 - the version view's click (markdownLinkClickPlugin, new tab), Ctrl/Cmd-click, middle click and the two hover cards are stated as the code behaves; documented rather than settled, which I accept: suppressing the library card would cost the real href; accepted",
+    "PRRT_kwDORFy7ds6rmCkV": "fixed in af766f05 - fallbackLink's comment reworded the same way; accepted",
+    "PRRT_kwDORFy7ds6rmCkY": "fixed in af766f05 - stopEvent returns false for dragstart; copy/cut stay stopped; traced: handlers.dragstart with mouseDown null and a target inside the link resolves the wrapper's desc and drags the picture node; accepted",
+    "PRRT_kwDORFy7ds6rmCkf": "fixed in af766f05 - pictureNodeView exported from picture-view.ts beside the Firefox explanation; ask-block.ts no longer imports TextSelection; accepted (the factory layer is the named Fast-follow)"
   },
   "thermonuclear": {
-    "head": "61d72a1c00ed22da09e6404a61b2c4bda8dee31b",
-    "deepReview": "0 Critical/Important; 4 Minor (the two AGENTS.md inaccuracies, the double hover card, the stale PR-body Look-at-first), 2 hardening (stopEvent/dragstart; renderSpec guard, traced non-exploitable). Round-1 fixes re-traced and hold; placeCaretAfter mechanism traced end to end (position validity, selectionToDOM in each focus state, plugins inert for a selection-only transaction, read-only view, drag after the dispatch).",
-    "codeQuality": "Rated the two AGENTS.md sentences and the split caret workaround Important; the stale firefox list, getIssueArtifactText, PictureReference's `caption: \"\"` and the CHANGELOG wording Minor/hardening. pictureReference refactor output-identical in both callers."
+    "head": "3141cdc51b1cad5d5d97d06989bd990c2d06ddbb",
+    "deepReview": "0 Critical/Important. Minor: stale reviewer lines in the PR body (mine, rewritten), the Size line, no pin for the dragstart token. Hardening: drop/dragover/dragenter inside the link still stopped (a drop onto the link's words is left to the browser, which refuses it over a non-editable element; not observed). The dragstart exception traced: an Element target inside the link resolves the wrapper's desc and drags the picture node; a Text-node target carries the collapsed selection's empty slice and handleDrop returns with no change. AGENTS.md:719 and :1067-1075 checked claim by claim and accurate. Threads 8/8 resolved verified on GitHub.",
+    "codeQuality": "0 Critical/Important. Minor: the pictureNodeView factory layer; stopEvent as a denylist (its allowlist proposal - stop only mousedown/copy/cut - I do not take: a focused <a> in Chromium would then hand keydown to ProseMirror's keymaps while the browser also activates the link); one AGENTS.md clause compressing stopEvent's mousedown role into 'the click'; the useDraftUpload parenthetical's placement. Every other sentence of AGENTS.md:719 and :1067-1075 checked accurate."
   },
   "verified": {
-    "ci": "At d68babb9 (the round-3 code push's head): Tests 38289216530 (lint, typecheck, test) success; Legion Envoy and Contracts 38289216494 success, its dispatch job (browser suite incl. picture-link-click.e2e.ts on chromium, iphone and firefox - `bunx playwright test --config e2e/playwright.config.ts` runs every project) success; PR Title 38289216480/38289275413/38291696154, Docs 38289216574, Worker Image 38289216485 success. No run on 61d72a1c (handoff-only, skip-checks); read_record checksVerdict green.",
-    "threads": "3 threads, all mine from round 1, each answered by the implementer with a Fixed/Declined reply and resolved by it at b1c1e709; the declined one verified (dist/index.d.ts:150).",
-    "proofs": "E2E (implementer) round 3 at fcf0ad1b (dispatch:local, real CLI, Firefox 155 and Chromium, 40-paragraph spec, negative control: with placeCaretAfter() removed the firefox row fails as the tester saw) and E2E (tester) round 3 at d68babb9 (own instance, both engines, red test 3 passed, right-click negative control) present in the PR body."
-  }
+    "ci": "At 0f242ed8 (the round-4 code push's head; code head af766f05): Tests 38299276077 (lint, typecheck, test) success; Legion Envoy and Contracts 38299276058 success, its dispatch job (unit tests, the browser suite: pictures.e2e.ts on chromium and iphone, picture-link-click.e2e.ts on chromium, iphone and firefox) success; Docs 38299276290, Worker Image 38299276104, PR Title x13 success. No run on 3141cdc5 (handoff-only); read_record checksVerdict green.",
+    "threads": "8 threads, all mine (3 round 1, 5 round 2), each answered by the implementer with a Fixed/Declined reply and resolved by it; each of mine answered with my own reply.",
+    "proofs": "E2E (implementer) round 4 at af766f05 (harness lanes re-run; the real-surface proofs of rounds 2-3 stand for unchanged behaviour, as my round-2 review said a docs-plus-one-token push needs) and E2E (tester) round 4 at 0f242ed8 (own dispatch:local, Chromium and Firefox 155: the drag moves the picture line once with no link words in both engines, the far-down click in-app, the nested links, the version view, the red test 3 passed; negative control: right click places no caret and changes nothing) present in the PR body with surface, command, observation, head and negative control."
+  },
+  "notProvenForMerge": [
+    "Two hover cards on a fallback link in the live editor (RefPreviewHost's and proof-editor's link card) - documented in AGENTS.md:719, not changed; a one-card design is a product decision for the architect.",
+    "A dragstart whose target is inside the fallback link is not reachable by gesture (the wrapper is the drag source); the token that lets it through is code-traced only.",
+    "WebKit is not exercised by any proof."
+  ]
 }
