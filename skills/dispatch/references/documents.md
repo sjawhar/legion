@@ -209,9 +209,10 @@ The command opens an approval ask with the options `Approve` and `Request change
 "Approve spec.md (version N)?" followed by the summary, where N is the document's latest version. It
 is refused, with nothing sent, while that version holds a decision block open, and the refusal
 names each block and its ask. An answer or a `dispatch resolve-ask` closes the ask at once but
-reaches a version only when the document settles, about two seconds later, or with your next
-`dispatch doc-edit`: fold the answer into the text (or, for a waiver, write the human's decision
-in) before you request. A block written in the last few seconds counts as open before Dispatch has
+reaches a version only when the document settles, about two seconds later. An answered block
+already carries its own record, so wait for that version rather than editing just to force one; a
+waiver carries none, so write the human's decision into the text with your next `dispatch doc-edit`
+before you request. A block written in the last few seconds counts as open before Dispatch has
 opened its ask. A document holds one open request. A new version moves it to that version, keeping
 its thread and summary, and leaves it waiting on you, as a human's reply in its thread does; a move
 your own edit made sends you no event, and `dispatch read` and `dispatch doc-read` show it as
