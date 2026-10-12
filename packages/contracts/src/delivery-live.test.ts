@@ -2,16 +2,19 @@ import { expect, test } from "bun:test";
 import after from "../fixtures/delivery-live/after.json";
 import delta from "../fixtures/delivery-live/delta.json";
 import error from "../fixtures/delivery-live/error.json";
+import heartbeat from "../fixtures/delivery-live/heartbeat.json";
 import snapshot from "../fixtures/delivery-live/snapshot.json";
 import type {
   DeliveryLiveCounts,
   DeliveryLiveDelta,
   DeliveryLiveError,
+  DeliveryLiveHeartbeat,
   DeliveryLiveItemChanges,
   DeliveryLiveList,
   DeliveryLiveMap,
   DeliveryLiveRevChanges,
   DeliveryLiveRevs,
+  DeliveryLiveServerFrame,
   DeliveryLiveSnapshot,
   DeliveryTimelineResponse,
 } from "./dispatch-api";
@@ -49,6 +52,14 @@ const DELTA_KEYS = allOf<keyof DeliveryLiveDelta>()([
   "revs",
 ]);
 const ERROR_KEYS = allOf<keyof DeliveryLiveError>()(["type", "sub", "code", "message"]);
+const HEARTBEAT_KEYS = allOf<keyof DeliveryLiveHeartbeat>()(["type"]);
+const SERVER_FRAME_TYPES = allOf<DeliveryLiveServerFrame["type"]>()([
+  "snapshot",
+  "delta",
+  "freshness",
+  "error",
+  "heartbeat",
+]);
 const TIMELINE_KEYS = allOf<keyof DeliveryTimelineResponse>()([
   "window",
   "prs",
@@ -171,4 +182,10 @@ test("an error frame names its code and its message", () => {
     message:
       "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
   });
+});
+
+test("a heartbeat frame carries its type and nothing else", () => {
+  expect(keysOf(heartbeat)).toEqual(sorted(HEARTBEAT_KEYS));
+  expect(heartbeat).toEqual({ type: "heartbeat" });
+  expect(SERVER_FRAME_TYPES).toContain(heartbeat.type as DeliveryLiveServerFrame["type"]);
 });
