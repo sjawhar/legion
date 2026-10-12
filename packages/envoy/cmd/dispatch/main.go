@@ -369,6 +369,9 @@ func main() {
 	go delivery.NewReconcile(database.Pool, appCtx.GitHub()).Run(ctx)
 	if natsClient != nil {
 		go delivery.NewIntake(natsClient, database.Pool, appCtx.GitHub()).Run(ctx)
+		// LEGION-690: a deploy run's jobs as each finishes, from Envoy's job events, on a durable
+		// of its own so a run's burst of jobs never queues behind the intake's merges.
+		go delivery.NewJobIntake(natsClient, database.Pool, appCtx.GitHub()).Run(ctx)
 	} else {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}

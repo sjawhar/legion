@@ -639,6 +639,14 @@ func RunCompletedAt(ctx context.Context, q Querier, repo string, runID int64) (*
 	return completedAt, true, nil
 }
 
+// RunTracked reports whether repo's run runID is stored: the job consumer reads GitHub only for a
+// run Dispatch already tracks, so a job event of any other run costs this one indexed read.
+func RunTracked(ctx context.Context, q Querier, repo string, runID int64) (bool, error) {
+	var tracked bool
+	err := q.QueryRow(ctx, `select exists(select 1 from delivery_runs where repo = $1 and run_id = $2)`, repo, runID).Scan(&tracked)
+	return tracked, err
+}
+
 // MarkRunJobsUnfetchable records that repo's run_id's job listing answered a permanent 404
 // (github_runs.go's ErrRunNotFound) or a 404 resolving which installation covers the repository
 // (githubapp.ErrNoInstallation): the run's repository no longer exists, or no longer reaches this
