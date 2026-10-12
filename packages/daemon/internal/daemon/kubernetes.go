@@ -127,8 +127,7 @@ type sandboxBoot struct {
 	// namespace for the project.
 	clusterCheck func(context.Context) error
 	// probe is the image probe the runtime runs (sandbox.ImageProbe), over the references of the
-	// role prompts every worker pod is handed (prompts.RoleReferences, the daemon's own
-	// plan.roleReferences).
+	// role prompts every worker pod is handed (prompts.RoleReferences).
 	probe sandbox.ImageProbe
 }
 
