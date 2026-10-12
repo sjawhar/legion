@@ -29,6 +29,7 @@ import type {
   CreateAskInput,
   CreateBroadcastInput,
   CreateCommentInput,
+  CreateDeliverySessionGroupInput,
   CreatedAgentToken,
   CreateIssueInput,
   CreateMessageInput,
@@ -41,6 +42,7 @@ import type {
   DeliveryMeasuresResponse,
   DeliveryPipelineResponse,
   DeliveryRunDetail,
+  DeliverySessionGroup,
   DeliverySettings,
   DeliverySettingsInput,
   DeliveryTimelineResponse,
@@ -63,6 +65,7 @@ import type {
   RepoProject,
   SearchResponse,
   Subscriber,
+  UpdateDeliverySessionGroupInput,
   UpdateIssueInput,
   UserAgentState,
   UserAgentStateInput,
@@ -736,6 +739,34 @@ export class DispatchApiClient {
    *  the GitHub App can read `deploy_repo`, answering `409 DELIVERY_SETTINGS_ACCESS` when not. */
   putDeliverySettings(input: DeliverySettingsInput): Promise<DeliverySettings> {
     return this.send<DeliverySettings>("PUT", "/api/v1/settings/delivery", input);
+  }
+
+  /** Creates a Delivery session group: its sessions' pull requests take it as their Parent agent.
+   *  A session another group holds is `409 SESSION_IN_GROUP`; a name another group has, or that is
+   *  the title of a session outside the group, is `409` as well, the message naming which. */
+  createDeliverySessionGroup(
+    input: CreateDeliverySessionGroupInput
+  ): Promise<DeliverySessionGroup> {
+    return this.post<DeliverySessionGroup>("/api/v1/delivery/session-groups", input);
+  }
+
+  /** Renames a session group, adds sessions to it or removes sessions from it. */
+  updateDeliverySessionGroup(
+    id: string,
+    input: UpdateDeliverySessionGroupInput
+  ): Promise<DeliverySessionGroup> {
+    return this.send<DeliverySessionGroup>(
+      "PATCH",
+      `/api/v1/delivery/session-groups/${pathSegment(id)}`,
+      input
+    );
+  }
+
+  /** Deletes a session group; its sessions show as themselves again. */
+  async deleteDeliverySessionGroup(id: string): Promise<void> {
+    await this.response(`/api/v1/delivery/session-groups/${pathSegment(id)}`, {
+      method: "DELETE",
+    });
   }
 
   getIssueSubscribers(key: string): Promise<Subscriber[]> {

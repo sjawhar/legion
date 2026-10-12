@@ -108,8 +108,8 @@ func (s *server) deliverySettings(w http.ResponseWriter, r *http.Request) (deliv
 
 // getDeliveryTimeline answers GET /api/v1/delivery/timeline: merges, deploys, pipeline failures
 // and waiting-to-deploy PRs within [from, to) and the given facets and search, computed from
-// stored facts at request time (deployed_status, root_failing_job, the parent_agent/session
-// display labels, the issue facts and every count are never stored -- "the server computes every
+// stored facts at request time (deployed_status, root_failing_job, the Parent agent and session
+// labels, the issue facts and every count are never stored -- "the server computes every
 // measure from stored facts on request"), and the measures of that same window and selection
 // (deliveryMeasuresFor over the population this read already holds), so a page showing both reads
 // the population once. GET /api/v1/delivery/measures is the measures alone, for another window.
@@ -183,15 +183,18 @@ func (s *server) getDeliveryTimeline(w http.ResponseWriter, r *http.Request) {
 
 	WriteJSON(w, http.StatusOK, deliveryTimelineWithMeasures{
 		DeliveryTimelineResponse: delivery.DeliveryTimelineResponse{
-			Window:      delivery.DeliveryWindowView{From: from, To: to},
-			PRs:         prViews,
-			Waiting:     waitingViews,
-			Runs:        runViews,
-			FacetCounts: deliveryFacetCounts(population.rows, population.selection),
-			ColorCounts: deliveryColorCounts(population.rows),
-			Components:  population.components,
-			IssueTitles: population.issueTitles,
-			Freshness:   population.freshness,
+			Window:          delivery.DeliveryWindowView{From: from, To: to},
+			PRs:             prViews,
+			Waiting:         waitingViews,
+			Runs:            runViews,
+			FacetCounts:     deliveryFacetCounts(population.rows, population.selection),
+			ColorCounts:     deliveryColorCounts(population.rows),
+			Components:      population.components,
+			IssueTitles:     population.issueTitles,
+			Freshness:       population.freshness,
+			SessionGroups:   population.sessionGroups,
+			SessionTitles:   population.sessionTitles,
+			SessionPRCounts: population.sessionPRCounts,
 		},
 		Measures: measured,
 	})
@@ -227,6 +230,13 @@ type deliveryPopulation struct {
 	jobsByRun   map[int64][]delivery.DeliveryRunJob
 	components  map[string]delivery.DeliveryComponentView
 	issueTitles map[string]string
+	// sessionGroups is every session group; sessionTitles and sessionPRCounts are, for each session
+	// that is the first session of a window pull request (the sessions a Parent agent can be),
+	// its title (or its id when it has none) and how many window pull requests it is first on,
+	// before the facets.
+	sessionGroups   []delivery.SessionGroup
+	sessionTitles   map[string]string
+	sessionPRCounts map[string]int
 	// freshness is the timeline's and the measures' freshness object: the settings row's intake
 	// and reconcile times, the last reconcile error, and how many population pull requests can no
 	// longer be fetched from GitHub.
@@ -256,9 +266,9 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	// (store.ForConcurrentRead): on the request's shared mark one read's open cursor would refuse
 	// the rest. The run jobs depend on the runs, so they follow the runs in the same goroutine.
 	//
-	// A timeline request therefore holds up to four of the pool's 16 connections
+	// A timeline request therefore holds up to five of the pool's 16 connections
 	// (store.sharedPoolSize) for the length of its longest read, where it held one at a time. That
-	// is fine because none of the four holds a lock or opens a transaction, so none waits on
+	// is fine because none of the five holds a lock or opens a transaction, so none waits on
 	// another caller or makes another caller wait on it: the deadlock the pool's guard exists to
 	// prevent needs a caller already holding a connection, which ForConcurrentRead refuses. A read
 	// past the pool's free connections waits for one, as any request does. The page reads the
@@ -270,6 +280,7 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		applyRuns        []delivery.DeliveryRun
 		jobsByRun        map[int64][]delivery.DeliveryRunJob
 		unfetchableCount int
+		groups           []delivery.SessionGroup
 	)
 	independent := []func(ctx context.Context) error{
 		func(ctx context.Context) (err error) {
@@ -299,6 +310,10 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 		},
 		func(ctx context.Context) (err error) {
 			unfetchableCount, err = delivery.CountUnfetchablePullRequests(ctx, pool)
+			return err
+		},
+		func(ctx context.Context) (err error) {
+			groups, err = delivery.ListSessionGroups(ctx, pool)
 			return err
 		},
 	}
@@ -348,6 +363,17 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	if err != nil {
 		return deliveryPopulation{}, err
 	}
+	parentAgents := delivery.NewParentAgents(groups, titles)
+	sessionTitles := map[string]string{}
+	sessionPRCounts := map[string]int{}
+	for _, pr := range prs {
+		if len(pr.Sessions) == 0 {
+			continue
+		}
+		first := pr.Sessions[0]
+		sessionPRCounts[first]++
+		sessionTitles[first] = delivery.SessionTitle(titles, first)
+	}
 	issues, err := s.deliveryIssueFacts(ctx, issueKeys)
 	if err != nil {
 		return deliveryPopulation{}, err
@@ -386,7 +412,7 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 			}
 		}
 		if len(pr.Sessions) > 0 {
-			agent := delivery.DisplayAgent(pr.Sessions[0], titles)
+			agent := parentAgents.Value(pr.Sessions[0])
 			view.ParentAgent = &agent
 		}
 		return view
@@ -422,14 +448,17 @@ func (s *server) filteredDeliveryPullRequests(ctx context.Context, settings deli
 	}
 
 	return deliveryPopulation{
-		rows:        rows,
-		shipped:     shipped,
-		selection:   parseDeliverySelection(query, components),
-		waiting:     waitingRows,
-		applyRuns:   applyRuns,
-		jobsByRun:   jobsByRun,
-		components:  components,
-		issueTitles: issueTitles,
+		rows:            rows,
+		shipped:         shipped,
+		selection:       parseDeliverySelection(query, components),
+		waiting:         waitingRows,
+		applyRuns:       applyRuns,
+		jobsByRun:       jobsByRun,
+		components:      components,
+		issueTitles:     issueTitles,
+		sessionGroups:   groups,
+		sessionTitles:   sessionTitles,
+		sessionPRCounts: sessionPRCounts,
 		freshness: delivery.DeliveryFreshnessView{
 			LastEventAt: settings.LastEventAt, LastReconcileAt: settings.LastReconcileAt, LastError: settings.LastError,
 			UnfetchableCount: unfetchableCount,

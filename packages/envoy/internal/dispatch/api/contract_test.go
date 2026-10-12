@@ -39,6 +39,8 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/events"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 const (
@@ -47,6 +49,10 @@ const (
 	// enrollment's operator.
 	contractOther   = "mallory@example.com"
 	contractUIToken = "contract-ui-token"
+	// contractDaemonAccount is the ServiceAccount the rig's BROKER_SERVICE_LOGINS lets log in as
+	// legion-daemon, and contractTokenAudience the audience its tokens carry.
+	contractDaemonAccount = "system:serviceaccount:legion-system:legion-daemon-contract"
+	contractTokenAudience = "agent-secrets"
 )
 
 // contractRig is the real broker (real Postgres) behind Dispatch's own mounted routes. Every UI
@@ -58,6 +64,8 @@ type contractRig struct {
 	Dispatch    http.Handler
 	BrokerURL   string
 	brokerStore *store.Store
+	issuer      *oidctest.Issuer
+	issuerKey   *oidctest.Key
 }
 
 func newContractRig(t *testing.T) *contractRig {
@@ -77,7 +85,16 @@ func newContractRig(t *testing.T) *contractRig {
 	brokerServer := httptest.NewServer(brokerMux)
 	t.Cleanup(brokerServer.Close)
 
-	enr := &enroll.Service{Store: brokerStore, Lease: time.Hour}
+	issuer := oidctest.New(t)
+	issuerKey := issuer.PublishKey(t, "signing-key")
+	tokenVerifier, err := oidc.New(context.Background(), issuer.URL(), contractTokenAudience)
+	if err != nil {
+		t.Fatalf("oidc.New: %v", err)
+	}
+	enr := &enroll.Service{
+		Store: brokerStore, Lease: time.Hour, Pod: enroll.K8sPodVerifier{Verifier: tokenVerifier},
+		ServiceLogins: map[string]string{contractDaemonAccount: "legion-daemon"},
+	}
 	enr.Chain = enroll.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
 	reqMachine := &requests.Machine{
 		Store: brokerStore, Policy: cur, Secrets: secrets.AWS{Client: local},
@@ -114,7 +131,7 @@ func newContractRig(t *testing.T) *contractRig {
 	dispatchMux := http.NewServeMux()
 	Register(dispatchMux, deps)
 
-	return &contractRig{Dispatch: dispatchMux, BrokerURL: brokerServer.URL, brokerStore: brokerStore}
+	return &contractRig{Dispatch: dispatchMux, BrokerURL: brokerServer.URL, brokerStore: brokerStore, issuer: issuer, issuerKey: issuerKey}
 }
 
 // --- fixture seeding: direct broker access, mirroring what an agent or a machine would do ---
@@ -341,7 +358,7 @@ func TestPendingListShowsCreatedRecordThroughDispatch(t *testing.T) {
 // resolves it to the record (ruling 13's one selector); approving through Dispatch with the same
 // code mints a launcher credential, and without the code the broker refuses CODE_REQUIRED.
 func TestMachineLoginLookupAndApproveThroughDispatch(t *testing.T) {
-	newContractRig(t).approveMachineLogin(t, contractApprover, "", "contract-test-host")
+	newContractRig(t).approveMachineLogin(t, contractApprover, "contract-test-host")
 }
 
 // TestGrantsListAndRevokeByApproverThroughDispatch approves a request to mint a grant, lists it
@@ -532,25 +549,17 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 	}
 }
 
-// approveMachineLogin logs approver's own machine in (service "") or a service's login in, the
-// login naming approver in its login_hint, and approves it as approver (approveMachineLoginAs).
-func (rig *contractRig) approveMachineLogin(t *testing.T, approver, service, host string) (string, *ecdsa.PrivateKey) {
-	t.Helper()
-	return rig.approveMachineLoginAs(t, approver, approver, service, host)
-}
-
-// approveMachineLoginAs logs a machine in as a person does: the machine posts its signed login,
-// naming loginHint ("" for none), straight to the broker; approver looks its code up through
-// Dispatch (ruling 13's one selector), which answers the pending launcher_credential record; an
-// approval without the code is refused CODE_REQUIRED; and approver's approval with the same code
-// mints a launcher credential. service names the service a service's login is for (the Legion
-// daemon's is legion-daemon), "" for a person's own machine. It returns the launcher credential the
-// approval minted and the machine's key.
-func (rig *contractRig) approveMachineLoginAs(t *testing.T, loginHint, approver, service, host string) (string, *ecdsa.PrivateKey) {
+// approveMachineLogin logs approver's own machine in as a person does: the machine posts its
+// signed login, naming approver in its login_hint, straight to the broker; approver looks its code
+// up through Dispatch (ruling 13's one selector), which answers the pending launcher_credential
+// record; an approval without the code is refused CODE_REQUIRED; and approver's approval with the
+// same code mints a launcher credential. It returns the launcher credential the approval minted and
+// the machine's key. A service logs in with its own token instead (tokenLogin).
+func (rig *contractRig) approveMachineLogin(t *testing.T, approver, host string) (string, *ecdsa.PrivateKey) {
 	t.Helper()
 	machineKey := contractSigningKey(t)
 	compact, err := record.Sign(machineKey, rig.BrokerURL,
-		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: host, Service: service}}, "", loginHint, nil, time.Now())
+		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: host}}, "", approver, nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
@@ -628,6 +637,7 @@ type contractMachineLogin struct {
 	CredentialID string    `json:"credential_id"`
 	Host         string    `json:"host"`
 	Service      *string   `json:"service"`
+	Subject      *string   `json:"subject"`
 	ApprovedBy   string    `json:"approved_by"`
 	IssuedAt     time.Time `json:"issued_at"`
 	ExpiresAt    time.Time `json:"expires_at"`
@@ -652,7 +662,7 @@ func (rig *contractRig) machineLoginsOf(t *testing.T, login string) []contractMa
 // and whose machine enrolls no one more.
 func TestAPersonRevokesTheirMachineLoginThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
-	credentialID, machineKey := rig.approveMachineLogin(t, contractApprover, "", "contract-test-host")
+	credentialID, machineKey := rig.approveMachineLogin(t, contractApprover, "contract-test-host")
 	status, body, session := rig.enrollWithLauncher(t, machineKey, credentialID, "box-"+t.Name())
 	if status != http.StatusCreated {
 		t.Fatalf("enroll under the machine login = %d: %s", status, body)
@@ -695,26 +705,53 @@ func TestAPersonRevokesTheirMachineLoginThroughDispatch(t *testing.T) {
 	}
 }
 
-// TestAServicesLoginIsApprovedListedAndRevokedByAnyoneThroughDispatch: a service's machine login
-// (the Legion daemon's, which has no operator) is approved through Dispatch by a person it names
-// nowhere, and its launcher authenticates; it is listed, named by its service and by who approved
-// it, for that person and for every other signed-in person; another person's revoke, whoever their
-// browser's body names, ends it, after which its launcher proofs authenticate nothing.
-func TestAServicesLoginIsApprovedListedAndRevokedByAnyoneThroughDispatch(t *testing.T) {
+// tokenLogin logs the daemon in on the broker with a fresh token for contractDaemonAccount and a
+// request object a fresh key signed, as the Legion daemon does at boot, and answers the credential
+// id and the key. No Dispatch route is involved: no person approves a token login.
+func (rig *contractRig) tokenLogin(t *testing.T) (string, *ecdsa.PrivateKey) {
+	t.Helper()
+	claims := rig.issuer.Claims(contractDaemonAccount, contractTokenAudience)
+	claims["iat"] = time.Now().Add(-5 * time.Second).Unix()
+	claims["exp"] = time.Now().Add(time.Hour).Unix()
+	key := contractSigningKey(t)
+	compact, err := record.Sign(key, rig.BrokerURL,
+		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: "legion-daemon", Service: "legion-daemon"}}, "", "", nil, time.Now())
+	if err != nil {
+		t.Fatalf("record.Sign: %v", err)
+	}
+	status, body := rig.brokerReq(t, http.MethodPost, "/v1/launcher-credentials/token", nil,
+		map[string]any{"token": rig.issuer.Mint(t, rig.issuerKey, claims), "request": compact})
+	var login struct {
+		CredentialID string `json:"credential_id"`
+	}
+	if err := json.Unmarshal(body, &login); status != http.StatusOK || err != nil || login.CredentialID == "" {
+		t.Fatalf("POST /v1/launcher-credentials/token = %d %s (%v), want a credential", status, body, err)
+	}
+	return login.CredentialID, key
+}
+
+// TestAServicesTokenLoginIsListedAndRevokedByAnyoneThroughDispatch: the Legion daemon's token
+// login, which no person approves and which has no operator, is listed through Dispatch for every
+// signed-in person, naming its service and its ServiceAccount and no approver, and its launcher
+// authenticates; another person's revoke, whoever their browser's body names, ends it, after which
+// its launcher proofs authenticate nothing; and a device-code login naming the service, which an
+// older daemon would open, is refused SERVICE_LOGS_IN_WITH_TOKEN with nothing for Dispatch to show.
+func TestAServicesTokenLoginIsListedAndRevokedByAnyoneThroughDispatch(t *testing.T) {
 	rig := newContractRig(t)
-	credentialID, machineKey := rig.approveMachineLoginAs(t, "", contractOther, "legion-daemon", "cluster.example")
+	credentialID, machineKey := rig.tokenLogin(t)
 
 	for _, person := range []string{contractOther, contractApprover} {
 		logins := rig.machineLoginsOf(t, person)
-		if len(logins) != 1 || logins[0].CredentialID != credentialID || logins[0].Host != "cluster.example" ||
-			logins[0].Service == nil || *logins[0].Service != "legion-daemon" || logins[0].ApprovedBy != contractOther {
-			t.Fatalf("%s's machine logins = %s, want legion-daemon's login on cluster.example, approved by %s", person, asJSON(t, logins), contractOther)
+		if len(logins) != 1 || logins[0].CredentialID != credentialID || logins[0].Host != "legion-system/legion-daemon-contract" ||
+			logins[0].Service == nil || *logins[0].Service != "legion-daemon" || logins[0].ApprovedBy != "" ||
+			logins[0].Subject == nil || *logins[0].Subject != contractDaemonAccount {
+			t.Fatalf("%s's machine logins = %s, want legion-daemon's token login for %s, approved by no one", person, asJSON(t, logins), contractDaemonAccount)
 		}
 	}
 	// A service's credential enrolls pods only, so a box is refused; what matters is that its
 	// launcher proof authenticates.
 	if status, body, _ := rig.enrollWithLauncher(t, machineKey, credentialID, "box-"+t.Name()); status != http.StatusForbidden || !strings.Contains(string(body), "OPERATOR_MISMATCH") {
-		t.Fatalf("enroll under the approved login = %d %s, want 403 OPERATOR_MISMATCH from a launcher that authenticates", status, body)
+		t.Fatalf("enroll under the token login = %d %s, want 403 OPERATOR_MISMATCH from a launcher that authenticates", status, body)
 	}
 
 	revokePath := "/api/v1/machine-logins/" + credentialID + "/revoke"
@@ -729,6 +766,16 @@ func TestAServicesLoginIsApprovedListedAndRevokedByAnyoneThroughDispatch(t *test
 		if logins := rig.machineLoginsOf(t, person); len(logins) != 0 {
 			t.Fatalf("%s's machine logins after the revoke = %s, want none", person, asJSON(t, logins))
 		}
+	}
+
+	compact, err := record.Sign(contractSigningKey(t), rig.BrokerURL,
+		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: "cluster.example", Service: "legion-daemon"}}, "", "", nil, time.Now())
+	if err != nil {
+		t.Fatalf("record.Sign: %v", err)
+	}
+	status, body := rig.brokerReq(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
+	if status != http.StatusBadRequest || !strings.Contains(string(body), "SERVICE_LOGS_IN_WITH_TOKEN") {
+		t.Fatalf("a service's device-code login = %d %s, want 400 SERVICE_LOGS_IN_WITH_TOKEN", status, body)
 	}
 }
 

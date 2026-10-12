@@ -31,13 +31,19 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 //
 // A worker's issue can close, or an operator suspend it, while it is in a turn: the production
 // check's sign-off, say, arriving while the implementer's report of the check is still a tool call
-// inside that turn. Stopping the process at once would cut that call off before Oh My Pi writes its
-// result, and a session resumed from that transcript holds a report with no answer. So the
-// suspension is held:
+// inside that turn, or an architect's own sign-off moving its tree into linger. Stopping the
+// process at once would cut that call off before Oh My Pi writes its result, and a session resumed
+// from that transcript holds a report with no answer. So the suspension is held:
 //
-//   - It runs when the turn ends (turnEnded), or when the stop timeout runs out first
-//     (TimerSuspend, suspendAtTimeout). Asked again meanwhile, it is the same hold, its timeout
-//     unchanged. Until it runs the agent keeps its process and its capability.
+//   - It runs when the turn ends (turnEnded). The operator's suspension also runs when the stop
+//     timeout runs out first (TimerSuspend, suspendAtTimeout): an operator stopping the process —
+//     to drain the daemon, say — needs the stop bounded. The daemon's own suspension (its issue left
+//     the workflow, or its tree lingers) waits for the turn however long it takes: what bounds it is
+//     what ends the process anyway, the tree's close when its linger expires or the child's close
+//     as done. Asked again meanwhile, it is the
+//     same hold, its timeout unchanged, except that the operator's suspend takes a daemon's hold
+//     over: from then on it is the operator's, and its stop timeout runs from then. Until it runs the
+//     agent keeps its process and its capability.
 //   - A stop the runtime refuses keeps it held and tries again every probe interval (suspendHeld),
 //     so the stop timeout bounds the wait only while the runtime can stop the process. A claim
 //     whose turn ended stays idle meanwhile and is handed nothing (sendPending); a turn it starts
@@ -45,8 +51,9 @@ func suspend(m *Machine, ctx context.Context, ev Event) error {
 //   - A process that dies first, or is found at a stale address (repoint), leaves the claim
 //     suspended, charged nothing (endHeld). A prompt retirement meanwhile is the held stop itself
 //     (suspendHeld), charged nothing.
-//   - A start run against the claim drops it (StartedBy), and every other end of the process drops
-//     it with the process (letGo).
+//   - A start run against the claim drops a daemon's hold (StartedBy); one the operator's
+//     suspension holds waits instead. Every other end of the process drops it with the process
+//     (letGo).
 //   - It lives in memory only. A restart forgets it, so whoever holds the request asks again: the
 //     outbox retries its suspend row until the claim answers nil, and a restart starts the stop
 //     timeout over.
@@ -58,20 +65,73 @@ func holdSuspension(m *Machine, _ context.Context, ev Event) error {
 	if err != nil {
 		return err
 	}
-	if m.held == nil {
+	switch {
+	case m.held == nil:
+		m.held = &request
+		if request.By == SuspendedByOperator {
+			m.arm(TimerSuspend, m.deps.Timeouts.Stop, "")
+			m.log.Info("supervise: the suspension is held for the agent's turn to end", "reason", request.Reason, "by", request.By,
+				"stopTimeout", m.deps.Timeouts.Stop)
+		} else {
+			m.log.Info("supervise: the suspension is held for the agent's turn to end, however long it takes", "reason", request.Reason, "by", request.By)
+		}
+	case request.By == SuspendedByOperator && m.held.By != SuspendedByOperator:
+		m.log.Info("supervise: the operator's suspension takes the held suspension over", "reason", request.Reason, "held", m.held.Reason,
+			"stopTimeout", m.deps.Timeouts.Stop)
 		m.held = &request
 		m.arm(TimerSuspend, m.deps.Timeouts.Stop, "")
-		m.log.Info("supervise: the suspension is held for the agent's turn to end", "reason", request.Reason,
-			"stopTimeout", m.deps.Timeouts.Stop)
 	}
 	return ErrSuspendHeld
 }
 
+// holdSuspendUntilReady retains a suspend that reaches a rule-resuming launch after the rule
+// changed the claim to launching. The old table ignored it, returning a conflict to an operator and
+// dropping a daemon's linger or leave row. The hold survives launch and is run as soon as the agent
+// says ready (ready), before the claim is published ready or takes a task. It answers
+// ErrSuspendHeld so the operator sees 202 and a daemon row retries across a restart.
+func holdSuspendUntilReady(m *Machine, _ context.Context, ev Event) error {
+	request, err := suspendRequest(m, ev)
+	if err != nil {
+		return err
+	}
+	m.held = &request
+	m.log.Info("supervise: the suspension waits for the rule-resuming agent to become ready", "reason", request.Reason, "by", request.By)
+	return ErrSuspendHeld
+}
+
+// suspendedAgain is a suspension of a claim already suspended. An operator's suspend of a claim the
+// daemon suspended takes the suspension over (Claim.SuspendedBy), so the rule resumes it no more
+// until the operator does; any other changes nothing, and an operator's suspension stays the
+// operator's.
+func suspendedAgain(m *Machine, ctx context.Context, ev Event) error {
+	request, err := suspendRequest(m, ev)
+	if err != nil {
+		return err
+	}
+	if request.By != SuspendedByOperator || m.claim.SuspendedBy == SuspendedByOperator {
+		return nil
+	}
+	m.log.Info("supervise: the operator's suspension takes the suspended claim over", "reason", request.Reason, "suspendedBy", m.claim.SuspendedBy)
+	m.claim.SuspendedBy = SuspendedByOperator
+	return m.persist(ctx)
+}
+
 // suspendAtTimeout is the held suspension's timer: the turn did not end within the stop timeout,
 // so the process is stopped mid-turn; or an earlier stop failed, and it is tried again.
+//
+// A stop forced mid-turn is not the turn's end: the confirmed task did not finish, so it goes back
+// interrupted, as a death in a turn takes it back, and the operator's resume re-sends it to the
+// same owner. The task is taken back before the stop, as died does: a take-back that fails stops
+// nothing and is tried again at the probe interval, and a crash between the two leaves a running
+// claim holding an interrupted task, never a suspended claim holding a confirmed one, which settle
+// would retire as a finished turn.
 func suspendAtTimeout(m *Machine, ctx context.Context, _ Event) error {
 	if m.claim.State == StateWorking {
 		m.log.Warn("supervise: the agent's turn has not ended; suspending it mid-turn", "stopTimeout", m.deps.Timeouts.Stop)
+		if err := m.interrupted(ctx, "the stop timeout ended the task's turn"); err != nil {
+			m.arm(TimerSuspend, m.deps.Timeouts.Probe, "")
+			return fmt.Errorf("take back the task of %s before its forced stop: %w", m.claim.Token, err)
+		}
 	} else {
 		m.log.Info("supervise: trying the held suspension's stop again")
 	}
@@ -79,12 +139,25 @@ func suspendAtTimeout(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // suspendRequest is the event a suspension's row is handed. The table routes only RequestSuspend
-// there (kindOf's onSuspend); another event is a wiring error, refused before anything is stopped,
-// rather than a panic or a journal line with no reason.
+// there (kindOf's onSuspend); another event is a wiring error, and so is a suspension that names
+// neither the operator nor the daemon (a root's exit suspends it through RequestExit, never this),
+// since the source is what decides whether the daemon may resume the claim. Either is refused
+// before anything is stopped, rather than a panic, a journal line with no reason, or a claim
+// suspended by nobody.
 func suspendRequest(m *Machine, ev Event) (RequestSuspend, error) {
 	request, ok := ev.(RequestSuspend)
 	if !ok {
 		return RequestSuspend{}, fmt.Errorf("suspend %s: the suspend action was handed %T, not a RequestSuspend", m.claim.Token, ev)
+	}
+	if request.By != SuspendedByOperator && request.By != SuspendedByDaemon {
+		return RequestSuspend{}, fmt.Errorf("suspend %s: the suspension names source %q, not operator or daemon", m.claim.Token, request.By)
+	}
+	// An operator's held suspension wins everywhere — launching, registered, ready while its
+	// stop retries, and working — until it completes. A later daemon linger/leave request must
+	// use that same source rather than changing a deliberate operator hold into a rule-resumable
+	// daemon suspension.
+	if m.held != nil && m.held.By == SuspendedByOperator && request.By != SuspendedByOperator {
+		return *m.held, nil
 	}
 	return request, nil
 }
@@ -100,21 +173,21 @@ func (m *Machine) suspendNow(ctx context.Context, request RequestSuspend) error 
 // suspendedFor moves the claim to suspended once request's stop has ended its process, and says
 // why.
 func (m *Machine) suspendedFor(ctx context.Context, request RequestSuspend) error {
-	if err := m.suspended(ctx); err != nil {
+	if err := m.suspended(ctx, request.By); err != nil {
 		return err
 	}
-	m.log.Info("supervise: suspended", "reason", request.Reason)
+	m.log.Info("supervise: suspended", "reason", request.Reason, "by", request.By)
 	return nil
 }
 
-// suspended moves the claim to suspended: its session kept, and the process it stopped let go for
-// the resume to wait out. It only persists — revoking the stopped agent's capability, in memory
-// even when the write fails. The finished phase's unconfirmed task is retired after it by settle,
-// which Handle runs after every row; a retirement that fails is reported, and the claim's next
-// decision retires it before anything else.
-func (m *Machine) suspended(ctx context.Context) error {
+// suspended moves the claim to suspended by by: its session kept, and the process it stopped let
+// go for the resume to wait out. It only persists — revoking the stopped agent's capability, in
+// memory even when the write fails. The finished phase's unconfirmed task is retired after it by
+// settle, which Handle runs after every row; a retirement that fails is reported, and the claim's
+// next decision retires it before anything else.
+func (m *Machine) suspended(ctx context.Context, by SuspendSource) error {
 	m.letGo()
-	m.claim.State = StateSuspended
+	m.claim.State, m.claim.SuspendedBy = StateSuspended, by
 	return m.persist(ctx)
 }
 

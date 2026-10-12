@@ -365,7 +365,7 @@ describe("design-gate-verdict.jq", () => {
   }
 
   // The flow the dispatch skill prescribes for a request the human comments on: reply in the
-  // thread, write their point as a decision block, fold its answer in and hand the request back.
+  // thread, write their point as a decision block, then hand the request back.
   test("a request the human replied to is not early for the block the reply raised", () => {
     expect(followedRequest([{ at: "2026-09-30T10:01:00Z", by: "user" }])).toEqual({
       request: "Approve spec.md (version 4)? Proposes the file under docs/smoke/.",

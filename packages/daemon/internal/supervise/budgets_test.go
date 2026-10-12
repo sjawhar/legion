@@ -109,9 +109,10 @@ func TestATurnOfTheAgentsOwnDoesNotClearTheDeathsOfATaskItNeverRan(t *testing.T)
 	h.wantBudgets(Budgets{Deaths: 1})
 }
 
-// A task that ends some other way than its turn's end — the suspension a transition sends, run at
-// the stop timeout when the worker's handoff turn does not end — takes its deaths with it: the
-// claim's next round starts its count afresh.
+// A task that ends some other way than its turn's end — the daemon's suspension a transition or a
+// close sends, held for the turn and run when the process dies first — takes its deaths with it:
+// the claim's next round starts its count afresh. (An operator's forced stop does not end the task:
+// it goes back interrupted for the operator's resume.)
 func TestATaskThatEndsTakesItsDeathsWithIt(t *testing.T) {
 	h := newHarness(t)
 	h.reach(StateReady)
@@ -122,11 +123,14 @@ func TestATaskThatEndsTakesItsDeathsWithIt(t *testing.T) {
 		h.relaunched()
 		h.must(StreamTurnStart{Claim: testToken})
 	}
-	if err := h.handle(RequestSuspend{Claim: testToken}); !errors.Is(err, ErrSuspendHeld) {
+	if err := h.handle(RequestSuspend{Claim: testToken, By: SuspendedByDaemon}); !errors.Is(err, ErrSuspendHeld) {
 		t.Fatalf("suspend mid-turn returned %v, want ErrSuspendHeld", err)
 	}
-	h.advance(testStop)
+	h.observe(runtime.Gone)
 	h.wantState(StateSuspended)
+	if p := h.claim().Pending; p != nil {
+		t.Fatalf("pending %+v after the daemon's suspension, want the finished phase's task retired", p)
+	}
 
 	h.must(RequestDeliver{Claim: testToken, Task: "round two", Phase: "implementing", Generation: 6})
 	h.relaunched()

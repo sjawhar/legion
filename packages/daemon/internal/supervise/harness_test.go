@@ -564,7 +564,7 @@ func (h *harness) reach(state ClaimState) {
 	steps := []ClaimState{StateQueued, StateLaunching, StateShimConnected, StateRegistered, StateReady, StateWorking, StateIdle}
 	if state == StateSuspended {
 		h.reach(StateIdle)
-		h.must(RequestSuspend{Claim: h.token})
+		h.must(RequestSuspend{Claim: h.token, By: SuspendedByOperator})
 		h.wantState(StateSuspended)
 		return
 	}

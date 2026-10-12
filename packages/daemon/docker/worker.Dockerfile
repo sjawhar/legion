@@ -16,8 +16,9 @@
 # explicit loads twice; the pod lane's probe refuses an image whose pi-envoy does), and
 # @bopstack/pi-codegraph (from npm, pinned), the one plugin linked into the isolated OMP profile
 # `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
-# /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the
-# debian:trixie-slim runtime base — jj's git backend requires it); gh; what the capability check
+# /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
+# git backend requires it); gh; trixie's socat, which carries a connection over `kubectl exec` to a
+# loopback port inside the pod (the runtime stage says why); what the capability check
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
 # toolchain at go.work's version (go and gofmt, /opt/go), gopls, typescript-language-server with
 # TypeScript's tsc and tsserver, pyright with its pyright-langserver, and trixie's python3, curl, wget
@@ -410,7 +411,7 @@ COPY --from=toolchain /opt/node/lib/node_modules/pyright/LICENSE.txt /in/pyright
 COPY --from=toolchain /opt/node/lib/node_modules/pyright/dist/typeshed-fallback/LICENSE /in/pyright-typeshed-LICENSE
 RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
-      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, and the chromium, python3, curl and wget of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/node/lib/node_modules (their sections below)." \
+      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl and wget of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/node/lib/node_modules (their sections below)." \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
       "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
@@ -453,12 +454,16 @@ ARG PI_CODEGRAPH_VERSION
 # fontconfig-config requires one, fonts-dejavu-core first), and its Recommends stay out with everyone
 # else's — the setuid sandbox (chromium-sandbox) and fonts-liberation among them; Oh My Pi never uses
 # the sandbox, launching the browser with --no-sandbox --disable-setuid-sandbox.
+# socat: a pipe that carries a connection over `kubectl exec` to a port the pod listens on at 127.0.0.1
+# (a dev server an agent runs), which under gVisor `kubectl port-forward` cannot reach. python3 or
+# bash's /dev/tcp over the same exec works too; a listener on 0.0.0.0 is also reachable on the pod IP
+# inside the cluster, unless the deployment's NetworkPolicy denies that ingress.
 # /opt/legion and /opt/legion/bin are created here, root-owned, before any COPY into them: a COPY
 # creates a missing parent with its own --chown, so the plugin's legion:legion copy below would
 # otherwise leave the runtime user free to rename bin/ and plant its own `legion`. The final step
 # refuses an image where either is not root's.
 # hadolint ignore=DL3008
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium curl git python3 wget \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates chromium curl git python3 socat wget \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --gid 1000 legion \
     && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash legion \
@@ -558,7 +563,9 @@ ENV COREPACK_DEFAULT_TO_LATEST=0
 # Being its own layer above `legion`, it reruns only when the toolchain or a layer before it changes,
 # so a commit that only rebuilds `legion` fetches nothing from a registry. pnpx is `pnpm dlx`, which
 # takes no --version; its --help, whose first line names the pnpm version, is the check. `kubectl
-# version --client` reports the client alone: it reads no kubeconfig and contacts no API server.
+# version --client` reports the client alone: it reads no kubeconfig and contacts no API server. socat
+# answers -V, not --version, with its compiled-in features after the version line; the step prints
+# that line alone.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \
@@ -570,6 +577,7 @@ RUN set -eu; \
     printf 'package main\n' | gofmt; gopls version; \
     typescript-language-server --version; tsc --version; pyright --version; \
     python3 --version; curl --version; wget --version; chromium --version; \
+    socat -V > "$scratch/socat-V"; sed -n '/^socat version/p' "$scratch/socat-V"; \
     rm -rf "$scratch"
 # The notices stage's file, after the toolchain step so a notices change never reruns it, and before
 # `legion`, which changes on every commit while the notices change only with a dependency or a pin.

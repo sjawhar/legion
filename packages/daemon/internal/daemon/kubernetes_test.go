@@ -763,16 +763,15 @@ func TestSandboxOptionsCarryTheAgentSecretsBlock(t *testing.T) {
 	}
 }
 
-// No credential material — no key, no launcher credential, no bearer — ever reaches a pod or a
-// launch secret: the daemon's machine login lives only in the *agentsecrets.Client's process
-// memory (Task 1's cred atomic.Pointer[credential]), which the configuration and
-// sandbox.Options carry no field for at all. newSecretsLogin hands the runtime only the broker
-// URL, audience and token lifetime, and no launch's secrets ever name an AGENT_SECRETS_*
-// variable.
+// No credential material — no key, no launcher credential, no bearer, no ServiceAccount token —
+// ever reaches a pod or a launch secret: the daemon's login reads its own token from token_file and
+// holds the key it wins only in the *agentsecrets.Client's process memory, which sandbox.Options
+// carry no field for at all. newSecretsLogin hands the runtime only the broker URL, audience and
+// pod token lifetime, and no launch's secrets ever name an AGENT_SECRETS_* variable.
 func TestNoCredentialMaterialReachesAPod(t *testing.T) {
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
-		URL: "https://s", Audience: "agent-secrets", TokenExpirySeconds: 3600,
+		URL: "https://s", TokenFile: filepath.Join(t.TempDir(), "token"), Audience: "agent-secrets", TokenExpirySeconds: 3600,
 	}
 	for _, secret := range launchSecrets(cfg, lookup(nil)) {
 		if strings.HasPrefix(secret.name, "AGENT_SECRETS") {
@@ -790,8 +789,8 @@ func TestNoCredentialMaterialReachesAPod(t *testing.T) {
 	if enroller == nil || client == nil {
 		t.Fatalf("enroller %v, client %v; want both", enroller, client)
 	}
-	if client.URL != "https://s" {
-		t.Fatalf("client = %+v, want only the configured URL, never a key or a bearer", client)
+	if client.URL != "https://s" || client.TokenFile != cfg.Runtime.Kubernetes.AgentSecrets.TokenFile {
+		t.Fatalf("client = %+v, want only the configured URL and token file, never a key or a bearer", client)
 	}
 	cfg.Runtime.Kubernetes.AgentSecrets = nil
 	if enroller, client := newSecretsLogin(cfg, quietLogger()); enroller != nil || client != nil {
@@ -799,38 +798,74 @@ func TestNoCredentialMaterialReachesAPod(t *testing.T) {
 	}
 }
 
-// newSecretsLogin logs the contract's exact line, once, naming the code the broker issued and that
-// anyone signed in may approve it; a background poll goroutine keeps running against the (later closed)
-// broker after the login is issued, which is fine — it is the same unbounded, backed-off retry
-// production leaves running for as long as the daemon is up.
-func TestNewSecretsLoginLogsTheConfirmationCode(t *testing.T) {
+// newSecretsLogin logs in at boot with the token token_file holds, posting it to the broker's token
+// route, and logs that it did; no confirmation code exists, so nothing waits for a person.
+func TestNewSecretsLoginLogsInWithTheDaemonsToken(t *testing.T) {
+	var mu sync.Mutex
+	var tokens []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/v1/launcher-credentials" {
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/launcher-credentials/token" {
+			http.NotFound(w, r)
 			return
 		}
+		var body struct {
+			Token string `json:"token"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		tokens = append(tokens, body.Token)
+		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		_ = json.NewEncoder(w).Encode(map[string]string{"pending_id": "pending-1", "code": "ABCD-1234"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"credential_id": "cred-1", "expires_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)})
 	}))
 	defer server.Close()
 
+	tokenFile := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(tokenFile, []byte("the-daemon's-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	cfg := kubernetesConfig(t, "https://127.0.0.1:1")
 	cfg.Runtime.Kubernetes.AgentSecrets = &config.AgentSecretsConfig{
-		URL: server.URL, Audience: "agent-secrets", TokenExpirySeconds: 3600,
+		URL: server.URL, TokenFile: tokenFile, Audience: "agent-secrets", TokenExpirySeconds: 3600,
 	}
-	var logged bytes.Buffer
+	var logged lockedBuffer
 	enroller, client := newSecretsLogin(cfg, slog.New(slog.NewJSONHandler(&logged, nil)))
 	if enroller == nil || client == nil {
 		t.Fatal("want an enroller and a client")
 	}
-	want := "agent-secrets machine login: enter code ABCD-1234 on the Dispatch credential page, where anyone signed in may approve it; pod enrollment is held until approved"
 	deadline := time.Now().Add(2 * time.Second)
-	for !strings.Contains(logged.String(), want) {
+	for !strings.Contains(logged.String(), "agent-secrets: logged in with the daemon's ServiceAccount token") || client.LoginStatus().State != "issued" {
 		if time.Now().After(deadline) {
-			t.Fatalf("log = %s, want it to contain %q", logged.String(), want)
+			t.Fatalf("log = %s, state %q; want the token login logged and issued", logged.String(), client.LoginStatus().State)
 		}
 		time.Sleep(time.Millisecond)
 	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(tokens) != 1 || tokens[0] != "the-daemon's-token" {
+		t.Fatalf("the broker saw tokens %q, want the token file's one", tokens)
+	}
+	if strings.Contains(logged.String(), "enter code") {
+		t.Fatalf("log = %s, want no confirmation code", logged.String())
+	}
+}
+
+// lockedBuffer is a log a test reads while a goroutine writes it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // A hello carrying an agent-secrets identity maps to the machine's StreamHello with it; a hello

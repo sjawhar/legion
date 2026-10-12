@@ -26,14 +26,26 @@ func (ts *testServer) podToken(t *testing.T, account, podUID string) string {
 	return ts.podIssuer.Mint(t, ts.podKey, claims)
 }
 
-// mintServiceLauncherCredential is mintLauncherCredential for a service login (a launcher
-// credential detail naming service legion-daemon, and no login_hint): the credential has no
-// operator and enrolls pods only, the shape the Legion daemon logs in with. testApprover approves
-// it, as any signed-in person may.
+// mintServiceLauncherCredential logs daemonAccount in as legion-daemon with its token
+// (POST /v1/launcher-credentials/token), as the Legion daemon logs in, and returns the launcher
+// credential's id and the key it is bound to: no operator, enrolling pods only, and no person
+// approved it.
 func (ts *testServer) mintServiceLauncherCredential(t *testing.T) (credentialID string, key *ecdsa.PrivateKey) {
 	t.Helper()
+	return ts.mintServiceLauncherCredentialAs(t, daemonAccount)
+}
+
+// mintServiceLauncherCredentialAs is mintServiceLauncherCredential for account, which the test
+// server's BROKER_SERVICE_LOGINS names. Each account holds one credential, so a second daemon's
+// login is another account's.
+func (ts *testServer) mintServiceLauncherCredentialAs(t *testing.T, account string) (credentialID string, key *ecdsa.PrivateKey) {
+	t.Helper()
 	key = newSigningKey(t)
-	return ts.approveMachineLogin(t, signMachineLoginRequest(t, key, ts.URL, "", "cluster.example", "legion-daemon"), testApprover), key
+	status, body := ts.tokenLogin(t, ts.accountToken(t, account, uuid.NewString(), time.Hour), signMachineLoginRequest(t, key, ts.URL, "", "cluster.example", "legion-daemon"))
+	if status != http.StatusOK {
+		t.Fatalf("token login as %s = %d %s, want 200", account, status, body)
+	}
+	return decode[wireTokenLogin](t, body).CredentialID, key
 }
 
 type wireEnrolled struct {

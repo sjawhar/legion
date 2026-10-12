@@ -1,5 +1,5 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import type { AgentStreamFrame } from "@legion/contracts";
+import type { AgentStreamCommand, AgentStreamFrame } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -421,4 +421,163 @@ test("the live view shows nothing for a session whose client reports no model", 
   await within(thread).findByText("Switching to it now.");
   expect(screen.queryByTestId("agent-session-model")).toBeNull();
   expect(within(thread).queryByTestId("agent-message-model")).toBeNull();
+});
+
+/** The slash commands a session advertises (LEGION-394), in the order it lists them: one only its
+ *  own terminal runs, listed first, and a prompt whose name holds another's as a substring. */
+const COMMANDS: AgentStreamCommand[] = [
+  { description: "Start a new session", name: "new", source: "builtin", terminalOnly: true },
+  { description: "Compact the session's context", name: "compact", source: "builtin" },
+  { description: "Show background jobs", name: "jobs", source: "builtin" },
+  { name: "recompile", source: "prompt" },
+];
+
+function commandsFrame(seq: number, commands: AgentStreamCommand[]) {
+  return { commands, kind: "commands", seq, v: 1 } as const satisfies AgentStreamFrame;
+}
+
+/** The live view of a session that sent `commands`, or none, with its composer's input. */
+async function renderWithCommands(commands?: AgentStreamCommand[]): Promise<HTMLTextAreaElement> {
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    replay: commands === undefined ? [] : [commandsFrame(1, commands)],
+  });
+  const mode = (await screen.findByRole("combobox", {
+    name: "Delivery mode",
+  })) as HTMLSelectElement;
+  await waitFor(() => expect(mode.value).toBe("steer"));
+  return within(screen.getByTestId("agent-composer")).getByRole("textbox") as HTMLTextAreaElement;
+}
+
+function type(input: HTMLTextAreaElement, value: string): void {
+  fireEvent.change(input, { target: { value } });
+}
+
+function commandOptions(): string[] {
+  return within(screen.getByRole("listbox", { name: "Slash commands" }))
+    .getAllByRole("option")
+    .map((option) => option.textContent ?? "");
+}
+
+// A message that starts with `/` is a command line at the session's terminal, so the composer
+// completes the session's own commands there: every runnable one first, a command only its
+// terminal runs after them (listed, so the person learns it will not run here), and as the
+// person types, names that start with what they typed before names that merely hold it.
+test("the composer completes the session's slash commands, filtering as the person types", async () => {
+  const input = await renderWithCommands(COMMANDS);
+  await waitFor(() => expect(input.placeholder).toContain("/"));
+
+  type(input, "/");
+  await waitFor(() =>
+    expect(commandOptions()).toEqual([
+      "/compactCompact the session's context",
+      "/jobsShow background jobs",
+      "/recompile",
+      "/newterminal onlyStart a new session",
+    ])
+  );
+
+  type(input, "/comp");
+  await waitFor(() =>
+    expect(commandOptions()).toEqual(["/compactCompact the session's context", "/recompile"])
+  );
+});
+
+// Picking a command writes what the person would have typed at the terminal, never a directive
+// the session would receive as markup, and Send carries it to the session unchanged.
+test("picking a command puts /name in the message as plain text, and Enter sends it unchanged", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
+    async (_session, input) => message("sent", input.body)
+  );
+  spies.push(createAgentMessage);
+  const input = await renderWithCommands(COMMANDS);
+
+  type(input, "/co");
+  await waitFor(() => expect(commandOptions()).toHaveLength(2));
+  fireEvent.keyDown(input, { key: "Enter" });
+  await waitFor(() => expect(input.value).toBe("/compact "));
+  expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
+
+  // With the list closed Enter is the composer's own Send again.
+  fireEvent.keyDown(input, { key: "Enter" });
+  await waitFor(() =>
+    expect(createAgentMessage).toHaveBeenCalledWith(SESSION, {
+      body: "/compact",
+      delivery: "steer",
+    })
+  );
+});
+
+// The list is the keyboard's while it is open, and Escape hands Enter back to sending.
+test("arrow keys move through the commands, and after Escape Enter sends what was typed", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockImplementation(
+    async (_session, input) => message("sent", input.body)
+  );
+  spies.push(createAgentMessage);
+  const input = await renderWithCommands(COMMANDS);
+
+  type(input, "/");
+  await waitFor(() => expect(commandOptions()).toHaveLength(4));
+  fireEvent.keyDown(input, { key: "ArrowDown" });
+  await waitFor(() =>
+    expect(
+      within(screen.getByRole("listbox", { name: "Slash commands" })).getByRole("option", {
+        selected: true,
+      }).textContent
+    ).toBe("/jobsShow background jobs")
+  );
+  fireEvent.keyDown(input, { key: "Tab" });
+  await waitFor(() => expect(input.value).toBe("/jobs "));
+
+  type(input, "/rec");
+  await waitFor(() => expect(commandOptions()).toEqual(["/recompile"]));
+  fireEvent.keyDown(input, { key: "Escape" });
+  await waitFor(() => expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull());
+  fireEvent.keyDown(input, { key: "Enter" });
+  await waitFor(() =>
+    expect(createAgentMessage).toHaveBeenCalledWith(SESSION, { body: "/rec", delivery: "steer" })
+  );
+});
+
+// A session with every skill installed lists hundreds of commands; the list shows the best
+// fifty rather than a scroller the length of the page.
+test("a session with hundreds of commands shows fifty of them", async () => {
+  const many = Array.from({ length: 300 }, (_, index) => ({
+    name: `skill:s${String(index).padStart(3, "0")}`,
+    source: "skill" as const,
+  }));
+  const input = await renderWithCommands(many);
+
+  type(input, "/");
+  await waitFor(() => expect(commandOptions()).toHaveLength(50));
+  expect(commandOptions()[0]).toBe("/skill:s000");
+});
+
+// Completion is offered only where the session would run the text as a command: a session that
+// sent no command list cannot, a `/` inside a message is just text at a terminal too, and a BTW
+// is a side question the session answers rather than input it runs. None of them mentions `/`.
+test("no completion is offered without a command list, for a / mid-message, or in BTW", async () => {
+  const silent = await renderWithCommands();
+  expect(silent.placeholder).not.toContain("/");
+  type(silent, "/");
+  await Bun.sleep(50);
+  expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
+
+  cleanup();
+  for (const spy of spies.splice(0)) spy.mockRestore();
+  const input = await renderWithCommands(COMMANDS);
+  type(input, "please /co");
+  await Bun.sleep(50);
+  expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
+
+  fireEvent.change(screen.getByRole("combobox", { name: "Delivery mode" }), {
+    target: { value: "btw" },
+  });
+  await waitFor(() => expect(input.placeholder).toContain("delivered as BTW"));
+  expect(input.placeholder).not.toContain("/");
+  type(input, "/co");
+  await Bun.sleep(50);
+  expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull();
 });

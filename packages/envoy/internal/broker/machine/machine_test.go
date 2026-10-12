@@ -288,164 +288,191 @@ func TestAMachineLoginNamingAnyoneIsDecidedByNoOne(t *testing.T) {
 	}
 }
 
-// TestServiceCredentialEnrollsOnlyPods pins that a login whose launcher_credential detail names a
-// service, with no login_hint, opens a record anyone signed in decides, and mints a credential with
-// a nil operator (never the approving human's own login) when a person it names nowhere approves
-// it; and that this new-flow-minted credential still respects enroll's own authorized() trust
-// boundary: a service credential enrols pods only.
-func TestServiceCredentialEnrollsOnlyPods(t *testing.T) {
+// fakeTokens is an enroll.PodVerifier whose VerifyAccount answers one account's claims, or one
+// refusal; a pod's own token never reaches it.
+type fakeTokens struct {
+	claims enroll.AccountClaims
+	err    error
+}
+
+func (f fakeTokens) VerifyAccount(context.Context, string) (enroll.AccountClaims, error) {
+	return f.claims, f.err
+}
+
+func (f fakeTokens) Verify(context.Context, string) (enroll.PodClaims, error) {
+	return enroll.PodClaims{}, errors.New("fakeTokens verifies no pod's token")
+}
+
+// daemonTokenAccount is the ServiceAccount the token-login tests list for legion-daemon.
+const daemonTokenAccount = "system:serviceaccount:legion-system:legion-daemon-test"
+
+// withTokenAccount lists daemonTokenAccount for legion-daemon and has svc's verifier answer a
+// token for it issued at issued and expiring at expires.
+func withTokenAccount(svc *Service, issued, expires time.Time) {
+	svc.Enroll.Pod = fakeTokens{claims: enroll.AccountClaims{Subject: daemonTokenAccount, IssuedAt: issued, Expiry: expires}}
+	svc.Enroll.ServiceLogins = map[string]string{daemonTokenAccount: "legion-daemon"}
+}
+
+// TestATokenLoginsCredentialEnrollsOnlyPods pins that a credential a service's token login issued
+// has no operator, names its service and the account's host, authenticates while
+// BROKER_SERVICE_LOGINS names its account, and keeps enroll's own authorized() trust boundary: a
+// service credential enrolls pods only.
+func TestATokenLoginsCredentialEnrollsOnlyPods(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
-
-	compact := signMachineLogin(t, "", "cluster", "legion-daemon")
-	_, code, err := svc.Login(ctx, compact)
+	withTokenAccount(svc, time.Now(), time.Now().Add(time.Hour))
+	machineKey, err := proof.NewKey()
 	if err != nil {
-		t.Fatalf("Login: %v", err)
+		t.Fatal(err)
 	}
-	view, err := svc.LookupByCode(ctx, code)
+	compact, err := record.Sign(machineKey, testAudience, []record.AuthorizationDetail{
+		{Type: "launcher_credential", Identifier: "legion-daemon", Service: "legion-daemon"},
+	}, "", "", nil, time.Now())
 	if err != nil {
-		t.Fatalf("LookupByCode: %v", err)
+		t.Fatal(err)
 	}
-	if view.Service != "legion-daemon" || view.Approver != record.AnyoneApprover {
-		t.Fatalf("view = %+v, want service legion-daemon, approver %s", view, record.AnyoneApprover)
-	}
-
-	state, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, true, "bob@example.com", code)
+	account, err := svc.VerifyServiceToken(ctx, "the-daemon's-token")
 	if err != nil {
-		t.Fatalf("ApplyDecision: %v", err)
+		t.Fatalf("VerifyServiceToken: %v", err)
 	}
-	if state != "issued" {
-		t.Fatalf("state = %q, want issued", state)
+	issued, err := svc.TokenLogin(ctx, account, compact)
+	if err != nil {
+		t.Fatalf("TokenLogin: %v", err)
 	}
-
 	var operator *string
-	var service string
-	if err := svc.Store.Pool.QueryRow(ctx, `select operator, service from launcher_credentials where id=$1`, credentialID).Scan(&operator, &service); err != nil {
+	var service, host string
+	if err := svc.Store.Pool.QueryRow(ctx, `select operator, service, host from launcher_credentials where id=$1`, issued.ID).Scan(&operator, &service, &host); err != nil {
 		t.Fatalf("read launcher_credentials: %v", err)
 	}
-	if operator != nil {
-		t.Fatalf("operator = %v, want nil for a service credential", *operator)
+	if operator != nil || service != "legion-daemon" || host != "legion-system/legion-daemon-test" {
+		t.Fatalf("credential = operator %v, service %q, host %q; want no operator, legion-daemon, legion-system/legion-daemon-test", operator, service, host)
 	}
-	if service != "legion-daemon" {
-		t.Fatalf("service = %q, want legion-daemon", service)
-	}
-
-	cred := enroll.Credential{ID: uuid.MustParse(credentialID), Service: &service, Host: "cluster"}
+	assertLauncherAuthenticates(t, svc, machineKey, issued.ID)
+	cred := enroll.Credential{ID: uuid.MustParse(issued.ID), Service: &service, Host: host}
 	if _, err := svc.Enroll.Create(ctx, cred, enroll.Enrollment{Kind: "session", RuntimeID: "session-1", Operator: new(testApprover), Thumbprint: "tp-1"}); !errors.Is(err, enroll.ErrOperatorMismatch) {
 		t.Fatalf("Create(service cred, kind session) = %v, want ErrOperatorMismatch", err)
 	}
 }
 
-// TestAServiceLoginIsDecidedByAnyoneWhateverItsLoginHintNames pins that the approver rule reads the
-// service from the signed request alone: a service's login that still names a person in its
-// login_hint (the Legion daemon's release before this rule did) opens a record anyone decides;
-// another person's login approves it, the approved event records that login, and the credential
-// it mints authenticates through AuthenticateLauncher's chain re-check. The sentinel and an empty
-// login decide it no more than they decide any record.
-func TestAServiceLoginIsDecidedByAnyoneWhateverItsLoginHintNames(t *testing.T) {
+// TestAServiceTokenLivingPastAnHourIsRefused pins MaxTokenLoginLifetime on the token itself: a
+// token that lives longer than an hour from its issue, beyond the request object's skew, or that
+// names no issue time, is refused ErrTokenTooLongLived, so a copy of it logs in as its service for
+// at most an hour after it was minted; one that lives an hour plus less than the skew verifies.
+func TestAServiceTokenLivingPastAnHourIsRefused(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
-	machineKey, err := proof.NewKey()
-	if err != nil {
-		t.Fatal(err)
-	}
-	compact, err := record.Sign(machineKey, testAudience, []record.AuthorizationDetail{
-		{Type: "launcher_credential", Identifier: "cluster", Service: "legion-daemon"},
-	}, "", testApprover, nil, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, code, err := svc.Login(ctx, compact)
-	if err != nil {
-		t.Fatalf("Login(a service's login naming %s): %v", testApprover, err)
-	}
-	view, err := svc.LookupByCode(ctx, code)
-	if err != nil {
-		t.Fatalf("LookupByCode: %v", err)
-	}
-	if view.Approver != record.AnyoneApprover {
-		t.Fatalf("view.Approver = %q, want %s: a service's login names no approver, whatever its login_hint says", view.Approver, record.AnyoneApprover)
-	}
-	for _, login := range []string{record.AnyoneApprover, " ANYONE ", "", "  "} {
-		if _, _, err := svc.ApplyDecision(ctx, view.RecordID, true, login, code); !errors.Is(err, record.ErrNotApprover) {
-			t.Fatalf("ApplyDecision(%q) = %v, want record.ErrNotApprover", login, err)
+	issued := time.Now().Truncate(time.Second)
+	for _, c := range []struct {
+		name            string
+		issued, expires time.Time
+		refused         bool
+	}{
+		{"a three-hour token", issued, issued.Add(3 * time.Hour), true},
+		{"an hour past the skew", issued, issued.Add(MaxTokenLoginLifetime + svc.Skew + time.Second), true},
+		{"no issue time", time.Time{}, issued.Add(time.Hour), true},
+		{"an hour", issued, issued.Add(MaxTokenLoginLifetime), false},
+		{"an hour within the skew", issued, issued.Add(MaxTokenLoginLifetime + svc.Skew - time.Second), false},
+	} {
+		withTokenAccount(svc, c.issued, c.expires)
+		_, err := svc.VerifyServiceToken(ctx, "token")
+		if c.refused != errors.Is(err, ErrTokenTooLongLived) || (!c.refused && err != nil) {
+			t.Fatalf("%s: VerifyServiceToken = %v, want refused %v", c.name, err, c.refused)
 		}
 	}
-	state, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, true, " Bob@Example.com ", code)
-	if err != nil || state != "issued" {
-		t.Fatalf("ApplyDecision(bob, whom the login names nowhere) = %q, %v; want issued", state, err)
-	}
-	var login string
-	if err := svc.Store.Pool.QueryRow(ctx, `select login from credential_request_events where record_id=$1 and event='approved'`, view.RecordID).Scan(&login); err != nil || login != "bob@example.com" {
-		t.Fatalf("approved event login = %q, %v; want bob@example.com", login, err)
-	}
-	assertLauncherAuthenticates(t, svc, machineKey, credentialID)
 }
 
-// TestAServiceLoginIsDeniedByAnyoneWhateverItsLoginHintNames pins the deny half of the same rule:
-// a service's login naming testApprover in its login_hint is denied by bob, whom it names nowhere;
-// the denied event records bob, and the login mints no credential.
-func TestAServiceLoginIsDeniedByAnyoneWhateverItsLoginHintNames(t *testing.T) {
+// TestAServiceDeviceCodeLoginIsRefused pins that a device-code login naming a service, whether or
+// not it names a person too, is refused ErrServiceLogsInWithToken and opens no record: a service
+// logs in with its own token.
+func TestAServiceDeviceCodeLoginIsRefused(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
-	_, code, err := svc.Login(ctx, signMachineLogin(t, testApprover, "cluster", "legion-daemon"))
-	if err != nil {
-		t.Fatalf("Login(a service's login naming %s): %v", testApprover, err)
+	for _, hint := range []string{"", testApprover} {
+		if _, _, err := svc.Login(ctx, signMachineLogin(t, hint, "cluster", "legion-daemon")); !errors.Is(err, ErrServiceLogsInWithToken) {
+			t.Fatalf("Login(a service's login, login_hint %q) = %v, want ErrServiceLogsInWithToken", hint, err)
+		}
 	}
-	view, err := svc.LookupByCode(ctx, code)
-	if err != nil {
-		t.Fatalf("LookupByCode: %v", err)
-	}
-	state, credentialID, err := svc.ApplyDecision(ctx, view.RecordID, false, "bob@example.com", code)
-	if err != nil || state != "denied" || credentialID != "" {
-		t.Fatalf("ApplyDecision(deny, bob, whom the login names nowhere) = %q, %q, %v; want denied with no credential", state, credentialID, err)
-	}
-	var login string
-	if err := svc.Store.Pool.QueryRow(ctx, `select login from credential_request_events where record_id=$1 and event='denied'`, view.RecordID).Scan(&login); err != nil || login != "bob@example.com" {
-		t.Fatalf("denied event login = %q, %v; want bob@example.com", login, err)
-	}
-	var minted int
-	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials where record_id=$1`, view.RecordID).Scan(&minted); err != nil || minted != 0 {
-		t.Fatalf("launcher_credentials minted from the denied login = %d, %v; want none", minted, err)
+	var records int
+	if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from credential_requests`).Scan(&records); err != nil || records != 0 {
+		t.Fatalf("credential-request records = %d, %v; want none", records, err)
 	}
 }
 
-// TestAServiceLoginPendingWithANamedApproverIsDecidedByAnyone pins the rule for a service's login a
-// broker from before it opened with a person as the approver, still pending at the deploy: the
-// stored approver is part of the hashed body and is never rewritten, and the rule reads the service
-// from the signed request instead, so another person approves it and its credential authenticates.
-func TestAServiceLoginPendingWithANamedApproverIsDecidedByAnyone(t *testing.T) {
-	svc := newFixture(t)
-	ctx := context.Background()
+// insertServiceRecord writes a pending service login record as a broker before token logins
+// opened one, naming approver, and returns its id, its code and the machine's key.
+func insertServiceRecord(t *testing.T, svc *Service, approver string) (recordID, code string, machineKey *ecdsa.PrivateKey) {
+	t.Helper()
 	machineKey, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
 	}
 	compact, err := record.Sign(machineKey, testAudience, []record.AuthorizationDetail{
 		{Type: "launcher_credential", Identifier: "cluster", Service: "legion-daemon"},
-	}, "", testApprover, nil, time.Now())
+	}, "", "", nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
-	const code = "ABCD-EFGH"
+	code = "ABCD-EFGH"
 	body := record.Body{
 		Request:         compact,
-		Approver:        testApprover,
+		Approver:        approver,
 		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-"},
 		LifetimeSeconds: new(int(svc.CredentialLifetime.Seconds())),
 		RulesVersion:    svc.Policy.Get().Version,
 		ExpiresAt:       time.Now().Add(svc.PendingTTL).UTC().Truncate(time.Second),
 		Code:            code,
 	}
-	if _, err := svc.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, code, expires_at) values ($1,$2,'launcher_credential',$3,$4,$5)`,
+	if _, err := svc.Store.Pool.Exec(context.Background(), `insert into credential_requests (id, body, kind, approver, code, expires_at) values ($1,$2,'launcher_credential',$3,$4,$5)`,
 		body.ID(), body.Canonical(), body.Approver, code, body.ExpiresAt); err != nil {
 		t.Fatalf("insert the record an older broker opened: %v", err)
 	}
-	state, credentialID, err := svc.ApplyDecision(ctx, body.ID(), true, "bob@example.com", code)
-	if err != nil || state != "issued" {
-		t.Fatalf("ApplyDecision(bob) = %q, %v; want issued", state, err)
+	return body.ID(), code, machineKey
+}
+
+// TestAPendingServiceLoginIsNeverApprovedButMayBeDenied pins a service login an older broker
+// opened, still pending at the deploy, whichever approver it stored: approving it is refused
+// ErrServiceLogsInWithToken and mints nothing, and anyone signed in may still deny it, which the
+// denied event records.
+func TestAPendingServiceLoginIsNeverApprovedButMayBeDenied(t *testing.T) {
+	for _, approver := range []string{record.AnyoneApprover, testApprover} {
+		svc := newFixture(t)
+		ctx := context.Background()
+		recordID, code, _ := insertServiceRecord(t, svc, approver)
+		if _, _, err := svc.ApplyDecision(ctx, recordID, true, "bob@example.com", code); !errors.Is(err, ErrServiceLogsInWithToken) {
+			t.Fatalf("approver %q: ApplyDecision(approve) = %v, want ErrServiceLogsInWithToken", approver, err)
+		}
+		var minted int
+		if err := svc.Store.Pool.QueryRow(ctx, `select count(*) from launcher_credentials`).Scan(&minted); err != nil || minted != 0 {
+			t.Fatalf("approver %q: launcher credentials = %d, %v; want none", approver, minted, err)
+		}
+		state, credentialID, err := svc.ApplyDecision(ctx, recordID, false, "bob@example.com", code)
+		if err != nil || state != "denied" || credentialID != "" {
+			t.Fatalf("approver %q: ApplyDecision(deny, bob) = %q, %q, %v; want denied", approver, state, credentialID, err)
+		}
 	}
-	assertLauncherAuthenticates(t, svc, machineKey, credentialID)
+}
+
+// TestAServiceLoginApprovedBeforeTokenLoginsStillAuthenticates pins the rollout: a service login a
+// person approved before this broker refused service device codes keeps authenticating, through
+// its record's chain re-check, for the rest of its lifetime.
+func TestAServiceLoginApprovedBeforeTokenLoginsStillAuthenticates(t *testing.T) {
+	svc := newFixture(t)
+	ctx := context.Background()
+	recordID, _, machineKey := insertServiceRecord(t, svc, record.AnyoneApprover)
+	thumbprint, err := proof.Thumbprint(&machineKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentialID := uuid.New()
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into launcher_credentials (id, service, host, key_thumbprint, public_jwk, record_id, expires_at)
+		values ($1,'legion-daemon','cluster',$2,'{}'::jsonb,$3, now() + interval '6 days')`, credentialID, thumbprint, recordID); err != nil {
+		t.Fatalf("mint the credential its approval minted: %v", err)
+	}
+	if _, err := svc.Store.Pool.Exec(ctx, `insert into credential_request_events (record_id, event, login, credential_id, actor) values ($1,'approved',$2,$3,$4)`,
+		recordID, "bob@example.com", credentialID.String(), record.HumanActor("bob@example.com")); err != nil {
+		t.Fatalf("record its approval: %v", err)
+	}
+	assertLauncherAuthenticates(t, svc, machineKey, credentialID.String())
 }
 
 // assertLauncherAuthenticates fails t unless a launcher proof signed by machineKey for credentialID

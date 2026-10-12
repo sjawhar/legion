@@ -1794,9 +1794,11 @@ async function readUploadedFile(
  * answer it. The live document's `ask` blocks are judged by the latest version, the one the
  * request would name: a block that version shows open counts as open even when its ask is already
  * answered or closed, since that answer reaches a version only when the document settles, about
- * two seconds later, or with the next edit (the agent's fold of the answer into the text). A block
- * not yet in that version counts as open too. A block removed from the document is not judged
- * here; `refuseRemovingOpenDecisionBlocks` keeps one whose ask is open in it. A document already
+ * two seconds later, or with the agent's next edit, whichever is first. An answered block already
+ * carries its own record, so no edit is needed for that; a waiver carries none, so the agent's
+ * next edit is where the human's decision gets written into the text. A block not yet in that
+ * version counts as open too. A block removed from the document is not judged here;
+ * `refuseRemovingOpenDecisionBlocks` keeps one whose ask is open in it. A document already
  * approved at its latest version is left to the server, which answers with that approval.
  */
 async function refuseOpenDecisionBlocks(
@@ -1816,12 +1818,12 @@ async function refuseOpenDecisionBlocks(
   ]);
   const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version.markdown.split("\n");
-  // An answered block's answer is folded in; a waived one (resolved) gets the decision written in.
-  const stillOpen = (named: string, state: string): string => {
-    const next =
-      state === "answered" ? "fold the answer into the text" : "write the decision into the text";
-    return `${named}, ${state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`;
-  };
+  // An answered block already carries its own record and settles into a version on its own; a
+  // waived one (resolved) gets the decision written in.
+  const stillOpen = (named: string, state: string): string =>
+    state === "answered"
+      ? `${named}, answered but still open in version ${latest}: it settles into a version on its own in about two seconds; wait, then request again`
+      : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block): string[] => {
     const ask = asks.get(block.id);
     // The block's opening lines, `:::ask{#<id> … state="…"}`. Every match counts, so a line that
@@ -1871,7 +1873,7 @@ async function refuseOpenDecisionBlocks(
     [
       `dispatch ${commandName(tool)} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
       ...open.map((line) => `- ${line}`),
-      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch doc-edit. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
+      "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, it settles into a version on its own in about two seconds; wait, then request again. Edit the document only where the answer changes design text outside the block, never to restate it. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human.",
     ].join("\n")
   );
 }

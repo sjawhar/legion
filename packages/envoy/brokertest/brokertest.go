@@ -19,6 +19,10 @@ import (
 // Rig is internal/broker/brokertest.Rig under a name a foreign module may import.
 type Rig = internal.Rig
 
+// DaemonAccount is internal/broker/brokertest.DaemonAccount: the ServiceAccount every Rig lets log
+// in as legion-daemon with its token.
+const DaemonAccount = internal.DaemonAccount
+
 // NewRig forwards to internal/broker/brokertest.NewRig, including its own skip when
 // BROKER_TEST_DATABASE_URL is unset.
 func NewRig(t *testing.T) *Rig {

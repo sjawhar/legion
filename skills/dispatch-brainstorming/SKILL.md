@@ -72,17 +72,18 @@ are ones you checked.
    revise or hand back, reply with `--reply-to-ask <ask id> --turn agent` instead: a `--reply-to`
    reply takes the default turn, which hands the request back to the human unchanged, and a call
    with a corrected `--summary` is refused while it waits on them.
-3. **Each next version folds the answers in and adds what they open.** Keep each answered
-   decision block where it is, fold its answer into the surrounding text in the human's words with
-   the date, recording the person as `skill://dispatch`'s "Writing a spec" says for a settled
-   point. Then add the next sections, each with its question. Every question that is ready goes out
+3. **Each next version keeps answers in place and adds what they open.** An answered decision
+   block already carries its own record, as `skill://dispatch`'s "Writing a spec" says; leave it
+   where it is. Where an answer changes design text elsewhere in the spec, rewrite that text. Then
+   add the next sections, each with its question. Every question that is ready goes out
    at once, each as a decision block at the end of the section that sets it up; a question waits
    only when it depends on an answer still open.
-4. **A comment that answers a question settles it** as surely as the block does. Fold it into the
-   text at once, and close the block with `dispatch resolve-ask` if the human has not.
+4. **A comment that answers a question settles it** as surely as the block does. It carries no
+   rendered record, so write it into the text at once, recording the person as `skill://dispatch`'s
+   "Writing a spec" says, and close the block with `dispatch resolve-ask` if the human has not.
 5. **Request approval at the end, not after each section.** Once nothing in the spec is new to the
    human, request it exactly when "Approval of a spec" in `skill://dispatch` says: every decision
-   block settled and folded in, the human has agreed to every point in the spec, and the current
+   block settled, the human has agreed to every point in the spec, and the current
    version is not yet approved (or waived, as that section's next paragraph covers). The request
    carries nothing new, as that section also says.
 

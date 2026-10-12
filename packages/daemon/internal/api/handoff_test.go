@@ -1019,7 +1019,7 @@ func TestHandoffCompleteCarriesTheRunOfTheTaskBeingWorked(t *testing.T) {
 				if err := machine.Handle(context.Background(), supervise.StreamTurnEnd{Claim: tester.token}); err != nil {
 					t.Fatalf("end the turn: %v", err)
 				}
-				if err := machine.Handle(context.Background(), supervise.RequestSuspend{Claim: tester.token}); err != nil {
+				if err := machine.Handle(context.Background(), supervise.RequestSuspend{Claim: tester.token, By: supervise.SuspendedByOperator}); err != nil {
 					t.Fatalf("suspend: %v", err)
 				}
 				if err := machine.Handle(context.Background(), supervise.RequestResume{Claim: tester.token}); err != nil {

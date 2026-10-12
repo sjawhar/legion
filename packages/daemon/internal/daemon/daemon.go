@@ -48,6 +48,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/store"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 	"github.com/sjawhar/legion/daemon/internal/supervise"
+	"github.com/sjawhar/legion/daemon/internal/workflow"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
 
@@ -127,6 +128,10 @@ type overrides struct {
 	githubAPI string
 	// listen opens the API listener; nil is net.Listen.
 	listen func(network, address string) (net.Listener, error)
+	// strandedReported runs once the boot's report of the claims nothing will wake has finished,
+	// whether it logged or not (reportStranded); nil, in production, is nothing. The report runs
+	// beside the API, so a test that asserts on its line waits for this rather than for /healthz.
+	strandedReported func()
 }
 
 // Run is the daemon. It refuses what it cannot run on before it touches anything — the
@@ -393,7 +398,7 @@ func run(ctx context.Context, cfg config.Config, log *slog.Logger, o overrides) 
 			if workflow != nil {
 				log.Info("legion workflow boot stage", "stage", "api")
 			}
-			err = serve(ctx, cfg, st, startedAt, listener, s, plan, workflow)
+			err = serve(ctx, cfg, st, startedAt, bootID, listener, s, plan, workflow)
 		default:
 			failed <- err
 			s.halt(err)
@@ -515,13 +520,15 @@ type plan struct {
 	controllerRetry time.Duration
 	// stopBudget is how long the stop waits for the daemon's own work once it begins (stopBudget).
 	stopBudget time.Duration
-	// secretsEnroller is the daemon's agent-secrets machine login as the machines' Enroller
+	// secretsEnroller is the daemon's agent-secrets token login as the machines' Enroller
 	// (newSecretsLogin); nil when the deployment enrolls no pod.
 	secretsEnroller supervise.Enroller
-	// secretsLogin is the same machine login's client, read-only, for the state route to show its
+	// secretsLogin is the same login's client, read-only, for the state route to show its
 	// current status (source.State, agentsecrets.Client.LoginStatus); nil when the deployment
 	// enrolls no pod.
 	secretsLogin *agentsecrets.Client
+	// strandedReported is overrides.strandedReported; nil runs nothing.
+	strandedReported func()
 }
 
 // runtimeFactory builds the runtime over the worker stream (C3): ctx is supervision's lifetime,
@@ -579,7 +586,7 @@ func prepare(cfg config.Config, log *slog.Logger, o overrides) (plan, error) {
 		project: reads.project, operatorToken: reads.operatorToken, secrets: reads.secrets, nats: reads.nats, instructions: instructions,
 		dispatchToken: reads.dispatchToken, prompts: composer, roleReferences: prompts.RoleReferences(),
 		tools: reads.tmux.tools, clock: clock, orphanSweep: orphanSweep, controllerRetry: controllerRetry, stopBudget: stop,
-		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin,
+		secretsEnroller: secretsEnroller, secretsLogin: secretsLogin, strandedReported: o.strandedReported,
 	}
 	if cfg.Runtime.Name == "kubernetes" {
 		err = prepareSandbox(cfg, o, reads.sandbox, &p)
@@ -1317,7 +1324,7 @@ func (s *supervision) stop() {
 // anything waits — the workflow's outbox and the controller keeper would otherwise wait on a
 // machine whose relaunch holds it, and the stop on them — and then drains the API until drainBy,
 // letting the decisions its routes asked for finish, and ends them when the drain does (endDrain).
-func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time, listener net.Listener, s *supervision, p plan, workflow *workflowRuntime) error {
+func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt time.Time, bootID int64, listener net.Listener, s *supervision, p plan, workflow *workflowRuntime) error {
 	records := record.Store(record.NewStore())
 	var handlers []intake.Handler
 	var client dispatch.Client
@@ -1340,7 +1347,6 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		State: &source{
 			store:        st,
 			records:      records,
-			supervisor:   s.supervisor,
 			project:      cfg.Project,
 			projectToken: p.project,
 			runtime:      cfg.Runtime.Name,
@@ -1379,9 +1385,28 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	})
 
 	group, serving := errgroup.WithContext(ctx)
+	serverStarted := make(chan struct{})
 	group.Go(func() error {
+		close(serverStarted)
 		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("serve the API on %s: %w", server.Addr, err)
+		}
+		return nil
+	})
+	// The report is advisory: its transaction must never sit in the path from restored claims to a
+	// serving API. Start it only after the server goroutine has begun and bound its store read; a
+	// lock or unavailable connection is a report error, not a failed or unhealthy boot.
+	group.Go(func() error {
+		select {
+		case <-serverStarted:
+		case <-serving.Done():
+			return nil
+		}
+		report, cancel := context.WithTimeout(serving, strandedReportTimeout)
+		defer cancel()
+		reportStranded(report, st, projectRecords{Store: record.NewStore(), project: cfg.Project}, cfg.Project, p.project, s.log)
+		if p.strandedReported != nil {
+			p.strandedReported()
 		}
 		return nil
 	})
@@ -1401,6 +1426,13 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	})
 	if workflow != nil {
 		group.Go(func() error { return workflow.run(serving) })
+		// The boot fact runs beside the already-started API server, so a slow census of claims
+		// never delays /healthz or repeats LEGION-653's boot-time deadlock. A failure while the
+		// daemon serves is retried (runBooted); only the daemon's stop ends it unapplied.
+		group.Go(func() error {
+			workflow.runBooted(serving, bootID)
+			return nil
+		})
 	}
 	if keeper != nil {
 		group.Go(func() error {
@@ -1415,19 +1447,19 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 	return group.Wait()
 }
 
-// source answers the state route out of the daemon's own store: the daemon itself, the cap it
-// admits under, every claim it supervises, filed under the issue it is on, and the project's
-// controller.
+// source answers the state route out of one repeatable-read snapshot: the daemon itself, the cap
+// it admits under, every stored claim filed under the issue it is on, and the project's controller.
+// A machine persists its claim before it publishes it to supervision, so the durable snapshot
+// prevents a claim view and strandedClaims from describing different instants.
 type source struct {
 	store        *store.Store
 	records      record.Store
-	supervisor   *supervisor
 	project      string
 	projectToken string
 	runtime      string
 	admissionCap int
 	startedAt    time.Time
-	// secretsLogin is the daemon's own agent-secrets machine login client (newSecretsLogin), read
+	// secretsLogin is the daemon's own agent-secrets token login client (newSecretsLogin), read
 	// through LoginStatus for the state route; nil when the deployment enrolls no pod.
 	secretsLogin *agentsecrets.Client
 	// deployment is the deployment's capabilities as this boot knows them (supervision.deployment),
@@ -1472,14 +1504,21 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	if err != nil {
 		return api.State{}, err
 	}
-	claims, err := s.supervisor.Claims(ctx)
+	claims, err := s.store.ClaimsTx(ctx, tx)
 	if err != nil {
 		return api.State{}, err
 	}
-	state, err := projection.Project(ctx, tx, projectRecords{Store: s.records, project: s.project}, s.project, claims, s.reports())
+	claims = ofProject(claims, s.projectToken)
+	records := projectRecords{Store: s.records, project: s.project}
+	state, err := projection.Project(ctx, tx, records, s.project, claims, s.reports())
 	if err != nil {
 		return api.State{}, err
 	}
+	stranded, err := workflow.Stranded(ctx, tx, records, claims)
+	if err != nil {
+		return api.State{}, err
+	}
+	state.StrandedClaims = api.StrandedClaimsOf(stranded)
 	state.Daemon = api.DaemonInfo{
 		Project:       s.project,
 		SchemaVersion: version,
@@ -1494,8 +1533,7 @@ func (s *source) State(ctx context.Context, tx pgx.Tx) (api.State, error) {
 	}
 	state.ControllerLocator = api.ControllerLocatorOf(s.runtime, controller)
 	if s.secretsLogin != nil {
-		login := s.secretsLogin.LoginStatus()
-		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: login.State, Code: login.Code}
+		state.AgentSecretsLogin = &api.AgentSecretsLoginView{State: s.secretsLogin.LoginStatus().State}
 	}
 	state.Capabilities = api.CapabilityStatesOf(s.deployment().Report())
 	return state, nil

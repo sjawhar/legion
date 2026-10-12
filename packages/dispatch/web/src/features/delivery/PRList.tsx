@@ -1,6 +1,6 @@
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
-import type { DeliveryPR } from "../../api/types";
+import type { DeliveryPR, DeliverySessionGroup } from "../../api/types";
 import {
   borderDefault,
   dangerText,
@@ -236,6 +236,7 @@ export function PRList({
   allRepos,
   colorBy,
   colorScale,
+  sessionGroups,
   selectedId,
   onSelect,
   onSelectRun,
@@ -244,6 +245,7 @@ export function PRList({
   allRepos: readonly string[];
   colorBy: ColorFacet;
   colorScale: Map<string, string>;
+  sessionGroups: readonly DeliverySessionGroup[];
   selectedId: string | undefined;
   onSelect: (id: string) => void;
   onSelectRun: (runId: number) => void;
@@ -260,7 +262,10 @@ export function PRList({
   // At most one scroll update per frame: a fling fires scroll events faster than React renders.
   const scrollFrameRef = useRef<number | null>(null);
 
-  const rows = useMemo(() => buildPRListRows(prs, allRepos), [prs, allRepos]);
+  const rows = useMemo(
+    () => buildPRListRows(prs, allRepos, sessionGroups),
+    [prs, allRepos, sessionGroups]
+  );
   const sorted = useMemo(
     () => [...rows].sort((a, b) => compareRows(a, b, sort.id, sort.desc)),
     [rows, sort]

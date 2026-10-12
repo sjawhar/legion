@@ -13,8 +13,10 @@ import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors";
  * `dispatch read` answering, and the role's App login through `gh api graphql {viewer{login}}`.
  *
  * The daemon renders the report and never refuses a session for it, so a failing check is a
- * failing row, never a stopped boot: `measureCapabilities` never throws. Every collaborator a check
- * needs is behind `CapabilityHost`, so a test fakes it; `ompCapabilityHost()` is the production one.
+ * failing row, never a stopped boot: `measureCapabilities` never throws. Every row's detail leaves
+ * cleaned (`cleanDetail`), since a check quotes upstream errors and the report reaches the
+ * daemon's unauthenticated state route. Every collaborator a check needs is behind
+ * `CapabilityHost`, so a test fakes it; `ompCapabilityHost()` is the production one.
  */
 
 /** The budget of one check; a check still pending at it is a failing row. */
@@ -217,30 +219,22 @@ const checkWebSearch: Check = async (host, input, signal) => {
   return ok(`web_search registered; provider ${String(provider)} answered in ${elapsed} ms`);
 };
 
-/** `scheme://userinfo@` in a URL: the credentials a connection error may quote. */
-const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi;
-
-/** The error `discoverMCPServers` recorded for `name`, when its `errors` carry one, with every
- * URL's userinfo in it replaced by `***`: a server's connection error can quote its URL whole,
- * token and all, and the detail travels to the daemon's log and the state. Oh My Pi records
- * `{path: "mcp:<name>", error}`; a `server` or `name` member and a `message` are read the same
- * way, and anything else naming the server is quoted whole. */
+/** The error `discoverMCPServers` recorded for `name`, when its `errors` carry one. Oh My Pi
+ * records `{path: "mcp:<name>", error}`; a `server` or `name` member and a `message` are read the
+ * same way, and anything else naming the server is quoted whole. */
 function mcpErrorFor(errors: readonly unknown[], name: string): string | undefined {
-  let quoted: string | undefined;
   for (const entry of errors) {
     if (typeof entry !== "object" || entry === null) {
       if (!String(entry).includes(name)) continue;
-      quoted = String(entry);
-      break;
+      return String(entry);
     }
     const record = entry as Record<string, unknown>;
     const names = [record.server, record.name, record.path];
     if (!names.some((value) => value === name || value === `mcp:${name}`)) continue;
     const message = record.error ?? record.message;
-    quoted = message === undefined ? String(entry) : String(message);
-    break;
+    return message === undefined ? String(entry) : String(message);
   }
-  return quoted?.replace(URL_USERINFO, "$1***@");
+  return undefined;
 }
 
 const checkMCP: Check = async (host, input, signal) => {
@@ -412,6 +406,102 @@ const CHECKS: Readonly<Record<LiveCapability, Check>> = {
   github: checkGitHub,
 };
 
+/** The longest detail a row carries, in UTF-8 bytes: the daemon's `capabilities.MaxReportDetail`. */
+const MAX_DETAIL_BYTES = 1024;
+
+/** What `cleanDetail` holds a control character as while it redacts: a noncharacter, which no text
+ * carries, so it stands for nothing else. */
+const HELD = "\uffff";
+
+/** Go's `unicode.IsSpace`, the space runes the daemon's cleanup splits on. */
+function isSpace(code: number): boolean {
+  return (
+    (code >= 0x09 && code <= 0x0d) ||
+    code === 0x20 ||
+    code === 0x85 ||
+    code === 0xa0 ||
+    code === 0x1680 ||
+    (code >= 0x2000 && code <= 0x200a) ||
+    code === 0x2028 ||
+    code === 0x2029 ||
+    code === 0x202f ||
+    code === 0x205f ||
+    code === 0x3000
+  );
+}
+
+/** `text` cut to at most `max` UTF-8 bytes on a character boundary. */
+function truncateUtf8(text: string, max: number): string {
+  let bytes = 0;
+  let end = 0;
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    bytes += code < 0x80 ? 1 : code < 0x800 ? 2 : code < 0x10000 ? 3 : 4;
+    if (bytes > max) break;
+    end += char.length;
+  }
+  return text.slice(0, end);
+}
+
+/**
+ * The credential shapes `cleanDetail` replaces, as the daemon's `credentialRules` in
+ * `packages/daemon/internal/capabilities` and in its order, which its comment explains; the shared
+ * fixture names each with an example. A value class takes `HELD`, and a separator a space or
+ * `HELD`. The userinfo rule starts only where a run of scheme characters starts, and the JWT rule
+ * only where a run of base64url characters starts, as the daemon's prefix groups do, so a long run
+ * that never completes a match is read once rather than once per start: JavaScriptCore backtracks,
+ * where the daemon's RE2 does not.
+ */
+const CREDENTIAL_RULES: readonly (readonly [RegExp, string])[] = [
+  [/(?<![a-z0-9+.-])([0-9+.-]*[a-z][a-z0-9+.-]*:\/\/)[^ /?#]+@/gi, "$1***@"],
+  [
+    /([?&](?:token|key|secret|password|access_token|refresh_token|id_token|api_key|apikey|client_secret|sig|x-amz-security-token|x-amz-signature)=)[^ &#"'<>]+/gi,
+    "$1***",
+  ],
+  [
+    /(authorization["']?[ \uffff]*[:=][ \uffff]*)(?:(["'])((?:bearer|basic|token|digest)[ \uffff]+)?[^"']+|(\[?)((?:bearer|basic|token|digest)[ \uffff]+)?[^)\]}>]+)/gi,
+    "$1$2$3$4$5***",
+  ],
+  [/(x-api-key["']?[ \uffff]*[:=][ \uffff]*["']?)[A-Za-z0-9._~+/=*\uffff-]+/gi, "$1***"],
+  [/\b(bearer[ \uffff]+)[A-Za-z0-9._~+/=*\uffff-]+/gi, "$1***"],
+  [/\b(gh[pousr]_|github_pat_)[A-Za-z0-9._\uffff-]{20,}/g, "$1***"],
+  [
+    /(?<![A-Za-z0-9_\uffff-])eyJ[A-Za-z0-9_\uffff-]{8,}\.[A-Za-z0-9_\uffff-]{8,}\.[A-Za-z0-9_\uffff-]*/g,
+    "***",
+  ],
+  [/\b(sk-|dsp_)[A-Za-z0-9_\uffff-]{20,}/g, "$1***"],
+  [/\b(AKIA|ASIA)[A-Z0-9]{16}\b/g, "$1***"],
+];
+
+/**
+ * A detail as the daemon's `cleanDetail` (`packages/daemon/internal/capabilities`) keeps it, and
+ * held to the same shared fixture: one line, every credential redacted, cut at 1024 UTF-8 bytes.
+ * Every space rune is a space; every other control character is held as `HELD` while the rules
+ * run, so a credential value runs on across it, then is a space too; space runs then collapse, and
+ * redaction runs before the cut. The daemon cleans the report again, which leaves it as it is; this
+ * copy keeps a credential inside the pod when the daemon is a contract-21 release from before that
+ * cleaning (legion-v11.5.0, v11.5.1).
+ */
+export function cleanDetail(text: string): string {
+  let marked = "";
+  for (const char of text) {
+    const code = char.codePointAt(0) ?? 0;
+    // Go's unicode.IsControl: C0, DEL and C1.
+    const control = code < 0x20 || (code >= 0x7f && code < 0xa0);
+    marked += isSpace(code) ? " " : control ? HELD : char;
+  }
+  const redacted = CREDENTIAL_RULES.reduce(
+    (line, [pattern, replacement]) => line.replace(pattern, replacement),
+    marked
+  );
+  const line = redacted
+    .replaceAll(HELD, " ")
+    .split(" ")
+    .filter((field) => field !== "")
+    .join(" ");
+  return truncateUtf8(line, MAX_DETAIL_BYTES);
+}
+
 /** `8 s` for a whole number of seconds, else the milliseconds. */
 function budgetLabel(ms: number): string {
   return ms % 1_000 === 0 ? `${ms / 1_000} s` : `${ms} ms`;
@@ -432,8 +522,9 @@ async function withinBudget<T>(work: Promise<T>, ms: number, onDeadline: () => T
  * Measures the six live rows concurrently: each check under `budgets.checkMs` (its signal is
  * aborted at the deadline), the whole report under `budgets.reportMs`. A check that throws, or
  * is still pending at its deadline, is a failing row with the reason; the function itself never
- * throws. `measuredAt` is when the measuring started, `elapsedMs` how long it took, and the rows
- * are in `LIVE_CAPABILITIES` order.
+ * throws. Every row's detail is cleaned here (`cleanDetail`), the one place every check's outcome
+ * passes, so no branch of a check quotes a credential into the report. `measuredAt` is when the
+ * measuring started, `elapsedMs` how long it took, and the rows are in `LIVE_CAPABILITIES` order.
  */
 export async function measureCapabilities(
   host: CapabilityHost,
@@ -465,10 +556,11 @@ export async function measureCapabilities(
     () => undefined
   );
   for (const controller of controllers) controller.abort();
-  const rows: LegionCapabilityRow[] = LIVE_CAPABILITIES.map((name) => ({
-    name,
-    ...(outcomes.get(name) ?? failed(`did not finish within ${budgetLabel(budgets.reportMs)}`)),
-  }));
+  const rows: LegionCapabilityRow[] = LIVE_CAPABILITIES.map((name) => {
+    const { ok, detail } =
+      outcomes.get(name) ?? failed(`did not finish within ${budgetLabel(budgets.reportMs)}`);
+    return { name, ok, detail: cleanDetail(detail) };
+  });
   return { measuredAt, elapsedMs: Date.now() - started, rows };
 }
 

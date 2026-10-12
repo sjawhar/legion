@@ -414,6 +414,33 @@ func TestAnEnrollmentWithoutAnIncarnationIsRefusedByTheSchema(t *testing.T) {
 	}
 }
 
+// Who suspended a claim round-trips with it, and the schema refuses a source it does not know:
+// the daemon's resume by rule reads the column after a restart, and a value it cannot read would
+// be a claim nobody can say whether to resume.
+func TestASuspendedClaimsSourceRoundTripsAndTheSchemaRefusesAnUnknownOne(t *testing.T) {
+	s := migratedStore(t)
+	ctx := context.Background()
+	for _, by := range []supervise.SuspendSource{supervise.SuspendedByOperator, supervise.SuspendedByDaemon, supervise.SuspendedByExit, ""} {
+		c := supervise.Claim{Token: "legion-LEGION-209-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
+			Role: claim.RoleTester, Generation: 2, State: supervise.StateSuspended, Session: "ses_tester", SuspendedBy: by}
+		if err := s.PutClaim(ctx, c); err != nil {
+			t.Fatalf("put a claim suspended by %q: %v", by, err)
+		}
+		claims, err := s.Claims(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(claims) != 1 || claims[0].SuspendedBy != by {
+			t.Fatalf("a claim suspended by %q read back as %+v", by, claims)
+		}
+	}
+	c := supervise.Claim{Token: "legion-LEGION-209-tester", Project: "legion", Tree: "LEGION-208", Issue: "LEGION-209",
+		Role: claim.RoleTester, State: supervise.StateSuspended, SuspendedBy: "someone"}
+	if err := s.PutClaim(ctx, c); err == nil {
+		t.Fatal("a claim suspended by an unknown source was stored")
+	}
+}
+
 // The project controller's claim, which the daemon launches under `controller: daemon`, is a row
 // like any claim's: on the role `controller`, with no issue and no tree, so its boot token resolves
 // a shim's hello and a registration as any launch's does.

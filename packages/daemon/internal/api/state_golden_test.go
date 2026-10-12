@@ -127,16 +127,21 @@ func populatedState() State {
 				Phase:      phase.Held,
 				Status:     "in_progress",
 				HoldReason: "escalated",
-				Workers:    map[claim.Role]PhaseView{},
+				Workers: map[claim.Role]PhaseView{
+					claim.RoleImplementer: {Claim: ClaimView{Session: "ses_implementer_210", State: "failed"}, Rounds: 1},
+				},
 			},
 		},
+		// LEGION-210's implementer failed while implementing: its issue is held from that phase,
+		// and nothing retries the claim until its architect retries the phase.
+		StrandedClaims: []StrandedClaim{{Issue: "LEGION-210", Role: claim.RoleImplementer, State: "failed"}},
 		ControllerLocator: &ControllerLocator{
 			Runtime:      "kubernetes",
 			External:     true,
 			SessionID:    "ses_controller",
 			RegisteredAt: time.Date(2026, 9, 22, 9, 16, 40, 0, time.UTC),
 		},
-		AgentSecretsLogin: &AgentSecretsLoginView{State: "pending", Code: "WXYZ-1234"},
+		AgentSecretsLogin: &AgentSecretsLoginView{State: "issued"},
 		// A kubernetes deployment whose image passed the probe, with the broker gap decided and
 		// one role unreserved, and no session's report yet, so the fixture carries a decided row and
 		// an open row beside the present, unchecked and withheld ones, rendered by the report
