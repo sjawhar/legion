@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "LEGION-695",
+  "completed": "2026-10-12T15:58:00Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1928",
+  "proof": [
+    {
+      "criterion": "Opened at /issues/<KEY>/spec, the spec draws the picture from /api/v1/issues/<KEY>/artifacts/shot-png/versions/1; the same document opened at a past version draws it too (confirmed by hand in a real browser against `bun run dispatch:local`).",
+      "surface": "`bun run dispatch:local` at http://127.0.0.1:8777 (the seeded harness on a Postgres 17 + pgvector under /tmp), the real `dispatch` CLI pointed at it (DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token, DISPATCH_TOKEN_FILE unset), and Playwright's Chromium (1200x900) opening the signed-in URL.",
+      "command": "dispatch issue --project CORE --title 'Picture check' (CORE-8); dispatch artifact --issue CORE-8 --name shot.png --path packages/dispatch/e2e/fixtures/diagram.png (slug shot-png, version 1); dispatch artifact --issue CORE-8 --name photo.png --path /tmp/photo.png (a 480x200 PNG); dispatch doc-edit --issue CORE-8 --artifact spec --ops-json '[{\"op\":\"insert\",\"after\":\"end\",\"markdown\":\"# Picture check\\n\\n![shot.png](dispatch://CORE-8/artifact/shot-png@v1)\\n\\nBelow the picture.\\n\\n![x](dispatch://CORE-8/artifact/shot-png@v9)\"}]' then '[{\"op\":\"insert\",\"after\":\"end\",\"markdown\":\"![photo.png](dispatch://CORE-8/artifact/photo-png@v1)\"}]'; chromium.launch() → page.goto('http://127.0.0.1:8777/auth/_dev/signin?login=alice&next=/issues/CORE-8/spec'), read the editor's img[alt=photo.png] src/loading/naturalWidth/className, screenshot; getByRole('combobox', {name: 'Version'}).selectOption('3'), read the version view's img and its editor's contenteditable, screenshot.",
+      "observed": "Live editor: <img alt=\"photo.png\" src=\"/api/v1/issues/CORE-8/artifacts/photo-png/versions/1\" loading=\"lazy\"> with naturalWidth 480, naturalHeight 200 and class `not-prose inline-block max-h-96 w-auto max-w-full rounded border object-contain align-bottom border-slate-200 dark:border-slate-800` (pictureClassName); the 1x1 shot.png drawn too (naturalWidth 1). Version 3 in the read-only version view: the same <img> with naturalWidth 480, the view's editor contenteditable=\"false\". Screenshots: dispatch://LEGION-695/artifact/legion-695-live-spec-png@v1 and dispatch://LEGION-695/artifact/legion-695-version-3-png@v1, linked from the pull request comment https://github.com/sjawhar/legion/pull/1928#issuecomment-6127269535.",
+      "headSha": "5caee947d9bb23868c5a2398c3bb07fd07a5321d",
+      "negativeControl": "The line ![x](dispatch://CORE-8/artifact/shot-png@v9) (a version that does not exist): its wrapper [data-dispatch-doc-picture=\"dispatch://CORE-8/artifact/shot-png@v9\"] holds the link `CORE-8 shot-png` (href /issues/CORE-8/artifacts/shot-png?v=9, data-dispatch-href dispatch://CORE-8/artifact/shot-png@v9) and no <img> (count 0), in the live editor and in the version view."
+    },
+    {
+      "criterion": "The stored markdown does not change: GET /api/v1/issues/<KEY>/artifacts/spec/text answers {\"markdown\": …} still containing the exact picture line.",
+      "surface": "The same `bun run dispatch:local` instance, read over HTTP with the agent bearer and from the signed-in page.",
+      "command": "curl -H 'Authorization: Bearer e2e-token' http://127.0.0.1:8777/api/v1/issues/CORE-8/artifacts/spec/text; and, from the signed-in page after the editor had rendered, fetch('/api/v1/issues/CORE-8/artifacts/spec/text').",
+      "observed": "{\"markdown\":\"# Picture check\\n\\n![shot.png](dispatch://CORE-8/artifact/shot-png@v1)\\n\\nBelow the picture.\\n\\n![x](dispatch://CORE-8/artifact/shot-png@v9)\\n\\n![photo.png](dispatch://CORE-8/artifact/photo-png@v1)\\n\", …, \"version\":3}: every picture line kept its dispatch:// source. The browser test 'a picture written into a spec draws in the editor and in a past version, and its markdown is kept' reads the same route after typing a sentence below the picture and asserts the exact line.",
+      "headSha": "5caee947d9bb23868c5a2398c3bb07fd07a5321d",
+      "negativeControl": "The first doc-edit without --artifact was refused by the CLI (`Exactly one of issue and project is required; artifact or ref must name the document`) and the route then answered {\"markdown\":\"\",\"version\":1}: nothing was written until the corrected call."
+    },
+    {
+      "criterion": "Browser tests in packages/dispatch/e2e/pictures.e2e.ts prove the editor draws the picture, the past version draws it, a markdown version and a version-less source show a link, an https:// picture stays an <img>, and the comment case keeps passing, on Desktop Chrome and the iPhone 13 project.",
+      "surface": "The Playwright harness (real Go dispatch server built by e2e/run-server.sh on a Postgres 17 + pgvector under /tmp, the fake Envoy/GitHub/broker listeners, Playwright's Chromium) from packages/dispatch.",
+      "command": "cd packages/dispatch && bun run build:web && DATABASE_URL='postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable' bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/pictures.e2e.ts",
+      "observed": "10 passed (21.5s): the three existing cases and the two new ones on both projects. Also `bun run lint` (555 files, no fixes), `bun run typecheck` (clean), `bun test web/src/features/doc` (144 pass).",
+      "headSha": "5caee947d9bb23868c5a2398c3bb07fd07a5321d",
+      "negativeControl": "The new tests' assertions cannot pass without the view: expectDrawn asserts src=/api/v1/… on an <img> the old editor rendered with src=dispatch://… and no [data-dispatch-doc-picture] wrapper existed. Separately, the full `bun run test` (2142 tests) fails one pre-existing, unrelated test in this sandbox, 'a cold Inbox hydrates every ask thread from its one list response' (features/inbox/Inbox.test.tsx), which fails identically on the base revision 4c4f3e10 here (`bun test web/src/features/inbox web/src/features/refs web/src/features/doc` → 1 fail) and passes alone; main's CI is green at 6e23f140 and 0eb9681a."
+    }
+  ],
+  "filesChanged": [
+    "packages/dispatch/web/src/features/doc/picture-view.ts (new): the image node view",
+    "packages/dispatch/web/src/features/doc/picture-view.test.ts (new): its unit tests",
+    "packages/dispatch/web/src/features/doc/ask-block.ts: installTypedBlocks mounts pictureView for `image`; doc comment",
+    "packages/dispatch/web/src/features/refs/DispatchPicture.tsx: pictureClassName exported",
+    "packages/dispatch/e2e/api.ts: getIssueArtifactText (the slug text route)",
+    "packages/dispatch/e2e/pictures.e2e.ts: Test A (draws, past version, markdown kept) and Test B (links, web picture, click navigates)",
+    "packages/dispatch/AGENTS.md: the installTypedBlocks passage, the pictures.e2e.ts sentence, the picture-rendering passage",
+    "packages/envoy/CHANGELOG.md: a Fixed entry under Unreleased"
+  ],
+  "trickyParts": [
+    "happy-dom raises `error` synchronously from the `src` attribute setter when the URL cannot resolve (page at about:blank); the img is appended to the wrapper before `src` is set so a synchronous error replaces it rather than preceding it. Real browsers queue the error as a task; the ordering is right either way, and a unit case holds it.",
+    "The Playwright harness and `bun run dispatch:local` need a loopback Postgres with pgvector; this sandbox has no Docker, so one was built under /tmp from Debian packages (nothing in the repository) and left running for the tester's own run: `export LD_LIBRARY_PATH=/tmp/pg/usr/lib/x86_64-linux-gnu PATH=/tmp/pg/usr/lib/postgresql/17/bin:$PATH DATABASE_URL='postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable'` (restart with `postgres -D /tmp/pgdata -p 55432 -h 127.0.0.1 -k /tmp/pgsock` if it is gone).",
+    "The simplify pass (ce-simplify-code, three reviewer subagents) applied one change, to the unit test only (literal paths and words in the link test); runtime code is unchanged since the proof's head, so the browser proof was not re-run. The two reviewers' other finding — pictureView and pictureSerializer (features/refs/markdown-engine.ts) each derive the dispatch:// source test and the alt-or-slug caption — is duplication cleanup outside the diff, recorded as the pull request's Fast-follow."
+  ],
+  "deviations": [
+    "The CHANGELOG already had a `### Fixed` heading under `## [Unreleased]` (the plan said there was none); the entry was placed first under it rather than a second heading being added."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Pre-existing, not changed here: a paragraph that ends in a picture is ~115 px tall in the editor whatever the picture's size, because ProseMirror's cursor hack after a contenteditable=false leaf (`<img class=\"ProseMirror-separator\">`) gets Tailwind preflight's `display: block` and Typography's `.prose img` 2em margins. Measured on the plain `<img>` path too (`![logo](https://example.invalid/logo.png)` → 115.19 px), so it predates this change; the fix would be a `.milkdown img.ProseMirror-separator` rule in styles.css, a separate issue for the architect."
+  ]
+}
