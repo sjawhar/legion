@@ -1002,6 +1002,7 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		Specs: specs{
 			stateDir: cfg.StateDir, project: p.project, instructions: p.instructions, secrets: p.secrets, repo: repo, prompts: p.prompts,
 			identity: p.identity, designGate: cfg.Gates.Design, reviewWorkflows: cfg.Projects[cfg.Project].ReviewWorkflows,
+			mergeRules: cfg.Projects[cfg.Project].Merge,
 		},
 		Identity:     p.identity,
 		Secrets:      p.secretsEnroller,
@@ -1376,6 +1377,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		GitHubOwner:        githubOwner(cfg),
 		GitHubAPI:          githubAPI,
 		Repository:         projectRepository(cfg),
+		MergeRules:         projectMergeRules(cfg),
 		Grants:             grants,
 		Releaser:           s.supervisor.deps.Runtime,
 		Trees:              st,
@@ -1552,5 +1554,13 @@ func projectRepository(cfg config.Config) func(project string) (ghrepo.Repositor
 	return func(project string) (ghrepo.Repository, bool) {
 		configured, ok := cfg.Projects[project]
 		return configured.Repo, ok && !configured.Repo.IsZero()
+	}
+}
+
+// projectMergeRules answers the merge policy an issue's project configures. A project absent from
+// the configuration has no special merge policy.
+func projectMergeRules(cfg config.Config) func(project string) config.MergeRules {
+	return func(project string) config.MergeRules {
+		return cfg.Projects[project].Merge
 	}
 }

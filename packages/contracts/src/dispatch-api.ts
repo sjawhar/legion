@@ -262,6 +262,8 @@ export interface Issue {
   readonly rank: string;
   readonly labels: string[];
   readonly parent: string | null;
+  /** Issue keys in the same project this issue waits on, sorted. */
+  readonly blocked_by: string[];
   /** Lowercase email of the person who answers this issue's asks; null when unassigned. */
   readonly assignee: string | null;
   /** The session or human working this issue, or null when nobody has claimed it. */
@@ -306,18 +308,23 @@ export interface IssueSummary
       | "priority"
       | "rank"
       | "parent"
+      | "blocked_by"
       | "assignee"
       | "claim"
       | "components"
       | "route"
       | "updated_at"
       | "last_seq"
+      | "primary_artifact_id"
     >,
     IssueRouteReach {
   readonly labels?: string[];
   readonly open_asks: number;
   readonly progress: IssueProgress;
 }
+
+/** Maximum entries in an issue's blocked_by input, before duplicate keys are removed. */
+export const MAX_ISSUE_BLOCKERS = 20;
 
 /**
  * The longest issue title, in UTF-16 units, counted after the trim `POST /api/v1/issues` and
@@ -1396,6 +1403,7 @@ export interface ArtifactReferences {
 export type GraphEdgeKind =
   | "mentions"
   | "child_of"
+  | "blocked_by"
   | "attached_to"
   | "anchored_to"
   | "owned_by"
@@ -1827,6 +1835,8 @@ export interface CreateIssueInput {
   readonly project: string;
   readonly title: string;
   readonly parent?: string;
+  /** Issue keys in the same project this issue waits on. */
+  readonly blocked_by?: string[];
   readonly external?: string;
   readonly spec?: string;
   readonly force?: boolean;
@@ -1859,6 +1869,8 @@ export interface UpdateIssueInput {
   readonly assignee?: string | null;
   /** A parent issue key in the same project, or null to clear; omitted leaves it alone. */
   readonly parent?: string | null;
+  /** Replaces every issue key this issue waits on; [] clears it. Omitted leaves it alone. */
+  readonly blocked_by?: string[];
   /** The issue's own component attachment; null (or mode `inherit`) deletes it so the issue
    *  inherits again; omitted leaves it alone. Allowed on a closed issue. */
   readonly components?: IssueComponentsInput | null;

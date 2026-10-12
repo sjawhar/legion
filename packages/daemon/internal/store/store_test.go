@@ -670,8 +670,10 @@ func TestTheServingRunBackfillsForARelaunchingClaim(t *testing.T) {
 // past 0020 applies the lower 0016 late, where a check without controller_notice would refuse the
 // queued row and the upgrade: neither sets the list, 0021 does, after both. In the same way
 // `issue_branch` (0030) and `issue_suspend` (0034) each come with a migration that rewrites the
-// check, and a database that ran 0031 onwards before 0029 and 0030 applies those two last, so a
-// queued close suspension must survive them and both kinds must stand at the end in either order.
+// check, and a database that ran 0031 through 0038 before 0029 and 0030 applies those two last, so
+// a queued close suspension must survive them and both kinds must stand at the end in either
+// order. Migrations from 0039 on ship only in binaries that carry 0030, and Migrate applies in
+// ascending order, so none can run before it: 0039 sets the list after every kind it names.
 func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.T) {
 	all, err := migrations.All()
 	if err != nil {
@@ -679,7 +681,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 	}
 	kinds := []record.OutboxKind{record.OutboxKindDispatchStatus, record.OutboxKindDispatchMessage, record.OutboxKindNotice, record.OutboxKindControllerNotice,
 		record.OutboxKindSupervise, record.OutboxKindGateSeed, record.OutboxKindLingerClose, record.OutboxKindWorkspaceRemove, record.OutboxKindMergeQueuePublish,
-		record.OutboxKindIssueSuspend, record.OutboxKindIssueBranch}
+		record.OutboxKindIssueSuspend, record.OutboxKindIssueBranch, record.OutboxKindAutoMergeDisable}
 	insert := "insert into outbox (kind, issue, payload, attempts, next_at, last_error) values ($1, 'LEGION-208', '{}', 0, now(), '')"
 	for _, tc := range []struct {
 		name  string
@@ -687,7 +689,7 @@ func TestTheOutboxCheckAdmitsEveryKindWhicheverOrderTheMigrationsRan(t *testing.
 	}{
 		{"a fresh database", func(migrations.Migration) bool { return false }},
 		{"a database that ran 0020 before 0016", func(m migrations.Migration) bool { return m.Version <= 20 && m.Version != 16 }},
-		{"a database that ran 0031 onwards before 0029 and 0030", func(m migrations.Migration) bool { return m.Version <= 28 || m.Version >= 31 }},
+		{"a database that ran 0031 through 0038 before 0029 and 0030", func(m migrations.Migration) bool { return m.Version <= 28 || (m.Version >= 31 && m.Version <= 38) }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()

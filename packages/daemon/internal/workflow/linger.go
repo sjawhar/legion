@@ -22,7 +22,8 @@ import (
 // closes; a child closed as done is finished, so each of its claims is closed (issue_close: retired,
 // its session dropped) and its Sandbox released with the volume it owns (record.IssueSuspend's
 // Release), while its parent keeps running on a volume of its own. A done child set back to todo
-// starts fresh.
+// starts fresh. An issue leaving disarms its open pull request (disarmOpen), as a root's linger
+// disarms every member's.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: issue left the workflow", "issue", issue.Key, "tree", issue.Tree, "status", status)
 	if claim.IsTreeRoot(issue.Key, issue.Tree) {
@@ -33,6 +34,9 @@ func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, statu
 		if err := e.store.PutIssue(ctx, tx, issue); err != nil {
 			return err
 		}
+	}
+	if err := e.disarmOpen(ctx, tx, issue.Key); err != nil {
+		return err
 	}
 	op, release := record.SuperviseOp("suspend"), false
 	if status == "done" {
@@ -78,6 +82,9 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 	}
 	for _, member := range members {
 		if err := e.everyClaim(ctx, tx, member, "suspend", fmt.Sprintf("the tree of %s lingers", root.Key)); err != nil {
+			return err
+		}
+		if err := e.disarmOpen(ctx, tx, member.Key); err != nil {
 			return err
 		}
 		if err := e.enqueue(ctx, tx, member.Key, record.IssueSuspend{

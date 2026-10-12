@@ -1,4 +1,4 @@
--- 0039_handovers.up.sql -- a closing root's in-flight child hand-over fence.
+-- 0040_handovers.up.sql -- a closing root's in-flight child hand-over fence.
 --
 -- A hand-over PATCH reaches Dispatch outside intake's transaction. The row stays until that
 -- daemon-authored event either moves the child to its own tree or is rejected because the root

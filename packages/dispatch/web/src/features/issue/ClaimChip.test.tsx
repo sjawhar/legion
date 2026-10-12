@@ -29,6 +29,7 @@ const base: Issue = {
   last_seq: 1,
   number: 1,
   parent: null,
+  blocked_by: [],
   primary_artifact_id: "artifact-1",
   priority: null,
   project: "CORE",

@@ -929,7 +929,10 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // (every other re-admission starts its root at admitted), starts no worker, and the hold's notice
 // went to the architect of the tree it was handed over from, so its own architect is told of the
 // hold (workflow.HeldNotice), whether or not it carried a gate. Promotion already queued the root's
-// branch; each other member queues its own before starting.
+// branch; each other member queues its own before starting. Every member resumes in
+// workflow.ResumePhase, recorded before its start: a child of a re-admitted tree, and a root a
+// hand-over created, left awaiting its merge resume in merging, since the old tree's linger disarmed
+// the pull request (beginLinger) and only a new READY from the merger arms it again.
 func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	project, err := claim.ProjectToken(a.project)
 	if err != nil {
@@ -941,11 +944,17 @@ func (a *Admission) startMidPhaseMembers(ctx context.Context, tx pgx.Tx, root re
 		}
 	}
 	for _, member := range issues {
-		if member.Tree != root.Tree {
+		if member.Tree != root.Tree || record.OutOfWorkflow(member.Status) {
 			continue
 		}
+		if resume := workflow.ResumePhase(member); resume != member.Phase {
+			member.Phase = resume
+			if err := a.store.PutIssue(ctx, tx, member); err != nil {
+				return fmt.Errorf("resume %s in %s: %w", member.Key, resume, err)
+			}
+		}
 		role := workflow.RoleFor(member.Phase)
-		if role == "" || record.OutOfWorkflow(member.Status) {
+		if role == "" {
 			continue
 		}
 		token, err := claim.NewToken(project, member.Key, role)

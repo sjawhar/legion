@@ -99,23 +99,26 @@ func TestAFinishedRootSettlesItsUnfinishedChildrenWhenItsLingerEnds(t *testing.T
 // Every phase carries across a durable hand-over. The child is a new root generation, but its gate,
 // pull request head, phase rows and phase itself stay intact; promotion starts the architect and the
 // role that owns a worked phase. In particular production_check keeps a merged pull request that
-// GitHub will never report merged again.
+// GitHub will never report merged again. The one phase that moves is awaiting_merge: the old tree's
+// linger disarmed the pull request (beginLinger), so nothing would arm it again, and the carried
+// root resumes in merging, as a re-admitted tree's child does (workflow.ResumePhase), its merger
+// started to send READY again.
 func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 	for _, tc := range []struct {
-		name     string
-		phase    phase.Phase
-		prState  record.PullRequestState
-		role     claim.Role
-		wantRole bool
+		name    string
+		phase   phase.Phase
+		resumes phase.Phase
+		prState record.PullRequestState
+		role    claim.Role
 	}{
-		{name: "planning", phase: phase.Planning, prState: record.PullRequestOpen, role: claim.RolePlanner, wantRole: true},
-		{name: "implementing", phase: phase.Implementing, prState: record.PullRequestOpen, role: claim.RoleImplementer, wantRole: true},
-		{name: "testing", phase: phase.Testing, prState: record.PullRequestOpen, role: claim.RoleTester, wantRole: true},
-		{name: "reviewing", phase: phase.Reviewing, prState: record.PullRequestOpen, role: claim.RoleReviewer, wantRole: true},
-		{name: "retro", phase: phase.Retro, prState: record.PullRequestOpen, role: claim.RoleImplementer, wantRole: true},
-		{name: "merging", phase: phase.Merging, prState: record.PullRequestOpen, role: claim.RoleMerger, wantRole: true},
-		{name: "awaiting merge", phase: phase.AwaitingMerge, prState: record.PullRequestOpen},
-		{name: "production check", phase: phase.ProductionCheck, prState: record.PullRequestMerged, role: claim.RoleImplementer, wantRole: true},
+		{name: "planning", phase: phase.Planning, resumes: phase.Planning, prState: record.PullRequestOpen, role: claim.RolePlanner},
+		{name: "implementing", phase: phase.Implementing, resumes: phase.Implementing, prState: record.PullRequestOpen, role: claim.RoleImplementer},
+		{name: "testing", phase: phase.Testing, resumes: phase.Testing, prState: record.PullRequestOpen, role: claim.RoleTester},
+		{name: "reviewing", phase: phase.Reviewing, resumes: phase.Reviewing, prState: record.PullRequestOpen, role: claim.RoleReviewer},
+		{name: "retro", phase: phase.Retro, resumes: phase.Retro, prState: record.PullRequestOpen, role: claim.RoleImplementer},
+		{name: "merging", phase: phase.Merging, resumes: phase.Merging, prState: record.PullRequestOpen, role: claim.RoleMerger},
+		{name: "awaiting merge", phase: phase.AwaitingMerge, resumes: phase.Merging, prState: record.PullRequestOpen, role: claim.RoleMerger},
+		{name: "production check", phase: phase.ProductionCheck, resumes: phase.ProductionCheck, prState: record.PullRequestMerged, role: claim.RoleImplementer},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -141,8 +144,8 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 
 			apply(t, pool, admission, "handover", intake.DispatchIssue{Key: child, Seq: 2, Type: "issue.updated", Status: "todo", Title: child, Parent: root, Rank: "B", HandedOver: true, DaemonActor: true}, engine)
 			got := issue(t, pool, child)
-			if got.Tree != child || got.Generation != 2 || got.Phase != tc.phase || got.Status != "in_progress" {
-				t.Fatalf("handed-over child = %#v, want own tree, generation 2, phase %s, in_progress", got, tc.phase)
+			if got.Tree != child || got.Generation != 2 || got.Phase != tc.resumes || got.Status != "in_progress" {
+				t.Fatalf("handed-over child = %#v, want own tree, generation 2, phase %s, in_progress", got, tc.resumes)
 			}
 			inTx(t, pool, func(tx pgx.Tx) {
 				records := record.NewStore()
@@ -162,8 +165,8 @@ func TestAHandedOverChildCarriesItsPhaseGateAndPullRequest(t *testing.T) {
 					t.Fatalf("handed-over root = %#v, %v; want generation 2 with its gate carried", handedRoot, err)
 				}
 			})
-			if starts := phaseStarts(t, pool, child, tc.role, tc.phase); (starts == 1) != tc.wantRole {
-				t.Fatalf("starts of %s at %s = %d, want role start %t", tc.role, tc.phase, starts, tc.wantRole)
+			if starts := phaseStarts(t, pool, child, tc.role, tc.resumes); starts != 1 {
+				t.Fatalf("starts of %s at %s = %d, want one", tc.role, tc.resumes, starts)
 			}
 		})
 	}
@@ -778,6 +781,99 @@ func seedFinishedChildUnderLingeringRoot(t *testing.T, pool *pgxpool.Pool, root,
 			records.PutIssue(ctx, tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
 			records.PutIssue(ctx, tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Done, Generation: 1, Status: "todo", DispatchStatus: "todo", Rank: "B", LastDispatchSeq: 1}),
 			records.PutGate(ctx, tx, record.DesignGate{Issue: root, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 1, ApprovedVersion: new(1)}),
+			records.PutHandover(ctx, tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
+		} {
+			if put != nil {
+				t.Fatalf("seed: %v", put)
+			}
+		}
+	})
+}
+
+const (
+	byHandNote    = "MANUAL_MERGE_REQUIRED: pull request #42 matches a by_hand merge rule; do not auto-arm it"
+	carriedPacket = "READY #42 at head (approved at approved) for LEGION-209 (https://github.com/acme/widgets/pull/42)\nMerge: submit on normal acceptance with gh pr merge 42 -R acme/widgets --auto --squash --match-head-commit head\n\nA docs/solutions/legion/retro-LEGION-209.md"
+)
+
+// A hand-over carries the merger's phase row whole, the by-hand note of its READY included
+// (PhaseRow.MergeNote, which #1906 records with the READY): a READY a person merges stays one
+// after the carry, so the packet the carried root later tells still says so and asks no reader to
+// arm the merge. Here the READY was refused while the old root's spec was unapproved, so the issue
+// keeps its pending version too.
+func TestAHandedOverChildKeepsItsMergersByHandNote(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	seedByHandREADYUnderLingeringRoot(t, pool)
+
+	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	got := issue(t, pool, "LEGION-209")
+	if got.Tree != "LEGION-209" || got.Generation != 2 || got.Phase != phase.Merging || got.ReadyPendingVersion == nil || *got.ReadyPendingVersion != 2 {
+		t.Fatalf("handed-over child = %#v, want its own tree at generation 2, merging, its READY pending version 2", got)
+	}
+	inTx(t, pool, func(tx pgx.Tx) {
+		rows, err := record.NewStore().Phases(context.Background(), tx, "LEGION-209")
+		if err != nil {
+			t.Fatalf("read phase rows: %v", err)
+		}
+		for _, row := range rows {
+			if row.Role == claim.RoleMerger {
+				if row.MergeNote != byHandNote || row.Summary != carriedPacket {
+					t.Fatalf("carried merger row = %#v, want its by-hand note and packet kept", row)
+				}
+				return
+			}
+		}
+		t.Fatalf("phase rows = %#v, want the merger's carried", rows)
+	})
+}
+
+// End to end: once carried, a by-hand READY the closed gate refused is released by a human's
+// approval of the old root's document, and the packet the carried root tells starts with the
+// by-hand note and asks for no submitted merge, exactly as the READY was told it would be.
+func TestACarriedByHandREADYIsReleasedWithItsNote(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	engine := workflow.New(record.NewStore(), workflow.Config{Project: testProject, Linger: time.Hour, Clock: func() time.Time { return fixedNow }}, nil)
+	seedByHandREADYUnderLingeringRoot(t, pool)
+
+	apply(t, pool, admission, "handover", intake.DispatchIssue{Key: "LEGION-209", Seq: 2, Type: "issue.updated", Status: "todo", Title: "LEGION-209", Parent: "LEGION-208", Rank: "B", HandedOver: true, DaemonActor: true}, engine)
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "approval", intake.DispatchArtifact{Key: "LEGION-208", ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", Kind: intake.DispatchArtifactApproved, Version: 2}, engine, admission); err != nil {
+		t.Fatalf("apply the old document's approval: %v", err)
+	}
+	if got := issue(t, pool, "LEGION-209"); got.Phase != phase.AwaitingMerge {
+		t.Fatalf("carried child after the approval = %#v, want awaiting_merge", got)
+	}
+	var told []string
+	for _, effect := range effects(t, pool) {
+		if post, ok := effect.payload.(record.MessagePost); ok && effect.issue == "LEGION-209" {
+			told = append(told, post.Body)
+		}
+	}
+	if len(told) != 1 {
+		t.Fatalf("messages told on LEGION-209 = %q, want the READY once", told)
+	}
+	if !strings.HasPrefix(told[0], byHandNote+"\n\n") || strings.Contains(told[0], "gh pr merge") || strings.Contains(told[0], "--auto") {
+		t.Fatalf("told READY %q, want the by-hand note first and no submitted merge", told[0])
+	}
+}
+
+// seedByHandREADYUnderLingeringRoot is a done root lingering, its spec revised to version 2 and not
+// yet approved, and a child of it in merging whose merger's by-hand READY that closed gate refused,
+// with the hand-over fence the linger's expiry wrote for it.
+func seedByHandREADYUnderLingeringRoot(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	const root, child = "LEGION-208", "LEGION-209"
+	until := fixedNow.Add(time.Hour)
+	parent, pending := root, 2
+	inTx(t, pool, func(tx pgx.Tx) {
+		records, ctx := record.NewStore(), context.Background()
+		for _, put := range []error{
+			records.PutIssue(ctx, tx, record.Issue{Key: root, Tree: root, Project: testProject, Title: root, Phase: phase.Done, Generation: 1, Status: "done", LingerUntil: &until}),
+			records.PutIssue(ctx, tx, record.Issue{Key: child, Tree: root, Project: testProject, Title: child, Parent: &parent, Phase: phase.Merging, Generation: 1, Status: "retro", Rank: "B", LastDispatchSeq: 1, ReadyPendingVersion: &pending}),
+			records.PutGate(ctx, tx, record.DesignGate{Issue: root, ArtifactID: "7d1e3a5c-9b2f-4c6e-8a40-3f5d7b9e1c26", LatestVersion: 2, ApprovedVersion: new(1)}),
+			records.PutPullRequest(ctx, tx, record.PullRequest{Issue: child, Repo: "acme/widgets", Number: 42, Branch: "legion/LEGION-209", HeadSHA: "head", Generation: 1, State: record.PullRequestOpen}),
+			records.PutPhase(ctx, tx, record.PhaseRow{Issue: child, Role: claim.RoleMerger, Claim: "merger-claim", HandoffCommit: "head", Summary: carriedPacket, MergeNote: byHandNote}),
 			records.PutHandover(ctx, tx, record.Handover{Issue: child, Tree: root, Generation: 1}),
 		} {
 			if put != nil {

@@ -91,6 +91,8 @@ type Options struct {
 	// project the configuration has no repository for; the handoff route reads the issue branch
 	// there. Nil answers no project.
 	Repository func(project string) (ghrepo.Repository, bool)
+	// MergeRules is the merge policy an issue's project configures. Nil has no special policy.
+	MergeRules func(project string) config.MergeRules
 	// Grants mints and redeems the daemon-local one-command credential handles.
 	Grants   *credential.Grants
 	Pool     *pgxpool.Pool
@@ -143,6 +145,7 @@ type server struct {
 	githubOwner  string
 	githubAPI    string
 	repository   func(project string) (ghrepo.Repository, bool)
+	mergeRules   func(project string) config.MergeRules
 	grants       *credential.Grants
 	releaser     store.TreeReleaser
 	trees        TreeLifecycles
@@ -183,6 +186,7 @@ func NewServer(bind string, port int, opts Options) *http.Server {
 		githubOwner:        opts.GitHubOwner,
 		githubAPI:          opts.GitHubAPI,
 		repository:         opts.Repository,
+		mergeRules:         opts.MergeRules,
 		releaser:           opts.Releaser,
 		trees:              opts.Trees,
 		grants:             opts.Grants,
