@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-695",
-  "completed": "2026-10-12T17:28:24Z",
+  "completed": "2026-10-12T18:10:50Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1928",
   "proof": [
+    {
+      "criterion": "Tester round 2 failure: in Firefox, a plain click on the fallback link in a spec longer than one screen must open the artifact's page (spec: 'the picture gives way to a link to the artifact's page'; plan: 'in the live editor it navigates in the app through the existing click handler'). The tester's red test e2e/picture-link-click.e2e.ts passes unmodified on chromium, firefox and iphone.",
+      "surface": "`bun run dispatch:local` on alternate ports (DISPATCH_E2E_PORT=18777 and the four fake listeners on 19021-19024; the default ports are held by another lane's harness in this pod), the real `dispatch` CLI (DISPATCH_URL=http://127.0.0.1:18777 DISPATCH_TOKEN=e2e-token, DISPATCH_TOKEN_FILE unset), Playwright's Firefox 155 and Chromium at 1280x720, web/dist built from this head; and the Playwright harness (chromium, firefox, iphone projects) for the red test.",
+      "command": "dispatch issue --project CORE --title 'Picture link far down a spec' (CORE-8); dispatch artifact --issue CORE-8 --name notes.md (a markdown document, slug notes-md); dispatch doc-edit --issue CORE-8 --artifact spec --ops-json-file (a heading, 40 filler paragraphs, `![notes.md](dispatch://CORE-8/artifact/notes-md)`, `Below the link.`); a throwaway Playwright script per browser: open /auth/_dev/signin?login=alice&next=/issues/CORE-8/spec, scroll the wrapper [data-dispatch-doc-picture=\"dispatch://CORE-8/artifact/notes-md\"] into view (scrollY ~1500-1600, nothing focused), set window.__marker='kept', click the link `CORE-8 notes-md`, read location and the marker. Then: cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=firefox --project=iphone e2e/picture-link-click.e2e.ts; and --project=chromium --project=iphone e2e/pictures.e2e.ts.",
+      "observed": "Firefox: before the click scrollY 1534, activeElement BODY; after it location /issues/CORE-8/artifacts/notes-md with window.__marker still 'kept' (in-app navigation, no page load). Chromium: scrollY 1624 → the same path, marker kept. Screenshots: dispatch://LEGION-695/artifact/legion-695-round3-firefox-before-click-png@v1 and dispatch://LEGION-695/artifact/legion-695-round3-firefox-after-click-png@v1. The tester's red test, unmodified (jj diff from 4fe80599 to the working copy on e2e/picture-link-click.e2e.ts and e2e/playwright.config.ts: 0 files changed): 3 passed (chromium 1.6s, iphone 1.5s, firefox 3.5s); pictures.e2e.ts 10 passed on chromium + iphone (the drag row included). bun test web/src/features/doc web/src/features/refs 321 pass; bun run lint 556 files clean; bun run typecheck clean.",
+      "headSha": "fcf0ad1b1b66f45b99b62ed04a067ac42f0e4ecb",
+      "negativeControl": "With the one call `placeCaretAfter()` taken out of the link's mousedown listener and web/dist rebuilt, the firefox red test fails exactly as the tester saw it: expected http://127.0.0.1:18777/issues/CORE-1/artifacts/notes-md, received http://127.0.0.1:18777/issues/CORE-1/spec (1 failed, 18.6s); restored, rebuilt, 3 passed."
+    },
     {
       "criterion": "Review round 1, finding 2 (stopEvent covered dragstart on the fallback link): a drag of a fallback link moves the picture line through ProseMirror, and the link's own words never reach the stored markdown; a plain click on it still navigates in the app.",
       "surface": "`bun run dispatch:local` on alternate ports (DISPATCH_E2E_PORT=18777, FAKE_ENVOY_PORT=19021, FAKE_GITHUB_PORT=19022, PLAIN_HTTP_PORT=19023, FAKE_BROKER_PORT=19024; the default ports are held by another lane's harness in this pod), the real `dispatch` CLI (DISPATCH_URL=http://127.0.0.1:18777 DISPATCH_TOKEN=e2e-token, DISPATCH_TOKEN_FILE unset), Playwright's Chromium and Firefox 155 (1200x900), web/dist built from this head.",
@@ -68,14 +76,19 @@
     "round 2 — packages/dispatch/e2e/pictures.e2e.ts: Test B drags the fallback link and reads the stored markdown back (moved once, no link words)",
     "round 2 — packages/dispatch/web/src/features/refs/routes.ts (+ routes.test.ts): pictureReference / PictureReference, the one reading of an image node's src and alt",
     "round 2 — packages/dispatch/web/src/features/refs/markdown-engine.ts: pictureSerializer's image override calls pictureReference",
-    "round 2 — packages/dispatch/AGENTS.md: the installTypedBlocks passage names pictureReference as where the caption rule lives"
+    "round 2 — packages/dispatch/AGENTS.md: the installTypedBlocks passage names pictureReference as where the caption rule lives",
+    "round 3 — packages/dispatch/web/src/features/doc/picture-view.ts: pictureView(node, document, placeCaretAfter); the fallback link's primary-button mousedown calls it (no preventDefault, so Firefox still drags from the link)",
+    "round 3 — packages/dispatch/web/src/features/doc/ask-block.ts: installTypedBlocks passes a callback that dispatches a collapsed TextSelection at getPos() + node.nodeSize",
+    "round 3 — packages/dispatch/web/src/features/doc/picture-view.test.ts: the callback is called once for a primary-button mousedown on the link, not for button 2, not for a mousedown on the <img>",
+    "round 3 — packages/dispatch/AGENTS.md: the installTypedBlocks passage says what the mousedown does and why (Firefox focuses the editing host; ProseMirror restores the last selection; a long document would scroll away before the click lands)"
   ],
   "trickyParts": [
     "happy-dom raises `error` synchronously from the `src` attribute setter when the URL cannot resolve (page at about:blank); the img is appended to the wrapper before `src` is set so a synchronous error replaces it rather than preceding it. Real browsers queue the error as a task; the ordering is right either way, and a unit case holds it.",
     "The Playwright harness and `bun run dispatch:local` need a loopback Postgres with pgvector; this sandbox has no Docker, so one was built under /tmp from Debian packages (nothing in the repository) and left running for the tester's own run: `export LD_LIBRARY_PATH=/tmp/pg/usr/lib/x86_64-linux-gnu PATH=/tmp/pg/usr/lib/postgresql/17/bin:$PATH DATABASE_URL='postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable'` (restart with `postgres -D /tmp/pgdata -p 55432 -h 127.0.0.1 -k /tmp/pgsock` if it is gone).",
     "The simplify pass (ce-simplify-code, three reviewer subagents) applied one change, to the unit test only (literal paths and words in the link test); runtime code is unchanged since the proof's head, so the browser proof was not re-run. The two reviewers' other finding — pictureView and pictureSerializer (features/refs/markdown-engine.ts) each derive the dispatch:// source test and the alt-or-slug caption — is duplication cleanup outside the diff, recorded as the pull request's Fast-follow.",
     "round 2 — Playwright's dragTo begins no drag on desktop Chromium when the page scrolls between the press and the move (the drop target was below the fold at 1280x720), so Test B scrolls the target paragraph into view first and asserts the link is still in the viewport; on the iPhone project no scroll is needed.",
-    "round 2 — The default harness ports (8777, 9021-9024) are held by another lane's harness in this pod's shared network namespace; the e2e and dispatch:local runs here used DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 PLAIN_HTTP_PORT=19023 FAKE_BROKER_PORT=19024 with DATABASE_URL on the /tmp Postgres at 55432 (database dispatch_e2e for the suite, dispatch_local for dispatch:local). Firefox 155 is installed for Playwright too (bunx playwright install firefox)."
+    "round 2 — The default harness ports (8777, 9021-9024) are held by another lane's harness in this pod's shared network namespace; the e2e and dispatch:local runs here used DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 PLAIN_HTTP_PORT=19023 FAKE_BROKER_PORT=19024 with DATABASE_URL on the /tmp Postgres at 55432 (database dispatch_e2e for the suite, dispatch_local for dispatch:local). Firefox 155 is installed for Playwright too (bunx playwright install firefox).",
+    "round 3 — Mechanism (prosemirror-view 1.42.3 dist/index.js:3904-3916, :2261-2264): Firefox focuses the editing host on a mousedown inside the contenteditable=false wrapper, and 20 ms later handlers.focus writes the editor's own selection into the DOM; stopEvent keeps ProseMirror's mousedown handler out on purpose (it would node-select the picture, a non-collapsed selection ProofDocument's click handler steps aside for), so for a reader who had not clicked into the text the caret went to the document's start and a long document scrolled away before the mouseup. Placing a collapsed caret just after the picture on mousedown makes that the selection ProseMirror restores. Chromium focuses the link itself, so the editor is unfocused when the caret moves and the DOM selection is untouched (editorOwnsSelection). preventDefault on mousedown was rejected: Firefox then starts no drag, and round 2's drag of the fallback link would be lost."
   ],
   "deviations": [
     "The CHANGELOG already had a `### Fixed` heading under `## [Unreleased]` (the plan said there was none); the entry was placed first under it rather than a second heading being added."
@@ -100,6 +113,12 @@
       "thread": "PRRT_kwDORFy7ds6rjBuf",
       "finding": "renderSpec without the attrs guard (Minor, hardening)",
       "disposition": "Declined: prosemirror-model's published types omit the internal fourth parameter (a four-argument call fails typecheck, TS2554, observed), so parity needs a cast through an @internal signature that the library may change; Milkdown's image attrs validate as strings, so the guard is not engaged."
+    },
+    {
+      "thread": "(tester failure, test.json round 2; no GitHub thread)",
+      "finding": "Firefox: a plain click on the fallback link far down a spec did not open the artifact's page",
+      "disposition": "Fixed in fcf0ad1b1b66f45b99b62ed04a067ac42f0e4ecb: the red test passes unmodified on chromium, firefox and iphone."
     }
-  ]
+  ],
+  "testRound": 2
 }
