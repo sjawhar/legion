@@ -1112,6 +1112,9 @@ runtime:
     issue_volume: 20Gi
     kubeconfig: $runtime_kubeconfig
     context: $runtime_context
+    plugins:
+      pi_legion: "$pi_legion_version"
+      pi_envoy: "$pi_envoy_version"
 $(resources_block)
     pod:
 EOF
@@ -2422,7 +2425,7 @@ audit_failure() { echo "the run wrote outside $project or subscribed outside it:
 # ==== checkpoints ===================================================================================
 
 begin prerequisites
-for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss kubectl aws gh bun jj mise shellcheck secrets setpriv pgrep npm; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 [ -n "$runtime_context" ] || fail "LEGION_E2E_RUNTIME_CONTEXT is unset: the daemon runs as the Legion daemon's restricted identity, never the operator's"
 [ -r "$runtime_kubeconfig" ] || fail "the runtime kubeconfig $runtime_kubeconfig is not readable"
 case "$image" in *@sha256:*) ;; *) fail "LEGION_E2E_IMAGE must be the worker image by digest (…@sha256:…), not '$image'" ;; esac
@@ -2442,6 +2445,26 @@ gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
+# The branch-built daemon links no release plugin pair (only a release workflow build does), so a
+# daemon started from this checkout boots in the degraded mode (a Warn and `plugins: none` from
+# `--check-config`) unless the run's legion.yaml names runtime.kubernetes.plugins itself. Stage 4b
+# relaunches no stale role onto that pair — every claim in this run registers at the branch
+# daemon's own contract, so the boot pass and the registration path post nothing (restart-mid-tree
+# below asserts exactly that negative) — so naming the pair here never exercises the kept-pod
+# install; it only keeps `legion start --check-config` and the boot log off the degraded-mode
+# lines for a run that otherwise has nothing to name, and it must name a source the pod can
+# actually read: the image carries the two plugins already unpacked under /opt/legion, not as
+# tarballs, and their manifests name the monorepo's workspace packages, which `bun add` refuses to
+# install from an unpacked copy. The published npm packages are the only real source a pod's `bun
+# add` can reach, so this resolves the latest exact version of each at run time rather than
+# pinning a literal that would drift. If a future checkpoint ever does drive a stale relaunch in
+# this run, the shim's own `node -e` contract check would refuse to exec into a published
+# pi-legion whose `daemonApiVersion` is not this branch's, visibly, rather than silently running
+# the wrong contract.
+pi_legion_version=$(npm view @sjawhar/pi-legion version 2>/dev/null) &&
+  [ -n "$pi_legion_version" ] || fail "npm view @sjawhar/pi-legion version returned nothing"
+pi_envoy_version=$(npm view @sjawhar/pi-envoy version 2>/dev/null) &&
+  [ -n "$pi_envoy_version" ] || fail "npm view @sjawhar/pi-envoy version returned nothing"
 # The Dispatch bearer's file is named, never read into the transcript: a refusal names the variable
 # and the path, never what the file holds.
 [ -n "$dispatch_token_file" ] ||

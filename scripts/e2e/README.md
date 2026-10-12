@@ -686,7 +686,12 @@ restricted identity, with `bind: 0.0.0.0`, as a daemon that runs as a pod binds,
 its worker stream at `advertise_host`, the devbox's private address. Tree 1 runs the whole workflow
 to `done`; while its planner holds, the driver files two children under it, each in an issue pod
 and on a volume of its own, closes one as `done` and parks the other in backlog. A third child,
-filed late and left mid-run when tree 1 closes, is handed to Legion as a tree of its own.
+filed late and left mid-run when tree 1 closes, is handed to Legion as a tree of its own. Its
+`legion.yaml` names `runtime.kubernetes.plugins` with the latest published `@sjawhar/pi-legion` and
+`@sjawhar/pi-envoy`, resolved at run time: the branch-built daemon links no release plugin pair, so
+without it the run would boot in the degraded mode (`plugins: none` from `--check-config`) instead
+of the pair a stale-plugin relaunch would install, even though this run's own claims register at
+the branch daemon's own contract and so never go stale enough to trigger that install.
 
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \

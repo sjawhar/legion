@@ -117,6 +117,11 @@ The daemon's boot gate (`internal/daemon/bootgate.go`) refuses to start unless t
 manifest's field equals its `DaemonAPIVersion` — the manifest at the plugin root Oh My Pi resolves
 under the environment a pane will get, and the plugin a pane's Oh My Pi actually loads, which must
 be that same package — and `legion probe-image` holds a worker image's plugin to it the same way.
+Both hold a fresh process's plugin to the daemon's contract; a process already running keeps the
+plugin it started with, so since contract 24 (LEGION-164) the daemon records the contract each
+session registers with and relaunches a session on another one onto the current plugin — under
+Kubernetes by installing the release's pair from npm under the role's generation directory in the
+pod it already runs in, in place of the image's copies (docs/kubernetes.md "Contract discipline").
 Notes on earlier contracts that still describe behaviour:
 Contract 4 adds the operator-launched controller: `POST /legion/v1/controller/secret` (the CLI's
 call, never this extension's), a controller registration on `claims/register` answered with the
@@ -167,7 +172,10 @@ worker — the daemon registers both on one route, a root being the claim whose 
 the persisted transcript; `claims/register` with the pane's boot token and this build's
 `daemonApiVersion` (`pluginContract`), where any 4xx exits the process with one log line naming
 the route, status, and daemon sentence (`exitOnRegistrationRefusal`) and a 5xx or transport
-failure propagates without exiting; the capability measurement, started once the registration has
+failure propagates without exiting — a 409 naming a stale `pluginContract` is one such 4xx, so a
+pane that registers on an old contract exits and its daemon-side claim is already being relaunched
+onto the current plugin, under Kubernetes through a kept-pod install (docs/kubernetes.md "Contract
+discipline"), never a new pod; the capability measurement, started once the registration has
 answered and run beside the next two steps (`measureCapabilities` in `src/capability-report.ts`:
 the six live rows of the daemon's capability table — `subagents`, `web-search`, `mcp`,
 `repository-extensions`, `dispatch-envoy-tools`, `github` — each check within 8 s and the report
@@ -226,7 +234,10 @@ plugin root, a symlinked state directory) moves the check with it. That call,
 both, before it mints anything. The mint revokes the incumbent controller, so neither a plugin that
 would refuse the new session nor a CLI built for another daemon (a binary replaced before its
 daemon restarted) cuts the running controller off. And the daemon refuses a controller registration
-whose `pluginContract` is not its `DaemonAPIVersion` with 409, naming both. That session goes
+whose `pluginContract` is not its `DaemonAPIVersion` with 409, naming both — under Kubernetes a
+daemon-launched controller's own pod is a Sandbox pod like any role's, so a stale registration
+keeps that pod and installs the current pair under its generation directory the same way
+(docs/kubernetes.md "Contract discipline"), never a replaced pod. That session goes
 through the controller session (`src/controller-session.ts`), not the claim session, and gets the
 `legion` tool's controller operations once its claim registers: `read_state`, the whole
 `GET /legion/v1/state` (unauthenticated, as the route is), and `set_status`, which mints a
