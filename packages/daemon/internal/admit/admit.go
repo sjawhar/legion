@@ -821,18 +821,24 @@ func ownSlots(issues []record.Issue, slots []record.Slot) []record.Slot {
 // A child whose claim a stop from the tree's close will still suspend is started, so this start
 // ends last or supersedes the stop (workflow.StartFor, over the role's queued rows and this
 // daemon's own claim). Each start is queued behind a row creating its child's branch, as the root's
-// architect start is.
+// architect start is. A child resumes in workflow.ResumePhase, recorded before its start.
 func (a *Admission) startMidPhaseChildren(ctx context.Context, tx pgx.Tx, root record.Issue, issues []record.Issue, now time.Time) error {
 	project, err := claim.ProjectToken(a.project)
 	if err != nil {
 		return err
 	}
 	for _, child := range issues {
-		if child.Key == root.Key || child.Tree != root.Tree {
+		if child.Key == root.Key || child.Tree != root.Tree || record.OutOfWorkflow(child.Status) {
 			continue
 		}
+		if resume := workflow.ResumePhase(child); resume != child.Phase {
+			child.Phase = resume
+			if err := a.store.PutIssue(ctx, tx, child); err != nil {
+				return fmt.Errorf("resume child %s in %s: %w", child.Key, resume, err)
+			}
+		}
 		role := workflow.RoleFor(child.Phase)
-		if role == "" || record.OutOfWorkflow(child.Status) {
+		if role == "" {
 			continue
 		}
 		token, err := claim.NewToken(project, child.Key, role)

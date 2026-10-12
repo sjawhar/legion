@@ -785,9 +785,11 @@ describe("cleanDetail", () => {
     });
   }
 
-  test("at the cut keeps what came before it and is idempotent: each byte of every case cut once", () => {
-    const problems: string[] = [];
-    for (const { pattern, name, pad, detail } of redaction.patterns) {
+  // One test per case, as above, so each case's placements (its length plus 25, at most 1,033) have
+  // Bun's per-test budget to themselves; every case's together are about ten thousand.
+  for (const { pattern, name, pad, detail } of redaction.patterns) {
+    test(`at the cut keeps what came before it and is idempotent: ${pattern}: ${name}, each byte cut once`, () => {
+      const problems: string[] = [];
       const whole = cleanDetail(detail);
       for (
         let letters = Math.max(0, 1024 - Buffer.byteLength(detail) - 16);
@@ -796,16 +798,16 @@ describe("cleanDetail", () => {
       ) {
         const padding = "a".repeat(letters);
         const once = cleanDetail(`${padding} ${detail}`);
-        const label = `${pattern}: ${name}, pushed by ${letters} letters`;
+        const label = `pushed by ${letters} letters`;
         if (cleanDetail(once) !== once) problems.push(`${label}: not idempotent`);
         if (!once.startsWith(padding.slice(0, 1024))) problems.push(`${label}: lost its padding`);
         if (pad === undefined && !`${padding} ${whole}`.startsWith(once)) {
           problems.push(`${label}: not a prefix of the case cleaned whole`);
         }
       }
-    }
-    expect(problems).toEqual([]);
-  });
+      expect(problems).toEqual([]);
+    });
+  }
 
   // A rule that may start inside a run its own value class reads through makes JavaScriptCore,
   // which backtracks, read that run once per start: time quadratic in the detail, which the plugin

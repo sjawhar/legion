@@ -183,8 +183,8 @@ export function createLegionTool(deps: {
       "carrying it is found here, with the pane's jj, and reported, so write it, commit it and push the branch (`jj git push`) before calling; this call " +
       "refuses, posting nothing, a handoff still in the working copy, missing, not committed on this branch, carried by another pane's commit, or not yet " +
       "on `legion/<issue>@origin`, each naming the remedy. The daemon refuses HANDOFF_NOT_NEW (the commit is the one you reported for your previous " +
-      "phase: write and commit this phase's handoff), and for READY READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_CONFLICTS or READY_CHECKS_NOT_GREEN; a refused completion changed " +
-      "nothing, so fix what it names and complete again. " +
+      "phase: write and commit this phase's handoff) and, for READY, each refusal the merger's role names; a refused completion changed " +
+      "nothing, so fix what it names and complete again. An accepted READY whose `note` begins MANUAL_MERGE_REQUIRED: is one a person merges: arm nothing. " +
       "The controller's read_state returns the daemon's whole state and set_status moves an issue to todo, backlog or icebox. " +
       "What a later phase needs goes in your handoff; a question for another live role goes to its role topic with envoy_publish.",
     defaultInactive: true,

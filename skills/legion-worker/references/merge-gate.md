@@ -1,8 +1,8 @@
 # The merge gate: review, retro, READY, and the production check
 
 Part of `skill://legion-worker`. Read it when you are the reviewer submitting a review or an
-approval, the implementer disarming a withdrawn READY or recording the production check, or the
-merger building READY and submitting the merge. Every path it cites is in sjawhar/legion.
+approval, the implementer recording the production check, or the merger building READY and
+submitting the merge. Every path it cites is in sjawhar/legion.
 
 The order, in full: the tester's evidence green → the reviewer's approval of the head →
 retro → the merger's READY → the merge → the implementer's production check. The approved
@@ -97,45 +97,46 @@ review posted without a completion leaves the issue in reviewing until you finis
 - READY is `handoff_complete` with `ready: true` and the packet as its `summary`; the merger runs
   no pre-flight of its own, and its completion reports the commit the workspace stands on. READY's
   checks run in the daemon, which reads the pull request's head on GitHub and refuses, before
-  recording anything: `READY_HEAD_CARRIES_HANDOFFS` while the head still carries `.legion/<issue>/`
-  (tell the architect, which has you move the issue back to `retro` with `request_backward_move`,
-  so the implementer's retro removes it; a refusal saying GitHub's read of the directory failed is
-  GitHub's failure, not the head's: complete again); `READY_HEAD_CONFLICTS` while the pull
-  request conflicts with its base, named — GitHub can neither merge it nor start pull_request CI
-  for it, so the implementer brings the base into the branch with a forward merge; and
-  `READY_CHECKS_NOT_GREEN` unless every check the base branch requires has succeeded at that head
-  and every workflow its rulesets require has a passing run there — no result for a check, or no
-  run of a workflow, means that head's push skipped CI when it should not have; a check still
-  running means wait; a failed one is a finding. Report the refusal to the architect; never
-  push a commit to make CI run. On success the daemon posts the packet as a `dispatch message` on
-  the issue, publishes it to the project's merge queue role when one is set, and says on the issue
-  when that role has no live holder; the answer's `note` says when READY was published on a pull
-  request a person already merged, whose head can no longer change, or on a base that requires no
-  check, which the packet itself also says.
-- **The merger submits the merge the moment READY is accepted.** In the same turn, before anything
-  else, it runs `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` with
-  its pane's plain `gh`: `<n>` the pull request number, `<head>` the full sha of the current head
-  READY named. A repository with a merge queue enqueues the pull request; one without arms
-  auto-merge; one whose rules are already satisfied merges at once. `--match-head-commit` has
-  GitHub refuse the request when the head has moved since READY read it. The repository's required
-  reviews and checks decide when it lands: the merger makes no merge by hand and bypasses no
-  rule. It then tells the architect with `envoy_publish` to its encoded role token what the
-  command answered — enqueued, auto-merge enabled, or merged — and the head. On any READY refusal
-  it submits nothing, since an armed request would merge through the gate the refusal names; a
-  READY the design gate refused is submitted later, on the architect's word, once the gate opens,
-  and that turn runs only `gh`. A `gh pr merge` GitHub refuses is reported to the architect with
-  its message; a person can still merge after READY. The packet's second line records the step,
-  `Merge: submitted on acceptance with gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`.
-- **A withdrawn READY is disarmed by the implementer.** When READY is withdrawn (the head's CI
-  turned red, or it conflicts with its base, after READY, which sends the issue back to
-  `implementing`), a merge queue drops the pull request on the red check, but auto-merge stays
-  enabled across pushes, and `--match-head-commit` was checked only when it was enabled. So the
-  implementer, at the start of that implementing round, runs
-  `gh pr merge <n> -R <owner>/<repo> --disable-auto` before any push. A pull request still in a
-  merge queue is removed with `gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}' -F id=<pull request node id>`
-  (`--disable-auto` dequeues nothing). When nothing is armed — the merger's submission was refused,
-  or a queue already dropped it — the command exits 1 with "Can't disable auto-merge for this pull
-  request.": run it anyway and take that answer as nothing to disarm.
+  recording anything, on each ground the merger's role prompt names in its `Go daemon workflow`
+  part, by its code and with its remedy. That part is the one complete list of READY's refusals.
+  A refusal records nothing; the merger reports it to the architect unless it says to complete
+  again, and never pushes a commit to make CI run. On success the daemon posts the packet as a
+  `dispatch message` on the issue, publishes it to the project's merge queue role when one is set,
+  and says on the issue when that role has no live holder; the answer's `note` says when READY was
+  published on a pull request a person already merged, whose head can no longer change, or on a
+  base that requires no check, which the packet itself also says, or carries the by-hand note of a
+  pull request a person merges.
+- **The merger submits the merge the moment READY is accepted, unless the answer says a person
+  merges it.** In the same turn, before anything else, it runs
+  `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` with its pane's
+  plain `gh`: `<n>` the pull request number, `<head>` the full sha of the current head READY named.
+  A repository with a merge queue enqueues the pull request; one without arms auto-merge; one whose
+  rules are already satisfied merges at once. `--match-head-commit` has GitHub refuse the request
+  when the head has moved since READY read it. The repository's required reviews and checks decide
+  when it lands: the merger makes no merge by hand and bypasses no rule. It then tells the
+  architect with `envoy_publish` to its encoded role token what the command answered — enqueued,
+  auto-merge enabled, or merged — and the head. When the answer's `note` begins
+  `MANUAL_MERGE_REQUIRED:` (the pull request touches a path the project's `merge.by_hand` names),
+  READY stands but the merger submits nothing: it tells the architect the note and the head, and a
+  person merges under the repository's rules. The daemon tells that READY with the note at its head
+  and the packet's `Merge:` line replaced, so the issue and the merge queue role are never asked to
+  arm it. On any READY refusal it submits nothing, since an armed request would merge through the
+  gate the refusal names; a READY the design gate refused is submitted later, on the architect's
+  word, once the gate opens, and that turn runs only `gh` and a read of the READY the daemon posted
+  then: a refusal or a posted READY carrying the by-hand note is submitted by nobody. A push that
+  moves the head past a READY the gate holds voids it before then: the architect is told
+  `READY_HEAD_MOVED` and has the merger build a new READY at the new head. A
+  `gh pr merge` GitHub refuses is reported to the architect with its message; a person can still
+  merge after READY. The packet's second line records the step,
+  `Merge: submit on normal acceptance with gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>`.
+- **The daemon disarms a merge no READY covers.** Auto-merge stays enabled across pushes, and
+  `--match-head-commit` is checked only when it is enabled, so the daemon itself disables the pull
+  request's auto-merge and takes it out of a merge queue, as the implement App, on any push or
+  reopen but one landing on an awaiting READY's head, when READY is withdrawn (a push or reopen
+  moved the head past it, its CI turned red, or it conflicts with its base, each of which sends the
+  issue back to `implementing`), when a child is set back to `todo`, and when the issue leaves the
+  workflow. A by-hand READY covers no arm, so whoever arms it is undone. READY waits
+  (`READY_DISARM_PENDING`) until that disarm has finished. No role runs a disarm.
 
 ## After the merge
 

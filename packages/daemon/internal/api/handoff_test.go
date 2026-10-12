@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/appauth"
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/credential"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/intake"
@@ -56,12 +58,17 @@ type handoffGitHub struct {
 	// fail is the status GitHub answers every route under the given path prefix with instead of
 	// its answer: GitHub's trouble.
 	fail map[string]int
-	// pull request #42: its head, its base's repository id, its mergeable_state and whether it is
-	// merged.
+	// pull request #42: its head, its base's repository id, its mergeable_state, its state,
+	// whether it is merged, and its updated_at. merge is the project's merge policy, and pullFiles
+	// the JSON array GitHub answers for the pull request's changed files.
 	pullHead       string
 	baseRepo       int64
 	mergeableState string
+	pullState      string
 	merged         bool
+	pullUpdatedAt  time.Time
+	merge          config.MergeRules
+	pullFiles      string
 	// What READY reads of main and of the head: the rulesets' rules (with the status the read
 	// answers when not 200), the branch's protection, and the head's check runs, commit statuses
 	// and workflow runs.
@@ -80,7 +87,8 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 	t.Helper()
 	g := &handoffGitHub{
 		files: map[string]map[string]string{}, fail: map[string]int{},
-		pullHead: headSHA, baseRepo: 4242, mergeableState: "clean",
+		pullFiles: `[{"filename":"src/main.go"}]`,
+		pullHead:  headSHA, baseRepo: 4242, mergeableState: "clean", pullState: "open", pullUpdatedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC),
 		rules:        `[{"type":"pull_request"},{"type":"required_status_checks","parameters":{"required_status_checks":[{"context":"ci"}]}}]`,
 		mainBranch:   `{"name":"main","protection":{"required_status_checks":{"contexts":["legacy"],"checks":[{"context":"legacy"}]}}}`,
 		checkRuns:    `[{"id":1,"name":"ci","status":"completed","conclusion":"success"}]`,
@@ -113,7 +121,8 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 		case path == "branches/main":
 			_, _ = io.WriteString(w, g.mainBranch)
 		case path == "pulls/42":
-			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"base":{"ref":"main","repo":{"id":%d}},"mergeable_state":%q,"merged":%t}`, g.pullHead, g.baseRepo, g.mergeableState, g.merged)
+			_, _ = fmt.Fprintf(w, `{"head":{"sha":%q},"base":{"ref":"main","repo":{"id":%d}},"mergeable_state":%q,"state":%q,"merged":%t,"updated_at":%q}`,
+				g.pullHead, g.baseRepo, g.mergeableState, g.pullState, g.merged, g.pullUpdatedAt.Format(time.RFC3339))
 		case path == "rules/branches/main":
 			if g.rulesStatus != 0 {
 				w.WriteHeader(g.rulesStatus)
@@ -129,6 +138,8 @@ func newHandoffGitHub(t *testing.T) *handoffGitHub {
 			_, _ = fmt.Fprintf(w, `{"total_count":%d,"check_runs":%s}`, strings.Count(g.checkRuns, `"name"`), g.checkRuns)
 		case strings.HasSuffix(path, "/status"):
 			_, _ = fmt.Fprintf(w, `{"statuses":%s}`, g.statuses)
+		case path == "pulls/42/files":
+			_, _ = io.WriteString(w, g.pullFiles)
 		case strings.HasPrefix(path, "contents/"):
 			file := strings.TrimPrefix(path, "contents/")
 			g.contentsRead = append(g.contentsRead, file+"@"+ref)
@@ -197,6 +208,12 @@ func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.G
 		Controller: h.store, Grants: grants, Pool: h.store.Pool(), Record: record.NewStore(),
 		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{},
 		Tokens: handoffTokens{}, GitHubOwner: "acme", GitHubAPI: github.url, Repository: acmeWidgets,
+		MergeRules: func(project string) config.MergeRules {
+			if project != testProject {
+				return config.MergeRules{}
+			}
+			return github.merge
+		},
 	}).Handler
 	return h, facts
 }
@@ -218,9 +235,16 @@ func seedIssueAt(t *testing.T, h *harness, key string, at phase.Phase) {
 // seedPullRequest records acme/widgets#42 as key's open pull request at head.
 func seedPullRequest(t *testing.T, h *harness, key, head string) {
 	t.Helper()
+	seedPullRequestAt(t, h, key, head, time.Time{})
+}
+
+// seedPullRequestAt records acme/widgets#42 as key's open pull request at head, at the pull
+// request's updated_at at.
+func seedPullRequestAt(t *testing.T, h *harness, key, head string, at time.Time) {
+	t.Helper()
 	err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
 		return record.NewStore().PutPullRequest(context.Background(), tx, record.PullRequest{
-			State: record.PullRequestOpen, Issue: key, Repo: "acme/widgets", Number: 42, Branch: "legion/" + key, HeadSHA: head,
+			State: record.PullRequestOpen, Issue: key, Repo: "acme/widgets", Number: 42, Branch: "legion/" + key, HeadSHA: head, HeadUpdatedAt: at,
 		})
 	})
 	if err != nil {
@@ -1049,6 +1073,227 @@ func newReadyHarness(t *testing.T, github *handoffGitHub) (*harness, *factRecord
 	seedPullRequest(t, h, "LEGION-208", headSHA)
 	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
 	return h, facts, merger
+}
+
+func TestHandoffCompleteReadyRefusesAHeadThatMovedBeforeTheMergerCanArmIt(t *testing.T) {
+	const movedHead = "f00d00000000000000000000000000000000ff"
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.pullHead = movedHead })
+	h, facts, merger := newReadyHarness(t, github)
+
+	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at the old head", Ready: true, Commit: headSHA})
+	if message := refused(t, recorder, http.StatusConflict, "READY_HEAD_MOVED"); !strings.Contains(message, movedHead) {
+		t.Fatalf("READY head-moved refusal = %q, want it to name %s", message, movedHead)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts after stale READY = %#v, want none", got)
+	}
+
+	recorder = h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at the moved head", Ready: true, Commit: movedHead})
+	completion(t, recorder)
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("handoff facts after the re-posted READY = %#v, want one at %s", got, movedHead)
+	}
+	if got := lastCompletion(t, facts).Commit; got != movedHead {
+		t.Fatalf("re-posted READY commit = %s, want %s", got, movedHead)
+	}
+}
+
+// The route holds READY's commit to GitHub's head and passes the workflow the record as it read it,
+// head and clock, which follows GitHub only by webhook and can lag, and GitHub's clock in that read.
+// Here the record still holds an earlier push, at an earlier clock, while GitHub and the commit are
+// at retro's last: the READY passes, and its fact carries the lagging record and GitHub's clock, so
+// the workflow takes the record as lagging, not moved, and stamps the READY's head with that clock.
+func TestHandoffCompleteReadyPassesTheRecordedHeadItRead(t *testing.T) {
+	recordedAt, githubAt := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC), time.Date(2026, 10, 12, 10, 5, 0, 0, time.UTC)
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.pullUpdatedAt = githubAt })
+	h, facts, merger := newReadyHarness(t, github)
+	seedPullRequestAt(t, h, "LEGION-208", "stale", recordedAt)
+	completion(t, h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at retro's last push", Ready: true, Commit: headSHA}))
+	got := lastCompletion(t, facts)
+	if got.Commit != headSHA || got.RecordedHead != "stale" || !got.RecordedHeadAt.Equal(recordedAt) || !got.HeadAt.Equal(githubAt) {
+		t.Fatalf("the READY fact = commit %q, recorded %q at %s, GitHub's clock %s; want %q, the record's %q at %s, and %s",
+			got.Commit, got.RecordedHead, got.RecordedHeadAt, got.HeadAt, headSHA, "stale", recordedAt, githubAt)
+	}
+}
+
+// GitHub can answer a read from a replica that has not seen the newest push, while the daemon's
+// record already holds it from that push's webhook: the record is then ahead of GitHub's answer,
+// and a READY at the head GitHub showed names a head the pull request has left. Both clocks are the
+// pull request's updated_at, to the second, so a record at another head whose clock is not before
+// GitHub's answer, a same-second tie included, may be ahead of it, and READY is refused, naming the
+// recorded head, with nothing recorded. A tie costs one retry, until the head's own webhook lands.
+func TestHandoffCompleteReadyRefusesWhenTheRecordIsAheadOfGitHubsAnswer(t *testing.T) {
+	const newer = "beef00000000000000000000000000000000ff"
+	githubAt := time.Date(2026, 10, 12, 10, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name       string
+		recordedAt time.Time
+	}{
+		{"a record later than GitHub's answer", githubAt.Add(5 * time.Minute)},
+		{"a record in the same second as GitHub's answer", githubAt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := newHandoffGitHub(t)
+			github.set(func(g *handoffGitHub) { g.pullUpdatedAt = githubAt })
+			h, facts, merger := newReadyHarness(t, github)
+			seedPullRequestAt(t, h, "LEGION-208", newer, tc.recordedAt)
+			recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY at the head GitHub showed", Ready: true, Commit: headSHA})
+			if message := refused(t, recorder, http.StatusConflict, "READY_HEAD_MOVED"); !strings.Contains(message, newer) {
+				t.Fatalf("READY with the record ahead of GitHub = %q, want it to name the recorded head %s", message, newer)
+			}
+			if got := facts.recorded(); len(got) != 0 {
+				t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
+			}
+		})
+	}
+}
+
+// A pull request closed without merging has no merge left to arm, so READY is refused there by
+// GitHub's own state, rather than accepted and left waiting on whether the close's webhook arrives
+// in time to tell the architect: the READY's advance of the record can make that webhook look
+// older than the record, and drop it.
+func TestHandoffCompleteReadyRefusesAPullRequestClosedWithoutMerging(t *testing.T) {
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) { g.pullState = "closed" })
+	h, facts, merger := newReadyHarness(t, github)
+	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "READY on a closed pull request", Ready: true, Commit: headSHA})
+	if message := refused(t, recorder, http.StatusConflict, "READY_PULL_REQUEST_CLOSED"); !strings.Contains(message, "#42") {
+		t.Fatalf("READY on a closed pull request = %q, want it to name pull request #42", message)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
+	}
+}
+
+// A pull request whose change touches a by_hand path is READY for a person to merge, never armed:
+// the answer carries MANUAL_MERGE_REQUIRED whether or not the base branch requires a check, and a
+// rename counts both of its paths, so moving a protected file out of a by_hand path is by hand too.
+// The completion the workflow records carries the note too, so the packet the daemon tells carries
+// it and nobody it reaches arms the pull request.
+func TestHandoffCompleteReadyMarksAByHandPullRequestWithoutAutoArmingIt(t *testing.T) {
+	noChecks := func(g *handoffGitHub) { g.rules, g.mainBranch = `[]`, `{"name":"main","protected":false}` }
+	for _, tc := range []struct {
+		name, files string
+		base        func(*handoffGitHub)
+	}{
+		{"a by_hand path on a base requiring checks", `[{"filename":"migrations/versions/0001_init.py"}]`, func(*handoffGitHub) {}},
+		{"a by_hand path on a base requiring none", `[{"filename":"migrations/versions/0001_init.py"}]`, noChecks},
+		{"a rename out of a by_hand path", `[{"filename":"src/legacy.py","previous_filename":"migrations/versions/0001_init.py","status":"renamed"}]`, noChecks},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			github := byHandGitHub(t, tc.files)
+			github.set(tc.base)
+			h, facts, merger := newReadyHarness(t, github)
+			code, body := ready(t, h, merger)
+			if code != http.StatusOK || !strings.HasPrefix(body, "MANUAL_MERGE_REQUIRED:") {
+				t.Fatalf("READY for a by-hand pull request = %d %q", code, body)
+			}
+			if got := lastCompletion(t, facts).MergeNote; got != body {
+				t.Fatalf("the recorded READY's by-hand note = %q, want the answer's %q", got, body)
+			}
+		})
+	}
+}
+
+// A by-hand READY the design gate refuses keeps its note in the refusal, so the merger, which
+// submits the merge on the architect's word once the gate opens, already knows a person merges it.
+func TestHandoffCompleteReadyKeepsTheByHandNoteInADesignGateRefusal(t *testing.T) {
+	github := byHandGitHub(t, `[{"filename":"migrations/versions/0001_init.py"}]`)
+	h, facts := newHandoffHarness(t, github, nil, &intake.Refusal{Status: http.StatusConflict, Code: "DESIGN_GATE_CLOSED", Message: "READY refused: approve design version 4 before requesting READY."})
+	seedIssueAt(t, h, "LEGION-208", phase.Merging)
+	seedPullRequest(t, h, "LEGION-208", headSHA)
+	merger := newLiveClaim(t, h, "LEGION-208", claim.RoleMerger)
+	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: "gate facts hold", Ready: true, Commit: headSHA})
+	if message := refused(t, recorder, http.StatusConflict, "DESIGN_GATE_CLOSED"); !strings.Contains(message, "MANUAL_MERGE_REQUIRED: pull request #42") {
+		t.Fatalf("the design gate's refusal of a by-hand READY = %q, want it to carry the by-hand note", message)
+	}
+	if got := lastCompletion(t, facts).MergeNote; !strings.HasPrefix(got, "MANUAL_MERGE_REQUIRED:") {
+		t.Fatalf("the refused READY's by-hand note = %q, want it recorded for the approval to tell", got)
+	}
+}
+
+// The packet the daemon tells for a by-hand READY carries its note above the merger's packet, so it
+// is the told packet that must fit one Dispatch message. A packet that fits alone but not with the
+// note is refused, naming the note's share, and records nothing.
+func TestHandoffCompleteReadyRefusesAByHandPacketTooLongWithItsNote(t *testing.T) {
+	h, facts, merger := newReadyHarness(t, byHandGitHub(t, `[{"filename":"migrations/versions/0001_init.py"}]`))
+	recorder := h.complete(HandoffCompleteRequest{GrantID: merger.grant(t), Summary: strings.Repeat("x", record.MessagePostLimit), Ready: true, Commit: headSHA})
+	if message := refused(t, recorder, http.StatusBadRequest, "READY_PACKET_TOO_LONG"); !strings.Contains(message, "by-hand note") {
+		t.Fatalf("a by-hand READY whose packet fits only alone = %q, want it refused naming the by-hand note", message)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
+	}
+}
+
+// byHandGitHub is a GitHub whose pull request #42 changes files, under a by_hand rule for
+// migrations/versions/.
+func byHandGitHub(t *testing.T, files string) *handoffGitHub {
+	t.Helper()
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) {
+		g.merge.ByHand = []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}}
+		g.pullFiles = files
+	})
+	return github
+}
+
+// GitHub lists at most 3,000 of a pull request's changed files, so a by_hand path past that limit
+// is never read. With by_hand rules configured, READY refuses a pull request at the limit, naming
+// why, rather than calling an unread path safe to arm.
+func TestHandoffCompleteReadyRefusesAFileListGitHubTruncated(t *testing.T) {
+	files := make([]string, 3000)
+	for i := range files {
+		files[i] = fmt.Sprintf(`{"filename":"src/file%04d.go"}`, i)
+	}
+	github := newHandoffGitHub(t)
+	github.set(func(g *handoffGitHub) {
+		g.merge.ByHand = []config.PathPattern{{Expression: "^migrations/versions/", Regexp: regexp.MustCompile("^migrations/versions/")}}
+		g.pullFiles = "[" + strings.Join(files, ",") + "]"
+	})
+	h, facts, merger := newReadyHarness(t, github)
+	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_FILES_TRUNCATED:") {
+		t.Fatalf("READY of a pull request with 3,000 changed files = %d %q", code, body)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
+	}
+}
+
+// A disarm row decides by state when it runs, so one still unfinished when a new READY is accepted
+// would keep a stale arm that still stands at the new READY head, or disable the new READY's own
+// arm. READY is refused while the issue has an unfinished auto_merge_disable row, with a code the
+// merger completes again on, and is accepted once the row has finished. Another issue's unfinished
+// row refuses nothing.
+func TestHandoffCompleteReadyWaitsForTheIssuesUnfinishedDisarm(t *testing.T) {
+	github := newHandoffGitHub(t)
+	h, facts, merger := newReadyHarness(t, github)
+	for _, issue := range []string{"LEGION-208", "LEGION-209"} {
+		row, err := record.NewOutboxRow(issue, record.AutoMergeDisable{Number: 42}, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error { return record.NewStore().Enqueue(context.Background(), tx, row) }); err != nil {
+			t.Fatalf("queue the disarm of %s: %v", issue, err)
+		}
+	}
+	if code, body := ready(t, h, merger); code != http.StatusConflict || !strings.HasPrefix(body, "READY_DISARM_PENDING:") || !strings.Contains(body, "#42") {
+		t.Fatalf("READY with the issue's disarm unfinished = %d %q", code, body)
+	}
+	if got := facts.recorded(); len(got) != 0 {
+		t.Fatalf("handoff facts = %#v, want none for a refused READY", got)
+	}
+	if err := h.store.Tx(context.Background(), func(tx pgx.Tx) error {
+		_, err := tx.Exec(context.Background(), "delete from outbox where kind = 'auto_merge_disable' and issue = 'LEGION-208'")
+		return err
+	}); err != nil {
+		t.Fatalf("finish the issue's disarm: %v", err)
+	}
+	if code, body := ready(t, h, merger); code != http.StatusOK || body != "" {
+		t.Fatalf("READY once the issue's disarm finished, with another issue's still unfinished = %d %q", code, body)
+	}
 }
 
 // ready posts the merger's READY and returns its answer: the note when it was published, or the

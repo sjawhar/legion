@@ -302,9 +302,11 @@ or is not yet on `legion/<issue>@origin` (push the issue branch, then complete a
 other phase the commit the workspace stands on, `@-`. It then posts
 `POST /legion/v1/handoff/complete` (`summary`, `verdict`, `ready`, `commit`). The daemon reads no
 handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
-reported for its previous phase) and, for the merger's `ready: true`, runs READY's three refusals on
-the pull request's head (`READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS`, `READY_CHECKS_NOT_GREEN`); a refusal changed
-nothing, and the answer's `note` is what READY's checks said when they read no head. The
+reported for its previous phase) and, for the merger's `ready: true`, runs READY's checks on the
+pull request's head, each refusal named in the merger's role prompt
+(`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's
+`note` is what READY's checks said when they read no head, or the by-hand note
+(`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
 pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's
 plain `gh` and `git`, which read the role's App token from the gh files under `GH_CONFIG_DIR`; no

@@ -312,6 +312,22 @@ type HandoffComplete struct {
 	Verdict    string
 	Ready      bool
 	Commit     string
+	// MergeNote is READY's by-hand note, empty for any other completion: the MANUAL_MERGE_REQUIRED
+	// answer the route's READY checks give a pull request whose change touches a path the project's
+	// merge.by_hand names. The workflow keeps it with the merger's packet and tells it at its head.
+	MergeNote string
+	// RecordedHead and RecordedHeadAt are the head the daemon's record held for the issue's pull
+	// request when the route read it for READY, and the record's clock then
+	// (record.PullRequest.HeadUpdatedAt). The record follows GitHub only by webhook, so it can lag:
+	// the workflow accepts READY while the record is still exactly that snapshot, or already at
+	// Commit, and otherwise refuses it, since a push landed in between. Both fields are compared, so
+	// a record that left this head and came back to it (a force push and its undo) is a moved one.
+	RecordedHead   string
+	RecordedHeadAt time.Time
+	// HeadAt is GitHub's updated_at for the pull request in the route's read, which showed Commit
+	// as its head. A READY the workflow records advances the record to Commit at this clock, so a
+	// synchronize older than it, delivered late or again, changes nothing (classify.LateLifecycle).
+	HeadAt time.Time
 }
 
 func (HandoffComplete) isFact() {}
