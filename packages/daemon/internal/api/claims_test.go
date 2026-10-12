@@ -58,7 +58,7 @@ func TestRegisterIssuesASecretWhoseHashIsStoredBeforeTheResponse(t *testing.T) {
 // A claim's registration records the plugin contract it declared, shows it on the claim row, and
 // the operator's claim list shows it too; a claim never registered shows pluginContract 0.
 func TestRegisterRecordsThePluginContractAndTheOperatorViewShowsIt(t *testing.T) {
-	h := newHarness(t)
+	h := newHarnessUnrelaunchable(t)
 	token, boot := h.launch("LEGION-208", claim.RoleArchitect)
 
 	if stored := h.stored(token); stored.PluginContract != 0 {
@@ -239,7 +239,7 @@ func TestClaimRoutesRefuseABodyTheyDoNotRead(t *testing.T) {
 		name, route, body, wantFragment string
 	}{
 		{"not JSON", "register", `{"bootToken":`, "invalid request body"},
-		{"an unknown member", "register", `{"bootToken":"b","sessionId":"s","ompSessionFile":"f","agentId":"a","pluginContract":1,"workerSecret":"x"}`, "workerSecret"},
+		{"an unknown member", "ready", `{"claimToken":"c","sessionId":"s","secret":"x","generation":1,"workerSecret":"y"}`, "workerSecret"},
 		{"no session", "register", `{"bootToken":"b","ompSessionFile":"f","agentId":"a","pluginContract":1}`, "sessionId is required"},
 		{"no transcript", "register", `{"bootToken":"b","sessionId":"s","agentId":"a","pluginContract":1}`, "ompSessionFile is required"},
 		{"no secret", "ready", `{"claimToken":"c","sessionId":"s","generation":1}`, "secret is required"},

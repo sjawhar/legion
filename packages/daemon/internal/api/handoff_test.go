@@ -206,7 +206,7 @@ func newHandoffHarness(t *testing.T, github *handoffGitHub, grants *credential.G
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor: h.supervisor, BootTokens: h.tokens, Project: testProject, OperatorToken: testOperatorToken,
 		Controller: h.store, Grants: grants, Pool: h.store.Pool(), Record: record.NewStore(),
-		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{},
+		Handlers: []intake.Handler{facts}, Dispatch: &statusRecorder{}, PluginRelaunchable: true,
 		Tokens: handoffTokens{}, GitHubOwner: "acme", GitHubAPI: github.url, Repository: acmeWidgets,
 		MergeRules: func(project string) config.MergeRules {
 			if project != testProject {

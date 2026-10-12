@@ -125,3 +125,17 @@ func StalePluginContract(got, want int) Refusal {
 	return Refusal{Status: http.StatusConflict, Message: fmt.Sprintf(
 		"pi-legion speaks daemon API contract %d; this daemon requires %d: the daemon is relaunching this process onto the current plugin", got, want)}
 }
+
+// StaleControllerContract refuses a call from the operator's controller recorded at another
+// contract across a daemon restart (LEGION-164): the operator's controller is not the daemon's to
+// relaunch, so the sentence tells the operator to restart it themselves rather than promising a
+// relaunch. got and want are as StalePluginContract's. The sentence is a contract item beside it
+// and may not be reworded here alone.
+func StaleControllerContract(got, want int) Refusal {
+	if got == 0 {
+		return Refusal{Status: http.StatusConflict, Message: fmt.Sprintf(
+			"pi-legion registered no daemon API contract; this daemon requires %d: run legion controller start from the release built with this daemon", want)}
+	}
+	return Refusal{Status: http.StatusConflict, Message: fmt.Sprintf(
+		"pi-legion speaks daemon API contract %d; this daemon requires %d: run legion controller start from the release built with this daemon", got, want)}
+}

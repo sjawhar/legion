@@ -1408,6 +1408,7 @@ func serve(ctx context.Context, cfg config.Config, st *store.Store, startedAt ti
 		Controller:         st,
 		DesignGate:         cfg.Gates.Design,
 		ControllerLaunched: keeper != nil,
+		PluginRelaunchable: p.pluginRelaunchable,
 		Stopping:           s.stopping,
 		Drained:            s.draining,
 		Decisions:          s.decided,

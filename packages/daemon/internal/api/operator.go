@@ -168,7 +168,7 @@ func secureBearerEqual(expected [sha256.Size]byte, given string) bool {
 // then the task, so a claim the machine will not launch is given no task either.
 func (s *server) spawn(w http.ResponseWriter, r *http.Request) {
 	var req SpawnRequest
-	if !readBody(w, r, &req) || !requireFields(w,
+	if !s.readBody(w, r, &req, nil) || !requireFields(w,
 		field{"tree", req.Tree}, field{"issue", req.Issue}, field{"role", string(req.Role)},
 	) {
 		return
@@ -260,9 +260,9 @@ func (s *server) claimRequest(request string, event func(http.ResponseWriter, *h
 	}
 }
 
-func deliverEvent(w http.ResponseWriter, r *http.Request, c supervise.Claim) (supervise.Event, bool) {
+func (s *server) deliverEvent(w http.ResponseWriter, r *http.Request, c supervise.Claim) (supervise.Event, bool) {
 	var req DeliverRequest
-	if !readBody(w, r, &req) || !requireFields(w, field{"task", req.Task}) {
+	if !s.readBody(w, r, &req, nil) || !requireFields(w, field{"task", req.Task}) {
 		return nil, false
 	}
 	return supervise.RequestDeliver{Claim: c.Token, Task: req.Task}, true

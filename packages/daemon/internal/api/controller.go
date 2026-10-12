@@ -97,7 +97,7 @@ func (s *server) controllerSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req ControllerSecretRequest
-	if !readBody(w, r, &req) {
+	if !s.readBody(w, r, &req, nil) {
 		return
 	}
 	if req.PluginContract != DaemonAPIVersion {
@@ -145,7 +145,7 @@ func (s *server) controllerGitHubCredential(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var req ControllerCredentialRequest
-	if !readBody(w, r, &req) {
+	if !s.readBody(w, r, &req, nil) {
 		return
 	}
 	if !requireFailureFields(w, field{"secret", req.Secret}) {
@@ -305,7 +305,56 @@ func (s *server) controllerSessionGrant(w http.ResponseWriter, r *http.Request, 
 		writeFailure(w, http.StatusForbidden, "INVALID_SESSION_SECRET", claim.InvalidSecret.Message)
 		return
 	}
+	if s.refuseIfStaleController(w, r, record) {
+		return
+	}
 	s.mintControllerGrant(w)
+}
+
+// refuseIfStaleController is the stale-caller refusal for the operator's controller record
+// (LEGION-164). When the deployment launches its own controller (`controller: daemon`), the caller named
+// by this record is a claim: its machine (claim.ControllerToken) carries the contract its own
+// registration recorded, so it is refused by the same rule and sentence (claim.StalePluginContract,
+// staleClaim) any other claim is — no machine recorded means nothing is stale. Otherwise (the
+// operator's own `legion controller start`) the daemon never relaunches the operator's controller,
+// so there is no relaunch to wait for: it is stale, with claim.StaleControllerContract's sentence,
+// whenever its recorded contract differs at all.
+func (s *server) refuseIfStaleController(w http.ResponseWriter, r *http.Request, record controller.Record) bool {
+	if !s.controllerLaunched {
+		if record.PluginContract == DaemonAPIVersion {
+			return false
+		}
+		s.logStaleRefusal(r, "session", record.Session, record.PluginContract)
+		refusal := claim.StaleControllerContract(record.PluginContract, DaemonAPIVersion)
+		writeFailure(w, http.StatusConflict, "STALE_PLUGIN_CONTRACT", refusal.Message)
+		return true
+	}
+	m, found := s.supervisor.Machine(claim.ControllerToken(s.project))
+	if !found {
+		return false
+	}
+	got, stale := s.staleClaim(m)
+	if !stale {
+		return false
+	}
+	s.logStaleRefusal(r, "session", record.Session, got)
+	refusal := claim.StalePluginContract(got, DaemonAPIVersion)
+	writeFailure(w, http.StatusConflict, "STALE_PLUGIN_CONTRACT", refusal.Message)
+	return true
+}
+
+// refuseIfStaleControllerSession is readBody's identity check for the grants route's controller
+// form ({sessionId, secret}): the session registered with the current controller capability,
+// authenticated exactly as controllerSessionGrant does.
+func (s *server) refuseIfStaleControllerSession(w http.ResponseWriter, r *http.Request, sessionID, secret string) bool {
+	s.controllerMu.Lock()
+	record, found, err := s.controller.Controller(r.Context(), s.project)
+	s.controllerMu.Unlock()
+	if err != nil || !found || !record.Registered() || record.Session != sessionID ||
+		subtle.ConstantTimeCompare(record.SecretHash, capabilityHash(secret)) != 1 {
+		return false
+	}
+	return s.refuseIfStaleController(w, r, record)
 }
 
 // mintControllerGrant answers a controller grant for a caller its route has authorised.

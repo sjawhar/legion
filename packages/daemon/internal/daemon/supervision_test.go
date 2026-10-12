@@ -663,9 +663,13 @@ func TestRunWaitsToRelaunchAnUnfinishedClaimUntilOrphanReconciliationSucceeds(t 
 	bootToken := "interrupted-" + randomSuffix(t)
 	oldSecret := "old-secret"
 	oldCapability := sha256.Sum256([]byte(oldSecret))
+	// A launching claim holds no capability in reality (holdsCapability); the hash here stands in
+	// for a process at this daemon's own contract, so the register/ready exchange below exercises
+	// the "previous launch" refusal rather than the stale-plugin one.
 	putClaim(t, cfg, supervise.Claim{
 		Token: token, Project: project, Tree: "LEGION-1", Issue: "LEGION-4", Role: claim.RoleReviewer,
 		Generation: 1, State: supervise.StateLaunching, BootTokenHash: supervise.HashBootToken(bootToken), CapabilityHash: oldCapability[:],
+		PluginContract: api.DaemonAPIVersion,
 	})
 	writePrompt(t, cfg, token)
 	rt := fake.NewRuntime()
