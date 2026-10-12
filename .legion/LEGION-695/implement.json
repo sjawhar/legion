@@ -2,9 +2,33 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-695",
-  "completed": "2026-10-12T15:58:00Z",
+  "completed": "2026-10-12T17:28:24Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1928",
   "proof": [
+    {
+      "criterion": "Review round 1, finding 2 (stopEvent covered dragstart on the fallback link): a drag of a fallback link moves the picture line through ProseMirror, and the link's own words never reach the stored markdown; a plain click on it still navigates in the app.",
+      "surface": "`bun run dispatch:local` on alternate ports (DISPATCH_E2E_PORT=18777, FAKE_ENVOY_PORT=19021, FAKE_GITHUB_PORT=19022, PLAIN_HTTP_PORT=19023, FAKE_BROKER_PORT=19024; the default ports are held by another lane's harness in this pod), the real `dispatch` CLI (DISPATCH_URL=http://127.0.0.1:18777 DISPATCH_TOKEN=e2e-token, DISPATCH_TOKEN_FILE unset), Playwright's Chromium and Firefox 155 (1200x900), web/dist built from this head.",
+      "command": "dispatch issue --project CORE --title 'Picture check round 2' (CORE-8); dispatch artifact --issue CORE-8 --name notes.md (a markdown document, slug notes-md) and --name photo.png (480x200 PNG); dispatch doc-edit --issue CORE-8 --artifact spec inserting '# Picture check / Intro. / ![notes.md](dispatch://CORE-8/artifact/notes-md@v1) / ![photo.png](dispatch://CORE-8/artifact/photo-png@v1) / Below the pictures.' then '![x](dispatch://CORE-8/artifact/photo-png@v9) / End.'; a throwaway Playwright script: open /auth/_dev/signin?login=alice&next=/issues/CORE-8/spec; set window.__marker='kept'; click the notes-md@v1 fallback link; waitForURL(/issues/CORE-8/artifacts/notes-md?v=1) and read the marker; reopen the spec; scroll 'Below the pictures.' into view; link.dragTo(that paragraph); poll GET /api/v1/issues/CORE-8/artifacts/spec/text.",
+      "observed": "Chromium and Firefox alike: the fallback link has draggable=false, text `CORE-8 notes-md`, href /issues/CORE-8/artifacts/notes-md?v=1, 0 <img>; the click lands on /issues/CORE-8/artifacts/notes-md?v=1 with window.__marker still 'kept' (in-app navigation, no page load); after the drag the stored markdown holds `![notes.md](dispatch://CORE-8/artifact/notes-md@v1)` exactly once, now after the photo.png line (the node moved, an empty paragraph left where it was), and contains no `[CORE-8 notes-md](` link text. pictures.e2e.ts Test B now drags the link and asserts the same three facts; it fails without `link.draggable = false` (observed: with the line commented out and web/dist rebuilt, chromium 'cannot draw' row → the poll for the moved order never became true, 1 failed) and passes with it on chromium and iphone (10 passed, twice). Screenshot after the drag: dispatch://LEGION-695/artifact/legion-695-round2-drag-chromium-png@v1.",
+      "headSha": "cee69bb1e2ac7a985fa3b14a0398c1457ecd0306",
+      "negativeControl": "The line `![x](dispatch://CORE-8/artifact/photo-png@v9)` (a version that does not exist) → its wrapper holds the link `CORE-8 photo-png` and 0 <img>, in both browsers; and the regression lock's own before/after: the e2e drag row fails on a build without the fix and passes with it."
+    },
+    {
+      "criterion": "Review round 1, finding 1 (ignoreMutation: () => true swallowed ProseMirror's selection record): the override is removed, so the leaf default (`!contentDOM && mutation.type != \"selection\"`, prosemirror-view 1.42.3 dist/index.js:1110-1111) applies and a DOM selection settling inside the fallback link reaches state.selection.",
+      "surface": "The same dispatch:local instance, Playwright's Chromium and Firefox 155, trying to put a DOM selection inside the fallback link: caret placed at the end of 'Intro.', then (a) a mouse drag from the link's left edge to its right edge, (b) a double-click on the link, (c) a Shift+click on the link; then Backspace and a read of /api/v1/issues/CORE-8/artifacts/spec/text.",
+      "command": "/tmp throwaway scripts proof.ts and select.ts (deleted after the run) driving page.mouse.down/move/up, page.mouse.dblclick, page.mouse.click({modifiers:['Shift']}) on the link's bounding box, then page.keyboard.press('Backspace'), reading document.activeElement and document.getSelection() before the keypress and the text route after it.",
+      "observed": "No gesture left a DOM selection inside the link in either browser, so the stale-selection symptom could not be reproduced with or without the override: (a) Chromium focuses the <a> (activeElement A, selection collapsed, Backspace changes nothing); Firefox keeps focus on the editing host with the caret where it was (selection collapsed, anchor not in the link; Backspace deletes the '.' of 'Intro.', the caret's true position); (b) and (c) run the article's click handler and navigate to /issues/CORE-8/artifacts/notes-md before any selection settles. The fix is therefore code-traced, not browser-observed: it deletes the override and restores the library default, which is already what ignores the <img>→<a> swap; picture-view.test.ts no longer asserts the override, and the full unit, lint and typecheck lanes are green at this head.",
+      "headSha": "cee69bb1e2ac7a985fa3b14a0398c1457ecd0306",
+      "negativeControl": "Firefox's Backspace after gesture (a) deleting the '.' of 'Intro.' shows the editor's selection is exactly where the DOM selection is (the caret never entered the link), i.e. no stale selection existed to expose; the text route confirmed the one-character change and nothing else."
+    },
+    {
+      "criterion": "Fast-follow taken into this round: pictureSerializer and pictureView read a picture's dispatch:// source through one helper (pictureReference in features/refs/routes.ts) with outputs unchanged.",
+      "surface": "The Playwright harness on alternate ports (both projects) plus the package's unit lanes; web/dist built from this head.",
+      "command": "cd packages/dispatch && bun test web/src/features/refs web/src/features/doc (321 pass); bun run lint; bun run typecheck; bun run build:web && DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 PLAIN_HTTP_PORT=19023 FAKE_BROKER_PORT=19024 DATABASE_URL='postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable' bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/pictures.e2e.ts",
+      "observed": "321 unit tests pass (the existing serializer surfaces in markdown-surfaces.test.tsx and MarkdownPreview.test.tsx unmodified, seven new routes.test.ts cases for pictureReference); lint 555 files clean; typecheck clean; 10 passed on chromium + iphone at this head, including the comment-picture rows the serializer serves.",
+      "headSha": "cee69bb1e2ac7a985fa3b14a0398c1457ecd0306",
+      "negativeControl": "pictureReference({ src: 'dispatch://not a reference' }) and ({}) are undefined (routes.test.ts), so a refused string and a picture with no source still take the schema's own path in both callers; the unit case for `dispatch://CORE-1/ask/a1` shows a non-artifact reference yields named undefined and so a link, as before."
+    },
     {
       "criterion": "Opened at /issues/<KEY>/spec, the spec draws the picture from /api/v1/issues/<KEY>/artifacts/shot-png/versions/1; the same document opened at a past version draws it too (confirmed by hand in a real browser against `bun run dispatch:local`).",
       "surface": "`bun run dispatch:local` at http://127.0.0.1:8777 (the seeded harness on a Postgres 17 + pgvector under /tmp), the real `dispatch` CLI pointed at it (DISPATCH_URL=http://127.0.0.1:8777 DISPATCH_TOKEN=e2e-token, DISPATCH_TOKEN_FILE unset), and Playwright's Chromium (1200x900) opening the signed-in URL.",
@@ -38,12 +62,20 @@
     "packages/dispatch/e2e/api.ts: getIssueArtifactText (the slug text route)",
     "packages/dispatch/e2e/pictures.e2e.ts: Test A (draws, past version, markdown kept) and Test B (links, web picture, click navigates)",
     "packages/dispatch/AGENTS.md: the installTypedBlocks passage, the pictures.e2e.ts sentence, the picture-rendering passage",
-    "packages/envoy/CHANGELOG.md: a Fixed entry under Unreleased"
+    "packages/envoy/CHANGELOG.md: a Fixed entry under Unreleased",
+    "round 2 — packages/dispatch/web/src/features/doc/picture-view.ts: ignoreMutation override removed; fallbackLink sets link.draggable = false; reads the source through pictureReference",
+    "round 2 — packages/dispatch/web/src/features/doc/picture-view.test.ts: no ignoreMutation assertion; asserts the fallback link is not draggable",
+    "round 2 — packages/dispatch/e2e/pictures.e2e.ts: Test B drags the fallback link and reads the stored markdown back (moved once, no link words)",
+    "round 2 — packages/dispatch/web/src/features/refs/routes.ts (+ routes.test.ts): pictureReference / PictureReference, the one reading of an image node's src and alt",
+    "round 2 — packages/dispatch/web/src/features/refs/markdown-engine.ts: pictureSerializer's image override calls pictureReference",
+    "round 2 — packages/dispatch/AGENTS.md: the installTypedBlocks passage names pictureReference as where the caption rule lives"
   ],
   "trickyParts": [
     "happy-dom raises `error` synchronously from the `src` attribute setter when the URL cannot resolve (page at about:blank); the img is appended to the wrapper before `src` is set so a synchronous error replaces it rather than preceding it. Real browsers queue the error as a task; the ordering is right either way, and a unit case holds it.",
     "The Playwright harness and `bun run dispatch:local` need a loopback Postgres with pgvector; this sandbox has no Docker, so one was built under /tmp from Debian packages (nothing in the repository) and left running for the tester's own run: `export LD_LIBRARY_PATH=/tmp/pg/usr/lib/x86_64-linux-gnu PATH=/tmp/pg/usr/lib/postgresql/17/bin:$PATH DATABASE_URL='postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable'` (restart with `postgres -D /tmp/pgdata -p 55432 -h 127.0.0.1 -k /tmp/pgsock` if it is gone).",
-    "The simplify pass (ce-simplify-code, three reviewer subagents) applied one change, to the unit test only (literal paths and words in the link test); runtime code is unchanged since the proof's head, so the browser proof was not re-run. The two reviewers' other finding — pictureView and pictureSerializer (features/refs/markdown-engine.ts) each derive the dispatch:// source test and the alt-or-slug caption — is duplication cleanup outside the diff, recorded as the pull request's Fast-follow."
+    "The simplify pass (ce-simplify-code, three reviewer subagents) applied one change, to the unit test only (literal paths and words in the link test); runtime code is unchanged since the proof's head, so the browser proof was not re-run. The two reviewers' other finding — pictureView and pictureSerializer (features/refs/markdown-engine.ts) each derive the dispatch:// source test and the alt-or-slug caption — is duplication cleanup outside the diff, recorded as the pull request's Fast-follow.",
+    "round 2 — Playwright's dragTo begins no drag on desktop Chromium when the page scrolls between the press and the move (the drop target was below the fold at 1280x720), so Test B scrolls the target paragraph into view first and asserts the link is still in the viewport; on the iPhone project no scroll is needed.",
+    "round 2 — The default harness ports (8777, 9021-9024) are held by another lane's harness in this pod's shared network namespace; the e2e and dispatch:local runs here used DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 PLAIN_HTTP_PORT=19023 FAKE_BROKER_PORT=19024 with DATABASE_URL on the /tmp Postgres at 55432 (database dispatch_e2e for the suite, dispatch_local for dispatch:local). Firefox 155 is installed for Playwright too (bunx playwright install firefox)."
   ],
   "deviations": [
     "The CHANGELOG already had a `### Fixed` heading under `## [Unreleased]` (the plan said there was none); the entry was placed first under it rather than a second heading being added."
@@ -51,5 +83,23 @@
   "openQuestions": [],
   "discoveredComplexity": [
     "Pre-existing, not changed here: a paragraph that ends in a picture is ~115 px tall in the editor whatever the picture's size, because ProseMirror's cursor hack after a contenteditable=false leaf (`<img class=\"ProseMirror-separator\">`) gets Tailwind preflight's `display: block` and Typography's `.prose img` 2em margins. Measured on the plain `<img>` path too (`![logo](https://example.invalid/logo.png)` → 115.19 px), so it predates this change; the fix would be a `.milkdown img.ProseMirror-separator` rule in styles.css, a separate issue for the architect."
+  ],
+  "reviewRound": 1,
+  "reviewThreads": [
+    {
+      "thread": "PRRT_kwDORFy7ds6rjBua",
+      "finding": "ignoreMutation: () => true swallowed the selection record",
+      "disposition": "Fixed in 8af418cf584c9c37dda2a4301abb690b19973e15: the override is gone; the leaf default applies."
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6rjBud",
+      "finding": "stopEvent covered dragstart on the fallback <a>",
+      "disposition": "Fixed in 8af418cf584c9c37dda2a4301abb690b19973e15: link.draggable = false; e2e drag regression lock; proven in Chromium and Firefox on dispatch:local."
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6rjBuf",
+      "finding": "renderSpec without the attrs guard (Minor, hardening)",
+      "disposition": "Declined: prosemirror-model's published types omit the internal fourth parameter (a four-argument call fails typecheck, TS2554, observed), so parity needs a cast through an @internal signature that the library may change; Milkdown's image attrs validate as strings, so the guard is not engaged."
+    }
   ]
 }
