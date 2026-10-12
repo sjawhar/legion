@@ -2,9 +2,17 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-695",
-  "completed": "2026-10-12T18:10:50Z",
+  "completed": "2026-10-12T19:40:41Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1928",
   "proof": [
+    {
+      "criterion": "Review round 2: the pull request's AGENTS.md passages describe the picture view exactly (no ignoreMutation override; the version view's click opens the artifact's page in a new tab through proof-editor's markdownLinkClickPlugin; both hover cards show on the fallback link in the live editor; the firefox project's spec list names e2e/picture-link-click.e2e.ts); stopEvent leaves dragstart to ProseMirror; the Firefox caret wiring lives beside its explanation. Behaviour otherwise unchanged.",
+      "surface": "A docs push with one stopEvent token and a pure move: no new real-surface run; the Playwright harness on alternate ports (chromium, firefox, iphone) and the package's unit lanes re-run at this head, web/dist rebuilt from it; the round-3 by-hand proof (Firefox and Chromium on dispatch:local) and round 2's drag proof stand for the unchanged behaviour.",
+      "command": "cd packages/dispatch && bun test web/src/features/doc web/src/features/refs; bun run lint; bun run typecheck; bash .github/scripts/check-private-names.sh; bun run build:web && DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 PLAIN_HTTP_PORT=19023 FAKE_BROKER_PORT=19024 DATABASE_URL='postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable' bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=firefox --project=iphone e2e/picture-link-click.e2e.ts; the same with --project=chromium --project=iphone e2e/pictures.e2e.ts. Each documented claim was read in the code it names: prosemirror-view dist/index.js:1110-1111 (leaf default ignoreMutation), :3160-3165 and :3173-3183 (handleDOMEvents listeners are not gated by stopEvent), proof-sdk editor/plugins/markdown-link-click.ts handleLinkClick (~:515-552: early return for an unmodified primary click on an editable view; preventDefault + window.open(href, '_blank', 'noopener,noreferrer') on a non-editable view or a Ctrl/Cmd-click), handleMouseMove/showCardForLink (~:268-283, :355-389: the card for any a[href] outside [data-mark-id] on an editable view), features/refs/RefPreview.tsx:36 (TRIGGER_SELECTOR includes [data-dispatch-href]).",
+      "observed": "321 unit tests pass; lint 556 files clean; typecheck clean; check-private-names clean; picture-link-click.e2e.ts 3 passed (chromium, iphone, firefox); pictures.e2e.ts 10 passed. The rewritten AGENTS.md:719 passage and the firefox project list (AGENTS.md:1067-1075) say what the cited code does.",
+      "headSha": "af766f053b7a9917ce9361409a00e07a45e8f2fe",
+      "negativeControl": "The removed sentence (`ignoreMutation` is always true) named an override the file has not had since 8af418cf (grep of picture-view.ts for ignoreMutation: no match), and the removed claim that the version view 'follows its href' contradicts markdown-link-click.ts, whose non-editable branch calls preventDefault before window.open; both were false against the code they described, which is why they were replaced rather than kept."
+    },
     {
       "criterion": "Tester round 2 failure: in Firefox, a plain click on the fallback link in a spec longer than one screen must open the artifact's page (spec: 'the picture gives way to a link to the artifact's page'; plan: 'in the live editor it navigates in the app through the existing click handler'). The tester's red test e2e/picture-link-click.e2e.ts passes unmodified on chromium, firefox and iphone.",
       "surface": "`bun run dispatch:local` on alternate ports (DISPATCH_E2E_PORT=18777 and the four fake listeners on 19021-19024; the default ports are held by another lane's harness in this pod), the real `dispatch` CLI (DISPATCH_URL=http://127.0.0.1:18777 DISPATCH_TOKEN=e2e-token, DISPATCH_TOKEN_FILE unset), Playwright's Firefox 155 and Chromium at 1280x720, web/dist built from this head; and the Playwright harness (chromium, firefox, iphone projects) for the red test.",
@@ -80,7 +88,10 @@
     "round 3 — packages/dispatch/web/src/features/doc/picture-view.ts: pictureView(node, document, placeCaretAfter); the fallback link's primary-button mousedown calls it (no preventDefault, so Firefox still drags from the link)",
     "round 3 — packages/dispatch/web/src/features/doc/ask-block.ts: installTypedBlocks passes a callback that dispatches a collapsed TextSelection at getPos() + node.nodeSize",
     "round 3 — packages/dispatch/web/src/features/doc/picture-view.test.ts: the callback is called once for a primary-button mousedown on the link, not for button 2, not for a mousedown on the <img>",
-    "round 3 — packages/dispatch/AGENTS.md: the installTypedBlocks passage says what the mousedown does and why (Firefox focuses the editing host; ProseMirror restores the last selection; a long document would scroll away before the click lands)"
+    "round 3 — packages/dispatch/AGENTS.md: the installTypedBlocks passage says what the mousedown does and why (Firefox focuses the editing host; ProseMirror restores the last selection; a long document would scroll away before the click lands)",
+    "round 4 — packages/dispatch/AGENTS.md: the installTypedBlocks passage corrected (no ignoreMutation; the version view's click opens a new tab through markdownLinkClickPlugin; both hover cards; pictureNodeView named); the firefox project list gains e2e/picture-link-click.e2e.ts with its reason",
+    "round 4 — packages/dispatch/web/src/features/doc/picture-view.ts: fallbackLink's doc comment corrected; stopEvent false for dragstart; pictureNodeView(view) exported (the Firefox caret wiring, moved here beside its explanation)",
+    "round 4 — packages/dispatch/web/src/features/doc/ask-block.ts: image: pictureNodeView(view); TextSelection import dropped"
   ],
   "trickyParts": [
     "happy-dom raises `error` synchronously from the `src` attribute setter when the URL cannot resolve (page at about:blank); the img is appended to the wrapper before `src` is set so a synchronous error replaces it rather than preceding it. Real browsers queue the error as a task; the ordering is right either way, and a unit case holds it.",
@@ -88,7 +99,8 @@
     "The simplify pass (ce-simplify-code, three reviewer subagents) applied one change, to the unit test only (literal paths and words in the link test); runtime code is unchanged since the proof's head, so the browser proof was not re-run. The two reviewers' other finding — pictureView and pictureSerializer (features/refs/markdown-engine.ts) each derive the dispatch:// source test and the alt-or-slug caption — is duplication cleanup outside the diff, recorded as the pull request's Fast-follow.",
     "round 2 — Playwright's dragTo begins no drag on desktop Chromium when the page scrolls between the press and the move (the drop target was below the fold at 1280x720), so Test B scrolls the target paragraph into view first and asserts the link is still in the viewport; on the iPhone project no scroll is needed.",
     "round 2 — The default harness ports (8777, 9021-9024) are held by another lane's harness in this pod's shared network namespace; the e2e and dispatch:local runs here used DISPATCH_E2E_PORT=18777 FAKE_ENVOY_PORT=19021 FAKE_GITHUB_PORT=19022 PLAIN_HTTP_PORT=19023 FAKE_BROKER_PORT=19024 with DATABASE_URL on the /tmp Postgres at 55432 (database dispatch_e2e for the suite, dispatch_local for dispatch:local). Firefox 155 is installed for Playwright too (bunx playwright install firefox).",
-    "round 3 — Mechanism (prosemirror-view 1.42.3 dist/index.js:3904-3916, :2261-2264): Firefox focuses the editing host on a mousedown inside the contenteditable=false wrapper, and 20 ms later handlers.focus writes the editor's own selection into the DOM; stopEvent keeps ProseMirror's mousedown handler out on purpose (it would node-select the picture, a non-collapsed selection ProofDocument's click handler steps aside for), so for a reader who had not clicked into the text the caret went to the document's start and a long document scrolled away before the mouseup. Placing a collapsed caret just after the picture on mousedown makes that the selection ProseMirror restores. Chromium focuses the link itself, so the editor is unfocused when the caret moves and the DOM selection is untouched (editorOwnsSelection). preventDefault on mousedown was rejected: Firefox then starts no drag, and round 2's drag of the fallback link would be lost."
+    "round 3 — Mechanism (prosemirror-view 1.42.3 dist/index.js:3904-3916, :2261-2264): Firefox focuses the editing host on a mousedown inside the contenteditable=false wrapper, and 20 ms later handlers.focus writes the editor's own selection into the DOM; stopEvent keeps ProseMirror's mousedown handler out on purpose (it would node-select the picture, a non-collapsed selection ProofDocument's click handler steps aside for), so for a reader who had not clicked into the text the caret went to the document's start and a long document scrolled away before the mouseup. Placing a collapsed caret just after the picture on mousedown makes that the selection ProseMirror restores. Chromium focuses the link itself, so the editor is unfocused when the caret moves and the DOM selection is untouched (editorOwnsSelection). preventDefault on mousedown was rejected: Firefox then starts no drag, and round 2's drag of the fallback link would be lost.",
+    "round 4 — Settled by documenting rather than changing: the fallback link shows two hover cards in the live editor (RefPreviewHost's on data-dispatch-href, and proof-sdk's link card on any a[href] in an editable view). Suppressing the library's card would need either dropping the real href (which the version view's click and a middle click use) or stopping mousemove propagation at the link (which would also hide the event from ProseMirror's document-level drag-selection tracking), so both cards stay and the passage says so; a one-card design is the architect's to file if wanted."
   ],
   "deviations": [
     "The CHANGELOG already had a `### Fixed` heading under `## [Unreleased]` (the plan said there was none); the entry was placed first under it rather than a second heading being added."
@@ -97,7 +109,7 @@
   "discoveredComplexity": [
     "Pre-existing, not changed here: a paragraph that ends in a picture is ~115 px tall in the editor whatever the picture's size, because ProseMirror's cursor hack after a contenteditable=false leaf (`<img class=\"ProseMirror-separator\">`) gets Tailwind preflight's `display: block` and Typography's `.prose img` 2em margins. Measured on the plain `<img>` path too (`![logo](https://example.invalid/logo.png)` → 115.19 px), so it predates this change; the fix would be a `.milkdown img.ProseMirror-separator` rule in styles.css, a separate issue for the architect."
   ],
-  "reviewRound": 1,
+  "reviewRound": 2,
   "reviewThreads": [
     {
       "thread": "PRRT_kwDORFy7ds6rjBua",
@@ -118,6 +130,31 @@
       "thread": "(tester failure, test.json round 2; no GitHub thread)",
       "finding": "Firefox: a plain click on the fallback link far down a spec did not open the artifact's page",
       "disposition": "Fixed in fcf0ad1b1b66f45b99b62ed04a067ac42f0e4ecb: the red test passes unmodified on chromium, firefox and iphone."
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6rmCkN",
+      "finding": "AGENTS.md:719 documented the deleted ignoreMutation override",
+      "disposition": "Fixed in af766f053b7a9917ce9361409a00e07a45e8f2fe: the sentence now says the view sets no ignoreMutation and why the leaf default suffices."
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6rmCkT",
+      "finding": "AGENTS.md:719: the version view 'follows its href'; the hover claim incomplete",
+      "disposition": "Fixed in af766f053b7a9917ce9361409a00e07a45e8f2fe: the version view's click is taken by markdownLinkClickPlugin (new tab); Ctrl/Cmd-click likewise; middle click uses href; both hover cards documented (kept, not settled)."
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6rmCkV",
+      "finding": "picture-view.ts doc comment: 'the read-only version view follows it'",
+      "disposition": "Fixed in af766f053b7a9917ce9361409a00e07a45e8f2fe: reworded to the plugin's new-tab open."
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6rmCkY",
+      "finding": "stopEvent true for dragstart inside the link",
+      "disposition": "Fixed in af766f053b7a9917ce9361409a00e07a45e8f2fe: stopEvent returns false for dragstart; copy/cut stay stopped."
+    },
+    {
+      "thread": "PRRT_kwDORFy7ds6rmCkf",
+      "finding": "placeCaretAfter wiring split across ask-block.ts and picture-view.ts",
+      "disposition": "Fixed in af766f053b7a9917ce9361409a00e07a45e8f2fe: pictureNodeView(view) in picture-view.ts; installTypedBlocks uses image: pictureNodeView(view)."
     }
   ],
   "testRound": 2
