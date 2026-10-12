@@ -97,24 +97,15 @@ review posted without a completion leaves the issue in reviewing until you finis
 - READY is `handoff_complete` with `ready: true` and the packet as its `summary`; the merger runs
   no pre-flight of its own, and its completion reports the commit the workspace stands on. READY's
   checks run in the daemon, which reads the pull request's head on GitHub and refuses, before
-  recording anything: `READY_HEAD_CARRIES_HANDOFFS` while the head still carries `.legion/<issue>/`
-  (tell the architect, which has you move the issue back to `retro` with `request_backward_move`,
-  so the implementer's retro removes it; a refusal saying GitHub's read of the directory failed is
-  GitHub's failure, not the head's: complete again); `READY_HEAD_CONFLICTS` while the pull
-  request conflicts with its base, named — GitHub can neither merge it nor start pull_request CI
-  for it, so the implementer brings the base into the branch with a forward merge; and
-  `READY_CHECKS_NOT_GREEN` unless every check the base branch requires has succeeded at that head
-  and every workflow its rulesets require has a passing run there — no result for a check, or no
-  run of a workflow, means that head's push skipped CI when it should not have; a check still
-  running means wait; a failed one is a finding. Report the refusal to the architect; never
-  push a commit to make CI run. It also refuses `READY_DISARM_PENDING` while a disarm the daemon
-  queued for the pull request, when an earlier READY was withdrawn or its head moved, has not
-  finished, since that disarm decides by the record when it runs: submit nothing, complete again
-  in a minute, and tell the architect if it keeps refusing. On success the daemon posts the packet
-  as a `dispatch message` on the issue, publishes it to the project's merge queue role when one is
-  set, and says on the issue when that role has no live holder; the answer's `note` says when READY
-  was published on a pull request a person already merged, whose head can no longer change, or on a
-  base that requires no check, which the packet itself also says.
+  recording anything, on each ground the merger's role prompt names in its `Go daemon workflow`
+  part, by its code and with its remedy. That part is the one complete list of READY's refusals.
+  A refusal records nothing; the merger reports it to the architect unless it says to complete
+  again, and never pushes a commit to make CI run. On success the daemon posts the packet as a
+  `dispatch message` on the issue, publishes it to the project's merge queue role when one is set,
+  and says on the issue when that role has no live holder; the answer's `note` says when READY was
+  published on a pull request a person already merged, whose head can no longer change, or on a
+  base that requires no check, which the packet itself also says, or carries the by-hand note of a
+  pull request a person merges.
 - **The merger submits the merge the moment READY is accepted, unless the answer says a person
   merges it.** In the same turn, before anything else, it runs
   `gh pr merge <n> -R <owner>/<repo> --auto --squash --match-head-commit <head>` with its pane's

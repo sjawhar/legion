@@ -360,13 +360,13 @@ The daemon reads no handoff file and no branch head; it refuses, before recordin
 
 - `HANDOFF_NOT_NEW` — the commit is the one you reported for your previous phase: write and
   commit this phase's handoff before completing.
-- `READY_HEAD_CARRIES_HANDOFFS`, `READY_HEAD_CONFLICTS`, `READY_CHECKS_NOT_GREEN` and
-  `READY_DISARM_PENDING` — the merger's READY, in `skill://legion-worker/references/merge-gate.md`.
+- each `READY_…` refusal of the merger's READY — named, with its remedy, in the merger's role
+  prompt (`skill://legion-worker/references/merge-gate.md` says how READY is checked).
 - `GITHUB_READ_FAILED` — GitHub's failure, not the head's, reading READY's checks: complete again.
 
 Such a refusal records nothing, so the corrected call at the same commit is applied. The answer
 may carry a `note` (READY published on an already-merged pull request, or a base requiring no
-check).
+check, or the `MANUAL_MERGE_REQUIRED:` note of a pull request a person merges).
 
 Retro's last commit removes `.legion/<issue>/` from the head that merges (`skill://legion-retro`);
 a round after it, such as one a withdrawn READY sends back, writes and commits its own handoff

@@ -182,3 +182,17 @@ func TestAPushAppliedInsideTheREADYWindowIsJudgedByGitHubsClock(t *testing.T) {
 		})
 	}
 }
+
+// Every webhook that moves the record's head stamps it with GitHub's updated_at, so only a legacy
+// row holds a head with no clock. Such a record at a third head, neither the snapshot the route
+// read nor the READY's commit, gives no evidence it is behind GitHub's read, so READY is refused.
+func TestAREADYIsRefusedOnARecordAtAnotherHeadWithNoClock(t *testing.T) {
+	pool := migratedPool(t)
+	seedLaggingRecord(t, pool, true)
+	seedPR(t, pool, record.PullRequest{State: record.PullRequestOpen, Issue: "LEGION-208", Repo: "sjawhar/legion", Number: 42, Branch: "legion/LEGION-208", HeadSHA: "V"})
+	result := applyFacts(t, pool, readyEngine(""))("ready", readyAtX)
+	if refusalCode(result) != "READY_HEAD_MOVED" {
+		t.Fatalf("READY on a record at V with no clock = %#v, want READY_HEAD_MOVED", result)
+	}
+	assertPhase(t, pool, phase.Merging)
+}

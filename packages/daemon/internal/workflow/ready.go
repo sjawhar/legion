@@ -31,13 +31,16 @@ func (e *Engine) ready(ctx context.Context, tx pgx.Tx, issue record.Issue, merge
 // hold. The route held the commit to GitHub's head, and passes the record as it read it, head and
 // clock (intake.HandoffComplete.RecordedHead, RecordedHeadAt), and GitHub's clock in its read
 // (HeadAt): the record follows GitHub only by webhook, so one still exactly that snapshot is
-// lagging, not moved, one at the commit has caught up, and one whose clock is still before
-// GitHub's read applied only pushes that read had passed, so it is behind, not moved (a push
-// between the snapshot's head and the commit, its webhook applied while the route checked READY).
-// Any other record is a push past GitHub's read, a record back at the snapshot's head at a later
-// clock among them (a force push and its undo), and is refused, so the merger's READY at the new
-// head is applied. Refused on a record merely lagging or behind, the right READY's retry at the
-// same commit would be answered HANDOFF_ALREADY_RECORDED, and the issue would stay in merging.
+// lagging, not moved, one at the commit has caught up, and one with a clock still before GitHub's
+// read applied only pushes that read had passed, so it is behind, not moved (a push between the
+// snapshot's head and the commit, its webhook applied while the route checked READY). Any other
+// record is a push no earlier than GitHub's read, a record back at the snapshot's head at a later
+// clock among them (a force push and its undo), or a legacy record with no clock, and is refused,
+// so the merger's READY at the new head is applied. Refused on a record merely lagging or behind,
+// the right READY's retry at the same commit would be answered HANDOFF_ALREADY_RECORDED, and the
+// issue would stay in merging. GitHub's clock is to the second, so a push in the same second as the
+// READY's head, its webhook applied in that window, is refused that way too: counting a tie as
+// behind would accept a push made after GitHub's read, which is worse.
 //
 // A READY it lets through, accepted or held by the design gate, advances the record to its head at
 // GitHub's clock in the route's read (intake.HandoffComplete.HeadAt). GitHub showed that head then,
@@ -49,7 +52,7 @@ func (e *Engine) holdReadyToItsHead(ctx context.Context, tx pgx.Tx, issue record
 		return intake.Result{}, nil
 	}
 	snapshot := pr.HeadSHA == fact.RecordedHead && pr.HeadUpdatedAt.Equal(fact.RecordedHeadAt)
-	behind := pr.HeadUpdatedAt.Before(fact.HeadAt)
+	behind := !pr.HeadUpdatedAt.IsZero() && pr.HeadUpdatedAt.Before(fact.HeadAt)
 	if pr.HeadSHA != fact.Commit && !snapshot && !behind {
 		return refused("READY_HEAD_MOVED", fmt.Sprintf("pull request #%d of %s now heads at %s, not READY's %s: build a new packet at that head and complete again; this completion changed nothing",
 			pr.Number, issue.Key, pr.HeadSHA, fact.Commit)), nil
