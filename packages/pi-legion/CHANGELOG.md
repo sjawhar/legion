@@ -45,12 +45,18 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
-- `legion.daemonApiVersion` is 22. Contract 22 adds `strandedClaims` to `GET /legion/v1/state`
+- `legion.daemonApiVersion` is 23. Contract 23 adds `strandedClaims` to `GET /legion/v1/state`
   (LEGION-670): every claim nothing will wake — a suspended or failed worker of its issue's phase
   that no queued start will wake, or a suspended or failed tree architect, in a tree that holds an
   admission slot — each named by its issue, role and state. The list is never absent, so a plugin
-  built before 22 refuses the state; install this release with a Go `legion` and a worker image
+  built before 23 refuses the state; install this release with a Go `legion` and a worker image
   built from the same commit.
+- `legion.daemonApiVersion` is 22 (LEGION-618). The daemon logs in to the secrets broker with its
+  own Kubernetes ServiceAccount token, which no person approves, so `agentSecretsLogin` on
+  `GET /legion/v1/state` has no `code` any more and its `state` is `none`, `issued` or `failed`.
+  Install this release with a Go `legion` built from the same commit: this release's strict state
+  reader refuses an older daemon's `code`, and an older release's refuses a 22 daemon's state
+  without it, so the boot gate and `legion probe-image` refuse the mixed pair.
 - `legion.daemonApiVersion` is 21 (LEGION-663). Contract 21 adds an optional `capabilities`
   report to `POST /legion/v1/claims/ready` — what a session measured of the six live capability
   rows at boot — and `promptAgents`, the sorted task agents the role's prompts dispatch, to the
@@ -116,6 +122,13 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   refuses it (the 8.4.x and 8.5.x releases declare 16 and 17, whose `workspace-init` still reads
   the shared disk's variables); install this release with a Go `legion` and a worker image built
   from the same commit.
+- The plugin interface it reads from `@sjawhar/pi-envoy` is at version 2 (LEGION-394). In a phase
+  worker, a person's `/skill:<name>` sent from Dispatch's Agents page counts as an inbound event,
+  as their plain Send does. On a host with `pi.sendUserInput`, so does a Send the host runs as a
+  turn of its own after a run's `agent_end`, where it counted as the daemon's assignment; on a host
+  without that method this remains unchanged. Install this release together with the
+  `@sjawhar/pi-envoy` built from the same commit: this entry refuses a pi-envoy at another interface
+  version, naming both, and so does the daemon's boot gate. `legion.daemonApiVersion` is unchanged.
 - The `legion-controller` skill no longer tells a controller the daemon launched
   (`controller: daemon`) that nobody types into its session or reads its replies, or that text
   left in its session reaches no one (LEGION-306). A plain user turn in that session other than

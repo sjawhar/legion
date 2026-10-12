@@ -54,6 +54,7 @@ function renderList(
       allRepos={["acme/widgets"]}
       colorBy="repo"
       colorScale={new Map()}
+      sessionGroups={[]}
       onSelect={onSelect}
       onSelectRun={onSelectRun}
       prs={rows}

@@ -29,14 +29,13 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
-// secretsBlocked reports r.secretsBlockReason first — the attended machine login newLiveRig ran
-// timed out, was denied, or expired — and falls back to agentSecretsBlockReason for a run whose
-// inputs never attempted one at all.
+// secretsBlocked reports r.secretsBlockReason first — the broker refused the token login newLiveRig
+// ran — and falls back to agentSecretsBlockReason for a run whose inputs never attempted one at all.
 func secretsBlocked(r *liveRig) string {
 	if r.secretsBlockReason != "" {
 		return r.secretsBlockReason
 	}
-	return agentSecretsBlockReason(r.env.agentSecretsURL, r.env.agentSecretsOperator, r.env.agentSecretsAutoSHA, r.env.agentSecretsBin)
+	return agentSecretsBlockReason(r.env.agentSecretsURL, r.env.agentSecretsOperator, r.env.agentSecretsAutoSHA, r.env.agentSecretsBin, r.env.agentSecretsTokenFile)
 }
 
 // ensureEnrolled enrolls c's running role process unless the harness already did for this
@@ -306,8 +305,8 @@ func (r *liveRig) checkSecretsSelfEnrollNegative() error {
 // secrets-approval-ask: a request for the approval-gated secret comes back pending with a
 // credential-request record id (ruling 16: the secret's owner and tier pick the approver at
 // request time, naming no issue); the harness prints it for the operator to approve on the
-// Dispatch credential page and polls, exactly as newLiveRig's attended machine login does, until it
-// settles granted (success), denied, or expired (both failures).
+// Dispatch credential page and polls until it settles granted (success), denied, or expired (both
+// failures).
 func (r *liveRig) checkSecretsApprovalAsk() error {
 	worker := r.claim("worker")
 	if err := r.ensureRunning(worker); err != nil {

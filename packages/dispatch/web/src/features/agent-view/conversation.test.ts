@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 
-import type { AgentStreamFrame } from "@legion/contracts";
+import {
+  AGENT_STREAM_LIMITS,
+  AGENT_STREAM_TRUNCATION_SUFFIX,
+  type AgentStreamCommand,
+  type AgentStreamFrame,
+} from "@legion/contracts";
 
 import {
   applyFrames,
@@ -8,6 +13,7 @@ import {
   dispatchTurns,
   EMPTY_CONVERSATION,
   isRunning,
+  sessionCommands,
   toThreadMessages,
 } from "./conversation";
 
@@ -296,5 +302,116 @@ describe("the model that produced an assistant turn", () => {
   test("a session whose client never reports one has nothing to show", () => {
     const state = applyFrames(EMPTY_CONVERSATION, [message(1, "a10", 10, "first", false)]);
     expect(currentModel(state)).toBeUndefined();
+  });
+});
+
+function commandsFrame(seq: number, commands: readonly AgentStreamCommand[]): AgentStreamFrame {
+  return { commands, kind: "commands", seq, v: 1 };
+}
+
+const LISTED: readonly AgentStreamCommand[] = [
+  { description: "Compact the session's context", name: "compact", source: "builtin" },
+  { description: "Start a new session", name: "new", source: "builtin", terminalOnly: true },
+  { name: "skill:dispatch", source: "skill" },
+];
+
+// The slash commands a session takes from Dispatch (LEGION-394) arrive as one `commands` frame
+// holding the whole list. They are what the composer completes, never a turn of the transcript.
+describe("the session's slash commands", () => {
+  test("are the latest list the session sent, kept through later messages and tool results", () => {
+    const result: AgentStreamFrame = {
+      kind: "tool-result",
+      result: { at: 60, isError: false, output: "ok", toolCallId: "c1", toolName: "bash" },
+      seq: 3,
+      v: 1,
+    };
+    const state = applyFrames(EMPTY_CONVERSATION, [
+      commandsFrame(1, LISTED),
+      message(2, "a50", 50, "Hello", false),
+      result,
+    ]);
+    expect(sessionCommands(state)).toEqual(LISTED);
+    expect(toThreadMessages(state).map((entry) => entry.id)).toEqual(["a50"]);
+  });
+
+  test("are absent for a session that sent no list, which is one that cannot take any", () => {
+    const state = applyFrames(EMPTY_CONVERSATION, [message(1, "a50", 50, "Hello", false)]);
+    expect(sessionCommands(state)).toBeUndefined();
+  });
+
+  test("a newer list replaces the one before it, and a list that lost its race is ignored", () => {
+    const newer = [{ name: "jobs", source: "builtin" }] as const satisfies AgentStreamCommand[];
+    const state = applyFrames(EMPTY_CONVERSATION, [
+      commandsFrame(5, LISTED),
+      commandsFrame(7, newer),
+      commandsFrame(6, LISTED),
+    ]);
+    expect(sessionCommands(state)).toEqual(newer);
+  });
+
+  test("a list with any entry this build cannot read is dropped whole", () => {
+    // Each fails one rule the contract states; the list the session sent before stays.
+    const bad = [
+      { commands: "compact", kind: "commands", seq: 2, v: 1 },
+      { kind: "commands", seq: 3, v: 1 },
+      { commands: [...LISTED, null], kind: "commands", seq: 4, v: 1 },
+      { commands: [{ name: 7, source: "builtin" }], kind: "commands", seq: 5, v: 1 },
+      { commands: [{ name: "compact", source: "terminal" }], kind: "commands", seq: 6, v: 1 },
+      {
+        commands: [{ name: "new", source: "builtin", terminalOnly: false }],
+        kind: "commands",
+        seq: 7,
+        v: 1,
+      },
+      {
+        commands: [{ description: 7, name: "compact", source: "builtin" }],
+        kind: "commands",
+        seq: 8,
+        v: 1,
+      },
+      { commands: [], kind: "commands", seq: "9", v: 1 },
+      { commands: [], kind: "commands", seq: 10, v: 2 },
+      // A person types a command as one token, so the session never lists an empty name or one
+      // holding whitespace or a control character (pi-envoy's `setCommands` drops them); one on
+      // the bus is forged.
+      { commands: [{ name: "", source: "builtin" }], kind: "commands", seq: 11, v: 1 },
+      { commands: [{ name: " ", source: "builtin" }], kind: "commands", seq: 12, v: 1 },
+      { commands: [{ name: "two words", source: "prompt" }], kind: "commands", seq: 13, v: 1 },
+      { commands: [{ name: "nul\u0000name", source: "prompt" }], kind: "commands", seq: 14, v: 1 },
+    ] as unknown as AgentStreamFrame[];
+    const state = applyFrames(EMPTY_CONVERSATION, [commandsFrame(1, LISTED), ...bad]);
+    expect(sessionCommands(state)).toEqual(LISTED);
+  });
+
+  test("drops a command list over its count, name or publisher-capped description bound", () => {
+    const cappedDescription =
+      "d".repeat(AGENT_STREAM_LIMITS.commandDescriptionChars) + AGENT_STREAM_TRUNCATION_SUFFIX;
+    const maximum = Array.from({ length: AGENT_STREAM_LIMITS.commands }, (_, index) => ({
+      description: cappedDescription,
+      name: `command-${index}`,
+      source: "extension" as const,
+    }));
+    const bad = [
+      commandsFrame(2, [...maximum, { name: "one-too-many", source: "extension" }]),
+      commandsFrame(3, [
+        { name: "n".repeat(AGENT_STREAM_LIMITS.commandNameChars + 1), source: "extension" },
+      ]),
+      commandsFrame(4, [
+        {
+          description: "d".repeat(
+            AGENT_STREAM_LIMITS.commandDescriptionChars + AGENT_STREAM_TRUNCATION_SUFFIX.length + 1
+          ),
+          name: "too-long-description",
+          source: "extension",
+        },
+      ]),
+    ];
+
+    expect(
+      sessionCommands(applyFrames(EMPTY_CONVERSATION, [commandsFrame(1, LISTED), ...bad]))
+    ).toEqual(LISTED);
+    expect(sessionCommands(applyFrames(EMPTY_CONVERSATION, [commandsFrame(1, maximum)]))).toEqual(
+      maximum
+    );
   });
 });

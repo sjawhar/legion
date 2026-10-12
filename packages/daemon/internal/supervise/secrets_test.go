@@ -172,14 +172,14 @@ func TestAFailedRevocationIsRetriedThenLeftToTheLease(t *testing.T) {
 	}
 }
 
-// TestARevocationTheBrokerRefusesIsNotRetried: a daemon restarted under a new machine login cannot
-// end an enrollment its earlier login made (the broker answers 403 NOT_ENROLLING_CREDENTIAL, a
-// refusal no retry changes), so the machine makes one attempt, retries nothing, and logs that the
-// enrollment's lease ends it once the pod stops renewing.
+// TestARevocationTheBrokerRefusesIsNotRetried: a daemon cannot end an enrollment another launcher
+// credential made (the broker answers 403 NOT_ENROLLING_CREDENTIAL, a refusal no retry changes), so
+// the machine makes one attempt, retries nothing, and logs that the enrollment's lease ends it once
+// the pod stops renewing.
 func TestARevocationTheBrokerRefusesIsNotRetried(t *testing.T) {
 	h := newHarness(t)
 	broker := h.withSecrets()
-	broker.revokeErr = permanentErr{"broker answered 403 NOT_ENROLLING_CREDENTIAL: only the machine login that enrolled a pod may end its enrollment"}
+	broker.revokeErr = permanentErr{"broker answered 403 NOT_ENROLLING_CREDENTIAL: only the launcher credential that enrolled a pod may end its enrollment"}
 	h.launch()
 	h.helloWithIdentity()
 	h.register()
@@ -220,13 +220,13 @@ func TestATransientEnrollmentFailureIsRetriedOnTheNextAliveObservation(t *testin
 }
 
 // A projected token is valid for an hour at most, and the shim reads it once per hello. An
-// enrollment held up past the hello token's expiry (the daemon's machine login waiting for a
-// person to approve it) presents a token the shim reads again then, never the expired one, which
-// the broker refuses as POD_TOKEN_EXPIRED.
+// enrollment held up past the hello token's expiry (the daemon's token login failing and retrying)
+// presents a token the shim reads again then, never the expired one, which the broker refuses as
+// POD_TOKEN_EXPIRED.
 func TestAnEnrollmentHeldPastTheHelloTokensExpiryPresentsAFreshToken(t *testing.T) {
 	h := newHarness(t)
 	broker := h.withSecrets()
-	broker.enrollErr = errors.New("broker answered 0 NO_MACHINE_CREDENTIAL: machine login pending; code ABCD-1234")
+	broker.enrollErr = errors.New("broker answered 0 NO_MACHINE_CREDENTIAL: token login failed: broker answered 503 DATABASE: down")
 	h.launch()
 	h.helloWithToken(podToken(h.clock.Now().Add(time.Hour)))
 	h.register()

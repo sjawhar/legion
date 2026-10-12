@@ -27,7 +27,7 @@ const (
 )
 
 // authorizationDetail is one entry of a request object's RFC 9396 authorization_details, mirrored
-// from envoy's record.AuthorizationDetail wire shape. A machine login always sends exactly one
+// from envoy's record.AuthorizationDetail wire shape. A token login always sends exactly one
 // "launcher_credential" entry, so Actions is never needed here.
 type authorizationDetail struct {
 	Type       string `json:"type"`
@@ -36,8 +36,8 @@ type authorizationDetail struct {
 }
 
 // requestClaims is a credential-request object's JSON payload, mirrored from envoy's
-// record.requestClaims. Reason is always empty for a machine login (envoy's own sign.go leaves
-// it empty too) and so never appears on the wire, and the daemon's login names no approver, so it
+// record.requestClaims. Reason is always empty for a token login (envoy's own sign.go leaves it
+// empty too) and so never appears on the wire, and no person approves the daemon's login, so it
 // carries no login_hint.
 type requestClaims struct {
 	Issuer               string                `json:"iss"`
@@ -70,10 +70,10 @@ func thumbprint(pub *ecdsa.PublicKey) (string, error) {
 	return base64.RawURLEncoding.EncodeToString(sum), nil
 }
 
-// signRequestObject signs a machine-login credential-request object naming host as the
-// launcher_credential the daemon asks to hold, for the service launcherService: the daemon only
-// ever logs in as a service, and it names no approver, since anyone signed in to Dispatch decides a
-// service's login. Byte-compatible with envoy's record.Sign.
+// signRequestObject signs the request object a token login posts beside the daemon's
+// ServiceAccount token: one launcher_credential detail naming host and the service
+// launcherService, signed by the key the credential is bound to, which proves the daemon holds it.
+// Byte-compatible with envoy's record.Sign.
 func signRequestObject(key *ecdsa.PrivateKey, audience, host string, now time.Time) (string, error) {
 	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, &jose.SignerOptions{
 		EmbedJWK:     true,

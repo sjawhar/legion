@@ -8,6 +8,8 @@ const tables = [
   "repo_projects",
   "architecture_sources",
   "delivery_settings",
+  "delivery_session_group_members",
+  "delivery_session_groups",
   "delivery_run_jobs",
   "delivery_runs",
   "delivery_pull_requests",

@@ -2197,8 +2197,9 @@ retry. Other session routes map a not-live proof to `PROOF_INVALID` as before.
 `internal/broker/policy` decides who may have which
 secret from the secret's own tags (below); `internal/broker/proof`
 authenticates a session's or a launcher's signed request against its live enrollment or
-credential; `internal/broker/machine` decides typed-code machine logins and mints the launcher
-credentials they approve; and `internal/broker/secrets` reads the granted value from AWS Secrets
+credential; `internal/broker/machine` decides typed-code machine logins, logs services in with
+their Kubernetes tokens, and mints the launcher credentials both issue; and
+`internal/broker/secrets` reads the granted value from AWS Secrets
 Manager, or, for local development, from `secrets.Local`, an in-memory stand-in for the AWS calls.
 
 `internal/broker/policy` reads the policy from Secrets Manager itself (`policy.Loader`), and
@@ -2222,8 +2223,9 @@ an owner tag naming a service is refused as malformed unless `Loader.Services` l
 `service` of the launcher credential that enrolled it (`launcher_credentials.service`, joined by
 `requests.Machine`'s enrollment reads into `enrollmentRow.Service`) only when the session is a pod
 and its verified `enrollments.subject` is the service account `BROKER_SERVICES` binds that service
-to (`requests.Machine.ServiceAccounts`, `requester()`): a machine login's service name is the machine's
-claim, which anyone signed in to Dispatch may approve. So a `legion-worker` pod the Legion daemon's
+to (`requests.Machine.ServiceAccounts`, `requester()`): a credential's service is the one a token
+login's `BROKER_SERVICE_LOGINS` entry names, or, for a service login a person approved through a
+code before token logins, the machine's own claim. So a `legion-worker` pod the Legion daemon's
 login enrolled is `legion-daemon`'s, and a service's secret goes at once to those pods and to no
 one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant and
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
@@ -2539,6 +2541,12 @@ entries, each name `record.ValidService`'s form, not `shared` and given once, an
 to one name, never a namespace's `default` account (every pod there that names no account runs as
 it) — any other entry is refused naming it, and an account given twice names both; unset,
 `Config.ServiceAccounts` is nil and no service is registered),
+`BROKER_SERVICE_LOGINS` (optional; whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>`
+entries, the ServiceAccounts that log in as a service with their own token, each account given
+once and named exactly, keyed by account in `Config.ServiceLogins`; read by the same parser as
+`BROKER_SERVICES` (`parseServiceAccounts`), so a namespace's `default` account is refused, and so
+is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for
+it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
@@ -2609,7 +2617,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 27 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 28 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -2633,17 +2641,54 @@ reload; a reread spends a token from either bucket only when both allow it
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
 with the refusing limit's `Retry-After`), and the
 unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
-`BROKER_TRUSTED_PROXY_HEADER` above) and per login (`LauncherLimits.PerLogin`) — the per-login
-bucket keys on the signed request object itself (`launcherLoginKey`): one shared `service` bucket
-for every service's login, whatever service or `login_hint` it names, since a service's name is the
-machine's own claim and a bucket per name would give every invented name one, and `person:<login>`
-for a person's machine login, so the two never share a bucket; an attacker naming a specific
-victim operator, or naming any service, repeatedly can still lock out those machine logins at a
-low rate; this is inherent to a per-login
-limit on an unauthenticated route and is an accepted risk, not a bug. A request object `Login`
-refuses (a person's login with no `login_hint`, or `anyone`, a replayed `jti`) is
-`400 REQUEST_INVALID`. Read `routes()`
-for the current, authoritative route list.
+bucket keys on the signed request object itself (`launcherLoginKey`): `person:<login>`, the person
+the `login_hint` names; a request naming a service is refused `400 SERVICE_LOGS_IN_WITH_TOKEN` before
+any bucket. An attacker naming a specific victim operator repeatedly can still lock out that
+operator's machine logins at a low rate; this is inherent to a per-login limit on an
+unauthenticated route and is an accepted risk, not a bug. A request object `Login` refuses (a
+person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQUEST_INVALID`.
+`POST /v1/launcher-credentials/token`, a service's token login, spends its source address's bucket
+before the token verifies (`refuseAddress`), whatever account the token claims, since a refused
+token signature makes the verifier fetch the issuer's keys again; a verified account then spends
+an `account:<subject>` bucket of the per-login limit (`refuseAccount`), the same address-then-key
+pair the device-code route spends. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the address
+bucket on the caller's own address. Read `routes()` for the current, authoritative route list.
+
+A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
+token (`POST /v1/launcher-credentials/token`: `machine.Service.VerifyServiceToken`, then
+`TokenLogin`), and no person approves it. The body carries the token and a machine request object
+the login's key signed, with one `launcher_credential` detail naming the service. The broker
+verifies the token with `enroll.Service.Pod.VerifyAccount`, the verifier pod enrollment uses
+against `BROKER_K8S_OIDC_ISSUER` and `BROKER_K8S_OIDC_AUDIENCE` (a token bound to no pod is
+accepted, so a `kubectl create token` token logs a daemon off the cluster in), refuses a token that
+names no `iat` or whose `exp` lies more than `MaxTokenLoginLifetime` (an hour) plus the request
+skew past it, `401 TOKEN_TOO_LONG_LIVED`, so a copied token logs in for at most an hour after it
+was minted, and maps its subject through `BROKER_SERVICE_LOGINS` (`enroll.Service.ServiceLogins`,
+keyed by exact subject, no wildcard) to the one service it logs in as; a subject not listed, or
+listed for another service than the request names, is `403 ACCOUNT_NOT_LISTED`, an expired token
+`401 TOKEN_EXPIRED`, any other verification failure `401 TOKEN_INVALID`, a request object that does
+not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `Login`
+shares), a key another live credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a broker with no
+issuer `404 TOKEN_LOGIN_OFF`. `enroll.Service.IssueTokenLogin` writes the credential. Each subject
+holds one live launcher credential (migration 0015, `launcher_credentials.subject`, its partial
+unique index on live rows, and a check that a row with a subject names a service and no record):
+the first login inserts it, with no operator, the service, host `<namespace>/<name>` and no
+`record_id`, and each later one moves it, in one upsert under the same id, to the request's key and
+to the token's expiry, at most an hour away, so a key that was already the credential's (the
+daemon's renewals) changes nothing but the expiry, a new key (a restart) stops the previous one
+authenticating at once, and every pod the account enrolled stays under the same credential. Each
+login writes one `launcher_credential.token_login` audit row naming the credential as actor, the
+subject, the pod the token is bound to, the key, and both the credential's and the token's expiry
+(`token_expires_at`). `AuthenticateLauncher` authenticates such a credential while
+`enroll.Service.ServiceLogins` still names its subject for its service, rather than through a
+record's chain, so removing the entry and redeploying ends it at its next call. A revoke on
+Dispatch's machine-login page ends it as any service's login (anyone signed in, through
+`record.MayDecide`; `LiveCredentials` lists it with `approved_by` empty and its `subject`), and the
+service's next login inserts a new credential, which enrolls the pods it launches next; the daemon
+never enrolls a pod the revoke ended again. A service login a person approved through a code
+before token logins keeps authenticating through its record's chain until it expires; a pending one
+can only be denied (`ErrServiceLogsInWithToken`, `400 SERVICE_LOGS_IN_WITH_TOKEN`, the same
+sentinel a device-code login naming a service is refused with).
 
 `internal/broker/record` implements the credential-request record every human decision turns
 on: `Body.Canonical()` renders the contract's fixed `\n`-terminated line format (the request
@@ -2665,7 +2710,9 @@ equal to `BROKER_PUBLIC_URL`, `iat`/`exp` within skew and a 600-second cap, a `r
 `Body.ApproverLogin(kind, service, login)` (`record.MayDecide`) is the one approver comparison. A
 record's approver is resolved when the record is created (a secret's owner, `anyone` for a shared
 human-tier secret, a person's machine login's `login_hint`, which is never `anyone`, or `anyone` for
-a service's machine login), and every decision and every chain re-check compares the canonical
+a service's machine login a broker before token logins opened, which `ApplyDecision` now refuses to
+approve though it may still be denied, and whose approved credentials keep re-verifying through
+this rule until they expire), and every decision and every chain re-check compares the canonical
 lowercase login against it, with `service` the one the record's signed request object names
 (`RequestObject.Service()`, re-read from `Body.Request`, never from the stored approver): any login
 but `anyone` itself deciding a machine login whose request names a service, whatever its record
@@ -2822,9 +2869,9 @@ value itself is read fresh from
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
 machine login. `Login` verifies a machine's signed request object (exactly one `launcher_credential`
-authorization detail; a person's machine login also needs a `login_hint`, the approving operator's
-email, never `anyone`, while a service's login, one whose detail names a `service`, needs none and
-any it carries is ignored, its record's approver `anyone`), mints an
+authorization detail naming no service, and a `login_hint`, the approving operator's email, never
+`anyone`; a detail naming a `service` is `400 SERVICE_LOGS_IN_WITH_TOKEN` at the route and
+`record.ErrRequestInvalid` here, since a service logs in with its token, below), mints an
 eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
 `pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
 (keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
@@ -2834,8 +2881,9 @@ record (ruling 13: a direct link can never approve a machine login, only the typ
 it), so `code` is required and checked again on the decision itself, before the approver
 (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
 update`, which an event insert's foreign-key check does not wait on), refuses any login the
-record's rule does not admit (`403 NOT_APPROVER`: anyone signed in decides a service's login, only
-its person a person's machine login) whatever the record's state, answers a record that
+record's rule does not admit (`403 NOT_APPROVER`: only its person decides a person's machine login,
+and anyone signed in may deny a service's login a broker before token logins opened, which no one
+may approve, `400 REQUEST_INVALID`) whatever the record's state, answers a record that
 already carries a terminal event, or is past its `expires_at` before the sweeper has recorded it
 expired, `409 RECORD_TERMINAL` before minting anything, as a decided `agent_secret` record
 answers, so a second click, a concurrent one and a late one all get it — but a record past its

@@ -930,17 +930,18 @@ runtime:
 	}
 }
 
+// agentSecretsTokenFile is the token_file line every agent_secrets block in these tests carries.
+const agentSecretsTokenFile = "      token_file: /var/run/legion/agent-secrets-token/token\n"
+
 func TestAgentSecretsBlockSettlesWithDefaults(t *testing.T) {
-	path := writeConfigFile(t, kubernetesFile+`    agent_secrets:
-      url: https://secrets.internal.example
-`)
+	path := writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: https://secrets.internal.example\n"+agentSecretsTokenFile)
 	cfg, err := LoadForValidation(path, noEnv)
 	if err != nil {
 		t.Fatal(err)
 	}
 	got := cfg.Runtime.Kubernetes.AgentSecrets
 	want := &AgentSecretsConfig{
-		URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpirySeconds: 3600,
+		URL: "https://secrets.internal.example", TokenFile: "/var/run/legion/agent-secrets-token/token", Audience: "agent-secrets", TokenExpirySeconds: 3600,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("agent_secrets = %+v, want %+v", got, want)
@@ -958,21 +959,26 @@ func TestAgentSecretsBlockIsAbsentByDefault(t *testing.T) {
 }
 
 func TestAgentSecretsBlockRefusals(t *testing.T) {
+	const tf = agentSecretsTokenFile
 	for name, tc := range map[string]struct{ block, want string }{
-		"no url":            {"    agent_secrets:\n      audience: agent-secrets\n", "runtime.kubernetes.agent_secrets.url is required"},
-		"url with a path":   {"    agent_secrets:\n      url: https://s/v1\n", "runtime.kubernetes.agent_secrets.url must be an absolute URL with no path"},
-		"plain http remote": {"    agent_secrets:\n      url: http://secrets.example.com\n", "runtime.kubernetes.agent_secrets.url must use https unless the host is a loopback address"},
-		"expiry too long":   {"    agent_secrets:\n      url: https://s\n      token_expiry_seconds: 7200\n", "runtime.kubernetes.agent_secrets.token_expiry_seconds must be between 600 and 3600"},
-		"expiry too short":  {"    agent_secrets:\n      url: https://s\n      token_expiry_seconds: 60\n", "runtime.kubernetes.agent_secrets.token_expiry_seconds must be between 600 and 3600"},
-		"blank audience":    {"    agent_secrets:\n      url: https://s\n      audience: \"\"\n", "runtime.kubernetes.agent_secrets.audience must not be empty"},
-		"unknown key":       {"    agent_secrets:\n      url: https://s\n      token: abc\n", "unknown key runtime.kubernetes.agent_secrets.token"},
-		// The Plan C daemon runs its own machine login instead of reading a launcher credential
-		// off disk: the old key must fail loudly, never parse as a silently-ignored unknown.
-		"the removed launcher_token_file key": {"    agent_secrets:\n      url: https://s\n      launcher_token_file: x\n", "unknown key runtime.kubernetes.agent_secrets.launcher_token_file"},
-		// The daemon's login is a service's, which anyone signed in to Dispatch approves, so it
-		// names no approver: a file that still sets one is refused, naming the key and why.
-		"the removed operator key": {"    agent_secrets:\n      url: https://s\n      operator: sjawhar\n",
-			"runtime.kubernetes.agent_secrets.operator was removed (LEGION-664): the daemon's machine login is the legion-daemon service's, which anyone signed in to Dispatch approves, so it names no approver; delete the key"},
+		"no url":            {"    agent_secrets:\n      audience: agent-secrets\n" + tf, "runtime.kubernetes.agent_secrets.url is required"},
+		"url with a path":   {"    agent_secrets:\n      url: https://s/v1\n" + tf, "runtime.kubernetes.agent_secrets.url must be an absolute URL with no path"},
+		"plain http remote": {"    agent_secrets:\n      url: http://secrets.example.com\n" + tf, "runtime.kubernetes.agent_secrets.url must use https unless the host is a loopback address"},
+		// The daemon logs in with its own ServiceAccount token, so the block must say where the
+		// kubelet projects it.
+		"no token_file":       {"    agent_secrets:\n      url: https://s\n", "runtime.kubernetes.agent_secrets.token_file is required"},
+		"relative token_file": {"    agent_secrets:\n      url: https://s\n      token_file: token\n", "runtime.kubernetes.agent_secrets.token_file must be an absolute path"},
+		"expiry too long":     {"    agent_secrets:\n      url: https://s\n" + tf + "      token_expiry_seconds: 7200\n", "runtime.kubernetes.agent_secrets.token_expiry_seconds must be between 600 and 3600"},
+		"expiry too short":    {"    agent_secrets:\n      url: https://s\n" + tf + "      token_expiry_seconds: 60\n", "runtime.kubernetes.agent_secrets.token_expiry_seconds must be between 600 and 3600"},
+		"blank audience":      {"    agent_secrets:\n      url: https://s\n" + tf + "      audience: \"\"\n", "runtime.kubernetes.agent_secrets.audience must not be empty"},
+		"unknown key":         {"    agent_secrets:\n      url: https://s\n" + tf + "      token: abc\n", "unknown key runtime.kubernetes.agent_secrets.token"},
+		// A launcher credential is never read off disk: the old key must fail loudly, never parse
+		// as a silently-ignored unknown.
+		"the removed launcher_token_file key": {"    agent_secrets:\n      url: https://s\n" + tf + "      launcher_token_file: x\n", "unknown key runtime.kubernetes.agent_secrets.launcher_token_file"},
+		// No person approves the daemon's login, so it names no approver: a file that still sets
+		// one is refused, naming the key and why.
+		"the removed operator key": {"    agent_secrets:\n      url: https://s\n" + tf + "      operator: sjawhar\n",
+			"runtime.kubernetes.agent_secrets.operator was removed (LEGION-664): the daemon logs in with its own ServiceAccount token (token_file), which no person approves, so it names no approver; delete the key"},
 		"not a mapping": {"    agent_secrets: yes\n", "runtime.kubernetes.agent_secrets must be a mapping"},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -987,7 +993,7 @@ func TestAgentSecretsBlockRefusals(t *testing.T) {
 func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
 	for _, url := range []string{"http://127.0.0.1:13380", "http://LOCALHOST:13380"} {
 		t.Run(url, func(t *testing.T) {
-			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: "+url+"\n"), noEnv)
+			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: "+url+"\n"+agentSecretsTokenFile), noEnv)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -4,6 +4,22 @@
 
 ### Added
 
+- The Delivery page groups agent sessions (LEGION-682). A session group, kept in two new tables
+  (migration 0093), is a stable id, a name and the sessions it holds; a pull request whose first
+  session is a member has the group as its Parent agent, `group:<id>`, so the timeline's facet,
+  colours, lanes, list and measures all follow the group while the Session facet keeps each
+  session apart. `POST /api/v1/delivery/session-groups` and `PATCH` and `DELETE
+  /api/v1/delivery/session-groups/{id}` write them on the delivery settings' rule (any signed-in
+  person or agent), refusing a session another group holds (`409 SESSION_IN_GROUP`), a name another
+  group has (`409 SESSION_GROUP_NAME_TAKEN`) and a name that is the title of a session outside the
+  group (`409 SESSION_GROUP_NAME_IS_SESSION_TITLE`). A session that takes a group's name as its
+  title afterwards shows as `<title> (<session id>)`. The timeline gains `session_groups`,
+  `session_titles` and `session_pr_counts`. The dashboard edits groups from the Parent agent
+  facet's **Edit groups**, chooses which Parent agents get their own colour and lane (the rest
+  share **Other**), and sets the window from its header: the last 7, 14, 28 or 84 days, rolling,
+  or a custom range of whole UTC days, refused past 84 days. A facet change no longer writes the
+  window into the address as fixed dates.
+
 - Dispatch's **Machine logins** list shows each login's **Credential** id, the broker's
   `credential_id` that every enrollment the login made names. A login's machine name is what its
   machine reported, so two logins of one service on one host read alike there; the id tells them
@@ -26,6 +42,11 @@
   such a document from the list alone (LEGION-481). The dashboard's issue Artifacts tab and project
   Documents tab show each document's latest size beside its kind, and a document's version list
   shows every version's.
+- The conversation view (`/agents/<id>/live`) completes `/` from the session's commands in Send
+  and Aside: built-ins, extension/custom/skill commands, file commands and prompt templates. It
+  ranks prefix matches first, puts terminal-only rows last and never offers a list in BTW or when
+  the session sent none. Picking runs the command as if typed at the session's terminal; output,
+  or why a terminal-only command did not run, is the session's Reply via Dispatch (LEGION-394).
 - A person lists and ends their own machines' logins and their live grants from their own shell.
   `agent-secrets machine list` and `machine revoke ID`, and `agent-secrets grant list` and
   `grant revoke ID`, call four new broker routes, `GET /v1/operator/machines`,
@@ -513,9 +534,9 @@
   session advertises steer, and as Aside otherwise, and names the modes Send, Aside and BTW. A
   person's message that an Oh My Pi session took as its own user turn shows once, where the
   session took it, still naming its author, and only when the streamed text is the stored one;
-  one the session took between a run's last queue or aside poll and its `agent_end` reaches the
-  stream untagged and shows twice (`packages/pi-envoy/AGENTS.md`). The Agents page shows an
-  attempt the session accepted as delivered to the session's
+  on a host without `pi.sendUserInput`, one the session took between a run's last queue or aside
+  poll and its `agent_end` reaches the stream untagged and shows twice
+  (`packages/pi-envoy/AGENTS.md`). The Agents page shows an attempt the session accepted as
   conversation, with no retry, even after a later `failed`; every other attempt keeps its states
   (LEGION-394). Every label the dashboard composes for a mode now uses the composer's names (Send,
   Aside, BTW), the card's mode-change buttons included ("Use BTW instead", "Use Send instead",
@@ -572,6 +593,14 @@
 - A Markdown document now nests at most 100 blocks, and a document tree with a node more than 1,000 levels below the document, a node attribute value nesting more than 100 arrays and objects, or a mark attribute value nesting more than 99, is outside the Proof schema (LEGION-465, LEGION-535). The bounds sit where every read serves the tree: past about 5,000 levels the document token is JSON that `encoding/json` will not write from Go 1.27 or read in any version, and `GET /blocks`, which hashes each block's subtree apart, does work growing with the square of the depth. A live tree past either tree bound is treated as any other tree outside the schema: settlement writes no version, its reads and edits answer `409 DOC_SCHEMA` naming the repair, the document websocket refuses it, and an upload of replacement markdown repairs it (LEGION-469). A textblock's inline markdown nests at most 100 marks inside one another - emphasis, strong, strikethrough, links, images and code - and deeper content is refused naming the line. An accepted suggestion whose own markdown nests within 100 blocks but lands deep enough that the document would nest past them is refused as `400 INVALID_OP` on `replace_with`, naming how many blocks the result nests (LEGION-465).
 
 ### Fixed
+- A listener's shutdown drain no longer waits out 5 s of its 10 s budget when its NATS connection
+  closes while nats.go drains it. nats.go v1.50.0 marks a connection closed during its drain as
+  draining again and waits 5 s for a reply on the socket it closed, and the drain read the
+  connection's state, so it could miss the close; it now waits for the connection's closed event.
+  The listener's own reconnect callback was one such close: nats.go can run the callback for a
+  reconnect that came before the drain once the drain is under way, and it closed the connection
+  there, cutting off the deliveries still in their handlers. A reconnect callback now closes the
+  connection only for a reconnect that came after the drain began.
 - A person's new comment on a document reaches the agents that wrote it, each once, on its own
   `notifications.agent.<session_id>` topic, whatever the issue's route: a comment on a passage of
   an issue's document or a project document, a comment on a whole project document, a suggestion,

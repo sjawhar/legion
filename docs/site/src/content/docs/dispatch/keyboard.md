@@ -167,4 +167,6 @@ These keys belong to the message boxes rather than to a page, so `?` does not li
 | --- | --- |
 | `Ctrl+Enter` | Send |
 | `Enter` | New line |
+
+| After `/` in the live view's Send or Aside box | Arrow keys choose a command; `Tab` or `Enter` picks it; `Escape` closes the list |
 | `Ctrl+K` | In a new comment on an issue, open the reference picker to insert a `dispatch://` link |

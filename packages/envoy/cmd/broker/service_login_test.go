@@ -18,19 +18,23 @@ import (
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
-// TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLogin drives the REAL
+// TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin drives the REAL
 // compiled broker on a real Postgres, with a local OIDC issuer standing in for the cluster's
 // service-account token issuer (BROKER_K8S_OIDC_ISSUER), over HTTP alone. The Legion daemon's
-// login, still naming ada in its login_hint as a daemon from before this rule does, opens a record
-// anyone decides; bob approves it; its credential enrolls a pod; carol, who approved nothing, lists
-// it with bob as its approver and revokes it, after which the pod renews no more. A person's own
-// machine login, naming ada, is refused 403 NOT_APPROVER to carol and approved by ada. Every
-// request and answer is logged, with no proof, bearer or pod token, as the live run's transcript.
-func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLogin(t *testing.T) {
+// device-code login is refused; its token login, for the account BROKER_SERVICE_LOGINS names, issues
+// a credential at once, which enrolls a pod whose renewals re-verify its own projected token; a
+// restart's token login answers the same credential on a new key, after which the first key is
+// refused and the new one enrolls; carol, whom no one asked, lists the daemon's login, naming no
+// approver, and revokes it, after which the pod renews no more and the daemon's next login is a new
+// credential. A person's own machine login, naming ada, is refused 403 NOT_APPROVER to carol and approved
+// by ada. Every request and answer is logged, with no proof, bearer or token, as the live run's
+// transcript.
+func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(t *testing.T) {
 	databaseURL := storetest.URL(t)
 	issuer := oidctest.New(t)
 	podKey := issuer.PublishKey(t, "signing-key")
 	const podAudience = "legion-broker-pod"
+	const daemonAccount = "system:serviceaccount:legion-system:legion-daemon-test"
 	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
 	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -42,6 +46,7 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
 		"BROKER_K8S_OIDC_ISSUER="+issuer.URL(),
 		"BROKER_K8S_OIDC_AUDIENCE="+podAudience,
+		"BROKER_SERVICE_LOGINS=legion-daemon="+daemonAccount,
 	)
 	base := "http://" + addr
 
@@ -73,8 +78,10 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 		}
 		shown := string(payload)
 		if fields, ok := body.(map[string]any); ok {
-			if token, ok := fields["pod_token"].(string); ok {
-				shown = strings.ReplaceAll(shown, token, "<pod token>")
+			for _, secret := range []string{"pod_token", "token"} {
+				if token, ok := fields[secret].(string); ok {
+					shown = strings.ReplaceAll(shown, token, "<"+secret+">")
+				}
 			}
 		}
 		t.Logf("> %s %s %s\n< %d %s", method, path, shown, response.StatusCode, bytes.TrimSpace(answer))
@@ -101,7 +108,7 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 		value, _ := fields[name].(string)
 		return value
 	}
-	startLogin := func(key *ecdsa.PrivateKey, host, service, loginHint string) (code, recordID string) {
+	signRequest := func(key *ecdsa.PrivateKey, host, service, loginHint string) string {
 		t.Helper()
 		compact, err := record.Sign(key, base, []record.AuthorizationDetail{
 			{Type: record.KindLauncherCredential, Identifier: host, Service: service},
@@ -109,7 +116,11 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 		if err != nil {
 			t.Fatal(err)
 		}
-		status, answer := call(http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
+		return compact
+	}
+	startLogin := func(key *ecdsa.PrivateKey, host, loginHint string) (code, recordID string) {
+		t.Helper()
+		status, answer := call(http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": signRequest(key, host, "", loginHint)})
 		if status != http.StatusAccepted {
 			t.Fatalf("start the login = %d %s, want 202", status, answer)
 		}
@@ -120,35 +131,59 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 		}
 		return code, field(answer, "record_id")
 	}
+	tokenLogin := func(key *ecdsa.PrivateKey) string {
+		t.Helper()
+		status, answer := call(http.MethodPost, "/v1/launcher-credentials/token", nil, map[string]any{
+			"token":   issuer.Mint(t, podKey, issuer.Claims(daemonAccount, podAudience)),
+			"request": signRequest(key, "example-host-cluster", "legion-daemon", ""),
+		})
+		credentialID := field(answer, "credential_id")
+		if status != http.StatusOK || credentialID == "" {
+			t.Fatalf("the daemon's token login = %d %s, want 200 with a credential_id", status, answer)
+		}
+		return credentialID
+	}
+	podToken := func(uid string) string {
+		claims := issuer.Claims("system:serviceaccount:legion:legion-worker", podAudience)
+		claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": uid}}
+		return issuer.Mint(t, podKey, claims)
+	}
+	expiredToken := func(uid string) string {
+		claims := issuer.Claims("system:serviceaccount:legion:legion-worker", podAudience)
+		claims["iat"], claims["exp"] = time.Now().Add(-20*time.Minute).Unix(), time.Now().Add(-10*time.Minute).Unix()
+		claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": uid}}
+		return issuer.Mint(t, podKey, claims)
+	}
+	enroll := func(key *ecdsa.PrivateKey, credentialID, podUID string, sessionKey *ecdsa.PrivateKey) (int, []byte) {
+		t.Helper()
+		thumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return launcher(key, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
+			"kind": "pod", "runtime_id": podUID, "slot": "implementer-g1", "thumbprint": thumbprint,
+			"pod_token": podToken(podUID),
+		})
+	}
 
-	t.Log("--- the Legion daemon's login, naming ada in its login_hint, approved by bob")
+	t.Log("--- the Legion daemon's device-code login is refused")
 	daemonKey, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, recordID := startLogin(daemonKey, "example-host-cluster", "legion-daemon", "ada@example.com")
-	status, answer := ui(http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
-		map[string]any{"approver": "bob@example.com", "code": code})
-	credentialID := field(answer, "credential_id")
-	if status != http.StatusOK || credentialID == "" {
-		t.Fatalf("bob approves the daemon's login = %d %s, want 200 with a credential_id", status, answer)
+	status, answer := call(http.MethodPost, "/v1/launcher-credentials", nil,
+		map[string]any{"request": signRequest(daemonKey, "example-host-cluster", "legion-daemon", "ada@example.com")})
+	if status != http.StatusBadRequest || field(answer, "code") != "SERVICE_LOGS_IN_WITH_TOKEN" {
+		t.Fatalf("the daemon's device-code login = %d %s, want 400 SERVICE_LOGS_IN_WITH_TOKEN", status, answer)
 	}
 
-	t.Log("--- the credential enrolls a pod")
+	t.Log("--- the daemon logs in with its token, and its credential enrolls a pod")
+	credentialID := tokenLogin(daemonKey)
 	sessionKey, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	thumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	claims := issuer.Claims("system:serviceaccount:legion:legion-worker", podAudience)
-	claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": "pod-1"}}
-	status, answer = launcher(daemonKey, credentialID, http.MethodPost, "/v1/enrollments", map[string]any{
-		"kind": "pod", "runtime_id": "pod-1", "slot": "implementer-g1", "thumbprint": thumbprint,
-		"pod_token": issuer.Mint(t, podKey, claims),
-	})
+	status, answer = enroll(daemonKey, credentialID, "pod-1", sessionKey)
 	enrollmentID := field(answer, "enrollment_id")
 	if status != http.StatusCreated || enrollmentID == "" {
 		t.Fatalf("enroll a pod = %d %s, want 201", status, answer)
@@ -164,17 +199,6 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 		return status, field(answer, "code")
 	}
 	renew := func(body any) (int, string) { t.Helper(); return renewAt(body, time.Now()) }
-	podToken := func(uid string) string {
-		claims := issuer.Claims("system:serviceaccount:legion:legion-worker", podAudience)
-		claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": uid}}
-		return issuer.Mint(t, podKey, claims)
-	}
-	expiredToken := func(uid string) string {
-		claims := issuer.Claims("system:serviceaccount:legion:legion-worker", podAudience)
-		claims["iat"], claims["exp"] = time.Now().Add(-20*time.Minute).Unix(), time.Now().Add(-10*time.Minute).Unix()
-		claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": uid}}
-		return issuer.Mint(t, podKey, claims)
-	}
 
 	t.Log("--- the pod renews: no token accepted until its first token renewal, another pod's token and its own expired token refused, a skewed proof retryable, then no token refused")
 	if status, code := renew(nil); status != http.StatusOK {
@@ -196,10 +220,32 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 		t.Fatalf("the pod renews with no token after renewing with it = %d %s, want 403 POD_TOKEN_REQUIRED", status, code)
 	}
 
-	t.Log("--- carol, who approved nothing, lists the daemon's login and revokes it")
+	t.Log("--- a restart logs in again: the same credential, on a new key")
+	restartKey, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again := tokenLogin(restartKey); again != credentialID {
+		t.Fatalf("the restart's credential = %s, want the account's one, %s", again, credentialID)
+	}
+	otherSession, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, answer := enroll(daemonKey, credentialID, "pod-3", otherSession); status != http.StatusUnauthorized {
+		t.Fatalf("the first key after the restart = %d %s, want 401", status, answer)
+	}
+	if status, answer := enroll(restartKey, credentialID, "pod-3", otherSession); status != http.StatusCreated {
+		t.Fatalf("the restart's key enrolls a pod = %d %s, want 201", status, answer)
+	}
+	if status, code := renew(map[string]any{"pod_token": podToken("pod-1")}); status != http.StatusOK {
+		t.Fatalf("the pod enrolled before the restart renews = %d %s, want 200", status, code)
+	}
+
+	t.Log("--- carol, whom no one asked, lists the daemon's token login and revokes it")
 	status, answer = ui(http.MethodGet, "/v1/launcher-credentials?approver=carol@example.com", nil)
-	if status != http.StatusOK || !bytes.Contains(answer, []byte(`"credential_id":"`+credentialID+`"`)) || !bytes.Contains(answer, []byte(`"approved_by":"bob@example.com"`)) {
-		t.Fatalf("carol's machine logins = %d %s, want the daemon's, approved by bob", status, answer)
+	if status != http.StatusOK || !bytes.Contains(answer, []byte(`"credential_id":"`+credentialID+`"`)) || !bytes.Contains(answer, []byte(`"approved_by":""`)) {
+		t.Fatalf("carol's machine logins = %d %s, want the daemon's token login, approved by no one", status, answer)
 	}
 	status, answer = ui(http.MethodPost, "/v1/launcher-credentials/"+credentialID+"/revoke-by-approver",
 		map[string]any{"approver": "carol@example.com"})
@@ -209,13 +255,16 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 	if status, code := renew(map[string]any{"pod_token": podToken("pod-1")}); status != http.StatusUnauthorized || code != "ENROLLMENT_NOT_LIVE" {
 		t.Fatalf("the pod renews after the revoke = %d %s, want 401 ENROLLMENT_NOT_LIVE", status, code)
 	}
+	if again := tokenLogin(proofKey(t)); again == credentialID {
+		t.Fatal("the daemon's token login after the revoke answered the revoked credential, want a new one")
+	}
 
 	t.Log("--- ada's own machine login: refused to carol, approved by ada")
 	adaKey, err := proof.NewKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	code, recordID = startLogin(adaKey, "example-host-devbox", "", "ada@example.com")
+	code, recordID := startLogin(adaKey, "example-host-devbox", "ada@example.com")
 	status, answer = ui(http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
 		map[string]any{"approver": "carol@example.com", "code": code})
 	if status != http.StatusForbidden || field(answer, "code") != "NOT_APPROVER" {
@@ -226,4 +275,14 @@ func TestTheBinaryLetsAnyoneDecideAServicesLoginAndOnlyItsPersonDecideAPersonsLo
 	if status != http.StatusOK || field(answer, "credential_id") == "" {
 		t.Fatalf("ada approves her machine login = %d %s, want 200 with a credential_id", status, answer)
 	}
+}
+
+// proofKey is a fresh signing key, failing t if none can be made.
+func proofKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := proof.NewKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return key
 }

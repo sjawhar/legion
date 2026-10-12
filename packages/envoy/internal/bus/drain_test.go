@@ -3,6 +3,7 @@ package bus_test
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -308,5 +309,144 @@ func TestDrainDoesNotWaitForABindInFlight(t *testing.T) {
 	}
 	if client.SubOK() {
 		t.Fatal("SubOK reports the durable bound after the drain")
+	}
+}
+
+// A reconnect that came before Drain leaves the connection to the drain, even when nats.go runs its
+// callback only once the drain is under way, as a loaded process can: the drain still lets a
+// delivery in its handler finish, and returns once the connection has drained. Closing the
+// connection there would end Drain at once on the CLOSED event and cut the delivery off.
+func TestDrainKeepsAConnectionThatReconnectedBeforeIt(t *testing.T) {
+	client, err := bus.ConnectOwningStream([]string{testnats.URL(t)})
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer client.Close()
+	conn := client.Conn
+	// nats.go runs a connection's callbacks one at a time, in order, so a disconnect callback that
+	// waits holds back the reconnect callback queued behind it.
+	release := make(chan struct{})
+	releaseCallbacks := sync.OnceFunc(func() { close(release) })
+	defer releaseCallbacks()
+	conn.SetDisconnectErrHandler(func(*natsgo.Conn, error) { <-release })
+	onReconnect := conn.ReconnectHandler()
+	reconnectRan := make(chan struct{})
+	conn.SetReconnectHandler(func(nc *natsgo.Conn) {
+		onReconnect(nc)
+		close(reconnectRan)
+	})
+
+	inHandler := make(chan struct{})
+	finish := make(chan struct{})
+	finishHandler := sync.OnceFunc(func() { close(finish) })
+	defer finishHandler()
+	finished := &atomic.Bool{}
+	if _, err := conn.Subscribe("drain.reconnected-before", func(*natsgo.Msg) {
+		close(inHandler)
+		<-finish
+		finished.Store(true)
+	}); err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	if err := conn.Publish("drain.reconnected-before", nil); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	select {
+	case <-inHandler:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the delivery never reached its handler")
+	}
+
+	if err := conn.ForceReconnect(); err != nil {
+		t.Fatalf("reconnect: %v", err)
+	}
+	waitFor(t, 15*time.Second, "the connection to reconnect in place", func() bool {
+		return conn.Status() == natsgo.CONNECTED && conn.Stats().Reconnects == 1
+	})
+	began := time.Now()
+	drained := make(chan error, 1)
+	go func() { drained <- client.Drain(5 * time.Second) }()
+	waitFor(t, 5*time.Second, "Drain to drain the connection", conn.IsDraining)
+
+	// nats.go's close() sends the CLOSED event synchronously, so a callback that closed the
+	// connection has sent it by the time the callback returns.
+	closed := conn.StatusChanged(natsgo.CLOSED)
+	defer conn.RemoveStatusListener(closed)
+	releaseCallbacks()
+	select {
+	case <-reconnectRan:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reconnect callback never ran")
+	}
+	select {
+	case <-closed:
+		t.Fatal("the late reconnect callback closed the connection with the delivery still in its handler")
+	default:
+	}
+	finishHandler()
+	select {
+	case err := <-drained:
+		if err != nil {
+			t.Fatalf("drain: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Drain had not returned 2s after the delivery finished (%s since it began)", time.Since(began))
+	}
+	if !finished.Load() {
+		t.Fatal("Drain returned before the delivery in its handler finished")
+	}
+	if !conn.IsClosed() {
+		t.Fatal("Drain returned with the connection still open")
+	}
+}
+
+// A connection closed while nats.go drains it, as nats.go closes a connection whose server goes
+// away during the drain, ends the drain at once. nats.go v1.50.0 marks such a connection draining
+// again and waits 5 s for a reply on the socket it closed, so a drain that read the connection's
+// state could miss the close and wait those 5 s out. bus.Connect makes no JetStream request (it
+// ensures no stream, unlike ConnectOwningStream), so nats.go has no request subscription to drain
+// and marks the connection draining again as soon as the close empties its subscriptions; whether a
+// reader of the state misses it is a race, so the test runs it several times.
+func TestDrainEndsWhenTheConnectionClosesWhileNATSDrainsIt(t *testing.T) {
+	uri := testnats.URL(t)
+	for attempt := 1; attempt <= 10; attempt++ {
+		client, err := bus.Connect([]string{uri})
+		if err != nil {
+			t.Fatalf("connect: %v", err)
+		}
+		t.Cleanup(client.Close)
+		conn := client.Conn
+		inHandler := make(chan struct{})
+		release := make(chan struct{})
+		releaseHandler := sync.OnceFunc(func() { close(release) })
+		t.Cleanup(releaseHandler)
+		if _, err := conn.Subscribe("drain.closed-while-draining", func(*natsgo.Msg) {
+			close(inHandler)
+			<-release
+		}); err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		if err := conn.Publish("drain.closed-while-draining", nil); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+		select {
+		case <-inHandler:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the delivery never reached its handler")
+		}
+		drained := make(chan error, 1)
+		go func() { drained <- client.Drain(5 * time.Second) }()
+		// The delivery in its handler holds nats.go's drain of the connection's subscriptions.
+		waitFor(t, 5*time.Second, "Drain to drain the connection", conn.IsDraining)
+		conn.Close()
+		releaseHandler()
+		select {
+		case err := <-drained:
+			if err != nil {
+				t.Fatalf("attempt %d: drain: %v", attempt, err)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("attempt %d: Drain had not returned 1s after the connection closed while nats.go drained it, want at once", attempt)
+		}
 	}
 }

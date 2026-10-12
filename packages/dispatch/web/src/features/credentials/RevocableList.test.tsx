@@ -78,6 +78,7 @@ const sections: Section[] = [
             host: "devbox.example.com",
             issued_at: "2026-10-03T12:00:00Z",
             service: null,
+            subject: null,
           },
         ],
       });
