@@ -12,6 +12,8 @@ interface AskThreadDisclosureProps {
   embedded?: boolean;
   /** Where a file pasted or dropped into the reply goes (`AskReplyComposer`). */
   uploadOwner?: ArtifactOwner;
+  /** Marks the thread read on the Replies page once its newest reply has been on screen. */
+  markRead?: boolean;
 }
 
 export function AskThreadDisclosure({
@@ -20,6 +22,7 @@ export function AskThreadDisclosure({
   createReply,
   embedded = false,
   uploadOwner,
+  markRead = false,
 }: AskThreadDisclosureProps): ReactNode {
   const [composerOpen, setComposerOpen] = useState(false);
   const composerId = useId();
@@ -51,7 +54,13 @@ export function AskThreadDisclosure({
   return (
     <>
       {replyCount === 0 ? null : (
-        <AskThread ask={ask} embedded={embedded} showComposer={false} thread={thread} />
+        <AskThread
+          ask={ask}
+          embedded={embedded}
+          markRead={markRead}
+          showComposer={false}
+          thread={thread}
+        />
       )}
       {ask.state === "answered" ? (
         <>

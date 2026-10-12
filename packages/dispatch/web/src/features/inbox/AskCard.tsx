@@ -103,6 +103,10 @@ export interface AskCardProps {
   onAnswered?: (id: string) => void;
   /** `change` opens the seeded form when the viewer may replace the current answer. */
   mode?: "answer" | "change";
+  /** Marks the ask's thread read on the Replies page once its newest reply has been on screen.
+   *  Set only on the ask's own pages - its Conversation turn, its margin card, its decision
+   *  block - so the Inbox, its drawer and the Answers page start no unread-set reads. */
+  markRead?: boolean;
 }
 
 /** The urgency notch's text colour, matching the urgency badge of the same level. */
@@ -159,6 +163,7 @@ export function AskCard({
   documentLink = true,
   onAnswered,
   mode = "answer",
+  markRead = false,
 }: AskCardProps): ReactNode {
   const {
     answerFailure,
@@ -306,6 +311,7 @@ export function AskCard({
         ask={currentAsk}
         createReply={reply}
         embedded={completed === null}
+        markRead={markRead}
         thread={threadQuery}
         uploadOwner={uploadOwner}
       />
@@ -314,6 +320,7 @@ export function AskCard({
         ask={currentAsk}
         createReply={reply}
         embedded={completed === null}
+        markRead={markRead}
         thread={threadQuery}
         uploadOwner={uploadOwner}
       />

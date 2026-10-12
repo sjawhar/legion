@@ -73,6 +73,51 @@ test("an element that leaves the screen before its second is up does not dwell",
   }
 });
 
+test("an element less than three-quarters on screen does not dwell", async () => {
+  jest.useFakeTimers();
+  const screen = installIntersectionObserver();
+  const dwelled: Element[] = [];
+  const view = render(<Watched onDwell={(element) => dwelled.push(element)} />);
+  try {
+    act(() => screen.show(view.getByTestId("watched"), { height: 100, visible: 70 }));
+    act(() => {
+      jest.advanceTimersByTime(2_000);
+    });
+    await Promise.resolve();
+    expect(dwelled).toEqual([]);
+  } finally {
+    view.unmount();
+    screen.restore();
+  }
+});
+
+// A thread taller than the screen can never have three-quarters of itself on screen; it counts
+// once it fills three-quarters of the screen, and not while only a sliver of it shows.
+test("an element taller than the screen dwells once it fills three-quarters of the screen", async () => {
+  jest.useFakeTimers();
+  const screen = installIntersectionObserver();
+  const dwelled: Element[] = [];
+  const view = render(<Watched onDwell={(element) => dwelled.push(element)} />);
+  try {
+    const element = view.getByTestId("watched");
+    act(() => screen.show(element, { height: 3_000, screen: 800, visible: 200 }));
+    act(() => {
+      jest.advanceTimersByTime(2_000);
+    });
+    await Promise.resolve();
+    expect(dwelled).toEqual([]);
+    act(() => screen.show(element, { height: 3_000, screen: 800, visible: 800 }));
+    act(() => {
+      jest.advanceTimersByTime(1_000);
+    });
+    await Promise.resolve();
+    expect(dwelled).toEqual([element]);
+  } finally {
+    view.unmount();
+    screen.restore();
+  }
+});
+
 test("an element that needs no dwell starts no timer", async () => {
   jest.useFakeTimers();
   const screen = installIntersectionObserver();

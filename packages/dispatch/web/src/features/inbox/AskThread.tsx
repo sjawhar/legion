@@ -24,15 +24,17 @@ import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/A
 import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import { askRepliesOwner, useMarkThreadRead } from "../replies/useMarkThreadRead";
+import type { DwellRef } from "../shell/useDwell";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
 
 export type CreateReply = (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
 
 const createReply: CreateReply = (issueKey, input) => api.createComment(issueKey, input);
 
-function AskReply({ comment }: { comment: Comment }): ReactNode {
+function AskReply({ comment, markRef }: { comment: Comment; markRef?: DwellRef }): ReactNode {
   return (
-    <li className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`}>
+    <li className={`rounded-lg p-2 text-sm ${surfaceMutedBg}`} ref={markRef}>
       <div className={textPrimaryOnSurfaceMuted}>
         <MarkdownBody markdown={comment.body} />
       </div>
@@ -157,6 +159,9 @@ export interface AskThreadProps {
   embedded?: boolean;
   /** Where a file pasted or dropped into the reply goes (`AskReplyComposer`). */
   uploadOwner?: ArtifactOwner;
+  /** Marks the ask's thread read on the Replies page once its newest reply has been on screen:
+   *  set on the ask's own pages (its Conversation turn, its margin card, its decision block). */
+  markRead?: boolean;
 }
 
 /**
@@ -173,12 +178,20 @@ export function AskThread({
   showComposer = true,
   embedded = false,
   uploadOwner,
+  markRead = false,
 }: AskThreadProps): ReactNode {
   const olderRepliesId = useId();
   const replies = thread.data?.replies ?? [];
   const [showAllReplies, setShowAllReplies] = useState(false);
   const hiddenReplyCount = Math.max(replies.length - 2, 0);
   const recentReplies = replies.slice(-2).reverse();
+  const newestReply = replies.at(-1);
+  const markNewest = useMarkThreadRead({
+    enabled: markRead,
+    newestShownAt: newestReply?.created_at,
+    owner: askRepliesOwner(ask),
+    threadId: ask.id,
+  });
   const olderReplies = showAllReplies ? replies.slice(0, -2).reverse() : [];
 
   return (
@@ -190,7 +203,11 @@ export function AskThread({
       {recentReplies.length === 0 ? null : (
         <ul className="space-y-2">
           {recentReplies.map((comment) => (
-            <AskReply comment={comment} key={comment.id} />
+            <AskReply
+              comment={comment}
+              key={comment.id}
+              markRef={comment === newestReply ? markNewest : undefined}
+            />
           ))}
         </ul>
       )}
