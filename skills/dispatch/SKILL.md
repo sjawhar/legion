@@ -82,20 +82,23 @@ a new version that keeps the human's own text, never a second "spec" artifact be
 
 - **Each open question is a decision block**, shaped and placed as [Decision blocks](#decision-blocks)
   says. Because it is an ask, it reaches the human's Inbox, and the answer lands next to its context.
-- **A settled point records the person's own words and the date**, quoted, so no reader mistakes
-  it for your inference; an answer that is only a chosen option is recorded in the form
-  `<name> chose "Commit author" on the question below (<date>)`, naming them from `dispatch whoami`
-  or the conversation, or "the person" when the token names no owner — never a name you were not
-  given. A point you inferred says so, with the reasoning — a security concern, a restriction, or
-  a cost nobody measured is exactly this, not a settled constraint; during a live brainstorming
-  conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference out of the spec
-  until the human has agreed to it. One carried in from another document keeps its provenance: an
-  agent's inference there is marked one here, or stays out until the human raises it.
+- **An answered decision block is itself the record of the decision.** It already renders the
+  person's chosen option and their own words, with who answered it and when; never add text
+  restating it. A point you inferred says so, with the reasoning — a security concern, a
+  restriction, or a cost nobody measured is exactly this, not a settled constraint; during a live
+  brainstorming conversation, `skill://dispatch-brainstorming` is stricter and keeps an inference
+  out of the spec until the human has agreed to it. One carried in from another document keeps its
+  provenance: an agent's inference there is marked one here, or stays out until the human raises
+  it.
+- **A decision that arrives another way carries no rendered record.** A comment that answers a
+  question, a conversation, or a waiver is written into the text in the person's own words and the
+  date, quoted, naming them from `dispatch whoami` or the conversation, or "the person" when the
+  token names no owner — never a name you were not given.
 - **Sections follow the topic.** No heading is required and none has a fixed place; name each
   section for what it discusses.
-- **A changed point is rewritten, not appended to.** When an answer or a new fact changes the
-  design, rewrite the text it changes and fold the answered decision into it; the document's
-  versions keep the history.
+- **A changed point is rewritten, not appended to.** When an answer or a new fact changes design
+  text outside its decision block, rewrite that text; the block stays where it is as the record of
+  the answer. The document's versions keep the history.
 - **No placeholders.** No TBD, TODO, or hedging ("might", "could consider"): an open item is a
   decision block, a technical decision your lane makes where the work happens, outside the spec,
   or, for a contract between two lanes, a question you settle with the other lane over Envoy (see
@@ -367,7 +370,7 @@ version, the way a pull-request review approves a commit, and any later version 
 approval stale. A later version also moves an open request to that version and leaves it waiting
 on you until you request again, which hands the same request back to the human. Answering a
 decision block writes a new version, so request approval only when all three hold: every decision
-block is settled, which means answered and folded into the text, or waived as the next paragraph
+block is settled, which means answered or waived as the next paragraph
 says; the human has agreed to every point in the spec; and the current version has not been
 approved. A Legion root spec under an armed design gate always goes to approval once all three
 hold (`skill://legion-architect`).

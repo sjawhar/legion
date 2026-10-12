@@ -17351,10 +17351,7 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const asks = new Map(documentAsks.map((ask) => [ask.block_id, ask]));
   const lines = version2.markdown.split(`
 `);
-  const stillOpen = (named, state) => {
-    const next = state === "answered" ? "fold the answer into the text" : "write the decision into the text";
-    return `${named}, ${state} but still open in version ${latest}: ${next} with dispatch doc-edit, which writes a version that carries it`;
-  };
+  const stillOpen = (named, state) => state === "answered" ? `${named}, answered but still open in version ${latest}: it settles into a version on its own in about two seconds; wait, then request again` : `${named}, ${state} but still open in version ${latest}: write the decision into the text with dispatch doc-edit, which writes a version that carries it`;
   const open = blocks.flatMap((block) => {
     const ask = asks.get(block.id);
     const openers = lines.filter((line) => line.includes(`ask{#${block.id} `) || line.includes(`ask{#${block.id}}`));
@@ -17383,7 +17380,7 @@ async function refuseOpenDecisionBlocks(client, tool, resolved) {
   throw new Error([
     `dispatch ${commandName(tool)} was not called: ${artifact.name} (version ${latest}) has ${count}. Answering one writes a new version, which would move this request to that version and leave it waiting on you.`,
     ...open.map((line) => `- ${line}`),
-    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, fold the answer into the text with dispatch doc-edit. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human."
+    "Do not request approval over an open block, even when a human asked for it. Tell the human which block is open and ask them to answer it or to waive it. Once it is answered, it settles into a version on its own in about two seconds; wait, then request again. Edit the document only where the answer changes design text outside the block, never to restate it. If they waive it, close the block with dispatch resolve-ask (--kind resolved, their words as the --reason) and write their decision into the text with dispatch doc-edit. Then request approval again once the human has agreed to every point in the new version: the call opens the request, or hands an open one back to the human."
   ].join(`
 `));
 }

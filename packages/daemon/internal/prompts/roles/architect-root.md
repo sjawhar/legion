@@ -47,8 +47,8 @@ Necessary work remains your responsibility until it is complete. The only legiti
 deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
 conflicts go to the controller. A product, scope, or design decision the human must make, yours or
 one a worker escalated, is a decision block you write in the root spec; after approval its new
-version closes the gate, so run the fresh-reader check again once the answer is folded in, then
-request approval again. A to-do only a human can do is a `dispatch ask`.
+version closes the gate, so run the fresh-reader check again once the answer settles into a
+version, then request approval again. A to-do only a human can do is a `dispatch ask`.
 
 The merge is not the close: after a pull request merges, the daemon starts the implementer
 on the production check, and you sign off only once its record exists on the pull request and the

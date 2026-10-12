@@ -3987,7 +3987,7 @@ describe("executeDispatchTool", () => {
 
   // A request names the latest version, and a new version moves it there and back to its agent: a
   // request made over an open block leaves the human's turn the moment they answer it, and an
-  // answer reaches a version only when the document settles or the agent folds it into the text.
+  // answer reaches a version only when the document settles, or sooner with the agent's next edit.
   describe("dispatch_request_approval with decision blocks in the document", () => {
     const opening = (block: string, state: string) =>
       `:::ask{#${block} urgency="med" multiple="false" state="${state}"}\nQuestion of ${block}?\n:::`;
@@ -4073,13 +4073,19 @@ describe("executeDispatchTool", () => {
         () => "",
         (error: Error) => error.message
       );
-      expect(refusal.split("\n").slice(0, 5)).toEqual([
+      const lines = refusal.split("\n");
+      expect(lines.slice(0, 4)).toEqual([
         "dispatch request-approval was not called: spec.md (version 4) has 4 open decision blocks. Answering one writes a new version, which would move this request to that version and leave it waiting on you.",
         '- "Question of b-1?" (block b-1, ask ask-b-1)',
         "- block b-2, whose ask Dispatch has not opened yet",
         "- block b-3, which version 4 does not hold yet",
-        '- "Question of b-4?" (block b-4, ask ask-b-4), answered but still open in version 4: fold the answer into the text with dispatch doc-edit, which writes a version that carries it',
       ]);
+      // b-4 is answered but the latest version has not caught up yet: it still counts as open,
+      // but its line no longer sends the agent to doc-edit, since an answered block already
+      // carries its own record and needs no restatement.
+      expect(lines[4]).toContain('"Question of b-4?" (block b-4, ask ask-b-4)');
+      expect(lines[4]).toContain("answered but still open in version 4");
+      expect(lines[4]).not.toContain("doc-edit");
       expect(refusal).toContain("even when a human asked for it");
       expect(refusal).toContain("ask them to answer it or to waive it");
       expect(posts).toEqual([]);
