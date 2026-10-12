@@ -2004,6 +2004,15 @@ the probe, and the NATS connection and the Dispatch listing, which it runs after
 prints `probe-boot: OK project=<project> image=<image> model-fallback=<mark> capacity-waits=<n>` and
 exits 0; a refusal is boot's own, on stderr, and exits 1.
 
+- **Release.** Run the `legion` of the daemon's release. The probe's daemon API contract, the role
+  prompts' references, the probe command, its reservation and its verdicts are compiled into the
+  binary, so a CLI older than the daemon can pass a probe the daemon refuses.
+- **Where to run it.** As a one-shot pod of the daemon's image, under the daemon's ServiceAccount,
+  with the daemon pod's environment and mounts: that matches the release above and the identity,
+  the environment and the files below at once, and no credential leaves the cluster. Minting a
+  token for the daemon's ServiceAccount onto a CI runner or any other host hands that host every
+  grant the daemon holds, Secret writes and Sandbox patches included, not only the subset
+  probe-boot uses, and the host must also hold every bearer file the configuration names.
 - **Identity.** It acts as whoever `runtime.kubernetes` resolves to in its own process: the daemon's
   identity only with the daemon's kubeconfig and context, or in a pod under the daemon's
   ServiceAccount. It uses a subset of the daemon's grants above: `sandboxes` create, get, list,
@@ -2017,7 +2026,9 @@ exits 0; a refusal is boot's own, on stderr, and exits 1.
   container's providers pointer to the seed and the probe's check of the providers Secret's seed
   against the pane NATS user, so a caller without them runs another probe than the daemon would.
   It also reads every secret file the configuration names, as `legion start --check-config` does,
-  so the host it runs on holds all of them.
+  so the host it runs on holds all of them. Of their contents, only the pane NATS seed's enters the
+  probe: it decides the pane NATS user the probe checks the providers Secret's seed against. Every
+  other file only has to pass boot's reads.
 - **Its own probe Sandbox.** A booting daemon names its probe Sandbox for the project and the image;
   probe-boot names its own for its run as well (`legion-probe-<project>-<digest>-<run>`). So it may
   run while that project's daemon boots, or beside another probe-boot, and none takes another's
@@ -2025,11 +2036,18 @@ exits 0; a refusal is boot's own, on stderr, and exits 1.
   SIGKILL, or one cut off mid-create, the Sandbox ends at its `shutdownTime`.
 - **Capacity.** It waits on room in the Legion pool without limit, as the daemon's probe does (a
   waiting attempt counts against no retry), so the caller bounds it: a CI job's timeout, or
-  `timeout <duration> legion probe-boot …`.
+  `timeout <duration> legion probe-boot …`. The daemon's own probe runs at boot, before it launches
+  any pod; probe-boot runs while the daemon serves, so its pod (`probeReservation`) competes with
+  live issue pods for the pool's capacity until it finishes, and on a pool with a hard cap it can
+  delay an issue pod's launch or relaunch.
 
 A change to the worker pod (a new projected token, a ConfigMap mount, a variable) is proven with it,
 run as the daemon's identity, on a cluster that admits Legion's pods before any daemon restarts on
 it: a pod the cluster would not admit, mount or start fails here as it would fail the daemon's boot.
+A pass holds only against the cluster's objects as they are at the run, since the probe mounts the
+ConfigMaps, Secrets, ServiceAccount and providers Secret that exist then. A change that adds one of
+them applies it first, and fails here until it does; a change that removes or renames one the pod
+still names passes here and fails at the restart.
 
 ## Kubernetes runtime (TypeScript daemon)
 
