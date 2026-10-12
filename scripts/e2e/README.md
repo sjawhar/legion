@@ -516,12 +516,21 @@ LEGION_E2E_SESSION_DB_PORT=<port> \
 in the Tests workflow's `typecheck` job) and does not run it.** Stage 4a's gate: `internal/runtime/sandbox` drives
 Agent Sandbox pods in namespace `legion` from the devbox, the way the 4b daemon will. The script
 needs `go`, `kubectl`, `aws` (the runtime kubeconfig's `aws eks get-token`), `curl`, `ss`,
-`diff`, `docker` (the scratch session database), and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
+`diff`, `docker` (the scratch session database), `jq`, `bun` and `npm` (the `plugins` step, below),
+and the `secrets` CLI holding `LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64` (agent tier: no
 YubiKey touch). The harness runs `secrets <KEY> -- sh -c 'printf %s "$<KEY>"'`: the `secrets` CLI
 decrypts the key and puts it in the environment of that one `sh` child, which prints it to a pipe
 the harness reads into memory. The harness decodes it there and mints the implement App's
 installation token in process. The key is written to no file, appears in no argv, and reaches no
 other process; only the installation token enters each claim's Secret.
+
+The `plugins` step packs this checkout's own `@sjawhar/pi-envoy` and `@sjawhar/pi-legion` (`npm
+pack`, which runs each package's `prepack`, `scripts/pi-plugin-prepack.sh`, and so needs `bun`
+too) for `stale-plugin-install`'s own Resume, and the published `@sjawhar/pi-legion@9.6.1` for its
+negative control; `prepack` packs only a manifest pointed at its built `dist` bundle, so the step
+rewrites each package's `omp.extensions` to it exactly as the release workflow does before
+publishing, and restores the checkout's committed manifest once it has packed (and on any exit,
+through the same trap that removes the scratch session database).
 
 Every pod carries the operator route's pod,
 [`deploy/kubernetes/operator-route/pod.yml`](../../deploy/kubernetes/operator-route/pod.yml), read through the daemon's
@@ -631,6 +640,7 @@ The checks, in order, each printing what it observed and then `CHECK <name>: PAS
 | `suspend` | Suspend of the worker: when it returns the runtime's watch no longer holds that claim and its old locator probes `Gone`; the shared Sandbox stays `Running`, the pod UID and root role stay alive, and the issue's PVC remains `Bound` |
 | `role-container-isolation` | a second role runs then stops in its own fixed container of the root issue pod; the root process remains Alive throughout |
 | `resume` | Resume of the first worker: a new process incarnation and hello generation in the unchanged shared pod; the marker holds exactly the old and new process incarnations |
+| `stale-plugin-install` | a Resume the harness marks as installing a stale-plugin pair (LEGION-164), naming the checkout's own packed `@sjawhar/pi-legion` and `@sjawhar/pi-envoy` tarballs `kubectl cp`'d into the worker's pod: the pod's uid and creation time are unchanged and its Sandbox is `Running`, the installed pair under `legion-plugins/g<generation>` matches the packed versions and the daemon's contract, and the shim's own `/proc/<pid>/cmdline` (the one process of the launch chain the agent's own execs never touch) carries `--extension` for both installed roots in place of the image's. Negative control: naming a published `@sjawhar/pi-legion@9.6.1` (contract 23) a second Resume installs it but the wrapper's own check ends the child before `exec`, the runtime observes it `Gone`, the pod is still the same uid, and the first generation's own install directory is gone, replaced by the second's |
 | `same-agent-negative` | a Resume naming a session file the volume lacks is refused by the role start, observed as gone; the shared pod remains available, then a correct resume writes the second marker and never the refused process |
 | `kill-launcher` | `kubectl exec … -c <role> -- sh -c 'kill 1'` ends one launcher container: the old process is gone, `Resume(prev=dead)` returns a new generation in the same pod, and the root role stays Alive |
 | `stale-incarnation` | across that relaunch, every observation carrying the new process is alive or uncertain, the gone carried the old process, and `Suspend(old)` leaves the Sandbox `Running` on the same pod |
