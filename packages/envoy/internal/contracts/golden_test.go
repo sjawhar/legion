@@ -33,7 +33,8 @@ func TestGithubEnvelopeGoldens(t *testing.T) {
 		{name: "pull-request-review-submitted", event: "pull_request_review"},
 		{name: "pull-request-review-comment-created", event: "pull_request_review_comment"},
 		{name: "push", event: "push"},
-		// A finished Actions job of a run with no pull request, on its run's job topic.
+		// A finished Actions job on the default branch, of a run with no pull request, on its run's
+		// job topic.
 		{name: "check-run-actions-job-without-pr", event: "check_run"},
 	}
 

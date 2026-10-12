@@ -5,8 +5,9 @@
 ### Added
 
 - `githubJobSubject(owner, repo, runId, "completed")` and its type `GithubJobSubject`,
-  `notifications.github.<owner>.<repo>.job.<run_id>.completed`: a GitHub Actions job of a run with
-  no pull request that finished, and the generated Go `GithubJobSubject` (LEGION-690).
+  `notifications.github.<owner>.<repo>.job.<run_id>.completed`: a finished Actions job on the
+  default branch, of a run with no pull request, and the generated Go `GithubJobSubject`
+  (LEGION-690).
 
 - `DeliverySessionGroup`, `CreateDeliverySessionGroupInput` and
   `UpdateDeliverySessionGroupInput`, and `DeliveryTimelineResponse.session_groups`,

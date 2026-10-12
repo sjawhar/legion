@@ -389,10 +389,10 @@ func TestDecodeChecksIgnoresAMalformedSettledAt(t *testing.T) {
 	}
 }
 
-// Envoy publishes a finished GitHub Actions job of a run with no pull request on
-// `notifications.github.<owner>.<repo>.job.<run_id>.completed`, with `kind: "job"`, inside the
-// repository's filter. It changes no workflow record, so it decodes to no fact even for a configured
-// repository, which consumeMessage acknowledges.
+// Envoy publishes a finished GitHub Actions job on the default branch, of a run with no pull
+// request, on `notifications.github.<owner>.<repo>.job.<run_id>.completed`, with `kind: "job"`,
+// inside the repository's filter. It changes no workflow record, so it decodes to no fact even for
+// a configured repository, which consumeMessage acknowledges.
 func TestAJobEnvelopeIsNoFact(t *testing.T) {
 	const subject = "notifications.github.sjawhar.legion.job.38230245571.completed"
 	payload := `{"kind":"job","repo":"sjawhar/legion","run_id":"38230245571","job_id":"114758907253",` +

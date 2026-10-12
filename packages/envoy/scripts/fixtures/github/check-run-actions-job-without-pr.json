@@ -10,7 +10,11 @@
     "completed_at": "2026-09-07T03:24:00Z",
     "html_url": "https://github.com/example-org/example-repo/actions/runs/3002/job/3101",
     "details_url": "https://github.com/example-org/example-repo/actions/runs/3002/job/3101",
-    "check_suite": { "id": 1003 },
+    "check_suite": {
+      "id": 1003,
+      "head_branch": "main",
+      "head_sha": "4444444444444444444444444444444444444444"
+    },
     "app": { "id": 15368, "slug": "github-actions" },
     "pull_requests": []
   },
@@ -18,6 +22,7 @@
   "repository": {
     "name": "example-repo",
     "full_name": "example-org/example-repo",
+    "default_branch": "main",
     "owner": { "login": "example-org" }
   }
 }

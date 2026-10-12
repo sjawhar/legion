@@ -244,8 +244,8 @@ func GithubWorkflowSubject(owner, repo, workflowFilename, action string) string 
 	return githubRepositoryPrefix(owner, repo) + ".workflow." + SanitizeSubjectSegment(workflowFilename) + "." + action
 }
 
-// GithubJobSubject names a finished GitHub Actions job of a run with no pull request by its run.
-// Mirrored on the TS side as `githubJobSubject`.
+// GithubJobSubject names a finished GitHub Actions job on the default branch, of a run with no pull
+// request, by its run. Mirrored on the TS side as `githubJobSubject`.
 func GithubJobSubject(owner, repo, runID, action string) string {
 	return githubRepositoryPrefix(owner, repo) + ".job." + SanitizeSubjectSegment(runID) + "." + action
 }

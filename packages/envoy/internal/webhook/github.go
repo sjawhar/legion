@@ -124,7 +124,8 @@ func githubHandler(secret, mentionTrigger, reviewerAppID string, publisher Publi
 		}
 		// A pull request's CI events only update durable state. The summary loop publishes one
 		// settled checks envelope for each commit whose suites and check runs are done. A finished
-		// Actions job of a run with no pull request records nothing and is published below.
+		// Actions job on the default branch, of a run with no pull request, records nothing and is
+		// published below.
 		if obs := contracts.GithubCIObservations(event, payload); len(obs) > 0 {
 			for _, o := range obs {
 				if o.CheckName == "" {

@@ -771,9 +771,10 @@ func TestGithubEnvelopesCheckSuiteNotPublished(t *testing.T) {
 	}
 }
 
-// actionsJob is the check_run webhook GitHub sends when a GitHub Actions job of a run with no pull
-// request finishes: its App is GitHub Actions, its details_url names the run and the job, and it
-// lists no pull request. change edits the body and its check run before it is returned.
+// actionsJob is the check_run webhook GitHub sends when a GitHub Actions job finishes, of a run on
+// the repository's default branch with no pull request: its App is GitHub Actions, its details_url
+// names the run and the job, its check suite's head_branch is the repository's default_branch, and
+// it lists no pull request. change edits the body and its check run before it is returned.
 func actionsJob(change func(body, checkRun map[string]any)) map[string]any {
 	checkRun := map[string]any{
 		"id":            float64(9001),
@@ -786,12 +787,13 @@ func actionsJob(change func(body, checkRun map[string]any)) map[string]any {
 		"html_url":      "https://github.com/acme/widgets/actions/runs/500/job/9001",
 		"details_url":   "https://github.com/acme/widgets/actions/runs/500/job/9001",
 		"app":           map[string]any{"id": float64(15368), "slug": "github-actions"},
+		"check_suite":   map[string]any{"id": float64(7001), "head_branch": "main", "head_sha": "abcdef1234567890abcdef1234567890abcdef12"},
 		"pull_requests": []any{},
 	}
 	body := map[string]any{
 		"action":     "completed",
 		"check_run":  checkRun,
-		"repository": map[string]any{"full_name": "acme/widgets", "name": "widgets", "owner": map[string]any{"login": "acme"}},
+		"repository": map[string]any{"full_name": "acme/widgets", "name": "widgets", "owner": map[string]any{"login": "acme"}, "default_branch": "main"},
 		"sender":     map[string]any{"login": "github-actions[bot]", "type": "Bot"},
 	}
 	if change != nil {
@@ -804,9 +806,9 @@ func checkRunEnvelopes(body map[string]any) []Envelope {
 	return GithubEnvelopes(GithubEnvelopeInput{Event: "check_run", Delivery: "d-job", EventID: "e-job", TraceID: "t-job", Body: body}, "@legion")
 }
 
-// A finished Actions job of a run with no pull request is published as itself, on its run's job
-// topic, so a consumer learns a job ended before its run does (Dispatch's Delivery page shows a
-// deploy once its production job finishes).
+// A finished Actions job of a run on the default branch with no pull request is published as
+// itself, on its run's job topic, so a consumer learns a job ended before its run does (Dispatch's
+// Delivery page shows a deploy once its production job finishes).
 func TestACompletedActionsCheckRunWithNoPullRequestIsAJobEnvelope(t *testing.T) {
 	items := checkRunEnvelopes(actionsJob(nil))
 	if len(items) != 1 {
@@ -892,6 +894,53 @@ func TestACheckRunWhoseDetailsURLNamesNoRunIsNotAJob(t *testing.T) {
 func TestJobIsAGithubTopicKind(t *testing.T) {
 	if !slices.Contains(GithubTopicKinds, "job") {
 		t.Fatalf("GithubTopicKinds = %v, want it to hold job", GithubTopicKinds)
+	}
+}
+
+// The rule is the repository's own default branch, whatever it is called.
+func TestAJobOnADefaultBranchNamedOtherThanMainIsAJob(t *testing.T) {
+	body := actionsJob(func(body, checkRun map[string]any) {
+		body["repository"].(map[string]any)["default_branch"] = "trunk"
+		checkRun["check_suite"].(map[string]any)["head_branch"] = "trunk"
+	})
+	if items := checkRunEnvelopes(body); len(items) != 1 || items[0].Topic != "notifications.github.acme.widgets.job.500.completed" {
+		t.Fatalf("a job on the default branch trunk published %+v, want one job envelope", items)
+	}
+}
+
+// Only the default branch's jobs are published: a merge queue's commit and a branch push run with no
+// pull request too, and would publish most of a busy repository's jobs.
+func TestAJobOfARunOnAnotherBranchIsNotAJob(t *testing.T) {
+	for _, branch := range []string{"gh-readonly-queue/main/pr-1-abcdef1234567890abcdef1234567890abcdef12", "feature/widgets", "Main"} {
+		body := actionsJob(func(_, checkRun map[string]any) {
+			checkRun["check_suite"].(map[string]any)["head_branch"] = branch
+		})
+		if items := checkRunEnvelopes(body); len(items) != 0 {
+			t.Errorf("a job on %q published %d envelopes", branch, len(items))
+		}
+	}
+}
+
+// A payload that does not name both branches cannot show the job is the default branch's, so it is
+// not published.
+func TestAJobWhosePayloadNamesNoBranchIsNotAJob(t *testing.T) {
+	for name, change := range map[string]func(body, checkRun map[string]any){
+		"no check suite branch": func(_, checkRun map[string]any) {
+			delete(checkRun["check_suite"].(map[string]any), "head_branch")
+		},
+		"a null check suite branch": func(_, checkRun map[string]any) {
+			checkRun["check_suite"].(map[string]any)["head_branch"] = nil
+		},
+		"no check suite":    func(_, checkRun map[string]any) { delete(checkRun, "check_suite") },
+		"no default branch": func(body, _ map[string]any) { delete(body["repository"].(map[string]any), "default_branch") },
+		"both empty": func(body, checkRun map[string]any) {
+			body["repository"].(map[string]any)["default_branch"] = ""
+			checkRun["check_suite"].(map[string]any)["head_branch"] = ""
+		},
+	} {
+		if items := checkRunEnvelopes(actionsJob(change)); len(items) != 0 {
+			t.Errorf("%s: published %d envelopes", name, len(items))
+		}
 	}
 }
 

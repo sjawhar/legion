@@ -11,7 +11,7 @@ repository traffic.
 | Push to a branch | `notifications.github.<owner>.<repo>.push.branch.<branch_sanitized>` |
 | Push to a tag | `notifications.github.<owner>.<repo>.push.tag.<tag_sanitized>` |
 | `workflow_run` | `notifications.github.<owner>.<repo>.workflow.<filename_sanitized>.<action>` |
-| GitHub Actions job finished, of a run with no PR | `notifications.github.<owner>.<repo>.job.<run_id>.completed` |
+| A finished Actions job on the default branch, of a run with no PR | `notifications.github.<owner>.<repo>.job.<run_id>.completed` |
 | Settled PR CI | `notifications.github.<owner>.<repo>.pr.<number>.checks` |
 | PR opened/closed/merged/ready | `notifications.github.<owner>.<repo>.pr.<number>` |
 | PR comment | `notifications.github.<owner>.<repo>.pr.<number>.comment` |
@@ -26,7 +26,8 @@ is `notifications.github.sjawhar._github`); the payload's `repo` is the exact na
 A `check_run` or `check_suite` of a pull request does not publish a raw envelope.
 It updates durable CI state; one `checks` envelope publishes after the PR head's
 CI is complete. A completed `check_run` from the GitHub Actions App that lists no
-pull request, whose `details_url` names `/actions/runs/<run_id>/job/<job_id>`,
+pull request, whose check suite's `head_branch` is the repository's
+`default_branch` and whose `details_url` names `/actions/runs/<run_id>/job/<job_id>`,
 publishes on its run's `job` topic as it finishes.
 
 ## Subscription examples

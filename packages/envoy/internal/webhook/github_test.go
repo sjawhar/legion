@@ -95,7 +95,7 @@ func TestGitHubHandler(t *testing.T) {
 		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
 	}`
 
-	// A finished GitHub Actions job of a run with no pull request.
+	// A finished GitHub Actions job on the default branch, of a run with no pull request.
 	actionsJob := `{
 		"action": "completed",
 		"check_run": {
@@ -109,10 +109,11 @@ func TestGitHubHandler(t *testing.T) {
 			"html_url": "https://github.com/sjawhar/legion/actions/runs/38230245571/job/114758907253",
 			"details_url": "https://github.com/sjawhar/legion/actions/runs/38230245571/job/114758907253",
 			"app": {"id": 15368, "slug": "github-actions"},
+			"check_suite": {"id": 103576905558, "head_branch": "main", "head_sha": "f15b4562bb3b9ba82cf4c25a82ff0a312fc3e80b"},
 			"pull_requests": []
 		},
 		"sender": {"login": "github-actions[bot]", "type": "Bot"},
-		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion"}
+		"repository": {"name": "legion", "owner": {"login": "sjawhar"}, "full_name": "sjawhar/legion", "default_branch": "main"}
 	}`
 
 	cases := []struct {
@@ -237,7 +238,7 @@ func TestGitHubHandler(t *testing.T) {
 			wantRecorded:  1,
 		},
 		{
-			name:          "a finished Actions job of a run with no pull request publishes its job topic and records nothing",
+			name:          "a finished Actions job on the default branch, of a run with no pull request, publishes its job topic and records nothing",
 			method:        "POST",
 			body:          actionsJob,
 			delivery:      "d-job",

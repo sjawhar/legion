@@ -240,9 +240,11 @@ export function githubWorkflowSubject(
 export type GithubJobAction = "completed";
 
 /**
- * A GitHub Actions job of a run with no pull request, published when it finishes: Envoy reads one
- * from a `check_run` webhook whose App is GitHub Actions and whose `details_url` names the run and
- * the job. The run id is the subject's segment, so a consumer follows one run's jobs as they end.
+ * A GitHub Actions job on the repository's default branch, of a run with no pull request, published
+ * when it finishes: Envoy reads one from a `check_run` webhook whose App is GitHub Actions, whose
+ * check suite's `head_branch` is the repository's `default_branch` and whose `details_url` names the
+ * run and the job. The run id is the subject's segment, so a consumer follows one run's jobs as they
+ * end.
  */
 export type GithubJobSubject<
   Owner extends string = string,
