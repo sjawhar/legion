@@ -13,7 +13,7 @@
 //     deletes one durable consumer and prints "deleted"; one that does not exist is already gone:
 //     it prints "absent" and exits 0 too, so a caller says which it was
 import { connect, DeliverPolicy } from "nats";
-import type { NatsSeed } from "../../../packages/envoy-client/src/defaults";
+import type { NatsSeed } from "../../../packages/envoy-client/src/envoy-settings";
 import { messageFor } from "../../../packages/envoy-client/src/errors";
 import { natsAuthOptions } from "../../../packages/envoy-client/src/nats-auth";
 import { operatorNatsSeed } from "./operator-nats-seed";

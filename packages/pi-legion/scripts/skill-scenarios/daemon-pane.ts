@@ -8,8 +8,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { LegionRole } from "@legion/contracts";
-import { DEFAULT_ENVOY_URL, envoySettings } from "@legion/envoy-client/defaults";
 import { envoyConfigPath, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
+import { DEFAULT_ENVOY_URL, envoySettings } from "@legion/envoy-client/envoy-settings";
 
 /** This checkout's daemon module, the one the rig reads unless a run names another checkout's. */
 export const DAEMON_MODULE = path.resolve(import.meta.dir, "../../../daemon");

@@ -14,7 +14,7 @@ import (
 )
 
 // Heartbeat is the pi-envoy plugin's registration heartbeat (`DEFAULT_HEARTBEAT_MS`,
-// packages/envoy-client/src/defaults.ts): what refreshes a session's `last_seen` in the Envoy
+// packages/envoy-client/src/envoy-settings.ts): what refreshes a session's `last_seen` in the Envoy
 // listener's role lookup.
 const Heartbeat = 120 * time.Second
 

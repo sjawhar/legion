@@ -167,7 +167,7 @@ the same commit, exactly like an HTTP shape change. Three things the round taugh
   checked 1:1.** The first draft was "verified against `processes.ts`" and still missed
   `LEGION_CONTROL_SUBJECT` (root panes only, `processes.ts` root env), `ENVOY_NATS_URL`, and
   `ENVOY_URL` (every pane; read not by the plugin's own files but by `@legion/envoy-client`'s
-  `defaults.ts`). The reviewer found them by reading the three pane environments in
+  `envoy-settings.ts`). The reviewer found them by reading the three pane environments in
   `processes.ts` (root, worker, controller) plus `credentialProcessEnvironment` and the runtime's
   `<NAME>_FILE` pointer, then every `process.env.*`/`env.*` read in `extensions/legion.ts`,
   `src/legion/classify.ts` (`requiredSecret` maps `X` to `X_FILE`), and `envoy-client`. Daemon-set

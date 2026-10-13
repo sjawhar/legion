@@ -1,6 +1,6 @@
 import { type Envelope, EnvelopeSchema } from "@legion/contracts";
 import { z } from "zod";
-import { normalizeEnvoyUrl } from "./defaults";
+import { normalizeEnvoyUrl } from "./envoy-settings";
 
 const DEFAULT_TIMEOUT_MS = 5_000;
 const RETRY_DELAY_MS = 250;

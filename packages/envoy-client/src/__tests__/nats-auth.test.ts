@@ -3,7 +3,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { connect, nkeys } from "nats";
-import { natsSeedFromEnvironment } from "../defaults";
+import { natsSeedFromEnvironment } from "../envoy-settings";
 import { natsAuthOptions } from "../nats-auth";
 import { type NatsServer, startNatsServer } from "./nats-server";
 

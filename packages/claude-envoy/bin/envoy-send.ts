@@ -1,5 +1,5 @@
-import { envoySettings } from "@legion/envoy-client/defaults"
 import { envoyConfigPath, readEnvoyConfig } from "@legion/envoy-client/envoy-config"
+import { envoySettings } from "@legion/envoy-client/envoy-settings"
 import { messageFor } from "@legion/envoy-client/errors"
 import { sendEnvoyMessage } from "../src/envoy-client"
 import { parseSendArguments } from "../src/send-arguments"

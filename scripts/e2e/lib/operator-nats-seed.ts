@@ -1,15 +1,15 @@
 // scripts/e2e/lib/operator-nats-seed.ts: the nkey seed a command run from the operator's shell
 // sends to a NATS it names (envoy-bridge.ts's upstream, nats-stream.ts's server). It is what
 // `envoySettings` resolves over the envoy.json `envoyConfigPath("command")` chooses with
-// ENVOY_NATS_URL set to those servers (packages/envoy-client/src/defaults.ts), so the operator's
-// `envoy.natsSeed` serves these scripts as it serves the operator's sessions, and only against the
-// servers written beside it.
+// ENVOY_NATS_URL set to those servers (packages/envoy-client/src/envoy-settings.ts), so the
+// operator's `envoy.natsSeed` serves these scripts as it serves the operator's sessions, and only
+// against the servers written beside it.
+import { envoyConfigPath, readEnvoyConfig } from "../../../packages/envoy-client/src/envoy-config";
 import {
   type EnvoyEnvironment,
   envoySettings,
   type NatsSeed,
-} from "../../../packages/envoy-client/src/defaults";
-import { envoyConfigPath, readEnvoyConfig } from "../../../packages/envoy-client/src/envoy-config";
+} from "../../../packages/envoy-client/src/envoy-settings";
 
 /**
  * The seed for `servers` (comma-separated, as ENVOY_NATS_URL takes them): NATS_NKEY_SEED_FILE or

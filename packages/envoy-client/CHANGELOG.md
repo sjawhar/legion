@@ -29,6 +29,9 @@
   name the rename. A top-level `natsUrls` is refused, naming `envoy.natsUrls`.
 - `createEnvoyClient` takes the listener's bearer as `token` and reads no environment;
   `natsAuthOptions` takes a resolved `NatsSeed` (`envoySettings`, or `natsSeedFromEnvironment`).
+- The Envoy resolver's module is `envoy-settings` (`@legion/envoy-client/envoy-settings`), which
+  was `defaults`: `envoySettings`, `natsSeedFromEnvironment`, `DEFAULT_ENVOY_URL` and the settings
+  types.
 - The `dispatch` command reads the envoy.json its session's plugin chose: with `DISPATCH_HOST` set,
   the file `ENVOY_CONFIG_FILE` names (each plugin sets the two together), else its host plugin's
   rule (`omp`, `claude` or `opencode`); with `DISPATCH_HOST` unset and

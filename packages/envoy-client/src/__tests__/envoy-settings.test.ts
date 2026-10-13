@@ -2,9 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { envoySettings } from "../defaults";
 import { dispatchSettings } from "../dispatch-config";
 import { type EnvoyConfig, readEnvoyConfig } from "../envoy-config";
+import { envoySettings } from "../envoy-settings";
 
 /** The error a read failed with, or a test failure naming what it read instead. */
 function errorOf(config: EnvoyConfig): string {

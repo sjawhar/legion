@@ -1,5 +1,5 @@
 import { type Authenticator, nkeyAuthenticator, nkeys } from "nats";
-import type { NatsSeed } from "./defaults";
+import type { NatsSeed } from "./envoy-settings";
 import { messageFor } from "./errors";
 
 /** The part of nats.js's `nkeys` export this module uses; nats.js types the export `any`. */

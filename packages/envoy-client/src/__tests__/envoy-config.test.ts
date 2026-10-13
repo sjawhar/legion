@@ -10,7 +10,6 @@ import {
 } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { envoySettings } from "../defaults";
 import { type DispatchConfigResolution, dispatchSettings } from "../dispatch-config";
 import {
   type EnvoyConfig,
@@ -19,6 +18,7 @@ import {
   missingConfigNotice,
   readEnvoyConfig,
 } from "../envoy-config";
+import { envoySettings } from "../envoy-settings";
 
 function tempDir(): string {
   return mkdtempSync(path.join(os.tmpdir(), "envoy-config-"));

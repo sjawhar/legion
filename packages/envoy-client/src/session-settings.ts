@@ -1,4 +1,3 @@
-import { type EnvoyEnvironment, type EnvoySettings, envoySettings } from "./defaults";
 import {
   type ActiveDispatchConfig,
   activeDispatchSettings,
@@ -14,6 +13,7 @@ import {
   offWithError,
   readEnvoyConfig,
 } from "./envoy-config";
+import { type EnvoyEnvironment, type EnvoySettings, envoySettings } from "./envoy-settings";
 import { messageFor } from "./errors";
 
 /** The envoy.json a plugin's session reads (`envoyConfigPath`), or why its location cannot be
