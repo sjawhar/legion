@@ -26,9 +26,10 @@ events and sends them to the current Claude Code session as supported
   each, which Claude Code sources into every later Bash command of the session, records the current
   session id for the channel server, and puts the session's open Dispatch asks into the model's
   context (`Dispatch authored-ask summary:`; `unavailable: <reason>` when Dispatch cannot be
-  reached; nothing when Dispatch is not configured, unless the session's file is missing beside
-  `~/.config/opencode/envoy.json`, which is not read: then `unavailable: <notice>`, the notice
-  naming what to do with it). Before that, whether Dispatch is on or off, a checkout's
+  reached; nothing when Dispatch is not configured or a file sets `dispatch.enabled` to false,
+  unless the session's missing file is what turns it off while `~/.config/opencode/envoy.json`,
+  which is not read, is there: then `unavailable: <notice>`, the notice naming what to do with
+  it). Before that, whether Dispatch is on or off, a checkout's
   `.opencode/envoy.json`, which is not read, is one `envoy: <file> is not read: mkdir -p … && mv …`
   line while the checkout has no `.envoy/envoy.json`. The `dispatch` command reads the file
   `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set. A subagent's Bash can lack what the

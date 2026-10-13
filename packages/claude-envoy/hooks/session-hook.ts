@@ -112,8 +112,12 @@ async function openAsks(raw: unknown): Promise<void> {
     }
   } else if (dispatch.error !== null) {
     process.stdout.write(`Dispatch authored-ask summary unavailable: ${dispatch.error}\n`)
-  } else if (missing?.oldUserFileNotice !== undefined) {
-    // The OpenCode-era file this machine still holds is why Dispatch is off: say so and what to do.
+  } else if (
+    missing?.oldUserFileNotice !== undefined &&
+    dispatch.notice.endsWith(missing.oldUserFileNotice)
+  ) {
+    // The missing file is why Dispatch is off, and that notice names the OpenCode-era file this
+    // machine still holds: say so and what to do. Off for any other reason says nothing.
     process.stdout.write(`Dispatch authored-ask summary unavailable: ${dispatch.notice}\n`)
   }
 }

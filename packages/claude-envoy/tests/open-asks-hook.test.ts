@@ -173,6 +173,43 @@ test("summarises a missing Claude profile file with where its unread old file be
   }
 })
 
+test("says nothing of the unread old user file when a checkout's enabled: false turns Dispatch off", async () => {
+  const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-checkout-off-"))
+  const checkout = join(scratch, "checkout")
+  const old = join(scratch, ".config", "opencode", "envoy.json")
+  await mkdir(join(checkout, ".envoy"), { recursive: true })
+  await writeFile(
+    join(checkout, ".envoy", "envoy.json"),
+    JSON.stringify({ dispatch: { enabled: false } }),
+  )
+  await mkdir(join(scratch, ".config", "opencode"), { recursive: true })
+  await writeFile(
+    old,
+    JSON.stringify({
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://old.dispatch.example",
+        token: "old-token",
+      },
+    }),
+  )
+  try {
+    // No ~/.config/legion/envoy.json, so the read names the old file beside the missing one; the
+    // checkout's own enabled: false, not the missing file, is what turns Dispatch off.
+    const result = await runHook({ ...hookInput, cwd: checkout }, { HOME: scratch })
+    expect(result.exitCode).toBe(0)
+    expect(result.stdout).toBe("")
+
+    // The same session without the old file prints the same.
+    await rm(old)
+    const withoutOld = await runHook({ ...hookInput, cwd: checkout }, { HOME: scratch })
+    expect(withoutOld.exitCode).toBe(0)
+    expect(withoutOld.stdout).toBe(result.stdout)
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+})
+
 test("names a checkout's unread .opencode/envoy.json and still summarises the asks from the user file's server", async () => {
   const scratch = await mkdtemp(join(tmpdir(), "claude-envoy-hook-old-checkout-"))
   const checkout = join(scratch, "checkout")

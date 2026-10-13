@@ -19191,7 +19191,7 @@ ${formatOpenAsksSummary(snapshot, dispatch.url)}
   } else if (dispatch.error !== null) {
     process.stdout.write(`Dispatch authored-ask summary unavailable: ${dispatch.error}
 `);
-  } else if (missing?.oldUserFileNotice !== undefined) {
+  } else if (missing?.oldUserFileNotice !== undefined && dispatch.notice.endsWith(missing.oldUserFileNotice)) {
     process.stdout.write(`Dispatch authored-ask summary unavailable: ${dispatch.notice}
 `);
   }

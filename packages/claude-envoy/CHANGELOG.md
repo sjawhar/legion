@@ -7,8 +7,8 @@
 - The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707):
   `$CLAUDE_CONFIG_DIR/envoy.json`, else the file `ENVOY_CONFIG_FILE` names, else
   `~/.config/legion/envoy.json`. `~/.config/opencode/envoy.json` is not read: while it is there and
-  the session's file is missing, the channel server's notice and the `open-asks` hook's summary say
-  so and name the move
+  the session's file is missing, the channel server's notice, and the `open-asks` hook's summary
+  when that missing file is what turns Dispatch off, say so and name the move
   (`mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`), or, for
   `$CLAUDE_CONFIG_DIR/envoy.json`, the file to copy or link it to; under a relocated
   `XDG_CONFIG_HOME` they say only that the old file is not read there. A top-level `natsUrls` is
