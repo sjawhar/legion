@@ -1745,11 +1745,24 @@ does (`xargs -0 sh -c 'exec env -i "$@" omp …' agent-env </proc/<pid>/environ`
 **No pod of the issue is running**, as when the only pod is the one whose `workspace-init`
 refuses. That pod is still there: the kubelet retries its `workspace-init` (`restartPolicy:
 Always`) and the daemon's next launch replaces it, and every attempt removes the git locks in the
-issue's clone, one a git of yours holds included. So make it go first. `legion claims suspend`
-stops a role's process but leaves the pod, and its Sandbox `Running` (`Suspend`,
-`internal/runtime/sandbox/sandbox.go`). Once `legion claims list` shows no claim of the issue
-launching or running (suspend a running one), set the Sandbox `Suspended` from the operator's
-context, and run git or jj writes only once the issue lists no pod:
+issue's clone, one a git of yours holds included. So make it go first, and keep the issue from
+launching again while you work:
+
+1. Suspend every claim of the issue that is in `registered`, `ready`, `idle`, `working`,
+   `launching`, `shim_connected`, or `suspended` with a `suspendedBy` other than `operator` (`legion
+   claims list --json --operator-token-file <file>`): `legion claims suspend --claim <token>
+   --operator-token-file <file>` on each. An operator's suspend takes over one the daemon recorded,
+   so the workflow resumes it no more until you do. A `working` claim stops at its turn's end (the
+   command waits `--wait`, a minute by default), and a `launching` or `shim_connected` one once its
+   agent is ready. For a child issue, suspend its tree's architect too: it runs in the root's pod,
+   and its retry of a held phase relaunches the child's failed worker.
+2. `legion claims suspend` stops a role's process but leaves the pod, and its Sandbox `Running`
+   (`Suspend`, `internal/runtime/sandbox/sandbox.go`), so set the Sandbox `Suspended` from the
+   operator's context.
+3. Run git or jj writes only once the issue lists no pod. A claim the suspend does not act on —
+   `queued`, `launch_uncertain`, `failed`, `retired` — the workflow can still start: a start row
+   spawns a queued claim and retries a failed or retired one (`internal/daemon/outbox.go`), which
+   sets the Sandbox `Running` again. So list the pods again right before each write.
 
 ```sh
 kubectl -n legion patch sandbox legion-<project>-<issue key lowercased> --type merge -p '{"spec":{"operatingMode":"Suspended"}}'
@@ -1759,12 +1772,15 @@ kubectl -n legion get pods -l legion.dev/issue=<KEY>
 Then mount the issue's claim in a pod of your own, `issue-<Sandbox>`, i.e.
 `issue-legion-<project>-<issue key lowercased>` (`kubectl -n legion get pvc -l legion.dev/issue=<KEY>`).
 The claim is `ReadWriteOnce`, and the pod carries no affinity, so it lands wherever the pool has
-room and the volume follows it. The issue's next launch (`legion claims resume` or `retry`) sets
-its Sandbox `Running` again (`relaunch`, `relaunch.go`); delete your pod before it. `ReadWriteOnce`
-binds the volume to one node, not one pod: on another node the new pod waits on the detach, with
-`FailedAttachVolume` or `Multi-Attach` events, until yours is gone, but on the same node it mounts
-the volume beside yours, and its `workspace-init` removes the clone's git locks, one a git still
-running in yours holds included:
+room and the volume follows it. The issue's next launch (the operator's `resume` or `retry`, or the
+workflow's start of one of its roles, such as its tree's architect retrying a held phase) sets its
+Sandbox `Running` again (`relaunch`, `relaunch.go`); delete your pod before it, and for a child
+issue suspend the tree's architect first. Once you are done and your pod is deleted, resume each
+claim you suspended (`legion claims resume --claim <token> --operator-token-file <file>`).
+`ReadWriteOnce` binds the volume to one node, not one pod: on another node the new pod waits on the
+detach, with `FailedAttachVolume` or `Multi-Attach` events, until yours is gone, but on the same
+node it mounts the volume beside yours, and its `workspace-init` removes the clone's git locks, one
+a git still running in yours holds included:
 
 ```yaml
 apiVersion: v1
