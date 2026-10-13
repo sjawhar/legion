@@ -98,23 +98,6 @@ func (r remote) remove() error {
 	return nil
 }
 
-// isolatedGitConfig is the configuration Fetch's git reads besides its own: none. Not the system's,
-// not the image user's; and git's `-c`, GIT_CONFIG_PARAMETERS, no process provisioning starts
-// inherits (config.go).
-var isolatedGitConfig = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1"}
-
-// FetchRequest is a pod's first init container's: the repository, the provisioning token, the
-// directory its one-shot credential goes under, the feed directory, the log each retried clone
-// attempt is told to, and the clock the retries read and wait on.
-type FetchRequest struct {
-	Repo          ghrepo.Repository
-	Token         string
-	CredentialDir string
-	Feed          string
-	Log           func(line string)
-	Clock         Clock
-}
-
 // Source is how provisioning reaches the repository for the shared clone's clone and fetch: from a
 // pod's feed with no credential (FromFeed), or from GitHub with the one-shot credential
 // (FromGitHub). Only this package's two constructors make one.
@@ -198,74 +181,6 @@ func feedRemote(feed string, repo ghrepo.Repository, bookmark string) remote {
 			"GIT_CONFIG_VALUE_0=" + GitHubURL(repo),
 		},
 		branches: []string{"main", bookmark},
-	}
-}
-
-// Fetch clones the repository from GitHub, bare, into the feed, with the provisioning token and
-// no configuration but the one-shot credential's and the pins: the process of a pod's first init
-// container, the only one that holds the token, whose feed is its own and which mounts nothing a
-// tree agent can write. It reaches GitHub as the tmux runtime's Source does, so the token's two
-// holders share one credential rule. Provision then clones and fetches the shared clone from the
-// feed with no credential. It returns the feed repository.
-//
-// A clone that fails transiently (transientCloneFailure) is cloned again after the next of
-// fetchBackoff's waits, its partial clone removed first and its failure logged, all within
-// FetchTimeout from the first attempt's start: each attempt is bounded by what remains of it, and
-// no retry starts past it. Every other failure is the answer at once. Nothing Fetch logs or
-// returns carries the token, wherever git echoed it.
-func Fetch(ctx context.Context, run Runner, request FetchRequest) (string, error) {
-	feed, err := feedRepository(request.Feed, request.Repo)
-	if err != nil {
-		return "", err
-	}
-	github := gitHubSource{token: request.Token, credentialDir: request.CredentialDir}
-	if err := github.check(request.Repo); err != nil {
-		return "", err
-	}
-	if request.Log == nil {
-		return "", errors.New("workspace fetch request names no log")
-	}
-	if request.Clock == nil {
-		return "", errors.New("workspace fetch request names no clock")
-	}
-	credential, err := github.open(request.Repo, "")
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		_ = credential.remove()
-	}()
-	if err := os.MkdirAll(filepath.Dir(feed), 0o700); err != nil {
-		return "", fmt.Errorf("create feed parent: %w", err)
-	}
-	clone := []string{"git", "clone", "--bare", "--quiet", GitHubURL(request.Repo), feed}
-	env := merge(credential.env, isolatedGitConfig)
-	scrub := strings.NewReplacer(request.Token, "***").Replace
-	now := request.Clock.Now()
-	deadline := now.Add(FetchTimeout)
-	for attempt := 1; ; attempt++ {
-		result, runErr := runCommandTimeout(ctx, run, clone, env, "", deadline.Sub(now))
-		_, failed := checkedResult(clone, result, runErr)
-		if failed == nil {
-			return feed, credential.remove()
-		}
-		failed = errors.New(scrub(failed.Error()))
-		if runErr != nil || !transientCloneFailure(result) {
-			return "", failed
-		}
-		wait := fetchBackoff[min(attempt-1, len(fetchBackoff)-1)]
-		if !request.Clock.Now().Add(wait).Before(deadline) {
-			return "", fmt.Errorf("%w\nclone attempt %d failed, and a retry in %s would start past the fetch's %s bound", failed, attempt, wait, FetchTimeout)
-		}
-		request.Log(fmt.Sprintf("clone attempt %d failed; retrying in %s: %s", attempt, wait,
-			strings.ReplaceAll(strings.TrimSpace(scrub(result.Stderr)), "\n", " | ")))
-		if err := os.RemoveAll(feed); err != nil {
-			return "", fmt.Errorf("remove clone attempt %d's partial clone %s: %w", attempt, feed, err)
-		}
-		if err := request.Clock.Sleep(ctx, wait); err != nil {
-			return "", fmt.Errorf("%w\nthe wait before clone attempt %d ended: %w", failed, attempt+1, err)
-		}
-		now = request.Clock.Now()
 	}
 }
 

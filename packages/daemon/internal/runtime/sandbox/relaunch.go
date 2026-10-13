@@ -148,12 +148,12 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 		}
 	}
 	loc := r.locatorFor(spec.Claim, spec.Role, pod.UID, spec.Generation)
-	starting, cancel := context.WithTimeout(ctx, r.bootTimeout+r.terminationGrace)
-	defer cancel()
-	ended, err := r.awaitRoleLauncher(starting, loc)
+	ended, deadline, err := r.awaitRoleLauncher(ctx, loc)
 	if err != nil {
 		return fail("wait for its role launcher", err)
 	}
+	starting, cancel := context.WithDeadline(ctx, deadline.Add(r.terminationGrace))
+	defer cancel()
 	if ended {
 		// A real failed init proves no role could start. Return its recorded pod so supervision
 		// observes Gone (and WorkspaceLost), rather than charging an unrelated launcher timeout.
@@ -198,9 +198,19 @@ func (r *Runtime) stopIssuedChild(ctx context.Context, token claim.Token, podUID
 	return nil
 }
 
-func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, error) {
+// awaitRoleLauncher waits until loc's role launcher has connected, reporting false, or loc's pod
+// has ended, reporting true, and returns the deadline the wait stood at when it stopped. The
+// launcher starts only once both of the pod's init containers have finished, and workspace-fetch's
+// clone and its retries may take up to ProvisionBound. So the wait gives the launcher the boot
+// timeout from the later of the wait's start and the last moment it saw the pod provisioning (an
+// init container running, provisioning), never past the boot timeout plus ProvisionBound from the
+// start (launcherDeadline). A pod that never provisions past the boot timeout waits it alone.
+func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (bool, time.Time, error) {
+	what := "role launcher " + string(loc.Claim)
+	start := time.Now()
+	deadline := start.Add(r.bootTimeout)
 	ended := false
-	err := r.await(ctx, r.bootTimeout, "role launcher "+string(loc.Claim), func() (bool, error) {
+	err := r.await(ctx, r.bootTimeout+r.ProvisionBound(), what, func() (bool, error) {
 		view, err := r.view(loc.Sandbox.Name)
 		if err != nil {
 			return false, err
@@ -210,10 +220,41 @@ func (r *Runtime) awaitRoleLauncher(ctx context.Context, loc runtime.Locator) (b
 			ended = true
 			return true, nil
 		}
-		_, ready := r.launchers.state(loc.Claim, loc.Sandbox.PodUID)
-		return ready, nil
+		if _, ready := r.launchers.state(loc.Claim, loc.Sandbox.PodUID); ready {
+			return true, nil
+		}
+		now := time.Now()
+		if provisioning(view.pod) {
+			deadline = launcherDeadline(start, now, r.bootTimeout, r.ProvisionBound())
+		}
+		if !now.Before(deadline) {
+			return false, fmt.Errorf("timed out after %s waiting for %s", deadline.Sub(start), what)
+		}
+		return false, nil
 	})
-	return ended, err
+	return ended, deadline, err
+}
+
+// launcherDeadline is when a wait for a role launcher that started at start gives up, having last
+// seen its pod provisioning at provisioned: the boot timeout after that, but no later than the boot
+// timeout plus bound after start.
+func launcherDeadline(start, provisioned time.Time, boot, bound time.Duration) time.Time {
+	deadline := provisioned.Add(boot)
+	if limit := start.Add(boot + bound); deadline.After(limit) {
+		return limit
+	}
+	return deadline
+}
+
+// provisioning is whether pod is running one of its init containers, workspace-fetch or
+// workspace-init: the rule the liveness mapping reads such a pod alive by (evaluate).
+func provisioning(pod *corev1.Pod) bool {
+	if phaseOf(pod) != corev1.PodPending {
+		return false
+	}
+	return slices.ContainsFunc(pod.Status.InitContainerStatuses, func(status corev1.ContainerStatus) bool {
+		return status.State.Running != nil
+	})
 }
 
 // suspendFailedLaunch sets the Sandbox of a launch that failed once its Running patch was sent

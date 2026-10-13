@@ -722,9 +722,9 @@ func (r *Runtime) initEnvironment(l launch) []corev1.EnvVar {
 }
 
 // ProvisionBound satisfies runtime.Runtime: workspace.FetchTimeout, the fetch's own clone bound,
-// which is how much longer a launch may run before its agent starts while its pod's init containers
-// run. Provisioning from the feed onto the issue's own volume is local work and waits on no other
-// pod, so it shares the registration deadline's base bound as the agent's own boot does.
+// which is how much longer than the boot timeout a launch may wait for its pod's launcher while the
+// pod's init containers run (awaitRoleLauncher). workspace-init's provisioning from the feed onto
+// the issue's own volume is local work, waits on no other pod, and fits inside the same bound.
 func (r *Runtime) ProvisionBound() time.Duration {
 	return workspace.FetchTimeout
 }

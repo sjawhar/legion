@@ -255,8 +255,9 @@ func useInstantClock(t *testing.T) *instantClock {
 }
 
 // A clone that fails transiently is run again after a backoff wait, each failure logged on stdout
-// as one line, until one succeeds and fills the feed. Each failed attempt left a partial clone
-// where the next clones, as a killed git leaves one, so the next succeeds only once it is removed.
+// as one line, until one succeeds and fills the feed. Real git removes its own destination when a
+// clone fails; this git leaves a partial clone there anyway, so the test holds the fetch to removing
+// whatever a failed attempt left before it clones again.
 func TestWorkspaceInitFetchRetriesATransientCloneFailure(t *testing.T) {
 	v := newIssueVolume(t).withRemote(t)
 	attempts := v.failClones(t, curl92Failure, http408Failure)
@@ -295,47 +296,29 @@ func TestWorkspaceInitFetchRetriesATransientCloneFailure(t *testing.T) {
 	}
 }
 
-// A clone GitHub refuses for good — the token refused, the repository not found or not granted —
-// fails on its first attempt, with no wait and no retry, naming git's own message.
+// A clone GitHub refuses for good fails on its first attempt, with no wait and no retry, naming
+// git's own message on stderr and logging nothing on stdout. Which failures are permanent is
+// workspace.Fetch's to tell; this is what the command does with one.
 func TestWorkspaceInitFetchFailsAPermanentCloneFailureAtOnce(t *testing.T) {
-	for _, tc := range []struct{ name, stderr, says string }{
-		{
-			name:   "the token refused",
-			stderr: "remote: Invalid username or token. Password authentication is not supported for Git operations.\nfatal: Authentication failed for 'https://github.com/acme/widgets/'\n",
-			says:   "fatal: Authentication failed for 'https://github.com/acme/widgets/'",
-		},
-		{
-			name:   "the repository not found",
-			stderr: "remote: Repository not found.\nfatal: repository 'https://github.com/acme/widgets/' not found\n",
-			says:   "fatal: repository 'https://github.com/acme/widgets/' not found",
-		},
-		{
-			name:   "the repository not granted",
-			stderr: "remote: Write access to repository not granted.\nfatal: unable to access 'https://github.com/acme/widgets/': The requested URL returned error: 403\n",
-			says:   "The requested URL returned error: 403",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			v := newIssueVolume(t).withRemote(t)
-			attempts := v.failClones(t, tc.stderr, tc.stderr)
-			clock := useInstantClock(t)
-			v.setenv(t)
-			t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
+	v := newIssueVolume(t).withRemote(t)
+	notFound := "remote: Repository not found.\nfatal: repository 'https://github.com/acme/widgets/' not found\n"
+	attempts := v.failClones(t, notFound, notFound)
+	clock := useInstantClock(t)
+	v.setenv(t)
+	t.Setenv("LEGION_PROVISION_TOKEN_FILE", v.token)
 
-			code, stdout, stderr := runWorkspaceInitHere(v.fetchArgs())
-			if code != 1 || !strings.Contains(stderr, tc.says) {
-				t.Fatalf("exit %d, stderr %q; want 1 naming %q", code, stderr, tc.says)
-			}
-			if stdout != "" {
-				t.Fatalf("stdout %q, want nothing", stdout)
-			}
-			if got := cloneAttempts(t, attempts); got != 1 {
-				t.Fatalf("git cloned %d times, want 1", got)
-			}
-			if waits := clock.waits; len(waits) != 0 {
-				t.Fatalf("the fetch waited %v, want no wait", waits)
-			}
-		})
+	code, stdout, stderr := runWorkspaceInitHere(v.fetchArgs())
+	if says := "fatal: repository 'https://github.com/acme/widgets/' not found"; code != 1 || !strings.Contains(stderr, says) {
+		t.Fatalf("exit %d, stderr %q; want 1 naming %q", code, stderr, says)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout %q, want nothing", stdout)
+	}
+	if got := cloneAttempts(t, attempts); got != 1 {
+		t.Fatalf("git cloned %d times, want 1", got)
+	}
+	if waits := clock.waits; len(waits) != 0 {
+		t.Fatalf("the fetch waited %v, want no wait", waits)
 	}
 }
 
