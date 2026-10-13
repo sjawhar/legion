@@ -10,6 +10,7 @@ import { ApiError, isDeliveryNotConfigured } from "./client";
 import { createDeliveryLive, type DeliveryLive } from "./delivery-live";
 import { refreshQueries } from "./query-refresh";
 import type {
+  DeliveryLiveBody,
   DeliveryLiveDelta,
   DeliveryLiveRevs,
   DeliveryLiveSnapshot,
@@ -230,14 +231,22 @@ test("a query collected before its observer subscribed still gets its snapshot",
   // React builds the page's query while it renders and subscribes its observer in a later effect.
   // gcTime 0 can collect that first query in between; subscribing then builds a second query under
   // the same hash, and the first one's own removal notice arrives after the second subscribed.
-  jest.useFakeTimers();
+  // Each collection is the cache's remove, called here as the gcTime 0 timer calls it: happy-dom
+  // groups zero-delay timeouts into one batch an earlier test can leave pending, so a timer would
+  // collect nothing in some orders.
+  const cache = queryClient.getQueryCache();
   const observer = liveObserver();
-  jest.advanceTimersByTime(1);
+  const first = observer.getCurrentQuery();
+  cache.remove(first);
+  expect(cache.get(first.queryHash)).toBeUndefined();
   const unsubscribe = observer.subscribe(() => {});
   try {
     await settle();
     const socket = sockets.latest();
-    jest.advanceTimersByTime(1);
+    const second = observer.getCurrentQuery();
+    expect(second).not.toBe(first);
+    expect(cache.get<DeliveryLiveBody>(first.queryHash)).toBe(second);
+    cache.remove(first);
     await settle();
     expect(socket.closedWith).toBeUndefined();
     socket.open();

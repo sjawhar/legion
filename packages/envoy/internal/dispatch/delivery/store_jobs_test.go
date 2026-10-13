@@ -2,15 +2,12 @@ package delivery
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
-	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // TestJobsReadBeforeARunEndsLeaveItForTheBackfill: jobs read while the run was still running leave
@@ -157,6 +154,48 @@ func TestAListingThatRepeatsAJobNameStoresItAsWritingEachInTurn(t *testing.T) {
 	}
 }
 
+// TestAnEmptyListingStillWritesTheRunRow: GitHub may list no jobs for a run that has not created
+// them yet. Such a listing writes no job, but it is still a successful listing: it clears the run's
+// jobs-unfetchable mark, and its complete flag reaches the run row.
+func TestAnEmptyListingStillWritesTheRunRow(t *testing.T) {
+	pool, ctx := deliveryTestPool(t)
+	started := time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC)
+	if err := UpsertRun(ctx, pool, changeTestRun(805, DeliveryRunKindDeploy, started, started)); err != nil {
+		t.Fatalf("UpsertRun: %v", err)
+	}
+	if err := MarkRunJobsUnfetchable(ctx, pool, "acme/widgets", 805, "not found"); err != nil {
+		t.Fatalf("MarkRunJobsUnfetchable: %v", err)
+	}
+	runRow := func() (unfetchable bool, complete bool) {
+		t.Helper()
+		var at *time.Time
+		if err := pool.QueryRow(ctx, `select jobs_unfetchable_at, jobs_complete from delivery_runs where repo = 'acme/widgets' and run_id = 805`).Scan(&at, &complete); err != nil {
+			t.Fatalf("read the run: %v", err)
+		}
+		return at != nil, complete
+	}
+	if unfetchable, _ := runRow(); !unfetchable {
+		t.Fatal("the run is not marked unfetchable before the listing")
+	}
+
+	if err := UpsertRunJobs(ctx, pool, "acme/widgets", 805, nil, false); err != nil {
+		t.Fatalf("UpsertRunJobs with an empty listing: %v", err)
+	}
+	if unfetchable, complete := runRow(); unfetchable || complete {
+		t.Fatalf("run after an empty listing: unfetchable %v, jobs_complete %v; want false and false", unfetchable, complete)
+	}
+	if err := UpsertRunJobs(ctx, pool, "acme/widgets", 805, nil, true); err != nil {
+		t.Fatalf("UpsertRunJobs with an empty complete listing: %v", err)
+	}
+	if _, complete := runRow(); !complete {
+		t.Fatal("jobs_complete after an empty complete listing = false, want true")
+	}
+	jobs, err := ListRunJobs(ctx, pool, "acme/widgets", 805)
+	if err != nil || len(jobs) != 0 {
+		t.Fatalf("jobs after empty listings = %+v, %v; want none", jobs, err)
+	}
+}
+
 // TestAJobsWriteAndARunWriteOfOneRunNeverDeadlock: a run's jobs and the run's own completion are
 // written by separate consumers (JobIntake and Intake) and race for the same run. A single-statement
 // run write takes the run row's lock and then, in delivery_runs' change trigger, the change log's
@@ -191,16 +230,16 @@ func TestAJobsWriteAndARunWriteOfOneRunNeverDeadlock(t *testing.T) {
 	if _, err := gate.Exec(ctx, `select pg_advisory_xact_lock(6900, 0)`); err != nil {
 		t.Fatalf("take the change log's lock: %v", err)
 	}
-	var gatePID int
-	if err := gate.QueryRow(ctx, `select pg_backend_pid()`).Scan(&gatePID); err != nil {
-		t.Fatalf("read the gate's pid: %v", err)
-	}
 	jobsDone := make(chan error, 1)
 	go func() { jobsDone <- UpsertRunJobs(ctx, pool, "acme/widgets", 803, jobs, true) }()
-	jobsPID := waitForBlocked(t, ctx, pool, []int{gatePID}, []int{})
+	if waiting := storetest.WaitForLockWaiters(t, gate, 1, 10*time.Second); waiting < 1 {
+		t.Fatalf("the jobs write never waited for the change log's lock: %d waiting", waiting)
+	}
 	runDone := make(chan error, 1)
 	go func() { runDone <- UpsertRun(ctx, pool, run) }()
-	waitForBlocked(t, ctx, pool, []int{gatePID, jobsPID}, []int{jobsPID})
+	if waiting := storetest.WaitForLockWaiters(t, gate, 2, 10*time.Second); waiting < 2 {
+		t.Fatalf("the run write never waited behind the jobs write: %d waiting", waiting)
+	}
 	if err := gate.Commit(ctx); err != nil {
 		t.Fatalf("release the change log's lock: %v", err)
 	}
@@ -221,32 +260,6 @@ func TestAJobsWriteAndARunWriteOfOneRunNeverDeadlock(t *testing.T) {
 	}
 	if completed == nil || !completed.Equal(finished) || !complete {
 		t.Fatalf("run after both writes: completed_at %v, jobs_complete %v; want %v and true", completed, complete, finished)
-	}
-}
-
-// waitForBlocked returns the pid of a backend, not one of holders or except, that waits for a lock
-// one of holders holds.
-func waitForBlocked(t *testing.T, ctx context.Context, pool *store.Pool, holders, except []int) int {
-	t.Helper()
-	for {
-		var pid int
-		err := pool.QueryRow(ctx, `
-			select pid from pg_stat_activity
-			where datname = current_database() and pid <> all($1::int[]) and pid <> all($2::int[])
-				and pg_blocking_pids(pid) && $1::int[]
-			limit 1
-		`, holders, except).Scan(&pid)
-		if err == nil {
-			return pid
-		}
-		if !errors.Is(err, pgx.ErrNoRows) {
-			t.Fatalf("read lock waits: %v", err)
-		}
-		select {
-		case <-ctx.Done():
-			t.Fatalf("no backend waited for a lock held by %v: %v", holders, ctx.Err())
-		case <-time.After(5 * time.Millisecond):
-		}
 	}
 }
 

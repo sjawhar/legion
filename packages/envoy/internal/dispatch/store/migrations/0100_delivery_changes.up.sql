@@ -8,12 +8,14 @@
 -- intake, job intake and reconcile writes take turns. The hub needs that order: a reader that has
 -- seen seq N must never later receive an earlier-committed N-1. Almost every writer is one
 -- statement, holding the lock from its trigger to its commit; the longest holders are a run's jobs
--- write (UpsertRunJobs: the run row, then every job in one statement) and a session-group write
--- (a few statements). A writer that also writes a delivery_runs row writes it before anything that
--- takes this lock, as a one-statement run write does (row lock, then this lock in its trigger), so
--- the two never wait on each other in a cycle. This migration locks no existing table: 0101-0106
--- each add one table's trigger, so each migration holds one table's lock alone, for milliseconds
--- (0073's reason).
+-- write and a session-group write (a few statements). A run's jobs write (UpsertRunJobs) writes the
+-- run row first, whose trigger takes this lock only when the write clears an unfetchable mark, then
+-- every job in one statement, whose trigger takes it at the first job row it changes; it holds the
+-- lock from whichever takes it first to its commit. A writer that also writes a delivery_runs row
+-- takes that row's lock before this one, as a one-statement run write does (row lock, then this
+-- lock in its trigger), so the two never wait on each other in a cycle. This migration locks no
+-- existing table: 0101-0106 each add one table's trigger, so each migration holds one table's lock
+-- alone, for milliseconds (0073's reason).
 create table delivery_changes (
   seq      bigserial primary key,
   at       timestamptz not null default clock_timestamp(),

@@ -597,13 +597,13 @@ func ScanJob(row pgx.Row) (DeliveryRunJob, error) {
 // itself the "it is fetchable after all" signal, the same way a successful UpsertPullRequest
 // clears unfetchable_at/unfetchable_reason.
 //
-// The run's bookkeeping and its job rows commit together, in one transaction of two statements:
-// the run row first, then every job in one statement. Every other writer of a delivery_runs row is
-// one statement that takes the row's lock and then, in its change trigger, the change log's
-// advisory lock (0100); this transaction takes them in that same order, so a run's own completion
-// written beside its jobs waits for one of them rather than deadlocking with it. The advisory lock
-// is taken by the jobs statement's trigger, or the run statement's when it clears an unfetchable
-// mark, and held from there to the commit: at most the two statements and the commit.
+// The run's bookkeeping and its job rows commit together, in one transaction: the run row first,
+// then every job in one statement (none for an empty listing). Every other writer of a
+// delivery_runs row is one statement that takes the row's lock and then, in its change trigger,
+// the change log's advisory lock (0100); this transaction takes them in that same order, so a run's
+// own completion written beside its jobs waits for one of them rather than deadlocking with it. The
+// advisory lock is taken by the jobs statement's trigger, or the run statement's when it clears an
+// unfetchable mark, and held from there to the commit: at most the two statements and the commit.
 func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int64, jobs []DeliveryRunJob, complete bool) error {
 	if complete {
 		for _, job := range jobs {
@@ -615,28 +615,27 @@ func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int
 	// One statement writes each name once, so a listing that repeats a name is folded here by the
 	// statement's own rule (a finished job is never replaced by an unfinished one), leaving the
 	// stored row as writing each job in turn would.
+	type foldedJob struct {
+		name                   string
+		startedAt, completedAt *time.Time
+		conclusion             *string
+	}
 	index := make(map[string]int, len(jobs))
-	names := make([]string, 0, len(jobs))
-	started := make([]*time.Time, 0, len(jobs))
-	completed := make([]*time.Time, 0, len(jobs))
-	conclusions := make([]*string, 0, len(jobs))
+	folded := make([]foldedJob, 0, len(jobs))
 	for _, job := range jobs {
-		var conclusion *string
+		row := foldedJob{name: job.Name, startedAt: job.StartedAt, completedAt: job.CompletedAt}
 		if job.Conclusion != nil {
 			c := string(*job.Conclusion)
-			conclusion = &c
+			row.conclusion = &c
 		}
 		i, seen := index[job.Name]
 		if !seen {
-			index[job.Name] = len(names)
-			names = append(names, job.Name)
-			started = append(started, job.StartedAt)
-			completed = append(completed, job.CompletedAt)
-			conclusions = append(conclusions, conclusion)
+			index[job.Name] = len(folded)
+			folded = append(folded, row)
 			continue
 		}
-		if completed[i] == nil || job.CompletedAt != nil {
-			started[i], completed[i], conclusions[i] = job.StartedAt, job.CompletedAt, conclusion
+		if folded[i].completedAt == nil || row.completedAt != nil {
+			folded[i] = row
 		}
 	}
 	tx, err := pool.Begin(ctx)
@@ -651,17 +650,27 @@ func UpsertRunJobs(ctx context.Context, pool *store.Pool, repo string, runID int
 	`, repo, runID, complete); err != nil {
 		return fmt.Errorf("clear jobs-unfetchable mark for run %d: %w", runID, err)
 	}
-	if _, err := tx.Exec(ctx, `
-		insert into delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion)
-		select $1, $2, job.name, job.started_at, job.completed_at, job.conclusion
-		from unnest($3::text[], $4::timestamptz[], $5::timestamptz[], $6::text[]) as job (name, started_at, completed_at, conclusion)
-		on conflict (repo, run_id, name) do update set
-			started_at = excluded.started_at,
-			completed_at = excluded.completed_at,
-			conclusion = excluded.conclusion
-		where delivery_run_jobs.completed_at is null or excluded.completed_at is not null
-	`, repo, runID, names, started, completed, conclusions); err != nil {
-		return fmt.Errorf("upsert the jobs of run %d: %w", runID, err)
+	// An empty listing (GitHub has not created a running run's jobs yet) writes the run row alone.
+	if len(folded) > 0 {
+		names := make([]string, len(folded))
+		started := make([]*time.Time, len(folded))
+		completed := make([]*time.Time, len(folded))
+		conclusions := make([]*string, len(folded))
+		for i, row := range folded {
+			names[i], started[i], completed[i], conclusions[i] = row.name, row.startedAt, row.completedAt, row.conclusion
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into delivery_run_jobs (repo, run_id, name, started_at, completed_at, conclusion)
+			select $1, $2, job.name, job.started_at, job.completed_at, job.conclusion
+			from unnest($3::text[], $4::timestamptz[], $5::timestamptz[], $6::text[]) as job (name, started_at, completed_at, conclusion)
+			on conflict (repo, run_id, name) do update set
+				started_at = excluded.started_at,
+				completed_at = excluded.completed_at,
+				conclusion = excluded.conclusion
+			where delivery_run_jobs.completed_at is null or excluded.completed_at is not null
+		`, repo, runID, names, started, completed, conclusions); err != nil {
+			return fmt.Errorf("upsert the jobs of run %d: %w", runID, err)
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit jobs write for run %d: %w", runID, err)

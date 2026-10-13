@@ -107,6 +107,7 @@ function after(ms: number, fn: () => void): () => void {
 }
 
 export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
+  const cache = queryClient.getQueryCache();
   const subs = new Map<string, Subscription>();
   const byHash = new Map<string, Subscription>();
   const listeners = new Set<() => void>();
@@ -190,7 +191,7 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
     }
     // A subscription that already answered fails as a failed refetch does, keeping its data. It
     // stays subscribed: Dispatch answers it again once it can (a configuration saved, say).
-    const query = queryClient.getQueryCache().find({ exact: true, queryKey: sub.queryKey });
+    const query = cache.find({ exact: true, queryKey: sub.queryKey });
     query?.setState({
       ...query.state,
       error: failure,
@@ -297,13 +298,17 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
     });
   };
 
-  const stopCache = queryClient.getQueryCache().subscribe((event) => {
+  const stopCache = cache.subscribe((event) => {
     if (event.type !== "observerRemoved" && event.type !== "removed") return;
     // gcTime 0 can collect the query a render built before its observer subscribes; subscribing
     // then builds a second query under the same hash, and the first still reports its own removal
     // afterwards (QueryCache.remove notifies for a query it no longer holds). The subscription
-    // belongs to the query the cache holds now.
-    const held = queryClient.getQueryCache().get(event.query.queryHash);
+    // belongs to the query the cache holds now. That relies on every query under a live key being
+    // built from queries.ts's live options, so the query the cache holds subscribes through
+    // live.subscribe itself, which replaces the hash's subscription. A query built under one of
+    // these keys any other way (a prefetch with its own queryFn, say) would break it: the live
+    // query's final removal would be skipped and its subscription never dropped.
+    const held = cache.get(event.query.queryHash);
     if (held !== undefined && held !== event.query) return;
     if (event.type === "observerRemoved" && event.query.getObserversCount() > 0) return;
     const sub = byHash.get(event.query.queryHash);
