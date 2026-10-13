@@ -39132,19 +39132,17 @@ var DispatchSectionSchema = exports_external.strictObject({
   serverUrl: httpUrlSchema.optional(),
   token: exports_external.string().optional()
 });
-var NatsUrlsSchema = exports_external.array(exports_external.string().trim().min(1, "must not be empty"));
 var EnvoySectionSchema = exports_external.strictObject({
   enabled: exports_external.boolean().optional(),
   url: httpUrlSchema.optional(),
-  natsUrls: NatsUrlsSchema.optional(),
+  natsUrls: exports_external.array(exports_external.string().trim().min(1, "must not be empty")).optional(),
   token: exports_external.string().optional(),
   natsSeed: exports_external.string().optional()
 });
 var EnvoyFileSchema = exports_external.looseObject({
   $schema: exports_external.string().optional(),
   dispatch: DispatchSectionSchema.optional(),
-  envoy: EnvoySectionSchema.optional(),
-  natsUrls: NatsUrlsSchema.optional()
+  envoy: EnvoySectionSchema.optional()
 });
 var CheckoutFileSchema = exports_external.looseObject({
   $schema: exports_external.string().optional(),
@@ -39292,10 +39290,10 @@ function parseFile(filePath, schema, checkout) {
       reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`
     };
   }
-  if (checkout && typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
+  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
     return {
       kind: "invalid",
-      reason: `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section`
+      reason: checkout ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section` : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`
     };
   }
   const parsed = schema.safeParse(parsedJson);
@@ -39378,13 +39376,14 @@ function checkoutCommandRefusal(checkoutPath, field) {
   return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
 }
 function oldUserFileNotice(filePath, env) {
-  if (openCodeUserFile(filePath, env) !== null)
-    return;
   const home = nonEmpty(env.HOME) ?? homedir();
   const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old))
     return;
   const selected = path.resolve(filePath);
+  if (selected === path.resolve(home, ".config", "legion", "envoy.json")) {
+    return `${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`;
+  }
   const profileDirectories = [
     nonEmpty(env.OMP_PROFILE) !== undefined && nonEmpty(env.OMP_PROFILE) !== "default" ? nonEmpty(env.PI_CODING_AGENT_DIR) : undefined,
     nonEmpty(env.CLAUDE_CONFIG_DIR),
@@ -39395,7 +39394,7 @@ function oldUserFileNotice(filePath, env) {
   }
   const configHome = nonEmpty(env.XDG_CONFIG_HOME);
   const neutral = neutralConfig(env);
-  if (configHome !== undefined && path.isAbsolute(configHome) && "path" in neutral && selected === neutral.path && neutral.path !== path.resolve(home, ".config", "legion", "envoy.json")) {
+  if (configHome !== undefined && path.isAbsolute(configHome) && "path" in neutral && selected === neutral.path) {
     return `${old} is not read under XDG_CONFIG_HOME=${configHome}`;
   }
   return;
@@ -39405,83 +39404,33 @@ function missingConfigNotice(filePath, missing, off) {
   const old = missing.oldUserFileNotice === undefined ? "" : `; ${missing.oldUserFileNotice}`;
   return `no envoy.json at ${filePath}${link}: ${off}${old}`;
 }
-function openCodeUserFile(filePath, env) {
-  const neutral = neutralConfig(env);
-  if ("error" in neutral || neutral.path !== path.resolve(filePath))
-    return null;
-  const home = nonEmpty(env.HOME) ?? homedir();
-  if (neutral.path !== path.resolve(home, ".config", "legion", "envoy.json"))
-    return null;
-  return path.join(home, ".config", "opencode", "envoy.json");
-}
-function chosenSections(filePath, settings, warnings, warn) {
-  const { natsUrls, ...rest } = settings;
-  if (natsUrls === undefined)
-    return { kind: "valid", settings };
-  if (rest.envoy?.natsUrls !== undefined) {
-    return {
-      kind: "invalid",
-      error: `${filePath}: natsUrls and envoy.natsUrls are both set; keep envoy.natsUrls`
-    };
-  }
-  if (warn) {
-    warnings.push(`${filePath}: the top-level natsUrls is read as envoy.natsUrls until it moves (a later release stops reading it): move natsUrls into envoy.natsUrls`);
-  }
-  return { kind: "valid", settings: { ...rest, envoy: { ...rest.envoy, natsUrls } } };
-}
 function readEnvoyConfig(filePath, env, options) {
-  const warnings = [];
-  let readPath = filePath;
-  let chosen = parseFile(filePath, EnvoyFileSchema, false);
-  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env) : undefined;
-  const openCode = chosen.kind === "absent" ? openCodeUserFile(filePath, env) : null;
-  if (openCode !== null) {
-    const old = parseFile(openCode, EnvoyFileSchema, false);
-    if (old.kind !== "absent") {
-      chosen = old;
-      readPath = openCode;
-      warnings.push(`${openCode} is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv ${openCode} ${filePath}, then move a top-level natsUrls into envoy.natsUrls`);
-    }
-  }
+  const chosen = parseFile(filePath, EnvoyFileSchema, false);
   if (chosen.kind === "invalid")
-    return { kind: "failed", path: readPath, error: chosen.reason };
-  const sections = chosen.kind === "valid" ? chosenSections(readPath, chosen.settings, warnings, readPath === filePath) : { kind: "valid", settings: {} };
-  if (sections.kind === "invalid")
-    return { kind: "failed", path: readPath, error: sections.error };
-  const own = sections.settings;
+    return { kind: "failed", path: filePath, error: chosen.reason };
   const resolvedChosen = path.resolve(filePath);
-  const checkoutFile = (candidate, legacy) => candidate === resolvedChosen ? { kind: "absent", link: null } : parseFile(candidate, CheckoutFileSchema, !legacy);
-  let checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  let legacyCheckout = false;
-  let parsedCheckout = checkoutFile(checkoutPath, false);
-  if (parsedCheckout.kind === "absent") {
-    const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
-    const old = checkoutFile(oldCheckout, true);
-    if (old.kind !== "absent") {
-      warnings.push(`${oldCheckout} is read until it moves (a later release stops reading it): mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`);
-      parsedCheckout = old;
-      checkoutPath = oldCheckout;
-      legacyCheckout = true;
-    }
-  }
+  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
+  const checkoutFile = checkoutPath === resolvedChosen ? { kind: "absent", link: null } : parseFile(checkoutPath, CheckoutFileSchema, true);
+  const own = chosen.kind === "valid" ? chosen.settings : {};
   let checkout = null;
-  if (parsedCheckout.kind === "invalid") {
-    checkout = { kind: "invalid", path: checkoutPath, error: parsedCheckout.reason };
-  } else if (parsedCheckout.kind === "valid") {
-    const ignoredLegacySettings = legacyCheckout && (Object.hasOwn(parsedCheckout.settings, "natsUrls") || Object.hasOwn(parsedCheckout.settings, "envoy"));
-    if (ignoredLegacySettings) {
-      warnings.push(`${checkoutPath}: natsUrls/envoy is not read from a checkout's envoy.json; ignored`);
-    }
+  if (checkoutFile.kind === "invalid") {
+    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
+  } else if (checkoutFile.kind === "valid") {
     checkout = {
       kind: "valid",
       path: checkoutPath,
-      dispatch: parsedCheckout.settings.dispatch ?? {},
-      envoyError: legacyCheckout || !Object.hasOwn(parsedCheckout.settings, "envoy") ? null : `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}`
+      dispatch: checkoutFile.settings.dispatch ?? {},
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
     };
   }
+  const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
+  const warnings = oldCheckout !== resolvedChosen && !existsSync(checkoutPath) && existsSync(oldCheckout) ? [
+    `${oldCheckout} is not read: mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`
+  ] : [];
+  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env) : undefined;
   return {
     kind: "read",
-    path: readPath,
+    path: filePath,
     dispatch: own.dispatch ?? {},
     envoy: own.envoy ?? {},
     checkout,
@@ -39765,18 +39714,10 @@ function sessionDispatchSettings(file2, env, options) {
     return offWithError(file2.error);
   return dispatchSettings(env, readEnvoyConfig(file2.path, env, options));
 }
-function resolveDispatchConfigWithWarnings(env, options) {
-  const file2 = sessionConfigFile(options.harness, env);
-  if (file2.path === null)
-    return { dispatch: offWithError(file2.error), warnings: [] };
-  const config2 = readEnvoyConfig(file2.path, env, { cwd: options.cwd ?? process.cwd() });
-  return {
-    dispatch: dispatchSettings(env, config2),
-    warnings: config2.kind === "read" ? config2.warnings : []
-  };
-}
 function resolveDispatchConfig(env, options) {
-  return resolveDispatchConfigWithWarnings(env, options).dispatch;
+  return sessionDispatchSettings(sessionConfigFile(options.harness, env), env, {
+    cwd: options.cwd ?? process.cwd()
+  });
 }
 
 // ../envoy-client/src/tool-input-errors.ts
