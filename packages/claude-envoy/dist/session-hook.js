@@ -19013,10 +19013,18 @@ function sessionDispatchSettings(file2, env, options) {
     return offWithError(file2.error);
   return dispatchSettings(env, readEnvoyConfig(file2.path, env, options));
 }
+function resolveDispatchConfigWithWarnings(env, options) {
+  const file2 = sessionConfigFile(options.harness, env);
+  if (file2.path === null)
+    return { dispatch: offWithError(file2.error), warnings: [] };
+  const config2 = readEnvoyConfig(file2.path, env, { cwd: options.cwd ?? process.cwd() });
+  return {
+    dispatch: dispatchSettings(env, config2),
+    warnings: config2.kind === "read" ? config2.warnings : []
+  };
+}
 function resolveDispatchConfig(env, options) {
-  return sessionDispatchSettings(sessionConfigFile(options.harness, env), env, {
-    cwd: options.cwd ?? process.cwd()
-  });
+  return resolveDispatchConfigWithWarnings(env, options).dispatch;
 }
 
 // src/claude-session.ts
