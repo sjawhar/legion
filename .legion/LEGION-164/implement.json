@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "LEGION-164",
-  "completed": "2026-10-13T00:40:00Z",
+  "completed": "2026-10-13T00:48:28Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/1932",
-  "head": "210f810a8389bbf3092c12de9c4b92d5e558deb3",
+  "head": "c8626dffc9e5815cbc1ce52bd3ff60ede1068f0e",
   "proof": [
     {
       "criterion": "4. Under Kubernetes the pod stays and the plugin comes from npm: the install wrapper the Sandbox runtime hands the launcher installs the exact pair under $XDG_STATE_HOME/legion-plugins/g<generation>/, refuses a pi-legion on another contract before the agent starts, and names the installed copies as the two --extension roots",
@@ -72,12 +72,14 @@
   "deviations": [
     "The five plan departures from the spec (plan §3), all accepted by the architect over Envoy on 2026-10-12T20:29Z before implementation: no-plugin-source degraded mode relaunches nothing; a stale registration is recorded, relaunched, then answered 409; stage 4a reads the installed pi-legion's declared contract; a new Go-daemon `### Contract discipline` subsection; acceptance 7 proves the stale-caller path with the role's next `bash` call plus `read_record`.",
     "Stage 4a's `stale-plugin-install` checkpoint (acceptance 4d) and the production preconditions are operator-run; opened as dispatch://LEGION-164/ask/8f60b4e5-dcb5-4925-8d25-7f478e52df84 and dispatch://LEGION-164/ask/28313726-42fe-49db-a0fa-5df9fa9e97aa. The production boot itself (acceptance 7) is the post-merge production check.",
-    "A forward merge with main (#1930 landed mid-implementation) at 210f810a resolved two conflicts (AGENTS.md's `go build` line, kubernetes.go's prepareSandbox doc comment); the fingerprint changed by that one AGENTS.md line only (https://github.com/sjawhar/legion/pull/1932#issuecomment-6135313192)."
+    "A forward merge with main (#1930 landed mid-implementation) at 210f810a resolved two conflicts (AGENTS.md's `go build` line, kubernetes.go's prepareSandbox doc comment); the fingerprint changed by that one AGENTS.md line only (https://github.com/sjawhar/legion/pull/1932#issuecomment-6135313192).",
+    "CI at the merge head 210f810a failed TestRunPrunesTheSecretFilesOfClaimsWithNoProcess (internal/daemon): it seeds a live claim with no recorded contract through the store and boots the daemon, which now relaunches such a claim first; c8626dff seeds it at api.DaemonAPIVersion, as the unfinished-claim test already does. The pod could not run it (the package's NATS tests need Docker)."
   ],
   "openQuestions": [
     "Whether the LEGION deployment's daemon is the release archive's `legion` or the worker image's (ask 28313726): both link the pair; the answer only tells the production check where to read `legion version` from before the restart."
   ],
   "discoveredComplexity": [
     "Simplify pass (ce-simplify-code, three `reviewer` agents): 11 findings applied at 48f3c831 — one correctness fix (above) and shared helpers (`replaceProcess`, `staleContract`, `claimHolds` returning the machine, `controllerSessionRegistered`, `HoldsCapability`, `NoPluginSourceMessage`, `PluginsFromFile`/`PluginsFromBinary`, `staleClaim` over a claim copy); one skipped (streaming decode for routes with no identity check: bodies are already bounded by maxRequestBytes)."
-  ]
+  ],
+  "ci": "Tests run 38328392549 (lint, typecheck, test success) and PR Title run 38328392565 at c8626dffc9e5815cbc1ce52bd3ff60ede1068f0e"
 }
