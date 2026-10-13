@@ -60,7 +60,7 @@ func redeliverWebhooks(ctx context.Context, args []string, env settingValues, ou
 		fmt.Fprintf(out, "redeliver-webhooks: load envoy config: %v\n", err)
 		return 1
 	}
-	natsClient, err := bus.Connect(envoyConfig.NatsURLs, bus.WithEnvironment(env.lookup))
+	natsClient, err := bus.Connect(envoyConfig.Envoy.NatsURLs, bus.WithEnvironment(env.lookup))
 	if err != nil {
 		fmt.Fprintf(out, "redeliver-webhooks: connect NATS: %v\n", err)
 		return 1

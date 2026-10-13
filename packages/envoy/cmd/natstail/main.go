@@ -42,7 +42,7 @@ func main() {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	if err := tail(ctx, cfg.NatsURLs, *subject, *count, os.Stdout); err != nil {
+	if err := tail(ctx, cfg.Envoy.NatsURLs, *subject, *count, os.Stdout); err != nil {
 		if errors.Is(err, context.DeadlineExceeded) {
 			fmt.Fprintln(os.Stderr, "natstail: timed out waiting for envelopes")
 		} else {

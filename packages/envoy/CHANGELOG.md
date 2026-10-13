@@ -261,6 +261,15 @@
 
 ### Changed
 
+- **Breaking:** `envoy-dispatch` and `natstail` read `envoy.json` from
+  `${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json` and the checkout's `.envoy/envoy.json`, and
+  take the NATS URLs from `envoy.natsUrls` (LEGION-707). `~/.config/opencode/envoy.json` and
+  `.opencode/envoy.json` are not read: while the old user file is the only one, startup refuses,
+  naming both paths and saying to move it, and a file that still carries a top-level `natsUrls` is
+  refused, naming `envoy.natsUrls`. The `envoy` section takes `enabled`, `url`, `natsUrls`,
+  `token` and `natsSeed` and refuses any other key. `XDG_CONFIG_HOME` is a row of the settings
+  table; `DISPATCH_SERVER_URL` and `NATS_URLS` still override both files. A deployment that sets
+  both variables, as `deploy/compose/dispatch.compose.yml` does, needs no change.
 - **Breaking:** the secrets broker refuses to start when `BROKER_SERVICES` binds a namespace's
   `default` service account (`system:serviceaccount:<namespace>:default`), naming the entry: every
   pod in that namespace whose spec names no account runs as it and can get a token for the broker's
