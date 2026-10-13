@@ -69,6 +69,17 @@
 
 ### Changed
 
+- The `dispatch` skill and its documents reference say what follows a human's answer to a decision
+  block in a document they approved (LEGION-573): when the answer is the whole change since the
+  version they approved, Dispatch records an `approved` review in their name at the new version
+  and emits `artifact.approved`, so the agent requests nothing; when the answer changes text
+  outside the block, the agent rewrites that text, runs the fresh reader on the new version and
+  requests approval again with a one-sentence `--summary` naming what changed since the earlier
+  approval, which the request names in `ask.approval` (`approved_version`, `approved_at`,
+  `approved_by`) and the card shows with its `Show diff` control. The reference lists what still
+  leaves an approval stale: a change outside the blocks, a block added since the approval the human
+  has not answered, a removed block, a newer request for changes, or a document they never approved.
+
 - `@legion/pi-shared`'s plugin interface is at version 2 (LEGION-394): a turn sent as typed input
   is found by its tag alone, a `/skill:`'s tagged `skill-prompt` message counts as the person's
   turn in a Legion phase worker, and such a turn is still found after the run's `agent_end` (the

@@ -45,6 +45,17 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Changed
 
+- The `legion-architect` skill's section 1 and its `design-approved` row say what follows a
+  human's answer to a decision block in the approved root spec (LEGION-573): when the answer is the
+  whole change since the version they approved, Dispatch carries their approval to the new version,
+  the daemon reopens the gate and sends `design-approved`, and that notice opens nothing new — the
+  architect requests nothing and releases no wave because of it; when the answer changes the
+  Summary, the Acceptance or the tree's scope, the architect rewrites that text, repeats the
+  fresh-reader check, the approval request and `register_gate` on the new version with a
+  one-sentence `--summary` naming what changed since the earlier approval, and releases no wave on
+  the `design-approved` the answer brought. An approved spec gets nothing but the decision block
+  and its evidence; an in-block edit before the answer closes the gate like any version without
+  stopping the answer carrying the approval.
 - `legion.daemonApiVersion` is 24 (LEGION-164): the daemon records each session's `pluginContract`
   and shows it on the claim views (`GET /legion/v1/state`, `legion state --json`) and the
   controller locator; a session whose plugin speaks another contract is relaunched onto the

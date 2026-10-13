@@ -185,7 +185,10 @@ the document id and version with the daemon, and the daemon opens the gate on th
 `artifact.approved` event for that document at its current version — or at registration itself,
 when Dispatch already shows the human approved that version before the architect registered (the
 daemon reads the approval; it never writes one). A later spec version closes the gate until
-someone approves the new version, and a `changes_requested` review closes it with the reviewer's
+someone approves the new version, which Dispatch does in the human's own name when the version is
+his answer to a decision block and that answer is the whole change since the version he approved
+(it records an `approved` review pinned to the new version and emits `artifact.approved`, and the
+gate reopens on that event), and a `changes_requested` review closes it with the reviewer's
 reason. `gates.design: off` is the only way past the gate without a human review — Legion has no
 operator approve command; with `off` the root architect is told so in its system prompt and adds
 no approval step. Whether a human must approve a pull request before it merges is the repository's

@@ -10,7 +10,10 @@
   a `reason` naming the carry and the version it follows and an `ask_id` that is null unless a
   request was open at the carry, which it answers. `AskApproval.approved_version`, `approved_at`
   and `approved_by` name the document's newest approval when a request opens; all three are absent
-  on a first request (LEGION-573).
+  on a first request. The `dispatch_request_approval` tool description says the same rule: an edit
+  outside the decision blocks stales the approval and the request after it carries a one-sentence
+  summary of what changed, and the human's own answer carries it when it is the whole change
+  (LEGION-573).
 - `MyReplyRow`, `MyReplyReply` and `MyRepliesResponse`, the page `GET /api/v1/me/replies`
   returns, and the `user_thread_state.updated` event with its `UserThreadStateUpdatedEventPayload`
   (LEGION-687).
