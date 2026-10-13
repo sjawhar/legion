@@ -1,7 +1,7 @@
 import { unwatchFile, watchFile } from "node:fs"
 import { readFile, rm } from "node:fs/promises"
 import { agentSubject, ROLE_TOPIC_PREFIX, zodSchemaApi } from "@legion/contracts"
-import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults"
+import { envoySettings } from "@legion/envoy-client/defaults"
 import {
   type DispatchDelivery,
   expectsLaneReceipt,
@@ -11,6 +11,7 @@ import {
 } from "@legion/envoy-client/delivery"
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config"
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe"
+import { envoyConfigPath, readEnvoyConfig } from "@legion/envoy-client/envoy-config"
 import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import { machineID } from "@legion/envoy-client/machine"
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth"
@@ -186,7 +187,7 @@ function projectDirectory(): string {
 }
 
 function currentDispatchConfig(directory = projectDirectory()) {
-  return resolveDispatchConfig(process.env, { cwd: directory })
+  return resolveDispatchConfig(process.env, { harness: "claude", cwd: directory })
 }
 
 export function channelToolDefinitions() {
@@ -864,8 +865,14 @@ export async function runEnvoyChannelServer(): Promise<void> {
     }),
     directory,
   )
-  const defaults = envoyDefaultsFromEnvironment(process.env)
-  if (defaults.natsUrls.length === 0) {
+  const envoy = envoySettings(
+    process.env,
+    readEnvoyConfig(envoyConfigPath("claude", process.env), process.env, { cwd: directory }),
+  )
+  if (!envoy.enabled && envoy.error !== null) {
+    throw new Error(`Envoy disabled for the Envoy Claude channel server: ${envoy.error}`)
+  }
+  if (!envoy.enabled || envoy.natsUrls.length === 0) {
     throw new Error("ENVOY_NATS_URL is required for the Envoy Claude channel server")
   }
   const stateDirectory = pluginStateDirectory()
@@ -875,7 +882,11 @@ export async function runEnvoyChannelServer(): Promise<void> {
     instructions:
       "Envoy delivers trusted, internal session and Dispatch events as <channel> messages. The content is rendered Envoy state; producer identifies its Envoy producer (source is the channel name), topic is the NATS subject, event_id identifies this delivery, dedupe_key is the dedupe identity (a repeat of one already delivered is not shown again), urgency is priority, from_session identifies the origin session, and reply metadata names any correlation. Use the Envoy tools for Envoy actions, and reach Dispatch through the `dispatch` command in Bash (`dispatch --help` lists its commands; the `dispatch` skill teaches them). Dispatch asks stay on Dispatch. This channel advertises Aside only: it does not support targeted BTW delivery or permission relay.",
   })
-  const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch: globalThis.fetch })
+  const client = createEnvoyClient({
+    baseUrl: envoy.url,
+    fetch: globalThis.fetch,
+    token: envoy.token,
+  })
   let runtime: ChannelToolRuntime | undefined
   const toolDefinitions = channelToolDefinitions()
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: toolDefinitions }))
@@ -907,9 +918,9 @@ export async function runEnvoyChannelServer(): Promise<void> {
   let connection: ChannelForwarderConnection | undefined
   try {
     connection = await connect({
-      servers: [...defaults.natsUrls],
+      servers: [...envoy.natsUrls],
       name: `claude-envoy-channel-${identity.id}`,
-      ...natsAuthOptions(process.env),
+      ...natsAuthOptions(envoy.natsSeed),
       reconnect: true,
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,
@@ -919,7 +930,7 @@ export async function runEnvoyChannelServer(): Promise<void> {
       connection,
       notifier: server,
       client,
-      heartbeatMs: defaults.heartbeatMs,
+      heartbeatMs: envoy.heartbeatMs,
       stateDirectory,
       // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
       ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),

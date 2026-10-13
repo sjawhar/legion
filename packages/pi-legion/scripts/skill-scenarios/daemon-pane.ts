@@ -8,7 +8,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { LegionRole } from "@legion/contracts";
-import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import { DEFAULT_ENVOY_URL, envoySettings } from "@legion/envoy-client/defaults";
+import { envoyConfigPath, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
 
 /** This checkout's daemon module, the one the rig reads unless a run names another checkout's. */
 export const DAEMON_MODULE = path.resolve(import.meta.dir, "../../../daemon");
@@ -96,8 +97,9 @@ export interface PaneSource {
  * scratch state directory and the stand-in daemon, over the caller's own environment. Everything
  * the daemon tells the pane comes from the daemon's own functions in `source`'s module
  * (`daemon-pane.go`): the claim's identity, the daemon URL, the state directory and workspace,
- * Envoy (the listener and NATS the pane's own extension reaches from the caller's environment,
- * `envoyDefaultsFromEnvironment`), `GH_CONFIG_DIR` naming the claim's gh files, which hold
+ * Envoy (the listener and NATS the pane's own extension reaches from the caller's environment and
+ * the profile's envoy.json, `envoySettings`; the default listener and no NATS when that Envoy is
+ * off), `GH_CONFIG_DIR` naming the claim's gh files, which hold
  * `RIG_GH_TOKEN`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty, `PI_SHELL_PREFIX`, the
  * four XDG base directories, the boot token pointer (`<state>/secrets/boot`, the file the stand-in
  * checks), and PATH with the launcher directory first; no grant file, since the `legion` tool mints
@@ -122,14 +124,23 @@ export function workerPane(
   }
   const home = env.HOME ?? os.homedir();
   const stateDir = path.join(launch.rig, "state");
-  const envoy = envoyDefaultsFromEnvironment(env);
+  const profileEnv = {
+    ...env,
+    OMP_PROFILE: launch.profile,
+    PI_CODING_AGENT_DIR: path.join(home, ".omp", "profiles", launch.profile, "agent"),
+  };
+  const envoy = envoySettings(
+    profileEnv,
+    readEnvoyConfig(envoyConfigPath("omp", profileEnv), profileEnv, { cwd: process.cwd() })
+  );
+  if (!envoy.enabled && envoy.error !== null) throw new Error(`envoy: ${envoy.error}`);
   const request: PaneRequest = {
     ...claim,
     stateDir,
     workspace: path.join(launch.rig, "ws"),
     daemonUrl: `http://127.0.0.1:${launch.port}`,
-    envoyUrl: envoy.envoyUrl,
-    natsUrls: envoy.natsUrls,
+    envoyUrl: envoy.enabled ? envoy.url : DEFAULT_ENVOY_URL,
+    natsUrls: envoy.enabled ? envoy.natsUrls : [],
     bootTokenFile: path.join(stateDir, "secrets", "boot"),
     ghToken: RIG_GH_TOKEN,
     path: env.PATH ?? "",
@@ -142,9 +153,9 @@ export function workerPane(
     ...pane,
     env: {
       ...env,
-      OMP_PROFILE: launch.profile,
+      OMP_PROFILE: profileEnv.OMP_PROFILE,
       PI_PROFILE: launch.profile,
-      PI_CODING_AGENT_DIR: path.join(home, ".omp", "profiles", launch.profile, "agent"),
+      PI_CODING_AGENT_DIR: profileEnv.PI_CODING_AGENT_DIR,
       PI_NOTIFICATIONS: "off",
       PI_NO_TITLE: "1",
       ...pane.env,

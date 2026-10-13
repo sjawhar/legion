@@ -356,7 +356,10 @@ export default function legionExtension(pi: PiApi): void {
         // on it; PATH's jj, the one its shell runs.
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
         resolveDocument: async (issue, reference) => {
-          const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+          const config = activeDispatchConfig(process.env, {
+            harness: "omp",
+            cwd: process.cwd(),
+          });
           if (config === null) {
             throw new Error(
               `register_gate cannot look up document "${reference}" on ${issue}: this pane has no Dispatch configured; pass the document's id`

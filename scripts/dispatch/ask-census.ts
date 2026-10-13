@@ -447,10 +447,10 @@ export async function censusIssues(
 }
 
 async function run(options: CensusOptions): Promise<void> {
-  const config = activeDispatchConfig(process.env);
+  const config = activeDispatchConfig(process.env, { harness: "command" });
   if (config === null) {
     throw new Error(
-      "Dispatch is not configured: set DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or enable dispatch in ~/.config/opencode/envoy.json"
+      "Dispatch is not configured: set DISPATCH_URL with DISPATCH_TOKEN or DISPATCH_TOKEN_FILE, or enable dispatch in the envoy.json a command reads (ENVOY_CONFIG_FILE, or ~/.config/legion/envoy.json)"
     );
   }
   const codes =

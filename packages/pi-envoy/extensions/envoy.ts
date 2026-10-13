@@ -15,7 +15,11 @@ import {
   ROLE_TOPIC_PREFIX,
   zodSchemaApi,
 } from "@legion/contracts";
-import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import {
+  DEFAULT_ENVOY_URL,
+  DEFAULT_HEARTBEAT_MS,
+  envoySettings,
+} from "@legion/envoy-client/defaults";
 import {
   createDeliveryDedupe,
   DedupeIdentitySchema,
@@ -46,6 +50,7 @@ import {
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
+import { envoyConfigPath, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
@@ -141,7 +146,7 @@ const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
  * throws, as `activeDispatchConfig` does.
  */
 function timedDispatchClient(timeoutMs: number): DispatchClient | undefined {
-  const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+  const config = activeDispatchConfig(process.env, { harness: "omp", cwd: process.cwd() });
   return config === null
     ? undefined
     : new DispatchClient(config.url, config.token, fetch, AbortSignal.timeout(timeoutMs));
@@ -402,22 +407,39 @@ export default function envoyExtension(pi: PiApi): void {
   // Envoy entry at another interface version published first: that entry's object stays the one
   // Legion finds, and this instance pushes no claim instance onto it (first wins).
   const publishedInterface = publishEnvoyPluginInterface(import.meta.url);
-  const defaults = envoyDefaultsFromEnvironment(process.env);
+  const envoy = envoySettings(
+    process.env,
+    readEnvoyConfig(envoyConfigPath("omp", process.env), process.env, { cwd: process.cwd() })
+  );
+  // An Envoy that is off keeps the no-NATS path: outbound tools against the default listener
+  // address with no bearer, and no inbound messages.
+  const defaults = envoy.enabled
+    ? envoy
+    : {
+        url: DEFAULT_ENVOY_URL,
+        natsUrls: [],
+        token: undefined,
+        natsSeed: undefined,
+        heartbeatMs: DEFAULT_HEARTBEAT_MS,
+      };
   // One loader for the shared envoy.json contract: the dispatch-first context is injected only
   // where the file names a service at load, and an invalid file is reported at session start, not
   // silently treated as off. The URL and token themselves are re-read on every use
   // (`currentDispatchConfig`) so a Dispatch that moved - a new dispatch.serverUrl in envoy.json -
   // takes effect without /reload-plugins; a file that has since broken fails with its own error
   // instead of quietly using the stale endpoint.
-  const dispatchConfig = resolveDispatchConfig(process.env, { cwd: process.cwd() });
+  const dispatchConfig = resolveDispatchConfig(process.env, {
+    harness: "omp",
+    cwd: process.cwd(),
+  });
   const currentDispatchConfig = (): ActiveDispatchConfig => {
-    const config = activeDispatchConfig(process.env, { cwd: process.cwd() });
+    const config = activeDispatchConfig(process.env, { harness: "omp", cwd: process.cwd() });
     if (config === null) {
       throw new Error("Dispatch is no longer configured (dispatch.serverUrl/token missing)");
     }
     return config;
   };
-  const client = createEnvoyClient({ baseUrl: defaults.envoyUrl, fetch });
+  const client = createEnvoyClient({ baseUrl: defaults.url, fetch, token: defaults.token });
   const subscriptions = new Map<string, Subscription>();
   const delivered = createDeliveryDedupe();
   let connection: NatsConnection | undefined;
@@ -659,7 +681,7 @@ export default function envoyExtension(pi: PiApi): void {
     connection = await connect({
       servers: [...defaults.natsUrls],
       name: `omp-${sessionID || "unknown"}`,
-      ...natsAuthOptions(process.env),
+      ...natsAuthOptions(defaults.natsSeed),
       // Survive NATS drops after the first connection: nats.js re-subscribes
       // existing subscriptions on its own once reconnected.
       reconnect: true,
@@ -1718,10 +1740,12 @@ export default function envoyExtension(pi: PiApi): void {
     }
     if (defaults.natsUrls.length === 0) {
       context.ui.notify(
-        [
-          "envoy: ENVOY_NATS_URL is not set; inbound envoy messages are disabled",
-          "(outbound tools still work)",
-        ].join(" "),
+        envoy.enabled || envoy.error === null
+          ? [
+              "envoy: ENVOY_NATS_URL is not set; inbound envoy messages are disabled",
+              "(outbound tools still work)",
+            ].join(" ")
+          : `envoy: Envoy disabled — ${envoy.error}`,
         "warning"
       );
       return;

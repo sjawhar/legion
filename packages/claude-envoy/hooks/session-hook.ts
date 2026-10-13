@@ -76,7 +76,7 @@ async function openAsks(raw: unknown): Promise<void> {
     { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
     input.cwd ?? process.cwd(),
   )
-  const config = resolveDispatchConfig(process.env, { cwd: directory })
+  const config = resolveDispatchConfig(process.env, { harness: "claude", cwd: directory })
   if (config.enabled && config.url !== null && config.token !== null) {
     try {
       const snapshot = await new DispatchClient(
@@ -102,7 +102,7 @@ function dispatchFirst(raw: unknown): void {
     { CLAUDE_PROJECT_DIR: process.env["CLAUDE_PROJECT_DIR"] },
     input.cwd ?? process.cwd(),
   )
-  if (!resolveDispatchConfig(process.env, { cwd: directory }).enabled) return
+  if (!resolveDispatchConfig(process.env, { harness: "claude", cwd: directory }).enabled) return
   const pluginRoot = configuredValue(process.env["CLAUDE_PLUGIN_ROOT"])
   if (pluginRoot === undefined) {
     throw new Error("CLAUDE_PLUGIN_ROOT is unset; Claude Code sets it for every plugin hook")

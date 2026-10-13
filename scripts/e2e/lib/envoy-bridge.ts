@@ -8,6 +8,7 @@
 import { connect, type NatsConnection, type Subscription } from "nats";
 import { EnvelopeSchema } from "../../../packages/contracts/src/envelope";
 import { githubSubject } from "../../../packages/contracts/src/subject";
+import { natsSeedFromEnvironment } from "../../../packages/envoy-client/src/defaults";
 import { natsAuthOptions } from "../../../packages/envoy-client/src/nats-auth";
 
 const requiredEnvelopeFields = [
@@ -170,7 +171,7 @@ export async function runBridge(config: BridgeConfig): Promise<void> {
     servers: config.upstreamUrl,
     name: `legion-e2e-bridge-upstream-${config.repository}`,
     // The production server's nkey user, when it requires one: NATS_NKEY_SEED_FILE or NATS_NKEY_SEED.
-    ...natsAuthOptions(process.env),
+    ...natsAuthOptions(natsSeedFromEnvironment(process.env)),
     reconnect: true,
     maxReconnectAttempts: -1,
     reconnectTimeWait: 2_000,

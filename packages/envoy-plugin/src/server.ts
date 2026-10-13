@@ -2,9 +2,14 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { agentSubject, zodSchemaApi } from "@legion/contracts";
-import { envoyDefaultsFromEnvironment } from "@legion/envoy-client/defaults";
+import {
+  DEFAULT_ENVOY_URL,
+  DEFAULT_HEARTBEAT_MS,
+  envoySettings,
+} from "@legion/envoy-client/defaults";
 import { resolveDispatchConfig } from "@legion/envoy-client/dispatch-config";
 import { dispatchFirstSkillFile } from "@legion/envoy-client/dispatch-first";
+import { envoyConfigPath, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
 import { machineID } from "@legion/envoy-client/machine";
 import {
   envoyToolSpecs,
@@ -77,7 +82,7 @@ export default async (input: { serverUrl: URL }) => {
   const cwd = process.cwd();
   // Dispatch configuration never prevents Envoy from loading. A Dispatch the configuration
   // cannot reach is visible in the host log, including normal unconfigured installs.
-  const dispatchConfig = resolveDispatchConfig(process.env, { cwd });
+  const dispatchConfig = resolveDispatchConfig(process.env, { harness: "opencode", cwd });
   if (!dispatchConfig.enabled) {
     logger.warn(
       `envoy: Dispatch disabled — ${dispatchConfig.error ?? "no Dispatch URL configured"}`
@@ -97,8 +102,22 @@ export default async (input: { serverUrl: URL }) => {
       throw new Error(`envoy: the dispatch-first skill ${dispatchFirst} is missing`);
     }
   }
-  const envoyDefaults = envoyDefaultsFromEnvironment(process.env);
-  const envoy = createEnvoyClient({ baseUrl: envoyDefaults.envoyUrl, fetch: globalThis.fetch });
+  const settings = envoySettings(
+    process.env,
+    readEnvoyConfig(envoyConfigPath("opencode", process.env), process.env, { cwd })
+  );
+  if (!settings.enabled && settings.error !== null) {
+    logger.warn(`envoy: Envoy disabled — ${settings.error}`);
+  }
+  // An Envoy that is off keeps the default listener address, with no bearer.
+  const envoyDefaults = settings.enabled
+    ? settings
+    : { url: DEFAULT_ENVOY_URL, token: undefined, heartbeatMs: DEFAULT_HEARTBEAT_MS };
+  const envoy = createEnvoyClient({
+    baseUrl: envoyDefaults.url,
+    fetch: globalThis.fetch,
+    token: envoyDefaults.token,
+  });
   let activeSessionID: string | null = null;
   let activeSessionTitle: string | null = null;
   // All sessions that have become busy in this serve instance. The heartbeat
