@@ -7,7 +7,8 @@
 //   bun scripts/e2e/lib/operator-dispatch.ts
 //     prints one JSON object: {"file","url","token"} when Dispatch is on, and {"file","notice"}
 //     when nothing configures it or a file turns it off, exiting 0; {"error"} with exit 1 when a
-//     file, a URL or a token prevents it (the error never carries the token)
+//     file, a URL or a token prevents it (the error never carries the token). A file it found and
+//     did not read, a checkout's `.opencode/envoy.json`, is named on stderr with its rename first.
 import {
   type DispatchEnvironment,
   dispatchSettings,
@@ -21,10 +22,15 @@ export type OperatorDispatch =
 
 /** The operator's Dispatch from `env` and the checkout at `cwd`. Throws naming what prevents it:
  * a relative path the rule would use, a file that cannot be read, or a URL or token that does not
- * resolve. */
+ * resolve. Each file the read found and did not read is written to stderr first, as the `dispatch`
+ * command says it. */
 export function operatorDispatch(env: DispatchEnvironment, cwd: string): OperatorDispatch {
   const file = envoyConfigPath("command", env);
-  const resolution = dispatchSettings(env, readEnvoyConfig(file, env, { cwd }));
+  const config = readEnvoyConfig(file, env, { cwd });
+  if (config.kind === "read") {
+    for (const warning of config.warnings) process.stderr.write(`dispatch: ${warning}\n`);
+  }
+  const resolution = dispatchSettings(env, config);
   if (resolution.enabled) return { file, url: resolution.url, token: resolution.token };
   if (resolution.error !== null) throw new Error(resolution.error);
   return { file, notice: resolution.notice };

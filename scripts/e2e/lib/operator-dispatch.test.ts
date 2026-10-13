@@ -68,12 +68,28 @@ describe("operator_dispatch", () => {
 . "$1"
 operator_dispatch
 printf '%s|%s|%s|%s\\n' "$operator_dispatch_file" "$operator_dispatch_url" "$operator_dispatch_token" "$operator_dispatch_notice"`;
-  const [on, refused] = [{}, { DISPATCH_URL: "https://other.internal.example" }].map((extra) =>
+  const run = (directory: string, extra: Record<string, string> = {}) =>
     Bun.spawnSync(["bash", "-c", script, "_", join(import.meta.dir, "operator-dispatch.sh")], {
-      cwd,
+      cwd: directory,
       env: { HOME: home, PATH: process.env.PATH ?? "", ...extra },
+    });
+  const on = run(cwd);
+  const refused = run(cwd, { DISPATCH_URL: "https://other.internal.example" });
+  // A checkout holding only the OpenCode-era file, which names another server and bearer.
+  const oldCheckout = join(dir, "old-checkout");
+  const old = join(oldCheckout, ".opencode", "envoy.json");
+  mkdirSync(join(oldCheckout, ".opencode"), { recursive: true });
+  writeFileSync(
+    old,
+    JSON.stringify({
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://checkout.internal.example",
+        token: "checkout-3",
+      },
     })
   );
+  const inOldCheckout = run(oldCheckout);
 
   test("sets the file, URL and bearer the client resolves", () => {
     expect(on?.exitCode).toBe(0);
@@ -89,5 +105,15 @@ printf '%s|%s|%s|%s\\n' "$operator_dispatch_file" "$operator_dispatch_url" "$ope
       "FAIL the operator's Dispatch: DISPATCH_URL names https://other.internal.example, but"
     );
     expect(output).not.toContain("neutral-1");
+  });
+
+  test("a checkout's .opencode/envoy.json is named on stderr with its rename, and the user file's server is used", () => {
+    expect(inOldCheckout.exitCode).toBe(0);
+    expect(inOldCheckout.stderr.toString()).toBe(
+      `dispatch: ${old} is not read: mkdir -p ${join(oldCheckout, ".envoy")} && mv ${old} ${join(oldCheckout, ".envoy", "envoy.json")}\n`
+    );
+    expect(inOldCheckout.stdout.toString()).toBe(
+      `${join(home, ".config", "legion", "envoy.json")}|https://dispatch.internal.example|neutral-1|\n`
+    );
   });
 });

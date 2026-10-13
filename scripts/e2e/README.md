@@ -1780,9 +1780,11 @@ only with the server written beside it, and a `!` token runs). With Dispatch on 
 envoy.json's path, the URL and the bearer; when nothing configures Dispatch or a file turns it off,
 the URL and bearer are empty and `operator_dispatch_notice` says why. A relative path the rule would
 use, a file that cannot be read, or a URL or token that does not resolve fails the call through the
-caller's `fail`, naming it and never the token. The bearer stays in the caller's unexported
-variable, so it reaches no argv and no process's environment. The entry imports the checkout's
-`packages/envoy-client`, so the checkout's dependencies must be installed (`bun install`).
+caller's `fail`, naming it and never the token. A checkout's `.opencode/envoy.json`, which is not
+read, is named on stderr with its rename while the working directory has no `.envoy/envoy.json`.
+The bearer stays in the caller's unexported variable, so it reaches no argv and no process's
+environment. The entry imports the checkout's `packages/envoy-client`, so the checkout's
+dependencies must be installed (`bun install`).
 
 ## lib/workflow.sh
 
