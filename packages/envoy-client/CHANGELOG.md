@@ -76,9 +76,10 @@
   natsUrls, token, natsSeed, heartbeatMs }` or a `SectionOff`, `{ enabled: false, notice, error }`
   with exactly one of the two set, each variable overriding its own field of the chosen file's
   section; `ENVOY_URL` with the file's token at another origin than the file's listener is refused,
-  and the file's `natsSeed` goes only with the file's `natsUrls` (`ENVOY_NATS_URL` naming other
-  servers needs `NATS_NKEY_SEED_FILE`). `nats: false`, for a caller that opens no NATS connection,
-  resolves no NATS servers and no seed.
+  as is an empty `envoy.token`, with the same messages as `dispatch.token`'s, and the file's
+  `natsSeed` goes only with the file's `natsUrls` (`ENVOY_NATS_URL` naming other servers needs
+  `NATS_NKEY_SEED_FILE`). `nats: false`, for a caller that opens no NATS connection, resolves no
+  NATS servers and no seed.
 - `dispatchSettings(env, config)` and `activeDispatchSettings(resolution)`, the two halves of
   `activeDispatchConfig` for a caller that has already read its envoy.json.
 - `session-settings`: `sessionConfigFile(harness, env)`, the file a plugin's harness rule chooses with the rule's refusal of a relative path as an `error` instead of a throw; `sessionSettings(file, env, { cwd, nats })`, both sections and the one start notice a plugin shows; `sessionDispatchSettings`, Dispatch re-read from that same file on each use; and `resolveDispatchConfig` and `activeDispatchConfig`.

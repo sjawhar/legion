@@ -147,7 +147,8 @@ OpenCode's plugin) gets no NATS servers and resolves no seed. A set `_FILE` poin
 read is an `error`, never a fallback. The file's `envoy.token` goes with `ENVOY_URL` only when it
 names the origin of the listener written in the file (`http://127.0.0.1:9020` when it names none),
 and is otherwise refused with `ENVOY_URL names <origin>, but <file>'s envoy.token is for <origin>;
-set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`. The file's `envoy.natsSeed` goes only with the servers
+set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`; an empty `envoy.token` is refused, as an empty
+`dispatch.token` is. The file's `envoy.natsSeed` goes only with the servers
 written in the file, since a server that is not the real one can relay the real server's nonce and
 replay the signature: `ENVOY_NATS_URL` gets it only when it names those servers (as a set), and is
 otherwise refused with `ENVOY_NATS_URL names other servers than <file>'s envoy.natsUrls; set

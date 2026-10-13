@@ -1,3 +1,4 @@
+import { bearerSource, fileBearer } from "./bearer";
 import {
   type EnvoyConfig,
   type EnvoyConfigEnvironment,
@@ -9,7 +10,6 @@ import {
   offWithError,
   offWithNotice,
   type SectionOff,
-  unsendableRefusal,
 } from "./envoy-config";
 import { messageFor } from "./errors";
 import { readSecretFile } from "./secret-file";
@@ -77,36 +77,6 @@ export interface EnabledEnvoySettings {
 export type DisabledEnvoySettings = SectionOff;
 
 export type EnvoySettings = EnabledEnvoySettings | DisabledEnvoySettings;
-
-/** The listener's bearer: `ENVOY_TOKEN_FILE`, then `ENVOY_TOKEN`, then the section's `token`,
- * which goes with `ENVOY_URL` only when that names the origin of the section's own listener.
- * Throws naming what could not be read or used. */
-function listenerToken(
-  env: EnvoyEnvironment,
-  section: EnvoyFileSettings,
-  namedUrl: string | undefined,
-  filePath: string
-): string | undefined {
-  const pointer = nonEmpty(env.ENVOY_TOKEN_FILE);
-  if (pointer !== undefined) return readSecretFile("ENVOY_TOKEN_FILE", pointer);
-  const plain = nonEmpty(env.ENVOY_TOKEN);
-  if (plain !== undefined) {
-    const refusal = unsendableRefusal("ENVOY_TOKEN", plain);
-    if (refusal !== null) throw new Error(refusal);
-    return plain;
-  }
-  if (section.token === undefined) return undefined;
-  if (namedUrl !== undefined) {
-    const named = httpUrl(namedUrl)?.origin;
-    const listener = httpUrl(section.url ?? DEFAULT_ENVOY_URL)?.origin;
-    if (named !== listener) {
-      throw new Error(
-        `ENVOY_URL names ${named}, but ${filePath}'s envoy.token is for ${listener}; set ENVOY_TOKEN or ENVOY_TOKEN_FILE for it`
-      );
-    }
-  }
-  return fileValue(section.token, "envoy.token", filePath, env);
-}
 
 /** The NATS user's seed: `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, else the section's
  * `natsSeed`, which goes only with the section's own servers: `ENVOY_NATS_URL`, the only way to
@@ -194,14 +164,32 @@ export function envoySettings(
       : namedNatsUrls.length > 0
         ? namedNatsUrls
         : (section.natsUrls ?? []);
+  const listener = section.url ?? DEFAULT_ENVOY_URL;
+  const url = namedUrl ?? listener;
   try {
-    const token = listenerToken(env, section, namedUrl, config.path);
+    const source = bearerSource(env, "ENVOY", () =>
+      section.token === undefined
+        ? undefined
+        : {
+            token: section.token,
+            field: "envoy.token",
+            path: config.path,
+            server: listener,
+            checkout: false,
+          }
+    );
+    const token =
+      source.kind === "none"
+        ? undefined
+        : source.kind === "variable"
+          ? source.token
+          : fileBearer(source, url, "ENVOY", env);
     const natsSeed =
       natsUrls.length > 0 ? natsCredential(env, section, namedNatsUrls, config.path) : undefined;
     const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
     return {
       enabled: true,
-      url: normalizeEnvoyUrl(namedUrl ?? section.url ?? DEFAULT_ENVOY_URL),
+      url: normalizeEnvoyUrl(url),
       natsUrls,
       token,
       natsSeed,

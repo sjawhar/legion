@@ -165,6 +165,15 @@ describe("envoySettings", () => {
     }
   });
 
+  test("an empty envoy.token is refused, as an empty dispatch.token is", () => {
+    const config = configFrom({ envoy: { enabled: true, token: "" } });
+    expect(envoySettings({}, config)).toEqual({
+      enabled: false,
+      notice: null,
+      error: `envoy.token in ${config.path} must be a non-empty bearer token`,
+    });
+  });
+
   test("a plain ENVOY_TOKEN with whitespace inside is refused without echoing it", () => {
     const config = configFrom({ envoy: listener });
     expect(envoySettings({ ENVOY_TOKEN: "S3CRET\nnotes" }, config)).toEqual({

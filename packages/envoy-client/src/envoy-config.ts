@@ -15,6 +15,7 @@ import type { SyncSubprocess } from "bun";
 import { z } from "zod";
 import { hasErrnoCode, messageFor } from "./errors";
 import { jsonErrorPosition } from "./json-position";
+import { sendable } from "./secret-file";
 
 /** Where a caller runs: one of the three plugins (and the `dispatch` command, which takes its host
  * plugin's rule), or a script outside any of them (`command`). */
@@ -314,12 +315,6 @@ type CommandOutcome = { readonly value: string } | { readonly failure: string };
 /** The outcome of every `!` command already run in this process, by command. */
 const commandOutcomes = new Map<string, CommandOutcome>();
 
-/** Whether `value` can go in a header as one token: no whitespace and no control character. A
- * multi-line value would otherwise reach a `fetch` error, which quotes the header it refuses. */
-function sendable(value: string): boolean {
-  return !/[\s\p{Cc}]/u.test(value);
-}
-
 function runCommand(command: string, env: EnvoyConfigEnvironment): CommandOutcome {
   const childEnv: Record<string, string> = {};
   for (const [name, variable] of Object.entries(env)) {
@@ -402,16 +397,6 @@ export function fileValue(
   }
   if ("failure" in outcome) throw new Error(`${filePath}: ${field}'s command ${outcome.failure}`);
   return outcome.value;
-}
-
-/** The refusal of a plain variable's token with whitespace or a control character inside it. */
-export function unsendableRefusal(source: string, value: string): string | null {
-  return sendable(value) ? null : `${source} holds whitespace or a control character`;
-}
-
-/** The refusal of a `!` value in a checkout's file, which the repository controls. */
-export function checkoutCommandRefusal(checkoutPath: string, field: string): string {
-  return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
 }
 
 /** What a missing chosen file says about the OpenCode-era user file,

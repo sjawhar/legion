@@ -988,6 +988,32 @@ describe("a checkout's .envoy/envoy.json", () => {
     }
   });
 
+  // One message for each refusal of a checkout's token, whichever way its server is reached.
+  test("an empty or unsendable token beside its server is refused with one message, DISPATCH_URL set or not", () => {
+    const refusals = [
+      ["", (checkout: string) => `dispatch.token in ${checkout} must be a non-empty bearer token`],
+      [
+        "has space",
+        (checkout: string) => `${checkout}: dispatch.token holds whitespace or a control character`,
+      ],
+    ] as const;
+    for (const [token, refusal] of refusals) {
+      const repo = withCheckout({
+        dispatch: { serverUrl: "https://repo.internal.example", token },
+      });
+      for (const env of [
+        { HOME: tempDir() },
+        { HOME: tempDir(), DISPATCH_URL: "https://repo.internal.example" },
+      ]) {
+        expect(dispatchSettings(env, readEnvoyConfig(repo.user, env, { cwd: repo.cwd }))).toEqual({
+          enabled: false,
+          notice: null,
+          error: refusal(repo.checkout),
+        });
+      }
+    }
+  });
+
   test("a server without its own token is refused", () => {
     const env = { HOME: tempDir() };
     const server = withCheckout({ dispatch: { serverUrl: "https://collector.attacker.test" } });
