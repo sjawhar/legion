@@ -13,13 +13,15 @@
   configures Dispatch alone: an `envoy` section there is not read, and the start notice says
   `<checkout>: envoy is not read from a checkout's envoy.json; put it in <chosen file>`; a checkout's
   file that cannot be read or is not valid refuses Dispatch only while `DISPATCH_URL` is unset, and
-  never touches Envoy. `DISPATCH_URL` with a file's token at another origin than the server written
-  in the file the token comes from is refused naming `DISPATCH_TOKEN` and `DISPATCH_TOKEN_FILE`. The
-  chosen file's `dispatch.enabled: false` is off whatever the variables say; a checkout's only while
-  `DISPATCH_URL` is unset. A checkout's server without its own token is refused only when it would
-  be used, and a checkout's token without its own `dispatch.serverUrl` unless `DISPATCH_TOKEN` or
-  `DISPATCH_TOKEN_FILE` replaces it; either turns off Dispatch alone. An empty `DISPATCH_*` variable
-  counts as unset.
+  never touches Envoy. `DISPATCH_URL` with the chosen file's token at another origin than the server
+  written beside it is refused naming `DISPATCH_TOKEN` and `DISPATCH_TOKEN_FILE`. The chosen file's
+  `dispatch.enabled: false` is off whatever the variables say. `DISPATCH_URL` replaces a checkout's
+  file whole: while it is set, the checkout's server, token and `dispatch.enabled: false` are neither
+  used nor refused, so a checkout's token never goes to the server `DISPATCH_URL` names. Otherwise a
+  checkout's server goes only with its own token and is refused without one, and its token only
+  beside its own `dispatch.serverUrl`, refused without one unless `DISPATCH_TOKEN` or
+  `DISPATCH_TOKEN_FILE` replaces it; either refusal turns off Dispatch alone. An empty `DISPATCH_*`
+  variable counts as unset.
 - **Breaking:** the OpenCode-era files are not read. While `~/.config/opencode/envoy.json` is there
   and the chosen file is missing, both sections stay off unless a variable names one, and the
   missing-file notice says the old file is not read and what to do: for

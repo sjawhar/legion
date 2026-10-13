@@ -109,15 +109,17 @@ OpenCode-era `.opencode/envoy.json` is never read: while the checkout has no `.e
 `warnings` holds `<old file> is not read: mkdir -p <cwd>/.envoy && mv <old file> <cwd>/.envoy/envoy.json`,
 which the start notice and the `dispatch` command say.
 
-Each section is resolved on its own: `dispatchSettings(env, config)` merges the checkout's
-`dispatch` section over the chosen file's, key by key, and `envoySettings(env, config)` reads the
-chosen file's `envoy` section alone. The chosen file's `enabled: false` turns its section off
-whatever the environment says; a checkout's `dispatch.enabled: false` does only while
-`DISPATCH_URL` is unset. A checkout's `dispatch.serverUrl` is used only with the `dispatch.token`
-written beside it, and is refused without one only when it would be used, that is while
-`DISPATCH_URL` does not replace it; its `dispatch.token` is used only beside its own
+Each section is resolved on its own: `dispatchSettings(env, config)` reads the chosen file's
+`dispatch` section and, while `DISPATCH_URL` is unset, the checkout's, and `envoySettings(env,
+config)` reads the chosen file's `envoy` section alone. The chosen file's `enabled: false` turns its
+section off whatever the environment says. `DISPATCH_URL` replaces a checkout's file whole: while it
+is set, the checkout's server, token and `dispatch.enabled: false` are neither used nor refused.
+Otherwise a checkout's `dispatch.serverUrl` is used only with the `dispatch.token` written beside
+it, and is refused without one; its `dispatch.token` is used only beside its own
 `dispatch.serverUrl`, and is refused without one unless `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`
-replaces it.
+replaces it. A checkout's server with its own token points the session at that server as that
+token's holder, whichever server it names, the user's own included; what a checkout cannot do is
+take the user's token, or a variable's, anywhere.
 
 A `token` or `natsSeed` value starting with `!` is a command (`fileValue`): it runs under
 `/bin/sh -c` in its own process group for at most 10 s, and its trimmed stdout is the value. Its
@@ -225,11 +227,12 @@ the envoy.json a caller reads, enables Dispatch only when both its URL and beare
 which counts only with `dispatch.enabled: true` and defaults to `http://localhost:8766`, the Go
 server's listen address; an empty `DISPATCH_*` variable counts as unset. The token resolves from
 `DISPATCH_TOKEN_FILE` (a path; the trimmed file contents are the token — how the Legion daemon hands
-the bearer to a pane without putting it on argv), then `DISPATCH_TOKEN`, then `dispatch.token`, the
-checkout's ahead of the chosen file's. A set `DISPATCH_TOKEN_FILE` that is unreadable or blank
-disables Dispatch and names the path in `error`; it never falls back. A file's token goes with
-`DISPATCH_URL` only when it names the origin of the server written in the file the token comes
-from: any other server needs `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`, and is refused with
+the bearer to a pane without putting it on argv), then `DISPATCH_TOKEN`, then the chosen file's
+`dispatch.token`; while `DISPATCH_URL` is unset, a checkout that names its own `dispatch.serverUrl`
+gives that server and its own token instead. A set `DISPATCH_TOKEN_FILE` that is unreadable or blank
+disables Dispatch and names the path in `error`; it never falls back. The chosen file's token goes
+with `DISPATCH_URL` only when it names the origin of the server written beside it: any other server
+needs `DISPATCH_TOKEN` or `DISPATCH_TOKEN_FILE`, and is refused with
 `DISPATCH_URL names <origin>, but <file>'s dispatch.token is for <origin>; set DISPATCH_TOKEN or
 DISPATCH_TOKEN_FILE for it`. Invalid configuration, malformed URLs, and empty tokens leave Dispatch
 disabled and name the failing source in `error`; nothing configuring it, or a file turning it off,

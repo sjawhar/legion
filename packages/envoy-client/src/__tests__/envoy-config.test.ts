@@ -987,8 +987,9 @@ describe("a checkout's .envoy/envoy.json", () => {
     }
   });
 
-  // One message for each refusal of a checkout's token, whichever way its server is reached.
-  test("an empty or unsendable token beside its server is refused with one message, DISPATCH_URL set or not", () => {
+  // One message for each refusal of a checkout's token. DISPATCH_URL replaces the checkout's server,
+  // and its token with it: the chosen file's token is the one paired with DISPATCH_URL.
+  test("an empty or unsendable token beside its server is refused with one message, and not used under DISPATCH_URL", () => {
     const refusals = [
       ["", (checkout: string) => `dispatch.token in ${checkout} must be a non-empty bearer token`],
       [
@@ -1000,16 +1001,18 @@ describe("a checkout's .envoy/envoy.json", () => {
       const repo = withCheckout({
         dispatch: { serverUrl: "https://repo.internal.example", token },
       });
-      for (const env of [
-        { HOME: tempDir() },
-        { HOME: tempDir(), DISPATCH_URL: "https://repo.internal.example" },
-      ]) {
-        expect(dispatchSettings(env, readEnvoyConfig(repo.user, env, { cwd: repo.cwd }))).toEqual({
+      const quiet = { HOME: tempDir() };
+      expect(dispatchSettings(quiet, readEnvoyConfig(repo.user, quiet, { cwd: repo.cwd }))).toEqual(
+        { enabled: false, notice: null, error: refusal(repo.checkout) }
+      );
+      const named = { HOME: tempDir(), DISPATCH_URL: "https://repo.internal.example" };
+      expect(dispatchSettings(named, readEnvoyConfig(repo.user, named, { cwd: repo.cwd }))).toEqual(
+        {
           enabled: false,
           notice: null,
-          error: refusal(repo.checkout),
-        });
-      }
+          error: `DISPATCH_URL names https://repo.internal.example, but ${repo.user}'s dispatch.token is for https://dispatch.example; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`,
+        }
+      );
     }
   });
 
@@ -1029,20 +1032,20 @@ describe("a checkout's .envoy/envoy.json", () => {
   // session act as the repository's author on the user's Dispatch.
   test("a token without its own server is refused when it would be used", () => {
     const repo = withCheckout({ dispatch: { token: "repo-token" } });
-    const refusal = {
+    const quiet = { HOME: tempDir() };
+    expect(dispatchSettings(quiet, readEnvoyConfig(repo.user, quiet, { cwd: repo.cwd }))).toEqual({
       enabled: false,
       notice: null,
       error: `${repo.checkout}: dispatch.token requires dispatch.serverUrl in the same file`,
-    } as const;
-    for (const env of [
-      { HOME: tempDir() },
-      { HOME: tempDir(), DISPATCH_URL: "https://dispatch.example" },
-    ]) {
-      expect(dispatchSettings(env, readEnvoyConfig(repo.user, env, { cwd: repo.cwd }))).toEqual(
-        refusal
-      );
-    }
-    // A token from the environment replaces it, so it is not used, and not refused.
+    });
+    // DISPATCH_URL or a token from the environment replaces it, so it is not used, and not
+    // refused: under DISPATCH_URL the chosen file's token goes to its own server.
+    const named = { HOME: tempDir(), DISPATCH_URL: "https://dispatch.example" };
+    expect(dispatchSettings(named, readEnvoyConfig(repo.user, named, { cwd: repo.cwd }))).toEqual({
+      enabled: true,
+      url: "https://dispatch.example",
+      token: "user-token",
+    });
     const environment = { HOME: tempDir(), DISPATCH_TOKEN: "environment-token" };
     expect(
       dispatchSettings(environment, readEnvoyConfig(repo.user, environment, { cwd: repo.cwd }))
@@ -1081,10 +1084,15 @@ describe("a checkout's .envoy/envoy.json", () => {
         error: `${repo.checkout}: dispatch.token is a command, which a checkout's envoy.json cannot run`,
       } as const;
       expect(dispatchSettings(env, config)).toEqual(refusal);
-      // DISPATCH_URL naming the checkout's own server takes its token too, and still runs nothing.
+      // DISPATCH_URL replaces the checkout's server and its token: the command is neither used nor
+      // refused, and the chosen file's token is paired with DISPATCH_URL instead.
       const named = { ...env, DISPATCH_URL: "https://repo.internal.example" };
       expect(dispatchSettings(named, readEnvoyConfig(repo.user, named, { cwd: repo.cwd }))).toEqual(
-        refusal
+        {
+          enabled: false,
+          notice: null,
+          error: `DISPATCH_URL names https://repo.internal.example, but ${repo.user}'s dispatch.token is for https://dispatch.example; set DISPATCH_TOKEN or DISPATCH_TOKEN_FILE for it`,
+        }
       );
       expect(envoySettings(env, config)).toMatchObject({ enabled: true });
     }
