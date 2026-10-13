@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "LEGION-164",
+  "completed": "2026-10-13T02:21:22Z",
+  "round": 1,
+  "pullRequest": "https://github.com/sjawhar/legion/pull/1932",
+  "reviewedHead": "75f88f4004b87683d2affb9574053101e71d0558 (code head 94325e57c7af6a66efa513dda981b404517a2cfb)",
+  "verdict": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 4,
+  "ci": "Required set on main (lint, typecheck, test, pr-title) green at the code head 94325e57: Tests run 38332984930, PR Title run 38332984989; the handoff head 75f88f40 carries the skip-checks trailer and the verdict is carried to it.",
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality run once at 75f88f40 (task agents ThermoDeep164, ThermoQuality164): deep — 1 Important (the refused boot relaunch below), 2 Minor, 2 hardening; quality — no correctness defect, 2 structural and 4 Minor items batched into the Fast-follow, 4 hardening. The lenient identity read authenticates before naming any contract; the install wrapper's quoting, rm -rf root derivation, stdout discipline and contract check; the charged/uncharged rule and the fences of the old generation; store column alignment; the 23→24 lockstep; the zod mirrors; release.yaml's always()/skipped guards — all read clean.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/supervise/plugin.go:28-37",
+      "description": "A boot-time StalePlugin whose launch the lifecycle check or the store refuses (launch returns checkLaunch's error before letGo, machine.go:828-831) leaves the claim live with its capability hash and stale contract; the event is posted once (daemon.go:1143-1155) and a failed decision is only logged (supervisor.go:176-195), so every call that process makes is refused 409 'the daemon is relaunching this process onto the current plugin' with no relaunch under way, until the next daemon restart. Reproduced with a throwaway supervise test: after a CheckLaunch error the claim stays ready, hashLen 10, pluginContract 0, Resume calls 0. Fix in this PR: a retry (re-post StalePlugin for stale live claims at each orphan sweep, as StaleAddress re-arrives every sweep; or re-post from the refusing route), and/or key the 409 on a relaunch actually started."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "No `## Contract change census` section, though the PR adds refusals (409 STALE_PLUGIN_CONTRACT; the exact-version refusal of runtime.kubernetes.plugins; the wrapper's contract refusal before exec), makes fields required (pluginContract on the three strict zod mirrors; both keys of runtime.kubernetes.plugins), changes `legion version`'s output shape, and changes package-boundary signatures (store.RegisterController, supervise.Deps, runtime.SpawnSpec.Plugins, sandbox launcherCommand/installArgv). Each entry needs the search command, every hit with a disposition, and a rollout line (immediate refusal naming what it closes, or warn-first)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/sandbox/plugins.go:40 / internal/config/kubernetes.go:285-290",
+      "description": "The loader accepts an upper-case scheme (url.Parse lowercases it) and `//host/x.tgz` (path.IsAbs), which bunSpec then renders as `@sjawhar/pi-legion@HTTPS://…` or hands to bun as a path, so `legion start --check-config` passes a pair every stale relaunch's install fails on, into worker-died. Normalise once in readPluginSource (return the canonical form) or compare the scheme case-insensitively in bunSpec, with a config test for each spelling."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:966-967; PR body line 11",
+      "description": "'Every undecodable request body is now logged `api: refused an undecodable request body` naming the route and the decoder's error' is false for the one case this change is for: readBody returns after the stale 409 (claims.go:312-313), which logs the stale Warn and never the decoder's error. Say 'every other undecodable body' (the spec's wording), or carry the decoder error on the stale Warn."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/supervise/machine.go:301,310",
+      "description": "Deps.check validates Limits and Timeouts but not PluginContract, and 0 is also the legal 'none recorded' value of a claim: a Deps wired with PluginContract 0 and PluginRelaunchable true relaunches every current claim and charges from the second registration on. One row in the existing >= 1 loop closes it (daemon.go passes api.DaemonAPIVersion today)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/api/stale_plugin_test.go:111",
+      "description": "The undecodable-body 409 is tested for the grants family only; claimSecretCheck (ready, exit) and redeemIdentityCheck (handoff/complete and the architect routes) have no undecodable-body case, so acceptance 5's second case is proven for one of three identity families."
+    }
+  ],
+  "fastFollow": "One cleanup item, batched: the lenient identity read is a second copy of each route's authentication (claims.go:378-393, credentials.go:106-147, 204-227) rather than a reordering of it; the boot pass re-implements the StalePlugin table's state filter and the degraded-mode policy in internal/daemon (daemon.go:1143-1155 vs table.go:496-499, plugin.go:66-70), forcing HoldsCapability and NoPluginSourceMessage to be exported; specs.runtimeName is a dead branch (specs.go:134); the stale-caller helpers could live in internal/api/stale_plugin.go beside their test; config.PluginsFromBinary is provenance cmd/legion stamps into the parsed config; controllerSecret keeps a hand-rolled copy of the sentence claim.staleContract renders (controller.go:103-114); stage 4b resolves the pair with npm view for a value the run never installs.",
+  "observations": [
+    "A moved-address relaunch at boot that also carries a stale plugin, when the configured image's plugin is itself stale (daemon restarted on the new release before the image was pinned): the replacement pod installs nothing, its process registers stale with PluginRelaunchFor already at the daemon's contract, so one launch failure is charged before the kept-pod install; ready resets it. Bounded; recorded, not a finding.",
+    "The tester's two observations stand: a pod still on the old image converges in two launches; stage 4b names the bare-version form but never installs."
+  ]
+}
