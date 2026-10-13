@@ -215,27 +215,71 @@ describe("sessionDispatchSettings", () => {
 });
 
 describe("the OpenCode-era file", () => {
-  test("is read in place of a missing neutral file, and the start notice says to move it", () => {
+  test("is not read in place of a missing neutral file: each section still off names the move", () => {
     const home = tempDir();
+    const marker = path.join(home, "old-token-ran");
     const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
-      dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "old-token" },
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://dispatch.example",
+        token: `!touch ${marker}; echo old-token`,
+      },
     });
     const neutral = path.join(home, ".config", "legion", "envoy.json");
-    const warning = `${old} is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv ${old} ${neutral}, then move a top-level natsUrls into envoy.natsUrls`;
+    const move = `${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`;
     const chosen = { path: neutral, error: null } as const;
+
     const settings = sessionSettings(chosen, { HOME: home }, { cwd: tempDir() });
     expect(settings.dispatch).toEqual({
-      enabled: true,
-      url: "https://dispatch.example",
-      token: "old-token",
+      enabled: false,
+      notice: `no envoy.json at ${neutral}: Dispatch is off; ${move}`,
+      error: null,
+      oldUserFileNotRead: true,
     });
-    expect(settings.notice).toBe(warning);
+    expect(settings.envoy).toMatchObject({ enabled: false, error: null });
+    expect(settings.notice).toBe(
+      `no envoy.json at ${neutral}: Dispatch and Envoy are off; ${move}`
+    );
+    const envoyOn = { HOME: home, ENVOY_NATS_URL: "nats://nats.internal.example:4222" };
+    expect(sessionSettings(chosen, envoyOn, { cwd: tempDir() }).notice).toBe(
+      `no envoy.json at ${neutral}: Dispatch is off; ${move}`
+    );
+    const dispatchOn = {
+      HOME: home,
+      DISPATCH_URL: "https://dispatch.example",
+      DISPATCH_TOKEN: "environment-token",
+    };
+    expect(sessionSettings(chosen, dispatchOn, { cwd: tempDir() }).notice).toBe(
+      `no envoy.json at ${neutral}: Envoy is off; ${move}`
+    );
+    expect(existsSync(marker)).toBe(false);
+
     // A neutral file that exists is read, and nothing is said about the old one.
     writeFile(neutral, { dispatch: { enabled: true, token: "new-token" } });
     expect(sessionSettings(chosen, { HOME: home }, { cwd: tempDir() })).toMatchObject({
       dispatch: { token: "new-token" },
       notice: null,
     });
+  });
+
+  test("a checkout's .opencode/envoy.json is named in the start notice, and nothing of it is used", () => {
+    const cwd = tempDir();
+    const old = writeFile(path.join(cwd, ".opencode", "envoy.json"), {
+      dispatch: { enabled: true, serverUrl: "https://old.internal.example", token: "t" },
+    });
+    const file = writeFile(path.join(tempDir(), "envoy.json"), {
+      dispatch: dispatchOn,
+      envoy: envoyOn,
+    });
+    const settings = sessionSettings({ path: file, error: null }, {}, { cwd });
+    expect(settings.dispatch).toEqual({
+      enabled: true,
+      url: "https://dispatch.example",
+      token: "file-token",
+    });
+    expect(settings.notice).toBe(
+      `${old} is not read: mkdir -p ${path.join(cwd, ".envoy")} && mv ${old} ${path.join(cwd, ".envoy", "envoy.json")}`
+    );
   });
 
   test("is not read when XDG_CONFIG_HOME puts the neutral file in another directory", () => {

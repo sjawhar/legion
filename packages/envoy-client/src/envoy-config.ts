@@ -119,30 +119,27 @@ export function envoyConfigPath(harness: EnvoyHarness, env: EnvoyConfigEnvironme
 const httpUrlSchema = z.url({ protocol: /^https?$/, error: "must be an http or https URL" });
 
 // Strict per section, http(s) addresses, tolerant top level. The Dispatch server reads the same
-// file and follows these validation and migration rules.
+// file and follows these validation rules.
 const DispatchSectionSchema = z.strictObject({
   enabled: z.boolean().optional(),
   serverUrl: httpUrlSchema.optional(),
   token: z.string().optional(),
 });
 
-const NatsUrlsSchema = z.array(z.string().trim().min(1, "must not be empty"));
-
 const EnvoySectionSchema = z.strictObject({
   enabled: z.boolean().optional(),
   url: httpUrlSchema.optional(),
-  natsUrls: NatsUrlsSchema.optional(),
+  natsUrls: z.array(z.string().trim().min(1, "must not be empty")).optional(),
   token: z.string().optional(),
   natsSeed: z.string().optional(),
 });
 
-// A top-level `natsUrls` is the layout before the `envoy` section: `readEnvoyConfig` reads it as
-// `envoy.natsUrls` with a warning until it moves; a later release stops reading it.
+// A top-level `natsUrls` is refused before this schema runs (`parseFile`): it belongs in
+// `envoy.natsUrls`.
 const EnvoyFileSchema = z.looseObject({
   $schema: z.string().optional(),
   dispatch: DispatchSectionSchema.optional(),
   envoy: EnvoySectionSchema.optional(),
-  natsUrls: NatsUrlsSchema.optional(),
 });
 
 // A checkout's file is the repository's: it may configure Dispatch and no Envoy. Its `envoy` key
@@ -190,8 +187,7 @@ export type EnvoyConfig =
   | { readonly kind: "failed"; readonly path: string; readonly error: string }
   | {
       readonly kind: "read";
-      /** The file read: the one the harness rule chose (`envoyConfigPath`), or the OpenCode-era
-       * file read in place of a missing neutral one. */
+      /** The file the harness rule chose (`envoyConfigPath`). */
       readonly path: string;
       /** The chosen file's sections; empty when it does not exist. */
       readonly dispatch: DispatchFileSettings;
@@ -200,7 +196,8 @@ export type EnvoyConfig =
       readonly checkout: CheckoutEnvoyConfig | null;
       /** Set when the chosen file does not exist. */
       readonly missing: MissingConfig | null;
-      /** What was read from a place or shape a later release stops reading, and how to move it. */
+      /** Files found and not read, each naming its move: a checkout's `.opencode/envoy.json` while
+       * the checkout has no `.envoy/envoy.json`. */
       readonly warnings: readonly string[];
     };
 
@@ -372,15 +369,12 @@ function parseFile<Settings>(
       reason: `${filePath}: invalid JSON${position === undefined ? "" : ` at ${position}`}`,
     };
   }
-  if (
-    checkout &&
-    typeof parsedJson === "object" &&
-    parsedJson !== null &&
-    "natsUrls" in parsedJson
-  ) {
+  if (typeof parsedJson === "object" && parsedJson !== null && "natsUrls" in parsedJson) {
     return {
       kind: "invalid",
-      reason: `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section`,
+      reason: checkout
+        ? `${filePath}: the top-level natsUrls is not read, and a checkout's envoy.json holds only a dispatch section`
+        : `${filePath}: the top-level natsUrls is not read; move it to envoy.natsUrls`,
     };
   }
   const parsed = schema.safeParse(parsedJson);
@@ -496,16 +490,23 @@ export function checkoutCommandRefusal(checkoutPath: string, field: string): str
   return `${checkoutPath}: ${field} is a command, which a checkout's envoy.json cannot run`;
 }
 
-/** What a missing chosen file says about the OpenCode-era user file without reading it. */
+/** What a missing chosen file says about the OpenCode-era user file,
+ * `$HOME/.config/opencode/envoy.json`, which nothing reads, while that file is still there. The
+ * chosen file's path decides, not the rule that chose it: the user's default file at
+ * `$HOME/.config/legion/envoy.json` names the move; a profile's own file names the file to copy or
+ * link it to; the neutral file under a relocated `XDG_CONFIG_HOME` (a Legion pane's, under the
+ * daemon's state directory) says it is not read there, without asking anyone to move it. Any other
+ * file says nothing of it. */
 function oldUserFileNotice(filePath: string, env: EnvoyConfigEnvironment): string | undefined {
-  // A harness directory can be the default config directory. The fallback and this notice must
-  // make that path decision together: it follows the default-file rule, not the profile rule.
-  if (openCodeUserFile(filePath, env) !== null) return undefined;
   const home = nonEmpty(env.HOME) ?? homedir();
   const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old)) return undefined;
 
   const selected = path.resolve(filePath);
+  if (selected === path.resolve(home, ".config", "legion", "envoy.json")) {
+    return `${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`;
+  }
+
   const profileDirectories = [
     nonEmpty(env.OMP_PROFILE) !== undefined && nonEmpty(env.OMP_PROFILE) !== "default"
       ? nonEmpty(env.PI_CODING_AGENT_DIR)
@@ -530,8 +531,7 @@ function oldUserFileNotice(filePath: string, env: EnvoyConfigEnvironment): strin
     configHome !== undefined &&
     path.isAbsolute(configHome) &&
     "path" in neutral &&
-    selected === neutral.path &&
-    neutral.path !== path.resolve(home, ".config", "legion", "envoy.json")
+    selected === neutral.path
   ) {
     return `${old} is not read under XDG_CONFIG_HOME=${configHome}`;
   }
@@ -546,45 +546,6 @@ export function missingConfigNotice(filePath: string, missing: MissingConfig, of
   return `no envoy.json at ${filePath}${link}: ${off}${old}`;
 }
 
-/** The OpenCode-era user file, read in place of a missing chosen file: only when that file is the
- * neutral one at `$HOME/.config/legion/envoy.json` (`XDG_CONFIG_HOME` unset, empty or
- * `$HOME/.config`). An `XDG_CONFIG_HOME` that names another directory, such as the one a Legion
- * pane is given under the daemon's state directory, gets no such file: the user's does not belong
- * there. */
-function openCodeUserFile(filePath: string, env: EnvoyConfigEnvironment): string | null {
-  const neutral = neutralConfig(env);
-  if ("error" in neutral || neutral.path !== path.resolve(filePath)) return null;
-  const home = nonEmpty(env.HOME) ?? homedir();
-  if (neutral.path !== path.resolve(home, ".config", "legion", "envoy.json")) return null;
-  return path.join(home, ".config", "opencode", "envoy.json");
-}
-
-/** A chosen file's sections, with a top-level `natsUrls` read as `envoy.natsUrls` with a warning
- * until it moves (a later release stops reading it), and refused when it is also set in `envoy`. */
-function chosenSections(
-  filePath: string,
-  settings: EnvoyFile,
-  warnings: string[],
-  warn: boolean
-):
-  | { readonly kind: "valid"; readonly settings: EnvoyFile }
-  | { readonly kind: "invalid"; readonly error: string } {
-  const { natsUrls, ...rest } = settings;
-  if (natsUrls === undefined) return { kind: "valid", settings };
-  if (rest.envoy?.natsUrls !== undefined) {
-    return {
-      kind: "invalid",
-      error: `${filePath}: natsUrls and envoy.natsUrls are both set; keep envoy.natsUrls`,
-    };
-  }
-  if (warn) {
-    warnings.push(
-      `${filePath}: the top-level natsUrls is read as envoy.natsUrls until it moves (a later release stops reading it): move natsUrls into envoy.natsUrls`
-    );
-  }
-  return { kind: "valid", settings: { ...rest, envoy: { ...rest.envoy, natsUrls } } };
-}
-
 /**
  * Read the envoy.json at `filePath` (`envoyConfigPath`) and the checkout's `.envoy/envoy.json`
  * under `cwd`, whose `dispatch` section Dispatch's resolver merges over the chosen file's. Runs no
@@ -593,91 +554,48 @@ function chosenSections(
  * cannot be read or is not valid is an `invalid` checkout, which only Dispatch reads, and an
  * `envoy` section in it sets `checkout.envoyError` rather than configuring anything.
  *
- * Three saved inputs from before this layout are read until they move, each with a warning in
- * `warnings`: in place of a missing default neutral file at `$HOME/.config/legion/envoy.json`, the
- * OpenCode-era `~/.config/opencode/envoy.json`; in place of a missing `.envoy/envoy.json`, the
- * checkout's `.opencode/envoy.json`; and a chosen user file's top-level `natsUrls` as
- * `envoy.natsUrls`. A profile or relocated-XDG file never reads the old user file; its missing
- * notice says why. A legacy checkout ignores top-level `natsUrls` and `envoy` with a warning, while
- * the current checkout keeps refusing them.
+ * The OpenCode-era files are never read. While the chosen file is missing, its notice names
+ * `$HOME/.config/opencode/envoy.json` when that file is there (`oldUserFileNotice`); while the
+ * checkout has no `.envoy/envoy.json`, `warnings` names its `.opencode/envoy.json` and the rename.
  */
 export function readEnvoyConfig(
   filePath: string,
   env: EnvoyConfigEnvironment,
   options: { readonly cwd: string }
 ): EnvoyConfig {
-  const warnings: string[] = [];
-  let readPath = filePath;
-  let chosen = parseFile(filePath, EnvoyFileSchema, false);
-  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env) : undefined;
-  const openCode = chosen.kind === "absent" ? openCodeUserFile(filePath, env) : null;
-  if (openCode !== null) {
-    const old = parseFile(openCode, EnvoyFileSchema, false);
-    if (old.kind !== "absent") {
-      chosen = old;
-      readPath = openCode;
-      warnings.push(
-        `${openCode} is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv ${openCode} ${filePath}, then move a top-level natsUrls into envoy.natsUrls`
-      );
-    }
-  }
-  if (chosen.kind === "invalid") return { kind: "failed", path: readPath, error: chosen.reason };
-  const sections =
-    chosen.kind === "valid"
-      ? chosenSections(readPath, chosen.settings, warnings, readPath === filePath)
-      : { kind: "valid" as const, settings: {} };
-  if (sections.kind === "invalid") return { kind: "failed", path: readPath, error: sections.error };
-  const own = sections.settings;
-
+  const chosen = parseFile(filePath, EnvoyFileSchema, false);
+  if (chosen.kind === "invalid") return { kind: "failed", path: filePath, error: chosen.reason };
   const resolvedChosen = path.resolve(filePath);
-  const checkoutFile = (
-    candidate: string,
-    legacy: boolean
-  ): ParsedFile<z.infer<typeof CheckoutFileSchema>> =>
-    candidate === resolvedChosen
-      ? { kind: "absent", link: null }
-      : parseFile(candidate, CheckoutFileSchema, !legacy);
-  let checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
-  let legacyCheckout = false;
-  let parsedCheckout = checkoutFile(checkoutPath, false);
-  if (parsedCheckout.kind === "absent") {
-    const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
-    const old = checkoutFile(oldCheckout, true);
-    if (old.kind !== "absent") {
-      warnings.push(
-        `${oldCheckout} is read until it moves (a later release stops reading it): mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`
-      );
-      parsedCheckout = old;
-      checkoutPath = oldCheckout;
-      legacyCheckout = true;
-    }
-  }
+  const checkoutPath = path.resolve(options.cwd, ".envoy", "envoy.json");
+  const checkoutFile =
+    checkoutPath === resolvedChosen
+      ? { kind: "absent" as const, link: null }
+      : parseFile(checkoutPath, CheckoutFileSchema, true);
+  const own: EnvoyFile = chosen.kind === "valid" ? chosen.settings : {};
   let checkout: CheckoutEnvoyConfig | null = null;
-  if (parsedCheckout.kind === "invalid") {
-    checkout = { kind: "invalid", path: checkoutPath, error: parsedCheckout.reason };
-  } else if (parsedCheckout.kind === "valid") {
-    const ignoredLegacySettings =
-      legacyCheckout &&
-      (Object.hasOwn(parsedCheckout.settings, "natsUrls") ||
-        Object.hasOwn(parsedCheckout.settings, "envoy"));
-    if (ignoredLegacySettings) {
-      warnings.push(
-        `${checkoutPath}: natsUrls/envoy is not read from a checkout's envoy.json; ignored`
-      );
-    }
+  if (checkoutFile.kind === "invalid") {
+    checkout = { kind: "invalid", path: checkoutPath, error: checkoutFile.reason };
+  } else if (checkoutFile.kind === "valid") {
     checkout = {
       kind: "valid",
       path: checkoutPath,
-      dispatch: parsedCheckout.settings.dispatch ?? {},
-      envoyError:
-        legacyCheckout || !Object.hasOwn(parsedCheckout.settings, "envoy")
-          ? null
-          : `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}`,
+      dispatch: checkoutFile.settings.dispatch ?? {},
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy")
+        ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}`
+        : null,
     };
   }
+  const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
+  const warnings =
+    oldCheckout !== resolvedChosen && !existsSync(checkoutPath) && existsSync(oldCheckout)
+      ? [
+          `${oldCheckout} is not read: mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`,
+        ]
+      : [];
+  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env) : undefined;
   return {
     kind: "read",
-    path: readPath,
+    path: filePath,
     dispatch: own.dispatch ?? {},
     envoy: own.envoy ?? {},
     checkout,

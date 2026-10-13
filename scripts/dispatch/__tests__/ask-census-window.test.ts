@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,24 +68,30 @@ describe("ask census since #1671", () => {
     // No ask opened in the window, two arrivals (the hand-backs), no human turn.
     expect(flagged).toMatch(/│ TEST-1\s*│ artifact-1\s*│ 0\s*│ 2\s*│ 0\s*│ true\s*│/);
   });
-  test("prints configuration migration warnings on stderr", async () => {
+  test("refuses while only the OpenCode-era user file is there, naming the move and sending nothing", async () => {
+    let requests = 0;
     const server = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
-      fetch(request) {
-        if (new URL(request.url).pathname === "/api/v1/issues") return Response.json([]);
-        return new Response("not found", { status: 404 });
+      fetch() {
+        requests += 1;
+        return Response.json([]);
       },
     });
     servers.push(server);
 
     const home = await mkdtemp(join(tmpdir(), "ask-census-"));
+    const marker = join(home, "old-token-ran");
     const oldConfig = join(home, ".config", "opencode", "envoy.json");
     await mkdir(join(home, ".config", "opencode"), { recursive: true });
     await writeFile(
       oldConfig,
       JSON.stringify({
-        dispatch: { enabled: true, serverUrl: `http://127.0.0.1:${server.port}`, token: "token" },
+        dispatch: {
+          enabled: true,
+          serverUrl: `http://127.0.0.1:${server.port}`,
+          token: `!touch ${marker}; echo token`,
+        },
       })
     );
     const {
@@ -102,6 +109,7 @@ describe("ask census since #1671", () => {
     const census = Bun.spawn(
       ["bun", script, "--from", recordedAt(2), "--to", recordedAt(7), "--project", "TEST"],
       {
+        cwd: home,
         env: { ...environment, HOME: home },
         stdout: "pipe",
         stderr: "pipe",
@@ -112,9 +120,11 @@ describe("ask census since #1671", () => {
       census.exited,
     ]);
 
-    expect(stderr).toBe(
-      `dispatch: ${oldConfig} is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv ${oldConfig} ${join(home, ".config", "legion", "envoy.json")}, then move a top-level natsUrls into envoy.natsUrls\n`
+    expect(stderr).toContain(
+      `Dispatch is not configured: no envoy.json at ${join(home, ".config", "legion", "envoy.json")}: Dispatch is off; ${oldConfig} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`
     );
-    expect(exitCode).toBe(0);
+    expect(exitCode).toBe(1);
+    expect(existsSync(marker)).toBe(false);
+    expect(requests).toBe(0);
   });
 });

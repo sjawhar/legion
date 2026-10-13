@@ -9,7 +9,7 @@ import type {
 } from "../../packages/contracts/src/dispatch-api";
 import type { ActiveDispatchConfig } from "../../packages/envoy-client/src/dispatch-config";
 import { DispatchClient } from "../../packages/envoy-client/src/dispatch-http";
-import { resolveDispatchConfigWithWarnings } from "../../packages/envoy-client/src/session-settings";
+import { resolveDispatchConfig } from "../../packages/envoy-client/src/session-settings";
 
 const CODES = ["to-do", "design", "may-I-proceed", "operations"] as const;
 const EVENT_PAGE_SIZE = 200;
@@ -445,10 +445,7 @@ export async function censusIssues(
 }
 
 async function run(options: CensusOptions): Promise<void> {
-  const { dispatch: resolution, warnings } = resolveDispatchConfigWithWarnings(process.env, {
-    harness: "command",
-  });
-  for (const warning of warnings) console.error(`dispatch: ${warning}`);
+  const resolution = resolveDispatchConfig(process.env, { harness: "command" });
   if (!resolution.enabled) {
     throw new Error(
       resolution.error === null

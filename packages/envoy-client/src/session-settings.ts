@@ -43,13 +43,13 @@ export interface SessionSettings {
 /**
  * The start notice. A chosen file that cannot be read turns both sections off with its one error.
  * A missing file configures neither section: with no variable naming either, its one notice says
- * both are off (`missingConfigNotice`, which names a dangling link's target and the old OpenCode
- * file while it is still there); when a variable turned a section on, each section still off is
- * said with the same missing-file text. A section's own error (a token that does not resolve, a
- * command that failed) is said for that section. A file that turns a section off, or holds no
- * section for it, says nothing. What a checkout's file holds that the session does not read is
- * said too: an `envoy` section, and a file that cannot be used while `DISPATCH_URL` replaces it.
- * So is each input read from a place or shape a later release stops reading (`warnings`).
+ * both are off (`missingConfigNotice`, which names a dangling link's target and the OpenCode-era
+ * user file, which is not read, while it is still there); when a variable turned a section on, each
+ * section still off is said with the same missing-file text. A section's own error (a token that
+ * does not resolve, a command that failed) is said for that section. A file that turns a section
+ * off, or holds no section for it, says nothing. What a checkout's files hold that the session does
+ * not read is said too: an `envoy` section, a file that cannot be used while `DISPATCH_URL`
+ * replaces it, and an OpenCode-era `.opencode/envoy.json` (`warnings`).
  */
 function startNotice(
   config: EnvoyConfig,
@@ -119,33 +119,15 @@ export interface DispatchConfigOptions {
   readonly cwd?: string;
 }
 
-/** Dispatch and migration warnings for a caller running in `options.harness`. */
-export interface ResolvedDispatchConfig {
-  readonly dispatch: DispatchConfigResolution;
-  /** Saved inputs the caller read that a later release stops reading. */
-  readonly warnings: readonly string[];
-}
-
-/** Dispatch and migration warnings from the envoy.json that `options.harness` reads. */
-export function resolveDispatchConfigWithWarnings(
-  env: DispatchEnvironment,
-  options: DispatchConfigOptions
-): ResolvedDispatchConfig {
-  const file = sessionConfigFile(options.harness, env);
-  if (file.path === null) return { dispatch: offWithError(file.error), warnings: [] };
-  const config = readEnvoyConfig(file.path, env, { cwd: options.cwd ?? process.cwd() });
-  return {
-    dispatch: dispatchSettings(env, config),
-    warnings: config.kind === "read" ? config.warnings : [],
-  };
-}
-
-/** Dispatch for a caller running in `options.harness`, from the envoy.json that harness reads. */
+/** Dispatch for a caller running in `options.harness`: `sessionDispatchSettings` over the file
+ * that harness's rule chooses (`sessionConfigFile`). */
 export function resolveDispatchConfig(
   env: DispatchEnvironment,
   options: DispatchConfigOptions
 ): DispatchConfigResolution {
-  return resolveDispatchConfigWithWarnings(env, options).dispatch;
+  return sessionDispatchSettings(sessionConfigFile(options.harness, env), env, {
+    cwd: options.cwd ?? process.cwd(),
+  });
 }
 
 /** The active Dispatch configuration (`resolveDispatchConfig`, then `activeDispatchSettings`). */

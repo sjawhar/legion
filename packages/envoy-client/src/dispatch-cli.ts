@@ -183,7 +183,7 @@ export async function runDispatchCli(
   let resolution: DispatchConfigResolution;
   try {
     const envoyConfig = readEnvoyConfig(envoyConfigPath(harness, env), env, { cwd: io.cwd });
-    // An input a later release stops reading is said on every call, until it moves.
+    // A checkout's OpenCode-era file, which is not read, is said on every call while it is there.
     if (envoyConfig.kind === "read") {
       for (const warning of envoyConfig.warnings) print(`dispatch: ${warning}`);
     }

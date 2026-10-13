@@ -219,65 +219,77 @@ describe("readEnvoyConfig", () => {
     );
   });
 
-  test("a missing neutral file beside the OpenCode-era file reads that file, with a warning naming the move", () => {
+  test("a missing neutral file beside the OpenCode-era file reads nothing of it, and its notice names the move", () => {
     const home = tempDir();
-    const oldDispatch = {
-      enabled: true,
-      serverUrl: "https://dispatch.example",
-      token: "old-token",
-    };
+    const marker = path.join(home, "old-token-ran");
     const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
-      dispatch: oldDispatch,
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://dispatch.example",
+        token: `!touch ${marker}; echo old-token`,
+      },
       natsUrls: ["nats://nats.internal.example:4222"],
     });
     const neutral = path.join(home, ".config", "legion", "envoy.json");
-    const warning = `${old} is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv ${old} ${neutral}, then move a top-level natsUrls into envoy.natsUrls`;
-    const read: EnvoyConfig = {
+    const notice = `${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`;
+    const unread: EnvoyConfig = {
       kind: "read",
-      path: old,
-      dispatch: oldDispatch,
-      envoy: { natsUrls: ["nats://nats.internal.example:4222"] },
-      checkout: null,
-      missing: null,
-      warnings: [warning],
-    };
-    expect(readEnvoyConfig(neutral, { HOME: home }, { cwd: tempDir() })).toEqual(read);
-    // XDG_CONFIG_HOME set to $HOME/.config is the same file, and reads the old one the same way.
-    const sameHome = { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config") };
-    expect(readEnvoyConfig(neutral, sameHome, { cwd: tempDir() })).toEqual(read);
-    // Its token goes to its own server, as the chosen file's does.
-    expect(
-      dispatchSettings({ HOME: home }, readEnvoyConfig(neutral, { HOME: home }, { cwd: tempDir() }))
-    ).toEqual({ enabled: true, url: "https://dispatch.example", token: "old-token" });
-
-    // A neutral file that exists is read, and the old one neither read nor named.
-    writeFile(neutral, { dispatch: { enabled: true, token: "new-token" } });
-    expect(readEnvoyConfig(neutral, { HOME: home }, { cwd: tempDir() })).toMatchObject({
       path: neutral,
-      dispatch: { token: "new-token" },
+      dispatch: {},
+      envoy: {},
+      checkout: null,
+      missing: { link: null, oldUserFileNotice: notice },
       warnings: [],
+    };
+    const config = readEnvoyConfig(neutral, { HOME: home }, { cwd: tempDir() });
+    expect(config).toEqual(unread);
+    expect(missingNotice(config, "Dispatch and Envoy are off")).toBe(
+      `no envoy.json at ${neutral}: Dispatch and Envoy are off; ${notice}`
+    );
+    expect(dispatchSettings({ HOME: home }, config)).toEqual({
+      enabled: false,
+      notice: `no envoy.json at ${neutral}: Dispatch is off; ${notice}`,
+      error: null,
+      oldUserFileNotRead: true,
+    });
+    expect(envoySettings({ HOME: home }, config)).toMatchObject({ enabled: false, error: null });
+    // XDG_CONFIG_HOME set to $HOME/.config is the same file, and says the same.
+    const sameHome = { HOME: home, XDG_CONFIG_HOME: path.join(home, ".config") };
+    expect(readEnvoyConfig(neutral, sameHome, { cwd: tempDir() })).toEqual(unread);
+    expect(existsSync(marker)).toBe(false);
+
+    // A neutral file that exists is read, and the old one is neither read nor named.
+    writeFile(neutral, { dispatch: { enabled: true, token: "new-token" } });
+    expect(readEnvoyConfig(neutral, { HOME: home }, { cwd: tempDir() })).toEqual({
+      ...unread,
+      dispatch: { enabled: true, token: "new-token" },
+      missing: null,
     });
 
-    // A neutral file under another XDG_CONFIG_HOME (a Legion pane's, under the daemon's state
-    // directory) is not where the user's file goes: no fallback.
-    const pane = { HOME: home, XDG_CONFIG_HOME: "/var/lib/legion/home/.config" };
-    const paneFile = "/var/lib/legion/home/.config/legion/envoy.json";
-    expect(readEnvoyConfig(paneFile, pane, { cwd: tempDir() })).toMatchObject({
-      path: paneFile,
-      dispatch: {},
-      missing: { link: null },
-      warnings: [],
-    });
-    // Nor for another chosen file, for which the neutral path is not worked out, so a relative
-    // XDG_CONFIG_HOME refuses nothing here.
-    const profile = path.join(tempDir(), "envoy.json");
+    // Another chosen file, neither the user's default nor a profile's nor the neutral one under
+    // XDG_CONFIG_HOME, says nothing of it, and a relative XDG_CONFIG_HOME refuses nothing here.
+    const handed = path.join(tempDir(), "envoy.json");
     for (const env of [{ HOME: home }, { HOME: home, XDG_CONFIG_HOME: "relative/config" }]) {
-      expect(readEnvoyConfig(profile, env, { cwd: tempDir() })).toMatchObject({
-        path: profile,
+      expect(readEnvoyConfig(handed, env, { cwd: tempDir() })).toEqual({
+        ...unread,
+        path: handed,
         missing: { link: null },
-        warnings: [],
       });
     }
+  });
+
+  test("an OpenCode-era file that is not valid refuses nothing, since it is not read", () => {
+    const home = tempDir();
+    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), "{not json");
+    const neutral = path.join(home, ".config", "legion", "envoy.json");
+    expect(readEnvoyConfig(neutral, { HOME: home }, { cwd: tempDir() })).toMatchObject({
+      kind: "read",
+      path: neutral,
+      missing: {
+        link: null,
+        oldUserFileNotice: `${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`,
+      },
+    });
   });
 
   test("a missing harness file leaves the OpenCode-era file unread and names how to configure each profile", () => {
@@ -339,53 +351,38 @@ describe("readEnvoyConfig", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  test("a harness directory at the default config directory reads the OpenCode-era file by the default rule", () => {
+  test("a harness directory at the default config directory gets the default file's move, reading nothing", () => {
     const home = tempDir();
     const directory = path.join(home, ".config", "legion");
-    const old = path.join(home, ".config", "opencode", "envoy.json");
+    const marker = path.join(home, "old-token-ran");
+    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
+      dispatch: {
+        enabled: true,
+        serverUrl: "https://old.dispatch.example",
+        token: `!touch ${marker}; echo old-token`,
+      },
+    });
     const profiles = [
       ["omp", { OMP_PROFILE: "work", PI_CODING_AGENT_DIR: directory }],
       ["claude", { CLAUDE_CONFIG_DIR: directory }],
       ["opencode", { OPENCODE_CONFIG_DIR: directory }],
     ] as const;
 
+    // The file's path decides, so a relocated XDG_CONFIG_HOME does not change it.
     for (const [harness, profile] of profiles) {
-      const marker = path.join(home, `${harness}-old-token-ran`);
-      writeFile(old, {
-        dispatch: {
-          enabled: true,
-          serverUrl: "https://old.dispatch.example",
-          token: `!touch ${marker}; echo old-token`,
-        },
-      });
-      const env = { HOME: home, ...profile };
-      const chosen = envoyConfigPath(harness, env);
-      const config = readEnvoyConfig(chosen, env, { cwd: tempDir() });
+      for (const configHome of [{}, { XDG_CONFIG_HOME: path.join(home, "relocated-config") }]) {
+        const env = { HOME: home, ...configHome, ...profile };
+        const chosen = envoyConfigPath(harness, env);
+        const config = readEnvoyConfig(chosen, env, { cwd: tempDir() });
 
-      expect(config).toMatchObject({
-        path: old,
-        missing: null,
-        warnings: [
-          `${old} is read until it moves (a later release stops reading it): mkdir -p ~/.config/legion && mv ${old} ${chosen}, then move a top-level natsUrls into envoy.natsUrls`,
-        ],
-      });
-      expect(dispatchSettings(env, config)).toMatchObject({
-        enabled: true,
-        token: "old-token",
-      });
-      expect(existsSync(marker)).toBe(true);
+        expect(config).toMatchObject({ path: chosen, dispatch: {}, envoy: {} });
+        expect(missingNotice(config, "Dispatch and Envoy are off")).toBe(
+          `no envoy.json at ${chosen}: Dispatch and Envoy are off; ${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`
+        );
+        expect(dispatchSettings(env, config)).toMatchObject({ enabled: false, error: null });
+      }
     }
-  });
-
-  test("the OpenCode-era file that is not valid is refused, naming it", () => {
-    const home = tempDir();
-    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
-      dispatch: { enabled: true, defaultRepo: "o/r" },
-    });
-    const neutral = path.join(home, ".config", "legion", "envoy.json");
-    expect(errorOf(readEnvoyConfig(neutral, { HOME: home }, { cwd: tempDir() }))).toContain(
-      `${old}: unrecognized dispatch key(s): dispatch.defaultRepo`
-    );
+    expect(existsSync(marker)).toBe(false);
   });
 
   test("a chosen file that cannot be read is an error, never a missing file; a path through a file is missing", () => {
@@ -524,7 +521,7 @@ describe("readEnvoyConfig", () => {
     });
   });
 
-  test("a legacy checkout's .opencode/envoy.json ignores NATS and Envoy settings but keeps its Dispatch server", () => {
+  test("a checkout's .opencode/envoy.json is not read, and a warning names the rename", () => {
     const cwd = tempDir();
     const old = writeFile(path.join(cwd, ".opencode", "envoy.json"), {
       dispatch: { enabled: true, serverUrl: "https://old.internal.example", token: "t" },
@@ -533,34 +530,19 @@ describe("readEnvoyConfig", () => {
     });
     const file = writeFile(path.join(tempDir(), "envoy.json"), {});
     const config = readEnvoyConfig(file, { HOME: tempDir() }, { cwd });
-    expect(config).toMatchObject({
+    expect(config).toEqual({
+      kind: "read",
+      path: file,
+      dispatch: {},
       envoy: {},
-      checkout: {
-        kind: "valid",
-        path: old,
-        dispatch: { serverUrl: "https://old.internal.example", token: "t" },
-        envoyError: null,
-      },
+      checkout: null,
+      missing: null,
       warnings: [
-        `${old} is read until it moves (a later release stops reading it): mkdir -p ${path.join(cwd, ".envoy")} && mv ${old} ${path.join(cwd, ".envoy", "envoy.json")}`,
-        `${old}: natsUrls/envoy is not read from a checkout's envoy.json; ignored`,
+        `${old} is not read: mkdir -p ${path.join(cwd, ".envoy")} && mv ${old} ${path.join(cwd, ".envoy", "envoy.json")}`,
       ],
     });
-    expect(dispatchSettings({}, config)).toEqual({
-      enabled: true,
-      url: "https://old.internal.example",
-      token: "t",
-    });
-    // Its `!` token is refused, as any checkout's is.
-    writeFile(old, {
-      dispatch: { enabled: true, serverUrl: "https://old.internal.example", token: "!echo t" },
-    });
-    expect(dispatchSettings({}, readEnvoyConfig(file, { HOME: tempDir() }, { cwd }))).toMatchObject(
-      {
-        enabled: false,
-        error: `${old}: dispatch.token is a command, which a checkout's envoy.json cannot run`,
-      }
-    );
+    expect(dispatchSettings({}, config)).toMatchObject({ enabled: false, error: null });
+    expect(envoySettings({}, config)).toMatchObject({ enabled: false, error: null });
     // A .envoy/envoy.json beside it is the one read, and the old one is not named.
     const current = writeFile(path.join(cwd, ".envoy", "envoy.json"), {
       dispatch: { enabled: false },
@@ -571,24 +553,30 @@ describe("readEnvoyConfig", () => {
     });
   });
 
-  test("a chosen file's top-level natsUrls is read as envoy.natsUrls with a warning, and refused beside envoy.natsUrls", () => {
-    const file = writeFile(path.join(tempDir(), "envoy.json"), {
-      envoy: { enabled: true },
-      natsUrls: [" nats://nats.internal.example:4222 "],
+  test("a chosen file at a checkout's .opencode/envoy.json is read as the chosen file, and not named", () => {
+    const cwd = tempDir();
+    const chosen = writeFile(path.join(cwd, ".opencode", "envoy.json"), { dispatch: dispatchOn });
+    expect(readEnvoyConfig(chosen, { HOME: tempDir() }, { cwd })).toMatchObject({
+      path: chosen,
+      dispatch: dispatchOn,
+      checkout: null,
+      warnings: [],
     });
-    expect(readEnvoyConfig(file, { HOME: tempDir() }, { cwd: tempDir() })).toMatchObject({
-      envoy: { enabled: true, natsUrls: ["nats://nats.internal.example:4222"] },
-      warnings: [
-        `${file}: the top-level natsUrls is read as envoy.natsUrls until it moves (a later release stops reading it): move natsUrls into envoy.natsUrls`,
-      ],
-    });
-    const both = writeFile(path.join(tempDir(), "envoy.json"), {
-      envoy: { natsUrls: ["nats://one.internal.example:4222"] },
-      natsUrls: ["nats://two.internal.example:4222"],
-    });
-    expect(errorOf(readEnvoyConfig(both, { HOME: tempDir() }, { cwd: tempDir() }))).toBe(
-      `${both}: natsUrls and envoy.natsUrls are both set; keep envoy.natsUrls`
-    );
+  });
+
+  test("a chosen file's top-level natsUrls is refused, naming envoy.natsUrls", () => {
+    for (const contents of [
+      { natsUrls: ["nats://nats.internal.example:4222"] },
+      {
+        envoy: { natsUrls: ["nats://one.internal.example:4222"] },
+        natsUrls: ["nats://two.internal.example:4222"],
+      },
+    ]) {
+      const file = writeFile(path.join(tempDir(), "envoy.json"), contents);
+      expect(errorOf(readEnvoyConfig(file, { HOME: tempDir() }, { cwd: tempDir() }))).toBe(
+        `${file}: the top-level natsUrls is not read; move it to envoy.natsUrls`
+      );
+    }
   });
 
   test("a chosen file that is the checkout's own is read once, as the chosen file", () => {

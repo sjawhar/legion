@@ -825,6 +825,50 @@ describe("the dispatch CLI's envoy.json", () => {
     expect(requests).toEqual([]);
   });
 
+  test("a missing neutral file beside the OpenCode-era file names the move and exits 2, running and sending nothing", async () => {
+    const marker = join(stateDir, "old-token-ran");
+    const old = join(stateDir, ".config", "opencode", "envoy.json");
+    mkdirSync(join(stateDir, ".config", "opencode"), { recursive: true });
+    writeFileSync(
+      old,
+      JSON.stringify({
+        dispatch: {
+          enabled: true,
+          serverUrl: `http://127.0.0.1:${server.port}`,
+          token: `!touch ${marker}; echo old-token`,
+        },
+      })
+    );
+
+    const { code, stdout } = await run(["projects"], fromFile);
+
+    expect(stdout).toBe(
+      `dispatch: no envoy.json at ${join(stateDir, ".config", "legion", "envoy.json")}: Dispatch is off; ${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/\n`
+    );
+    expect(code).toBe(2);
+    expect(existsSync(marker)).toBe(false);
+    expect(requests).toEqual([]);
+  });
+
+  test("a checkout's .opencode/envoy.json is named on every call, and its server is never used", async () => {
+    serverConfig(join(stateDir, ".config", "legion"));
+    const old = join(stateDir, ".opencode", "envoy.json");
+    mkdirSync(join(stateDir, ".opencode"), { recursive: true });
+    writeFileSync(
+      old,
+      JSON.stringify({
+        dispatch: { enabled: true, serverUrl: "http://127.0.0.1:1", token: "checkout-token" },
+      })
+    );
+
+    const { code, stdout } = await run(["projects"], fromFile);
+
+    expect(stdout).toBe(
+      `dispatch: ${old} is not read: mkdir -p ${join(stateDir, ".envoy")} && mv ${old} ${join(stateDir, ".envoy", "envoy.json")}\nCORE Core\nSMOKE684 Smoke\n`
+    );
+    expect(code).toBe(0);
+  });
+
   test("a profile's missing file tells dispatch where the old file belongs without running its token", async () => {
     const profile = join(stateDir, "profile");
     mkdirSync(profile);
