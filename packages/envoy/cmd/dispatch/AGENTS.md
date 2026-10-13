@@ -114,6 +114,9 @@ GitHub's App API. Its cursor and per-delivery claims live in the `envoy_webhook_
 bucket. `envoy-dispatch redeliver-webhooks --since <d> [--dry-run]` runs the same sweep once
 over a chosen window without moving the cursor. The README's "Webhook redelivery" section has
 the rules: 4xx is never redelivered, bounded attempts, GitHub's rate limits, the log lines.
+Like `natstail`, it connects as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`)
+names and runs no `!` command, so it never reads `envoy.natsSeed`: a run against a NATS that
+requires a user needs `NATS_NKEY_SEED_FILE`.
 
 With `DISPATCH_FILE_STORE_BUCKET` set, uploaded files' bytes live in that bucket under
 `files/sha256/<hash>` (`internal/dispatch/files`; `main.go`'s `openFileStore` builds the store
@@ -457,7 +460,9 @@ updates `ENVOY_NOTIFICATIONS`, and it refuses a NATS server that is not this
 machine's, naming the URL. A machine whose `envoy.json` names a shared NATS
 (an agent devbox names production's) runs it with
 `ENVOY_ALLOW_REMOTE_NATS=1 go run ./cmd/natstail …`, which is the run saying it
-means that server.
+means that server. It connects as the nkey user `NATS_NKEY_SEED_FILE` (or
+`NATS_NKEY_SEED`) names, never `envoy.natsSeed`, so a run against a NATS that
+requires a user sets `NATS_NKEY_SEED_FILE` too.
 
 ## Checks
 

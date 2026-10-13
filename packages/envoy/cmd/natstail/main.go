@@ -1,4 +1,7 @@
-// Command natstail writes Dispatch and Envoy envelopes from a NATS subject to stdout.
+// Command natstail writes Dispatch and Envoy envelopes from a NATS subject to stdout. It reads the
+// NATS servers from envoy.natsUrls in ${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json and connects
+// as the nkey user NATS_NKEY_SEED_FILE (or NATS_NKEY_SEED) names. It runs no `!` command, so it
+// never reads envoy.natsSeed: a run against a NATS that requires a user needs NATS_NKEY_SEED_FILE.
 package main
 
 import (
@@ -20,6 +23,13 @@ import (
 func main() {
 	flags := flag.NewFlagSet("natstail", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
+	flags.Usage = func() {
+		fmt.Fprintln(flags.Output(), "usage: natstail -subject <pattern> [-count <n>] [-timeout <duration>]")
+		fmt.Fprintln(flags.Output(), "Reads the NATS servers from envoy.natsUrls in envoy.json and connects as the nkey user")
+		fmt.Fprintln(flags.Output(), "NATS_NKEY_SEED_FILE (or NATS_NKEY_SEED) names; it never runs envoy.natsSeed, so a run")
+		fmt.Fprintln(flags.Output(), "against a NATS that requires a user needs NATS_NKEY_SEED_FILE.")
+		flags.PrintDefaults()
+	}
 	subject := flags.String("subject", "", "NATS subject pattern to subscribe to")
 	count := flags.Int("count", 1, "number of envelopes to print")
 	timeout := flags.Duration("timeout", 30*time.Second, "maximum time to wait for envelopes")

@@ -274,6 +274,9 @@
   `envoy.enabled` says, since `enabled` switches a session's Envoy. `XDG_CONFIG_HOME` is a row of
   the settings table, and one set to a path that is not absolute refuses startup, naming it.
   `DISPATCH_SERVER_URL` and `NATS_URLS` still override both files, but not the old-file refusal.
+  No Go process runs `envoy.natsSeed`: `natstail` and `envoy-dispatch redeliver-webhooks` connect
+  as the nkey user `NATS_NKEY_SEED_FILE` (or `NATS_NKEY_SEED`) names, so a run against a NATS that
+  requires a user needs `NATS_NKEY_SEED_FILE`, which the session launchers no longer export.
   The compose deployment (`deploy/compose/dispatch.compose.yml`) mounts no `envoy.json` and needs
   no change. A server started on a host whose user has only `~/.config/opencode/envoy.json`
   refuses until the file moves:

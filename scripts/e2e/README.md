@@ -250,12 +250,16 @@ NATS the GitHub bridge subscribes on by its fully-qualified name on the operator
 domain completes ([the rig-alias learning](../../docs/solutions/testing/a-rig-container-alias-that-is-momentarily-unheld-resolves-through-the-tailnet-to-production.md));
 `prerequisites` refuses a run without
 either, and refuses an upstream that is not one NATS URL naming a host with a dot. The script prints
-neither value. The bridge connects to that upstream as the nkey user `NATS_NKEY_SEED_FILE` or
-`NATS_NKEY_SEED` in the operator's environment names, and without a credential when neither is set. Every process the rigs start against their own no-auth NATS (the listener, the Envoy Dispatch
+neither value. The bridge connects to that upstream as the nkey user a command run from the
+operator's shell resolves for it (`lib/operator-nats-seed.ts`, `envoySettings` with
+`ENVOY_NATS_URL` set to that upstream): `NATS_NKEY_SEED_FILE` or `NATS_NKEY_SEED`, else the
+`envoy.natsSeed` of the operator's envoy.json when its `envoy.natsUrls` are exactly that upstream,
+and without a credential when none names one; a file's seed written for other servers, or a file
+that turns Envoy off, stops the bridge naming it. Every process the rigs start against their own no-auth NATS (the listener, the Envoy Dispatch
 server, the Go daemon; stage 2 and the other local rigs unset every variable below outright) runs without
 `NATS_NKEY_SEED`/`NATS_NKEY_SEED_FILE`, and the Go daemon also without the daemon seed's
 `NATS_DAEMON_NKEY_SEED`/`NATS_DAEMON_NKEY_SEED_FILE`, since the Go client refuses an nkey against a server with no
-users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, keeps the operator's seed. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
+users; `lib/nats-stream.ts`, which stage 4b runs against production NATS, resolves the operator's seed the same way. The proof human is the devbox's ordinary `gh` — the dotfiles shim, acting as the
 `sjawhar-agent` App — for its reviews, its reads, and its merge; it is never a Legion App, and the
 run needs no personal access token (`GH_PUBLIC_REPO_PAT` cannot read the private smoke repository
 anyway). The shim routes `gh` to that App only from the operator's own Oh My Pi session, so the run
