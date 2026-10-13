@@ -16,11 +16,6 @@ import {
   zodSchemaApi,
 } from "@legion/contracts";
 import {
-  DEFAULT_ENVOY_URL,
-  DEFAULT_HEARTBEAT_MS,
-  envoySettings,
-} from "@legion/envoy-client/defaults";
-import {
   createDeliveryDedupe,
   DedupeIdentitySchema,
   type DispatchDelivery,
@@ -33,8 +28,7 @@ import {
 } from "@legion/envoy-client/delivery";
 import {
   type ActiveDispatchConfig,
-  activeDispatchConfig,
-  resolveDispatchConfig,
+  activeDispatchSettings,
 } from "@legion/envoy-client/dispatch-config";
 import {
   dispatchFirstSkillFile,
@@ -50,10 +44,14 @@ import {
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
-import { envoyConfigPath, readEnvoyConfig } from "@legion/envoy-client/envoy-config";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
+import {
+  sessionConfigFile,
+  sessionDispatchSettings,
+  sessionSettings,
+} from "@legion/envoy-client/session-settings";
 import {
   EnvoyToolOperation,
   envoyToolSpecs,
@@ -141,12 +139,14 @@ const NATS_RETRY_INTERVAL_MS = 15_000;
 const DELIVERY_PICTURES_TIMEOUT_MS = 20_000;
 
 /**
- * A Dispatch client on the configuration as it stands now, every request of it ending after
- * `timeoutMs`, or undefined when Dispatch is not configured. A configuration that cannot be read
- * throws, as `activeDispatchConfig` does.
+ * A Dispatch client on the configuration as it stands now in the session's envoy.json
+ * (`CONFIG_FILE`), every request of it ending after `timeoutMs`, or undefined when Dispatch is not
+ * configured. A configuration that cannot be read throws, as `activeDispatchSettings` does.
  */
 function timedDispatchClient(timeoutMs: number): DispatchClient | undefined {
-  const config = activeDispatchConfig(process.env, { harness: "omp", cwd: process.cwd() });
+  const config = activeDispatchSettings(
+    sessionDispatchSettings(CONFIG_FILE, process.env, { cwd: process.cwd() })
+  );
   return config === null
     ? undefined
     : new DispatchClient(config.url, config.token, fetch, AbortSignal.timeout(timeoutMs));
@@ -394,12 +394,18 @@ const DISPATCH_FIRST_CONTEXT = readDispatchFirstContext(dispatchFirstSkillFile(S
 // The `dispatch` command this plugin ships: `bin/` is one directory above this module in both
 // layouts (`<pkg>/dist/envoy.js` packed, `<pkg>/extensions/envoy.ts` in the repository). Oh My Pi
 // snapshots `process.env` for its shell when it first runs one, after every extension has loaded,
-// so both reach every shell command.
+// so `PATH`, `DISPATCH_HOST` and `ENVOY_CONFIG_FILE` below reach every shell command.
 const PLUGIN_BIN = resolve(dirname(fileURLToPath(import.meta.url)), "..", "bin");
 if (!(process.env.PATH ?? "").split(delimiter).includes(PLUGIN_BIN)) {
   process.env.PATH = `${PLUGIN_BIN}${delimiter}${process.env.PATH ?? ""}`;
 }
 process.env.DISPATCH_HOST = "omp";
+// The session's envoy.json, by Oh My Pi's rule: a named profile's `$PI_CODING_AGENT_DIR/envoy.json`,
+// else the file `ENVOY_CONFIG_FILE` names, else the neutral file. The commands the session runs
+// are handed the same file, so a `dispatch` command reads what this session reads. A location that
+// cannot be worked out (a relative `XDG_CONFIG_HOME`) hands nothing on and turns both sections off.
+const CONFIG_FILE = sessionConfigFile("omp", process.env);
+if (CONFIG_FILE.path !== null) process.env.ENVOY_CONFIG_FILE = CONFIG_FILE.path;
 
 export default function envoyExtension(pi: PiApi): void {
   logger.debug("extension instance loaded", { extension: import.meta.url });
@@ -407,39 +413,51 @@ export default function envoyExtension(pi: PiApi): void {
   // Envoy entry at another interface version published first: that entry's object stays the one
   // Legion finds, and this instance pushes no claim instance onto it (first wins).
   const publishedInterface = publishEnvoyPluginInterface(import.meta.url);
-  const envoy = envoySettings(
-    process.env,
-    readEnvoyConfig(envoyConfigPath("omp", process.env), process.env, { cwd: process.cwd() })
-  );
-  // An Envoy that is off keeps the no-NATS path: outbound tools against the default listener
-  // address with no bearer, and no inbound messages.
-  const defaults = envoy.enabled
-    ? envoy
-    : {
-        url: DEFAULT_ENVOY_URL,
-        natsUrls: [],
-        token: undefined,
-        natsSeed: undefined,
-        heartbeatMs: DEFAULT_HEARTBEAT_MS,
-      };
-  // One loader for the shared envoy.json contract: the dispatch-first context is injected only
-  // where the file names a service at load, and an invalid file is reported at session start, not
-  // silently treated as off. The URL and token themselves are re-read on every use
-  // (`currentDispatchConfig`) so a Dispatch that moved - a new dispatch.serverUrl in envoy.json -
-  // takes effect without /reload-plugins; a file that has since broken fails with its own error
-  // instead of quietly using the stale endpoint.
-  const dispatchConfig = resolveDispatchConfig(process.env, {
-    harness: "omp",
-    cwd: process.cwd(),
-  });
+  // Dispatch and Envoy as this session starts with them, each resolved on its own from the
+  // session's envoy.json (`CONFIG_FILE`) and the variables over it. The dispatch-first context is
+  // injected only where Dispatch is on at load. Dispatch's URL and token are re-read on every use
+  // (`currentDispatchConfig`), so a Dispatch that moved - a new dispatch.serverUrl in envoy.json -
+  // takes effect without /reload-plugins, and a file that has since broken fails with its own
+  // error instead of quietly using the stale endpoint.
+  const atStart = sessionSettings(CONFIG_FILE, process.env, { cwd: process.cwd() });
+  const { envoy } = atStart;
   const currentDispatchConfig = (): ActiveDispatchConfig => {
-    const config = activeDispatchConfig(process.env, { harness: "omp", cwd: process.cwd() });
+    const config = activeDispatchSettings(
+      sessionDispatchSettings(CONFIG_FILE, process.env, { cwd: process.cwd() })
+    );
     if (config === null) {
       throw new Error("Dispatch is no longer configured (dispatch.serverUrl/token missing)");
     }
     return config;
   };
-  const client = createEnvoyClient({ baseUrl: defaults.url, fetch, token: defaults.token });
+  // Inbound messages arrive over NATS: an Envoy with no NATS server takes none, and its tools,
+  // which call the listener, still work.
+  const inbound = envoy.enabled && envoy.natsUrls.length > 0;
+  // What a top-level session start says, once: why a section is off (`sessionSettings`), and that
+  // inbound messages are off for an Envoy with no NATS server.
+  const startNotice = [
+    atStart.notice,
+    envoy.enabled && envoy.natsUrls.length === 0
+      ? "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work"
+      : null,
+  ]
+    .filter((part) => part !== null)
+    .join("; ");
+  // The listener client exists only while Envoy is on. Every listener call and the NATS
+  // connection go through `activeEnvoy`, which refuses while Envoy is off, so this session reaches
+  // no listener and no NATS server its configuration does not name.
+  const active = envoy.enabled
+    ? {
+        settings: envoy,
+        client: createEnvoyClient({ baseUrl: envoy.url, fetch, token: envoy.token }),
+      }
+    : undefined;
+  const activeEnvoy = (): NonNullable<typeof active> => {
+    if (active === undefined) {
+      throw new Error(`Envoy is off for this session (${CONFIG_FILE.path ?? CONFIG_FILE.error})`);
+    }
+    return active;
+  };
   const subscriptions = new Map<string, Subscription>();
   const delivered = createDeliveryDedupe();
   let connection: NatsConnection | undefined;
@@ -678,10 +696,11 @@ export default function envoyExtension(pi: PiApi): void {
 
   const ensureConnection = async (): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;
+    const { settings } = activeEnvoy();
     connection = await connect({
-      servers: [...defaults.natsUrls],
+      servers: [...settings.natsUrls],
       name: `omp-${sessionID || "unknown"}`,
-      ...natsAuthOptions(defaults.natsSeed),
+      ...natsAuthOptions(settings.natsSeed),
       // Survive NATS drops after the first connection: nats.js re-subscribes
       // existing subscriptions on its own once reconnected.
       reconnect: true,
@@ -1303,7 +1322,7 @@ export default function envoyExtension(pi: PiApi): void {
   // NATS subscriptions), so the registered topics serve recovery on resume; a role-bound subject
   // stays out of them.
   const registerSession = () =>
-    client.subscribe({
+    activeEnvoy().client.subscribe({
       sessionID,
       directory: sessionDirectory,
       topics: [
@@ -1346,23 +1365,27 @@ export default function envoyExtension(pi: PiApi): void {
     // racing this tick changes them mid-flight, and that call is the truth.
     const id = sessionID;
     const role = topic.slice(ROLE_TOPIC_PREFIX.length);
-    const holder = await client.getRole(role).then(
-      (info) => info.holder,
-      (error: unknown) => {
-        // 404 is the listener's answer for "no live holder", not a failure.
-        if (error instanceof EnvoyApiError && error.details.status === 404) return undefined;
-        throw error;
-      }
-    );
+    const holder = await activeEnvoy()
+      .client.getRole(role)
+      .then(
+        (info) => info.holder,
+        (error: unknown) => {
+          // 404 is the listener's answer for "no live holder", not a failure.
+          if (error instanceof EnvoyApiError && error.details.status === 404) return undefined;
+          throw error;
+        }
+      );
     let reason: RoleRegainReason;
     if (holder === id) {
       if (!afterOutage) return;
       reason = "reregistered";
     } else {
-      const result = await client.setRole({ sessionID: id, role, soft: true });
+      const result = await activeEnvoy().client.setRole({ sessionID: id, role, soft: true });
       if (claimedRoleTopic !== topic || sessionID !== id) {
         // Superseded while in flight, so a claim that landed here is handed straight back.
-        if (result.claimed) await client.unsubscribe({ sessionID: id, topics: [topic] });
+        if (result.claimed) {
+          await activeEnvoy().client.unsubscribe({ sessionID: id, topics: [topic] });
+        }
         return;
       }
       if (!result.claimed) {
@@ -1455,7 +1478,7 @@ export default function envoyExtension(pi: PiApi): void {
         .finally(() => {
           healing = false;
         });
-    }, defaults.heartbeatMs);
+    }, activeEnvoy().settings.heartbeatMs);
     heartbeatRegistered = true;
   };
 
@@ -1468,7 +1491,9 @@ export default function envoyExtension(pi: PiApi): void {
     // entry, and a listener outage must not fail session start.
     // Role topics are not subscriptions (role deliveries arrive on the agent
     // subject); they are re-claimed by reclaimHeldRoles once registered.
-    const registry = await client.getInterest(sessionID).catch(() => undefined);
+    const registry = await activeEnvoy()
+      .client.getInterest(sessionID)
+      .catch(() => undefined);
     if (registry === undefined) return;
     for (const topic of registry.topics) {
       if (topic === agentSubject(sessionID) || topic.startsWith(ROLE_TOPIC_PREFIX)) continue;
@@ -1491,7 +1516,7 @@ export default function envoyExtension(pi: PiApi): void {
   ): Promise<boolean> => {
     const topic = ROLE_TOPIC_PREFIX + role;
     const previousTopic = claimedRoleTopic;
-    const result = await client.setRole({
+    const result = await activeEnvoy().client.setRole({
       sessionID,
       role,
       soft: options.soft,
@@ -1517,7 +1542,7 @@ export default function envoyExtension(pi: PiApi): void {
     pi.appendEntry(ROLE_CLAIM_ENTRY, { role });
     if (activeSessionContext !== undefined) ensureHeartbeat(activeSessionContext);
     if (previousTopic !== undefined && previousTopic !== topic) {
-      await client.unsubscribe({ sessionID, topics: [previousTopic] });
+      await activeEnvoy().client.unsubscribe({ sessionID, topics: [previousTopic] });
     }
     return true;
   };
@@ -1572,7 +1597,9 @@ export default function envoyExtension(pi: PiApi): void {
     let role = remembered ?? claimedRoleTopic?.slice(ROLE_TOPIC_PREFIX.length);
     if (role === undefined) {
       for (const source of roleSources(previousSessionID, carryPreviousSessionRole)) {
-        const registry = await client.getInterest(source).catch(() => undefined);
+        const registry = await activeEnvoy()
+          .client.getInterest(source)
+          .catch(() => undefined);
         const topic = registry?.topics.find((candidate) => candidate.startsWith(ROLE_TOPIC_PREFIX));
         if (topic !== undefined) {
           role = topic.slice(ROLE_TOPIC_PREFIX.length);
@@ -1735,21 +1762,8 @@ export default function envoyExtension(pi: PiApi): void {
     bindDispatchSession(context.sessionManager.getSessionId());
     const previousSessionID = sessionID;
     restoreLocalSessionState(context);
-    if (dispatchConfig.error !== null) {
-      context.ui.notify(`envoy: Dispatch disabled — ${dispatchConfig.error}`, "warning");
-    }
-    if (defaults.natsUrls.length === 0) {
-      context.ui.notify(
-        envoy.enabled || envoy.error === null
-          ? [
-              "envoy: ENVOY_NATS_URL is not set; inbound envoy messages are disabled",
-              "(outbound tools still work)",
-            ].join(" ")
-          : `envoy: Envoy disabled — ${envoy.error}`,
-        "warning"
-      );
-      return;
-    }
+    if (startNotice !== "") context.ui.notify(`envoy: ${startNotice}`, "warning");
+    if (!inbound) return;
     let established = false;
     const establish = async (): Promise<void> => {
       await establishSession(context, {}, previousSessionID);
@@ -1785,7 +1799,7 @@ export default function envoyExtension(pi: PiApi): void {
     if (await isSubagent(context)) return;
     const previousID = sessionID;
     restoreLocalSessionState(context);
-    if (defaults.natsUrls.length === 0) return;
+    if (!inbound) return;
     try {
       const carryPreviousSessionRole = reason !== "new" && reason !== "resume";
       await establishSession(context, { carryPreviousSessionRole }, previousID);
@@ -1859,9 +1873,11 @@ export default function envoyExtension(pi: PiApi): void {
     const timer = setTimeout(deadline.resolve, 1_000);
     try {
       const deregistration =
-        sessionID === ""
+        sessionID === "" || !envoy.enabled
           ? Promise.resolve()
-          : client.unregisterSession(sessionID).catch(() => undefined);
+          : activeEnvoy()
+              .client.unregisterSession(sessionID)
+              .catch(() => undefined);
       const draining = connection?.drain().catch(() => undefined) ?? Promise.resolve();
       await Promise.race([
         Promise.allSettled([deregistration, draining]).then(() => undefined),
@@ -1885,21 +1901,25 @@ export default function envoyExtension(pi: PiApi): void {
     }
   });
 
-  // Every tool validates its own arguments inside execute (one refusal naming every
-  // problem); the host's schema check is bypassed so it cannot pre-empt that with its own wording.
-  for (const spec of envoyToolSpecs) {
-    pi.registerTool({
-      name: spec.name,
-      label: spec.name,
-      description: spec.description,
-      parameters: schemaFor(pi, spec.operation),
-      lenientArgValidation: true,
-      execute: async (_id, parameters, _signal, _onUpdate, context) =>
-        execute(spec.operation, parameters, context),
-    });
+  // An Envoy that is off registers no tool and no `/whoami`: there is no listener to reach. Every
+  // tool validates its own arguments inside execute (one refusal naming every problem); the host's
+  // schema check is bypassed so it cannot pre-empt that with its own wording.
+  if (envoy.enabled) {
+    for (const spec of envoyToolSpecs) {
+      pi.registerTool({
+        name: spec.name,
+        label: spec.name,
+        description: spec.description,
+        parameters: schemaFor(pi, spec.operation),
+        lenientArgValidation: true,
+        execute: async (_id, parameters, _signal, _onUpdate, context) =>
+          execute(spec.operation, parameters, context),
+      });
+    }
+    registerEnvoyWhoamiCommand(pi, replyAddress);
   }
 
-  if (dispatchConfig.enabled) {
+  if (atStart.dispatch.enabled) {
     // Every session that reaches Dispatch, Legion panes and `task` subagents included, carries
     // the dispatch-first skill on every request: any of them can file, ask, or start work.
     pi.on("context", async (event) => {
@@ -1907,8 +1927,6 @@ export default function envoyExtension(pi: PiApi): void {
       return messages === undefined ? undefined : { messages };
     });
   }
-
-  registerEnvoyWhoamiCommand(pi, replyAddress);
 
   // Turn start injects nothing into the conversation; its open-asks query only arms the run-end
   // nudge below, the snapshot's `as_of` becoming the period's baseline. A session the stop can
@@ -2281,8 +2299,8 @@ export default function envoyExtension(pi: PiApi): void {
           const registrationError =
             registryRemoved.length === 0
               ? undefined
-              : await client
-                  .unsubscribe({ sessionID, topics: registryRemoved })
+              : await activeEnvoy()
+                  .client.unsubscribe({ sessionID, topics: registryRemoved })
                   .then(registerSession)
                   .then(() => undefined, messageFor);
           return toolSuccess(`Unsubscribed: ${removed.join(", ") || "(none)"}`, {
@@ -2291,7 +2309,7 @@ export default function envoyExtension(pi: PiApi): void {
           });
         }
         case EnvoyToolOperation.listInterests: {
-          const registry = await client.getInterest(sessionID);
+          const registry = await activeEnvoy().client.getInterest(sessionID);
           const interests = mergeInterestSources(registry.topics, [...subscriptions.keys()]);
           return toolSuccess(
             JSON.stringify({ ...registry, topics: [...interests.keys()] }, null, 2),
@@ -2304,7 +2322,7 @@ export default function envoyExtension(pi: PiApi): void {
           return toolSuccess(JSON.stringify(inbox, null, 2), { count: inbox.length });
         case EnvoyToolOperation.send: {
           const targetSessionID = stringFor(parameters, "session_id");
-          const result = await client.send({
+          const result = await activeEnvoy().client.send({
             sourceSessionID: await replyAddress(context),
             targetSessionID,
             message: stringFor(parameters, "message"),
@@ -2320,7 +2338,7 @@ export default function envoyExtension(pi: PiApi): void {
           const topic = stringFor(parameters, "topic");
           const inSubagent = await isSubagent(context);
           const source = await replyAddress(context, "", inSubagent);
-          const result = await client.publish({
+          const result = await activeEnvoy().client.publish({
             sourceSessionID: source,
             topic,
             message: stringFor(parameters, "message"),
@@ -2356,7 +2374,7 @@ export default function envoyExtension(pi: PiApi): void {
           return toolSuccess(`Now holding role: ${role}`, { role });
         }
         case EnvoyToolOperation.getRole: {
-          const role = await client.getRole(stringFor(parameters, "role"));
+          const role = await activeEnvoy().client.getRole(stringFor(parameters, "role"));
           return toolSuccess(JSON.stringify(role, null, 2), role);
         }
         case EnvoyToolOperation.whoami: {
@@ -2398,7 +2416,7 @@ export default function envoyExtension(pi: PiApi): void {
           const machine = optionalStringFor(parameters, "machine");
           const directory = optionalStringFor(parameters, "dir");
           const title = optionalStringFor(parameters, "title");
-          const sessions = await client.listSessions({ directory, title });
+          const sessions = await activeEnvoy().client.listSessions({ directory, title });
           const result =
             machine === undefined
               ? sessions

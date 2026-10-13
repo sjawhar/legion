@@ -98,14 +98,15 @@ export interface PaneSource {
  * the daemon tells the pane comes from the daemon's own functions in `source`'s module
  * (`daemon-pane.go`): the claim's identity, the daemon URL, the state directory and workspace,
  * Envoy (the listener and NATS the pane's own extension reaches from the caller's environment and
- * the profile's envoy.json, `envoySettings`; the default listener and no NATS when that Envoy is
- * off), `GH_CONFIG_DIR` naming the claim's gh files, which hold
- * `RIG_GH_TOKEN`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty, `PI_SHELL_PREFIX`, the
- * four XDG base directories, the boot token pointer (`<state>/secrets/boot`, the file the stand-in
- * checks), and PATH with the launcher directory first; no grant file, since the `legion` tool mints
- * its grants in-process and no agent runs `legion` from bash; and, with `systemPrompt`, the system
- * prompt argument. An inherited `ANTHROPIC_API_KEY`, every `LEGION_*` and `DISPATCH_*` value and
- * the caller's own GitHub variables are dropped first. The profile's agent directory is under the
+ * the profile's envoy.json, with the workspace's `.envoy/envoy.json` over it, `envoySettings`; the
+ * default listener and no NATS when that Envoy is off), `GH_CONFIG_DIR` naming the claim's gh
+ * files, which hold `RIG_GH_TOKEN`, with `GH_TOKEN`, `GITHUB_TOKEN` and `GH_HOST` set empty,
+ * `PI_SHELL_PREFIX`, the four XDG base directories, the boot token pointer
+ * (`<state>/secrets/boot`, the file the stand-in checks), and PATH with the launcher directory
+ * first; no grant file, since the `legion` tool mints its grants in-process and no agent runs
+ * `legion` from bash; and, with `systemPrompt`, the system prompt argument. An inherited
+ * `ANTHROPIC_API_KEY`, every `LEGION_*` and `DISPATCH_*` value and the caller's own GitHub
+ * variables are dropped first. The profile's agent directory, and so its envoy.json, is under the
  * inherited `HOME`. */
 export function workerPane(
   launch: WorkerLaunch,
@@ -124,6 +125,7 @@ export function workerPane(
   }
   const home = env.HOME ?? os.homedir();
   const stateDir = path.join(launch.rig, "state");
+  const workspace = path.join(launch.rig, "ws");
   const profileEnv = {
     ...env,
     OMP_PROFILE: launch.profile,
@@ -131,13 +133,13 @@ export function workerPane(
   };
   const envoy = envoySettings(
     profileEnv,
-    readEnvoyConfig(envoyConfigPath("omp", profileEnv), profileEnv, { cwd: process.cwd() })
+    readEnvoyConfig(envoyConfigPath("omp", profileEnv), profileEnv, { cwd: workspace })
   );
   if (!envoy.enabled && envoy.error !== null) throw new Error(`envoy: ${envoy.error}`);
   const request: PaneRequest = {
     ...claim,
     stateDir,
-    workspace: path.join(launch.rig, "ws"),
+    workspace,
     daemonUrl: `http://127.0.0.1:${launch.port}`,
     envoyUrl: envoy.enabled ? envoy.url : DEFAULT_ENVOY_URL,
     natsUrls: envoy.enabled ? envoy.natsUrls : [],

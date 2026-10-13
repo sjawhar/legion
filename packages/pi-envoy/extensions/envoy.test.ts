@@ -292,6 +292,20 @@ const originalTmuxPane = process.env.TMUX_PANE;
 const originalDispatchSessionId = process.env.DISPATCH_SESSION_ID;
 const originalDispatchHost = process.env.DISPATCH_HOST;
 const originalDispatchStateDir = process.env.DISPATCH_STATE_DIR;
+// What picks the envoy.json the extension reads, and the credentials a Legion pane carries beside
+// it: each test starts with none of them but a file that holds no section (`beforeEach`).
+const configVariables = [
+  "ENVOY_CONFIG_FILE",
+  "OMP_PROFILE",
+  "PI_CODING_AGENT_DIR",
+  "XDG_CONFIG_HOME",
+  "ENVOY_TOKEN",
+  "ENVOY_TOKEN_FILE",
+  "NATS_NKEY_SEED",
+  "NATS_NKEY_SEED_FILE",
+] as const;
+const originalConfigVariables = configVariables.map((name) => [name, process.env[name]] as const);
+let configDirectory = "";
 
 beforeEach(() => {
   // `bun test` runs every file in one process: a Legion suite's bootstrapped-session record on
@@ -314,6 +328,13 @@ beforeEach(() => {
   delete process.env.TMUX_PANE;
   process.env.DISPATCH_STATE_DIR = mkdtempSync(join(tmpdir(), "envoy-dispatch-state-"));
   delete process.env.DISPATCH_SESSION_ID;
+  // The extension picks its envoy.json when its module loads, and each test loads it fresh: a file
+  // that holds no section, so Dispatch and Envoy come from the variables the test sets and never
+  // from the caller's own envoy.json or Oh My Pi profile.
+  for (const name of configVariables) delete process.env[name];
+  configDirectory = mkdtempSync(join(tmpdir(), "envoy-config-"));
+  process.env.ENVOY_CONFIG_FILE = join(configDirectory, "envoy.json");
+  writeFileSync(process.env.ENVOY_CONFIG_FILE, "{}\n");
 });
 
 afterEach(async () => {
@@ -347,6 +368,11 @@ afterEach(async () => {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
   }
+  for (const [name, value] of originalConfigVariables) {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+  rmSync(configDirectory, { recursive: true, force: true });
   procmgr.__resetShellConfigCacheForTests();
   clipboardState.copiedSessionIDs.length = 0;
   clipboardState.error = undefined;
@@ -3379,9 +3405,138 @@ describe("envoy OMP extension", () => {
         ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
       }
     );
-    expect(
-      notifications.filter((message) => message.startsWith("envoy: Dispatch disabled — "))
-    ).toEqual(["envoy: Dispatch disabled — dispatch.token must be a non-empty bearer token"]);
+    expect(notifications).toEqual([
+      "envoy: Dispatch is off: dispatch.token must be a non-empty bearer token",
+    ]);
+  });
+
+  describe("the session's envoy.json", () => {
+    /** A context for `sessionID` whose notifications land in `notifications`. */
+    const notifying = (sessionID: string, notifications: string[]): SessionContext => ({
+      ...sessionContext(sessionID),
+      ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+    });
+    const userTurn = { messages: [{ role: "user", content: "Fix the bug.", timestamp: 1 }] };
+
+    test("envoy.json: a named profile with none registers no Envoy tool, reaches nothing, and says so once", async () => {
+      const agentDirectory = mkdtempSync(join(tmpdir(), "envoy-profile-"));
+      process.env.OMP_PROFILE = "work";
+      process.env.PI_CODING_AGENT_DIR = agentDirectory;
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      const requests: string[] = [];
+      globalThis.fetch = async (input) => {
+        requests.push(input.toString());
+        return new Response("no request belongs here", { status: 500 });
+      };
+      try {
+        const { default: envoyExtension } = await import("./envoy.ts?envoy-json-profile");
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const file = join(agentDirectory, "envoy.json");
+        const notifications: string[] = [];
+        const context = notifying("ses_profile", notifications);
+        await fixture.handlers.get("session_start")?.({}, context);
+
+        expect(process.env.ENVOY_CONFIG_FILE).toBe(file);
+        expect(fixture.tools).toEqual([]);
+        expect(fixture.commands.map((command) => command.name)).not.toContain("whoami");
+        expect(notifications).toEqual([
+          `envoy: no envoy.json at ${file}: Dispatch and Envoy are off`,
+        ]);
+        // A Legion claim reaches the listener through the one accessor, which refuses it.
+        await expect(
+          claimEnvoyRole("ses_profile", "legion-omp-repo-1-implementer", context)
+        ).rejects.toThrow(`Envoy is off for this session (${file})`);
+        await fixture.handlers.get("session_shutdown")?.({}, context);
+        expect(requests).toEqual([]);
+        expect(natsState.connectedNames).toEqual([]);
+      } finally {
+        rmSync(agentDirectory, { recursive: true, force: true });
+      }
+    });
+
+    test("envoy.json: an envoy section on and dispatch off registers the Envoy tools and leaves dispatch-first out", async () => {
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      writeFileSync(
+        process.env.ENVOY_CONFIG_FILE ?? "",
+        JSON.stringify({
+          dispatch: { enabled: false },
+          envoy: {
+            enabled: true,
+            url: "http://envoy-from-file.test",
+            natsUrls: ["nats://nats-under-test:4222"],
+          },
+        })
+      );
+      const hosts: string[] = [];
+      globalThis.fetch = async (input, init) => {
+        hosts.push(new URL(input.toString()).host);
+        return responseWithRegistration(input, init, []);
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-envoy-only");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, notifying("ses_envoy_only", notifications));
+
+      expect(fixture.tools.map((tool) => tool.name)).toEqual(
+        envoyToolSpecs.map((spec) => spec.name)
+      );
+      const contextHandler = fixture.handlers.get("context");
+      expect(
+        contextHandler === undefined ? undefined : await contextHandler(userTurn, sessionContext())
+      ).toBeUndefined();
+      expect(notifications).toEqual([]);
+      expect(hosts.length).toBeGreaterThan(0);
+      expect(new Set(hosts)).toEqual(new Set(["envoy-from-file.test"]));
+    });
+
+    test("envoy.json: without a profile, the file ENVOY_CONFIG_FILE names is read and stays the one handed on", async () => {
+      delete process.env.ENVOY_URL;
+      delete process.env.ENVOY_NATS_URL;
+      const handed = join(configDirectory, "handed.json");
+      writeFileSync(
+        handed,
+        JSON.stringify({
+          dispatch: { enabled: true, serverUrl: "https://dispatch.example", token: "handed-token" },
+        })
+      );
+      process.env.ENVOY_CONFIG_FILE = handed;
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-handed");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+
+      expect(process.env.ENVOY_CONFIG_FILE).toBe(handed);
+      expect(fixture.tools).toEqual([]);
+      const contextHandler = fixture.handlers.get("context");
+      if (contextHandler === undefined) throw new Error("the handed file's Dispatch was not read");
+      expect(JSON.stringify(await contextHandler(userTurn, sessionContext()))).toContain(
+        "<dispatch-first-skill>"
+      );
+    });
+
+    test("envoy.json: a relative XDG_CONFIG_HOME still loads the plugin, with both sections off and the refusal said once", async () => {
+      delete process.env.ENVOY_CONFIG_FILE;
+      process.env.XDG_CONFIG_HOME = "relative/config";
+      const { default: envoyExtension } = await import("./envoy.ts?envoy-json-relative-xdg");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      await fixture.handlers.get("session_start")?.({}, notifying("ses_relative", notifications));
+
+      expect(process.env.ENVOY_CONFIG_FILE).toBeUndefined();
+      expect(fixture.tools).toEqual([]);
+      expect(fixture.handlers.has("context")).toBe(false);
+      // What needs no configuration still registers.
+      expect(fixture.handlers.has("resources_discover")).toBe(true);
+      expect(fixture.renderers.has("envoy-message")).toBe(true);
+      expect(notifications).toEqual([
+        "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
+      ]);
+      expect(natsState.connectedNames).toEqual([]);
+    });
   });
 
   test("envoy_sessions rejects a non-string machine filter before calling Envoy", async () => {
@@ -7705,7 +7860,7 @@ describe("envoy OMP extension", () => {
     expect(notifications[0]).toContain("Could not copy");
   });
 
-  test("disables inbound messaging loudly when ENVOY_NATS_URL is unset", async () => {
+  test("an Envoy with no NATS server says once that inbound messages are off, and keeps its tools", async () => {
     delete process.env.ENVOY_NATS_URL;
     const notifications: string[] = [];
     const intervals: (() => void)[] = [];
@@ -7721,7 +7876,9 @@ describe("envoy OMP extension", () => {
     envoyExtension(fixture.pi);
     await fixture.handlers.get("session_start")?.({}, context);
 
-    expect(notifications[0]).toContain("ENVOY_NATS_URL is not set");
+    expect(notifications).toEqual([
+      "envoy: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work",
+    ]);
     expect(natsState.connectedNames.length).toBe(0);
     expect(intervals.length).toBe(0);
     expect(fixture.tools.map((tool) => tool.name)).toContain("envoy_send");
