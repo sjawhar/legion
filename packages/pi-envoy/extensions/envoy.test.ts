@@ -9,6 +9,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { hostname, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { dispatchIssueSubject } from "@legion/contracts";
@@ -32,7 +33,11 @@ import type {
   PiApi,
   UserInputResult,
 } from "@legion/pi-shared/pi-types";
-import { claimEnvoyRole, onEnvoyRoleRegained } from "@legion/pi-shared/role-claim-bridge";
+import {
+  claimEnvoyRole,
+  onEnvoyRoleRegained,
+  subscribeLegionNotice,
+} from "@legion/pi-shared/role-claim-bridge";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import type { UserInputBuiltinCommand } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/send-user-input-handler";
 import { logger, procmgr } from "@oh-my-pi/pi-utils";
@@ -147,6 +152,8 @@ const natsState = {
   /** What each connect was given: its servers, and whether it carried an nkey authenticator. */
   connects: [] as { readonly servers: readonly string[]; readonly authenticated: boolean }[],
   failConnects: 0,
+  /** Hands each connect, once recorded, to nats.js itself, for a row that watches what it dials. */
+  realConnect: false,
   drainHangs: false,
   drainStarted: false,
 };
@@ -161,26 +168,28 @@ const clipboardState = {
   error: undefined as Error | undefined,
 };
 
-// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports.
-const { nkeyAuthenticator, nkeys } = await import("nats");
+// @legion/envoy-client/nats-auth resolves the NATS credential with the real nkey exports, and a row
+// that sets `natsState.realConnect` gets nats.js's own connect. They are copied out of the module
+// before the mock replaces it: a static import's live bindings would read the mock.
+const { connect: realConnect, nkeyAuthenticator, nkeys } = await import("nats");
 mock.module("nats", () => ({
   nkeyAuthenticator,
   nkeys,
-  connect: async ({
-    name,
-    servers,
-    authenticator,
-  }: {
+  connect: async (options: {
     readonly name: string;
     readonly servers: readonly string[];
     readonly authenticator?: unknown;
   }) => {
+    const { name, servers, authenticator } = options;
     if (natsState.failConnects > 0) {
       natsState.failConnects -= 1;
       throw new Error("CONNECTION_REFUSED");
     }
     natsState.connectedNames.push(name);
     natsState.connects.push({ servers, authenticated: authenticator !== undefined });
+    if (natsState.realConnect) {
+      return realConnect(options as unknown as Parameters<typeof realConnect>[0]);
+    }
     return {
       isClosed: () => false,
       drain: async () => {
@@ -397,6 +406,7 @@ afterEach(async () => {
   natsState.controls.clear();
   natsState.controlsByTopic.clear();
   natsState.failConnects = 0;
+  natsState.realConnect = false;
   natsState.drainHangs = false;
   natsState.drainStarted = false;
   hostBuiltins.length = 0;
@@ -8001,6 +8011,72 @@ describe("envoy OMP extension", () => {
     expect(fixture.tools.map((tool) => tool.name)).toContain("envoy_send");
     expect(fixture.commands.map((command) => command.name)).toContain("whoami");
   });
+
+  // nats.js dials 127.0.0.1:4222 when handed no server, so a subscription with inbound off must
+  // refuse before any connect: one that reached it would attach to whatever NATS this machine runs.
+  for (const { slug, name, configure, why } of [
+    {
+      slug: "seed-refused",
+      name: "its NATS seed refused (envoy.natsUrls other than ENVOY_NATS_URL's)",
+      configure: (file: string) => {
+        const seed = new TextDecoder().decode(nkeys.createUser().getSeed());
+        writeFileSync(
+          file,
+          JSON.stringify({ envoy: { natsUrls: ["nats://nats-from-file:4222"], natsSeed: seed } })
+        );
+      },
+      why: (file: string) =>
+        `ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
+    },
+    {
+      slug: "no-nats",
+      name: "no NATS server",
+      configure: () => {
+        delete process.env.ENVOY_NATS_URL;
+      },
+      why: () => "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
+    },
+  ]) {
+    test(`with ${name}, envoy_subscribe and the Legion subscribe refuse naming why, and no NATS is dialed`, async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      configure(file);
+      let dialed = 0;
+      const loopback = createServer((socket) => {
+        dialed += 1;
+        socket.destroy();
+      });
+      const listening = Promise.withResolvers<void>();
+      loopback.once("error", listening.reject);
+      loopback.listen(4222, "127.0.0.1", listening.resolve);
+      await listening.promise;
+      natsState.realConnect = true;
+      try {
+        const { default: envoyExtension } = await import(`./envoy.ts?inbound-off-${slug}`);
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const context = sessionContext("ses_inbound_off");
+        await fixture.handlers.get("session_start")?.({}, context);
+        const refusal = `inbound messages are off for this session: ${why(file)}`;
+
+        const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+        if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+        const result = await subscribeTool.execute("", { topics: ["team.standup"] });
+        expect(result.isError).toBe(true);
+        expect(result.content[0]?.text).toBe(refusal);
+        await expect(
+          subscribeLegionNotice("ses_inbound_off", "notifications.dispatch.ACME", context)
+        ).rejects.toThrow(refusal);
+
+        // Each call above awaited its connect, so a dial would already have reached the listener.
+        expect(dialed).toBe(0);
+        expect(natsState.connects).toEqual([]);
+      } finally {
+        const closed = Promise.withResolvers<void>();
+        loopback.close(() => closed.resolve());
+        await closed.promise;
+      }
+    });
+  }
 
   test("retries NATS in the background when the initial connection fails", async () => {
     globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});

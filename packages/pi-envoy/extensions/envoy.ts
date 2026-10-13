@@ -436,7 +436,8 @@ export default function envoyExtension(pi: PiApi): void {
   };
   // Inbound messages arrive over NATS: an Envoy with no NATS server, or whose seed was refused,
   // takes none, and its tools, which call the listener, still work. The start notice says so
-  // (`sessionSettings`), with why a section is off, once.
+  // (`sessionSettings`), with why a section is off, once, and `envoy_subscribe` and the Legion
+  // interface's `subscribe` refuse naming why (`ensureConnection`).
   const inbound = envoy.enabled && envoy.natsUrls.length > 0;
   const startNotice = atStart.notice ?? "";
   // The listener client exists only while Envoy is on. The listener calls and the NATS connection
@@ -694,9 +695,16 @@ export default function envoyExtension(pi: PiApi): void {
   pi.on("resources_discover", async () => ({ skillPaths: [SKILLS_DIRECTORY] }));
   registerEnvoyMessageRenderer(pi);
 
+  // Refuses, saying why inbound messages are off, when Envoy has no NATS server: nats.js dials
+  // 127.0.0.1:4222 when handed none, which would attach this session to whatever NATS runs there.
   const ensureConnection = async (): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;
     const { settings } = requireEnvoy();
+    if (settings.natsUrls.length === 0) {
+      throw new Error(
+        `inbound messages are off for this session: ${settings.inboundError ?? "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)"}`
+      );
+    }
     connection = await connect({
       servers: [...settings.natsUrls],
       name: `omp-${sessionID || "unknown"}`,
