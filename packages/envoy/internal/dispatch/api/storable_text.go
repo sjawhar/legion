@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -152,14 +153,20 @@ func unstorableParameter(r *http.Request, wildcards []string) *apiError {
 			return refusal
 		}
 	}
+	return unstorableQuery(r.URL.RawQuery)
+}
+
+// unstorableQuery refuses a query string holding, in a parameter's name or value, text
+// unstorableText refuses, naming the parameter: the URL's query a route is sent, and the query a
+// delivery socket's subscribe frame names for its view.
+func unstorableQuery(raw string) *apiError {
 	// A query without a percent escape decodes to the text it is written as, plus spaces for its
 	// plus signs, so when that text is storable every name and value is, and the query is not
 	// parsed here a second time.
-	raw := r.URL.RawQuery
 	if strings.IndexByte(raw, '%') < 0 && text.Storable(raw) {
 		return nil
 	}
-	query := r.URL.Query()
+	query, _ := url.ParseQuery(raw)
 	for _, name := range slices.Sorted(maps.Keys(query)) {
 		field := "query parameter " + escapedName(name)
 		if refusal := unstorableText(field, name); refusal != nil {

@@ -86,17 +86,19 @@ type Deps struct {
 	// nil keeps them in each version's row, and a row that still holds bytes is served from the
 	// row either way (files.BackfillRows moves them).
 	Files files.Store
-	// Lifetime bounds work a handler starts and does not wait for, and every event stream: it is
-	// the process's own context, cancelled when the server is shutting down, so a deploy stops a
-	// broadcast's remaining deliveries instead of leaving goroutines behind, and ends each open
-	// stream (streamEvents, streamAgentConversation) so http.Server.Shutdown is not held for its
-	// whole budget by a connection that never goes idle. Nil means unbounded, which is what a
-	// test gets.
+	// Lifetime bounds work a handler starts and does not wait for, and every event stream and
+	// delivery socket: it is the process's own context, cancelled when the server is shutting
+	// down, so a deploy stops a broadcast's remaining deliveries instead of leaving goroutines
+	// behind, and ends each open stream (streamEvents, streamAgentConversation) and closes each
+	// delivery socket with 1012 so http.Server.Shutdown is not held for its whole budget by a
+	// connection that never goes idle. The delivery hub runs on it, and GET /ws/delivery is
+	// mounted only with one. Nil means unbounded, which is what a test gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
-	// its caller again, and a document socket resolves its caller again (whileCallerResolves),
-	// each closing once the caller no longer resolves.
+	// its caller again, a document socket and a delivery socket resolve their caller again
+	// (whileCallerResolves), each closing once the caller no longer resolves, and a delivery
+	// socket pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
 }
 
@@ -233,8 +235,10 @@ type server struct {
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
-	// with no Lifetime (register).
+	// with no Lifetime (register), which mounts no GET /ws/delivery.
 	deliveryHub *deliveryHub
+	// deliverySockets is every open GET /ws/delivery socket, which the test hook drops.
+	deliverySockets deliverySocketSet
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job, so a read that judges a run again does not warn about it
 	// again. Nothing evicts an entry: the map holds one per (repo, run, configured job name) it has
@@ -272,8 +276,9 @@ type queryer interface {
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 //
 // With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
-// the first subscription and runs them until Lifetime ends; a server without one (a test's) has no
-// hub, so nothing outlives the test.
+// the first subscription and runs them until Lifetime ends, and mounts GET /ws/delivery beside the
+// document websocket, under the same wrappers; a server without one (a test's) has neither, so
+// nothing outlives the test.
 func Register(mux *http.ServeMux, deps Deps) {
 	register(mux, deps)
 }
@@ -296,6 +301,10 @@ func register(mux *http.ServeMux, deps Deps) *server {
 		const pattern = "/ws/doc/{room}"
 		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP)))))
 	}
+	if s.deliveryHub != nil {
+		const pattern = "/ws/delivery"
+		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveDeliverySocket))))
+	}
 	return s
 }
 
@@ -305,12 +314,13 @@ func trackTransactions(handler http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// whileCallerResolves serves a connection that outlives its request, the document websocket, only
-// while its caller resolves: on every StreamHeartbeat it resolves the caller again, as the event
-// streams do, and once the caller no longer resolves (a logout, a membership the sign-in pool no
-// longer confirms) it cancels the connection's context, on which the document server closes the
-// socket. The check runs beside the handler, which holds pooled connections of its own while it
-// admits the socket, so it marks a context of its own for the pool (store.ErrNestedAcquire).
+// whileCallerResolves serves a connection that outlives its request, a websocket, only while its
+// caller resolves: on every StreamHeartbeat it resolves the caller again, as the event streams do,
+// and once the caller no longer resolves (a logout, a membership the sign-in pool no longer
+// confirms, a revoked token) it cancels the connection's context, on which the document server and
+// the delivery socket close the socket. The check runs beside the handler, which holds pooled
+// connections of its own while it admits the socket, so it marks a context of its own for the pool
+// (store.ErrNestedAcquire).
 func (s *server) whileCallerResolves(handler http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, closeConnection := context.WithCancel(r.Context())
