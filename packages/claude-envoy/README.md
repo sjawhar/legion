@@ -216,10 +216,15 @@ the `dispatch` command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPAT
 Bash with neither, as a subagent's can be, has `CLAUDE_CODE_CHILD_SESSION=1` and takes this plugin's
 rule. With Envoy off the channel server lists no tool, refuses every call with
 `Envoy is off for this session: <why>` (the section's notice or error), subscribes nothing, and
-exits 0 when stdin ends; with Envoy on it needs a NATS server (`envoy.natsUrls` or
-`ENVOY_NATS_URL`). Why a section is off is written once to its stderr
-(`envoy-channel: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, or what
-a checkout's file holds that is not read). The variables are inherited from the environment that
+exits 0 when stdin ends. With Envoy on and no NATS server (`envoy.natsUrls` or `ENVOY_NATS_URL`),
+or with its NATS seed refused, it serves the Envoy tools, which call the listener, and takes no
+inbound messages: it registers nothing with the listener, its inbox stays empty, and
+`envoy_subscribe` is refused with `inbound messages are off for this session: <why>`. Why a section
+is off, and that inbound messages are off, is written once to its stderr
+(`envoy-channel: no envoy.json at <path>: Dispatch and Envoy are off`, the section's error, what a
+checkout's file holds that is not read, `Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL):
+inbound messages are off; the Envoy tools still work`, or `Envoy's inbound messages are off:
+<refusal>; the Envoy tools still work`). The variables are inherited from the environment that
 launched `claude`
 — `.mcp.json` passes through only `CLAUDE_PROJECT_DIR`, because an unset `${VAR}` in `.mcp.json`
 is substituted as the literal text, which used to register a session as the literal id

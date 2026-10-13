@@ -23,6 +23,7 @@
   `dispatch.serverUrl` beside it.
 - `DISPATCH_URL`, `ENVOY_URL` and `ENVOY_NATS_URL` take a file's token or seed only for that file's own server.
 - One rule for `enabled` in both sections (envoy-client's README): `enabled: false` turns a section off; otherwise it is on when its address resolves, from the file or a variable, so an `envoy` section with `url` and `token` and no `enabled` is on with its bearer. A checkout's file is not read while `DISPATCH_URL` is set, so its token never goes to the server `DISPATCH_URL` names, and its `dispatch.enabled: true` alone turns nothing on.
+- With Envoy on and no NATS server, or with its NATS seed refused, the channel server serves the Envoy tools with inbound messages off, as pi-envoy does, and says so once on stderr (`Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work`, or `Envoy's inbound messages are off: <refusal>; the Envoy tools still work`); `envoy_subscribe` is refused naming why. It exited 1.
 - The channel server writes one notice to stderr when a section is off: the missing file, the section's error, or what a checkout's files hold that is not read.
 - `bin/envoy-send.ts` sends to the listener the envoy.json a command reads names (`envoy.url`, or `ENVOY_URL`), with its bearer (`envoy.token`, or `ENVOY_TOKEN_FILE`/`ENVOY_TOKEN`), and refuses, saying why, when Envoy is off; it sent to `ENVOY_URL` or `http://127.0.0.1:9020` with no bearer.
 

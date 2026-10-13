@@ -576,11 +576,12 @@ const channelEntry = resolve(import.meta.dir, "..", "bin", "envoy-channel.ts")
 
 /**
  * Runs the channel server as Claude Code does, in `env.HOME` with `env` as its whole environment:
- * it initializes over MCP, lists the tools, calls `envoy_whoami`, then closes stdin. Returns the
- * exit code, each response by its request id, and stderr.
+ * it initializes over MCP, lists the tools, calls `envoy_whoami`, then each of `calls` (request ids
+ * 4 and on), then closes stdin. Returns the exit code, each response by its request id, and stderr.
  */
 async function runChannelServer(
   env: Readonly<Record<string, string>> & { readonly HOME: string },
+  calls: readonly { readonly name: string; readonly arguments: object }[] = [],
 ): Promise<{
   readonly exitCode: number
   readonly responses: ReadonlyMap<number, Record<string, unknown>>
@@ -642,7 +643,10 @@ async function runChannelServer(
       method: "tools/call",
       params: { name: "envoy_whoami", arguments: {} },
     })
-    await Promise.all([answered(2), answered(3)])
+    for (const [index, call] of calls.entries()) {
+      send({ jsonrpc: "2.0", id: 4 + index, method: "tools/call", params: call })
+    }
+    await Promise.all([answered(2), answered(3), ...calls.map((_, index) => answered(4 + index))])
     await server.stdin.end()
     const [exitCode, stderr] = await Promise.all([
       server.exited,
@@ -802,36 +806,105 @@ test("the server calls the listener with the file's envoy.token and signs in to 
   }
 }, 20_000)
 
-// A misconfiguration fails loudly: an Envoy that is on has nowhere to take its deliveries from.
-test("with Envoy on and no NATS server the server exits 1 naming where one goes", async () => {
+/** A listener that answers `GET /v1/sessions` with no session and records every call. */
+function recordingListener(calls: string[]) {
+  return Bun.serve({
+    port: 0,
+    fetch: (request) => {
+      const path = new URL(request.url).pathname
+      calls.push(`${request.method} ${path}`)
+      if (request.method === "GET" && path === "/v1/sessions") return Response.json([])
+      return Response.json({ error: "no call belongs here" }, { status: 500 })
+    },
+  })
+}
+
+// Inbound messages arrive over NATS; the tools call the listener. An Envoy with no NATS server
+// keeps its tools, as pi-envoy's does, and registers nothing a delivery would reach deaf.
+test("with Envoy on and no NATS server the server serves its listener tools with inbound off, and says so", async () => {
   const home = await mkdtemp(join(tmpdir(), "claude-envoy-no-nats-"))
   const configDirectory = join(home, "claude-config")
   await mkdir(configDirectory)
+  const calls: string[] = []
+  const listener = recordingListener(calls)
   await writeFile(
     join(configDirectory, "envoy.json"),
-    JSON.stringify({ envoy: { enabled: true, url: "http://127.0.0.1:1" } }),
+    JSON.stringify({ envoy: { url: `http://127.0.0.1:${listener.port}` } }),
   )
-  const server = Bun.spawn(["bun", channelEntry], {
-    cwd: home,
-    env: {
-      PATH: process.env["PATH"] ?? "",
-      HOME: home,
-      CLAUDE_CONFIG_DIR: configDirectory,
-      CLAUDE_CODE_SESSION_ID: "ses_no_nats",
-      CLAUDE_PLUGIN_DATA: home,
-    },
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "pipe",
-  })
   try {
-    const [code, stderr] = await Promise.all([server.exited, new Response(server.stderr).text()])
-    expect(code).toBe(1)
-    expect(stderr).toContain(
-      "the Envoy Claude channel server needs a NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
+    const { exitCode, responses, stderr } = await runChannelServer(
+      {
+        HOME: home,
+        CLAUDE_CONFIG_DIR: configDirectory,
+        CLAUDE_CODE_SESSION_ID: "ses_no_nats",
+        CLAUDE_PLUGIN_DATA: home,
+      },
+      [
+        { name: "envoy_sessions", arguments: {} },
+        { name: "envoy_subscribe", arguments: { topics: ["notifications.role.reviewer"] } },
+      ],
     )
+
+    const listed = responses.get(2)?.["result"] as { tools: { name: string }[] } | undefined
+    expect(listed?.tools.map((tool) => tool.name)).toContain("envoy_send")
+    expect(JSON.stringify(responses.get(3)?.["result"])).toContain("ses_no_nats")
+    expect(responses.get(4)?.["result"]).toEqual({ content: [{ type: "text", text: "[]" }] })
+    expect(responses.get(5)?.["error"]).toMatchObject({
+      message: expect.stringContaining(
+        "inbound messages are off for this session: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
+      ),
+    })
+    expect(stderr).toContain(
+      "envoy-channel: Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL): inbound messages are off; the Envoy tools still work",
+    )
+    expect(calls).toEqual(["GET /v1/sessions"])
+    expect(exitCode).toBe(0)
   } finally {
-    server.kill("SIGKILL")
+    listener.stop(true)
+    await rm(home, { recursive: true, force: true })
+  }
+}, 20_000)
+
+test("a refused NATS seed leaves the listener tools on, opens no NATS connection, and says why", async () => {
+  const home = await mkdtemp(join(tmpdir(), "claude-envoy-seed-refused-"))
+  const configDirectory = join(home, "claude-config")
+  await mkdir(configDirectory)
+  const calls: string[] = []
+  const listener = recordingListener(calls)
+  const broker = new FakeNatsServer()
+  const file = join(configDirectory, "envoy.json")
+  await writeFile(
+    file,
+    JSON.stringify({
+      envoy: {
+        url: `http://127.0.0.1:${listener.port}`,
+        natsUrls: ["nats://file.internal.example:4222"],
+        natsSeed: "SUFILESEED",
+      },
+    }),
+  )
+  try {
+    const { exitCode, responses, stderr } = await runChannelServer(
+      {
+        HOME: home,
+        CLAUDE_CONFIG_DIR: configDirectory,
+        CLAUDE_CODE_SESSION_ID: "ses_seed_refused",
+        CLAUDE_PLUGIN_DATA: home,
+        ENVOY_NATS_URL: broker.url,
+      },
+      [{ name: "envoy_sessions", arguments: {} }],
+    )
+
+    expect(responses.get(4)?.["result"]).toEqual({ content: [{ type: "text", text: "[]" }] })
+    expect(stderr).toContain(
+      `envoy-channel: Envoy's inbound messages are off: ENVOY_NATS_URL names other servers than ${file}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them; the Envoy tools still work`,
+    )
+    expect(broker.connections).toBe(0)
+    expect(calls).toEqual(["GET /v1/sessions"])
+    expect(exitCode).toBe(0)
+  } finally {
+    listener.stop(true)
+    await broker.stop()
     await rm(home, { recursive: true, force: true })
   }
 }, 20_000)

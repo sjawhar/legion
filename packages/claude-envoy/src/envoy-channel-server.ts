@@ -751,6 +751,35 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   }
 }
 
+/**
+ * The session of a channel server whose Envoy takes no inbound messages, for `why`: no NATS
+ * consumer, nothing registered with the listener (which would route a delivery to a deaf process),
+ * an empty inbox, and following a topic refused naming `why`. A role an explicit `envoy_role_set`
+ * claimed through the listener is still persisted, so a later server with NATS takes it back.
+ */
+export function inboundOffChannelSession(options: {
+  readonly identity: SessionIdentity
+  readonly stateDirectory: string
+  readonly why: string
+}): ChannelSession {
+  const { identity, stateDirectory, why } = options
+  return {
+    delivery: { enqueue: async () => false, inbox: () => [] },
+    topics: () => [],
+    async follow() {
+      throw new Error(`inbound messages are off for this session: ${why}`)
+    },
+    unfollow: async () => [],
+    async rememberRole(role) {
+      await writePersistedRole(roleStateFile(stateDirectory, identity.id), {
+        session_id: identity.id,
+        role,
+      })
+    },
+    shutdown: async () => undefined,
+  }
+}
+
 export interface ChannelToolRuntime {
   readonly identity: SessionIdentity
   readonly client: EnvoyClient
@@ -874,7 +903,9 @@ async function serveEnvoyOff(refusal: string): Promise<void> {
 }
 
 /** Start the stdio MCP server Claude Code invokes for this plugin, on the session's envoy.json
- * (`CONFIG_FILE`). */
+ * (`CONFIG_FILE`). With Envoy off it serves no tool (`serveEnvoyOff`). With Envoy on and no NATS
+ * server, or its seed refused (`inboundError`), it serves the tools, which call the listener, on an
+ * inbound-off session (`inboundOffChannelSession`); the start notice has said why on stderr. */
 export async function runEnvoyChannelServer(): Promise<void> {
   const directory = projectDirectory()
   const { envoy, notice } = sessionSettings(CONFIG_FILE, process.env, { cwd: directory })
@@ -883,11 +914,6 @@ export async function runEnvoyChannelServer(): Promise<void> {
   if (!envoy.enabled) {
     await serveEnvoyOff(`Envoy is off for this session: ${envoy.error ?? envoy.notice}`)
     return
-  }
-  if (envoy.natsUrls.length === 0) {
-    throw new Error(
-      "the Envoy Claude channel server needs a NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
-    )
   }
   const overrideSessionId = process.env["ENVOY_SESSION_ID"]
   const identity = new SessionIdentity(
@@ -939,24 +965,32 @@ export async function runEnvoyChannelServer(): Promise<void> {
 
   let connection: ChannelForwarderConnection | undefined
   try {
-    connection = await connect({
-      servers: [...envoy.natsUrls],
-      name: `claude-envoy-channel-${identity.id}`,
-      ...natsAuthOptions(envoy.natsSeed),
-      reconnect: true,
-      maxReconnectAttempts: -1,
-      reconnectTimeWait: 2_000,
-    })
-    session = await startChannelSession({
-      identity,
-      connection,
-      notifier: server,
-      client,
-      heartbeatMs: envoy.heartbeatMs,
-      stateDirectory,
-      // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
-      ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),
-    })
+    if (envoy.natsUrls.length === 0) {
+      session = inboundOffChannelSession({
+        identity,
+        stateDirectory,
+        why: envoy.inboundError ?? "Envoy has no NATS server (envoy.natsUrls, ENVOY_NATS_URL)",
+      })
+    } else {
+      connection = await connect({
+        servers: [...envoy.natsUrls],
+        name: `claude-envoy-channel-${identity.id}`,
+        ...natsAuthOptions(envoy.natsSeed),
+        reconnect: true,
+        maxReconnectAttempts: -1,
+        reconnectTimeWait: 2_000,
+      })
+      session = await startChannelSession({
+        identity,
+        connection,
+        notifier: server,
+        client,
+        heartbeatMs: envoy.heartbeatMs,
+        stateDirectory,
+        // The QA override names a fixed identity; only a Claude-minted id follows `/clear`.
+        ...(configuredValue(overrideSessionId) === undefined ? { handoffPid: process.ppid } : {}),
+      })
+    }
     runtime = { identity, client, session }
     if (stopping) await session.shutdown()
     await stopped.promise
