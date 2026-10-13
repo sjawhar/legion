@@ -39,7 +39,12 @@
   for a profile's own file, copy or link the old file to it, or write it; under a relocated
   `XDG_CONFIG_HOME`, only that it is not read there. A checkout's `.opencode/envoy.json` is not
   read: while the checkout has no `.envoy/envoy.json`, the start notice and the `dispatch` command
-  name the rename. A top-level `natsUrls` is refused, naming `envoy.natsUrls`.
+  name the rename. Neither move is a `mv` across a mount: where the old file's directory and the
+  nearest existing ancestor of the new file's directory are on different filesystems (as in an
+  agent box that bind-mounts `~/.config/opencode`), the notice reads `<old file> is not read, and is
+  on another filesystem than <new file> (a mount): create <new file>, and move <old file> on the
+  machine that owns it` (`readEnvoyConfig`'s `deviceOf` option answers a directory's device). A
+  top-level `natsUrls` is refused, naming `envoy.natsUrls`.
 - `createEnvoyClient` takes the listener's bearer as `token` and reads no environment;
   `natsAuthOptions` takes a resolved `NatsSeed` (`envoySettings`, or `natsSeedFromEnvironment`).
 - The Envoy resolver's module is `envoy-settings` (`@legion/envoy-client/envoy-settings`), which

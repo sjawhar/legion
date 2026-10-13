@@ -280,7 +280,12 @@
   `DISPATCH_SERVER_URL` and `NATS_URLS` say. A checkout's `.opencode/envoy.json` is not read: while
   the checkout has no `.envoy/envoy.json`, `envoy-dispatch` logs one WARN at start
   (`dispatch: a checkout's .opencode/envoy.json is not read`, with the rename as `fix`) and
-  `natstail` prints the rename. The `envoy` section takes `enabled`, `url`, `natsUrls`, `token` and
+  `natstail` prints the rename. Neither gives a `mv` across a mount: where the old file's directory
+  and the nearest existing ancestor of the new file's directory are on different filesystems (as in
+  an agent box that bind-mounts `~/.config/opencode`), the text is `<old file> is not read, and is
+  on another filesystem than <new file> (a mount): create <new file>, and move <old file> on the
+  machine that owns it` (`config.LoadOptions.DeviceOf` answers a directory's device, `stat`'s by
+  default). The `envoy` section takes `enabled`, `url`, `natsUrls`, `token` and
   `natsSeed` and refuses any other key; the server reads `envoy.natsUrls` whatever
   `envoy.enabled` says, since `enabled` switches a session's Envoy. `XDG_CONFIG_HOME` is a row of
   the settings table, and one set to a path that is not absolute refuses startup, naming it.

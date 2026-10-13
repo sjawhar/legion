@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -331,6 +332,55 @@ func TestLoadIgnoresTheOldCheckoutFile(t *testing.T) {
 	}
 	if cfg.Dispatch == nil || cfg.Dispatch.ServerURL != "https://new.dispatch.example" || len(cfg.Warnings) != 0 {
 		t.Errorf("got %+v (dispatch %+v), want the new checkout file and no warning", cfg, cfg.Dispatch)
+	}
+}
+
+// An agent box bind-mounts the host's ~/.config/opencode: a mv inside it would move the host's file
+// into the box's own throwaway filesystem. Where the old file's directory and the nearest existing
+// ancestor of the new file's directory are on different devices, the refusal and the warning name
+// the file to create and say to move the old one on the machine that owns it, with no mv.
+func TestLoadNamesNoMoveAcrossFilesystems(t *testing.T) {
+	home := t.TempDir()
+	cwd := t.TempDir()
+	oldUser := filepath.Join(home, ".config", "opencode", "envoy.json")
+	oldCheckout := filepath.Join(cwd, ".opencode", "envoy.json")
+	mustWrite(t, oldUser, `{}`)
+	mustWrite(t, oldCheckout, `{}`)
+	mounted := map[string]bool{filepath.Dir(oldUser): true, filepath.Dir(oldCheckout): true}
+	var asked []string
+	deviceOf := func(directory string) (uint64, bool) {
+		asked = append(asked, directory)
+		if !exists(directory) {
+			return 0, false
+		}
+		if mounted[directory] {
+			return 2, true
+		}
+		return 1, true
+	}
+	across := func(oldPath, newPath string) string {
+		return oldPath + " is not read, and is on another filesystem than " + newPath + " (a mount): create " + newPath + ", and move " + oldPath + " on the machine that owns it"
+	}
+
+	_, err := Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: home, DeviceOf: deviceOf})
+	if err == nil || err.Error() != across(oldUser, userFile(home)) {
+		t.Errorf("error: got %v, want %q", err, across(oldUser, userFile(home)))
+	}
+	if !slices.Contains(asked, filepath.Join(home, ".config")) {
+		t.Errorf("devices asked: %v, want ~/.config's, the nearest existing ancestor of ~/.config/legion", asked)
+	}
+
+	mustWrite(t, userFile(home), `{}`)
+	cfg, err := Load(environment(nil), LoadOptions{CWD: cwd, HomeDir: home, DeviceOf: deviceOf})
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	want := Warning{Message: WarnOpenCodeCheckout, Path: oldCheckout, Fix: across(oldCheckout, checkoutFile(cwd))}
+	if len(cfg.Warnings) != 1 || cfg.Warnings[0] != want {
+		t.Errorf("warnings: got %+v, want only %+v", cfg.Warnings, want)
+	}
+	if strings.Contains(cfg.Warnings[0].Fix, "mv ") {
+		t.Errorf("warning %q gives a mv across filesystems", cfg.Warnings[0].Fix)
 	}
 }
 

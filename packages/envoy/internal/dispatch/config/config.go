@@ -59,6 +59,9 @@ const WarnOpenCodeCheckout = "dispatch: a checkout's .opencode/envoy.json is not
 type LoadOptions struct {
 	CWD     string
 	HomeDir string
+	// DeviceOf answers the device a directory is on, false when it cannot be read; nil reads
+	// stat's. Load compares devices so that no notice gives a mv across filesystems (moveFix).
+	DeviceOf func(directory string) (uint64, bool)
 }
 
 var dispatchKnownKeys = map[string]struct{}{
@@ -127,6 +130,10 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 		return nil, fmt.Errorf("XDG_CONFIG_HOME is %q, which is not an absolute path", configHome)
 	}
 
+	deviceOf := opts.DeviceOf
+	if deviceOf == nil {
+		deviceOf = statDevice
+	}
 	merged := &EnvoyConfig{}
 	userPath := filepath.Join(configHome, "legion", "envoy.json")
 	userCfg, err := readConfigFile(userPath, userKind, userPath)
@@ -139,7 +146,7 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 	case userPath == filepath.Join(home, ".config", "legion", "envoy.json"):
 		// The old file is the user's only beside its own directory: an XDG_CONFIG_HOME naming another
 		// directory is not where it belongs.
-		if err := refuseOpenCodeUserFile(filepath.Join(home, ".config", "opencode", "envoy.json"), userPath); err != nil {
+		if err := refuseOpenCodeUserFile(filepath.Join(home, ".config", "opencode", "envoy.json"), userPath, deviceOf); err != nil {
 			return nil, err
 		}
 	}
@@ -154,7 +161,7 @@ func Load(environment func(string) (string, bool), opts LoadOptions) (*EnvoyConf
 		merged.Warnings = append(merged.Warnings, Warning{
 			Message: WarnOpenCodeCheckout,
 			Path:    oldCheckout,
-			Fix:     oldCheckout + " is not read: mkdir -p " + filepath.Dir(checkoutPath) + " && mv " + oldCheckout + " " + checkoutPath,
+			Fix:     moveFix(oldCheckout, checkoutPath, deviceOf),
 		})
 	}
 	if err := applyEnvironmentOverrides(merged, environment); err != nil {
@@ -169,13 +176,45 @@ func exists(path string) bool {
 	return err == nil
 }
 
+// statDevice is the device stat gives for directory, false when it cannot be read.
+func statDevice(directory string) (uint64, bool) {
+	info, err := os.Stat(directory)
+	if err != nil {
+		return 0, false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return uint64(stat.Dev), true //nolint:unconvert // Dev is int32 on darwin
+}
+
+// moveFix is what to do with oldPath, which is not read, so that newPath holds it: the mv, unless
+// the old file's directory and the nearest existing ancestor of the new file's directory are on
+// different devices (as for a directory an agent box bind-mounts from its host). There a mv would
+// move the host's file into the box's own filesystem, so it names the file to create and says to
+// move the old one on the machine that owns it, with no command.
+func moveFix(oldPath, newPath string, deviceOf func(string) (uint64, bool)) string {
+	oldDevice, oldKnown := deviceOf(filepath.Dir(oldPath))
+	ancestor := filepath.Dir(newPath)
+	newDevice, newKnown := deviceOf(ancestor)
+	for !newKnown && filepath.Dir(ancestor) != ancestor {
+		ancestor = filepath.Dir(ancestor)
+		newDevice, newKnown = deviceOf(ancestor)
+	}
+	if oldKnown && newKnown && oldDevice != newDevice {
+		return oldPath + " is not read, and is on another filesystem than " + newPath + " (a mount): create " + newPath + ", and move " + oldPath + " on the machine that owns it"
+	}
+	return oldPath + " is not read: mkdir -p " + filepath.Dir(newPath) + " && mv " + oldPath + " " + newPath
+}
+
 // refuseOpenCodeUserFile refuses a user file still at oldPath, which nothing reads, while none is
-// at userPath, naming both and the move.
-func refuseOpenCodeUserFile(oldPath, userPath string) error {
+// at userPath, naming both and what to do (moveFix).
+func refuseOpenCodeUserFile(oldPath, userPath string, deviceOf func(string) (uint64, bool)) error {
 	_, err := os.Stat(oldPath)
 	switch {
 	case err == nil:
-		return fmt.Errorf("%s is not read: mkdir -p %s && mv %s %s", oldPath, filepath.Dir(userPath), oldPath, userPath)
+		return errors.New(moveFix(oldPath, userPath, deviceOf))
 	case errors.Is(err, fs.ErrNotExist):
 		return nil
 	default:

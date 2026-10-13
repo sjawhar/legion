@@ -95,6 +95,15 @@ for a profile's own file, `; <old file> is not read for this profile; copy or li
 write that file`; for the neutral file under a relocated `XDG_CONFIG_HOME`, as a Legion pane's is,
 `; <old file> is not read under XDG_CONFIG_HOME=<dir>`, without asking anyone to move it.
 
+No notice tells anyone to `mv` across a mount. When the old file's directory and the nearest
+existing ancestor of the new file's directory are on different filesystems (`stat`'s device
+differs, as in an agent box whose `~/.config/opencode` is a bind mount of its host's), the move
+reads `<old file> is not read, and is on another filesystem than <new file> (a mount): create <new
+file>, and move <old file> on the machine that owns it`, with no command, for the user file and the
+checkout's `.opencode/envoy.json` alike; `readEnvoyConfig`'s `deviceOf` option answers a
+directory's device, `stat`'s by default. The Go Dispatch server's refusal and warning follow the
+same rule.
+
 A checkout's file is the repository's, and its failure is its own: one that cannot be read or is
 not valid refuses Dispatch with its error only while `DISPATCH_URL` is unset (a session's start
 notice then says `<error>; not read while DISPATCH_URL is set`), Envoy never reads it, and a `.envoy`

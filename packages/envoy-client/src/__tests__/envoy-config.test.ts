@@ -7,6 +7,8 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -352,6 +354,77 @@ describe("readEnvoyConfig", () => {
     );
     expect(existsSync(marker)).toBe(false);
   });
+
+  // An agent box bind-mounts the host's ~/.config/opencode: a `mv` inside it would move the host's
+  // file into the box's own throwaway filesystem. The devices decide: the old file's directory's,
+  // and that of the nearest ancestor of the new file's directory that exists.
+  test("a move across filesystems names the file to create, and no mv command", () => {
+    const home = tempDir();
+    const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {
+      dispatch: dispatchOn,
+    });
+    const neutral = path.join(home, ".config", "legion", "envoy.json");
+    const cwd = tempDir();
+    const oldCheckout = writeFile(path.join(cwd, ".opencode", "envoy.json"), {
+      dispatch: dispatchOn,
+    });
+    const checkout = path.join(cwd, ".envoy", "envoy.json");
+    const mounted = new Set([path.dirname(old), path.dirname(oldCheckout)]);
+    const asked: string[] = [];
+    const deviceOf = (directory: string) => {
+      asked.push(directory);
+      if (!existsSync(directory)) return undefined;
+      return mounted.has(directory) ? 2 : 1;
+    };
+    const across = readEnvoyConfig(neutral, { HOME: home }, { cwd, deviceOf });
+    expect(across).toMatchObject({
+      missing: {
+        oldUserFileNotice: `${old} is not read, and is on another filesystem than ${neutral} (a mount): create ${neutral}, and move ${old} on the machine that owns it`,
+      },
+      warnings: [
+        `${oldCheckout} is not read, and is on another filesystem than ${checkout} (a mount): create ${checkout}, and move ${oldCheckout} on the machine that owns it`,
+      ],
+    });
+    expect(JSON.stringify(across)).not.toContain("mv ");
+    // ~/.config/legion does not exist, so its parent's device is the one compared.
+    expect(asked).toEqual(
+      expect.arrayContaining([path.join(home, ".config", "legion"), path.join(home, ".config")])
+    );
+
+    const sameDevice = (directory: string) => (existsSync(directory) ? 1 : undefined);
+    expect(readEnvoyConfig(neutral, { HOME: home }, { cwd, deviceOf: sameDevice })).toMatchObject({
+      missing: {
+        oldUserFileNotice: `${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`,
+      },
+      warnings: [
+        `${oldCheckout} is not read: mkdir -p ${path.dirname(checkout)} && mv ${oldCheckout} ${checkout}`,
+      ],
+    });
+  });
+
+  // The same rule on real filesystems: a tmpfs directory linked in as ~/.config/opencode is another
+  // device than the temporary directory's.
+  const shm = "/dev/shm";
+  test.skipIf(!existsSync(shm) || statSync(shm).dev === statSync(os.tmpdir()).dev)(
+    "a move across real filesystems names the file to create, and no mv command",
+    () => {
+      const home = tempDir();
+      const elsewhere = mkdtempSync(path.join(shm, "envoy-config-"));
+      try {
+        mkdirSync(path.join(home, ".config"));
+        symlinkSync(elsewhere, path.join(home, ".config", "opencode"));
+        const old = writeFile(path.join(home, ".config", "opencode", "envoy.json"), {});
+        const neutral = path.join(home, ".config", "legion", "envoy.json");
+        expect(readEnvoyConfig(neutral, { HOME: home }, { cwd: tempDir() })).toMatchObject({
+          missing: {
+            oldUserFileNotice: `${old} is not read, and is on another filesystem than ${neutral} (a mount): create ${neutral}, and move ${old} on the machine that owns it`,
+          },
+        });
+      } finally {
+        rmSync(elsewhere, { recursive: true, force: true });
+      }
+    }
+  );
 
   test("a harness directory at the default config directory gets the default file's move, reading nothing", () => {
     const home = tempDir();

@@ -12,6 +12,7 @@
   profile's own file, the file to copy or link it to; under a relocated `XDG_CONFIG_HOME` it says
   only that the old file is not read there. A top-level `natsUrls` is refused, naming
   `envoy.natsUrls`.
+- No notice gives a `mv` across a mount: where the old file's directory is on another filesystem than the new file's nearest existing directory (an agent box's bind-mounted `~/.config/opencode`), it names the file to create and says to move the old one on the machine that owns it.
 - The extension hands the file it read to every shell command as `ENVOY_CONFIG_FILE`, so the `dispatch` command reads the same one.
 - Each section turns on and off on its own; a missing file contributes nothing, so a section is then on only when its variables name it, and with Envoy off the session has no Envoy tools, no `/whoami` and no NATS connection, and a listener call is refused with `Envoy is off for this session: <why>`.
 - A `token` or `natsSeed` starting with `!` is a command whose output is the value. A checkout's

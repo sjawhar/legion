@@ -12,6 +12,7 @@
   `$OPENCODE_CONFIG_DIR/envoy.json`, the file to copy or link it to; under a relocated
   `XDG_CONFIG_HOME` it says only that the old file is not read there. A top-level `natsUrls` is
   refused, naming `envoy.natsUrls`.
+- No notice gives a `mv` across a mount: where the old file's directory is on another filesystem than the new file's nearest existing directory (an agent box's bind-mounted `~/.config/opencode`), it names the file to create and says to move the old one on the machine that owns it.
 - The `shell.env` hook sets `ENVOY_CONFIG_FILE` to that file beside `DISPATCH_HOST=opencode`, and the `dispatch` command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set, so it reads the same one.
 - With Envoy off the plugin registers no Envoy tool and calls no listener; Dispatch keeps its instruction file and session title.
 - A `token` starting with `!` is a command whose output is the value. A checkout's

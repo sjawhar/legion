@@ -8,6 +8,7 @@ import {
   readFileSync,
   readlinkSync,
   rmSync,
+  statSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
@@ -419,21 +420,62 @@ export function fileValue(
   return outcome.value;
 }
 
+/** The device a directory is on, as `stat` gives it, or undefined when it cannot be read. */
+export type DeviceOf = (directory: string) => number | undefined;
+
+function statDevice(directory: string): number | undefined {
+  try {
+    return statSync(directory).dev;
+  } catch {
+    return undefined;
+  }
+}
+
+/** What to do with `oldFile`, which is not read, so that `newFile` holds it: `move`, the `mv`
+ * command, unless the old file's directory and the nearest existing ancestor of the new file's
+ * directory are on different filesystems (their devices differ, as for a directory an agent box
+ * bind-mounts from its host). There a `mv` would move the host's file into the box's own
+ * filesystem, so the notice names the file to create and says to move the old one on the machine
+ * that owns it, with no command. */
+function moveNotice(oldFile: string, newFile: string, move: string, deviceOf: DeviceOf): string {
+  const oldDevice = deviceOf(path.dirname(oldFile));
+  let ancestor = path.dirname(newFile);
+  let newDevice = deviceOf(ancestor);
+  while (newDevice === undefined && path.dirname(ancestor) !== ancestor) {
+    ancestor = path.dirname(ancestor);
+    newDevice = deviceOf(ancestor);
+  }
+  if (oldDevice !== undefined && newDevice !== undefined && oldDevice !== newDevice) {
+    return `${oldFile} is not read, and is on another filesystem than ${newFile} (a mount): create ${newFile}, and move ${oldFile} on the machine that owns it`;
+  }
+  return `${oldFile} is not read: ${move}`;
+}
+
 /** What a missing chosen file says about the OpenCode-era user file,
  * `$HOME/.config/opencode/envoy.json`, which nothing reads, while that file is still there. The
  * chosen file's path decides, not the rule that chose it: the user's default file at
- * `$HOME/.config/legion/envoy.json` names the move; a profile's own file names the file to copy or
- * link it to; the neutral file under a relocated `XDG_CONFIG_HOME` (a Legion pane's, under the
- * daemon's state directory) says it is not read there, without asking anyone to move it. Any other
- * file says nothing of it. */
-function oldUserFileNotice(filePath: string, env: EnvoyConfigEnvironment): string | undefined {
+ * `$HOME/.config/legion/envoy.json` names the move (`moveNotice`); a profile's own file names the
+ * file to copy or link it to; the neutral file under a relocated `XDG_CONFIG_HOME` (a Legion
+ * pane's, under the daemon's state directory) says it is not read there, without asking anyone to
+ * move it. Any other file says nothing of it. */
+function oldUserFileNotice(
+  filePath: string,
+  env: EnvoyConfigEnvironment,
+  deviceOf: DeviceOf
+): string | undefined {
   const home = nonEmpty(env.HOME) ?? homedir();
   const old = path.join(home, ".config", "opencode", "envoy.json");
   if (!existsSync(old)) return undefined;
 
   const selected = path.resolve(filePath);
-  if (selected === path.resolve(home, ".config", "legion", "envoy.json")) {
-    return `${old} is not read: mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/`;
+  const userFile = path.resolve(home, ".config", "legion", "envoy.json");
+  if (selected === userFile) {
+    return moveNotice(
+      old,
+      userFile,
+      "mkdir -p ~/.config/legion && mv ~/.config/opencode/envoy.json ~/.config/legion/",
+      deviceOf
+    );
   }
 
   // A relative directory chose no file here (`harnessDirectory` refuses it), so it is skipped.
@@ -470,7 +512,7 @@ export function missingConfigNotice(filePath: string, missing: MissingConfig, of
 
 /**
  * Read the envoy.json at `filePath` (`envoyConfigPath`) and the checkout's `.envoy/envoy.json`
- * under `cwd`, whose `dispatch` section Dispatch's resolver merges over the chosen file's. Runs no
+ * under `cwd`, whose `dispatch` section Dispatch's resolver reads beside the chosen file's. Runs no
  * command. A missing chosen file sets `missing`; a chosen file that cannot be read or is not valid
  * is `failed`, naming the file and the key. The checkout's file keeps its own outcome: one that
  * cannot be read or is not valid is an `invalid` checkout, which only Dispatch reads, and an
@@ -479,12 +521,15 @@ export function missingConfigNotice(filePath: string, missing: MissingConfig, of
  * The OpenCode-era files are never read. While the chosen file is missing, its notice names
  * `$HOME/.config/opencode/envoy.json` when that file is there (`oldUserFileNotice`); while the
  * checkout has no `.envoy/envoy.json`, `warnings` names its `.opencode/envoy.json` and the rename.
+ * Neither gives a `mv` across filesystems (`moveNotice`); `deviceOf` says which filesystem a
+ * directory is on, `stat`'s device by default.
  */
 export function readEnvoyConfig(
   filePath: string,
   env: EnvoyConfigEnvironment,
-  options: { readonly cwd: string }
+  options: { readonly cwd: string; readonly deviceOf?: DeviceOf | undefined }
 ): EnvoyConfig {
+  const deviceOf = options.deviceOf ?? statDevice;
   const chosen = parseFile(filePath, EnvoyFileSchema, false);
   if (chosen.kind === "invalid") return { kind: "failed", path: filePath, error: chosen.reason };
   const resolvedChosen = path.resolve(filePath);
@@ -511,10 +556,16 @@ export function readEnvoyConfig(
   const warnings =
     oldCheckout !== resolvedChosen && !existsSync(checkoutPath) && existsSync(oldCheckout)
       ? [
-          `${oldCheckout} is not read: mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`,
+          moveNotice(
+            oldCheckout,
+            checkoutPath,
+            `mkdir -p ${path.dirname(checkoutPath)} && mv ${oldCheckout} ${checkoutPath}`,
+            deviceOf
+          ),
         ]
       : [];
-  const unreadOldUserFile = chosen.kind === "absent" ? oldUserFileNotice(filePath, env) : undefined;
+  const unreadOldUserFile =
+    chosen.kind === "absent" ? oldUserFileNotice(filePath, env, deviceOf) : undefined;
   return {
     kind: "read",
     path: filePath,

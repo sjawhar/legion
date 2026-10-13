@@ -13,6 +13,7 @@
   `$CLAUDE_CONFIG_DIR/envoy.json`, the file to copy or link it to; under a relocated
   `XDG_CONFIG_HOME` they say only that the old file is not read there. A top-level `natsUrls` is
   refused, naming `envoy.natsUrls`.
+- No notice gives a `mv` across a mount: where the old file's directory is on another filesystem than the new file's nearest existing directory (an agent box's bind-mounted `~/.config/opencode`), it names the file to create and says to move the old one on the machine that owns it.
 - The `open-asks` hook writes `export ENVOY_CONFIG_FILE='<path>'` to `CLAUDE_ENV_FILE` beside `DISPATCH_HOST`, and the `dispatch` command reads the file `ENVOY_CONFIG_FILE` names whenever `DISPATCH_HOST` is set, so it reads the session's own file. A Bash that lacks what that hook writes, as a subagent's can, runs `dispatch` as host `claude` (`CLAUDE_CODE_CHILD_SESSION=1` with `DISPATCH_HOST` unset) on `CLAUDE_CONFIG_DIR`'s file, where it was refused for want of `DISPATCH_HOST`.
 - With Envoy off the channel server lists no tool, refuses each call with `Envoy is off for this session: <why>`, and exits 0 when stdin ends, instead of failing on `ENVOY_NATS_URL is required`.
 - A `token` or `natsSeed` starting with `!` is a command whose output is the value. A checkout's
